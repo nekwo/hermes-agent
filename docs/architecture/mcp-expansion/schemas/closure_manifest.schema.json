@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eternia.local/schemas/mcp-expansion/closure_manifest.schema.json",
+  "title": "Closure artifact manifest",
+  "description": "Per Stage 1 §5 and Stage 5. Lives at qa-artifacts/<closure_run_dir>/closure_manifest.safe.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "target",
+    "commit",
+    "branch",
+    "dirty",
+    "gates_run",
+    "gates_not_run",
+    "redaction_findings",
+    "classification",
+    "run_dir"
+  ],
+  "properties": {
+    "target": {
+      "type": "string",
+      "enum": ["launcher", "backend", "cross"]
+    },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "branch": { "type": "string", "minLength": 1 },
+    "dirty":  { "type": "boolean" },
+    "run_dir": {
+      "type": "string",
+      "description": "Absolute path to qa-artifacts/<closure_run_dir>/"
+    },
+    "gates_run": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "gates_not_run": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "labels_covered": {
+      "type": "array",
+      "description": "Launcher-only: the Stage 34 fixture labels covered.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "native_mp4",
+          "native_webm",
+          "r2_signed_happy",
+          "malformed_poster_only",
+          "bsky_hls_playlist"
+        ]
+      }
+    },
+    "parity_mismatches": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Launcher-only. Direct↔MCP envelope diff count."
+    },
+    "redaction_findings": { "type": "integer", "minimum": 0 },
+    "redaction_patterns_checked": { "type": "integer", "minimum": 1 },
+
+    "credential_contract": {
+      "type": "object",
+      "description": "Required for Stage C launcher closure per Pass 2 §R4. Stage 5 verifies these match the configured contract before classifying PASS.",
+      "additionalProperties": false,
+      "required": [
+        "keycloak_client",
+        "realm",
+        "k8s_secret_path",
+        "callback_url"
+      ],
+      "properties": {
+        "keycloak_client": { "type": "string", "minLength": 1 },
+        "realm":           { "type": "string", "minLength": 1 },
+        "k8s_secret_path": { "type": "string", "minLength": 1 },
+        "callback_url":    { "type": "string", "format": "uri" }
+      }
+    },
+
+    "classification": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "NEEDS_FIX",
+        "FAIL_NON_BLOCKING_TOOLING_PARITY",
+        "NOT_RUN_MISSING_CONTEXT",
+        "REDACTION_FAIL",
+        "ARTIFACT_MISSING"
+      ]
+    },
+
+    "ci_evidence_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Set only when the local full gate could not run (e.g. WSL hang) and CI is authoritative. Stage 5 checks this against the host allowlist."
+    },
+
+    "sqlite_escape_hatch": {
+      "type": "boolean",
+      "description": "Backend-only. True if --sqlite was used. Stage 5 classifier requires explicit caveats in next_actions[]."
+    }
+  }
+}
