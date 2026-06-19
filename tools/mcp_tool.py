@@ -320,12 +320,65 @@ _CREDENTIAL_PATTERN = re.compile(
 # so providers like MY-VAR or my.var work correctly.
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
+# Canonical POSIX env-var name pattern. Defined here so both tools/mcp_tool.py
+# and hermes_cli/mcp_config.py share a single source of truth.
+_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Prefix for namespaced one-shot stdio env overrides read from os.environ.
+# Example: HERMES_MCP_ENV_LAUNCHER_QA_RUNTIME_FILE=/tmp/x injects
+# RUNTIME_FILE=/tmp/x into the subprocess env for server "launcher-qa".
+_MCP_ENV_OVERRIDE_PREFIX = "HERMES_MCP_ENV_"
+
 
 # ---------------------------------------------------------------------------
 # Security helpers
 # ---------------------------------------------------------------------------
 
-def _build_safe_env(user_env: Optional[dict]) -> dict:
+def _normalize_mcp_env_server_name(name: str) -> str:
+    """Normalize a server name into an env-var-safe uppercase token.
+
+    Non-alphanumeric runs collapse to single underscores so the
+    ``HERMES_MCP_ENV_<NAME>_<KEY>`` shape is unambiguous shell syntax.
+    Returns an empty string for empty/None input.
+    """
+    return re.sub(r"[^A-Za-z0-9]+", "_", str(name or "")).upper().strip("_")
+
+
+def _get_process_mcp_env_overrides(server_name: str) -> dict:
+    """Extract ``HERMES_MCP_ENV_<SERVER>_<KEY>=VALUE`` entries for one server.
+
+    Returns a mapping of child env names (the part after the prefix) to
+    their string values. Names that fail ``_ENV_VAR_NAME_RE`` are skipped
+    with a WARNING log. The warning intentionally logs only the full
+    process-env key name (which the user typed) and never the value.
+    """
+    normalized = _normalize_mcp_env_server_name(server_name)
+    if not normalized:
+        return {}
+    prefix = f"{_MCP_ENV_OVERRIDE_PREFIX}{normalized}_"
+    overrides: dict = {}
+    for key, value in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        child_key = key[len(prefix):]
+        if not _ENV_VAR_NAME_RE.match(child_key):
+            logger.warning(
+                "Ignoring MCP env override with invalid child name for "
+                "server %r (process env key %r)",
+                server_name,
+                key,
+            )
+            continue
+        overrides[child_key] = value
+    return overrides
+
+
+def _build_safe_env(
+    user_env: Optional[dict],
+    *,
+    server_name: Optional[str] = None,
+    runtime_env: Optional[dict] = None,
+) -> dict:
     """Build a filtered environment dict for stdio subprocesses.
 
     Only passes through safe baseline variables (PATH, HOME, etc.) and XDG_*
@@ -334,6 +387,17 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
 
     This prevents accidentally leaking secrets like API keys, tokens, or
     credentials to MCP server subprocesses.
+
+    Merge order (lowest to highest precedence):
+      1. Safe baseline (``_SAFE_ENV_KEYS`` + ``XDG_*`` from os.environ).
+      2. Durable ``user_env`` from the server config's ``env`` block.
+      3. Process-level namespaced overlay
+         ``HERMES_MCP_ENV_<SERVER>_<KEY>``, when ``server_name`` is given.
+      4. In-memory ``runtime_env``, e.g. from ``hermes mcp test --env``.
+
+    Layers 3 and 4 are opt-in: callers that don't pass ``server_name``
+    or ``runtime_env`` see exactly today's safe-baseline + durable-env
+    behavior, so existing call sites stay backward-compatible.
     """
     env = {}
     for key, value in os.environ.items():
@@ -345,6 +409,10 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
             env[key] = value
     if user_env:
         env.update(user_env)
+    if server_name:
+        env.update(_get_process_mcp_env_overrides(server_name))
+    if runtime_env:
+        env.update(runtime_env)
     return env
 
 
@@ -1438,13 +1506,19 @@ class MCPServerTask:
         command = config.get("command")
         args = config.get("args", [])
         user_env = config.get("env")
+        # ``runtime_env`` is an in-memory-only override layer attached by
+        # callers like ``hermes mcp test --env KEY=VALUE``. It is never
+        # persisted to ``config.yaml`` — see _build_safe_env merge order.
+        runtime_env = config.get("runtime_env")
 
         if not command:
             raise ValueError(
                 f"MCP server '{self.name}' has no 'command' in config"
             )
 
-        safe_env = _build_safe_env(user_env)
+        safe_env = _build_safe_env(
+            user_env, server_name=self.name, runtime_env=runtime_env,
+        )
         command, safe_env = _resolve_stdio_command(command, safe_env)
 
         # Check package against OSV malware database before spawning
