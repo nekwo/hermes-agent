@@ -1403,6 +1403,9 @@ DEFAULT_CONFIG = {
         # behavior of showing tool-call summaries inline.
         "resume_skip_tool_only": True,
         "busy_input_mode": "interrupt",  # interrupt | queue | steer
+        "busy_text_mode": "interrupt",   # interrupt | queue (normal text follow-ups while busy)
+        "background_process_notifications": "result",  # off | error | result | all
+        "background_process_agent_turns": False,  # legacy notify_on_complete full agent turn
         # Which interface bare `hermes` (and `hermes chat`) launches by default:
         #   "cli" — the classic prompt_toolkit REPL (default, preserves prior behavior)
         #   "tui" — the modern Ink TUI (same as passing `--tui`)
@@ -2110,6 +2113,13 @@ DEFAULT_CONFIG = {
         # Seconds between dispatcher ticks (idle or not). Lower = snappier
         # pickup of newly-ready tasks; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
+        # Seconds before a running task claim is considered stale if the
+        # worker does not heartbeat. Long supervisor-style cards can spend
+        # >15 minutes inside one external agent/tool call before they can
+        # emit `kanban_heartbeat`, so keep the default comfortably above the
+        # old 15m hardcoded TTL while still allowing genuinely dead workers
+        # to recover automatically.
+        "claim_ttl_seconds": 45 * 60,
         # Auto-block after this many consecutive non-success attempts for the
         # same task/profile (spawn_failed, timed_out, or crashed). Reassignment
         # resets the streak for the new profile.

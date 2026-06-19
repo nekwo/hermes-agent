@@ -9,6 +9,7 @@ import pytest
 from gateway.platforms.base import (
     BasePlatformAdapter,
     GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE,
+    MEDIA_DELIVERY_SAFE_ROOTS,
     MessageEvent,
     safe_url_for_log,
     utf16_len,
@@ -329,6 +330,20 @@ class TestExtractMedia:
         media, cleaned = BasePlatformAdapter.extract_media(content)
         assert media == [("/tmp/Jane Doe/speech.flac", False)]
         assert cleaned == ""
+
+    def test_media_tag_supports_unquoted_windows_drive_paths(self):
+        content = r"MEDIA:X:\HermesCache\images\alice.png"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [(r"X:\HermesCache\images\alice.png", False)]
+        assert cleaned == ""
+
+    def test_media_tag_supports_quoted_windows_drive_paths_with_spaces(self):
+        content = r"Here\nMEDIA:'X:\Hermes Cache\images\alice cat.png'\nDone"
+        media, cleaned = BasePlatformAdapter.extract_media(content)
+        assert media == [(r"X:\Hermes Cache\images\alice cat.png", False)]
+        assert "Here" in cleaned
+        assert "Done" in cleaned
+        assert "MEDIA:" not in cleaned
 
     def test_as_document_directive_stripped_from_cleaned_text(self):
         """[[as_document]] is a routing directive — strip it from
@@ -1479,9 +1494,9 @@ class TestMediaDeliveryDiagnosability:
             assert sep not in _log_safe_path(f"/tmp/a{sep}b.png")
 
     def test_canonical_cache_roots_present(self):
-        from gateway.platforms.base import MEDIA_DELIVERY_SAFE_ROOTS
-        roots = {str(r) for r in MEDIA_DELIVERY_SAFE_ROOTS}
+        roots = {str(r).replace("\\", "/") for r in MEDIA_DELIVERY_SAFE_ROOTS}
         assert any(r.endswith("cache/images") for r in roots)
+        assert any(r.endswith("cache/audio") for r in roots)
+        assert any(r.endswith("cache/videos") for r in roots)
         assert any(r.endswith("cache/documents") for r in roots)
-        # Legacy layout still present.
-        assert any(r.endswith("image_cache") for r in roots)
+        assert any(r.endswith("cache/screenshots") for r in roots)
