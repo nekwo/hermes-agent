@@ -1219,8 +1219,10 @@ class TestEventBridgePollE2E:
         )
         conn.commit()
         conn.close()
-        # Touch the DB file to update mtime (WAL mode may not update mtime on small writes)
-        os.utime(db_path, None)
+        # Force the DB mtime forward; fast Linux filesystems can otherwise
+        # coalesce the create/write/touch timestamps into the same tick.
+        future = time.time() + 2
+        os.utime(db_path, (future, future))
 
         # Update sessions.json updated_at to trigger re-check
         sessions_data["agent:main:telegram:dm:new"]["updated_at"] = "2026-03-29T15:00:10"

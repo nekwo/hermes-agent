@@ -438,6 +438,44 @@ Do this after changing:
 - resources/prompts toggles
 - auth headers / env
 
+### Per-run environment overrides (stdio servers)
+
+For values that should only exist for a single discovery/test run — temp
+file paths, nonces, local ports, one-shot credentials — use one of the two
+non-persistent override surfaces. Neither writes back to `config.yaml`.
+
+**Interactive: `--env` on `hermes mcp test`**
+
+```bash
+# Inject RUNTIME_FILE just for this probe; it never lands on disk.
+hermes mcp test launcher-qa --env RUNTIME_FILE=/tmp/qa-runtime.json
+```
+
+The CLI prints `Applied 1 one-shot env override(s): RUNTIME_FILE` so you
+can confirm what was injected. Values are never printed.
+
+**Automation / wrappers: `HERMES_MCP_ENV_<SERVER>_<KEY>`**
+
+```bash
+HERMES_MCP_ENV_LAUNCHER_QA_RUNTIME_FILE=/tmp/qa-runtime.json \
+  hermes mcp test launcher-qa
+```
+
+PowerShell equivalent (POSIX `KEY=VALUE cmd` syntax does not work on
+PowerShell — set the env var first, then run):
+
+```powershell
+$env:HERMES_MCP_ENV_LAUNCHER_QA_RUNTIME_FILE = "C:\Temp\qa-runtime.json"
+hermes mcp test launcher-qa
+```
+
+The `HERMES_MCP_ENV_<SERVER>_<KEY>` form applies to every stdio MCP
+discovery path for that server, not just `hermes mcp test`. The
+`<SERVER>` token is the server's configured name uppercased with every
+non-alphanumeric run replaced by `_` (so `launcher-qa` →
+`LAUNCHER_QA`). See the [MCP Config Reference](/docs/reference/mcp-config-reference#one-shot-stdio-env-overrides)
+for full merge precedence and security notes.
+
 ## Troubleshooting by symptom
 
 ### "The server connects but the tools I expected are missing"

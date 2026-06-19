@@ -11,7 +11,6 @@ configuration in ~/.hermes/config.yaml under the ``mcp_servers`` key.
 import asyncio
 import logging
 import os
-import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,11 +25,9 @@ from hermes_cli.config import (
 from hermes_cli.colors import Colors, color
 from hermes_constants import display_hermes_home
 from hermes_cli.mcp_security import validate_mcp_server_entry
-from tools.mcp_tool import _ENV_VAR_PATTERN
+from tools.mcp_tool import _ENV_VAR_NAME_RE, _ENV_VAR_PATTERN
 
 logger = logging.getLogger(__name__)
-
-_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 _MCP_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -613,9 +610,34 @@ def cmd_mcp_test(args):
             _info(f"Available: {', '.join(available)}")
         return
 
-    cfg = servers[name]
+    # Shallow-copy so attaching ``runtime_env`` (in-memory one-shot env
+    # overrides from ``--env KEY=VALUE``) cannot leak back into the loaded
+    # config dict that other commands in the same process may read.
+    cfg = dict(servers[name])
+
+    raw_env = getattr(args, "env", None) or []
+    try:
+        runtime_env = _parse_env_assignments(raw_env)
+    except ValueError as exc:
+        _error(str(exc))
+        return
+
+    if runtime_env:
+        if "url" in cfg and "command" not in cfg:
+            _error("--env is only supported for stdio MCP servers")
+            return
+        cfg["runtime_env"] = runtime_env
+
     print()
     print(color(f"  Testing '{name}'...", Colors.CYAN))
+
+    if runtime_env:
+        # Print count + key names only — never values. The CLI must not
+        # surface secret material from one-shot overrides into stdout.
+        keys = ", ".join(sorted(runtime_env.keys()))
+        _info(
+            f"Applied {len(runtime_env)} one-shot env override(s): {keys}"
+        )
 
     # Show transport info
     if "url" in cfg:
