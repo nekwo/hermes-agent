@@ -3865,7 +3865,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """Load background process notification mode from config or env var.
 
         Modes:
-          - ``all``    — push running-output updates *and* the final message (default)
+          - ``all``    — push running-output updates *and* the final message
           - ``result`` — only the final completion message (regardless of exit code)
           - ``error``  — only the final message when exit code is non-zero
           - ``off``    — no watcher messages at all
@@ -3878,15 +3878,76 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 mode = "off"
             elif raw not in {None, ""}:
                 mode = str(raw)
-        mode = (mode or "all").strip().lower()
+        mode = (mode or "result").strip().lower()
         valid = {"all", "result", "error", "off"}
         if mode not in valid:
             logger.warning(
-                "Unknown background_process_notifications '%s', defaulting to 'all'",
+                "Unknown background_process_notifications '%s', defaulting to 'result'",
                 mode,
             )
-            return "all"
+            return "result"
         return mode
+
+    @staticmethod
+    def _background_agent_turns_enabled() -> bool:
+        """Return True only when legacy agent-turn completion notifications are enabled.
+
+        Background process completions used to synthesize an internal user
+        message and run a full agent turn.  That is expensive and can starve a
+        real human message behind monitor traffic.  Keep it as an explicit
+        compatibility opt-in; compact direct sends are the default.
+        """
+        raw = os.getenv("HERMES_BACKGROUND_AGENT_TURNS", "").strip().lower()
+        if not raw:
+            cfg = _load_gateway_runtime_config()
+            raw = str(
+                cfg_get(
+                    cfg,
+                    "display",
+                    "background_process_agent_turns",
+                    default="",
+                ) or ""
+            ).strip().lower()
+        return raw in {"1", "true", "yes", "on", "agent", "legacy"}
+
+    @staticmethod
+    def _format_background_completion_notification(
+        *,
+        session_id: str,
+        exit_code: int | None,
+        command: str,
+        output: str,
+        limit: int = 2000,
+    ) -> str:
+        """Build a compact, bounded, redacted process-completion message."""
+        from agent.redact import redact_sensitive_text
+        from tools.ansi_strip import strip_ansi
+
+        clean_output = strip_ansi(output or "")
+        if len(clean_output) > limit:
+            tail = clean_output[-limit:]
+            nl = tail.find("\n")
+            tail = tail[nl + 1:] if nl != -1 else tail
+            clean_output = f"[… output truncated — showing last {len(tail)} chars]\n{tail}"
+        clean_command = redact_sensitive_text(str(command or ""))
+        clean_output = redact_sensitive_text(clean_output)
+        return (
+            f"[Background process {session_id} finished with exit code {exit_code}.\n"
+            f"Command: {clean_command}\n"
+            f"Output:\n{clean_output}]"
+        )
+
+    @staticmethod
+    def _format_long_running_heartbeat(
+        *,
+        elapsed_seconds: float,
+        status_detail: str = "",
+    ) -> str:
+        elapsed_mins = max(0, int(elapsed_seconds // 60))
+        return (
+            f"⏳ Working — {elapsed_mins} min{status_detail}. "
+            f"Send /stop to interrupt if you need me back now."
+        )
 
     @staticmethod
     def _load_provider_routing() -> dict:
@@ -5681,6 +5742,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # `spawn_auto_blocked`, and `crashed` events to gateway subscribers
         # so human-in-the-loop workflows hear back without polling.
         asyncio.create_task(self._kanban_notifier_watcher())
+
+        # Start blocked-card PM transition hook. This is separate from the
+        # user-facing notifier: it reacts to committed `blocked` events and
+        # creates idempotent PM auto-route/triage cards without waiting for a
+        # cron watchdog. Gated by kanban.pm_blocked_hook.enabled.
+        asyncio.create_task(self._kanban_blocked_pm_hook_watcher())
 
         # Start background kanban dispatcher — spawns workers for ready
         # tasks. Gated by `kanban.dispatch_in_gateway` (default True).
@@ -7564,6 +7631,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     return "Queued for the next turn."
                 return f"Queued for the next turn. ({depth} queued)"
 
+            # /queue-status (/qstatus alias) is query-only and never interrupts.
+            if _cmd_def_inner and _cmd_def_inner.name == "queue-status":
+                return await self._handle_queue_status_command(event)
+
             # /steer <prompt> — inject mid-run after the next tool call.
             # Unlike /queue (turn boundary), /steer lands BETWEEN tool-call
             # iterations inside the same agent run, by appending to the
@@ -7957,6 +8028,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "status":
             return await self._handle_status_command(event)
+
+        if canonical == "queue-status":
+            return await self._handle_queue_status_command(event)
 
         if canonical == "agents":
             return await self._handle_agents_command(event)
@@ -13052,31 +13126,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Skip if the agent already consumed the result via wait/poll/log
                 from tools.process_registry import format_process_notification, process_registry as _pr_check
                 if agent_notify and not _pr_check.is_completion_consumed(session_id):
-                    from tools.ansi_strip import strip_ansi
-                    _raw = strip_ansi(session.output_buffer) if session.output_buffer else ""
-                    # Truncate at line boundaries so notifications never start
-                    # mid-line (fixes #23284). Keep the last ~2000 chars but
-                    # snap to the nearest preceding newline, then prepend a
-                    # truncation marker when output was cut.
-                    _LIMIT = 2000
-                    if len(_raw) > _LIMIT:
-                        _tail = _raw[-_LIMIT:]
-                        _nl = _tail.find("\n")
-                        _tail = _tail[_nl + 1:] if _nl != -1 else _tail
-                        _out = f"[… output truncated — showing last {len(_tail)} chars]\n{_tail}"
-                    else:
-                        _out = _raw
-                    synth_text = format_process_notification({
-                        "type": "completion",
-                        "session_id": session_id,
-                        "command": session.command,
-                        "exit_code": session.exit_code,
-                        "completion_reason": getattr(session, "completion_reason", "exited"),
-                        "termination_source": getattr(session, "termination_source", ""),
-                        "output": _out,
-                    })
-                    if not synth_text:
-                        break
+                    synth_text = self._format_background_completion_notification(
+                        session_id=session_id,
+                        exit_code=session.exit_code,
+                        command=getattr(session, "command", ""),
+                        output=session.output_buffer if session.output_buffer else "",
+                    )
                     source = self._build_process_event_source({
                         "session_id": session_id,
                         "session_key": session_key,
@@ -13098,7 +13153,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         if p == source.platform:
                             adapter = a
                             break
-                    if adapter and source.chat_id:
+                    if adapter and source.chat_id and self._background_agent_turns_enabled():
                         try:
                             synth_event = MessageEvent(
                                 text=synth_text,
@@ -13108,7 +13163,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 message_id=message_id,
                             )
                             logger.info(
-                                "Process %s finished — injecting agent notification for session %s chat=%s thread=%s",
+                                "Process %s finished — injecting legacy agent notification for session %s chat=%s thread=%s",
                                 session_id,
                                 session_key,
                                 source.chat_id,
@@ -13117,6 +13172,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             await adapter.handle_message(synth_event)
                         except Exception as e:
                             logger.error("Agent notify injection error: %s", e)
+                    elif adapter and source.chat_id:
+                        try:
+                            send_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                            await adapter.send(
+                                source.chat_id,
+                                synth_text,
+                                reply_to=message_id,
+                                metadata=send_meta,
+                            )
+                        except Exception as e:
+                            logger.error("Completion notification delivery error: %s", e)
                     break
 
                 # --- Normal text-only notification ---
@@ -13126,10 +13192,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     or (notify_mode == "error" and session.exit_code not in {0, None})
                 )
                 if should_notify:
-                    new_output = session.output_buffer[-1000:] if session.output_buffer else ""
-                    message_text = (
-                        f"[Background process {session_id} finished with exit code {session.exit_code}~ "
-                        f"Here's the final output:\n{new_output}]"
+                    new_output = session.output_buffer if session.output_buffer else ""
+                    message_text = self._format_background_completion_notification(
+                        session_id=session_id,
+                        exit_code=session.exit_code,
+                        command=getattr(session, "command", ""),
+                        output=new_output,
+                        limit=1000,
                     )
                     adapter = None
                     for p, a in self.adapters.items():
@@ -13151,7 +13220,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             elif has_new_output and notify_mode == "all" and not agent_notify:
                 # New output available -- deliver status update (only in "all" mode)
                 # Skip periodic updates for agent_notify watchers (they only care about completion)
-                new_output = session.output_buffer[-500:] if session.output_buffer else ""
+                raw_output = session.output_buffer[-500:] if session.output_buffer else ""
+                try:
+                    from tools.ansi_strip import strip_ansi as _strip_ansi
+                    from agent.redact import redact_sensitive_text as _redact_text
+                    new_output = _redact_text(_strip_ansi(raw_output))
+                except Exception:
+                    new_output = ""
                 message_text = (
                     f"[Background process {session_id} is still running~ "
                     f"New output:\n{new_output}]"
@@ -13202,7 +13277,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         "honcho.runtime_peer_prefix",
         "honcho.user_peer_aliases",
     )
-    _HONCHO_CACHE_BUSTING_MEMO: dict[tuple[str, int | None], dict[str, Any]] = {}
+    _HONCHO_CACHE_BUSTING_MEMO: dict[tuple[str, int | None, int | None], dict[str, Any]] = {}
 
     @classmethod
     def _empty_honcho_cache_busting_config(cls) -> dict[str, Any]:
@@ -13216,10 +13291,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             path = resolve_config_path()
             try:
-                mtime_ns = path.stat().st_mtime_ns
+                stat = path.stat()
+                mtime_ns = stat.st_mtime_ns
+                size = stat.st_size
             except OSError:
                 mtime_ns = None
-            memo_key = (str(path), mtime_ns)
+                size = None
+            memo_key = (str(path), mtime_ns, size)
             cached = cls._HONCHO_CACHE_BUSTING_MEMO.get(memo_key)
             if cached is not None:
                 return dict(cached)
@@ -16165,7 +16243,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _heartbeat_msg_id: Optional[str] = None
             while True:
                 await asyncio.sleep(_NOTIFY_INTERVAL)
-                _elapsed_mins = int((time.time() - _notify_start) // 60)
                 # Include agent activity context if available. Default
                 # heartbeat is terse: elapsed + current tool. Verbose
                 # iteration counter is gated on busy_ack_detail so users
@@ -16195,7 +16272,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
-                _heartbeat_text = f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                _heartbeat_text = self._format_long_running_heartbeat(
+                    elapsed_seconds=time.time() - _notify_start,
+                    status_detail=_status_detail,
+                )
                 try:
                     _notify_res = None
                     if _heartbeat_msg_id:
