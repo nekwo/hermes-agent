@@ -7,6 +7,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 import asyncio
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -306,6 +307,42 @@ def _append_unique_pid(
     pids.append(pid)
 
 
+def _command_matches_profile(command: str, *, profile_name: str, hermes_home: str) -> bool:
+    """Return whether a process command belongs to the requested profile.
+
+    Use token/boundary-aware profile matching so ``--profile alice`` does not
+    accidentally match ``--profile aliceimagecron`` in Windows process scans.
+    """
+    command_lc = command.lower()
+    profile_name = (profile_name or "").lower()
+    hermes_home = (hermes_home or "").lower().rstrip('\\/')
+
+    def _has_exact_profile_arg(flag: str) -> bool:
+        if not profile_name:
+            return False
+        pattern = rf"(?:^|\s){re.escape(flag)}\s+[\"']?{re.escape(profile_name)}[\"']?(?=$|\s)"
+        return re.search(pattern, command_lc) is not None
+
+    def _has_matching_home() -> bool:
+        if not hermes_home:
+            return False
+        pattern = rf"hermes_home=[\"']?{re.escape(hermes_home)}[\"']?(?=$|\s|;|&|\|)"
+        return re.search(pattern, command_lc) is not None
+
+    if profile_name:
+        return _has_exact_profile_arg("--profile") or _has_exact_profile_arg("-p") or _has_matching_home()
+
+    # Default-profile case: no profile flag in argv. Accept as long as the
+    # command doesn't advertise *some other* profile. HERMES_HOME may be passed
+    # via env (not visible in wmic/CIM command line) so its absence is NOT
+    # disqualifying — only a non-matching explicit HERMES_HOME= in argv is.
+    if re.search(r"(?:^|\s)(?:--profile|-p)\s+\S+", command_lc):
+        return False
+    if "hermes_home=" in command_lc and not _has_matching_home():
+        return False
+    return True
+
+
 def _scan_gateway_pids(exclude_pids: set[int], all_profiles: bool = False) -> list[int]:
     """Best-effort process-table scan for gateway PIDs.
 
@@ -344,27 +381,11 @@ def _scan_gateway_pids(exclude_pids: set[int], all_profiles: bool = False) -> li
     current_profile_name_lc = current_profile_name.lower()
 
     def _matches_current_profile(command: str) -> bool:
-        command_lc = command.lower()
-        if current_profile_name:
-            return (
-                f"--profile {current_profile_name_lc}" in command_lc
-                or f"-p {current_profile_name_lc}" in command_lc
-                or f"hermes_home={current_home_lc}" in command_lc
-            )
-
-        # Default-profile case: no profile flag in argv. Accept as long as
-        # the command doesn't advertise *some other* profile. HERMES_HOME
-        # may be passed via env (not visible in wmic/CIM command line) so
-        # its absence is NOT disqualifying — only a non-matching explicit
-        # HERMES_HOME= in argv is.
-        if "--profile " in command_lc or " -p " in command_lc:
-            return False
-        if (
-            "hermes_home=" in command_lc
-            and f"hermes_home={current_home_lc}" not in command_lc
-        ):
-            return False
-        return True
+        return _command_matches_profile(
+            command,
+            profile_name=current_profile_name_lc,
+            hermes_home=current_home_lc,
+        )
 
     try:
         if is_windows():
@@ -1511,14 +1532,21 @@ class SystemScopeRequiresRootError(RuntimeError):
 
 def _user_dbus_socket_path() -> Path:
     """Return the expected per-user D-Bus socket path (regardless of existence)."""
-    xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+    uid = _posix_uid_or_zero()
+    xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{uid}"
     return Path(xdg) / "bus"
 
 
 def _user_systemd_private_socket_path() -> Path:
     """Return the per-user systemd private socket path (regardless of existence)."""
-    xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+    uid = _posix_uid_or_zero()
+    xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{uid}"
     return Path(xdg) / "systemd" / "private"
+
+
+def _posix_uid_or_zero() -> int:
+    getuid = getattr(os, "getuid", None)
+    return int(getuid()) if callable(getuid) else 0
 
 
 def _user_systemd_socket_ready() -> bool:
@@ -1541,9 +1569,13 @@ def _ensure_user_systemd_env() -> None:
     the user's systemd instance is running (via linger).  Without them,
     ``systemctl --user`` fails with "Failed to connect to bus: No medium found".
     We detect the standard socket path and set the vars so all subsequent
-    subprocess calls inherit them.
+    subprocess calls inherit them. On non-POSIX hosts this is a no-op so unit
+    tests and accidental command paths do not crash on missing ``os.getuid``.
     """
-    uid = os.getuid()  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+    getuid = getattr(os, "getuid", None)
+    if not callable(getuid):
+        return
+    uid = int(getuid())
     if "XDG_RUNTIME_DIR" not in os.environ:
         runtime_dir = f"/run/user/{uid}"
         if Path(runtime_dir).exists():

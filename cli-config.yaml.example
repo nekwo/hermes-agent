@@ -1027,8 +1027,12 @@ display:
   #   off:     No watcher messages at all
   #   result:  Only the final completion message
   #   error:   Only the final message when exit code != 0
-  #   all:     Running output updates + final message (default)
-  background_process_notifications: all
+  #   all:     Running output updates + final message
+  background_process_notifications: result
+  # Legacy compatibility: when true, notify_on_complete creates a full agent
+  # turn from the completion notice. Default false sends compact direct status
+  # text so monitor events cannot starve human replies.
+  background_process_agent_turns: false
 
 
   # Play terminal bell when agent finishes a response.

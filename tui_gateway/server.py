@@ -1265,6 +1265,16 @@ def _load_cfg() -> dict:
     return {}
 
 
+def _tui_background_agent_turns_enabled() -> bool:
+    raw = os.getenv("HERMES_BACKGROUND_AGENT_TURNS", "").strip().lower()
+    if not raw:
+        cfg = _load_cfg()
+        display = cfg.get("display", {}) if isinstance(cfg, dict) else {}
+        if isinstance(display, dict):
+            raw = str(display.get("background_process_agent_turns", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on", "agent", "legacy"}
+
+
 def _save_cfg(cfg: dict):
     global _cfg_cache, _cfg_mtime, _cfg_path
     import yaml
@@ -5195,8 +5205,9 @@ def _notification_poller_loop(
     """Poll completion_queue and dispatch notifications autonomously.
 
     Runs in a daemon thread started by _init_session(). Emits a
-    status.update (kind=process) for user visibility, then chains an
-    agent turn via _run_prompt_submit if the session is idle.
+    status.update (kind=process) for user visibility. Legacy full-agent
+    notification turns are disabled by default and require explicit
+    HERMES_BACKGROUND_AGENT_TURNS / display.background_process_agent_turns opt-in.
 
     NOTE: The completion_queue is global (one per process). If multiple
     TUI sessions coexist, whichever poller wakes first grabs the event,
@@ -5238,6 +5249,9 @@ def _notification_poller_loop(
         if _dedup_key not in _emitted:
             _emit("status.update", sid, {"kind": "process", "text": text})
             _emitted.add(_dedup_key)
+
+        if not _tui_background_agent_turns_enabled():
+            continue
 
         with session["history_lock"]:
             if session.get("running"):
@@ -5281,6 +5295,9 @@ def _notification_poller_loop(
         if _dedup_key not in _emitted:
             _emit("status.update", sid, {"kind": "process", "text": text})
             _emitted.add(_dedup_key)
+
+        if not _tui_background_agent_turns_enabled():
+            continue
 
         with session["history_lock"]:
             if session.get("running"):
