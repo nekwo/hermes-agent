@@ -2,6 +2,7 @@
 
 import logging
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -67,8 +68,11 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
     raising, so one bad snippet can't wreck the whole skill message.
     """
     try:
+        bash_exe = shutil.which("bash")
+        if not bash_exe:
+            return "[inline-shell error: bash not found]"
         completed = subprocess.run(
-            ["bash", "-c", command],
+            [bash_exe, "-c", command],
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,

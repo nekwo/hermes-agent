@@ -173,6 +173,43 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     }
 
 
+def _emit_provider_timing(
+    agent: Any,
+    step: str,
+    duration_ms: int,
+    *,
+    status: str = "completed",
+    timing_values: Dict[str, int] | None = None,
+    **extra: Any,
+) -> None:
+    callback = getattr(agent, "status_callback", None)
+    if callback is None:
+        return
+    try:
+        callback(
+            {
+                "type": "run.progress",
+                "phase": "timing",
+                "step": f"provider_{step}",
+                "status": status,
+                "summary": f"Provider {step.replace('_', ' ')} {status} in {duration_ms}ms.",
+                "duration_ms": max(0, int(duration_ms)),
+                "timing_key": f"provider_{step}_ms",
+                "timing_values": timing_values or {},
+                "provider": getattr(agent, "provider", None),
+                "model": getattr(agent, "model", None),
+                "api_mode": getattr(agent, "api_mode", None),
+                **extra,
+            }
+        )
+    except Exception:
+        logger.debug("provider timing callback failed", exc_info=True)
+
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.perf_counter() - started) * 1000))
+
+
 def run_codex_app_server_turn(
     agent,
     *,
@@ -387,6 +424,7 @@ def _consume_codex_event_stream(
     on_first_delta=None,
     on_event=None,
     interrupt_check=None,
+    stream_stats: Dict[str, Any] | None = None,
 ) -> SimpleNamespace:
     """Consume a Codex Responses SSE event stream and return a final response.
 
@@ -431,8 +469,19 @@ def _consume_codex_event_stream(
     terminal_incomplete_details: Any = None
     terminal_error: Any = None
     saw_terminal = False
+    stream_started = time.perf_counter()
+    if stream_stats is not None:
+        stream_stats.setdefault("event_count", 0)
+        stream_stats.setdefault("text_delta_count", 0)
+        stream_stats.setdefault("reasoning_delta_count", 0)
+        stream_stats.setdefault("tool_call_event_count", 0)
+        stream_stats.setdefault("output_item_count", 0)
 
     for event in event_iter:
+        if stream_stats is not None:
+            stream_stats["event_count"] = int(stream_stats.get("event_count", 0)) + 1
+            if stream_stats.get("first_event_ms") is None:
+                stream_stats["first_event_ms"] = _elapsed_ms(stream_started)
         if on_event is not None:
             try:
                 on_event(event)
@@ -459,6 +508,8 @@ def _consume_codex_event_stream(
             _raise_stream_error(event)
 
         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
+            if stream_stats is not None:
+                stream_stats["text_delta_count"] = int(stream_stats.get("text_delta_count", 0)) + 1
             delta_text = _event_field(event, "delta", "")
             if delta_text:
                 collected_text_deltas.append(delta_text)
@@ -479,9 +530,13 @@ def _consume_codex_event_stream(
 
         if "function_call" in event_type:
             has_tool_calls = True
+            if stream_stats is not None:
+                stream_stats["tool_call_event_count"] = int(stream_stats.get("tool_call_event_count", 0)) + 1
             # fall through — function_call items still get added on output_item.done
 
         if "reasoning" in event_type and "delta" in event_type:
+            if stream_stats is not None:
+                stream_stats["reasoning_delta_count"] = int(stream_stats.get("reasoning_delta_count", 0)) + 1
             reasoning_text = _event_field(event, "delta", "")
             if reasoning_text and on_reasoning_delta is not None:
                 try:
@@ -491,6 +546,8 @@ def _consume_codex_event_stream(
             continue
 
         if event_type == "response.output_item.done":
+            if stream_stats is not None:
+                stream_stats["output_item_count"] = int(stream_stats.get("output_item_count", 0)) + 1
             done_item = _event_field(event, "item")
             if done_item is not None:
                 collected_output_items.append(done_item)
@@ -498,6 +555,9 @@ def _consume_codex_event_stream(
 
         if event_type in _TERMINAL_EVENT_TYPES:
             saw_terminal = True
+            if stream_stats is not None:
+                stream_stats["terminal_event_type"] = event_type
+                stream_stats["terminal_event_ms"] = _elapsed_ms(stream_started)
             resp_obj = _event_field(event, "response")
             if resp_obj is not None:
                 terminal_usage = getattr(resp_obj, "usage", None)
@@ -568,6 +628,10 @@ def _consume_codex_event_stream(
         incomplete_details=terminal_incomplete_details,
         error=terminal_error,
     )
+    if stream_stats is not None:
+        stream_stats["consume_ms"] = _elapsed_ms(stream_started)
+        stream_stats["saw_terminal_count"] = 1 if saw_terminal else 0
+        final._stream_stats = dict(stream_stats)
     return final
 
 
@@ -582,7 +646,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     """
     import httpx as _httpx
 
+    client_started = time.perf_counter()
     active_client = client or agent._ensure_primary_openai_client(reason="codex_stream_direct")
+    _emit_provider_timing(agent, "client_resolve", _elapsed_ms(client_started))
     max_stream_retries = 1
     # Accumulate streamed text so callers / compat shims can read it.
     agent._codex_streamed_text_parts: list = []
@@ -610,8 +676,23 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         stream_kwargs["stream"] = True
 
         try:
+            create_started = time.perf_counter()
             event_stream = active_client.responses.create(**stream_kwargs)
+            _emit_provider_timing(
+                agent,
+                "responses_create",
+                _elapsed_ms(create_started),
+                attempt=attempt + 1,
+            )
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
+            _emit_provider_timing(
+                agent,
+                "responses_create",
+                _elapsed_ms(create_started),
+                status="failed",
+                attempt=attempt + 1,
+                error_class=type(exc).__name__,
+            )
             if attempt < max_stream_retries:
                 logger.debug(
                     "Codex Responses stream connect failed (attempt %s/%s); retrying. %s error=%s",
@@ -625,9 +706,17 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             # Compatibility: some mocks/providers return a concrete response
             # instead of an iterable.  Pass it straight through.
             if hasattr(event_stream, "output") and not hasattr(event_stream, "__iter__"):
+                _emit_provider_timing(
+                    agent,
+                    "concrete_response",
+                    0,
+                    attempt=attempt + 1,
+                    timing_values={"provider_stream_event_count": 0},
+                )
                 return event_stream
 
             try:
+                stream_stats: Dict[str, Any] = {}
                 final = _consume_codex_event_stream(
                     event_stream,
                     model=api_kwargs.get("model"),
@@ -636,8 +725,53 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     on_first_delta=on_first_delta,
                     on_event=_on_event,
                     interrupt_check=_interrupt_check,
+                    stream_stats=stream_stats,
+                )
+                if stream_stats.get("first_event_ms") is not None:
+                    _emit_provider_timing(
+                        agent,
+                        "stream_first_event",
+                        int(stream_stats.get("first_event_ms") or 0),
+                        attempt=attempt + 1,
+                    )
+                timing_values = {
+                    "provider_stream_event_count": int(stream_stats.get("event_count", 0) or 0),
+                    "provider_stream_text_delta_count": int(stream_stats.get("text_delta_count", 0) or 0),
+                    "provider_stream_reasoning_delta_count": int(stream_stats.get("reasoning_delta_count", 0) or 0),
+                    "provider_stream_tool_call_event_count": int(stream_stats.get("tool_call_event_count", 0) or 0),
+                    "provider_stream_output_item_count": int(stream_stats.get("output_item_count", 0) or 0),
+                    "provider_stream_saw_terminal_count": int(stream_stats.get("saw_terminal_count", 0) or 0),
+                }
+                if stream_stats.get("terminal_event_ms") is not None:
+                    timing_values["provider_stream_terminal_event_ms"] = int(stream_stats.get("terminal_event_ms") or 0)
+                _emit_provider_timing(
+                    agent,
+                    "stream_consume",
+                    int(stream_stats.get("consume_ms", 0) or 0),
+                    attempt=attempt + 1,
+                    terminal_event_type=stream_stats.get("terminal_event_type"),
+                    timing_values=timing_values,
                 )
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
+                _emit_provider_timing(
+                    agent,
+                    "stream_consume",
+                    int(stream_stats.get("consume_ms", 0) or 0) if "stream_stats" in locals() else 0,
+                    status="failed",
+                    attempt=attempt + 1,
+                    error_class=type(exc).__name__,
+                    timing_values=(
+                        {
+                            "provider_stream_event_count": int(stream_stats.get("event_count", 0) or 0),
+                            "provider_stream_text_delta_count": int(stream_stats.get("text_delta_count", 0) or 0),
+                            "provider_stream_reasoning_delta_count": int(stream_stats.get("reasoning_delta_count", 0) or 0),
+                            "provider_stream_tool_call_event_count": int(stream_stats.get("tool_call_event_count", 0) or 0),
+                            "provider_stream_output_item_count": int(stream_stats.get("output_item_count", 0) or 0),
+                        }
+                        if "stream_stats" in locals()
+                        else {}
+                    ),
+                )
                 if attempt < max_stream_retries:
                     logger.debug(
                         "Codex Responses stream transport failed mid-iteration "

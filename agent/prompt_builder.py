@@ -23,9 +23,14 @@ from agent.skill_utils import (
     get_disabled_skill_names,
     iter_skill_index_files,
     parse_frontmatter,
-    skill_matches_environment,
     skill_matches_platform,
 )
+try:
+    from agent.skill_utils import skill_matches_environment
+except ImportError:
+    def skill_matches_environment(frontmatter):
+        environments = frontmatter.get("environments") if isinstance(frontmatter, dict) else None
+        return not environments
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
@@ -1755,7 +1760,7 @@ def build_context_files_prompt(
 ) -> str:
     """Discover and load context files for the system prompt.
 
-    Priority (first found wins — only ONE project context type is loaded):
+    Project context sources are loaded in deterministic order when present:
       1. .hermes.md / HERMES.md  (walk to git root)
       2. AGENTS.md / agents.md   (cwd only)
       3. CLAUDE.md / claude.md   (cwd only)
@@ -1777,15 +1782,15 @@ def build_context_files_prompt(
     cwd_path = Path(cwd).resolve()
     sections = []
 
-    # Priority-based project context: first match wins
-    project_context = (
-        _load_hermes_md(cwd_path, context_length)
-        or _load_agents_md(cwd_path, context_length)
-        or _load_claude_md(cwd_path, context_length)
-        or _load_cursorrules(cwd_path, context_length)
-    )
-    if project_context:
-        sections.append(project_context)
+    # Deterministic project context: load every supported source that exists.
+    for project_context in (
+        _load_hermes_md(cwd_path, context_length),
+        _load_agents_md(cwd_path, context_length),
+        _load_claude_md(cwd_path, context_length),
+        _load_cursorrules(cwd_path, context_length),
+    ):
+        if project_context:
+            sections.append(project_context)
 
     # SOUL.md from HERMES_HOME only — skip when already loaded as identity
     if not skip_soul:

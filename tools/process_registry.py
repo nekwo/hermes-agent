@@ -114,8 +114,8 @@ class ProcessSession:
     watcher_thread_id: str = ""
     watcher_message_id: str = ""                # Triggering message id — reply anchor for topic routing
     watcher_interval: int = 0                   # 0 = no watcher configured
-    notify_on_complete: bool = False             # Queue agent notification on exit
-    # Watch patterns — trigger agent notification when output matches any pattern
+    notify_on_complete: bool = False             # Queue completion notification on exit
+    # Watch patterns — trigger notification when output matches any pattern
     watch_patterns: List[str] = field(default_factory=list)
     _watch_hits: int = field(default=0, repr=False)          # total matches delivered
     _watch_suppressed: int = field(default=0, repr=False)    # matches dropped by rate limit
@@ -1624,14 +1624,33 @@ def format_process_notification(evt: dict) -> "str | None":
     """
     evt_type = evt.get("type", "completion")
     _sid = evt.get("session_id", "unknown")
-    _cmd = evt.get("command", "unknown")
+
+    try:
+        from agent.redact import redact_sensitive_text
+    except Exception:
+        redact_sensitive_text = lambda text: ""  # fail closed for UI notifications
+    try:
+        from tools.ansi_strip import strip_ansi
+    except Exception:
+        strip_ansi = lambda text: str(text or "")
+
+    def _safe(value: Any, *, limit: int = 2000) -> str:
+        text = strip_ansi(str(value or ""))
+        if len(text) > limit:
+            tail = text[-limit:]
+            nl = tail.find("\n")
+            tail = tail[nl + 1:] if nl != -1 else tail
+            text = f"[… output truncated — showing last {len(tail)} chars]\n{tail}"
+        return redact_sensitive_text(text)
+
+    _cmd = _safe(evt.get("command", "unknown"), limit=500)
 
     if evt_type == "watch_disabled":
-        return f"[IMPORTANT: {evt.get('message', '')}]"
+        return f"[IMPORTANT: {_safe(evt.get('message', ''), limit=1000)}]"
 
     if evt_type == "watch_match":
-        _pat = evt.get("pattern", "?")
-        _out = evt.get("output", "")
+        _pat = _safe(evt.get("pattern", "?"), limit=200)
+        _out = _safe(evt.get("output", ""), limit=2000)
         _sup = evt.get("suppressed", 0)
         text = (
             f"[IMPORTANT: Background process {_sid} matched "
@@ -1648,7 +1667,7 @@ def format_process_notification(evt: dict) -> "str | None":
         return _format_async_delegation(evt)
 
     _exit = evt.get("exit_code", "?")
-    _out = evt.get("output", "")
+    _out = _safe(evt.get("output", ""), limit=2000)
     _reason = evt.get("completion_reason") or "exited"
     _source = evt.get("termination_source") or ""
     _signal = ""

@@ -190,6 +190,35 @@ def _is_nous_inference_route(provider: str, base_url: str) -> bool:
     )
 
 
+def _emit_conversation_timing(
+    agent: Any,
+    step: str,
+    started: float,
+    *,
+    status: str = "completed",
+    **extra: Any,
+) -> int:
+    duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+    callback = getattr(agent, "status_callback", None)
+    if callback is not None:
+        try:
+            callback(
+                {
+                    "type": "run.progress",
+                    "phase": "timing",
+                    "step": f"conversation_{step}",
+                    "status": status,
+                    "summary": f"Conversation {step.replace('_', ' ')} {status} in {duration_ms}ms.",
+                    "duration_ms": duration_ms,
+                    "timing_key": f"conversation_{step}_ms",
+                    **extra,
+                }
+            )
+        except Exception:
+            logger.debug("conversation timing callback failed", exc_info=True)
+    return duration_ms
+
+
 def _billing_or_entitlement_message(
     *,
     capability: str,
@@ -976,11 +1005,27 @@ def run_conversation(
                 # unless the active provider needs it) so the fallback request
                 # isn't sent with stale, primary-shaped reasoning fields.
                 agent._reapply_reasoning_echo_for_provider(api_messages)
+                request_build_started = time.perf_counter()
                 api_kwargs = agent._build_api_kwargs(api_messages)
                 if agent._force_ascii_payload:
                     _sanitize_structure_non_ascii(api_kwargs)
                 if agent.api_mode == "codex_responses":
                     api_kwargs = agent._get_transport().preflight_kwargs(api_kwargs, allow_stream=False)
+                _emit_conversation_timing(
+                    agent,
+                    "request_build",
+                    request_build_started,
+                    api_call_count=api_call_count,
+                    api_mode=agent.api_mode,
+                    provider=agent.provider,
+                    model=agent.model,
+                    message_count=len(api_messages),
+                    tool_count=len(agent.tools or []),
+                    approx_input_tokens=approx_tokens,
+                    request_char_count=total_chars,
+                )
+
+                pre_api_hook_started = time.perf_counter()
                 try:
                     from hermes_cli.middleware import apply_llm_request_middleware
 
@@ -1060,9 +1105,28 @@ def run_conversation(
                         )
                 except Exception:
                     pass
+                _emit_conversation_timing(
+                    agent,
+                    "pre_api_hook",
+                    pre_api_hook_started,
+                    api_call_count=api_call_count,
+                    api_mode=agent.api_mode,
+                    provider=agent.provider,
+                    model=agent.model,
+                )
 
                 if env_var_enabled("HERMES_DUMP_REQUESTS"):
+                    dump_started = time.perf_counter()
                     agent._dump_api_request_debug(api_kwargs, reason="preflight")
+                    _emit_conversation_timing(
+                        agent,
+                        "request_dump",
+                        dump_started,
+                        api_call_count=api_call_count,
+                        api_mode=agent.api_mode,
+                        provider=agent.provider,
+                        model=agent.model,
+                    )
 
                 # Always prefer the streaming path — even without stream
                 # consumers.  Streaming gives us fine-grained health
@@ -1108,11 +1172,38 @@ def run_conversation(
                         _use_streaming = False
 
                 def _perform_api_call(next_api_kwargs):
-                    if _use_streaming:
-                        return agent._interruptible_streaming_api_call(
-                            next_api_kwargs, on_first_delta=_stop_spinner
+                    provider_dispatch_started = time.perf_counter()
+                    try:
+                        if _use_streaming:
+                            result = agent._interruptible_streaming_api_call(
+                                next_api_kwargs, on_first_delta=_stop_spinner
+                            )
+                        else:
+                            result = agent._interruptible_api_call(next_api_kwargs)
+                        _emit_conversation_timing(
+                            agent,
+                            "provider_dispatch",
+                            provider_dispatch_started,
+                            api_call_count=api_call_count,
+                            api_mode=agent.api_mode,
+                            provider=agent.provider,
+                            model=agent.model,
+                            streaming=bool(_use_streaming),
                         )
-                    return agent._interruptible_api_call(next_api_kwargs)
+                        return result
+                    except BaseException:
+                        _emit_conversation_timing(
+                            agent,
+                            "provider_dispatch",
+                            provider_dispatch_started,
+                            status="failed",
+                            api_call_count=api_call_count,
+                            api_mode=agent.api_mode,
+                            provider=agent.provider,
+                            model=agent.model,
+                            streaming=bool(_use_streaming),
+                        )
+                        raise
 
                 from hermes_cli.middleware import run_llm_execution_middleware
 
@@ -1152,6 +1243,7 @@ def run_conversation(
                     logging.debug(f"API Response received - Model: {resp_model}, Usage: {response.usage if hasattr(response, 'usage') else 'N/A'}")
                 
                 # Validate response shape before proceeding
+                response_validate_started = time.perf_counter()
                 response_invalid = False
                 error_details = []
                 if agent.api_mode == "codex_responses":
@@ -1230,6 +1322,19 @@ def run_conversation(
                             error_details.append("response.choices is None")
                         else:
                             error_details.append("response.choices is empty")
+
+                _emit_conversation_timing(
+                    agent,
+                    "response_validate",
+                    response_validate_started,
+                    status="failed" if response_invalid else "completed",
+                    api_call_count=api_call_count,
+                    api_mode=agent.api_mode,
+                    provider=agent.provider,
+                    model=agent.model,
+                    response_invalid=bool(response_invalid),
+                    error_detail_count=len(error_details),
+                )
 
                 if response_invalid:
                     agent._invoke_api_request_error_hook(

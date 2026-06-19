@@ -392,6 +392,80 @@ class GatewaySlashCommandsMixin:
             output = output[:3800] + "\n" + t("gateway.kanban.truncated_suffix")
         return output or t("gateway.kanban.no_output")
 
+    async def _handle_queue_status_command(self, event: MessageEvent) -> str:
+        """Handle /queue-status command with active-run and queue visibility."""
+        from gateway.run import _AGENT_PENDING_SENTINEL
+        from tools.process_registry import format_uptime_short
+
+        source = event.source
+        session_entry = self.session_store.get_or_create_session(source)
+        session_key = session_entry.session_key
+        adapter = self.adapters.get(source.platform) if source else None
+        pending_slot = getattr(adapter, "_pending_messages", {}) if adapter is not None else {}
+        current_pending_slot = 1 if session_key in pending_slot else 0
+        overflow_depth = len((getattr(self, "_queued_events", None) or {}).get(session_key, []))
+        explicit_queue_depth = self._queue_depth(session_key, adapter=adapter)
+
+        running_agents = getattr(self, "_running_agents", {}) or {}
+        running_started = getattr(self, "_running_agents_ts", {}) or {}
+        current_agent = running_agents.get(session_key)
+        is_running = session_key in running_agents
+        if not is_running:
+            state = "idle"
+        elif current_agent is _AGENT_PENDING_SENTINEL:
+            state = "starting"
+        else:
+            state = "running"
+        start_ts = float(running_started.get(session_key, 0) or 0)
+        running_age = (
+            format_uptime_short(max(0, int(time.time() - start_ts)))
+            if start_ts and is_running
+            else "0s"
+        )
+
+        total_pending_slots = 0
+        for platform_adapter in (getattr(self, "adapters", {}) or {}).values():
+            total_pending_slots += len(getattr(platform_adapter, "_pending_messages", {}) or {})
+        total_overflow_depth = sum(
+            len(items) for items in (getattr(self, "_queued_events", None) or {}).values()
+        )
+
+        lines = [
+            "🧭 Gateway queue/status",
+            "",
+            f"Active agents: {len(running_agents)}",
+            f"Current session: {state}",
+            f"Running age: {running_age}",
+            f"Pending follow-up slot: {current_pending_slot}",
+            f"Explicit /queue depth: {explicit_queue_depth}",
+            f"Overflow queue depth: {overflow_depth}",
+            f"All pending slots: {total_pending_slots}",
+            f"All overflow queued: {total_overflow_depth}",
+            "",
+            "Platforms:",
+        ]
+
+        adapters = getattr(self, "adapters", {}) or {}
+        if adapters:
+            for platform in sorted(adapters.keys(), key=lambda p: getattr(p, "value", str(p))):
+                name = getattr(platform, "value", str(platform))
+                lines.append(f"- {name}: connected")
+        else:
+            lines.append("- none: connected=0")
+
+        failed_platforms = getattr(self, "_failed_platforms", {}) or {}
+        for platform, info in sorted(
+            failed_platforms.items(),
+            key=lambda item: getattr(item[0], "value", str(item[0])),
+        ):
+            name = getattr(platform, "value", str(platform))
+            paused = bool(info.get("paused")) if isinstance(info, dict) else False
+            attempts = info.get("attempts", 0) if isinstance(info, dict) else 0
+            state_text = "paused" if paused else "retrying"
+            lines.append(f"- {name}: {state_text} (attempts={attempts})")
+
+        return "\n".join(lines)
+
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         from gateway.run import _AGENT_PENDING_SENTINEL, _load_gateway_config, _resolve_gateway_model
