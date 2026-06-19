@@ -631,6 +631,9 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                         default=kb.DEFAULT_SPAWN_FAILURE_LIMIT,
                         help=f"Auto-block a task after this many consecutive non-success attempts "
                              f"(spawn_failed, timed_out, or crashed; default: {kb.DEFAULT_SPAWN_FAILURE_LIMIT})")
+    p_disp.add_argument("--claim-ttl", type=int,
+                        default=kb.DEFAULT_CLAIM_TTL_SECONDS,
+                        help=f"Seconds before a running claim is stale if not heartbeated (default: {kb.DEFAULT_CLAIM_TTL_SECONDS})")
     p_disp.add_argument("--json", action="store_true")
 
     # --- daemon (deprecated) ---
@@ -644,6 +647,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Cap number of spawns per tick")
     p_daemon.add_argument("--failure-limit", type=int,
                           default=kb.DEFAULT_SPAWN_FAILURE_LIMIT)
+    p_daemon.add_argument("--claim-ttl", type=int,
+                          default=kb.DEFAULT_CLAIM_TTL_SECONDS)
     p_daemon.add_argument("--pidfile", default=None,
                           help="Write the daemon's PID to this file on start")
     p_daemon.add_argument("--verbose", "-v", action="store_true",
@@ -2146,6 +2151,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            ttl_seconds=getattr(args, "claim_ttl", kb.DEFAULT_CLAIM_TTL_SECONDS),
         )
     if getattr(args, "json", False):
         print(json.dumps({
@@ -2335,6 +2341,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             interval=args.interval,
             max_spawn=args.max,
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
+            ttl_seconds=getattr(args, "claim_ttl", kb.DEFAULT_CLAIM_TTL_SECONDS),
             on_tick=_on_tick,
         )
     finally:

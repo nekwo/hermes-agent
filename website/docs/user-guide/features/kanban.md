@@ -945,7 +945,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `spawned` | `{pid}` | Dispatcher successfully started a worker process. |
 | `heartbeat` | `{note?}` | Worker called `hermes kanban heartbeat $TASK` to signal liveness during long operations. |
 | `reclaimed` | `{stale_lock}` | Claim TTL expired without a completion; task goes back to `ready`. |
-| `crashed` | `{pid, claimer}` | Worker PID no longer alive but TTL hadn't expired yet. |
+| `crashed` | `{pid, claimer, exit_kind?, exit_code?, classification, evidence_path, alive_sidecar_pids?}` | Worker PID no longer alive but TTL hadn't expired yet. `classification` is `supervisor_lost_child` when a detached sidecar (e.g. an encoder, training loop) is still running, else `process_failed`. `evidence_path` points to a redaction-safe JSON crash artifact under `<board logs>/crashes/<task>-<epoch>-<rand>.json` that captures the bounded worker-log tail, sidecar manifests, and per-sidecar log tails — see [Crash artifacts](#crash-artifacts). |
 | `timed_out` | `{pid, elapsed_seconds, limit_seconds, sigkill}` | `max_runtime_seconds` exceeded; dispatcher SIGTERM'd (then SIGKILL'd after 5 s grace) and re-queued. |
 | `stale` | `{elapsed_seconds, last_heartbeat_at, heartbeat_age_seconds, timeout_seconds, pid, terminated}` | Task ran longer than `kanban.dispatch_stale_timeout_seconds` (default 4 h) AND no `kanban_heartbeat` arrived in the last hour. Dispatcher SIGTERM'd the host-local worker (if any), reset the task to `ready` for re-dispatch. Does NOT tick the failure counter (stale is dispatcher-side absence detection, not a worker fault). Workers running long operations should call `kanban_heartbeat` at least once an hour to avoid this. |
 | `respawn_guarded` | `{reason}` | Dispatcher refused to re-spawn this ready task this tick. Reasons: `blocker_auth` (last failure was a quota/auth/429 error — wait for the rate window to reset), `recent_success` (a completed run happened in the last hour — wait for review before re-running), `active_pr` (a GitHub PR URL appears in a recent comment — a prior worker already opened a PR). The task stays in `ready`; the next tick gets another chance to spawn. If the underlying condition persists, the normal `consecutive_failures` circuit breaker will auto-block via `gave_up` after `failure_limit` failures. |
@@ -954,6 +954,38 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `gave_up` | `{failures, effective_limit, limit_source, error}` | Circuit breaker fired after N consecutive non-successful attempts. Task auto-blocks with the last error. The effective limit resolves as task `max_retries`, then dispatcher `failure_limit` / `kanban.failure_limit`, then the built-in default. |
 
 `hermes kanban tail <id>` shows these for a single task. `hermes kanban watch` streams them board-wide.
+
+### Crash artifacts
+
+Every `crashed` event also writes a durable JSON artifact under
+`<board logs>/crashes/<task>-<epoch>-<rand>.json`. The path is referenced from
+both the `crashed` event payload's `evidence_path` field and the closed run's
+`task_runs.metadata.evidence_path`. The artifact is deterministic (sorted keys
++ atomic temp-rename) and redacts Bearer/JWT/`Authorization`/cookie/`X-Amz-*`/
+`Signature`/`Expires`/`--token=`/`api_key`-style values from every captured
+log tail. Fields:
+
+- `classification` — `supervisor_lost_child` (≥1 detached child still
+  running, recovery can attach) or `process_failed` (everything is dead,
+  clean failure).
+- `worker_pid`, `claimer`, `exit_kind`, `exit_code`, `error`.
+- `workspace_path`, `worker_log_path`, `worker_log_tail` (bounded ≤8 KiB,
+  redacted), `worker_log_growing` (true when the log was touched in the
+  last 120 s — useful when a detached child is still writing through the
+  supervisor's log fd).
+- `sidecars[]` — discovered from `<workspace>/.hermes/sidecars/*.json`
+  (also accepts `.sidecars/` and `sidecars/`). Each entry carries `pid`,
+  `cmd`, `cwd`, `name`, `log_path`, `log_tail` (redacted, bounded), and
+  `alive`. JSON manifests should include at least `{"pid": …}`; plain
+  `*.pid` files containing a single integer are also accepted. A
+  recovery task can use this list to re-attach to the surviving child
+  without re-deriving its argv.
+- `captured_at_epoch` + ISO `timestamp` for ordering.
+
+Sidecar discovery is bounded (8 entries, 32 KiB per manifest, 8 KiB per log
+tail) so a malformed workspace cannot stall the dispatcher tick. Artifact
+write failures degrade silently — the `crashed` event still records the
+pid + exit info, just without an `evidence_path`.
 
 ## Out of scope
 

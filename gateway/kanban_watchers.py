@@ -556,6 +556,133 @@ class GatewayKanbanWatchersMixin:
                     path, exc,
                 )
 
+    async def _kanban_blocked_pm_hook_watcher(self, interval: float = 5.0) -> None:
+        """React to committed Kanban `blocked` events by routing PM."""
+        try:
+            from hermes_cli.config import load_config as _load_config
+            from hermes_cli import kanban_db as _kb
+            from hermes_cli.kanban_blocked_pm import (
+                BlockedPmHookConfig,
+                handle_blocked_event,
+                unseen_blocked_events,
+            )
+        except Exception:
+            logger.warning("kanban blocked PM hook: imports unavailable; disabled")
+            return
+
+        env_override = os.environ.get("HERMES_KANBAN_PM_BLOCKED_HOOK", "").strip().lower()
+        try:
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning("kanban blocked PM hook: cannot load config (%s); disabled", exc)
+            return
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        hook_cfg = kanban_cfg.get("pm_blocked_hook", {}) if isinstance(kanban_cfg, dict) else {}
+        if not isinstance(hook_cfg, dict):
+            hook_cfg = {}
+        enabled = bool(hook_cfg.get("enabled", False))
+        if env_override in {"1", "true", "yes", "on"}:
+            enabled = True
+        elif env_override in {"0", "false", "no", "off"}:
+            enabled = False
+        if not enabled:
+            logger.info(
+                "kanban blocked PM hook: disabled "
+                "(set kanban.pm_blocked_hook.enabled=true to enable)"
+            )
+            return
+
+        pm_config = BlockedPmHookConfig(
+            pm_assignee=str(hook_cfg.get("assignee") or "pm"),
+            workspace_kind=str(hook_cfg.get("workspace_kind") or "scratch"),
+            workspace_path=hook_cfg.get("workspace_path"),
+            priority=int(hook_cfg.get("priority", 100) or 100),
+        )
+        dispatch_after_create = bool(hook_cfg.get("dispatch_after_create", True))
+        cursors: dict[str, int] = getattr(self, "_kanban_blocked_pm_hook_cursors", {})
+        self._kanban_blocked_pm_hook_cursors = cursors
+
+        await asyncio.sleep(5)
+
+        while self._running:
+            try:
+                def _tick_once() -> list[str]:
+                    outputs: list[str] = []
+                    try:
+                        boards = _kb.list_boards(include_archived=False)
+                    except Exception:
+                        boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+                    seen_db_paths: set[str] = set()
+                    for board_meta in boards:
+                        slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
+                        db_path = board_meta.get("db_path")
+                        try:
+                            resolved_db_path = (
+                                str(Path(db_path).expanduser().resolve())
+                                if db_path
+                                else str(_kb.kanban_db_path(slug).resolve())
+                            )
+                        except Exception:
+                            resolved_db_path = f"slug:{slug}"
+                        if resolved_db_path in seen_db_paths:
+                            continue
+                        seen_db_paths.add(resolved_db_path)
+                        conn = None
+                        try:
+                            conn = _kb.connect(board=slug)
+                            cursor = int(cursors.get(resolved_db_path, 0) or 0)
+                            events = unseen_blocked_events(conn, after_event_id=cursor)
+                            if not events:
+                                max_row = conn.execute(
+                                    "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
+                                ).fetchone()
+                                cursors[resolved_db_path] = max(
+                                    cursor, int(max_row["m"] or 0)
+                                )
+                                continue
+                            created_any = False
+                            for event in events:
+                                result = handle_blocked_event(conn, event, pm_config)
+                                cursors[resolved_db_path] = max(
+                                    cursors.get(resolved_db_path, 0), int(event.id)
+                                )
+                                if result.created_pm_task_id:
+                                    created_any = True
+                                    outputs.append(
+                                        f"{slug}:{event.task_id}->"
+                                        f"{result.created_pm_task_id}:{result.action}"
+                                    )
+                            if created_any and dispatch_after_create:
+                                try:
+                                    _kb.dispatch_once(conn, board=slug, max_spawn=1)
+                                except Exception as exc:
+                                    logger.warning(
+                                        "kanban blocked PM hook: dispatch after create "
+                                        "failed on board %s: %s",
+                                        slug,
+                                        exc,
+                                    )
+                        except Exception as exc:
+                            logger.warning(
+                                "kanban blocked PM hook: board %s tick failed: %s",
+                                slug,
+                                exc,
+                            )
+                        finally:
+                            if conn is not None:
+                                conn.close()
+                    return outputs
+
+                routed = await asyncio.to_thread(_tick_once)
+                for item in routed:
+                    logger.info("kanban blocked PM hook routed %s", item)
+            except Exception as exc:
+                logger.warning("kanban blocked PM hook tick failed: %s", exc)
+            for _ in range(int(max(1, interval))):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
     async def _kanban_dispatcher_watcher(self) -> None:
         """Embedded kanban dispatcher — one tick every `dispatch_interval_seconds`.
 
@@ -615,6 +742,26 @@ class GatewayKanbanWatchersMixin:
             )
             interval = 60.0
         interval = max(interval, 1.0)  # sanity floor — tighter than this is a footgun
+
+        raw_claim_ttl = kanban_cfg.get(
+            "claim_ttl_seconds", _kb.DEFAULT_CLAIM_TTL_SECONDS
+        )
+        try:
+            claim_ttl_seconds = int(raw_claim_ttl)
+        except (TypeError, ValueError):
+            logger.warning(
+                "kanban dispatcher: invalid kanban.claim_ttl_seconds=%r; using default %d",
+                raw_claim_ttl,
+                _kb.DEFAULT_CLAIM_TTL_SECONDS,
+            )
+            claim_ttl_seconds = _kb.DEFAULT_CLAIM_TTL_SECONDS
+        if claim_ttl_seconds < 60:
+            logger.warning(
+                "kanban dispatcher: kanban.claim_ttl_seconds=%r is below 60; using default %d",
+                raw_claim_ttl,
+                _kb.DEFAULT_CLAIM_TTL_SECONDS,
+            )
+            claim_ttl_seconds = _kb.DEFAULT_CLAIM_TTL_SECONDS
 
         # Read max_spawn config to limit concurrent kanban tasks
         max_spawn = kanban_cfg.get("max_spawn", None)
@@ -809,6 +956,7 @@ class GatewayKanbanWatchersMixin:
                     max_spawn=max_spawn,
                     max_in_progress=max_in_progress,
                     failure_limit=failure_limit,
+                    ttl_seconds=claim_ttl_seconds,
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
