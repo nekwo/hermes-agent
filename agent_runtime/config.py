@@ -1,0 +1,393 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from hermes_constants import get_config_path
+from hermes_cli.profiles import profile_exists
+
+from .personas import default_personas, validate_toolsets, AgentRole
+from .profile_context import active_profile_name
+from .runtime_config import ContinuousRoleSessionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
+
+_STAGE46_REQUIRED_SKILLS = {
+    "neko_supervisor": ("harness-mission-lead",),
+    "dev": ("harness-dev-delivery", "launcher-analyze-proof"),
+    "backend_dev": ("harness-dev-delivery",),
+    "qa": ("harness-qa-verdict",),
+}
+
+
+@dataclass(slots=True)
+class AgentRuntimeConfig(RuntimeConfig):
+    store_root: str | None = None
+    head_agent_profile: str | None = None
+    personas: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+
+def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeConfig:
+    config_path = config_path or get_config_path()
+    raw = {}
+    if config_path.exists():
+        raw = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("agent_runtime", {}) or {}
+    enterprise_worker_sessions = _enterprise_worker_sessions_config(raw.get("enterprise_worker_sessions") or {})
+    continuous_role_sessions = _continuous_role_sessions_config(raw.get("continuous_role_sessions") or {})
+    normal_worker_flow = _normal_worker_flow_config(raw.get("normal_worker_flow") or {})
+    mission_plan = _mission_plan_config(raw.get("mission_plan") or {})
+    role_envelope = _role_envelope_config(raw.get("role_envelope") or {})
+    repo_bundle_routing = _repo_bundle_routing_config(raw.get("repo_bundle_routing") or {})
+    simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
+    swarm = _swarm_config(raw.get("swarm") or {})
+    continuous_role_sessions = _apply_enterprise_role_session_compat(
+        continuous_role_sessions,
+        enterprise_worker_sessions=enterprise_worker_sessions,
+        raw_continuous=raw.get("continuous_role_sessions"),
+    )
+    cfg = AgentRuntimeConfig(
+        schema_version=int(raw.get("schema_version", 1)),
+        store_root=raw.get("store_root"),
+        head_agent_profile=raw.get("head_agent_profile") or raw.get("head_profile"),
+        default_provider=raw.get("default_provider"),
+        default_model=raw.get("default_model"),
+        default_api_mode=raw.get("default_api_mode", "codex_responses"),
+        heartbeat_ttl_seconds=int(raw.get("heartbeat_ttl_seconds", 900)),
+        max_actions_per_tick=int(raw.get("max_actions_per_tick", 1)),
+        daemon_enabled=bool((raw.get("daemon") or {}).get("enabled", raw.get("daemon_enabled", False))),
+        execution_mode=str(raw.get("execution_mode") or ("daemon" if bool((raw.get("daemon") or {}).get("enabled", raw.get("daemon_enabled", False))) else "manual")),
+        daemon_interval_seconds=int((raw.get("daemon") or {}).get("interval_seconds", raw.get("daemon_interval_seconds", 10))),
+        daemon_idle_interval_seconds=int((raw.get("daemon") or {}).get("idle_interval_seconds", raw.get("daemon_idle_interval_seconds", 30))),
+        daemon_heartbeat_seconds=int((raw.get("daemon") or {}).get("heartbeat_seconds", raw.get("daemon_heartbeat_seconds", 5))),
+        daemon_stale_run_seconds=int((raw.get("daemon") or {}).get("stale_run_seconds", raw.get("daemon_stale_run_seconds", 600))),
+        daemon_retry_cooldown_seconds=int((raw.get("daemon") or {}).get("retry_cooldown_seconds", raw.get("daemon_retry_cooldown_seconds", 120))),
+        daemon_max_retries_per_state=int((raw.get("daemon") or {}).get("max_retries_per_state", raw.get("daemon_max_retries_per_state", 3))),
+        task_create_auto_start_daemon=bool(raw.get("task_create_auto_start_daemon", False)),
+        preferred_goal_execution_mode=str(raw.get("preferred_goal_execution_mode", "in_process_controller") or "in_process_controller"),
+        live_run_max_wall_seconds=float(raw.get("live_run_max_wall_seconds", 300.0)),
+        live_run_max_api_calls=int(raw.get("live_run_max_api_calls", 20)),
+        live_run_max_total_tokens=int(raw.get("live_run_max_total_tokens", 750_000)),
+        live_run_iteration_budget=int(raw.get("live_run_iteration_budget", 60)),
+        scope_wait_deadline_seconds=int(raw.get("scope_wait_deadline_seconds", 900)),
+        run_lease_seconds=int(raw.get("run_lease_seconds", raw.get("daemon_stale_run_seconds", 600))),
+        tool_wait_timeout_seconds=int(raw.get("tool_wait_timeout_seconds", 300)),
+        mission_max_total_tokens=int(raw.get("mission_max_total_tokens", 1_000_000)),
+        mission_wall_clock_deadline_seconds=int(raw.get("mission_wall_clock_deadline_seconds", 86_400)),
+        neko_recovery_attempt_cap=int(raw.get("neko_recovery_attempt_cap", 2)),
+        neko_extension_cap=int(raw.get("neko_extension_cap", 2)),
+        artifact_storage_low_watermark_mb=int(raw.get("artifact_storage_low_watermark_mb", 512)),
+        artifact_storage_high_watermark_mb=int(raw.get("artifact_storage_high_watermark_mb", 1024)),
+        artifact_storage_critical_watermark_mb=int(raw.get("artifact_storage_critical_watermark_mb", 2048)),
+        continuous_role_sessions=continuous_role_sessions,
+        enterprise_worker_sessions=enterprise_worker_sessions,
+        normal_worker_flow=normal_worker_flow,
+        mission_plan=mission_plan,
+        role_envelope=role_envelope,
+        repo_bundle_routing=repo_bundle_routing,
+        simplified_agent_contract=simplified_agent_contract,
+        swarm=swarm,
+        personas=raw.get("personas", {}) or {},
+    )
+    return cfg
+
+
+def configured_personas(cfg: AgentRuntimeConfig | None = None):
+    cfg = cfg or load_agent_runtime_config()
+    personas = {p.id: p for p in default_personas()}
+    head_profile = _head_agent_profile(cfg)
+    for p in personas.values():
+        p.provider = p.provider or cfg.default_provider
+        p.model = p.model or cfg.default_model
+        p.api_mode = p.api_mode or cfg.default_api_mode
+    for pid, overrides in cfg.personas.items():
+        persona_id = "neko_supervisor" if pid == "alice_supervisor" else pid
+        if persona_id not in personas:
+            default_role = AgentRole.PM.value if persona_id == AgentRole.PM.value else AgentRole.DEV.value
+            role = str(overrides.get("role", default_role))
+            if role not in {item.value for item in AgentRole}:
+                continue
+            personas[persona_id] = _persona_from_overrides(persona_id, role, overrides, cfg)
+        p = personas[persona_id]
+        if "role" in overrides:
+            p.role = str(overrides.get("role") or p.role)
+        p.display_name = str(overrides.get("display_name", p.display_name))
+        p.provider = overrides.get("provider", p.provider)
+        p.model = overrides.get("model", p.model)
+        p.api_mode = overrides.get("api_mode", p.api_mode)
+        p.autonomy = str(overrides.get("autonomy", p.autonomy))
+        p.hermes_profile = overrides.get("hermes_profile", p.hermes_profile)
+        p.soul_overlay_path = overrides.get("soul_overlay_path", p.soul_overlay_path)
+        p.include_profile_memory = bool(overrides.get("include_profile_memory", p.include_profile_memory))
+        p.include_core_context_files = bool(overrides.get("include_core_context_files", p.include_core_context_files))
+        p.repo_scope = overrides.get("repo_scope", p.repo_scope)
+        p.repo_scope_label = overrides.get("repo_scope_label", p.repo_scope_label)
+        p.iteration_budget = _optional_int(overrides.get("iteration_budget", p.iteration_budget))
+        p.max_wall_seconds = _optional_float(overrides.get("max_wall_seconds", p.max_wall_seconds))
+        p.max_api_calls = _optional_int(overrides.get("max_api_calls", p.max_api_calls))
+        p.max_total_tokens = _optional_int(overrides.get("max_total_tokens", p.max_total_tokens))
+        if "skills" in overrides:
+            p.skills = _string_list(overrides["skills"])
+        if "required_mcp_servers" in overrides:
+            p.required_mcp_servers = _string_list(overrides["required_mcp_servers"])
+        if "toolsets" in overrides:
+            p.toolsets = validate_toolsets(AgentRole(p.role), list(overrides["toolsets"]))
+    supervisor = personas.get("neko_supervisor")
+    if supervisor is not None:
+        supervisor.hermes_profile = _effective_supervisor_profile(supervisor.hermes_profile, head_profile)
+    for persona in personas.values():
+        _ensure_stage46_required_skills(persona)
+    return list(personas.values())
+
+
+def _head_agent_profile(cfg: AgentRuntimeConfig) -> str:
+    configured = str(getattr(cfg, "head_agent_profile", None) or "").strip()
+    return configured or active_profile_name()
+
+
+def _effective_supervisor_profile(configured_profile: str | None, head_profile: str) -> str:
+    """Resolve Neko/head supervisor profile without hard-coding Alice.
+
+    Existing Tony configs may still say ``alice`` from the Windows runtime.  If
+    that profile exists, preserve it.  If it is absent on the current host, use
+    the active/configured head-agent profile instead so Mission Control can be
+    driven by alice-mac, pm, a future Neko profile, or any other head agent.
+    """
+    value = str(configured_profile or "").strip()
+    if not value:
+        return head_profile
+    if value == "alice" and not profile_exists("alice"):
+        return head_profile
+    return value
+
+
+def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any], cfg: AgentRuntimeConfig):
+    from .models import AgentPersona
+
+    return AgentPersona(
+        id=persona_id,
+        display_name=str(overrides.get("display_name") or persona_id.replace("_", " ").title()),
+        role=role,
+        model=overrides.get("model") or cfg.default_model,
+        provider=overrides.get("provider") or cfg.default_provider,
+        api_mode=overrides.get("api_mode") or cfg.default_api_mode,
+        toolsets=validate_toolsets(AgentRole(role), list(overrides.get("toolsets") or [])),
+        system_prompt_path=str(overrides.get("system_prompt_path") or f"personas/{role}/system.md"),
+        include_core_context_files=bool(overrides.get("include_core_context_files", False)),
+    )
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                decoded = yaml.safe_load(text)
+            except yaml.YAMLError:
+                decoded = None
+            if isinstance(decoded, list):
+                return [str(item).strip() for item in decoded if str(item).strip()]
+        return [text]
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _continuous_role_sessions_config(raw: dict[str, Any]) -> ContinuousRoleSessionConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = ContinuousRoleSessionConfig()
+    return ContinuousRoleSessionConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        observe_only=bool(raw.get("observe_only", defaults.observe_only)),
+        max_decisions_per_envelope=_positive_int(raw.get("max_decisions_per_envelope"), defaults.max_decisions_per_envelope),
+        max_proofs_per_envelope=_positive_int(raw.get("max_proofs_per_envelope"), defaults.max_proofs_per_envelope),
+        max_continuations_per_stage=_positive_int(raw.get("max_continuations_per_stage"), defaults.max_continuations_per_stage),
+        continue_after_passing_proof=bool(raw.get("continue_after_passing_proof", defaults.continue_after_passing_proof)),
+        continue_after_failed_proof=bool(raw.get("continue_after_failed_proof", defaults.continue_after_failed_proof)),
+        close_on_state_owner_change=bool(raw.get("close_on_state_owner_change", defaults.close_on_state_owner_change)),
+        close_on_open_incident=bool(raw.get("close_on_open_incident", defaults.close_on_open_incident)),
+        close_on_invalid_output=bool(raw.get("close_on_invalid_output", defaults.close_on_invalid_output)),
+        close_on_budget_warning=bool(raw.get("close_on_budget_warning", defaults.close_on_budget_warning)),
+    )
+
+
+def _enterprise_worker_sessions_config(raw: dict[str, Any]) -> EnterpriseWorkerSessionsConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = EnterpriseWorkerSessionsConfig()
+    mode = str(raw.get("mode", defaults.mode) or defaults.mode).strip() or defaults.mode
+    if mode not in {"observe_only", "enforce"}:
+        mode = defaults.mode
+    strategy = str(raw.get("static_prompt_strategy", defaults.static_prompt_strategy) or defaults.static_prompt_strategy).strip()
+    if strategy not in {"capability_detect", "always_send", "receipt_only"}:
+        strategy = defaults.static_prompt_strategy
+    return EnterpriseWorkerSessionsConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        mode=mode,
+        worker_session_store=bool(raw.get("worker_session_store", defaults.worker_session_store)),
+        persona_instance_runtime=bool(raw.get("persona_instance_runtime", defaults.persona_instance_runtime)),
+        persona_assignment_store=bool(raw.get("persona_assignment_store", defaults.persona_assignment_store)),
+        same_session_continuation=bool(raw.get("same_session_continuation", defaults.same_session_continuation)),
+        harness_owned_proof_recipes=bool(raw.get("harness_owned_proof_recipes", defaults.harness_owned_proof_recipes)),
+        no_edit_certification_sandbox=bool(raw.get("no_edit_certification_sandbox", defaults.no_edit_certification_sandbox)),
+        possession_controls=bool(raw.get("possession_controls", defaults.possession_controls)),
+        static_prompt_strategy=strategy,
+        worker_heartbeat_seconds=_positive_int(raw.get("worker_heartbeat_seconds"), defaults.worker_heartbeat_seconds),
+        worker_stale_seconds=_positive_int(raw.get("worker_stale_seconds"), defaults.worker_stale_seconds),
+        possession_lease_seconds=_positive_int(raw.get("possession_lease_seconds"), defaults.possession_lease_seconds),
+        max_same_worker_repairs_per_stage=_positive_int(raw.get("max_same_worker_repairs_per_stage"), defaults.max_same_worker_repairs_per_stage),
+        max_worker_context_compressions_per_goal=_positive_int(raw.get("max_worker_context_compressions_per_goal"), defaults.max_worker_context_compressions_per_goal),
+    )
+
+
+def _normal_worker_flow_config(raw: dict[str, Any]) -> NormalWorkerFlowConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = NormalWorkerFlowConfig()
+    return NormalWorkerFlowConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        dev_self_tests_in_session=bool(raw.get("dev_self_tests_in_session", defaults.dev_self_tests_in_session)),
+        auto_final_gate_after_delivery=bool(raw.get("auto_final_gate_after_delivery", defaults.auto_final_gate_after_delivery)),
+        hide_request_test_run_until_gate=bool(raw.get("hide_request_test_run_until_gate", defaults.hide_request_test_run_until_gate)),
+        self_test_evidence_capture=bool(raw.get("self_test_evidence_capture", defaults.self_test_evidence_capture)),
+        max_self_test_repeats_without_change=_positive_int(raw.get("max_self_test_repeats_without_change"), defaults.max_self_test_repeats_without_change),
+        max_auto_final_gate_repairs_per_stage=_positive_int(raw.get("max_auto_final_gate_repairs_per_stage"), defaults.max_auto_final_gate_repairs_per_stage),
+        expose_worker_actions_in_contract_dump=bool(raw.get("expose_worker_actions_in_contract_dump", defaults.expose_worker_actions_in_contract_dump)),
+    )
+
+
+
+
+def _role_envelope_config(raw: dict[str, Any]) -> RoleEnvelopeConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = RoleEnvelopeConfig()
+    return RoleEnvelopeConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        prefer_same_session=bool(raw.get("prefer_same_session", defaults.prefer_same_session)),
+        checklist_hud_enabled=bool(raw.get("checklist_hud_enabled", defaults.checklist_hud_enabled)),
+        self_approval_enabled=bool(raw.get("self_approval_enabled", defaults.self_approval_enabled)),
+        qa_final_approval_required=bool(raw.get("qa_final_approval_required", defaults.qa_final_approval_required)),
+        max_same_session_continuations=_positive_int(raw.get("max_same_session_continuations"), defaults.max_same_session_continuations),
+        max_no_progress_repeats=_positive_int(raw.get("max_no_progress_repeats"), defaults.max_no_progress_repeats),
+        max_fix_envelopes_per_stage=_positive_int(raw.get("max_fix_envelopes_per_stage"), defaults.max_fix_envelopes_per_stage),
+        max_checklist_items_rendered=_positive_int(raw.get("max_checklist_items_rendered"), defaults.max_checklist_items_rendered),
+        max_foreign_checklist_summaries=_positive_int(raw.get("max_foreign_checklist_summaries"), defaults.max_foreign_checklist_summaries),
+        enable_legacy_stage_projection=bool(raw.get("enable_legacy_stage_projection", defaults.enable_legacy_stage_projection)),
+    )
+
+
+def _repo_bundle_routing_config(raw: dict[str, Any]) -> RepoBundleRoutingConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = RepoBundleRoutingConfig()
+    return RepoBundleRoutingConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        strict_repo_ownership=bool(raw.get("strict_repo_ownership", defaults.strict_repo_ownership)),
+        auto_create_from_mission_plan=bool(raw.get("auto_create_from_mission_plan", defaults.auto_create_from_mission_plan)),
+        queue_on_dependency_bundles=bool(raw.get("queue_on_dependency_bundles", defaults.queue_on_dependency_bundles)),
+        expose_in_snapshot=bool(raw.get("expose_in_snapshot", defaults.expose_in_snapshot)),
+    )
+
+
+def _simplified_agent_contract_config(raw: dict[str, Any]) -> SimplifiedAgentContractConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = SimplifiedAgentContractConfig()
+    return SimplifiedAgentContractConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        expose_only_simplified_actions=bool(raw.get("expose_only_simplified_actions", defaults.expose_only_simplified_actions)),
+        keep_internal_state_machine=bool(raw.get("keep_internal_state_machine", defaults.keep_internal_state_machine)),
+        allow_legacy_decision_aliases=bool(raw.get("allow_legacy_decision_aliases", defaults.allow_legacy_decision_aliases)),
+        terminal_feedback_enabled=bool(raw.get("terminal_feedback_enabled", defaults.terminal_feedback_enabled)),
+    )
+
+
+def _swarm_config(raw: dict[str, Any]) -> SwarmConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = SwarmConfig()
+    return SwarmConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        requires_certification=bool(raw.get("requires_certification", defaults.requires_certification)),
+        allow_uncertified_dev_swarm=bool(raw.get("allow_uncertified_dev_swarm", defaults.allow_uncertified_dev_swarm)),
+        max_active_lanes=_positive_int(raw.get("max_active_lanes"), defaults.max_active_lanes),
+        global_token_soft_limit=_positive_int(raw.get("global_token_soft_limit"), defaults.global_token_soft_limit),
+        global_token_hard_limit=_positive_int(raw.get("global_token_hard_limit"), defaults.global_token_hard_limit),
+        global_api_call_soft_limit=_positive_int(raw.get("global_api_call_soft_limit"), defaults.global_api_call_soft_limit),
+        global_api_call_hard_limit=_positive_int(raw.get("global_api_call_hard_limit"), defaults.global_api_call_hard_limit),
+        per_lane_token_limit=_positive_int(raw.get("per_lane_token_limit"), defaults.per_lane_token_limit),
+        per_lane_api_call_limit=_positive_int(raw.get("per_lane_api_call_limit"), defaults.per_lane_api_call_limit),
+    )
+
+
+def _mission_plan_config(raw: dict[str, Any]) -> MissionPlanConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = MissionPlanConfig()
+    return MissionPlanConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        enforce_routing=bool(raw.get("enforce_routing", defaults.enforce_routing)),
+        enforce_hud=bool(raw.get("enforce_hud", defaults.enforce_hud)),
+        version=_positive_int(raw.get("version"), defaults.version),
+    )
+
+
+def _apply_enterprise_role_session_compat(
+    config: ContinuousRoleSessionConfig,
+    *,
+    enterprise_worker_sessions: EnterpriseWorkerSessionsConfig,
+    raw_continuous: Any,
+) -> ContinuousRoleSessionConfig:
+    if not enterprise_worker_sessions.enabled or not enterprise_worker_sessions.same_session_continuation:
+        return config
+    if isinstance(raw_continuous, dict) and ("enabled" in raw_continuous or "observe_only" in raw_continuous):
+        return config
+    return ContinuousRoleSessionConfig(
+        enabled=enterprise_worker_sessions.mode == "enforce",
+        observe_only=enterprise_worker_sessions.mode != "enforce",
+        max_decisions_per_envelope=config.max_decisions_per_envelope,
+        max_proofs_per_envelope=config.max_proofs_per_envelope,
+        max_continuations_per_stage=config.max_continuations_per_stage,
+        continue_after_passing_proof=config.continue_after_passing_proof,
+        continue_after_failed_proof=config.continue_after_failed_proof,
+        close_on_state_owner_change=config.close_on_state_owner_change,
+        close_on_open_incident=config.close_on_open_incident,
+        close_on_invalid_output=config.close_on_invalid_output,
+        close_on_budget_warning=config.close_on_budget_warning,
+    )
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
+
+
+def _ensure_stage46_required_skills(persona) -> None:
+    required = _STAGE46_REQUIRED_SKILLS.get(str(persona.id))
+    if not required:
+        return
+    existing = set(persona.skills or [])
+    for skill in required:
+        if skill not in existing:
+            persona.skills.append(skill)
+            existing.add(skill)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
