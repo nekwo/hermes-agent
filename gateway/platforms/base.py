@@ -953,7 +953,9 @@ def _media_delivery_strict_mode() -> bool:
 def _media_delivery_denied_paths() -> List[Path]:
     """Return absolute denylist paths under which delivery is never allowed."""
     denied = [Path(p) for p in _MEDIA_DELIVERY_DENIED_PREFIXES]
-    home = Path(os.path.expanduser("~"))
+    # Prefer HOME when tests/containers intentionally override it; on Windows
+    # os.path.expanduser("~") may ignore HOME in favour of USERPROFILE.
+    home = Path(os.environ.get("HOME") or os.path.expanduser("~"))
     for sub in _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS:
         denied.append(home / sub)
     # The active Hermes profile and shared Hermes root both contain control
@@ -1223,7 +1225,7 @@ MEDIA_TAG_CLEANUP_RE = re.compile(
     r'''[`"']?MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
     r'''(?:~/|/|[A-Za-z]:[/\\])\S+(?:[^\S\n]+\S+)*?\.(?:''' + _MEDIA_EXT_ALTERNATION + r'''))'''
-    r'''(?=[\s`"',;:)\]}]|$)[`"']?''',
+    r'''(?=[\s`"',;:)\]}\\]|$)[`"']?''',
     re.IGNORECASE,
 )
 
@@ -2969,7 +2971,10 @@ class BasePlatformAdapter(ABC):
             path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
             if path:
                 try:
-                    media.append((os.path.expanduser(path), has_voice_tag))
+                    expanded_path = os.path.expanduser(path)
+                    if "\x00" in expanded_path:
+                        continue
+                    media.append((expanded_path, has_voice_tag))
                 except (OSError, RuntimeError, ValueError):
                     # Skip a crafted ~\x00 path rather than aborting extraction
                     # and dropping every other attachment in the response.

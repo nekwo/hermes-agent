@@ -166,6 +166,7 @@ def init_agent(
     tool_delay: float = 1.0,
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
+    blocked_tool_names: List[str] = None,
     save_trajectories: bool = False,
     verbose_logging: bool = False,
     quiet_mode: bool = False,
@@ -271,6 +272,34 @@ def init_agent(
             identity even when skip_context_files=True. Project context files from the cwd
             remain skipped.
     """
+    _init_started = time.perf_counter()
+    _init_last_checkpoint = _init_started
+
+    def _emit_init_timing(step: str) -> None:
+        nonlocal _init_last_checkpoint
+        if status_callback is None:
+            _init_last_checkpoint = time.perf_counter()
+            return
+        current = time.perf_counter()
+        duration_ms = max(0, int((current - _init_last_checkpoint) * 1000))
+        elapsed_ms = max(0, int((current - _init_started) * 1000))
+        _init_last_checkpoint = current
+        try:
+            status_callback(
+                {
+                    "type": "run.progress",
+                    "phase": "timing",
+                    "step": f"agent_init_{step}",
+                    "status": "completed",
+                    "summary": f"Agent init {step.replace('_', ' ').title()} completed in {duration_ms}ms.",
+                    "duration_ms": duration_ms,
+                    "elapsed_ms": elapsed_ms,
+                    "timing_key": f"agent_init_{step}_ms",
+                }
+            )
+        except Exception:
+            pass
+
     _install_safe_stdio()
 
     agent.model = model
@@ -394,6 +423,7 @@ def init_agent(
         # from chat_completions to codex_responses after the warm at __init__.
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
+    _emit_init_timing("api_mode_setup")
 
     # Pre-warm OpenRouter model metadata cache in a background thread.
     # fetch_model_metadata() is cached for 1 hour; this avoids a blocking
@@ -510,6 +540,7 @@ def init_agent(
             agent._cache_ttl = _ttl
     except Exception:
         pass
+    _emit_init_timing("core_state_setup")
 
     # Iteration budget: the LLM is only notified when it actually exhausts
     # the iteration budget (api_call_count >= max_iterations).  At that
@@ -921,6 +952,8 @@ def init_agent(
         except Exception as e:
             raise RuntimeError(f"Failed to initialize OpenAI client: {e}")
     
+    _emit_init_timing("provider_client_setup")
+
     # Provider fallback chain — ordered list of backup providers tried
     # when the primary is exhausted (rate-limit, overload, connection
     # failure).  Supports both legacy single-dict ``fallback_model`` and
@@ -951,6 +984,7 @@ def init_agent(
         enabled_toolsets=enabled_toolsets,
         disabled_toolsets=disabled_toolsets,
         quiet_mode=agent.quiet_mode,
+        blocked_tool_names=blocked_tool_names,
     )
     
     # Show tool configuration and store valid tool names for validation
@@ -985,6 +1019,7 @@ def init_agent(
         missing_reqs = [name for name, available in requirements.items() if not available]
         if missing_reqs:
             print(f"⚠️  Some tools may not work due to missing requirements: {missing_reqs}")
+    _emit_init_timing("tool_setup")
     
     # Show trajectory saving status
     if agent.save_trajectories and not agent.quiet_mode:
@@ -1083,6 +1118,7 @@ def init_agent(
     # In-memory todo list for task planning (one per agent/session)
     from tools.todo_tool import TodoStore
     agent._todo_store = TodoStore()
+    _emit_init_timing("session_setup")
     
     # Load config once for memory, skills, and compression sections
     try:
@@ -1233,6 +1269,7 @@ def init_agent(
         agent._skill_nudge_interval = int(skills_config.get("creation_nudge_interval", 10))
     except Exception:
         pass
+    _emit_init_timing("memory_skill_setup")
 
     # Tool-use enforcement config: "auto" (default — matches hardcoded
     # model list), true (always), false (never), or list of substrings.
@@ -1607,6 +1644,7 @@ def init_agent(
             )
         except Exception as _ce_err:
             _ra().logger.debug("Context engine on_session_start: %s", _ce_err)
+    _emit_init_timing("context_engine_setup")
 
     agent._subdirectory_hints = SubdirectoryHintTracker(
         working_dir=os.getenv("TERMINAL_CWD") or None,
@@ -1737,6 +1775,7 @@ def init_agent(
             "anthropic_base_url": agent._anthropic_base_url,
             "is_anthropic_oauth": agent._is_anthropic_oauth,
         })
+    _emit_init_timing("final_state_setup")
 
 
 

@@ -1769,6 +1769,36 @@ def _foreground_background_guidance(command: str) -> str | None:
     return None
 
 
+_HERMES_INTERACTIVE_SUBCOMMAND_RE = re.compile(
+    r"(?:^|[;&|]\s*|&&\s*|\|\|\s*)"
+    r"(?:\S*[\\/])?hermes(?:\.exe)?"
+    r"(?:\s+(?:-p|--profile)\s+\S+)?"
+    r"\s+(?:tools|setup)\b",
+    re.IGNORECASE,
+)
+
+
+def _interactive_cli_guidance(command: str) -> str | None:
+    """Block known interactive Hermes CLIs in non-PTY foreground tool calls.
+
+    ``hermes tools`` and ``hermes setup`` launch menu UIs and wait for stdin.
+    In gateway/Telegram turns that looks like Alice is stuck, especially if the
+    command is piped through ``head`` and the subprocess tree keeps waiting.
+    Prefer non-interactive config inspection or explicit PTY usage.
+    """
+    if _looks_like_help_or_version_command(command):
+        return None
+    if _HERMES_INTERACTIVE_SUBCOMMAND_RE.search(_strip_quotes(command)):
+        return (
+            "This command starts an interactive Hermes menu (for example "
+            "`hermes tools` or `hermes setup`) and can hang in non-PTY gateway "
+            "turns. Use non-interactive config/file inspection, add an explicit "
+            "non-interactive subcommand/flag if available, or rerun with pty=true "
+            "only when interactive input is actually required."
+        )
+    return None
+
+
 def _resolve_notification_flag_conflict(
     *,
     notify_on_complete: bool,
@@ -1927,10 +1957,19 @@ def terminal_tool(
                 ),
             }, ensure_ascii=False)
 
-        # Guardrail: long-lived server/watch commands should run as managed
-        # background sessions, not foreground shell hacks.
+        # Guardrail: long-lived server/watch commands and known interactive
+        # menus should not run as foreground non-PTY gateway commands.
         if not background:
             guidance = _foreground_background_guidance(command)
+            if guidance:
+                return json.dumps({
+                    "output": "",
+                    "exit_code": -1,
+                    "error": guidance,
+                    "status": "error",
+                }, ensure_ascii=False)
+
+            guidance = _interactive_cli_guidance(command)
             if guidance:
                 return json.dumps({
                     "output": "",
@@ -2293,7 +2332,7 @@ def terminal_tool(
                     logger.warning("background proc %s: %s", proc_session.id, conflict_note)
                     result_data["watch_patterns_ignored"] = conflict_note
 
-                # Mark for agent notification on completion
+                # Mark for completion notification
                 if notify_on_complete and background:
                     proc_session.notify_on_complete = True
                     result_data["notify_on_complete"] = True
