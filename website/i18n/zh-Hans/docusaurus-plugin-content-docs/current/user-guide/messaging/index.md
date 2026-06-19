@@ -334,7 +334,8 @@ Hermes 立即确认：
 
 ```yaml
 display:
-  background_process_notifications: all    # all | result | error | off
+  background_process_notifications: result # all | result | error | off
+  background_process_agent_turns: false    # legacy full-agent completion turns
 ```
 
 | 模式 | 你收到的内容 |

@@ -148,12 +148,15 @@ class TestRuntimeProvider:
         assert "bedrock-runtime.eu-west-1.amazonaws.com" in result["base_url"]
         assert result["api_key"] == "aws-sdk"
 
-    def test_bedrock_runtime_default_region(self, monkeypatch):
+    def test_bedrock_runtime_default_region(self, monkeypatch, tmp_path):
         from hermes_cli.runtime_provider import resolve_runtime_provider
 
         monkeypatch.setenv("AWS_PROFILE", "default")
         monkeypatch.delenv("AWS_REGION", raising=False)
         monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "missing-config"))
+        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "missing-credentials"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
 
         with patch("hermes_cli.runtime_provider.resolve_provider", return_value="bedrock"), \
              patch("hermes_cli.runtime_provider._get_model_config", return_value={"provider": "bedrock"}):

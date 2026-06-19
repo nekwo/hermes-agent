@@ -64,10 +64,11 @@ class TestDiscoverHomebrewNodeDirs:
         entries = ["node@20", "node@24", "openssl", "node", "python@3.12"]
 
         def mock_isdir(p):
-            if p == "/opt/homebrew/opt":
+            normalized = str(p).replace("\\", "/")
+            if normalized == "/opt/homebrew/opt":
                 return True
             # node@20/bin and node@24/bin exist
-            if p in {
+            if normalized in {
                 "/opt/homebrew/opt/node@20/bin",
                 "/opt/homebrew/opt/node@24/bin",
             }:
@@ -78,9 +79,10 @@ class TestDiscoverHomebrewNodeDirs:
              patch("os.listdir", return_value=entries):
             result = _discover_homebrew_node_dirs()
 
-        assert len(result) == 2
-        assert "/opt/homebrew/opt/node@20/bin" in result
-        assert "/opt/homebrew/opt/node@24/bin" in result
+        normalized_result = tuple(path.replace("\\", "/") for path in result)
+        assert len(normalized_result) == 2
+        assert "/opt/homebrew/opt/node@20/bin" in normalized_result
+        assert "/opt/homebrew/opt/node@24/bin" in normalized_result
 
     def test_excludes_plain_node(self):
         """'node' (unversioned) should be excluded — covered by /opt/homebrew/bin."""
@@ -199,6 +201,7 @@ class TestFindAgentBrowser:
         with patch("shutil.which", return_value=None), \
              patch("os.path.isdir", return_value=False), \
              patch.object(Path, "exists", mock_path_exists), \
+             patch("hermes_cli.dep_ensure.ensure_dependency", return_value=False), \
              patch(
                  "tools.browser_tool._discover_homebrew_node_dirs",
                  return_value=[],
@@ -406,7 +409,7 @@ class TestRunBrowserCommandPathConstruction:
              patch("os.open", return_value=99), \
              patch("os.close"), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/test"}, clear=True):
+             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/test", "LOCALAPPDATA": str(tmp_path)}, clear=True):
             # The function reads from temp files for stdout/stderr
             with patch("builtins.open", mock_open(read_data=fake_json)):
                 _run_browser_command("test-task", "navigate", ["https://example.com"])
@@ -455,7 +458,7 @@ class TestRunBrowserCommandPathConstruction:
              patch("os.open", return_value=99), \
              patch("os.close"), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/test"}, clear=True):
+             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/test", "LOCALAPPDATA": str(tmp_path)}, clear=True):
             with patch("builtins.open", mock_open(read_data=fake_json)):
                 _run_browser_command("test-task", "navigate", ["https://example.com"])
 
@@ -504,7 +507,7 @@ class TestRunBrowserCommandPathConstruction:
              patch("os.open", return_value=99), \
              patch("os.close"), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/test"}, clear=True):
+             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/test", "LOCALAPPDATA": str(tmp_path)}, clear=True):
             with patch("builtins.open", mock_open(read_data=fake_json)):
                 _run_browser_command("test-task", "navigate", ["https://example.com"])
 

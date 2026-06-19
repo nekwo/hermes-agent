@@ -193,6 +193,7 @@ def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "Gate
 
     runner._running_agents = {}
     runner._pending_messages = {}
+    runner._queued_events = {}
     runner._pending_approvals = {}
     runner._shutdown_event = asyncio.Event()
     runner._exit_reason = None

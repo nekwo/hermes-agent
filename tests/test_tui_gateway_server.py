@@ -6949,8 +6949,8 @@ def test_config_show_displays_nested_max_turns(monkeypatch):
     assert ["Max Turns", "120"] in agent_rows
 
 
-def test_notification_poller_delivers_completion(monkeypatch):
-    """Poller picks up completion events and triggers agent turns."""
+def test_notification_poller_delivers_status_only_by_default(monkeypatch):
+    """Poller surfaces completion as status only; agent turns are legacy opt-in."""
     import queue as _queue_mod
 
     from tools.process_registry import process_registry
@@ -6998,9 +6998,9 @@ def test_notification_poller_delivers_completion(monkeypatch):
     isolated_queue.put({
         "type": "completion",
         "session_id": "proc_poller_test",
-        "command": "echo hello",
+        "command": "echo hello OPENAI_API_KEY=sk-testsecret1234567890",
         "exit_code": 0,
-        "output": "hello",
+        "output": "hello\nOPENAI_API_KEY=sk-outputsecret1234567890",
     })
     stop.set()
 
@@ -7011,15 +7011,81 @@ def test_notification_poller_delivers_completion(monkeypatch):
         status_calls = [a for a in emitted if a[0] == "status.update"]
         assert len(status_calls) >= 1
         assert status_calls[0][2]["kind"] == "process"
+        status_text = status_calls[0][2]["text"]
+        assert "Background process proc_poller_test completed" in status_text
+        assert "sk-testsecret" not in status_text
+        assert "sk-outputsecret" not in status_text
 
-        # Should have triggered an agent turn
-        assert len(turns) == 1
-        assert "[IMPORTANT: Background process proc_poller_test completed normally" in turns[0]
+        # Should not trigger an agent turn unless legacy opt-in is enabled.
+        assert len(turns) == 0
     finally:
         server._sessions.pop("sid_poll", None)
         while not process_registry.completion_queue.empty():
             process_registry.completion_queue.get_nowait()
 
+
+def test_notification_poller_legacy_agent_turn_env_opt_in(monkeypatch):
+    """Explicit opt-in preserves the old completion→agent-turn behavior."""
+    from tools.process_registry import process_registry
+
+    turns = []
+    emitted = []
+
+    class _Agent:
+        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+            turns.append(prompt)
+            return {
+                "final_response": "ok",
+                "messages": [{"role": "assistant", "content": "ok"}],
+            }
+
+    class _ImmediateThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+        def start(self):
+            self._target()
+
+    sess = _session(agent=_Agent())
+    server._sessions["sid_poll_legacy"] = sess
+    monkeypatch.setenv("HERMES_BACKGROUND_AGENT_TURNS", "true")
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda *a, **kw: emitted.append(a))
+    monkeypatch.setattr(server, "make_stream_renderer", lambda cols: None)
+    monkeypatch.setattr(server, "render_message", lambda raw, cols: None)
+
+    while not process_registry.completion_queue.empty():
+        process_registry.completion_queue.get_nowait()
+    process_registry._completion_consumed.discard("proc_poller_legacy")
+
+    process_registry.completion_queue.put({
+        "type": "completion",
+        "session_id": "proc_poller_legacy",
+        "command": "echo hello",
+        "exit_code": 0,
+        "output": "hello",
+    })
+    stop = threading.Event()
+    stop.set()
+
+    try:
+        server._notification_poller_loop(stop, "sid_poll_legacy", sess)
+        assert len(turns) == 1
+        assert "[IMPORTANT: Background process proc_poller_legacy completed" in turns[0]
+    finally:
+        server._sessions.pop("sid_poll_legacy", None)
+        while not process_registry.completion_queue.empty():
+            process_registry.completion_queue.get_nowait()
+
+
+def test_tui_background_agent_turns_can_be_enabled_by_config(monkeypatch):
+    monkeypatch.delenv("HERMES_BACKGROUND_AGENT_TURNS", raising=False)
+    monkeypatch.setattr(
+        server,
+        "_load_cfg",
+        lambda: {"display": {"background_process_agent_turns": True}},
+    )
+
+    assert server._tui_background_agent_turns_enabled() is True
 
 def test_notification_poller_skips_consumed(monkeypatch):
     """Already-consumed completions are not dispatched by the poller."""
@@ -7076,8 +7142,8 @@ def test_notification_poller_skips_consumed(monkeypatch):
             process_registry.completion_queue.get_nowait()
 
 
-def test_notification_poller_requeues_when_busy(monkeypatch):
-    """When the agent is busy, the poller requeues the event."""
+def test_notification_poller_status_only_when_busy_by_default(monkeypatch):
+    """When the agent is busy, default status-only notifications do not requeue."""
     import queue as _queue_mod
 
     from tools.process_registry import process_registry
@@ -7116,10 +7182,9 @@ def test_notification_poller_requeues_when_busy(monkeypatch):
         status_calls = [a for a in emitted if a[0] == "status.update"]
         assert len(status_calls) == 1
 
-        # Event was requeued (agent was busy, no turn triggered)
-        assert not isolated_queue.empty()
-        requeued = isolated_queue.get_nowait()
-        assert requeued["session_id"] == "proc_busy_test"
+        # Event is consumed after the status-only update; no synthetic agent turn
+        # should be queued ahead of a human message unless legacy opt-in is set.
+        assert isolated_queue.empty()
     finally:
         server._sessions.pop("sid_busy", None)
         while not process_registry.completion_queue.empty():
@@ -7212,6 +7277,7 @@ def test_notification_poller_emits_distinct_watch_matches_once(monkeypatch):
 
     from tools.process_registry import process_registry
 
+    monkeypatch.setenv("HERMES_BACKGROUND_AGENT_TURNS", "1")
     turns = []
     emitted = []
 

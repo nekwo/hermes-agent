@@ -818,27 +818,26 @@ class TestBuildContextFilesPrompt:
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "BLOCKED" in result
 
-    def test_hermes_md_beats_agents_md(self, tmp_path):
-        """When both exist, .hermes.md wins and AGENTS.md is not loaded."""
+    def test_hermes_md_and_agents_md_both_load(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("Agent guidelines here.")
         (tmp_path / ".hermes.md").write_text("Hermes project rules.")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Hermes project rules" in result
-        assert "Agent guidelines" not in result
+        assert "Agent guidelines" in result
 
-    def test_agents_md_beats_claude_md(self, tmp_path):
+    def test_agents_md_and_claude_md_both_load(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("Agent guidelines here.")
         (tmp_path / "CLAUDE.md").write_text("Claude guidelines here.")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Agent guidelines" in result
-        assert "Claude guidelines" not in result
+        assert "Claude guidelines" in result
 
-    def test_claude_md_beats_cursorrules(self, tmp_path):
+    def test_claude_md_and_cursorrules_both_load(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text("Claude guidelines here.")
         (tmp_path / ".cursorrules").write_text("Cursor rules here.")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Claude guidelines" in result
-        assert "Cursor rules" not in result
+        assert "Cursor rules" in result
 
     def test_loads_claude_md(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text("Use type hints everywhere.")
@@ -872,17 +871,16 @@ class TestBuildContextFilesPrompt:
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "BLOCKED" in result
 
-    def test_hermes_md_beats_all_others(self, tmp_path):
-        """When all four types exist, only .hermes.md is loaded."""
+    def test_all_project_context_sources_load(self, tmp_path):
         (tmp_path / ".hermes.md").write_text("Hermes wins.")
-        (tmp_path / "AGENTS.md").write_text("Agents lose.")
-        (tmp_path / "CLAUDE.md").write_text("Claude loses.")
-        (tmp_path / ".cursorrules").write_text("Cursor loses.")
+        (tmp_path / "AGENTS.md").write_text("Agents load.")
+        (tmp_path / "CLAUDE.md").write_text("Claude loads.")
+        (tmp_path / ".cursorrules").write_text("Cursor loads.")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Hermes wins" in result
-        assert "Agents lose" not in result
-        assert "Claude loses" not in result
-        assert "Cursor loses" not in result
+        assert "Agents load" in result
+        assert "Claude loads" in result
+        assert "Cursor loads" in result
 
     def test_cursorrules_loads_when_only_option(self, tmp_path):
         """Cursorrules still loads when no higher-priority files exist."""
