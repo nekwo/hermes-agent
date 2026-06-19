@@ -274,6 +274,7 @@ def get_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    blocked_tool_names: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -289,6 +290,9 @@ def get_tool_definitions(
             tool_search / tool_describe bridge handlers so they can read the
             real catalog, not the already-collapsed one. Public callers should
             leave this False.
+        blocked_tool_names: Exclude individual tool names after toolset/schema
+            resolution. Used by profile-bound personas to hide tools that are
+            not available in the persona's Hermes profile.
 
     Returns:
         Filtered list of OpenAI-format tool definitions.
@@ -312,6 +316,7 @@ def get_tool_definitions(
         cache_key = (
             frozenset(enabled_toolsets) if enabled_toolsets is not None else None,
             frozenset(disabled_toolsets) if disabled_toolsets else None,
+            frozenset(blocked_tool_names) if blocked_tool_names else None,
             registry._generation,
             cfg_fp,
             bool(os.environ.get("HERMES_KANBAN_TASK")),
@@ -328,7 +333,8 @@ def get_tool_definitions(
             return list(cached)
 
     result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
-                                       skip_tool_search_assembly=skip_tool_search_assembly)
+                                       skip_tool_search_assembly=skip_tool_search_assembly,
+                                       blocked_tool_names=blocked_tool_names)
     if quiet_mode:
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
@@ -352,6 +358,7 @@ def _compute_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    blocked_tool_names: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
@@ -480,6 +487,13 @@ def _compute_tool_definitions(
                         "function": {**td["function"], "description": desc},
                     }
                     break
+
+    if blocked_tool_names:
+        blocked = set(blocked_tool_names)
+        filtered_tools = [
+            tool for tool in filtered_tools
+            if tool.get("function", {}).get("name") not in blocked
+        ]
 
     if not quiet_mode:
         if filtered_tools:

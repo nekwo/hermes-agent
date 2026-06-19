@@ -881,34 +881,40 @@ def _auth_file_path() -> Path:
 
 
 def _global_auth_file_path() -> Optional[Path]:
-    """Return the global-root auth.json when the process is in profile mode.
+    """Return the read-only shared auth.json fallback, if any.
 
-    Returns ``None`` when the profile and global root resolve to the same
+    ``HERMES_AUTH_HOME`` is an explicit shared-auth override used by profile
+    workers/personas that should keep their own HERMES_HOME for memory,
+    sessions, and config while borrowing credentials from a head/global auth
+    pool.  When unset, fall back to the historical global-root auth.json in
+    profile mode.
+
+    Returns ``None`` when the fallback and active profile resolve to the same
     directory (classic mode, or custom HERMES_HOME that is not a profile).
-    Used by read-only fallback paths so providers authed at the root are
-    visible to profile processes that haven't configured them locally.
-
-    See issue #18594 follow-up (credential_pool shadowing).
     """
-    try:
-        from hermes_constants import get_default_hermes_root
-        global_root = get_default_hermes_root()
-    except Exception:
-        return None
     profile_home = get_hermes_home()
+    explicit_auth_home = os.environ.get("HERMES_AUTH_HOME", "").strip()
+    if explicit_auth_home:
+        auth_home = Path(explicit_auth_home)
+    else:
+        try:
+            from hermes_constants import get_default_hermes_root
+            auth_home = get_default_hermes_root()
+        except Exception:
+            return None
     try:
-        if profile_home.resolve(strict=False) == global_root.resolve(strict=False):
+        if profile_home.resolve(strict=False) == auth_home.resolve(strict=False):
             return None
     except Exception:
-        if profile_home == global_root:
+        if profile_home == auth_home:
             return None
     # No pytest seat belt here: this is a pure read-only path, and
     # ``_load_global_auth_store()`` wraps the read in a try/except so an
-    # unreadable global file can never break the profile process.  The
+    # unreadable global/shared file can never break the profile process.  The
     # write-side seat belt still lives on ``_auth_file_path()`` where it
     # belongs (that's what protects the real user's auth store from being
     # corrupted by a mis-configured test).
-    return global_root / "auth.json"
+    return auth_home / "auth.json"
 
 
 def _load_global_auth_store() -> Dict[str, Any]:
@@ -3792,6 +3798,21 @@ def resolve_codex_runtime_credentials(
         else:
             data = None
 
+        global_data = _read_global_codex_tokens_if_usable()
+        if global_data:
+            base_url = (
+                os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
+                or DEFAULT_CODEX_BASE_URL
+            )
+            return {
+                "provider": "openai-codex",
+                "base_url": base_url,
+                "api_key": global_data["access_token"],
+                "source": "global-auth-store",
+                "last_refresh": global_data.get("last_refresh"),
+                "auth_mode": "chatgpt",
+            }
+
     if data is None:
         pool_token = _pool_codex_access_token()
         if pool_token:
@@ -3946,23 +3967,37 @@ def _codex_pool_rate_limit_status() -> Optional[Dict[str, Any]]:
     return None
 
 
+def _read_global_codex_tokens_if_usable() -> Dict[str, Any] | None:
+    """Return usable global-root Codex singleton tokens for profile fallback."""
+    try:
+        global_store = _load_global_auth_store()
+        providers = global_store.get("providers") if isinstance(global_store, dict) else None
+        state = providers.get("openai-codex") if isinstance(providers, dict) else None
+        tokens = state.get("tokens") if isinstance(state, dict) else None
+        if not isinstance(tokens, dict):
+            return None
+        access_token = str(tokens.get("access_token", "") or "").strip()
+        refresh_token = str(tokens.get("refresh_token", "") or "").strip()
+        if not access_token or not refresh_token:
+            return None
+        return {"access_token": access_token, "refresh_token": refresh_token, "last_refresh": state.get("last_refresh")}
+    except Exception:
+        logger.debug("Global Codex singleton fallback lookup failed", exc_info=True)
+        return None
+
+
 def _pool_codex_access_token() -> str:
     """Return the most-recent usable access_token from the openai-codex pool.
 
     Used as a fallback by ``resolve_codex_runtime_credentials`` when the
-    singleton has no creds.  Reads ``credential_pool.openai-codex`` entries
-    directly from auth.json and picks the first non-empty access_token,
-    preferring entries that are not currently in an exhaustion cooldown.
+    singleton has no creds.  Reads through ``read_credential_pool`` instead of
+    directly from the active profile store so named profiles with an empty
+    local Codex pool still inherit the global-root credential pool.
     Returns ``""`` when no usable entry is found (caller handles by raising
     the original AuthError).
     """
     try:
-        with _auth_store_lock():
-            auth_store = _load_auth_store()
-        pool = auth_store.get("credential_pool")
-        if not isinstance(pool, dict):
-            return ""
-        entries = pool.get("openai-codex")
+        entries = read_credential_pool("openai-codex")
         if not isinstance(entries, list):
             return ""
 

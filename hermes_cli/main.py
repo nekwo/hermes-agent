@@ -11092,7 +11092,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "computer-use",
         "config", "cron", "curator", "dashboard", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
-        "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
+        "gui", "desktop", "harness", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
         "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
@@ -11611,6 +11611,15 @@ def main():
 
     parser, subparsers, chat_parser = build_top_level_parser()
     chat_parser.set_defaults(func=cmd_chat)
+
+    # harness command — experimental Agent Runtime Harness
+    # =========================================================================
+    try:
+        from hermes_cli.harness import build_parser as _build_harness_parser
+        _build_harness_parser(subparsers)
+    except Exception as exc:
+        # Keep core CLI resilient if experimental harness import breaks.
+        logger.debug("Harness parser registration failed: %s", exc)
 
     # =========================================================================
     # model command  (parser built in hermes_cli/subcommands/model.py)
@@ -12616,7 +12625,9 @@ def main():
 
     # Execute the command
     if hasattr(args, "func"):
-        args.func(args)
+        code = args.func(args)
+        if getattr(args, "command", None) == "harness" and isinstance(code, int):
+            sys.exit(code)
     else:
         parser.print_help()
 
