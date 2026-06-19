@@ -16,7 +16,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _clean_inference_env(monkeypatch):
+def _clean_inference_env(monkeypatch, tmp_path):
     """Strip credential-shaped env vars so the pool is the only source."""
     for key in (
         "OPENROUTER_API_KEY",
@@ -26,8 +26,16 @@ def _clean_inference_env(monkeypatch):
         "CLAUDE_CODE_OAUTH_TOKEN",
         "NOUS_API_KEY",
         "HERMES_INFERENCE_PROVIDER",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
     ):
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "missing-credentials"))
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "missing-config"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
 
 
 def _seed_openrouter_pool(token: str = "sk-or-FAKEKEY123") -> None:
