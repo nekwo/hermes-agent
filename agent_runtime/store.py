@@ -1,0 +1,1025 @@
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import uuid
+from datetime import timedelta
+from pathlib import Path
+from typing import TypeVar
+
+from hermes_time import now
+from utils import atomic_json_write
+
+from . import paths
+from .errors import AlreadyExists, NotFound
+from .events import EventLog
+from .locks import archive_lock, task_lock, run_lock
+from .mission_plan import has_typed_plan
+from .models import AgentPersona, AgentRun, Event, GoalRuntimeInstance, Incident, Proof, Task
+from .persona_assignments import PersonaAssignmentStore
+from .proof_rules import ProofType
+from .recovery_flags import mark_incident_closed_for_recovery
+from .serde import from_jsonable, to_jsonable
+from .states import RunState, TaskState
+
+T = TypeVar("T")
+
+TERMINAL_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED})
+TERMINAL_RUN_STATES = frozenset({RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED})
+ACTIVE_RUN_STATES = frozenset({RunState.QUEUED, RunState.STARTING, RunState.RUNNING, RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL})
+ARCHIVABLE_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED})
+_ANY_STAGE = object()
+
+
+def _safe_operator_reason(reason: str) -> str:
+    return "operator requested cancellation"
+
+
+def _safe_session_id(value) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value):
+        lowered = value.lower()
+        if not any(marker in lowered for marker in ("secret", "token", "password", "credential", "cookie", "key")):
+            return value
+    return None
+
+
+def _read_json(path: Path) -> dict:
+    if not path.exists():
+        raise NotFound(str(path))
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_model(cls: type[T], path: Path) -> T:
+    return from_jsonable(cls, _read_json(path))
+
+
+def _write_model(path: Path, model) -> None:
+    atomic_json_write(path, to_jsonable(model), indent=2, sort_keys=True)
+
+
+def _list_models(cls: type[T], directory: Path) -> list[T]:
+    if not directory.exists():
+        return []
+    items: list[T] = []
+    for path in directory.glob("*.json"):
+        try:
+            items.append(_read_model(cls, path))
+        except NotFound:
+            # Archive moves are evidence-preserving but not invisible to UI polls:
+            # a file can disappear after glob() and before read_text().
+            continue
+    return sorted(items, key=lambda item: item.id)
+
+
+class TaskStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
+    def create(self, task: Task) -> Task:
+        path = paths.task_path(task.id)
+        with task_lock(task.id):
+            if path.exists():
+                raise AlreadyExists(task.id)
+            _write_model(path, task)
+            self.event_log.append(
+                Event(
+                    ts=now(),
+                    type="task.created",
+                    task_id=task.id,
+                    run_id=None,
+                    persona_id=None,
+                    payload={"state": str(task.state), "actor": "harness"},
+                )
+            )
+        return self.get(task.id)
+
+    def get(self, task_id: str) -> Task:
+        return _read_model(Task, paths.task_path(task_id))
+
+    def update(self, task: Task, *, actor: str = "harness", reason: str = "") -> None:
+        path = paths.task_path(task.id)
+        with task_lock(task.id):
+            previous = self.get(task.id)
+            if previous.state in TERMINAL_TASK_STATES:
+                return
+            _write_model(path, task)
+            if previous.state != task.state:
+                event_type = "task.transition"
+                if task.state == TaskState.BLOCKED:
+                    event_type = "task.blocked"
+                elif previous.state == TaskState.BLOCKED:
+                    event_type = "task.unblocked"
+                elif task.state == TaskState.CANCELLED:
+                    event_type = "task.cancelled"
+                self.event_log.append(
+                    Event(
+                        ts=now(),
+                        type=event_type,
+                        task_id=task.id,
+                        run_id=None,
+                        persona_id=actor if actor != "harness" else None,
+                        payload={
+                            "from": str(previous.state),
+                            "to": str(task.state),
+                            "actor": actor,
+                            "reason": reason,
+                        },
+                    )
+                )
+
+    def list_open(self) -> list[Task]:
+        return [task for task in self.list_all() if task.state not in TERMINAL_TASK_STATES]
+
+    def cancel(self, task_id: str, *, reason: str, actor: str = "cli") -> Task:
+        task = self.get(task_id)
+        if task.state in TERMINAL_TASK_STATES:
+            return task
+        task.state = TaskState.CANCELLED
+        task.updated_at = now()
+        self.update(task, actor=actor, reason=_safe_operator_reason(reason))
+        return self.get(task_id)
+
+    def list_by_state(self, *states: TaskState) -> list[Task]:
+        wanted = {state if isinstance(state, TaskState) else TaskState(state) for state in states}
+        return [task for task in self.list_all() if task.state in wanted]
+
+    def list_all(self) -> list[Task]:
+        return _list_models(Task, paths.tasks_dir())
+
+    def archive_ready(self, *, actor: str = "cli", reason: str = "archive ready terminal tasks") -> dict:
+        return ArchiveStore(event_log=self.event_log).archive_ready(actor=actor, reason=reason)
+
+    def archive(self, task_id: str, *, actor: str = "cli", reason: str = "archive terminal task") -> dict:
+        return ArchiveStore(event_log=self.event_log).archive_tasks([task_id], actor=actor, reason=reason)
+
+
+class ArchiveStore:
+    """Evidence-preserving archive for terminal Harness tasks."""
+
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
+    def archive_ready(self, *, actor: str = "cli", reason: str = "archive ready terminal tasks") -> dict:
+        task_ids = [task.id for task in TaskStore(event_log=self.event_log).list_all() if task.state in ARCHIVABLE_TASK_STATES]
+        return self.archive_tasks(task_ids, actor=actor, reason=reason)
+
+    def archive_tasks(self, task_ids: list[str], *, actor: str = "cli", reason: str = "archive terminal task") -> dict:
+        normalized_task_ids = [str(task_id).strip() for task_id in task_ids if str(task_id).strip()]
+        batch = _archive_batch_name()
+        archive_dir = paths.deleted_archive_dir() / batch
+        archived: list[dict] = []
+        skipped: list[dict] = []
+        task_store = TaskStore(event_log=self.event_log)
+        run_store = RunStore(event_log=self.event_log)
+
+        with archive_lock():
+            ready: list[Task] = []
+            for task_id in normalized_task_ids:
+                try:
+                    task = task_store.get(task_id)
+                except NotFound:
+                    skipped.append({"task_id": task_id, "reason": "not_found", "message": "Task was not found; no archive batch was created for this id."})
+                    continue
+                active_runs = [run for run in run_store.list_for_task(task.id) if run.state in ACTIVE_RUN_STATES]
+                active_workers = _active_worker_sessions_for_task(task.id)
+                if task.state not in ARCHIVABLE_TASK_STATES:
+                    skipped.append({"task_id": task.id, "state": str(task.state), "reason": "not_terminal", "message": f"Task is {task.state.value}; only done/cancelled tasks can be archived."})
+                    continue
+                if active_runs:
+                    skipped.append({"task_id": task.id, "state": str(task.state), "reason": "active_runs", "run_ids": [run.id for run in active_runs], "message": "Task still has active runs; stop or settle them before archiving."})
+                    continue
+                if active_workers:
+                    skipped.append({"task_id": task.id, "state": str(task.state), "reason": "active_worker_sessions", "worker_session_ids": [worker.id for worker in active_workers], "message": "Task still has active or possessed worker sessions; close or release them before archiving."})
+                    continue
+                ready.append(task)
+
+            if not ready:
+                return _archive_result(
+                    batch=None,
+                    archive_dir=None,
+                    archived=[],
+                    skipped=skipped,
+                    manifest_path=None,
+                )
+
+            archive_dir.mkdir(parents=True, exist_ok=False)
+            prepare_manifest = {
+                "schema_version": 1,
+                "archive_batch": batch,
+                "prepared_at_utc": now().isoformat(),
+                "reason": _safe_archive_reason(reason),
+                "actor": _safe_archive_actor(actor),
+                "ready_task_ids": [task.id for task in ready],
+                "skipped_tasks": skipped,
+                "state": "prepared",
+            }
+            atomic_json_write(archive_dir / "manifest.prepare.json", prepare_manifest, indent=2, sort_keys=True)
+
+            for task in ready:
+                archived.append(self._archive_one(task, archive_dir, run_store))
+
+            manifest = {
+                "schema_version": 1,
+                "archive_batch": batch,
+                "created_at_utc": now().isoformat(),
+                "reason": _safe_archive_reason(reason),
+                "actor": _safe_archive_actor(actor),
+                "archived_task_ids": [item["task_id"] for item in archived],
+                "skipped_task_ids": [item["task_id"] for item in skipped],
+                "archived_tasks": archived,
+                "skipped_tasks": skipped,
+                "prepare_manifest_path": "manifest.prepare.json",
+            }
+            atomic_json_write(archive_dir / "manifest.json", manifest, indent=2, sort_keys=True)
+            for item in archived:
+                self._append_archive_event(item, archive_dir=archive_dir, actor=actor, reason=reason)
+            return _archive_result(
+                batch=batch,
+                archive_dir=archive_dir,
+                archived=archived,
+                skipped=skipped,
+                manifest_path=archive_dir / "manifest.json",
+            )
+
+    def _archive_one(self, task: Task, archive_dir: Path, run_store: "RunStore") -> dict:
+        task_dest = archive_dir / "tasks" / f"{task.id}.json"
+        task_dest.parent.mkdir(parents=True, exist_ok=True)
+        _move_if_exists(paths.task_path(task.id), task_dest)
+
+        archived_runs: list[str] = []
+        for run in run_store.list_for_task(task.id):
+            run_dest = archive_dir / "runs" / f"{run.id}.json"
+            run_dest.parent.mkdir(parents=True, exist_ok=True)
+            if _move_if_exists(paths.run_path(run.id), run_dest):
+                archived_runs.append(run.id)
+
+        archived_proofs: list[str] = []
+        proof_dir = paths.proofs_dir() / task.id
+        if proof_dir.exists():
+            proof_dest = archive_dir / "proofs" / task.id
+            proof_dest.parent.mkdir(parents=True, exist_ok=True)
+            if proof_dest.exists():
+                shutil.rmtree(proof_dest)
+            shutil.move(str(proof_dir), str(proof_dest))
+            archived_proofs = [path.stem.removeprefix("proof_") for path in sorted(proof_dest.glob("proof_*.json"))]
+
+        archived_incidents: list[str] = []
+        for incident in IncidentStore(event_log=self.event_log).list_all():
+            if incident.task_id != task.id:
+                continue
+            incident_dest = archive_dir / "incidents" / f"{incident.id}.json"
+            incident_dest.parent.mkdir(parents=True, exist_ok=True)
+            if _move_if_exists(paths.incident_path(incident.id), incident_dest):
+                archived_incidents.append(incident.id)
+            detail_dest = archive_dir / "incident_details" / f"{incident.id}.txt"
+            if _move_if_exists(paths.incident_detail_path(incident.id), detail_dest):
+                detail_dest.parent.mkdir(parents=True, exist_ok=True)
+
+        archived_workers = _archive_worker_evidence(task.id, archive_dir)
+        archived_assignments = _archive_persona_assignment_evidence(task.id, archive_dir)
+        archived_repo_bundles = _archive_repo_bundle_evidence(task.id, archive_dir)
+        archived_runtime_instances = _archive_runtime_instance_evidence(task.id, archive_dir)
+        archived_packet_artifacts = _archive_packet_artifacts(task.id, archive_dir)
+        archived_self_tests = _archive_self_test_evidence(task.id, archive_dir)
+        archived_role_state = _archive_role_envelope_evidence(task.id, archive_dir)
+
+        return {
+            "task_id": task.id,
+            "title": task.title,
+            "state": str(task.state),
+            "task_path": str(task_dest.relative_to(archive_dir)),
+            "run_ids": archived_runs,
+            "proof_ids": archived_proofs,
+            "incident_ids": archived_incidents,
+            "worker_session_ids": archived_workers.get("worker_session_ids", []),
+            "persona_assignment_ids": archived_assignments.get("persona_assignment_ids", []),
+            "persona_assignments_archived": archived_assignments.get("persona_assignments_archived", False),
+            "repo_bundle_ids": archived_repo_bundles.get("repo_bundle_ids", []),
+            "repo_bundles_archived": archived_repo_bundles.get("repo_bundles_archived", False),
+            "runtime_instance_ids": archived_runtime_instances.get("runtime_instance_ids", []),
+            "runtime_instances_archived": archived_runtime_instances.get("runtime_instances_archived", False),
+            "packet_artifact_ids": archived_packet_artifacts.get("packet_artifact_ids", []),
+            "packet_artifacts_archived": archived_packet_artifacts.get("packet_artifacts_archived", False),
+            "worker_context_archived": archived_workers.get("context_archived", False),
+            "proof_sandbox_archived": archived_workers.get("proof_sandbox_archived", False),
+            "self_test_evidence_ids": archived_self_tests.get("self_test_evidence_ids", []),
+            "self_test_evidence_archived": archived_self_tests.get("self_test_evidence_archived", False),
+            "role_envelope_ids": archived_role_state.get("role_envelope_ids", []),
+            "role_checklist_ids": archived_role_state.get("role_checklist_ids", []),
+            "proof_batch_ids": archived_role_state.get("proof_batch_ids", []),
+            "role_state_archived": archived_role_state.get("role_state_archived", False),
+        }
+
+    def _append_archive_event(self, item: dict, *, archive_dir: Path, actor: str, reason: str) -> None:
+        self.event_log.append(
+            Event(
+                ts=now(),
+                type="task.archived",
+                task_id=item["task_id"],
+                run_id=None,
+                persona_id=_safe_archive_persona(actor),
+                payload={
+                    "archive_batch": archive_dir.name,
+                    "manifest_path": "manifest.json",
+                    "state": item["state"],
+                    "reason": _safe_archive_reason(reason),
+                    "run_count": len(item.get("run_ids") or []),
+                    "proof_count": len(item.get("proof_ids") or []),
+                    "incident_count": len(item.get("incident_ids") or []),
+                    "worker_session_count": len(item.get("worker_session_ids") or []),
+                    "runtime_instance_count": len(item.get("runtime_instance_ids") or []),
+                    "self_test_evidence_count": len(item.get("self_test_evidence_ids") or []),
+                },
+            )
+        )
+
+
+class AgentStore:
+    def save(self, persona: AgentPersona) -> AgentPersona:
+        _write_model(paths.agent_path(persona.id), persona)
+        return persona
+
+    def get(self, persona_id: str) -> AgentPersona:
+        return _read_model(AgentPersona, paths.agent_path(persona_id))
+
+    def list_all(self) -> list[AgentPersona]:
+        return _list_models(AgentPersona, paths.agents_dir())
+
+
+class RunStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
+    def open_run(
+        self,
+        persona_id: str,
+        task_id: str,
+        stage_id: str | None = None,
+        *,
+        iteration_budget: int = 90,
+        max_wall_seconds: float | None = None,
+        max_api_calls: int | None = None,
+        max_total_tokens: int | None = None,
+        session_id: str | None = None,
+        tick_id: str | None = None,
+    ) -> AgentRun:
+        ts = now()
+        existing = self.find_active(task_id=task_id, persona_id=persona_id, stage_id=stage_id)
+        if existing:
+            raise AlreadyExists(existing[0].id)
+        run = AgentRun(
+            id=f"run_{uuid.uuid4().hex[:12]}",
+            persona_id=persona_id,
+            task_id=task_id,
+            stage_id=stage_id,
+            state=RunState.RUNNING,
+            started_at=ts,
+            last_heartbeat_at=ts,
+            iteration_budget=iteration_budget,
+            max_wall_seconds=max_wall_seconds,
+            max_api_calls=max_api_calls,
+            max_total_tokens=max_total_tokens,
+            session_id=_safe_session_id(session_id),
+        )
+        _write_model(paths.run_path(run.id), run)
+        self.event_log.append(
+            Event(
+                ts=now(),
+                type="run.opened",
+                task_id=task_id,
+                run_id=run.id,
+                persona_id=persona_id,
+                payload={
+                    "stage_id": stage_id,
+                    "iteration_budget": iteration_budget,
+                    "max_wall_seconds": max_wall_seconds,
+                    "max_api_calls": max_api_calls,
+                    "max_total_tokens": max_total_tokens,
+                    "session_id": _safe_session_id(session_id),
+                    "tick_id": tick_id,
+                },
+            )
+        )
+        return run
+
+    def get(self, run_id: str) -> AgentRun:
+        return _read_model(AgentRun, paths.run_path(run_id))
+
+    def update(self, run: AgentRun) -> bool:
+        with run_lock(run.id):
+            run.session_id = _safe_session_id(run.session_id)
+            if isinstance(run.llm, dict):
+                safe_llm_session_id = _safe_session_id(run.llm.get("session_id"))
+                if safe_llm_session_id:
+                    run.llm["session_id"] = safe_llm_session_id
+                else:
+                    run.llm.pop("session_id", None)
+            try:
+                previous = self.get(run.id)
+            except NotFound:
+                previous = None
+            if previous is not None and previous.state in TERMINAL_RUN_STATES:
+                return False
+            _write_model(paths.run_path(run.id), run)
+            return True
+
+    def heartbeat(self, run_id: str) -> AgentRun:
+        run = self.get(run_id)
+        if run.state in TERMINAL_RUN_STATES:
+            return run
+        run.last_heartbeat_at = now()
+        run.state = RunState.RUNNING
+        if not self.update(run):
+            return self.get(run_id)
+        self.event_log.append(
+            Event(
+                ts=now(),
+                type="run.heartbeat",
+                task_id=run.task_id,
+                run_id=run.id,
+                persona_id=run.persona_id,
+            )
+        )
+        return run
+
+    def close_run(
+        self,
+        run_id: str,
+        *,
+        state: RunState,
+        final_decision=None,
+        error=None,
+    ) -> AgentRun:
+        with run_lock(run_id):
+            run = self.get(run_id)
+            run.session_id = _safe_session_id(run.session_id)
+            if isinstance(run.llm, dict):
+                safe_llm_session_id = _safe_session_id(run.llm.get("session_id"))
+                if safe_llm_session_id:
+                    run.llm["session_id"] = safe_llm_session_id
+                else:
+                    run.llm.pop("session_id", None)
+            if run.state in TERMINAL_RUN_STATES:
+                return run
+            run.state = state if isinstance(state, RunState) else RunState(state)
+            run.finished_at = now()
+            run.final_decision = final_decision
+            run.error = error
+            if isinstance(run.llm, dict):
+                if final_decision and isinstance(final_decision, dict):
+                    run.llm.setdefault("decision_type", final_decision.get("type"))
+                    run.llm.setdefault("validation_status", "valid")
+                elif error:
+                    run.llm.setdefault("validation_status", "invalid")
+            _write_model(paths.run_path(run.id), run)
+            payload = {"state": str(run.state)}
+            if isinstance(final_decision, dict):
+                payload["decision_type"] = final_decision.get("type")
+                payload["validation_status"] = "valid"
+            if run.session_id:
+                payload["session_id"] = run.session_id
+            if isinstance(run.llm, dict):
+                for key in ("total_tokens", "input_tokens", "output_tokens", "api_calls", "tool_turns"):
+                    if run.llm.get(key) is not None:
+                        payload[key] = run.llm.get(key)
+                if run.llm.get("validation_status"):
+                    payload["validation_status"] = run.llm.get("validation_status")
+            self.event_log.append(
+                Event(
+                    ts=now(),
+                    type="run.closed",
+                    task_id=run.task_id,
+                    run_id=run.id,
+                    persona_id=run.persona_id,
+                    payload=payload,
+                )
+            )
+            return run
+
+    def cancel(self, run_id: str, *, reason: str) -> AgentRun:
+        return self.close_run(
+            run_id,
+            state=RunState.CANCELLED,
+            error={"type": "operator_cancelled", "summary": _safe_operator_reason(reason)},
+        )
+
+    def approve_continuation(self, run_id: str) -> AgentRun:
+        with run_lock(run_id):
+            run = self.get(run_id)
+            if run.state != RunState.WAITING_ON_APPROVAL:
+                raise ValueError("run is not waiting on approval")
+            if not _safe_session_id(run.session_id):
+                raise ValueError("same_session_not_safe: missing session_id")
+            error = run.error or {}
+            if error.get("type") != "run_budget_exceeded":
+                raise ValueError("run approval is only supported for budget-limited runs")
+            run.state = RunState.FAILED
+            run.finished_at = now()
+            run.progress = {**(run.progress or {}), "approved_for_continuation": True, "continuation_session_id": run.session_id}
+            run.error = {**error, "approved_for_continuation": True}
+            _write_model(paths.run_path(run.id), run)
+            self.event_log.append(
+                Event(
+                    ts=now(),
+                    type="run.approved",
+                    task_id=run.task_id,
+                    run_id=run.id,
+                    persona_id=run.persona_id,
+                    payload={
+                        "approval_type": "budget_continuation",
+                        "session_id": run.session_id,
+                        "next_expected": "continue_same_session",
+                    },
+                )
+            )
+            return run
+
+    def latest_session_id(self, *, task_id: str, persona_id: str, stage_id: object = _ANY_STAGE) -> str | None:
+        runs = [
+            run for run in self.list_all()
+            if run.task_id == task_id
+            and run.persona_id == persona_id
+            and (stage_id is _ANY_STAGE or run.stage_id == stage_id)
+            and _safe_session_id(run.session_id)
+        ]
+        if runs and _latest_run_is_invalid(runs):
+            return None
+        runs = [run for run in runs if _run_session_is_reusable(run)]
+        if not runs and stage_id is not _ANY_STAGE:
+            fallback_runs = [
+                run for run in self.list_all()
+                if run.task_id == task_id
+                and run.persona_id == persona_id
+                and _safe_session_id(run.session_id)
+            ]
+            if fallback_runs and _latest_run_is_invalid(fallback_runs):
+                return None
+            runs = [run for run in fallback_runs if _run_session_is_reusable(run)]
+        if not runs:
+            return None
+        latest = max(runs, key=lambda run: run.finished_at or run.last_heartbeat_at or run.started_at)
+        return latest.session_id
+
+    def find_stale(self, *, heartbeat_ttl_seconds: int) -> list[AgentRun]:
+        cutoff = now() - timedelta(seconds=heartbeat_ttl_seconds)
+        return [
+            run
+            for run in self.list_all()
+            if run.state not in TERMINAL_RUN_STATES and run.state != RunState.WAITING_ON_APPROVAL and run.last_heartbeat_at < cutoff
+        ]
+
+    def list_for_task(self, task_id: str) -> list[AgentRun]:
+        return [run for run in self.list_all() if run.task_id == task_id]
+
+    def find_active(self, *, task_id: str | None = None, persona_id: str | None = None, stage_id: object = _ANY_STAGE) -> list[AgentRun]:
+        return [
+            run
+            for run in self.list_all()
+            if run.state in ACTIVE_RUN_STATES
+            and (task_id is None or run.task_id == task_id)
+            and (persona_id is None or run.persona_id == persona_id)
+            and (stage_id is _ANY_STAGE or run.stage_id == stage_id)
+        ]
+
+    def list_all(self) -> list[AgentRun]:
+        return _list_models(AgentRun, paths.runs_dir())
+
+
+def _latest_run_is_invalid(runs: list[AgentRun]) -> bool:
+    latest = max(runs, key=lambda run: run.finished_at or run.last_heartbeat_at or run.started_at)
+    if _run_has_approved_continuation(latest):
+        return False
+    llm = latest.llm if isinstance(latest.llm, dict) else {}
+    return latest.state == RunState.FAILED and llm.get("validation_status") == "invalid"
+
+
+def _run_session_is_reusable(run: AgentRun) -> bool:
+    if not _safe_session_id(run.session_id):
+        return False
+    llm = run.llm if isinstance(run.llm, dict) else {}
+    if run.state == RunState.FAILED and llm.get("validation_status") == "invalid" and not _run_has_approved_continuation(run):
+        return False
+    return run.state in {RunState.COMPLETED, RunState.FAILED, RunState.WAITING_ON_APPROVAL}
+
+
+def _run_has_approved_continuation(run: AgentRun) -> bool:
+    progress = run.progress if isinstance(run.progress, dict) else {}
+    error = run.error if isinstance(run.error, dict) else {}
+    return progress.get("approved_for_continuation") is True or error.get("approved_for_continuation") is True
+
+
+def _enrich_proof_lane_attribution(proof: Proof) -> None:
+    """Default lane attribution onto proof metadata when the caller omitted it.
+
+    Foreground/targeted-daemon goals run in a goal runtime instance even outside
+    swarm mode; proofs should carry that lane identity so swarm-mode and
+    single-lane evidence read the same way.
+    """
+    try:
+        metadata = proof.metadata if isinstance(proof.metadata, dict) else {}
+        if not metadata.get("lane_id"):
+            from .runtime_instances import GoalRuntimeInstanceStore
+
+            instance_store = GoalRuntimeInstanceStore()
+            instance = instance_store.active_for_task(proof.task_id) or instance_store.latest_for_task(proof.task_id)
+            if instance is not None:
+                metadata["lane_id"] = instance.id
+        if not metadata.get("persona_instance_id"):
+            run_id = str(metadata.get("run_id") or "").strip()
+            if run_id:
+                try:
+                    run = RunStore().get(run_id)
+                    if getattr(run, "persona_id", None):
+                        metadata["persona_instance_id"] = f"personainst_{run.persona_id}"
+                except Exception:
+                    pass
+        if not metadata.get("repo_bundle_ids"):
+            from .repo_bundles import RepoBundleStore
+
+            stage_id = str(getattr(proof, "stage_id", "") or "")
+            bundle_ids = [
+                bundle.id
+                for bundle in RepoBundleStore().list_for_task(proof.task_id)
+                if not stage_id or stage_id in (getattr(bundle, "stage_ids", None) or [])
+            ]
+            if bundle_ids:
+                metadata["repo_bundle_ids"] = bundle_ids[:8]
+        proof.metadata = metadata
+    except Exception:
+        # Attribution is observability; never fail proof attachment for it.
+        pass
+
+
+class ProofStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
+    def attach(self, proof: Proof) -> Proof:
+        _enrich_proof_lane_attribution(proof)
+        _write_model(paths.proof_record_path(proof.task_id, proof.id), proof)
+        metadata = proof.metadata or {}
+        run_id = _safe_run_id(metadata.get("run_id"))
+        status = _safe_proof_status(metadata.get("status"))
+        exit_code = metadata.get("exit_code")
+        duration_ms = metadata.get("duration_ms")
+        safe_proof_id = _safe_event_token(proof.id, fallback="proof")
+        safe_stage_id = _safe_event_token(proof.stage_id, fallback=None)
+        payload = {
+            "proof_id": safe_proof_id,
+            "type": str(proof.type),
+            "phase": "proof",
+            "severity": "warning" if status in {"failed", "timeout"} else "info",
+            "step": "command_proof" if proof.type == ProofType.TEST_RUN else "proof_attached",
+            "status": status,
+            "summary": _proof_event_summary(safe_proof_id, proof.type, status=status, exit_code=exit_code, duration_ms=duration_ms),
+            "next_expected": "request_qa_review" if proof.type == ProofType.TEST_RUN and status == "passed" else "inspect_proof",
+        }
+        if safe_stage_id is not None:
+            payload["stage_id"] = safe_stage_id
+        for key in ("lane_id", "persona_instance_id", "repo_bundle_id", "proof_reuse_basis"):
+            value = metadata.get(key)
+            if isinstance(value, str) and _safe_event_token(value, fallback=None):
+                payload[key] = value
+        if isinstance(metadata.get("repo_bundle_ids"), list):
+            payload["repo_bundle_ids"] = [
+                str(item)[:128]
+                for item in metadata["repo_bundle_ids"][:8]
+                if _safe_event_token(str(item), fallback=None)
+            ]
+        if isinstance(exit_code, int):
+            payload["exit_code"] = exit_code
+        if isinstance(duration_ms, int) and duration_ms >= 0:
+            payload["duration_ms"] = duration_ms
+        self.event_log.append(
+            Event(
+                ts=now(),
+                type="proof.attached",
+                task_id=proof.task_id,
+                run_id=run_id,
+                persona_id=_safe_proof_actor(metadata.get("actor_requested"), fallback=proof.created_by),
+                payload=payload,
+            )
+        )
+        return proof
+
+    def get(self, proof_id: str) -> Proof:
+        for path in paths.proofs_dir().glob(f"*/proof_{proof_id}.json"):
+            return _read_model(Proof, path)
+        raise NotFound(proof_id)
+
+    def list_for_task(self, task_id: str) -> list[Proof]:
+        task_dir = paths.proofs_dir() / task_id
+        return _list_models(Proof, task_dir)
+
+    def list_for_stage(self, stage_id: str) -> list[Proof]:
+        proofs: list[Proof] = []
+        if paths.proofs_dir().exists():
+            for path in paths.proofs_dir().glob("*/proof_*.json"):
+                proof = _read_model(Proof, path)
+                if proof.stage_id == stage_id:
+                    proofs.append(proof)
+        return sorted(proofs, key=lambda proof: proof.id)
+
+
+def _safe_proof_actor(value, *, fallback: str) -> str:
+    if isinstance(value, str) and value in {"pm", "dev", "qa", "neko_supervisor", "supervisor", "harness"}:
+        return value
+    return fallback if fallback in {"pm", "dev", "qa", "neko_supervisor", "supervisor", "harness"} else "harness"
+
+
+def _safe_run_id(value) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"run_[A-Za-z0-9_-]{1,64}", value):
+        return value
+    return None
+
+
+def _safe_event_token(value, *, fallback: str | None) -> str | None:
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+        return value
+    return fallback
+
+
+def _safe_proof_status(value) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"passed", "failed", "timeout", "attached"}:
+            return normalized
+    return "attached"
+
+
+def _proof_event_summary(proof_id: str, proof_type: ProofType, *, status: str, exit_code, duration_ms) -> str:
+    if proof_type == ProofType.TEST_RUN:
+        exit_part = f"exit {exit_code}" if isinstance(exit_code, int) else "exit unknown"
+        duration_part = f", {duration_ms}ms" if isinstance(duration_ms, int) and duration_ms >= 0 else ""
+        return f"Command proof {status}: {exit_part}{duration_part}, proof {proof_id}"
+    return f"Proof attached: {proof_id}"
+
+
+def _safe_archive_actor(value: str) -> str:
+    return value if value in {"cli", "harness", "dev", "qa", "neko_supervisor", "supervisor"} else "cli"
+
+
+def _safe_archive_persona(value: str) -> str | None:
+    return value if value in {"dev", "qa", "neko_supervisor", "supervisor"} else None
+
+
+def _safe_archive_reason(value: str) -> str:
+    lowered = str(value or "").lower()
+    if any(marker in lowered for marker in ("secret", "token", "password", "credential", "authorization", "cookie", "key=")):
+        return "operator archive command"
+    return str(value or "archive terminal task")[:200]
+
+
+def _archive_result(*, batch: str | None, archive_dir: Path | None, archived: list[dict], skipped: list[dict], manifest_path: Path | None) -> dict:
+    return {
+        "archive_batch": batch,
+        "archive_dir": str(archive_dir) if archive_dir is not None else None,
+        "archived_task_ids": [item["task_id"] for item in archived],
+        "skipped_task_ids": [item["task_id"] for item in skipped],
+        "archived_tasks": archived,
+        "skipped_tasks": skipped,
+        "archived_count": len(archived),
+        "skipped_count": len(skipped),
+        "manifest_path": str(manifest_path) if manifest_path is not None else None,
+    }
+
+
+def _archive_batch_name() -> str:
+    stamp = now().strftime("%Y%m%dT%H%M%S%fZ")
+    return f"{stamp}_archive_ready"
+
+
+def _move_if_exists(source: Path, dest: Path) -> bool:
+    if not source.exists():
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        if dest.is_dir():
+            shutil.rmtree(dest)
+        else:
+            dest.unlink()
+    shutil.move(str(source), str(dest))
+    return True
+
+
+def _active_worker_sessions_for_task(task_id: str):
+    try:
+        from .worker_sessions import WorkerSessionStore
+
+        return WorkerSessionStore(event_log=EventLog()).find_active(task_id=task_id)
+    except Exception:
+        return []
+
+
+def _archive_worker_evidence(task_id: str, archive_dir: Path) -> dict:
+    result = {
+        "worker_session_ids": [],
+        "context_archived": False,
+        "proof_sandbox_archived": False,
+    }
+    try:
+        from .worker_sessions import WorkerSessionStore
+
+        workers = WorkerSessionStore(event_log=EventLog()).list_for_task(task_id)
+    except Exception:
+        workers = []
+    for worker in workers:
+        dest = archive_dir / "worker_sessions" / f"{worker.id}.json"
+        if _move_if_exists(paths.worker_session_path(worker.id), dest):
+            result["worker_session_ids"].append(worker.id)
+    context_src = paths.context_dir() / task_id
+    context_dest = archive_dir / "context" / task_id
+    if context_src.exists():
+        _move_if_exists(context_src, context_dest)
+        result["context_archived"] = True
+    sandbox_src = paths.proof_sandbox_task_dir(task_id)
+    sandbox_dest = archive_dir / "proof_sandbox" / task_id
+    if sandbox_src.exists():
+        _move_if_exists(sandbox_src, sandbox_dest)
+        result["proof_sandbox_archived"] = True
+    return result
+
+
+def _archive_persona_assignment_evidence(task_id: str, archive_dir: Path) -> dict:
+    result = {
+        "persona_assignment_ids": [],
+        "persona_assignments_archived": False,
+    }
+    try:
+        assignments = PersonaAssignmentStore(event_log=EventLog()).list_for_task(task_id)
+    except Exception:
+        assignments = []
+    for assignment in assignments:
+        dest = archive_dir / "persona_assignments" / f"{assignment.id}.json"
+        if _move_if_exists(paths.persona_assignment_path(assignment.id), dest):
+            result["persona_assignment_ids"].append(assignment.id)
+    result["persona_assignments_archived"] = bool(result["persona_assignment_ids"])
+    return result
+
+
+def _archive_repo_bundle_evidence(task_id: str, archive_dir: Path) -> dict:
+    result = {
+        "repo_bundle_ids": [],
+        "repo_bundles_archived": False,
+    }
+    source = paths.repo_bundles_task_dir(task_id)
+    if not source.exists():
+        return result
+    dest = archive_dir / "repo_bundles" / task_id
+    if _move_if_exists(source, dest):
+        result["repo_bundles_archived"] = True
+        result["repo_bundle_ids"] = [path.stem for path in sorted(dest.glob("*.json"))]
+    return result
+
+
+def _archive_runtime_instance_evidence(task_id: str, archive_dir: Path) -> dict:
+    result = {
+        "runtime_instance_ids": [],
+        "runtime_instances_archived": False,
+    }
+    source_dir = paths.runtime_instances_dir()
+    if not source_dir.exists():
+        return result
+    for path in sorted(source_dir.glob("*.json")):
+        try:
+            instance = _read_model(GoalRuntimeInstance, path)
+        except Exception:
+            continue
+        if instance.task_id != task_id:
+            continue
+        dest = archive_dir / "runtime_instances" / f"{instance.id}.json"
+        if _move_if_exists(path, dest):
+            result["runtime_instance_ids"].append(instance.id)
+    result["runtime_instances_archived"] = bool(result["runtime_instance_ids"])
+    return result
+
+
+def _archive_packet_artifacts(task_id: str, archive_dir: Path) -> dict:
+    result = {
+        "packet_artifact_ids": [],
+        "packet_artifacts_archived": False,
+    }
+    source = paths.packet_artifacts_task_dir(task_id)
+    if not source.exists():
+        return result
+    dest = archive_dir / "packet_artifacts" / task_id
+    if _move_if_exists(source, dest):
+        result["packet_artifacts_archived"] = True
+        result["packet_artifact_ids"] = [path.stem for path in sorted(dest.glob("*.json"))]
+    return result
+
+
+
+
+def _archive_role_envelope_evidence(task_id: str, archive_dir: Path) -> dict:
+    result = {
+        "role_envelope_ids": [],
+        "role_checklist_ids": [],
+        "proof_batch_ids": [],
+        "role_state_archived": False,
+    }
+    for source, dest_name, pattern, key in (
+        (paths.role_envelopes_task_dir(task_id), "role_envelopes", "*.json", "role_envelope_ids"),
+        (paths.role_checklists_task_dir(task_id), "role_checklists", "*.json", "role_checklist_ids"),
+        (paths.proof_batches_task_dir(task_id), "proof_batches", "*.json", "proof_batch_ids"),
+    ):
+        if not source.exists():
+            continue
+        dest = archive_dir / dest_name / task_id
+        if _move_if_exists(source, dest):
+            result["role_state_archived"] = True
+            result[key] = [path.stem for path in sorted(dest.glob(pattern))]
+    return result
+
+def _archive_self_test_evidence(task_id: str, archive_dir: Path) -> dict:
+    result = {
+        "self_test_evidence_ids": [],
+        "self_test_evidence_archived": False,
+    }
+    source = paths.self_test_task_dir(task_id)
+    if not source.exists():
+        return result
+    dest = archive_dir / "self_tests" / task_id
+    if _move_if_exists(source, dest):
+        result["self_test_evidence_archived"] = True
+        result["self_test_evidence_ids"] = [path.stem for path in sorted(dest.glob("selftest_*.json"))]
+    return result
+
+
+class IncidentStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
+    def open(self, incident: Incident) -> Incident:
+        _write_model(paths.incident_path(incident.id), incident)
+        metadata = incident.metadata if isinstance(getattr(incident, "metadata", None), dict) else {}
+        payload = {"incident_id": incident.id, "kind": incident.kind}
+        for key in ("proof_id", "check_id", "environment_fingerprint", "blocking_event_id", "stage_id", "persona_target", "lane_id", "lane_state_at_open"):
+            value = metadata.get(key)
+            if isinstance(value, str) and _safe_event_token(value, fallback=None):
+                payload[key] = value
+        if isinstance(metadata.get("budget_state"), dict):
+            payload["budget_state"] = metadata["budget_state"]
+        if isinstance(metadata.get("repo_lock_state"), dict):
+            payload["repo_lock_state"] = metadata["repo_lock_state"]
+        self.event_log.append(
+            Event(
+                ts=now(),
+                type="incident.opened",
+                task_id=incident.task_id,
+                run_id=incident.run_id,
+                persona_id=None,
+                payload=payload,
+            )
+        )
+        return incident
+
+    def get(self, incident_id: str) -> Incident:
+        return _read_model(Incident, paths.incident_path(incident_id))
+
+    def close(self, incident_id: str, *, reason: str | None = None) -> Incident:
+        incident = self.get(incident_id)
+        was_open = incident.closed_at is None
+        incident.closed_at = now()
+        _write_model(paths.incident_path(incident_id), incident)
+        if incident.task_id:
+            try:
+                task_store = TaskStore()
+                task = task_store.get(incident.task_id)
+                changed = False
+                if incident.id in (task.open_incident_ids or []):
+                    task.open_incident_ids = [item for item in task.open_incident_ids if item != incident.id]
+                    changed = True
+                if was_open and task.state == TaskState.BLOCKED:
+                    mark_incident_closed_for_recovery(task, incident_id=incident.id)
+                    if not task.open_incident_ids and not has_typed_plan(task):
+                        task.state = TaskState.CREATED
+                    changed = True
+                if changed:
+                    task.updated_at = now()
+                    task_store.update(task, actor="harness", reason="incident closed")
+            except NotFound:
+                pass
+        payload = {"incident_id": incident.id}
+        if reason:
+            payload["reason"] = reason
+        self.event_log.append(
+            Event(
+                ts=now(),
+                type="incident.closed",
+                task_id=incident.task_id,
+                run_id=incident.run_id,
+                persona_id=None,
+                payload=payload,
+            )
+        )
+        return incident
+
+    def list_open(self) -> list[Incident]:
+        return [incident for incident in self.list_all() if incident.closed_at is None]
+
+    def list_all(self) -> list[Incident]:
+        return _list_models(Incident, paths.incidents_dir())
+
+

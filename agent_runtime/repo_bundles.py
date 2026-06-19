@@ -1,0 +1,589 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import replace
+from typing import Any
+
+from hermes_time import now
+from utils import atomic_json_write
+
+from . import paths
+from .events import EventLog
+from .models import Event, MissionPlanStage, RepoBundle, Task
+from .serde import from_jsonable, to_jsonable
+
+REPO_BUNDLE_STATES = frozenset(
+    {
+        "planned",
+        "queued_waiting_dependency",
+        "assigned",
+        "running",
+        "delivered_waiting_for_qa",
+        "delivered",
+        "blocked",
+        "verified",
+        "rejected",
+        "cancelled",
+        "archived",
+    }
+)
+TERMINAL_REPO_BUNDLE_STATES = frozenset({"verified", "blocked", "cancelled", "archived"})
+DELIVERED_REPO_BUNDLE_STATES = frozenset({"delivered_waiting_for_qa", "delivered", "verified"})
+REPO_BUNDLE_OWNER_PERSONAS = frozenset({"dev", "backend_dev"})
+REPO_LOCK_MODES = frozenset({"read", "write", "exclusive_maintenance"})
+
+SIMPLIFIED_PHASES = frozenset({"created", "planning", "working", "verifying", "repair", "blocked", "done"})
+
+WAKE_DEPENDENCY_DELIVERED = "dependency_bundle_delivered"
+WAKE_CONTRACT_PACKET_AVAILABLE = "contract_packet_available"
+WAKE_ALL_REQUIRED_BUNDLES_DELIVERED = "all_required_bundles_delivered"
+WAKE_FINAL_GATE_PASSED = "final_gate_passed"
+WAKE_VISUAL_PROOF_ATTACHED = "visual_proof_attached"
+WAKE_QA_REJECTED_BUNDLE = "qa_rejected_bundle"
+WAKE_NEKO_SCOPE_REPAIRED = "neko_scope_repaired"
+WAKE_OPERATOR_RESUMED = "operator_resumed"
+
+_REPO_OWNER_RULES: tuple[tuple[str, str], ...] = (
+    ("eternialauncher", "dev"),
+    ("launcher", "dev"),
+    ("eterniabackend", "backend_dev"),
+    ("backend", "backend_dev"),
+    ("hermes-agent", "backend_dev"),
+    ("hermes", "backend_dev"),
+)
+
+
+class RepoBundleStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
+    def create_or_update_from_task(self, task: Task) -> list[RepoBundle]:
+        desired = desired_bundles_for_task(task)
+        result: list[RepoBundle] = []
+        for bundle in desired:
+            try:
+                existing = self.get(task.id, bundle.id)
+            except Exception:
+                self._write(bundle)
+                self._event("repo_bundle.created", bundle, {"state": bundle.state})
+                result.append(self.get(task.id, bundle.id))
+                continue
+            merged = merge_desired_bundle(existing, bundle)
+            if to_jsonable(merged) != to_jsonable(existing):
+                self._write(merged)
+                self._event("repo_bundle.updated", merged, {"state": merged.state})
+                result.append(self.get(task.id, merged.id))
+            else:
+                result.append(existing)
+        self.cancel_superseded(task, desired_ids={bundle.id for bundle in desired})
+        return sorted(result, key=lambda item: (item.repo.lower(), item.id))
+
+    def get(self, task_id: str, bundle_id: str) -> RepoBundle:
+        raw = json.loads(paths.repo_bundle_path(task_id, bundle_id).read_text(encoding="utf-8"))
+        return from_jsonable(RepoBundle, raw)
+
+    def update(self, bundle: RepoBundle, *, event_type: str = "repo_bundle.updated", payload: dict[str, Any] | None = None) -> RepoBundle:
+        bundle.updated_at = now()
+        bundle.state = safe_bundle_state(bundle.state)
+        self._write(bundle)
+        updated = self.get(bundle.task_id, bundle.id)
+        self._event(event_type, updated, {"state": updated.state, **(payload or {})})
+        return updated
+
+    def list_for_task(self, task_id: str) -> list[RepoBundle]:
+        directory = paths.repo_bundles_task_dir(task_id)
+        if not directory.exists():
+            return []
+        bundles: list[RepoBundle] = []
+        for path in sorted(directory.glob("*.json")):
+            try:
+                bundles.append(from_jsonable(RepoBundle, json.loads(path.read_text(encoding="utf-8"))))
+            except Exception:
+                continue
+        return sorted(bundles, key=lambda item: (item.repo.lower(), item.id))
+
+    def list_all(self) -> list[RepoBundle]:
+        root = paths.repo_bundles_dir()
+        if not root.exists():
+            return []
+        bundles: list[RepoBundle] = []
+        for path in sorted(root.glob("*/*.json")):
+            try:
+                bundles.append(from_jsonable(RepoBundle, json.loads(path.read_text(encoding="utf-8"))))
+            except Exception:
+                continue
+        return sorted(bundles, key=lambda item: (item.task_id, item.repo.lower(), item.id))
+
+    def find_for_assignment(self, assignment) -> RepoBundle | None:
+        bundle_id = getattr(assignment, "repo_bundle_id", None)
+        task_id = getattr(assignment, "task_id", None)
+        if not bundle_id or not task_id:
+            return None
+        try:
+            return self.get(str(task_id), str(bundle_id))
+        except Exception:
+            return None
+
+    def attach_assignment(self, bundle: RepoBundle, assignment_id: str | None, *, run_id: str | None = None) -> RepoBundle:
+        changed = False
+        if assignment_id and bundle.assignment_id != assignment_id:
+            bundle.assignment_id = assignment_id
+            changed = True
+        if run_id and bundle.active_run_id != run_id:
+            bundle.active_run_id = run_id
+            changed = True
+        if bundle.state == "planned":
+            bundle.state = "assigned"
+            changed = True
+        if not changed:
+            return bundle
+        return self.update(bundle, event_type="repo_bundle.assigned", payload={"assignment_id": assignment_id, "run_id": run_id})
+
+    def mark_running(self, bundle: RepoBundle, *, run_id: str | None) -> RepoBundle:
+        bundle.active_run_id = run_id or bundle.active_run_id
+        if bundle.state not in TERMINAL_REPO_BUNDLE_STATES:
+            bundle.state = "running"
+        return self.update(bundle, event_type="repo_bundle.running", payload={"run_id": run_id})
+
+    def mark_delivered(self, bundle: RepoBundle, *, proof_ids: list[str] | None = None) -> RepoBundle:
+        for proof_id in proof_ids or []:
+            safe = safe_token(proof_id)
+            if safe and safe not in bundle.proof_ids:
+                bundle.proof_ids.append(safe)
+        bundle.state = "delivered_waiting_for_qa"
+        bundle.active_run_id = None
+        bundle.delivered_at = now()
+        return self.update(bundle, event_type="repo_bundle.delivered", payload={"proof_count": len(bundle.proof_ids)})
+
+    def mark_verified(self, bundle: RepoBundle, *, proof_ids: list[str] | None = None) -> RepoBundle:
+        for proof_id in proof_ids or []:
+            safe = safe_token(proof_id)
+            if safe and safe not in bundle.proof_ids:
+                bundle.proof_ids.append(safe)
+        bundle.state = "verified"
+        bundle.verified_at = now()
+        bundle.active_run_id = None
+        return self.update(bundle, event_type="repo_bundle.verified", payload={"proof_count": len(bundle.proof_ids)})
+
+    def mark_rejected(self, bundle: RepoBundle, *, reason: str = "") -> RepoBundle:
+        bundle.state = "rejected"
+        bundle.rejected_at = now()
+        bundle.active_run_id = None
+        bundle.last_terminal_feedback = {"reason": safe_text(reason, limit=500)}
+        return self.update(bundle, event_type="repo_bundle.rejected", payload={"reason": safe_text(reason, limit=200)})
+
+    def wake_ready_dependencies(self, task_id: str) -> list[RepoBundle]:
+        bundles = self.list_for_task(task_id)
+        by_id = {bundle.id: bundle for bundle in bundles}
+        woke: list[RepoBundle] = []
+        for bundle in bundles:
+            if bundle.state != "queued_waiting_dependency":
+                continue
+            if all(by_id.get(dep_id) and by_id[dep_id].state in DELIVERED_REPO_BUNDLE_STATES for dep_id in bundle.dependency_bundle_ids):
+                bundle.state = "planned"
+                bundle.queue_reason = None
+                bundle.wake_condition = WAKE_DEPENDENCY_DELIVERED
+                woke.append(self.update(bundle, event_type="repo_bundle.woke", payload={"wake_condition": WAKE_DEPENDENCY_DELIVERED}))
+        return woke
+
+    def cancel_superseded(self, task: Task, *, desired_ids: set[str]) -> list[RepoBundle]:
+        if getattr(task, "mission_plan", None) is None:
+            return []
+        cancelled: list[RepoBundle] = []
+        for bundle in self.list_for_task(task.id):
+            if bundle.id in desired_ids or bundle.state in TERMINAL_REPO_BUNDLE_STATES:
+                continue
+            bundle.state = "cancelled"
+            bundle.queue_reason = "superseded_by_mission_plan"
+            bundle.wake_condition = None
+            bundle.last_terminal_feedback = {"reason": "Superseded by current mission plan repo bundle projection."}
+            cancelled.append(self.update(bundle, event_type="repo_bundle.updated", payload={"reason": "superseded_by_mission_plan"}))
+        return cancelled
+
+    def _write(self, bundle: RepoBundle) -> None:
+        bundle.state = safe_bundle_state(bundle.state)
+        bundle.updated_at = bundle.updated_at or now()
+        bundle.created_at = bundle.created_at or bundle.updated_at
+        path = paths.repo_bundle_path(bundle.task_id, bundle.id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(path, to_jsonable(bundle), indent=2, sort_keys=True)
+
+    def _event(self, event_type: str, bundle: RepoBundle, payload: dict[str, Any]) -> None:
+        self.event_log.append(
+            Event(
+                ts=now(),
+                type=event_type,
+                task_id=bundle.task_id,
+                run_id=bundle.active_run_id,
+                persona_id=bundle.owner_persona_id,
+                payload={
+                    "repo_bundle_id": bundle.id,
+                    "repo": safe_text(bundle.repo, limit=160),
+                    **payload,
+                },
+            )
+        )
+
+
+def desired_bundles_for_task(task: Task) -> list[RepoBundle]:
+    stages = list(getattr(getattr(task, "mission_plan", None), "stages", None) or [])
+    if stages:
+        return _bundles_from_mission_plan(task, stages)
+    repos = list(getattr(task, "affected_repos", None) or [])
+    if not repos:
+        return []
+    created_at = now()
+    bundles: list[RepoBundle] = []
+    for repo in _dedupe_preserve_order(repos):
+        repo_text = safe_text(repo, limit=160)
+        bundles.append(
+            RepoBundle(
+                id=bundle_id_for(task.id, repo_text, stage_ids=[]),
+                task_id=task.id,
+                repo=repo_text,
+                owner_persona_id=owner_for_repo(repo_text),
+                state="planned",
+                title=f"{repo_text} bundle",
+                objective=task.description,
+                acceptance=list(getattr(task, "acceptance_criteria", None) or []),
+                non_goals=list(getattr(task, "non_goals", None) or []),
+                proof_requirements=["final_gate"],
+                visual_requirements=["visual_proof"] if getattr(task, "requires_visual_proof", False) else [],
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+    return bundles
+
+
+def acquire_repo_bundle_locks(*, lane_id: str, task_id: str, bundle_ids: list[str], mode: str = "write", lane_kind: str = "production") -> dict[str, Any]:
+    mode = mode if mode in REPO_LOCK_MODES else "write"
+    if lane_kind == "playground" and mode != "read":
+        return {"ok": False, "park_state": "parked_by_repo_lock", "reason": "playground lanes are read-locked by default", "conflicts": []}
+    locks = _read_repo_locks()
+    desired = [str(item).strip() for item in bundle_ids if str(item).strip()]
+    conflicts = []
+    for bundle_id in desired:
+        for lock in locks:
+            if lock.get("bundle_id") != bundle_id or lock.get("lane_id") == lane_id:
+                continue
+            if _repo_lock_conflicts(mode, str(lock.get("mode") or "write")):
+                conflicts.append({"bundle_id": bundle_id, "owner_lane_id": lock.get("lane_id"), "owner_task_id": lock.get("task_id"), "mode": lock.get("mode")})
+    if conflicts:
+        return {"ok": False, "park_state": "parked_by_repo_lock", "reason": "repo bundle lock held by another lane", "conflicts": conflicts}
+    now_text = now()
+    kept = [lock for lock in locks if lock.get("lane_id") != lane_id or lock.get("bundle_id") not in desired]
+    kept.extend({"lane_id": lane_id, "task_id": task_id, "bundle_id": bundle_id, "mode": mode, "acquired_at": now_text} for bundle_id in desired)
+    _write_repo_locks(kept)
+    return {"ok": True, "locks": [lock for lock in kept if lock.get("lane_id") == lane_id and lock.get("bundle_id") in desired]}
+
+
+def release_repo_bundle_locks(*, lane_id: str | None = None, task_id: str | None = None) -> dict[str, Any]:
+    locks = _read_repo_locks()
+    kept = []
+    released = []
+    for lock in locks:
+        if (lane_id and lock.get("lane_id") == lane_id) or (task_id and lock.get("task_id") == task_id):
+            released.append(lock)
+        else:
+            kept.append(lock)
+    if released:
+        _write_repo_locks(kept)
+    return {"released_count": len(released), "released": released}
+
+
+def repo_lock_summary() -> dict[str, Any]:
+    locks = _read_repo_locks()
+    return {"lock_count": len(locks), "locks": locks}
+
+
+def _repo_lock_conflicts(requested: str, held: str) -> bool:
+    if requested == "read" and held == "read":
+        return False
+    return requested in {"write", "exclusive_maintenance"} or held in {"write", "exclusive_maintenance"}
+
+
+def _repo_locks_path():
+    return paths.store_root() / "repo_bundle_locks.json"
+
+
+def _read_repo_locks() -> list[dict[str, Any]]:
+    path = _repo_locks_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    locks = data.get("locks") if isinstance(data, dict) else data
+    return [item for item in locks if isinstance(item, dict)] if isinstance(locks, list) else []
+
+
+def _write_repo_locks(locks: list[dict[str, Any]]) -> None:
+    atomic_json_write(_repo_locks_path(), to_jsonable({"schema_version": 1, "locks": locks, "updated_at": now()}), indent=2, sort_keys=True)
+
+
+def _bundles_from_mission_plan(task: Task, stages: list[MissionPlanStage]) -> list[RepoBundle]:
+    by_repo: dict[str, list[MissionPlanStage]] = {}
+    for stage in stages:
+        owner = safe_token(getattr(stage, "owner", None))
+        if owner not in REPO_BUNDLE_OWNER_PERSONAS:
+            continue
+        repo = safe_text(getattr(stage, "repo", None) or _fallback_repo_for_stage(task, stage), limit=160)
+        if not repo:
+            continue
+        by_repo.setdefault(repo, []).append(stage)
+    created_at = now()
+    bundles: list[RepoBundle] = []
+    stage_to_bundle: dict[str, str] = {}
+    for repo, repo_stages in by_repo.items():
+        stage_ids = [stage.id for stage in repo_stages if getattr(stage, "id", None)]
+        bundle_id = bundle_id_for(task.id, repo, stage_ids=stage_ids)
+        stage_to_bundle.update({stage_id: bundle_id for stage_id in stage_ids})
+        requires_visual = any(bool(getattr(stage, "requires_visual_proof", False)) for stage in repo_stages) or bool(getattr(task, "requires_visual_proof", False))
+        proof_targets = []
+        for stage in repo_stages:
+            recipe_id = getattr(stage, "proof_recipe_id", None)
+            if recipe_id:
+                proof_targets.append(f"proof_recipe:{recipe_id}")
+        bundles.append(
+            RepoBundle(
+                id=bundle_id,
+                task_id=task.id,
+                repo=repo,
+                owner_persona_id=_bundle_owner_for_stages(repo, repo_stages),
+                state="planned",
+                title=_bundle_title(repo, repo_stages),
+                objective=_bundle_objective(task, repo_stages),
+                stage_ids=stage_ids,
+                acceptance=_dedupe_preserve_order([item for stage in repo_stages for item in getattr(stage, "acceptance_criteria", [])] or list(getattr(task, "acceptance_criteria", None) or [])),
+                non_goals=list(getattr(task, "non_goals", None) or []),
+                proof_targets=_dedupe_preserve_order(proof_targets),
+                proof_requirements=_dedupe_preserve_order(["self_test", "final_gate"]),
+                visual_requirements=["visual_proof"] if requires_visual else [],
+                created_at=created_at,
+                updated_at=created_at,
+            )
+        )
+    by_id = {bundle.id: bundle for bundle in bundles}
+    for bundle in bundles:
+        dependencies: list[str] = []
+        for stage in by_repo.get(bundle.repo, []):
+            for dep_stage_id in getattr(stage, "depends_on", []) or []:
+                dep_bundle_id = stage_to_bundle.get(str(dep_stage_id))
+                if dep_bundle_id and dep_bundle_id != bundle.id:
+                    dependencies.append(dep_bundle_id)
+        if dependencies:
+            bundle.dependency_bundle_ids = _dedupe_preserve_order(dependencies)
+            bundle.state = "queued_waiting_dependency"
+            bundle.queue_reason = "waiting_for_dependency_bundle"
+            bundle.wake_condition = WAKE_DEPENDENCY_DELIVERED
+        if bundle.id not in by_id:
+            continue
+    return sorted(bundles, key=lambda item: (item.repo.lower(), item.id))
+
+
+def merge_desired_bundle(existing: RepoBundle, desired: RepoBundle) -> RepoBundle:
+    mutable_state = existing.state if existing.state in REPO_BUNDLE_STATES else desired.state
+    if mutable_state in {"running", "delivered_waiting_for_qa", "delivered", "verified", "blocked", "rejected", "cancelled", "archived"}:
+        desired_state = mutable_state
+    else:
+        desired_state = desired.state
+    return replace(
+        existing,
+        repo=desired.repo,
+        owner_persona_id=desired.owner_persona_id,
+        state=desired_state,
+        title=desired.title,
+        objective=desired.objective,
+        stage_ids=desired.stage_ids,
+        affected_paths=desired.affected_paths,
+        acceptance=desired.acceptance,
+        non_goals=desired.non_goals,
+        proof_targets=desired.proof_targets,
+        proof_requirements=desired.proof_requirements,
+        visual_requirements=desired.visual_requirements,
+        dependency_bundle_ids=desired.dependency_bundle_ids,
+        queue_reason=desired.queue_reason if desired_state == "queued_waiting_dependency" else existing.queue_reason,
+        wake_condition=desired.wake_condition if desired_state == "queued_waiting_dependency" else existing.wake_condition,
+        updated_at=now(),
+    )
+
+
+def owner_for_repo(repo: str | None) -> str | None:
+    normalized = normalize_repo(repo)
+    for marker, owner in _REPO_OWNER_RULES:
+        if marker in normalized:
+            return owner
+    return None
+
+
+def _bundle_owner_for_stages(repo: str, stages: list[MissionPlanStage]) -> str | None:
+    owners = [safe_token(getattr(stage, "owner", None)) for stage in stages]
+    dev_owners = [owner for owner in owners if owner in REPO_BUNDLE_OWNER_PERSONAS]
+    unique = _dedupe_preserve_order(dev_owners)
+    if len(unique) == 1:
+        return unique[0]
+    return owner_for_repo(repo)
+
+
+def simplified_phase_for_task(task: Task, bundles: list[RepoBundle]) -> str:
+    state = getattr(task, "state", None)
+    state_value = state.value if hasattr(state, "value") else str(state or "")
+    if state_value in {"done", "cancelled"}:
+        return "done"
+    if state_value == "blocked" or any(bundle.state == "blocked" for bundle in bundles):
+        return "blocked"
+    if any(bundle.state == "rejected" for bundle in bundles):
+        return "repair"
+    if bundles and all(bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"} for bundle in bundles):
+        return "verifying"
+    if any(bundle.state in {"assigned", "running", "delivered_waiting_for_qa", "delivered"} for bundle in bundles):
+        return "working"
+    if bundles:
+        return "working"
+    if getattr(task, "mission_plan", None):
+        return "planning"
+    return "created"
+
+
+def qa_waiting_on(bundles: list[RepoBundle]) -> list[str]:
+    return [bundle.id for bundle in bundles if bundle.state not in DELIVERED_REPO_BUNDLE_STATES and bundle.state not in TERMINAL_REPO_BUNDLE_STATES]
+
+
+def bundle_queue_summary(bundles: list[RepoBundle]) -> list[dict[str, Any]]:
+    queued = [bundle for bundle in bundles if bundle.state == "queued_waiting_dependency"]
+    return [
+        {
+            "repo_bundle_id": bundle.id,
+            "repo": bundle.repo,
+            "owner_persona_id": bundle.owner_persona_id,
+            "state": bundle.state,
+            "queue_reason": bundle.queue_reason,
+            "wake_condition": bundle.wake_condition,
+            "dependency_bundle_ids": list(bundle.dependency_bundle_ids or []),
+        }
+        for bundle in queued
+    ]
+
+
+def repo_bundle_summary(bundle: RepoBundle) -> dict[str, Any]:
+    return {
+        "repo_bundle_id": bundle.id,
+        "task_id": bundle.task_id,
+        "repo": bundle.repo,
+        "owner_persona_id": bundle.owner_persona_id,
+        "state": bundle.state,
+        "title": bundle.title,
+        "objective": bundle.objective,
+        "stage_ids": list(bundle.stage_ids or []),
+        "affected_paths": list(bundle.affected_paths or []),
+        "acceptance": list(bundle.acceptance or []),
+        "non_goals": list(bundle.non_goals or []),
+        "proof_targets": list(bundle.proof_targets or []),
+        "proof_requirements": list(bundle.proof_requirements or []),
+        "visual_requirements": list(bundle.visual_requirements or []),
+        "dependency_bundle_ids": list(bundle.dependency_bundle_ids or []),
+        "contract_input_ids": list(bundle.contract_input_ids or []),
+        "contract_output_ids": list(bundle.contract_output_ids or []),
+        "assignment_id": bundle.assignment_id,
+        "active_run_id": bundle.active_run_id,
+        "proof_ids": list(bundle.proof_ids or []),
+        "queue_reason": bundle.queue_reason,
+        "wake_condition": bundle.wake_condition,
+        "delivered_at": bundle.delivered_at,
+        "verified_at": bundle.verified_at,
+        "rejected_at": bundle.rejected_at,
+        "last_terminal_feedback": dict(bundle.last_terminal_feedback or {}),
+        "created_at": bundle.created_at,
+        "updated_at": bundle.updated_at,
+    }
+
+
+def bundle_id_for(task_id: str, repo: str, *, stage_ids: list[str]) -> str:
+    payload = json.dumps(
+        {
+            "task_id": safe_token(task_id),
+            "repo": normalize_repo(repo),
+            "stage_ids": sorted(safe_token(item) for item in stage_ids if safe_token(item)),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"bundle_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
+
+
+def find_best_bundle_for_action(task: Task, *, persona_id: str, stage_id: str | None = None, repo: str | None = None, store: RepoBundleStore | None = None) -> RepoBundle | None:
+    store = store or RepoBundleStore()
+    bundles = store.create_or_update_from_task(task)
+    wanted_stage = safe_token(stage_id)
+    wanted_repo = normalize_repo(repo)
+    wanted_persona = safe_token(persona_id)
+    if wanted_stage:
+        for bundle in bundles:
+            if wanted_stage in {safe_token(item) for item in bundle.stage_ids}:
+                return bundle
+    if wanted_repo:
+        for bundle in bundles:
+            if normalize_repo(bundle.repo) == wanted_repo:
+                return bundle
+    for bundle in bundles:
+        if safe_token(bundle.owner_persona_id) == wanted_persona:
+            return bundle
+    return bundles[0] if bundles else None
+
+
+def safe_bundle_state(value: str | None) -> str:
+    state = safe_token(value)
+    return state if state in REPO_BUNDLE_STATES else "planned"
+
+
+def normalize_repo(value: str | None) -> str:
+    return "".join(ch.lower() for ch in str(value or "").strip() if ch.isalnum() or ch in {"_", "-", ".", "/", "\\"})
+
+
+def safe_token(value: Any) -> str:
+    text = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in str(value or "").strip())
+    return text.strip("._-")[:120]
+
+
+def safe_text(value: Any, *, limit: int) -> str:
+    return " ".join(str(value or "").replace("\x00", " ").split())[:limit]
+
+
+def _fallback_repo_for_stage(task: Task, stage: MissionPlanStage) -> str:
+    repos = list(getattr(task, "affected_repos", None) or [])
+    if len(repos) == 1:
+        return str(repos[0])
+    owner = str(getattr(stage, "owner", "") or "")
+    if owner == "dev":
+        return "EterniaLauncher"
+    if owner == "backend_dev":
+        return "EterniaBackend"
+    return str(repos[0]) if repos else ""
+
+
+def _bundle_title(repo: str, stages: list[MissionPlanStage]) -> str:
+    if len(stages) == 1:
+        return safe_text(stages[0].title, limit=200) or f"{repo} bundle"
+    return f"{repo} repo bundle"
+
+
+def _bundle_objective(task: Task, stages: list[MissionPlanStage]) -> str:
+    if len(stages) == 1:
+        return safe_text(stages[0].objective, limit=4000) or task.description
+    objectives = [safe_text(stage.objective, limit=500) for stage in stages if safe_text(stage.objective, limit=500)]
+    return "\n".join(objectives)[:4000] or task.description
+
+
+def _dedupe_preserve_order(items: list[Any]) -> list[Any]:
+    seen: set[str] = set()
+    result: list[Any] = []
+    for item in items:
+        key = str(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result

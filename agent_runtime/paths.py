@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import yaml
+
+from hermes_constants import get_config_path, get_default_hermes_root
+
+
+def store_root() -> Path:
+    override = os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()
+    if override:
+        return Path(override)
+    config_path = get_config_path()
+    if config_path.exists():
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        configured = str((raw.get("agent_runtime") or {}).get("store_root") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+    return get_default_hermes_root() / "agent-runtime"
+
+
+def tasks_dir() -> Path:
+    return store_root() / "tasks"
+
+
+def runs_dir() -> Path:
+    return store_root() / "runs"
+
+
+def worker_sessions_dir() -> Path:
+    return store_root() / "worker_sessions"
+
+
+def persona_instances_dir() -> Path:
+    return store_root() / "persona_instances"
+
+
+def persona_assignments_dir() -> Path:
+    return store_root() / "persona_assignments"
+
+
+def repo_bundles_dir() -> Path:
+    return store_root() / "repo_bundles"
+
+
+def runtime_instances_dir() -> Path:
+    return store_root() / "runtime_instances"
+
+
+def repo_bundles_task_dir(task_id: str) -> Path:
+    return repo_bundles_dir() / _safe_path_token(task_id)
+
+
+def agents_dir() -> Path:
+    return store_root() / "agents"
+
+
+def proofs_dir() -> Path:
+    return store_root() / "proofs"
+
+
+def incidents_dir() -> Path:
+    return store_root() / "incidents"
+
+
+def events_path() -> Path:
+    return store_root() / "events.jsonl"
+
+
+def lock_dir() -> Path:
+    return store_root() / "locks"
+
+
+def snapshot_path() -> Path:
+    return store_root() / "snapshot.json"
+
+
+def daemon_status_path() -> Path:
+    return store_root() / "daemon_status.json"
+
+
+def daemon_lease_path() -> Path:
+    return store_root() / "daemon.lease"
+
+
+def deleted_archive_dir() -> Path:
+    return store_root() / "deleted_archive"
+
+
+def context_dir() -> Path:
+    return store_root() / "context"
+
+
+def proof_sandbox_root() -> Path:
+    return store_root() / "proof_sandbox"
+
+
+def self_tests_dir() -> Path:
+    return store_root() / "self_tests"
+
+
+def self_test_task_dir(task_id: str) -> Path:
+    return self_tests_dir() / _safe_path_token(task_id)
+
+
+def self_test_artifacts_dir(task_id: str) -> Path:
+    return self_test_task_dir(task_id) / "artifacts"
+
+
+def self_test_record_path(task_id: str, evidence_id: str) -> Path:
+    return self_test_task_dir(task_id) / f"{_safe_path_token(evidence_id)}.json"
+
+
+
+
+def role_envelopes_dir() -> Path:
+    return store_root() / "role_envelopes"
+
+
+def role_envelopes_task_dir(task_id: str) -> Path:
+    return role_envelopes_dir() / _safe_path_token(task_id)
+
+
+def role_envelope_path(task_id: str, envelope_id: str) -> Path:
+    return role_envelopes_task_dir(task_id) / f"{_safe_path_token(envelope_id)}.json"
+
+
+def role_checklists_dir() -> Path:
+    return store_root() / "role_checklists"
+
+
+def role_checklists_task_dir(task_id: str) -> Path:
+    return role_checklists_dir() / _safe_path_token(task_id)
+
+
+def role_checklist_path(task_id: str, checklist_id: str) -> Path:
+    return role_checklists_task_dir(task_id) / f"{_safe_path_token(checklist_id)}.json"
+
+
+def role_checklist_events_dir(task_id: str) -> Path:
+    return role_checklists_task_dir(task_id) / "events"
+
+
+def role_checklist_event_path(task_id: str, event_id: str) -> Path:
+    return role_checklist_events_dir(task_id) / f"{_safe_path_token(event_id)}.json"
+
+
+def packet_artifacts_dir() -> Path:
+    return store_root() / "packet_artifacts"
+
+
+def packet_artifacts_task_dir(task_id: str) -> Path:
+    return packet_artifacts_dir() / _safe_path_token(task_id)
+
+
+def packet_raw_artifact_path(task_id: str, packet_id: str) -> Path:
+    return packet_artifacts_task_dir(task_id) / f"{_safe_path_token(packet_id)}.raw.json"
+
+
+def proof_batches_dir() -> Path:
+    return store_root() / "proof_batches"
+
+
+def proof_batches_task_dir(task_id: str) -> Path:
+    return proof_batches_dir() / _safe_path_token(task_id)
+
+
+def proof_batch_path(task_id: str, proof_batch_id: str) -> Path:
+    return proof_batches_task_dir(task_id) / f"{_safe_path_token(proof_batch_id)}.json"
+
+def proof_sandbox_task_dir(task_id: str) -> Path:
+    return proof_sandbox_root() / _safe_path_token(task_id)
+
+
+def proof_sandbox_dir(task_id: str, recipe_id: str) -> Path:
+    return proof_sandbox_task_dir(task_id) / _safe_path_token(recipe_id)
+
+
+def worker_context_dir(task_id: str, persona_id: str) -> Path:
+    return context_dir() / _safe_path_token(task_id) / _safe_path_token(persona_id)
+
+
+def task_path(task_id: str) -> Path:
+    return tasks_dir() / f"{task_id}.json"
+
+
+def worker_session_path(worker_session_id: str) -> Path:
+    return worker_sessions_dir() / f"{worker_session_id}.json"
+
+
+def persona_instance_path(persona_instance_id: str) -> Path:
+    return persona_instances_dir() / f"{_safe_path_token(persona_instance_id)}.json"
+
+
+def persona_assignment_path(assignment_id: str) -> Path:
+    return persona_assignments_dir() / f"{_safe_path_token(assignment_id)}.json"
+
+
+def repo_bundle_path(task_id: str, repo_bundle_id: str) -> Path:
+    return repo_bundles_task_dir(task_id) / f"{_safe_path_token(repo_bundle_id)}.json"
+
+
+def runtime_instance_path(instance_id: str) -> Path:
+    return runtime_instances_dir() / f"{_safe_path_token(instance_id)}.json"
+
+
+def run_path(run_id: str) -> Path:
+    return runs_dir() / f"{run_id}.json"
+
+
+def agent_path(persona_id: str) -> Path:
+    return agents_dir() / f"{persona_id}.json"
+
+
+def proof_record_path(task_id: str, proof_id: str) -> Path:
+    return proofs_dir() / task_id / f"proof_{proof_id}.json"
+
+
+def incident_path(incident_id: str) -> Path:
+    return incidents_dir() / f"{incident_id}.json"
+
+
+def incident_detail_path(incident_id: str) -> Path:
+    return incidents_dir() / f"{incident_id}.txt"
+
+
+def _safe_path_token(value: str) -> str:
+    text = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in str(value or "").strip())
+    return text.strip("._")[:120] or "item"
+
