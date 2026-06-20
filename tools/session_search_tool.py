@@ -37,7 +37,11 @@ from typing import Any, Dict, List, Optional, Union
 # Third-party integrations tag their sessions with HERMES_SESSION_SOURCE=tool;
 # delegate subagent runs are tagged "subagent" — neither belongs in the
 # user's session history.
-_HIDDEN_SESSION_SOURCES = ("subagent", "tool")
+# ``agent_runtime_persona_chat_scratch`` is the harness operator-chat scratch
+# lineage: the agent's raw in-flight turns. The curated, redacted operator
+# transcript lives under ``agent_runtime_persona_chat`` (kept searchable); the
+# scratch copy is hidden so it never becomes recall-reachable.
+_HIDDEN_SESSION_SOURCES = ("subagent", "tool", "agent_runtime_persona_chat_scratch")
 
 
 def _format_timestamp(ts: Union[int, float, str, None]) -> str:

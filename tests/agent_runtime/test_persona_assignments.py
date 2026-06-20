@@ -537,7 +537,7 @@ def test_free_floating_chat_session_binding_reuses_instance_session(monkeypatch,
     assert instance.mode == "free_floating"
 
 
-def test_persona_chat_transcript_records_operator_and_decision_fallback(isolate_agent_runtime_root):
+def test_persona_chat_transcript_records_operator_and_assistant_turn(isolate_agent_runtime_root):
     from hermes_cli import harness
 
     db = _TranscriptDB()
@@ -548,11 +548,10 @@ def test_persona_chat_transcript_records_operator_and_decision_fallback(isolate_
         session_id=session_id,
         message="hi",
     )
-    harness._append_persona_decision_reply(
+    harness._append_persona_assistant_text(
         session_db=db,
         session_id=session_id,
-        summary="Scope a safe diagnostic.",
-        rationale="The operator sent a greeting.",
+        text="Hey — what are we working on?",
     )
 
     assert [item["role"] for item in db.messages[session_id]] == [
@@ -560,9 +559,62 @@ def test_persona_chat_transcript_records_operator_and_decision_fallback(isolate_
         "assistant",
     ]
     assert db.messages[session_id][0]["content"] == "hi"
-    assert db.messages[session_id][1]["content"] == (
-        "Scope a safe diagnostic.\n\nThe operator sent a greeting."
+    assert db.messages[session_id][1]["content"] == "Hey — what are we working on?"
+
+
+def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, isolate_agent_runtime_root):
+    """Chat-first wiring: auto-run uses chat_reply (no decision/task), persists the
+    redacted operator + agent turns, wires SessionDB for recall, and completes
+    the assignment with run_ids=[]/task_id=None."""
+    from types import SimpleNamespace
+
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    captured: dict = {}
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            captured["runtime_kwargs"] = kwargs
+
+        def chat_reply(self, persona, message, **kwargs):
+            captured["chat_message"] = message
+            return SimpleNamespace(final_response="Hey — doing great, what's up?")
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._queue_free_floating_assignment(
+        persona_id="launcher-dev",
+        title="Launcher Dev chat",
+        message="hey, how are you",
+        requested_by="test",
+        json_output=True,
+        auto_run=True,
+        max_seconds=5.0,
     )
+
+    assert code == 0
+    # Recall is wired: the runtime received the shared SessionDB.
+    assert captured["runtime_kwargs"].get("session_db") is db
+    # Chat-first path: no decision contract, the agent saw the raw operator text.
+    assert "hey, how are you" in captured["chat_message"]
+
+    session_id = "persona_chat_personainst_dev"
+    roles = [item["role"] for item in db.messages.get(session_id, [])]
+    assert roles == ["user", "assistant"]
+    assert db.messages[session_id][0]["content"] == "hey, how are you"
+    assert db.messages[session_id][1]["content"] == "Hey — doing great, what's up?"
+
+    assignments = PersonaAssignmentStore().list_for_persona("dev")
+    assert len(assignments) == 1
+    assert assignments[0].state == "completed"
+    assert assignments[0].task_id is None
+    assert RunStore().list_all() == []
 
 
 def test_persona_chat_context_includes_prior_turns(isolate_agent_runtime_root):

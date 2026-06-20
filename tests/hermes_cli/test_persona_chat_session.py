@@ -7,7 +7,7 @@ exception-wrapped and never directly asserted, so a regression would fail silent
 """
 
 from hermes_cli.harness import (
-    _append_persona_decision_reply,
+    _append_persona_assistant_text,
     _append_persona_operator_turn,
     _persona_chat_message_with_history,
     _redact_persona_chat_text,
@@ -37,25 +37,16 @@ def test_operator_turn_is_persisted():
     assert db.get_messages("s1") == [{"role": "user", "content": "hi neko"}]
 
 
-def test_decision_reply_persisted_and_deduped():
+def test_assistant_turn_is_persisted():
     db = FakeSessionDB()
-    _append_persona_decision_reply(
-        session_db=db, session_id="s1", summary="Scoped the task", rationale="No criteria yet"
-    )
-    # Re-appending the identical decision must not duplicate the assistant turn.
-    _append_persona_decision_reply(
-        session_db=db, session_id="s1", summary="Scoped the task", rationale="No criteria yet"
-    )
-    assistant = [m for m in db.get_messages("s1") if m["role"] == "assistant"]
-    assert len(assistant) == 1
-    assert "Scoped the task" in assistant[0]["content"]
-    assert "No criteria yet" in assistant[0]["content"]
+    _append_persona_assistant_text(session_db=db, session_id="s1", text="hey, doing great")
+    assert db.get_messages("s1") == [{"role": "assistant", "content": "hey, doing great"}]
 
 
 def test_continuity_prepends_prior_turns():
     db = FakeSessionDB()
     _append_persona_operator_turn(session_db=db, session_id="s1", message="first")
-    _append_persona_decision_reply(session_db=db, session_id="s1", summary="ack", rationale=None)
+    _append_persona_assistant_text(session_db=db, session_id="s1", text="ack")
     enriched = _persona_chat_message_with_history(session_db=db, session_id="s1", message="second")
     assert "Prior persona chat context" in enriched
     assert "Operator: first" in enriched
@@ -84,13 +75,12 @@ def test_redaction_on_write_operator_turn():
     assert "[redacted]" in written
 
 
-def test_redaction_on_write_decision_reply():
+def test_redaction_on_write_assistant_turn():
     db = FakeSessionDB()
-    _append_persona_decision_reply(
+    _append_persona_assistant_text(
         session_db=db,
         session_id="s1",
-        summary="token: ghp_leakedtoken00000",
-        rationale="all good",
+        text="here is the token: ghp_leakedtoken00000",
     )
     written = db.get_messages("s1")[0]["content"]
     assert "ghp_leakedtoken00000" not in written
