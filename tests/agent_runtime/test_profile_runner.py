@@ -120,6 +120,41 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
     ]
 
 
+def test_runner_forwards_stream_callback_to_agent():
+    captured = {}
+
+    class StreamingAgent(FakeAgent):
+        def run_conversation(
+            self,
+            user_message,
+            system_message=None,
+            task_id=None,
+            stream_callback=None,
+        ):
+            captured["stream_callback"] = stream_callback
+            if stream_callback is not None:
+                stream_callback("He")
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    deltas = []
+    callback = deltas.append
+    result = ProfileAgentRunner(agent_factory=StreamingAgent).run(
+        AgentRunRequest(
+            profile=None,
+            user_message="hi",
+            stream_callback=callback,
+        )
+    )
+
+    assert result.final_response == "ok"
+    assert captured["stream_callback"] is callback
+    assert deltas == ["He"]
+
+
 def test_runner_persists_provider_conversation_timing_from_agent_status_callback():
     progress_events = []
 

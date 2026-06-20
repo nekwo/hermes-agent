@@ -13,6 +13,7 @@ from agent_runtime.persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    free_floating_persona_instance_id_for,
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
 from agent_runtime.proof_rules import ProofType
@@ -138,6 +139,30 @@ def test_persona_instance_derivation_clears_stale_worker_projection(isolate_agen
     assert instance.active_worker_session_id is None
     assert instance.active_run_id is None
     assert instance.session_id is None
+
+
+def test_create_free_floating_instance_is_stable_idle_and_worker_independent(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    first = store.create_free_floating("profile:reviewer")
+    second = store.create_free_floating("profile:reviewer")
+
+    assert first.id == second.id
+    assert first.id == free_floating_persona_instance_id_for("profile:reviewer")
+    assert first.id != "personainst_profile_reviewer"
+    assert first.persona_id == "profile:reviewer"
+    assert first.role == "profile"
+    assert first.profile_id == "reviewer"
+    assert first.mode == "free_floating"
+    assert first.state == WorkerSessionState.IDLE
+    assert first.current_task_id is None
+    assert first.active_worker_session_id is None
+
+    instances = store.derive_from_workers([_persona("dev")], [])
+    by_id = {item.id: item for item in instances}
+
+    assert by_id[first.id].persona_id == "profile:reviewer"
+    assert by_id[first.id].mode == "free_floating"
+    assert by_id[first.id].state == WorkerSessionState.IDLE
 
 
 def test_assignment_store_create_or_resume_uses_signal_hash(isolate_agent_runtime_root):
@@ -298,6 +323,21 @@ def test_status_and_snapshot_expose_persona_instances_when_enabled(monkeypatch, 
     assert {item["persona_id"] for item in snapshot["persona_instances"]} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
 
 
+def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, isolate_agent_runtime_root):
+    cfg = _assignment_config()
+    monkeypatch.setattr("agent_runtime.snapshot.load_agent_runtime_config", lambda: cfg)
+    created = PersonaInstanceStore().create_free_floating("profile:reviewer")
+
+    snapshot = build_snapshot()
+    by_id = {item["persona_instance_id"]: item for item in snapshot["persona_instances"]}
+
+    assert created.id in by_id
+    assert by_id[created.id]["persona_id"] == "profile:reviewer"
+    assert by_id[created.id]["state"] == "idle"
+    assert by_id[created.id]["mode"] == "free_floating"
+    assert by_id[created.id]["active_worker_session_id"] is None
+
+
 def test_persona_instance_create_cli_creates_free_floating_assignment_without_ticking(monkeypatch, isolate_agent_runtime_root):
     from argparse import Namespace
     from hermes_cli import harness
@@ -321,6 +361,7 @@ def test_persona_instance_create_cli_creates_free_floating_assignment_without_ti
     assert assignments[0].task_id is None
     assert assignments[0].kind == "free_floating_message"
     assert assignments[0].production_proof_eligible is False
+    assert assignments[0].persona_instance_id == free_floating_persona_instance_id_for("dev")
     instance = PersonaInstanceStore().get(assignments[0].persona_instance_id)
     assert instance.mode == "free_floating"
     assert instance.current_assignment_id == assignments[0].id
@@ -401,6 +442,94 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
             "messages": [],
         }
     ]
+
+
+def test_persona_chat_history_summary_ignores_task_bound_worker_sessions(isolate_agent_runtime_root):
+    from agent_runtime.models import PersonaInstance
+    from agent_runtime.states import WorkerSessionState
+
+    task_bound = PersonaInstance(
+        id="personainst_dev",
+        persona_id="dev",
+        role="dev",
+        display_name="Launcher Dev Agent",
+        profile_id=None,
+        runtime_root="runtime",
+        state=WorkerSessionState.IDLE,
+        mode="task_bound",
+        session_id="worker_session_123",
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=[task_bound],
+        session_db=_FakeSessionDB(
+            [
+                {
+                    "id": "worker_session_123",
+                    "title": None,
+                    "preview": "# Agent Runtime Tick Context ## Task",
+                    "message_count": 2,
+                    "started_at": 10,
+                    "last_active": 20,
+                }
+            ]
+        ),
+    )
+
+    assert rows == []
+
+
+def test_persona_chat_history_summary_projects_builtin_chat_source_when_worker_overwrites_binding(
+    isolate_agent_runtime_root,
+):
+    from agent_runtime.models import PersonaInstance
+    from agent_runtime.states import WorkerSessionState
+
+    task_bound = PersonaInstance(
+        id="personainst_qa",
+        persona_id="qa",
+        role="qa",
+        display_name="QA Agent",
+        profile_id=None,
+        runtime_root="runtime",
+        state=WorkerSessionState.IDLE,
+        mode="task_bound",
+        session_id="worker_session_qa",
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=[task_bound],
+        session_db=_FakeSessionDB(
+            [
+                {
+                    "id": "chat_qa_123",
+                    "source": "agent_runtime_persona_chat",
+                    "system_prompt": "Mission Control persona chat for qa",
+                    "title": None,
+                    "preview": "hi, what's your take on shipping fast?",
+                    "message_count": 2,
+                    "started_at": 100,
+                    "last_active": 200,
+                    "archived": 0,
+                }
+            ],
+            messages={
+                "chat_qa_123": [
+                    {
+                        "id": "msg_1",
+                        "role": "user",
+                        "content": "hi, what's your take on shipping fast?",
+                    }
+                ]
+            },
+        ),
+    )
+
+    assert rows[0]["session_id"] == "chat_qa_123"
+    assert rows[0]["persona_id"] == "qa"
+    assert rows[0]["persona_instance_id"] == "personainst_qa"
+    assert rows[0]["title"] == "hi, what's your take on shipping fast?"
+    assert rows[0]["messages"][0]["safe_text"] == "hi, what's your take on shipping fast?"
 
 
 def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_agent_runtime_root):
@@ -541,7 +670,7 @@ def test_persona_chat_transcript_records_operator_and_assistant_turn(isolate_age
     from hermes_cli import harness
 
     db = _TranscriptDB()
-    session_id = "persona_chat_personainst_dev"
+    session_id = f"persona_chat_{free_floating_persona_instance_id_for('dev')}"
     db.create_session(session_id, "agent_runtime_persona_chat")
     harness._append_persona_operator_turn(
         session_db=db,
@@ -575,6 +704,10 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
 
     db = _TranscriptDB()
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(
+        "agent.title_generator.generate_title",
+        lambda user_message, assistant_response, **kwargs: "Quick Persona Check",
+    )
 
     captured: dict = {}
 
@@ -604,17 +737,117 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
     # Chat-first path: no decision contract, the agent saw the raw operator text.
     assert "hey, how are you" in captured["chat_message"]
 
-    session_id = "persona_chat_personainst_dev"
+    session_id = f"persona_chat_{free_floating_persona_instance_id_for('dev')}"
     roles = [item["role"] for item in db.messages.get(session_id, [])]
     assert roles == ["user", "assistant"]
     assert db.messages[session_id][0]["content"] == "hey, how are you"
     assert db.messages[session_id][1]["content"] == "Hey — doing great, what's up?"
+    assert db.get_session_title(session_id) == "Quick Persona Check"
 
     assignments = PersonaAssignmentStore().list_for_persona("dev")
     assert len(assignments) == 1
     assert assignments[0].state == "completed"
     assert assignments[0].task_id is None
     assert RunStore().list_all() == []
+
+
+def test_free_floating_auto_run_streams_ndjson_and_final_payload(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from types import SimpleNamespace
+
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(
+        "agent.title_generator.generate_title",
+        lambda user_message, assistant_response, **kwargs: "Streaming Persona Chat",
+    )
+
+    captured: dict = {}
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            captured["runtime_kwargs"] = kwargs
+
+        def chat_reply(self, persona, message, **kwargs):
+            captured["stream_callback"] = kwargs.get("stream_callback")
+            kwargs["stream_callback"]("He")
+            kwargs["stream_callback"]("llo")
+            return SimpleNamespace(final_response="Hello")
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._queue_free_floating_assignment(
+        persona_id="launcher-dev",
+        title="Launcher Dev chat",
+        message="hi",
+        requested_by="test",
+        json_output=True,
+        auto_run=True,
+        max_seconds=5.0,
+        client_message_id="client_1",
+        stream=True,
+    )
+
+    assert code == 0
+    assert captured["stream_callback"] is not None
+    lines = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert [line["type"] for line in lines] == [
+        "chat.delta",
+        "chat.delta",
+        "chat.final",
+    ]
+    assert [line.get("text") for line in lines[:2]] == ["He", "llo"]
+    assert lines[-1]["ok"] is True
+    assert lines[-1]["execution_state"] == "completed"
+    assert lines[-1]["reply"] == "Hello"
+    assert lines[-1]["run_ids"] == []
+    assert lines[-1]["task_id"] is None
+    assert lines[-1]["assignment_id"]
+    assert lines[-1]["persona_instance_id"] == free_floating_persona_instance_id_for("dev")
+    assert lines[-1]["client_message_id"] == "client_1"
+
+
+def test_persona_chat_auto_title_waits_for_session_title_write(monkeypatch, isolate_agent_runtime_root):
+    from hermes_cli import harness
+
+    db = _TranscriptDB()
+    session_id = "persona_chat_personainst_dev"
+    db.create_session(session_id, "agent_runtime_persona_chat")
+    called = []
+
+    def fake_auto_title_session(session_db, sid, user_message, assistant_response, **kwargs):
+        called.append((sid, user_message, assistant_response))
+        session_db.set_session_title(sid, "Shipping Strategy Discussion")
+
+    monkeypatch.setattr("agent.title_generator.auto_title_session", fake_auto_title_session)
+
+    harness._maybe_auto_title_persona_chat(
+        session_db=db,
+        session_id=session_id,
+        user_message="what's your take on shipping fast?",
+        assistant_response="Ship the smallest coherent slice.",
+    )
+
+    assert called == [
+        (
+            session_id,
+            "what's your take on shipping fast?",
+            "Ship the smallest coherent slice.",
+        )
+    ]
+    assert db.get_session_title(session_id) == "Shipping Strategy Discussion"
 
 
 def test_persona_chat_context_includes_prior_turns(isolate_agent_runtime_root):

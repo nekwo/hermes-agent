@@ -7,6 +7,9 @@ from typing import Any, Iterable
 from .models import PersonaInstance
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 
+PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
+_CHAT_INSTANCE_MODES = {"chat", "free_floating"}
+
 _SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
 )
@@ -28,35 +31,39 @@ def persona_chat_history_summary(
     """
 
     bound_by_session: dict[str, PersonaInstance] = {}
+    instances_by_persona: dict[str, PersonaInstance] = {}
     for instance in persona_instances:
-        session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
-        if not session_id:
+        persona_id = safe_assignment_token(getattr(instance, "persona_id", None))
+        if persona_id:
+            instances_by_persona[persona_id] = instance
+        mode = safe_assignment_token(getattr(instance, "mode", None))
+        if mode not in _CHAT_INSTANCE_MODES:
             continue
-        bound_by_session[session_id] = instance
-    if not bound_by_session:
-        return []
+        session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
+        if session_id:
+            bound_by_session[session_id] = instance
 
     db = session_db or _default_session_db()
     if db is None:
         return []
 
+    broad_sessions = _list_sessions(
+        db,
+        exclude_sources=["tool"],
+        limit=max(limit * 4, len(bound_by_session), 1),
+        include_children=False,
+    )
+    source_sessions = _list_sessions(
+        db,
+        source=PERSONA_CHAT_SESSION_SOURCE,
+        limit=max(limit * 4, len(bound_by_session), 1),
+        include_children=True,
+    )
+
     try:
-        sessions = db.list_sessions_rich(
-            exclude_sources=["tool"],
-            limit=max(limit * 4, len(bound_by_session)),
-            include_children=False,
-            min_message_count=0,
-            order_by_last_active=True,
-            include_archived=True,
-        )
-    except TypeError:
-        # Some tests/fakes may implement an older subset of the signature.
-        try:
-            sessions = db.list_sessions_rich(limit=max(limit * 4, len(bound_by_session)))
-        except Exception:
-            return []
+        sessions = list(source_sessions) + list(broad_sessions)
     except Exception:
-        return []
+        sessions = list(broad_sessions)
 
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -66,7 +73,11 @@ def persona_chat_history_summary(
         session_id = safe_assignment_text(raw.get("id"), limit=200)
         if not session_id or session_id in seen:
             continue
-        instance = bound_by_session.get(session_id)
+        is_source_chat = safe_assignment_token(raw.get("source")) == PERSONA_CHAT_SESSION_SOURCE
+        inferred_persona = _infer_persona_id(raw, session_id=session_id)
+        instance = bound_by_session.get(session_id) or (
+            instances_by_persona.get(inferred_persona) if is_source_chat and inferred_persona else None
+        )
         if instance is None:
             continue
         row = _history_row(raw, instance, session_id=session_id, session_db=db)
@@ -87,6 +98,43 @@ def persona_chat_history_summary(
     return rows
 
 
+def _list_sessions(
+    db: Any,
+    *,
+    limit: int,
+    include_children: bool,
+    source: str | None = None,
+    exclude_sources: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        return list(
+            db.list_sessions_rich(
+                source=source,
+                exclude_sources=exclude_sources,
+                limit=limit,
+                include_children=include_children,
+                min_message_count=0,
+                order_by_last_active=True,
+                include_archived=True,
+            )
+            or []
+        )
+    except TypeError:
+        # Some tests/fakes may implement an older subset of the signature.
+        try:
+            rows = list(db.list_sessions_rich(limit=limit) or [])
+        except Exception:
+            return []
+        if source:
+            rows = [row for row in rows if isinstance(row, dict) and row.get("source") == source]
+        if exclude_sources:
+            blocked = set(exclude_sources)
+            rows = [row for row in rows if isinstance(row, dict) and row.get("source") not in blocked]
+        return rows
+    except Exception:
+        return []
+
+
 def _default_session_db() -> Any | None:
     try:
         from hermes_state import SessionDB
@@ -103,7 +151,10 @@ def _history_row(
     session_id: str,
     session_db: Any | None = None,
 ) -> dict[str, Any]:
-    title, title_status = _safe_display_text(raw.get("title"), fallback="Untitled persona chat", limit=120)
+    persona_id = safe_assignment_token(getattr(instance, "persona_id", None)) or "unknown"
+    raw_title = safe_assignment_text(raw.get("title"), limit=120)
+    title_fallback = "Untitled persona chat" if raw_title else _fallback_title(raw, persona_id=persona_id)
+    title, title_status = _safe_display_text(raw.get("title"), fallback=title_fallback, limit=120)
     preview, preview_status = _safe_display_text(
         raw.get("preview"), fallback="Preview hidden by redaction boundary", limit=180
     )
@@ -111,7 +162,6 @@ def _history_row(
     redaction_status = (
         "redacted" if "redacted" in {title_status, preview_status, messages_status} else "safe"
     )
-    persona_id = safe_assignment_token(getattr(instance, "persona_id", None)) or "unknown"
     return {
         "session_id": session_id,
         "persona_id": persona_id,
@@ -128,6 +178,31 @@ def _history_row(
         "redaction_status": redaction_status,
         "messages": messages,
     }
+
+
+def _infer_persona_id(raw: dict[str, Any], *, session_id: str) -> str | None:
+    system_prompt = safe_assignment_text(raw.get("system_prompt"), limit=240)
+    marker = "Mission Control persona chat for "
+    if marker in system_prompt:
+        return safe_assignment_token(system_prompt.split(marker, 1)[1])
+    prefix = "persona_chat_personainst_"
+    if session_id.startswith(prefix):
+        return safe_assignment_token(session_id[len(prefix) :])
+    prefix = "persona_chat_"
+    if session_id.startswith(prefix):
+        value = session_id[len(prefix) :]
+        if value.startswith("personainst_"):
+            value = value[len("personainst_") :]
+        return safe_assignment_token(value)
+    return None
+
+
+def _fallback_title(raw: dict[str, Any], *, persona_id: str) -> str:
+    preview, status = _safe_display_text(raw.get("preview"), fallback="", limit=80)
+    if status == "safe" and preview and not any(marker in preview for marker in _INTERNAL_SCAFFOLDING_MARKERS):
+        return preview
+    label = persona_id.replace("_", " ").strip().title() if persona_id else "Persona"
+    return f"{label} chat"
 
 
 def _safe_recent_messages(session_db: Any | None, *, session_id: str, limit: int = 8) -> tuple[list[dict[str, Any]], str]:

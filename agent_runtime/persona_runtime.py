@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import time
 from urllib.parse import urlparse
-from typing import Protocol
+from typing import Callable, Protocol
 
 from hermes_constants import get_hermes_home
 
@@ -162,6 +162,7 @@ class GPTPersonaRuntime:
         max_wall_seconds: float | None = 120.0,
         max_api_calls: int | None = 8,
         max_total_tokens: int | None = None,
+        stream_callback: Callable[[str | None], None] | None = None,
     ) -> AgentRunResult:
         """Run one plain conversational turn for an operator persona chat.
 
@@ -202,6 +203,7 @@ class GPTPersonaRuntime:
                 max_total_tokens=max_total_tokens,
                 user_message=message,
                 system_message=_persona_chat_system_prompt(persona),
+                stream_callback=stream_callback,
                 runtime_root=paths.store_root(),
             )
         )

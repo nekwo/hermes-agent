@@ -296,6 +296,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.add_argument("--requested-by", default="cli")
     persona_instance_create.add_argument("--client-message-id", default=None)
     persona_instance_create.add_argument("--auto-run", action="store_true", help="Immediately run one bounded chat turn after queuing the message")
+    persona_instance_create.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     persona_instance_create.add_argument("--max-actions", type=int, default=1)
     persona_instance_create.add_argument("--max-seconds", type=float, default=240.0)
     persona_instance_create.add_argument("--json", action="store_true")
@@ -312,6 +313,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_message.add_argument("--requested-by", default="cli")
     persona_instance_message.add_argument("--client-message-id", default=None)
     persona_instance_message.add_argument("--auto-run", action="store_true", help="Immediately run one bounded chat turn after queuing the message")
+    persona_instance_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     persona_instance_message.add_argument("--max-actions", type=int, default=1)
     persona_instance_message.add_argument("--max-seconds", type=float, default=240.0)
     persona_instance_message.add_argument("--json", action="store_true")
@@ -661,6 +663,7 @@ def _cmd_persona_instance_create(args) -> int:
         max_actions=getattr(args, "max_actions", 1),
         max_seconds=getattr(args, "max_seconds", 240.0),
         client_message_id=getattr(args, "client_message_id", None),
+        stream=getattr(args, "stream", False),
     )
 
 
@@ -696,6 +699,7 @@ def _cmd_persona_instance_message(args) -> int:
         max_actions=getattr(args, "max_actions", 1),
         max_seconds=getattr(args, "max_seconds", 240.0),
         client_message_id=getattr(args, "client_message_id", None),
+        stream=getattr(args, "stream", False),
     )
 
 
@@ -777,19 +781,26 @@ def _queue_free_floating_assignment(
     max_actions: int = 1,
     max_seconds: float = 240.0,
     client_message_id: str | None = None,
+    stream: bool = False,
 ) -> int:
     cfg = load_agent_runtime_config()
     if not persona_assignment_store_enabled(cfg):
         data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if json_output else data["error"])
+        if stream:
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if json_output else data["error"])
         return 2
-    normalized_persona = _normalize_cli_persona_id(persona_id)
-    PersonaInstanceStore().derive_from_workers(configured_personas(cfg), WorkerSessionStore().list_all())
+    normalized_persona = _normalize_cli_persona_or_template_id(persona_id)
+    instance_store = PersonaInstanceStore()
+    instance_store.derive_from_workers(configured_personas(cfg), WorkerSessionStore().list_all())
+    if persona_instance_id is None:
+        persona_instance_id = instance_store.create_free_floating(normalized_persona).id
     assignment_store = PersonaAssignmentStore()
     assignment = assignment_store.create_or_resume(
         PersonaAssignmentSpec(
             persona_id=normalized_persona,
-            persona_instance_id=persona_instance_id or persona_instance_id_for(normalized_persona),
+            persona_instance_id=persona_instance_id,
             kind="free_floating_message",
             title=title,
             message=message,
@@ -803,9 +814,9 @@ def _queue_free_floating_assignment(
     )
     session_db = _default_persona_session_db()
     session_id = _bind_free_floating_chat_session(
-        instance_store=PersonaInstanceStore(),
+        instance_store=instance_store,
         session_db=session_db,
-        persona_id=assignment.persona_id,
+        persona_id=normalized_persona,
         persona_instance_id=assignment.persona_instance_id,
         assignment_id=assignment.id,
     )
@@ -813,7 +824,7 @@ def _queue_free_floating_assignment(
         "ok": True,
         "assignment_id": assignment.id,
         "persona_instance_id": assignment.persona_instance_id,
-        "persona_id": assignment.persona_id,
+        "persona_id": normalized_persona,
         "task_id": assignment.task_id,
         "state": assignment.state,
         "kind": assignment.kind,
@@ -834,12 +845,13 @@ def _queue_free_floating_assignment(
             cfg=cfg,
             assignment_id=assignment.id,
             persona_instance_id=assignment.persona_instance_id,
-            persona_id=assignment.persona_id,
+            persona_id=normalized_persona,
             title=title,
             message=message,
             requested_by=requested_by,
             max_actions=max_actions,
             max_seconds=max_seconds,
+            stream=stream,
         )
         data.update(run_payload)
         try:
@@ -849,8 +861,25 @@ def _queue_free_floating_assignment(
         except Exception:
             pass
         exit_code = run_exit
-    print(emit_json(data) if json_output else f"queued free-floating {assignment.id} for {assignment.persona_id}")
+    if stream:
+        _emit_chat_final(data)
+    else:
+        print(emit_json(data) if json_output else f"queued free-floating {assignment.id} for {assignment.persona_id}")
     return exit_code
+
+
+def _emit_chat_delta(delta: str | None) -> None:
+    if not delta:
+        return
+    sys.stdout.write(json.dumps({"type": "chat.delta", "text": str(delta)}, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def _emit_chat_final(payload: dict[str, object]) -> None:
+    data = dict(payload)
+    data["type"] = "chat.final"
+    sys.stdout.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
 
 
 def _default_persona_session_db():
@@ -875,17 +904,24 @@ def _bind_free_floating_chat_session(
     persona_instance_id: str,
     assignment_id: str | None = None,
 ) -> str:
-    normalized_persona = _normalize_cli_persona_id(persona_id)
-    normalized_instance = safe_assignment_token(persona_instance_id) or persona_instance_id_for(normalized_persona)
+    requested_persona = _normalize_cli_persona_or_template_id(persona_id)
+    normalized_persona = requested_persona
+    normalized_instance = safe_assignment_token(persona_instance_id) or persona_instance_id_for(requested_persona)
     try:
         instance = instance_store.get(normalized_instance)
+        normalized_persona = instance.persona_id
         session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
     except Exception:
-        instance = instance_store.open_chat(
-            persona_id=normalized_persona,
-            session_id=_persona_chat_session_id(normalized_instance),
-        )
-        session_id = instance.session_id
+        if normalized_instance.startswith("personainst_operator_"):
+            instance = instance_store.create_free_floating(requested_persona)
+            normalized_persona = instance.persona_id
+            normalized_instance = instance.id
+        else:
+            instance = instance_store.open_chat(
+                persona_id=requested_persona,
+                session_id=_persona_chat_session_id(normalized_instance),
+            )
+        session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
     if not session_id:
         session_id = _persona_chat_session_id(normalized_instance)
     instance.session_id = session_id
@@ -988,15 +1024,13 @@ def _maybe_auto_title_persona_chat(*, session_db, session_id: str, user_message:
     if session_db is None or not session_id or not assistant_response:
         return
     try:
-        from agent.title_generator import maybe_auto_title
+        from agent.title_generator import auto_title_session
 
-        history = session_db.get_messages(session_id)
-        maybe_auto_title(
+        auto_title_session(
             session_db,
             session_id,
             user_message,
             assistant_response,
-            history,
         )
     except Exception:
         return
@@ -1013,6 +1047,7 @@ def _run_free_floating_assignment_once(
     requested_by: str,
     max_actions: int,
     max_seconds: float,
+    stream: bool = False,
 ) -> tuple[int, dict[str, object]]:
     """Run one bounded sandbox turn for an already-queued persona chat message."""
 
@@ -1060,7 +1095,13 @@ def _run_free_floating_assignment_once(
             default_provider=cfg.default_provider,
             default_model=cfg.default_model,
             session_db=session_db,
-        ).chat_reply(persona, chat_message, session_id=None, max_wall_seconds=max_seconds)
+        ).chat_reply(
+            persona,
+            chat_message,
+            session_id=None,
+            max_wall_seconds=max_seconds,
+            stream_callback=_emit_chat_delta if stream else None,
+        )
     except Exception as exc:
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
         return 2, {
@@ -1148,6 +1189,11 @@ def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, j
 
 def _persona_id_from_instance_id(persona_instance_id: str) -> str:
     token = safe_assignment_token(persona_instance_id)
+    if token.startswith("personainst_operator_"):
+        try:
+            return PersonaInstanceStore().get(token).persona_id
+        except Exception as exc:
+            raise ValueError(f"unsupported persona instance {persona_instance_id!r}") from exc
     if token.startswith("personainst_"):
         return _normalize_cli_persona_id(token.removeprefix("personainst_"))
     try:
@@ -1209,6 +1255,16 @@ def _normalize_cli_persona_id(persona_id: str) -> str:
     if value not in {"neko_supervisor", "dev", "backend_dev", "qa", "pm"}:
         raise ValueError(f"unsupported persona {persona_id!r}")
     return value
+
+
+def _normalize_cli_persona_or_template_id(persona_id: str) -> str:
+    raw = str(persona_id or "").strip()
+    if raw.lower().startswith("profile:"):
+        profile = safe_assignment_token(raw.split(":", 1)[1])
+        if not profile:
+            raise ValueError(f"unsupported persona {persona_id!r}")
+        return f"profile:{profile}"
+    return _normalize_cli_persona_id(raw)
 
 
 def _cmd_task_create(args) -> int:

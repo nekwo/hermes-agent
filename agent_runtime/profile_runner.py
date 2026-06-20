@@ -54,6 +54,7 @@ class AgentRunRequest:
     user_message: str = ""
     task_id: str | None = None
     progress_callback: Callable[[dict[str, Any]], None] | None = None
+    stream_callback: Callable[[str | None], None] | None = None
     runtime_root: Path | None = None
     workdir: Path | None = None
     stop_on_repeated_read_search: bool = False
@@ -194,11 +195,14 @@ class ProfileAgentRunner:
             max_wall_seconds = _positive_float(request.max_wall_seconds)
             if max_wall_seconds is None:
                 conversation_started = time.perf_counter()
-                raw_result = agent.run_conversation(
-                    user_message=request.user_message,
-                    system_message=request.system_message,
-                    task_id=request.task_id,
-                )
+                conversation_kwargs: dict[str, Any] = {
+                    "user_message": request.user_message,
+                    "system_message": request.system_message,
+                    "task_id": request.task_id,
+                }
+                if request.stream_callback is not None:
+                    conversation_kwargs["stream_callback"] = request.stream_callback
+                raw_result = agent.run_conversation(**conversation_kwargs)
                 timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started)
                 if budget_guard.tripped_reason:
                     raise RunBudgetExceeded(budget_guard.tripped_reason, session_id=getattr(agent, "session_id", None))
@@ -230,11 +234,14 @@ class ProfileAgentRunner:
             timer.start()
             try:
                 conversation_started = time.perf_counter()
-                raw_result = agent.run_conversation(
-                    user_message=request.user_message,
-                    system_message=request.system_message,
-                    task_id=request.task_id,
-                )
+                conversation_kwargs = {
+                    "user_message": request.user_message,
+                    "system_message": request.system_message,
+                    "task_id": request.task_id,
+                }
+                if request.stream_callback is not None:
+                    conversation_kwargs["stream_callback"] = request.stream_callback
+                raw_result = agent.run_conversation(**conversation_kwargs)
                 timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started)
             except BaseException:
                 timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started, status="failed")

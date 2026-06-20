@@ -92,6 +92,10 @@ This plan was written after auditing the local Hermes checkout at the repository
 65. [Claude-Grade Agent Harness Runtime](65-claude-grade-agent-harness-runtime.md)
 70. [Mission Control Cockpit Contract](70-mission-control-cockpit-contract.md)
 71. [Mission Control Agent Chat Streaming Deep Audit](71-mission-control-agent-chat-streaming-audit.md)
+72. [Streaming Operator Chat Implementation](72-operator-chat-streaming-implementation.md)
+73. [Mission Control Agent Console Enterprise-Grade Upgrade](73-mission-control-agent-console-enterprise-grade-stages.md)
+74. [Open Persona Runtime Blueprint Graph](74-open-persona-runtime-blueprint-graph.md)
+75. [Persona Library and Console Interactibility](75-persona-library-and-console-interactibility.md) — audit-backed execution path for Stage 74: ship the `available_personas` contract gap + console/label/glow asks first, plus a Mission Office UI remaster (dock layout, agent cards, library shelf); defer the graph editor and taskless runtime loops
 
 ## MVP success criteria
 

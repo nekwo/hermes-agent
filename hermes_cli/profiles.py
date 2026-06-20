@@ -567,6 +567,17 @@ class ProfileInfo:
     description_auto: bool = False
 
 
+@dataclass
+class ProfileTemplateInfo:
+    """Lightweight profile summary for read-only library surfaces."""
+
+    name: str
+    path: Path
+    model: Optional[str] = None
+    provider: Optional[str] = None
+    description: str = ""
+
+
 def _read_distribution_meta(profile_dir: Path) -> tuple:
     """Return ``(name, version, source)`` from the profile's ``distribution.yaml``
     if present; ``(None, None, None)`` otherwise.
@@ -820,6 +831,39 @@ def profiles_to_serve(multiplex: bool) -> List[Tuple[str, Path]]:
             serve.append((name, entry))
 
     return serve
+
+
+def available_profile_templates() -> List[ProfileTemplateInfo]:
+    """Return named profile templates without gateway or skill-count probes."""
+    profiles: list[ProfileTemplateInfo] = []
+    try:
+        profiles_root = _get_profiles_root()
+        entries = sorted(profiles_root.iterdir()) if profiles_root.is_dir() else []
+    except Exception:
+        return []
+
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name == "default" or not _PROFILE_ID_RE.match(name):
+                continue
+            model, provider = _read_config_model(entry)
+            meta = read_profile_meta(entry)
+            profiles.append(
+                ProfileTemplateInfo(
+                    name=name,
+                    path=entry,
+                    model=model,
+                    provider=provider,
+                    description=meta.get("description", ""),
+                )
+            )
+        except Exception:
+            continue
+
+    return profiles
 
 
 def create_profile(
