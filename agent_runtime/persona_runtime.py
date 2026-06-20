@@ -167,10 +167,17 @@ class GPTPersonaRuntime:
 
         This deliberately bypasses the decision-contract pipeline: the agent
         gets a conversational system prompt (no decision menu, no task scoping)
-        and the operator's raw message, and returns free-text. SessionDB history
-        + recall still apply via the shared session. This is the chat-first path
-        — the harness task/decision machinery only engages when the operator
-        explicitly asks for work.
+        and the operator's raw message, and returns free-text. This is the
+        chat-first path — the harness task/decision machinery only engages when
+        the operator explicitly asks for work.
+
+        Recall: when the runtime is constructed with a ``session_db`` the agent
+        can ``session_search`` the operator's prior (redaction-safe) persona
+        chats and prefetch its durable memory. The agent's own scratch turns
+        are persisted under :data:`PERSONA_CHAT_SCRATCH_SOURCE`, which is hidden
+        from recall, so this never double-writes the curated operator transcript
+        (the caller owns the redacted canonical writes) and never leaks an
+        unredacted copy back into recall.
         """
 
         binding = resolve_persona_profile(persona)
@@ -188,7 +195,7 @@ class GPTPersonaRuntime:
                 quiet_mode=True,
                 skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
                 skip_memory=False,
-                platform="agent_runtime",
+                platform=PERSONA_CHAT_SCRATCH_SOURCE,
                 session_id=session_id,
                 max_wall_seconds=max_wall_seconds,
                 max_api_calls=max_api_calls,
@@ -200,18 +207,52 @@ class GPTPersonaRuntime:
         )
 
 
+# Source label for the agent's own scratch turns during an operator chat reply.
+# The caller persists the redacted canonical transcript under
+# ``agent_runtime_persona_chat``; this scratch lineage is registered as a hidden
+# session source (see tools/session_search_tool.py) so the agent's raw, in-flight
+# copy never becomes recall-reachable while real cross-session recall stays on.
+PERSONA_CHAT_SCRATCH_SOURCE = "agent_runtime_persona_chat_scratch"
+
+
 def _persona_chat_system_prompt(persona: AgentPersona) -> str:
     display = getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")
     role = role_from_persona(persona).value
     return (
         f"You are {display}, a Mission Control operator-channel agent (role: {role}). "
-        "You are in a direct, real-time chat with a human operator. "
-        "Reply conversationally, warmly, and concisely in plain text. "
-        "Do NOT emit JSON, decision objects, task scopes, acceptance criteria, or handoff packets. "
-        "Do NOT scope, create, or route tasks unless the operator explicitly asks you to do work. "
-        "If the operator simply greets you or asks how you are, just chat back like a teammate. "
-        "Use session_search only when you genuinely need prior context to answer."
+        "You are in a direct, real-time chat with a single human operator — your teammate, not an end user. "
+        f"{_persona_chat_voice(role, display)} "
+        "Voice: warm, plain text, teammate-tight. Lead with the answer; skip preamble, filler, and restating the question. "
+        "A sentence or two is usually enough — only go longer when the operator clearly wants depth. "
+        "Hard rules: never emit JSON, decision objects, task scopes, acceptance criteria, handoff packets, or tool/tick chatter. "
+        "Do NOT scope, create, dispatch, or route tasks from here — chat is the conversational layer, not the work pipeline. "
+        "If the operator just greets you or makes small talk, talk back like a teammate. "
+        "Recall: lean on the inline chat history for continuity. Reach for session_search only when the operator points at "
+        "something specific from a past session you can't already see, and consult your durable memory only when it actually "
+        "bears on the reply — don't fish. "
+        "Escalation: when the operator genuinely asks you to DO work (build, fix, investigate, run, change code), don't start "
+        "executing from chat — confirm the ask in a sentence and tell them to hand it off as real work (the Assign Work action / "
+        "task pipeline) so it runs with proof and budgets. You can help shape the scope conversationally first."
     )
+
+
+def _persona_chat_voice(role: str, display: str) -> str:
+    if role == "alice_supervisor":
+        return (
+            f"As {display} you run point for the operator across the mission: you coordinate the dev/QA personas, track what's "
+            "in flight, and give crisp, decisive read-outs. Chief-of-staff energy, not cheerleader."
+        )
+    if role == "qa":
+        return (
+            "You are the quality gate: skeptical, precise, evidence-first. In chat you talk through risks, what you'd verify, "
+            "and what proof you'd want — without actually running a gate."
+        )
+    if role == "dev":
+        return (
+            "You are a senior engineer: concrete, pragmatic, fluent in the repo. In chat you reason about approach, tradeoffs, "
+            "and what you'd change — without editing files until it's handed off as real work."
+        )
+    return f"You speak as {display}: a capable, straight-talking teammate."
 
 
 def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:

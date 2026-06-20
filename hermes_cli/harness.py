@@ -956,35 +956,6 @@ def _persona_by_id(cfg, persona_id: str):
     return None
 
 
-def _append_persona_decision_reply(
-    *,
-    session_db,
-    session_id: str,
-    summary: str | None,
-    rationale: str | None,
-) -> None:
-    if session_db is None or not session_id:
-        return
-    parts = [
-        _redact_persona_chat_text(summary, limit=4000),
-        _redact_persona_chat_text(rationale, limit=4000),
-    ]
-    content = "\n\n".join(part for part in parts if part)
-    if not content:
-        return
-    try:
-        existing = session_db.get_messages(session_id)
-    except Exception:
-        existing = []
-    content_key = safe_assignment_text(content, limit=4000)
-    if any(item.get("role") == "assistant" and safe_assignment_text(item.get("content"), limit=4000) == content_key for item in existing or []):
-        return
-    try:
-        session_db.append_message(session_id=session_id, role="assistant", content=content)
-    except Exception:
-        return
-
-
 def _persona_chat_message_with_history(*, session_db, session_id: str, message: str) -> str:
     safe_message = _redact_persona_chat_text(message, limit=12000)
     if session_db is None or not session_id:
@@ -1011,22 +982,6 @@ def _persona_chat_message_with_history(*, session_db, session_id: str, message: 
         + "\n\nCurrent operator message:\n"
         + safe_message
     )
-
-
-def _latest_decision_projection(result) -> tuple[str | None, str | None]:
-    latest_run_id = result.run_ids[-1] if result.run_ids else None
-    if not latest_run_id:
-        return None, None
-    try:
-        run = RunStore().get(latest_run_id)
-    except Exception:
-        return None, None
-    decision = getattr(run, "final_decision", None)
-    if not decision:
-        return None, None
-    if isinstance(decision, dict):
-        return decision.get("summary"), decision.get("rationale")
-    return getattr(decision, "summary", None), getattr(decision, "rationale", None)
 
 
 def _maybe_auto_title_persona_chat(*, session_db, session_id: str, user_message: str, assistant_response: str) -> None:
@@ -1095,9 +1050,16 @@ def _run_free_floating_assignment_once(
         message=message,
     )
     try:
+        # Wire the shared SessionDB so the agent gets real recall (session_search
+        # over prior redaction-safe persona chats + durable memory prefetch). The
+        # agent runs on its own ephemeral scratch session (session_id=None) under
+        # the hidden PERSONA_CHAT_SCRATCH_SOURCE, so this never double-writes the
+        # curated operator transcript we persist below and never leaks an
+        # unredacted copy back into recall.
         chat_result = GPTPersonaRuntime(
             default_provider=cfg.default_provider,
             default_model=cfg.default_model,
+            session_db=session_db,
         ).chat_reply(persona, chat_message, session_id=None, max_wall_seconds=max_seconds)
     except Exception as exc:
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
