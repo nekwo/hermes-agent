@@ -936,6 +936,26 @@ def _append_persona_operator_turn(*, session_db, session_id: str, message: str) 
         return
 
 
+def _append_persona_assistant_text(*, session_db, session_id: str, text: str) -> None:
+    if session_db is None or not session_id:
+        return
+    safe = _redact_persona_chat_text(text, limit=8000)
+    if not safe:
+        return
+    try:
+        session_db.append_message(session_id=session_id, role="assistant", content=safe)
+    except Exception:
+        return
+
+
+def _persona_by_id(cfg, persona_id: str):
+    normalized = _normalize_cli_persona_id(persona_id)
+    for persona in configured_personas(cfg):
+        if getattr(persona, "id", None) == normalized:
+            return persona
+    return None
+
+
 def _append_persona_decision_reply(
     *,
     session_db,
@@ -1055,57 +1075,49 @@ def _run_free_floating_assignment_once(
         session_id=session_id,
         message=message,
     )
-    diagnostic_message = _persona_chat_message_with_history(
+    persona = _persona_by_id(cfg, persona_id)
+    if persona is None:
+        PersonaAssignmentStore().complete(assignment_id, state="blocked", error="unknown persona")
+        return 2, {
+            "ok": False,
+            "execution_state": "blocked",
+            "session_id": session_id,
+            "blocker": f"unknown persona {safe_assignment_token(persona_id)}",
+            "next_expected": "configure the persona before chatting",
+        }
+
+    # Chat-first: run a plain conversational turn (no decision contract, no task
+    # scoping). Continuity comes from the prepended session history; the agent
+    # returns free text which we persist as the assistant turn.
+    chat_message = _persona_chat_message_with_history(
         session_db=session_db,
         session_id=session_id,
         message=message,
     )
     try:
-        result = PersonaDiagnosticController(
-            config=cfg,
-            engine_factory=lambda **kwargs: TickEngine(
-                **kwargs,
-                persona_runtime=GPTPersonaRuntime(
-                    default_provider=cfg.default_provider,
-                    default_model=cfg.default_model,
-                    session_db=session_db,
-                ),
-            ),
-        ).diagnose(
-            PersonaDiagnosticOptions(
-                persona_id=persona_id,
-                title=title,
-                message=diagnostic_message,
-                requested_by=requested_by,
-                operation_kind="free_floating",
-                operation_mode="sandbox_task",
-                max_actions=max_actions,
-                max_seconds=max_seconds,
-                non_goals=["Not production proof"],
-            )
-        )
-    except ValueError as exc:
+        chat_result = GPTPersonaRuntime(
+            default_provider=cfg.default_provider,
+            default_model=cfg.default_model,
+        ).chat_reply(persona, chat_message, session_id=None, max_wall_seconds=max_seconds)
+    except Exception as exc:
+        PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
         return 2, {
             "ok": False,
             "execution_state": "blocked",
+            "session_id": session_id,
             "blocker": safe_assignment_text(str(exc), limit=240),
             "next_expected": "fix the runtime blocker and retry the persona chat turn",
         }
 
-    store = PersonaAssignmentStore()
-    for run_id in result.run_ids:
-        store.attach_run(assignment_id, run_id)
-    if result.ok:
-        store.complete(assignment_id, state="completed")
-        execution_state = "completed"
-    else:
-        store.complete(assignment_id, state="blocked", error=result.stop_reason or "persona turn did not complete")
-        execution_state = "blocked"
+    reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=8000)
+    _append_persona_assistant_text(session_db=session_db, session_id=session_id, text=reply_text)
+
+    PersonaAssignmentStore().complete(assignment_id, state="completed")
     try:
         instance_store = PersonaInstanceStore()
         instance = instance_store.get(persona_instance_id)
-        instance.active_run_id = result.run_ids[-1] if result.run_ids else None
-        instance.current_assignment_id = None if result.ok else assignment_id
+        instance.active_run_id = None
+        instance.current_assignment_id = None
         instance.state = WorkerSessionState.IDLE
         instance.mode = "free_floating"
         instance.session_id = session_id
@@ -1113,42 +1125,21 @@ def _run_free_floating_assignment_once(
     except Exception:
         pass
 
-    run_ids = list(result.run_ids)
-    decision_summary, decision_rationale = _latest_decision_projection(result)
-    _append_persona_decision_reply(
-        session_db=session_db,
-        session_id=session_id,
-        summary=decision_summary,
-        rationale=decision_rationale,
-    )
-    assistant_response = "\n\n".join(
-        part
-        for part in [
-            safe_assignment_text(decision_summary, limit=4000),
-            safe_assignment_text(decision_rationale, limit=4000),
-        ]
-        if part
-    )
     _maybe_auto_title_persona_chat(
         session_db=session_db,
         session_id=session_id,
         user_message=message,
-        assistant_response=assistant_response,
+        assistant_response=reply_text,
     )
-    return result.exit_code, {
-        "ok": result.ok,
-        "execution_state": execution_state,
+    return 0, {
+        "ok": True,
+        "execution_state": "completed",
         "session_id": session_id,
-        "turn_id": run_ids[-1] if run_ids else None,
-        "run_ids": run_ids,
-        "task_id": result.task_id,
-        "stop_reason": result.stop_reason,
-        "latest_decision_type": result.latest_decision_type,
-        "latest_validation_status": result.latest_validation_status,
-        "latest_total_tokens": result.latest_total_tokens,
-        "next_expected": "agent turn completed; refresh Harness snapshot for transcript/proof readback"
-        if result.ok
-        else "agent turn blocked; inspect runtime state and blocker details",
+        "reply": reply_text,
+        "turn_id": None,
+        "run_ids": [],
+        "task_id": None,
+        "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
     }
 
 
