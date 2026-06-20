@@ -426,6 +426,60 @@ def test_snapshot_exposes_specialist_agent_repo_scope_labels(isolate_agent_runti
     assert "X:/Unreal" not in repr(agent)
 
 
+def test_snapshot_exposes_available_profile_personas_without_changing_agents(tmp_path, monkeypatch, isolate_agent_runtime_root):
+    from agent_runtime import snapshot as snapshot_mod
+
+    hermes_home = tmp_path / "hermes_home"
+    profiles_root = hermes_home / "profiles"
+    alice = profiles_root / "alice"
+    reviewer = profiles_root / "reviewer"
+    alice.mkdir(parents=True)
+    reviewer.mkdir(parents=True)
+    (alice / "profile.yaml").write_text("description: Alice mission lead profile\n", encoding="utf-8")
+    (reviewer / "profile.yaml").write_text("description: Reviews release proof\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    class AgentList:
+        def list_all(self):
+            return [
+                AgentPersona(
+                    id="neko_supervisor",
+                    display_name="Neko Mission Lead",
+                    role="alice_supervisor",
+                    model="gpt-5.5",
+                    provider="openai-codex",
+                    api_mode="codex_responses",
+                    toolsets=["file", "search", "terminal"],
+                    system_prompt_path="personas/neko/system.md",
+                    hermes_profile="alice",
+                )
+                ]
+
+    original_available_profile_templates = snapshot_mod.available_profile_templates
+    monkeypatch.setattr(snapshot_mod, "available_profile_templates", lambda: [])
+    before = build_snapshot(agent_store=AgentList())
+    monkeypatch.setattr(snapshot_mod, "available_profile_templates", original_available_profile_templates)
+    snap = build_snapshot(agent_store=AgentList())
+
+    assert snap["agents"] == before["agents"]
+    assert snap["agents"][0]["persona_id"] == "neko_supervisor"
+    assert snap["agents"][0]["display_name"] == "Neko Mission Lead"
+    assert snap["agents"][0]["hermes_profile"] == "alice"
+
+    by_id = {item["persona_id"]: item for item in snap["available_personas"]}
+    assert set(by_id) == {"profile:alice", "profile:reviewer"}
+    assert by_id["profile:alice"]["template_only"] is True
+    assert by_id["profile:alice"]["source"] == "hermes_profile"
+    assert by_id["profile:alice"]["role"] == "profile"
+    assert by_id["profile:alice"]["hermes_profile"] == "alice"
+    assert by_id["profile:alice"]["display_name"] == "Alice"
+    assert by_id["profile:alice"]["profile_readiness"] == "available"
+    assert by_id["profile:alice"]["backs_persona_id"] == "neko_supervisor"
+    assert by_id["profile:alice"]["description"] == "Alice mission lead profile"
+    assert "backs_persona_id" not in by_id["profile:reviewer"]
+    assert "reviewer" not in by_id
+
+
 def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root):
     archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
     (archive / "tasks").mkdir(parents=True)

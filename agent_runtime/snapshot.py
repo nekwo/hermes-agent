@@ -4,6 +4,7 @@ import json
 import re
 from datetime import datetime
 
+from hermes_cli.profiles import available_profile_templates
 from hermes_time import now
 from utils import atomic_json_write
 
@@ -70,6 +71,8 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     proof_batches = proof_batch_store.list_all()
     repo_bundles = repo_bundle_store.list_all()
     runtime_instances = runtime_instance_store.list_all()
+    agent_summaries = [_agent_summary(a) for a in agents]
+    available_personas = _available_persona_summary(agents)
     proofs = []
     self_tests = []
     for task in tasks:
@@ -138,7 +141,8 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             for t in tasks
         ],
         "archived_tasks": _archived_task_summaries(),
-        "agents": [_agent_summary(a) for a in agents],
+        "agents": agent_summaries,
+        "available_personas": available_personas,
         "worker_sessions": [worker_session_summary(worker) for worker in workers],
         "role_envelopes": [role_envelope_summary(item, checklist_store=role_checklist_store) for item in role_envelopes],
         "role_checklists": [checklist_summary(item) for item in role_checklists],
@@ -1258,6 +1262,45 @@ def _agent_summary(agent):
     }
 
 
+def _available_persona_summary(agents) -> list[dict]:
+    try:
+        templates = available_profile_templates()
+    except Exception:
+        return []
+    backs_by_profile = {
+        str(getattr(agent, "hermes_profile", "") or ""): str(getattr(agent, "id", "") or "")
+        for agent in agents
+        if getattr(agent, "hermes_profile", None) and getattr(agent, "id", None)
+    }
+    summaries: list[dict] = []
+    for template in templates:
+        profile_name = str(getattr(template, "name", "") or "").strip()
+        if not profile_name:
+            continue
+        item = {
+            "persona_id": f"profile:{profile_name}",
+            "display_name": _display_name_for_profile(profile_name),
+            "role": "profile",
+            "hermes_profile": profile_name,
+            "source": "hermes_profile",
+            "template_only": True,
+            "profile_readiness": "available",
+        }
+        description = _safe_text(str(getattr(template, "description", "") or ""))
+        if description:
+            item["description"] = description
+        backs_persona_id = backs_by_profile.get(profile_name)
+        if backs_persona_id:
+            item["backs_persona_id"] = backs_persona_id
+        summaries.append(item)
+    return summaries
+
+
+def _display_name_for_profile(profile_name: str) -> str:
+    words = [part for part in re.split(r"[-_\s]+", profile_name.strip()) if part]
+    return " ".join(part[:1].upper() + part[1:] for part in words) or profile_name
+
+
 def _safe_repo_scope_label(value):
     if not value:
         return None
@@ -1389,7 +1432,6 @@ def _proof_summary(proof):
     if isinstance(metadata.get("repo_bundle_ids"), list):
         summary["repo_bundle_ids"] = list(metadata["repo_bundle_ids"][:8])
     return summary
-
 
 
 

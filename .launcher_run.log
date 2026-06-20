@@ -1,0 +1,202 @@
+Launching lib\main.dart on Windows in debug mode...
+Building Windows application...                                 
+CMake Deprecation Warning at CMakeLists.txt:4 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+Nuget is not installed.
+CMake Warning (dev) at flutter/ephemeral/.plugin_symlinks/webview_windows/windows/CMakeLists.txt:34 (add_custom_command):
+  The following keywords are not supported when using
+  add_custom_command(TARGET): DEPENDS.
+
+  Policy CMP0175 is not set: add_custom_command() rejects invalid arguments.
+  Run "cmake --help-policy CMP0175" for policy details.  Use the cmake_policy
+  command to set the policy and suppress this warning.
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+**************** SOLOUD CONFIGURE.CMAKE
+[+] Build dynamic library enabled
+[-] Build static library disabled
+[-] Build C API disabled
+[+] Build MiniAudio enabled
+[-] Build demos disabled
+[+] NULL backend enabled
+[-] SDL2 backend disabled
+[-] ALSA backend disabled
+[-] CoreAudio backend disabled
+[-] OpenSLES backend disabled
+[-] XAudio2 backend disabled
+[-] WINMM backend disabled
+[-] WASAPI backend disabled
+[-] Generate Glue disabled
+**************** SOLOUD SRC.CMAKE 1
+**************** SOLOUD SRC.CMAKE 2  soloud
+NO_OPUS_OGG_LIBS has not been set. Linking Opus and Ogg libraries!
+Building Windows application...                                    28.5s
+√ Built build\windows\x64\runner\Debug\eternia_launcher.exe
+package:media_kit_libs_windows_video registered.
+Skipping assets entry "packages/flutter_soloud/web/worker.dart.js" since its configured platform(s) did not match the target platform.
+Configured platforms: web
+Target platform: windows
+
+Skipping assets entry "packages/flutter_soloud/web/libflutter_soloud_plugin.js" since its configured platform(s) did not match the target platform.
+Configured platforms: web
+Target platform: windows
+
+Skipping assets entry "packages/flutter_soloud/web/libflutter_soloud_plugin.wasm" since its configured platform(s) did not match the target platform.
+Configured platforms: web
+Target platform: windows
+
+Skipping assets entry "packages/flutter_soloud/web/init_module.dart.js" since its configured platform(s) did not match the target platform.
+Configured platforms: web
+Target platform: windows
+
+Syncing files to device Windows...                                 256ms
+
+Flutter run key commands.
+r Hot reload. 
+R Hot restart.
+h List all available interactive commands.
+d Detach (terminate "flutter run" but leave application running).
+c Clear the screen
+q Quit (terminate the application on the device).
+
+A Dart VM Service on Windows is available at: http://127.0.0.1:51987/mrhweTjy7gc=/
+The Flutter DevTools debugger and profiler on Windows is available at: http://127.0.0.1:51987/mrhweTjy7gc=/devtools/?uri=ws://127.0.0.1:51987/mrhweTjy7gc=/ws
+[LibTrace store:init] source=steam count=26
+[LibTrace store:init] source=epic count=2
+[LibTrace epic:isAvailable] isInstalled=true manifestsPath=C:\ProgramData\Epic\EpicGamesLauncher\Data\Manifests
+[EterniaBackendWatcher] subscribe deferred for library#ca2a6bc3-ca89-40a0-a104-1aefeb86452f (transport not ready — will retry on connect)
+media_kit: NativeReferenceHolder: Allocated 2606531485936
+[EpicClassifier] UE_5.7 ("Unreal Engine") ns=ue tech=[engines/ue5, engines] cats=[engines/ue5, engines] isApp=false isExe=true hosted=false → plugin via structural (bIsApplication=false)
+[EpicClassifier] FabPlugin_5.7 ("Fab UE Plugin") ns=ue tech=[plugins/engine, codeproject] cats=[] isApp=false isExe=false hosted=true → plugin via structural (hostInstallationGuid=2989f61044aa63fea4a3a489fea1adb9)
+[SteamClassifier] 1068820 ("OVR Toolkit") → game via defaulted
+[EpicClassifier] Sugar ("Rocket League®") ns=9773aa1aa54f4f7b80e44bef04986cea tech=[public, games, applications] cats=[public, games, applications] isApp=true isExe=true hosted=false → game via defaulted
+[SteamClassifier] 228980 ("Steamworks Common Redistributables") → runtime via slug (appId=228980)
+[EpicClassifier] aa31f9e94e844b299ca757d1d0b97a09 ("Fortnite_StWContent") ns=fn tech=[applications] cats=[applications] isApp=true isExe=true hosted=false → dlc via structural (MainGameAppName=Fortnite)
+[SteamClassifier] 250820 ("SteamVR") → tool via slug (appId=250820)
+[EpicClassifier] Fortnite ("Fortnite") ns=fn tech=[games, applications] cats=[games, applications] isApp=true isExe=true hosted=false → game via defaulted
+[LibTrace epic:scan] manifestsAfterClassification=2 itemsAfterDedup=2
+[SteamClassifier] 990050 ("Death end re;Quest") → game via defaulted
+[SteamClassifier] 1068820 ("OVR Toolkit") → game via defaulted
+[SteamClassifier] 228980 ("Steamworks Common Redistributables") → runtime via slug (appId=228980)
+[SteamClassifier] 250820 ("SteamVR") → tool via slug (appId=250820)
+[SteamClassifier] 990050 ("Death end re;Quest") → game via defaulted
+[SteamClassifier] 365720 ("Skyrim Script Extender (SKSE)") → game via defaulted
+[SteamClassifier] 431960 ("Wallpaper Engine") → game via defaulted
+[SteamClassifier] 620980 ("Beat Saber") → game via defaulted
+[SteamClassifier] 1056640 ("Phantasy Star Online 2 New Genesis") → game via defaulted
+[SteamClassifier] 1335200 ("Action Taimanin") → game via defaulted
+[SteamClassifier] 1361350 ("DEAD OR ALIVE Xtreme Venus Vacation [JP]") → game via defaulted
+[SteamClassifier] 271590 ("Grand Theft Auto V Legacy") → game via defaulted
+[SteamClassifier] 310360 ("Higurashi When They Cry Hou - Ch.1 Onikakushi") → game via defaulted
+[SteamClassifier] 310950 ("Street Fighter V") → game via defaulted
+[SteamClassifier] 311730 ("Dead or Alive 5 Last Round") → game via defaulted
+[SteamClassifier] 374320 ("DARK SOULS™ III") → game via defaulted
+[SteamClassifier] 389730 ("TEKKEN 7") → game via defaulted
+[SteamClassifier] 403410 ("ARCADE GAME SERIES: Ms. PAC-MAN") → game via defaulted
+[SteamClassifier] 413410 ("Danganronpa: Trigger Happy Havoc") → game via defaulted
+[SteamClassifier] 533540 ("MONMUSU") → game via defaulted
+[SteamClassifier] 544750 ("SOULCALIBUR VI") → game via defaulted
+[SteamClassifier] 71250 ("Sonic Adventure DX") → game via defaulted
+[SteamClassifier] 730 ("Counter-Strike 2") → game via defaulted
+[SteamClassifier] 838380 ("DEAD OR ALIVE 6") → game via defaulted
+[SteamClassifier] 2074920 ("The First Descendant") → game via defaulted
+[SteamClassifier] 275850 ("No Man's Sky") → game via defaulted
+[SteamClassifier] 3354750 ("skate.") → game via defaulted
+[SteamClassifier] 3681810 ("Blue Protocol: Star Resonance") → game via defaulted
+[SteamClassifier] 774171 ("Muse Dash") → game via defaulted
+Failed to decrypt data: Error 0x00000000: Failure on CryptUnprotectData() Delete corrupt file: c:\users\beast\appdata\roaming\com.arcadialabs\eternia_launcher\flutter_secure_storage.dat
+[EterniaBackendWatcher] subscribe deferred for library#ca2a6bc3-ca89-40a0-a104-1aefeb86452f (transport not ready — will retry on connect)
+[EterniaBackendWatcher] subscribe deferred for library#ca2a6bc3-ca89-40a0-a104-1aefeb86452f (transport not ready — will retry on connect)
+[EterniaBackendWatcher] subscribe deferred for library#ca2a6bc3-ca89-40a0-a104-1aefeb86452f (transport not ready — will retry on connect)
+[EterniaBackendWatcher] subscribe deferred for library#ca2a6bc3-ca89-40a0-a104-1aefeb86452f (transport not ready — will retry on connect)
+[LibTrace repo:reload] trigger=startup isStale=false touchedSources=[manual, epic, steam, eternia]
+[LibTrace repo:reload] source=eternia touched=true itemCount=0
+[LibTrace repo:reload] source=steam touched=true itemCount=26
+[LibTrace repo:reload] source=epic touched=true itemCount=2
+[LibTrace repo:reload] source=gog touched=false itemCount=0
+[LibTrace repo:reload] source=emulator touched=false itemCount=0
+[LibTrace repo:reload] source=manual touched=true itemCount=0
+[LibTrace store:apply] source=manual incomingMatched=0 incomingMismatched=0 keepIds=0 removedMappingIds=0
+[LibTrace store:apply] KEEP target=epic title="Rocket League®" externalId=Sugar
+[LibTrace store:apply] KEEP target=epic title="Fortnite" externalId=Fortnite
+[LibTrace store:apply] source=epic incomingMatched=2 incomingMismatched=0 keepIds=2 removedMappingIds=0
+[LibTrace store:apply] KEEP target=steam title="OVR Toolkit" externalId=1068820
+[LibTrace store:apply] KEEP target=steam title="Death end re;Quest" externalId=990050
+[LibTrace store:apply] KEEP target=steam title="Skyrim Script Extender (SKSE)" externalId=365720
+[LibTrace store:apply] KEEP target=steam title="Wallpaper Engine" externalId=431960
+[LibTrace store:apply] KEEP target=steam title="Beat Saber" externalId=620980
+[LibTrace store:apply] KEEP target=steam title="Phantasy Star Online 2 New Genesis" externalId=1056640
+[LibTrace store:apply] KEEP target=steam title="Action Taimanin" externalId=1335200
+[LibTrace store:apply] KEEP target=steam title="DEAD OR ALIVE Xtreme Venus Vacation [JP]" externalId=1361350
+[LibTrace store:apply] KEEP target=steam title="Grand Theft Auto V Legacy" externalId=271590
+[LibTrace store:apply] KEEP target=steam title="Higurashi When They Cry Hou - Ch.1 Onikakushi" externalId=310360
+[LibTrace store:apply] KEEP target=steam title="Street Fighter V" externalId=310950
+[LibTrace store:apply] KEEP target=steam title="Dead or Alive 5 Last Round" externalId=311730
+[LibTrace store:apply] KEEP target=steam title="DARK SOULS™ III" externalId=374320
+[LibTrace store:apply] KEEP target=steam title="TEKKEN 7" externalId=389730
+[LibTrace store:apply] KEEP target=steam title="ARCADE GAME SERIES: Ms. PAC-MAN" externalId=403410
+[LibTrace store:apply] KEEP target=steam title="Danganronpa: Trigger Happy Havoc" externalId=413410
+[LibTrace store:apply] KEEP target=steam title="MONMUSU" externalId=533540
+[LibTrace store:apply] KEEP target=steam title="SOULCALIBUR VI" externalId=544750
+[LibTrace store:apply] KEEP target=steam title="Sonic Adventure DX" externalId=71250
+[LibTrace store:apply] KEEP target=steam title="Counter-Strike 2" externalId=730
+[LibTrace store:apply] KEEP target=steam title="DEAD OR ALIVE 6" externalId=838380
+[LibTrace store:apply] KEEP target=steam title="The First Descendant" externalId=2074920
+[LibTrace store:apply] KEEP target=steam title="No Man's Sky" externalId=275850
+[LibTrace store:apply] KEEP target=steam title="skate." externalId=3354750
+[LibTrace store:apply] KEEP target=steam title="Blue Protocol: Star Resonance" externalId=3681810
+[LibTrace store:apply] KEEP target=steam title="Muse Dash" externalId=774171
+[LibTrace store:apply] source=steam incomingMatched=26 incomingMismatched=0 keepIds=26 removedMappingIds=0
+[LibTrace store:apply] source=eternia incomingMatched=0 incomingMismatched=0 keepIds=0 removedMappingIds=0
+[EterniaBackendWatcher] subscribe deferred for library#ca2a6bc3-ca89-40a0-a104-1aefeb86452f (transport not ready — will retry on connect)
+[EterniaBackendWatcher] subscribe deferred for library#ca2a6bc3-ca89-40a0-a104-1aefeb86452f (transport not ready — will retry on connect)
+[EterniaBackendWatcher] subscribe deferred for library#ca2a6bc3-ca89-40a0-a104-1aefeb86452f (transport not ready — will retry on connect)
+[SteamClassifier] 1068820 ("OVR Toolkit") → game via defaulted
+[SteamClassifier] 228980 ("Steamworks Common Redistributables") → runtime via slug (appId=228980)
+[SteamClassifier] 250820 ("SteamVR") → tool via slug (appId=250820)
+[SteamClassifier] 990050 ("Death end re;Quest") → game via defaulted
+[SteamClassifier] 1068820 ("OVR Toolkit") → game via defaulted
+[SteamClassifier] 228980 ("Steamworks Common Redistributables") → runtime via slug (appId=228980)
+[SteamClassifier] 250820 ("SteamVR") → tool via slug (appId=250820)
+[SteamClassifier] 990050 ("Death end re;Quest") → game via defaulted
+[SteamClassifier] 365720 ("Skyrim Script Extender (SKSE)") → game via defaulted
+[SteamClassifier] 431960 ("Wallpaper Engine") → game via defaulted
+[SteamClassifier] 620980 ("Beat Saber") → game via defaulted
+[SteamClassifier] 1056640 ("Phantasy Star Online 2 New Genesis") → game via defaulted
+[SteamClassifier] 1335200 ("Action Taimanin") → game via defaulted
+[SteamClassifier] 1361350 ("DEAD OR ALIVE Xtreme Venus Vacation [JP]") → game via defaulted
+[SteamClassifier] 271590 ("Grand Theft Auto V Legacy") → game via defaulted
+[SteamClassifier] 310360 ("Higurashi When They Cry Hou - Ch.1 Onikakushi") → game via defaulted
+[SteamClassifier] 310950 ("Street Fighter V") → game via defaulted
+[SteamClassifier] 311730 ("Dead or Alive 5 Last Round") → game via defaulted
+[SteamClassifier] 374320 ("DARK SOULS™ III") → game via defaulted
+[SteamClassifier] 389730 ("TEKKEN 7") → game via defaulted
+[SteamClassifier] 403410 ("ARCADE GAME SERIES: Ms. PAC-MAN") → game via defaulted
+[SteamClassifier] 413410 ("Danganronpa: Trigger Happy Havoc") → game via defaulted
+[SteamClassifier] 533540 ("MONMUSU") → game via defaulted
+[SteamClassifier] 544750 ("SOULCALIBUR VI") → game via defaulted
+[SteamClassifier] 71250 ("Sonic Adventure DX") → game via defaulted
+[SteamClassifier] 730 ("Counter-Strike 2") → game via defaulted
+[SteamClassifier] 838380 ("DEAD OR ALIVE 6") → game via defaulted
+[SteamClassifier] 2074920 ("The First Descendant") → game via defaulted
+[SteamClassifier] 275850 ("No Man's Sky") → game via defaulted
+[SteamClassifier] 3354750 ("skate.") → game via defaulted
+[SteamClassifier] 3681810 ("Blue Protocol: Star Resonance") → game via defaulted
+[SteamClassifier] 774171 ("Muse Dash") → game via defaulted
+[EterniaBackendWatcher] subscribed to library#ca2a6bc3-ca89-40a0-a104-1aefeb86452f
+[Projection] msg-59286 contentType=text textShape=TextShape.text mediaKind=null imageDims=nullxnull reactions=false reply=false/0 edited=false position=GroupPosition.single colWidth=560 maxImage=605x436 projected=92.0
+[Projection] msg-59287 contentType=text textShape=TextShape.text mediaKind=null imageDims=nullxnull reactions=false reply=false/0 edited=false position=GroupPosition.single colWidth=560 maxImage=605x436 projected=131.0
+[Projection] msg-59288 contentType=text textShape=TextShape.text mediaKind=null imageDims=nullxnull reactions=false reply=false/0 edited=false position=GroupPosition.single colWidth=560 maxImage=605x436 projected=92.0
+[Projection] msg-59289 contentType=text textShape=TextShape.text mediaKind=null imageDims=nullxnull reactions=false reply=false/0 edited=false position=GroupPosition.single colWidth=560 maxImage=605x436 projected=112.0
+[Projection] msg-59290 contentType=text textShape=TextShape.text mediaKind=null imageDims=nullxnull reactions=false reply=false/0 edited=false position=GroupPosition.single colWidth=560 maxImage=605x436 projected=92.0
+[Projection] msg-59293 contentType=text textShape=TextShape.text mediaKind=null imageDims=nullxnull reactions=false reply=false/0 edited=false position=GroupPosition.single colWidth=560 maxImage=605x436 projected=187.0
+[Projection] msg-59298 contentType=text textShape=TextShape.text mediaKind=null imageDims=nullxnull reactions=false reply=false/0 edited=false position=GroupPosition.single colWidth=560 maxImage=605x436 projected=92.0
+[Projection] msg-59301 contentType=text textShape=TextShape.text mediaKind=null imageDims=nullxnull reactions=false reply=false/0 edited=false position=GroupPosition.single colWidth=560 maxImage=605x436 projected=112.0
+Lost connection to device.
