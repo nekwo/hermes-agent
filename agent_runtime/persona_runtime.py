@@ -153,6 +153,66 @@ class GPTPersonaRuntime:
         _apply_llm_metadata(run, result, timing=timing)
         return result.final_response
 
+    def chat_reply(
+        self,
+        persona: AgentPersona,
+        message: str,
+        *,
+        session_id: str | None = None,
+        max_wall_seconds: float | None = 120.0,
+        max_api_calls: int | None = 8,
+        max_total_tokens: int | None = None,
+    ) -> AgentRunResult:
+        """Run one plain conversational turn for an operator persona chat.
+
+        This deliberately bypasses the decision-contract pipeline: the agent
+        gets a conversational system prompt (no decision menu, no task scoping)
+        and the operator's raw message, and returns free-text. SessionDB history
+        + recall still apply via the shared session. This is the chat-first path
+        — the harness task/decision machinery only engages when the operator
+        explicitly asks for work.
+        """
+
+        binding = resolve_persona_profile(persona)
+        if binding.readiness == "missing_profile":
+            raise ValueError(binding.summary)
+        assert_provider_health_for_persona(persona)
+        return self._runner.run(
+            AgentRunRequest(
+                profile=binding.hermes_profile,
+                provider=persona.provider or self._default_provider,
+                model=persona.model or self._default_model or "",
+                api_mode=persona.api_mode,
+                enabled_toolsets=effective_toolsets(persona),
+                blocked_tool_names=blocked_tool_names(persona),
+                quiet_mode=True,
+                skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
+                skip_memory=False,
+                platform="agent_runtime",
+                session_id=session_id,
+                max_wall_seconds=max_wall_seconds,
+                max_api_calls=max_api_calls,
+                max_total_tokens=max_total_tokens,
+                user_message=message,
+                system_message=_persona_chat_system_prompt(persona),
+                runtime_root=paths.store_root(),
+            )
+        )
+
+
+def _persona_chat_system_prompt(persona: AgentPersona) -> str:
+    display = getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")
+    role = role_from_persona(persona).value
+    return (
+        f"You are {display}, a Mission Control operator-channel agent (role: {role}). "
+        "You are in a direct, real-time chat with a human operator. "
+        "Reply conversationally, warmly, and concisely in plain text. "
+        "Do NOT emit JSON, decision objects, task scopes, acceptance criteria, or handoff packets. "
+        "Do NOT scope, create, or route tasks unless the operator explicitly asks you to do work. "
+        "If the operator simply greets you or asks how you are, just chat back like a teammate. "
+        "Use session_search only when you genuinely need prior context to answer."
+    )
+
 
 def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:
     if role_from_persona(persona) != "dev":
