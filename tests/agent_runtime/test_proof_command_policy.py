@@ -14,7 +14,7 @@ def task(**overrides) -> Task:
         "id": "task_policy",
         "title": "Stage 46 real-token backend smoke",
         "description": "No product edits; perform an observational smoke proof only.",
-        "state": TaskState.PM_READY_FOR_DEV,
+        "state": TaskState.READY_FOR_IMPLEMENTATION,
         "created_at": now(),
         "updated_at": now(),
         "requested_by": "test",

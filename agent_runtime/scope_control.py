@@ -236,7 +236,7 @@ def apply_issue_triage(task: Task, decision: AgentDecision, *, actor: str, task_
             id=f"task_{uuid.uuid4().hex[:8]}",
             title=str(payload["child_title"]).strip(),
             description=str(payload["child_description"]).strip(),
-            state=TaskState.PM_READY_FOR_DEV,
+            state=TaskState.READY_FOR_IMPLEMENTATION,
             created_at=ts,
             updated_at=ts,
             requested_by=f"harness:issue_discovery:{discovery['id']}",

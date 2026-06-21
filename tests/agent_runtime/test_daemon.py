@@ -42,8 +42,8 @@ class SettledEngine:
             finished_at=datetime.now(timezone.utc),
             ticks=2,
             actions_taken=[
-                HarnessActionResult(HarnessAction(HarnessActionType.RUN_NEKO_SUPERVISOR, "task_1"), True, "scoped"),
-                HarnessActionResult(HarnessAction(HarnessActionType.RUN_DEV, "task_1"), True, "proved"),
+                HarnessActionResult(HarnessAction(HarnessActionType.RUN_SLOT, "task_1", slot_id="neko_supervisor"), True, "scoped"),
+                HarnessActionResult(HarnessAction(HarnessActionType.RUN_SLOT, "task_1", slot_id="dev"), True, "proved"),
             ],
             stop_reason=self.stop_reason,
         )

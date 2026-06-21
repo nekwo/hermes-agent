@@ -11,7 +11,7 @@ def test_no_model_smoke_runs_in_temp_root_and_finishes_done(monkeypatch):
     result = run_smoke(temp_root=True, no_model=True)
 
     assert result["ok"] is True
-    assert result["first_action"] == "run_neko_supervisor"
+    assert result["first_action"] == "run_slot"
     assert result["final_action"] == "complete_task"
     assert result["final_state"] == "done"
     assert result["transitions"] == ["neko_supervisor:propose_acceptance", "dev:propose_patch", "qa:report_qa_verdict"]

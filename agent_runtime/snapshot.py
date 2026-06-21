@@ -31,7 +31,7 @@ from .persona_assignments import (
 from .persona_chat_history import persona_chat_history_summary
 from .personas import blocked_tool_names, effective_toolsets
 from .profile_readiness import profile_readiness_for_persona
-from .proof_gates import can_qa_approve
+from .proof_gates import verification_proof_satisfied
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_summary, simplified_phase_for_task
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary, runtime_instances_summary
 from .repo_context import resolve_affected_repo_workdir
@@ -45,6 +45,34 @@ from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from .worker_sessions import WorkerSessionStore, worker_session_summary
+
+
+def _runtime_paths_diagnostic(available_personas: list) -> dict:
+    """TEMP diagnostic: report the paths/env this process actually resolved,
+    so the Launcher can see why available_personas came back empty."""
+    import os as _os
+
+    out: dict = {"available_personas_count": len(available_personas or [])}
+    try:
+        from hermes_constants import get_hermes_home, get_default_hermes_root
+
+        out["env_HERMES_HOME"] = _os.environ.get("HERMES_HOME", "<unset>")
+        out["env_HERMES_AGENT_RUNTIME_ROOT"] = _os.environ.get("HERMES_AGENT_RUNTIME_ROOT", "<unset>")
+        out["env_LOCALAPPDATA"] = _os.environ.get("LOCALAPPDATA", "<unset>")
+        out["resolved_hermes_home"] = str(get_hermes_home())
+        out["resolved_default_root"] = str(get_default_hermes_root())
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        out["error"] = repr(exc)
+    try:
+        from hermes_cli.profiles import _get_profiles_root
+
+        root = _get_profiles_root()
+        out["profiles_root"] = str(root)
+        out["profiles_root_exists"] = root.is_dir()
+        out["profiles_root_entries"] = sorted(p.name for p in root.iterdir()) if root.is_dir() else []
+    except Exception as exc:  # pragma: no cover - diagnostic only
+        out["profiles_error"] = repr(exc)
+    return out
 
 
 def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
@@ -143,6 +171,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         "archived_tasks": _archived_task_summaries(),
         "agents": agent_summaries,
         "available_personas": available_personas,
+        "runtime_paths_diagnostic": _runtime_paths_diagnostic(available_personas),
         "worker_sessions": [worker_session_summary(worker) for worker in workers],
         "role_envelopes": [role_envelope_summary(item, checklist_store=role_checklist_store) for item in role_envelopes],
         "role_checklists": [checklist_summary(item) for item in role_checklists],
@@ -780,7 +809,7 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
 
 
 def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None):
-    gate = can_qa_approve(task, proofs)
+    gate = verification_proof_satisfied(task, proofs)
     current = next((s for s in task.stages if s.id == task.current_stage_id), None)
     untriaged = untriaged_issue_discoveries(task)
     child_count = len([item for item in (all_tasks or []) if getattr(item, "parent_task_id", None) == task.id])
@@ -931,9 +960,9 @@ def _next_action_summary(task, open_incidents, *, run_store=None):
         runs = run_store or RunStore()
         cfg = load_agent_runtime_config()
         if any(budget_incident_needs_scope_recovery(incident, runs) for incident in open_incidents):
-            return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_neko_supervisor", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
+            return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_slot", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
         if any(budget_incident_can_continue(incident, runs, cap=cfg.neko_extension_cap) for incident in open_incidents):
-            return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_neko_supervisor", "reason": "needs Neko approval to continue budget-limited Dev run"}
+            return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_slot", "reason": "needs Neko approval to continue budget-limited Dev run"}
         reason = "budget_continuation_blocked" if _has_budget_incident(open_incidents) else "environment_blocked"
         message = "budget continuation cap reached; human review required" if reason == "budget_continuation_blocked" else "open incident requires human review"
         return {**_stopped_progress(task, open_incidents, reason, "human"), "action": "blocked_by_incident", "reason": message}
@@ -942,7 +971,7 @@ def _next_action_summary(task, open_incidents, *, run_store=None):
     cfg = load_agent_runtime_config()
     action = MissionStateMachine(config=cfg).next_action(task)
     reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
-    return {**_stopped_progress(task, [], reason, _owner_for_action(action.type.value, task=task, run_store=run_store)), "action": action.type.value, "reason": action.reason}
+    return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "action": action.type.value, "reason": action.reason}
 
 
 def _why_not_done(task, gate, open_incidents, next_action):
@@ -977,22 +1006,25 @@ def _stopped_progress(task, incidents, reason: str, owner: str) -> dict:
     }
 
 
-def _owner_for_action(action: str, *, task=None, run_store=None) -> str:
-    if action == "run_dev" and task is not None:
+def _owner_for_action(action, *, task=None, run_store=None) -> str:
+    action_value = action.type.value if hasattr(getattr(action, "type", None), "value") else str(action)
+    slot_id = str(getattr(action, "slot_id", "") or "").strip()
+    if action_value == "run_slot" and slot_id == "dev" and task is not None:
         try:
-            from .actions import HarnessActionType
-            from .ticker import _persona_id_for_action
+            from .ticker import _dev_persona_id_for_task
 
-            return _persona_id_for_action(HarnessActionType.RUN_DEV, task=task, run_store=run_store)
+            return _dev_persona_id_for_task(task, run_store=run_store)
         except Exception:
             return "dev"
+    if action_value == "run_slot" and slot_id:
+        return slot_id
     return {
         "run_dev": "dev",
         "run_qa": "qa",
         "run_neko_supervisor": "neko_supervisor",
         "complete_task": "harness",
         "noop": "harness",
-    }.get(action, "harness")
+    }.get(action_value, "harness")
 
 
 def _has_budget_incident(incidents) -> bool:
@@ -1432,6 +1464,3 @@ def _proof_summary(proof):
     if isinstance(metadata.get("repo_bundle_ids"), list):
         summary["repo_bundle_ids"] = list(metadata["repo_bundle_ids"][:8])
     return summary
-
-
-

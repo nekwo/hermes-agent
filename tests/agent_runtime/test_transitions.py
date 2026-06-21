@@ -25,8 +25,8 @@ def make_task(state=TaskState.CREATED):
     ("from_state", "to_state"),
     [
         (TaskState.CREATED, TaskState.PM_TRIAGE),
-        (TaskState.PM_READY_FOR_DEV, TaskState.DEV_AUDIT),
-        (TaskState.QA_NEEDS_FIXES, TaskState.DEV_IMPLEMENTING),
+        (TaskState.READY_FOR_IMPLEMENTATION, TaskState.DEV_AUDIT),
+        (TaskState.NEEDS_FIXES, TaskState.DEV_IMPLEMENTING),
         (TaskState.FAILED, TaskState.PM_TRIAGE),
         (TaskState.BLOCKED, TaskState.DEV_IMPLEMENTING),
     ],
@@ -45,8 +45,8 @@ def test_allowed_transitions_update_state_and_timestamp(from_state, to_state):
     ("from_state", "to_state"),
     [
         (TaskState.CREATED, TaskState.DEV_IMPLEMENTING),
-        (TaskState.PM_READY_FOR_DEV, TaskState.DEV_IMPLEMENTING),
-        (TaskState.QA_APPROVED, TaskState.DONE),
+        (TaskState.READY_FOR_IMPLEMENTATION, TaskState.DEV_IMPLEMENTING),
+        (TaskState.VERIFIED, TaskState.DONE),
         (TaskState.DONE, TaskState.PM_TRIAGE),
         (TaskState.CANCELLED, TaskState.PM_TRIAGE),
         (TaskState.FAILED, TaskState.DEV_IMPLEMENTING),

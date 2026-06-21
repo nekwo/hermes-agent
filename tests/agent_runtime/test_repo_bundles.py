@@ -350,7 +350,7 @@ def test_ticker_links_repo_bundle_to_assignment_and_marks_delivery(isolate_agent
     config = _bundle_config()
 
     result = TickEngine(task_store=task_store, persona_runtime=CompleteDevRuntime(), config=config)._execute_action(
-        HarnessAction(HarnessActionType.RUN_DEV, task_id=task.id, reason="run launcher bundle"),
+        HarnessAction(HarnessActionType.RUN_SLOT, task_id=task.id, reason="run launcher bundle", slot_id="dev"),
         task,
     )
 
@@ -372,7 +372,7 @@ def test_ticker_does_not_launch_dev_run_for_queued_dependency_bundle(isolate_age
     config = _bundle_config()
 
     result = TickEngine(task_store=task_store, persona_runtime=ShouldNotRunRuntime(), config=config)._execute_action(
-        HarnessAction(HarnessActionType.RUN_DEV, task_id=task.id, reason="run queued launcher bundle"),
+        HarnessAction(HarnessActionType.RUN_SLOT, task_id=task.id, reason="run queued launcher bundle", slot_id="dev"),
         task,
     )
 
@@ -391,7 +391,7 @@ def test_ticker_does_not_launch_qa_run_while_repo_bundle_waiting(isolate_agent_r
     config = _bundle_config()
 
     result = TickEngine(task_store=task_store, persona_runtime=ShouldNotRunRuntime(), config=config)._execute_action(
-        HarnessAction(HarnessActionType.RUN_QA, task_id=task.id, reason="qa waits on bundles"),
+        HarnessAction(HarnessActionType.RUN_SLOT, task_id=task.id, reason="qa waits on bundles", slot_id="qa"),
         task,
     )
 
@@ -414,7 +414,7 @@ def test_ticker_marks_request_test_run_bundle_delivered_after_passing_proof(isol
         proof_runner=PassingProofRunner(proof_store),
         config=_bundle_config(),
     )._execute_action(
-        HarnessAction(HarnessActionType.RUN_DEV, task_id=task.id, reason="run backend bundle"),
+        HarnessAction(HarnessActionType.RUN_SLOT, task_id=task.id, reason="run backend bundle", slot_id="backend_dev"),
         task,
     )
 
@@ -439,7 +439,7 @@ def test_qa_review_does_not_regress_delivered_bundle_to_running(isolate_agent_ru
         config=_bundle_config(),
     )
     dev_result = dev_engine._execute_action(
-        HarnessAction(HarnessActionType.RUN_DEV, task_id=task.id, reason="run backend bundle"),
+        HarnessAction(HarnessActionType.RUN_SLOT, task_id=task.id, reason="run backend bundle", slot_id="backend_dev"),
         task,
     )
     assert dev_result.ok is True
@@ -459,7 +459,7 @@ def test_qa_review_does_not_regress_delivered_bundle_to_running(isolate_agent_ru
         persona_runtime=ApproveQaRuntime(),
         config=_bundle_config(),
     )._execute_action(
-        HarnessAction(HarnessActionType.RUN_QA, task_id=task.id, reason="qa verify bundle"),
+        HarnessAction(HarnessActionType.RUN_SLOT, task_id=task.id, reason="qa verify bundle", slot_id="qa"),
         task_store.get(task.id),
     )
 

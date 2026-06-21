@@ -70,7 +70,7 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
         transitions: list[str] = []
 
         first_action = machine.next_action(task)
-        if first_action.type != HarnessActionType.RUN_NEKO_SUPERVISOR:
+        if first_action.type != HarnessActionType.RUN_SLOT or first_action.slot_id != "neko_supervisor":
             raise RuntimeError(f"expected Neko Mission Lead first action, got {first_action.type.value}")
         neko_decision = AgentDecision(
             type=DecisionType.PROPOSE_ACCEPTANCE,

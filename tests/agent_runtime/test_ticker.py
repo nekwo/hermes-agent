@@ -7,6 +7,7 @@ import pytest
 
 from hermes_time import now
 from agent_runtime.actions import HarnessActionType
+from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.events import EventLog
 from agent_runtime.recovery_flags import NEKO_BLOCK_RECOVERY_ATTEMPTED_FLAG
 from agent_runtime.ticker import TickEngine, _emit_decision_process_summary, _validate_request_test_run_targets_current_stage
@@ -384,6 +385,20 @@ class GPTPersonaRuntime:
         raise RuntimeError("stop after preflight")
 
 
+class BlueprintSmokeRuntime:
+    def __init__(self):
+        self.personas = []
+
+    def run_tick(self, persona, ctx, *, run):
+        self.personas.append(persona.id)
+        return AgentDecision(
+            type=DecisionType.REQUEST_TEST_RUN,
+            summary="collect blueprint smoke proof",
+            rationale="The blueprint build stage needs deterministic proof.",
+            payload={"stage_id": "build", "commands": ["printf blueprint-smoke\\n"]},
+        )
+
+
 class ResolveIncidentRuntime:
     def run_tick(self, persona, ctx, *, run):
         from agent_runtime.decision_schema import AgentDecision, DecisionType
@@ -473,8 +488,8 @@ def test_tick_advances_created_task_with_fake_pm():
     ts=TaskStore(); ts.create(make_task())
     res=TickEngine(task_store=ts, persona_runtime=FakeRuntime()).tick_once()
     assert res.actions_taken[0].ok
-    assert res.actions_taken[0].action.type == HarnessActionType.RUN_NEKO_SUPERVISOR
-    assert ts.get("task_1").state == TaskState.PM_READY_FOR_DEV
+    assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
+    assert ts.get("task_1").state == TaskState.READY_FOR_IMPLEMENTATION
 
 
 def test_targeted_tick_runs_named_task_instead_of_older_open_task():
@@ -485,7 +500,7 @@ def test_targeted_tick_runs_named_task_instead_of_older_open_task():
     res = TickEngine(task_store=ts, persona_runtime=FakeRuntime()).tick_once(task_id="task_z_target")
 
     assert [action.payload["run_id"] for action in res.actions_taken]
-    assert ts.get("task_z_target").state == TaskState.PM_READY_FOR_DEV
+    assert ts.get("task_z_target").state == TaskState.READY_FOR_IMPLEMENTATION
     assert ts.get("task_0_old").state == TaskState.CREATED
     assert res.tasks_seen == 1
 
@@ -526,7 +541,7 @@ def test_tick_persists_active_run_provider_model_metadata_before_runtime_call():
 
 def test_tick_uses_persona_specific_live_budget_for_dev_runs():
     task = make_task()
-    task.state = TaskState.PM_READY_FOR_DEV
+    task.state = TaskState.READY_FOR_IMPLEMENTATION
     ts = TaskStore(); ts.create(task)
     runs = RunStore()
     runtime = FakeRuntime()
@@ -620,6 +635,51 @@ def test_tick_uses_configured_persona_when_agent_store_empty():
     assert runtime.personas[0].id == "neko_supervisor"
     assert runtime.personas[0].hermes_profile == "alice"
     assert runtime.personas[0].skills == ["agent-runtime-harness", "harness-mission-lead"]
+
+
+def test_tick_resolves_blueprint_run_slot_through_binding():
+    ts = TaskStore()
+    bp = BlueprintStore().get("one_agent_smoke")
+    plan = instantiate_blueprint(bp, goal="smoke", bindings={"builder": "persona:neko_supervisor"})
+    task = make_task_with_id("task_blueprint_slot")
+    task.mission_plan = plan
+    task.current_stage_id = plan.current_stage_id
+    ts.create(task)
+    runtime = CapturingFailureRuntime()
+
+    res = TickEngine(task_store=ts, persona_runtime=runtime).tick_once(task_id=task.id)
+
+    assert not res.actions_taken[0].ok
+    assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
+    assert runtime.personas == ["neko_supervisor"]
+
+
+def test_blueprint_tick_runs_slot_collects_proof_and_completes():
+    ts = TaskStore()
+    proof_store = ProofStore()
+    bp = BlueprintStore().get("one_agent_smoke")
+    plan = instantiate_blueprint(bp, goal="smoke", bindings={"builder": "persona:dev"})
+    task = make_task_with_id("task_blueprint_smoke_tick")
+    task.mission_plan = plan
+    task.current_stage_id = plan.current_stage_id
+    ts.create(task)
+    runtime = BlueprintSmokeRuntime()
+    engine = TickEngine(
+        task_store=ts,
+        proof_store=proof_store,
+        persona_runtime=runtime,
+        proof_runner=PassingProofRunner(proof_store),
+    )
+
+    result = engine.run_until_settled(task_id=task.id, max_actions=2)
+
+    saved = ts.get(task.id)
+    assert result.stop_reason == "task_terminal"
+    assert saved.state == TaskState.DONE
+    assert runtime.personas == ["dev"]
+    assert saved.mission_plan.current_stage_id is None
+    assert saved.mission_plan.stage_attempts == {"build": 1}
+    assert saved.proof_ids
 
 
 def test_invalid_persona_output_opens_incident_and_routes_to_intervention():
@@ -738,7 +798,7 @@ def test_invalid_packet_contract_returns_repair_hud_inside_same_run():
     assert run.state == RunState.COMPLETED
     assert run.llm["validation_status"] == "valid"
     assert run.llm["schema_repair_attempts"] == 1
-    assert ts.get("task_1").state == TaskState.DEV_READY_FOR_QA
+    assert ts.get("task_1").state == TaskState.READY_FOR_VERIFICATION
     assert proof_store.get("proof_task_1_stage_1").metadata["status"] == "passed"
     assert not engine.incident_store.list_open()
     progress_events = [
@@ -776,7 +836,7 @@ def test_persona_runtime_raised_contract_error_returns_repair_hud_inside_same_ru
     assert run.llm["validation_status"] == "valid"
     assert run.llm["schema_repair_attempts"] == 1
     assert not incidents.list_open()
-    assert ts.get("task_1").state == TaskState.PM_READY_FOR_DEV
+    assert ts.get("task_1").state == TaskState.READY_FOR_IMPLEMENTATION
 
 
 def test_visual_screenshot_contract_repair_event_names_exact_invalid_field():
@@ -930,7 +990,7 @@ def test_duplicate_visual_request_repairs_to_verdict_instead_of_recapturing():
     assert run.llm["schema_repair_attempts"] == 1
     assert run.final_decision["type"] == "report_qa_verdict"
     saved = ts.get(task.id)
-    assert saved.state == TaskState.QA_APPROVED
+    assert saved.state == TaskState.VERIFIED
     assert saved.stages[0].status == StageStatus.PASSED
     assert [proof.id for proof in proof_store.list_for_task(task.id) if proof.type == ProofType.SCREENSHOT] == ["proof_screenshot"]
 
@@ -1086,7 +1146,7 @@ def test_dev_missing_proof_handoff_routes_to_neko_repair_instead_of_dead_skip():
     task = ts.get("task_1")
     assert task.state == TaskState.BLOCKED
     assert task.open_incident_ids == [engine.incident_store.list_open()[0].id]
-    assert engine.state_machine.next_action(task).type == HarnessActionType.RUN_NEKO_SUPERVISOR
+    assert engine.state_machine.next_action(task).type == HarnessActionType.RUN_SLOT
 
 
 def test_latest_session_id_ignores_invalid_failed_run_to_avoid_repeating_bad_handoff():
@@ -1124,7 +1184,7 @@ def test_transient_provider_ttfb_retries_once_and_records_attempt_visibility():
     assert res.actions_taken[0].ok
     assert runtime.calls == 2
     assert engine.incident_store.list_open() == []
-    assert ts.get("task_1").state == TaskState.PM_READY_FOR_DEV
+    assert ts.get("task_1").state == TaskState.READY_FOR_IMPLEMENTATION
     runs = sorted(engine.run_store.list_for_task("task_1"), key=lambda run: run.started_at)
     assert [run.state.value for run in runs] == ["failed", "completed"]
     assert runs[0].error["retryable"] is True
@@ -1292,10 +1352,10 @@ def test_tick_allows_new_run_after_existing_run_is_terminal():
     assert len(runs.list_for_task("task_1")) == 2
 
 
-def test_tick_deterministically_closes_qa_approved_mission_with_proof_without_persona_runtime():
+def test_tick_deterministically_closes_VERIFIED_mission_with_proof_without_persona_runtime():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.QA_APPROVED
+    task.state = TaskState.VERIFIED
     task.proof_ids = ["proof_test", "proof_qa"]
     ts.create(task)
 
@@ -1416,7 +1476,7 @@ class NekoNeedsContextRuntime:
 
 
 def test_neko_needs_context_blocks_instead_of_daemon_looping():
-    ts=TaskStore(); task=make_task(); task.state=TaskState.PM_READY_FOR_DEV
+    ts=TaskStore(); task=make_task(); task.state=TaskState.READY_FOR_IMPLEMENTATION
     task.context_requests = [
         {"id": "ctx_1", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
         {"id": "ctx_2", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
@@ -1430,7 +1490,8 @@ def test_neko_needs_context_blocks_instead_of_daemon_looping():
     second=engine.tick_once()
 
     assert first.actions_taken[0].ok
-    assert first.actions_taken[0].action.type.value == "run_neko_supervisor"
+    assert first.actions_taken[0].action.type.value == "run_slot"
+    assert first.actions_taken[0].action.slot_id == "neko_supervisor"
     assert runtime.personas[0].id == "neko_supervisor"
     assert ts.get("task_1").state == TaskState.BLOCKED
     assert second.actions_taken == []
@@ -1835,7 +1896,7 @@ def test_normal_worker_flow_auto_runs_final_gate_after_patch_delivery():
     assert runner.calls[0]["commands"] == ["flutter test test/features/mission_control/mission_control_page_test.dart"]
     assert runner.calls[0]["proof_intent"] == "auto_final_gate_after_delivery"
     stored = ts.get("task_1")
-    assert stored.state == TaskState.DEV_READY_FOR_QA
+    assert stored.state == TaskState.READY_FOR_VERIFICATION
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.proof_ids == ["proof_auto_task_1_mc_terminal_dm_bubble_rows"]
     proof = proofs.get(stored.proof_ids[0])
@@ -1897,7 +1958,7 @@ def test_normal_worker_flow_auto_runs_repo_default_final_gate_when_stage_test_pl
     assert runner.calls[0]["commands"] == [".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"]
     assert runner.calls[0]["proof_intent"] == "auto_final_gate_after_delivery"
     stored = ts.get("task_1")
-    assert stored.state == TaskState.DEV_READY_FOR_QA
+    assert stored.state == TaskState.READY_FOR_VERIFICATION
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.proof_ids == ["proof_auto_task_1_backend_implementation"]
 
@@ -1962,7 +2023,7 @@ def test_normal_worker_flow_reuses_existing_passed_final_gate_after_handoff_repa
     assert res.actions_taken[0].ok
     assert runner.calls == []
     stored = ts.get("task_1")
-    assert stored.state == TaskState.DEV_READY_FOR_QA
+    assert stored.state == TaskState.READY_FOR_VERIFICATION
     assert stored.proof_ids == ["proof_existing_passed"]
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     events = EventLog().for_task("task_1", limit=0)
@@ -2052,7 +2113,7 @@ def test_handoff_repair_with_existing_passed_proof_routes_to_qa_without_dev_run(
     assert res.actions_taken[0].ok
     assert res.actions_taken[0].summary == "handoff repair reused existing passed proof; routed to QA"
     stored = ts.get("task_1")
-    assert stored.state == TaskState.DEV_READY_FOR_QA
+    assert stored.state == TaskState.READY_FOR_VERIFICATION
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.mission_plan.stages[0].status == StageStatus.READY_FOR_QA
     events = EventLog().for_task("task_1", limit=0)
@@ -2098,9 +2159,9 @@ def test_normal_worker_flow_no_edit_investigation_delivery_advances_to_qa_withou
 
     assert res.actions_taken[0].ok
     stored = ts.get("task_1")
-    assert stored.state == TaskState.DEV_READY_FOR_QA
+    assert stored.state == TaskState.READY_FOR_VERIFICATION
     assert stored.mission_plan.stages[0].status == StageStatus.READY_FOR_QA
-    assert engine.state_machine.next_action(stored).type == HarnessActionType.RUN_QA
+    assert engine.state_machine.next_action(stored).type == HarnessActionType.RUN_SLOT
     assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "deliver_findings"
 
 
@@ -2118,10 +2179,10 @@ def test_run_until_settled_drives_neko_dev_qa_and_deterministic_complete():
     assert res.final_task_state == TaskState.DONE.value
     assert len(res.actions_taken) == 5
     assert [action.action.type for action in res.actions_taken] == [
-        HarnessActionType.RUN_NEKO_SUPERVISOR,
-        HarnessActionType.RUN_DEV,
-        HarnessActionType.RUN_NEKO_SUPERVISOR,
-        HarnessActionType.RUN_QA,
+        HarnessActionType.RUN_SLOT,
+        HarnessActionType.RUN_SLOT,
+        HarnessActionType.RUN_SLOT,
+        HarnessActionType.RUN_SLOT,
         HarnessActionType.COMPLETE_TASK,
     ]
     assert runtime.personas == ["neko_supervisor", "dev", "neko_supervisor", "qa"]
@@ -2140,7 +2201,7 @@ def test_backend_affected_repo_routes_run_dev_to_backend_dev():
     res = engine.tick_once(task_id="task_1")
 
     assert len(res.actions_taken) == 1
-    assert res.actions_taken[0].action.type == HarnessActionType.RUN_DEV
+    assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
     assert runtime.personas == ["backend_dev"]
 
 
@@ -2166,14 +2227,14 @@ def test_backend_stage_that_mentions_launcher_release_still_routes_to_backend_de
     res = engine.tick_once(task_id="task_1")
 
     assert len(res.actions_taken) == 1
-    assert res.actions_taken[0].action.type == HarnessActionType.RUN_DEV
+    assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
     assert runtime.personas == ["backend_dev"]
 
 
 def test_run_until_settled_blocks_orchestration_only_backend_plan_without_repeating():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.PM_READY_FOR_DEV
+    task.state = TaskState.READY_FOR_IMPLEMENTATION
     task.requested_by = "stage47_burn_in"
     task.affected_repos = ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
     task.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "bounded_complex_burn_in"]
@@ -2188,7 +2249,7 @@ def test_run_until_settled_blocks_orchestration_only_backend_plan_without_repeat
 
     assert res.stop_reason == "action_failed"
     assert len(res.actions_taken) == 1
-    assert res.actions_taken[0].action.type == HarnessActionType.RUN_DEV
+    assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
     assert runtime.personas == ["backend_dev"]
     assert saved.state == TaskState.BLOCKED
     assert len(incidents.list_open()) == 1
@@ -2198,7 +2259,7 @@ def test_run_until_settled_blocks_orchestration_only_backend_plan_without_repeat
 def test_latest_launcher_handoff_overrides_mixed_backend_affected_repos():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.PM_READY_FOR_DEV
+    task.state = TaskState.READY_FOR_IMPLEMENTATION
     task.current_stage_id = "stage_1"
     task.affected_repos = ["EterniaLauncher", "EterniaBackend", "hermes-agent"]
     ts.create(task)
@@ -2228,14 +2289,14 @@ def test_latest_launcher_handoff_overrides_mixed_backend_affected_repos():
     res = engine.tick_once(task_id="task_1")
 
     assert len(res.actions_taken) == 1
-    assert res.actions_taken[0].action.type == HarnessActionType.RUN_DEV
+    assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
     assert runtime.personas == ["dev"]
 
 
 def test_launcher_stage_identity_overrides_stale_unscoped_backend_handoff():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.PM_READY_FOR_DEV
+    task.state = TaskState.READY_FOR_IMPLEMENTATION
     task.current_stage_id = "launcher_contract_smoke"
     task.affected_repos = ["EterniaLauncher"]
     task.stages = [
@@ -2273,7 +2334,7 @@ def test_launcher_stage_identity_overrides_stale_unscoped_backend_handoff():
     res = engine.tick_once(task_id="task_1")
 
     assert len(res.actions_taken) == 1
-    assert res.actions_taken[0].action.type == HarnessActionType.RUN_DEV
+    assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
     assert runtime.personas == ["dev"]
 
 
@@ -2295,7 +2356,7 @@ def test_stale_approved_dev_continuation_does_not_override_backend_routing():
     res = engine.tick_once(task_id="task_1")
 
     assert len(res.actions_taken) == 1
-    assert res.actions_taken[0].action.type == HarnessActionType.RUN_DEV
+    assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
     assert runtime.personas == ["backend_dev"]
 
 
@@ -2324,7 +2385,7 @@ def test_matching_approved_backend_continuation_reuses_backend_session():
     res = engine.tick_once(task_id="task_1")
 
     assert len(res.actions_taken) == 1
-    assert res.actions_taken[0].action.type == HarnessActionType.RUN_DEV
+    assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
     assert runtime.seen_session_ids == [("backend_dev", "session_backend_dev")]
 
 
@@ -2392,7 +2453,7 @@ def test_run_until_settled_honors_max_actions_without_runaway_loop():
 
     assert res.stop_reason == "max_actions"
     assert len(res.actions_taken) == 1
-    assert ts.get("task_1").state == TaskState.PM_READY_FOR_DEV
+    assert ts.get("task_1").state == TaskState.READY_FOR_IMPLEMENTATION
 
 
 def test_run_until_settled_enforces_max_actions_even_when_tick_config_allows_more():
@@ -2406,7 +2467,7 @@ def test_run_until_settled_enforces_max_actions_even_when_tick_config_allows_mor
 
     assert res.stop_reason == "max_actions"
     assert len(res.actions_taken) == 1
-    assert ts.get("task_a").state == TaskState.PM_READY_FOR_DEV
+    assert ts.get("task_a").state == TaskState.READY_FOR_IMPLEMENTATION
     assert ts.get("task_b").state == TaskState.CREATED
 
 
@@ -2521,7 +2582,7 @@ def test_tick_collects_command_proof_for_request_test_run(tmp_path):
 
     assert res.actions_taken[0].ok
     saved = ts.get("task_1")
-    assert saved.state == TaskState.DEV_READY_FOR_QA
+    assert saved.state == TaskState.READY_FOR_VERIFICATION
     assert len(saved.proof_ids) == 1
     assert saved.stages[0].status == StageStatus.READY_FOR_QA
     proof = engine.proof_store.get(saved.proof_ids[0])
@@ -2890,7 +2951,7 @@ def test_bridge_archive_stage_request_qa_review_rejects_wrong_existing_page_proo
     assert res.actions_taken[0].payload["decision"] == "request_test_run"
     assert runtime.calls == 2
     saved = ts.get("task_bridge_wrong_qa_handoff")
-    assert saved.state == TaskState.DEV_READY_FOR_QA
+    assert saved.state == TaskState.READY_FOR_VERIFICATION
     assert saved.current_stage_id == "stage_bridge_archive_regression"
     assert saved.stages[0].status == StageStatus.READY_FOR_QA
     assert saved.proof_ids == ["proof_page_bridge", "proof_wrong_stage_command"]
@@ -3198,7 +3259,7 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_path_like_alias
 def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_implementation_qa(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.PM_READY_FOR_DEV
+    task.state = TaskState.READY_FOR_IMPLEMENTATION
     task.acceptance_criteria = ["smoke-ok proof exists"]
     ts.create(task)
     runtime = RequestTestThenHandoffRuntime()
@@ -3209,14 +3270,14 @@ def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_impleme
     after_proof = ts.get("task_1")
 
     assert first.actions_taken[0].ok
-    assert after_proof.state == TaskState.DEV_READY_FOR_QA
+    assert after_proof.state == TaskState.READY_FOR_VERIFICATION
     assert after_proof.current_stage_id == "stage_1"
     assert [stage.id for stage in after_proof.stages] == ["stage_1"]
     assert after_proof.stages[0].test_plan == ["printf 'smoke-ok\\n'"]
     assert after_proof.stages[0].status == StageStatus.READY_FOR_QA
     assert len(after_proof.proof_ids) == 1
     assert runtime.calls == 1
-    assert engine.state_machine.next_action(after_proof).type == HarnessActionType.RUN_NEKO_SUPERVISOR
+    assert engine.state_machine.next_action(after_proof).type == HarnessActionType.RUN_SLOT
 
 
 class FailingRequestTestRunRuntime:
@@ -3349,7 +3410,7 @@ def test_request_test_run_failed_proof_stays_in_dev_for_fix_pass(tmp_path):
     assert saved.proof_ids == [failed_proofs[0].id]
     stage_state = saved.harness_self_heal["stages"]["stage_1"]
     assert stage_state["last_failed_proof_ids"] == [failed_proofs[0].id]
-    assert engine.state_machine.next_action(saved).type == HarnessActionType.RUN_DEV
+    assert engine.state_machine.next_action(saved).type == HarnessActionType.RUN_SLOT
 
 
 def test_failed_command_proof_is_retry_context_and_clears_after_pass(tmp_path):
@@ -3372,7 +3433,7 @@ def test_failed_command_proof_is_retry_context_and_clears_after_pass(tmp_path):
     assert len(runtime.contexts[1].proof_ids) == 1
     assert runtime.contexts[1].proof_ids[0] == after_failure.proof_ids[0]
     assert runtime.contexts[1].autonomy_packet["failed_proof_ids"] == [after_failure.proof_ids[0]]
-    assert saved.state == TaskState.DEV_READY_FOR_QA
+    assert saved.state == TaskState.READY_FOR_VERIFICATION
     assert len(saved.proof_ids) == 2
     assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "passed"]
     assert "last_failed_proof_ids" not in saved.harness_self_heal["stages"]["stage_1"]
@@ -3396,7 +3457,7 @@ def test_failed_command_proof_retry_auto_attaches_context_when_model_omits_id(tm
     assert first.actions_taken[0].ok
     assert second.actions_taken[0].ok
     assert runtime.contexts[1].autonomy_packet["failed_proof_ids"] == [after_failure.proof_ids[0]]
-    assert saved.state == TaskState.DEV_READY_FOR_QA
+    assert saved.state == TaskState.READY_FOR_VERIFICATION
     assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "passed"]
     events = [event for event in EventLog().for_task("task_1", limit=50) if event.payload.get("step") == "failed_proof_auto_attached"]
     assert events
@@ -3421,7 +3482,7 @@ def test_second_same_stage_failed_command_proof_routes_to_neko(tmp_path):
     assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "failed"]
     assert saved.harness_self_heal["stages"]["stage_1"]["counters"]["same_stage_retry_count"] == 1
     next_action = engine.state_machine.next_action(saved)
-    assert next_action.type == HarnessActionType.RUN_NEKO_SUPERVISOR
+    assert next_action.type == HarnessActionType.RUN_SLOT
     assert "self-heal" in next_action.reason
 
 
@@ -3446,7 +3507,7 @@ def test_dev_block_after_failed_proof_routes_to_neko_self_heal(tmp_path):
     events = [event for event in EventLog().for_task("task_1", limit=50) if event.payload.get("step") == "failed_proof_block_recorded"]
     assert events
     next_action = engine.state_machine.next_action(saved)
-    assert next_action.type == HarnessActionType.RUN_NEKO_SUPERVISOR
+    assert next_action.type == HarnessActionType.RUN_SLOT
     assert "self-heal" in next_action.reason
 
 
@@ -3589,7 +3650,7 @@ def test_followup_neko_mission_lead_steering_reuses_previous_neko_session():
 def test_followup_qa_and_neko_steering_reuse_prior_persona_sessions():
     ts = TaskStore()
     qa_task = make_task_with_id("task_qa")
-    qa_task.state = TaskState.DEV_READY_FOR_QA
+    qa_task.state = TaskState.READY_FOR_VERIFICATION
     qa_task.current_stage_id = "stage_1"
     qa_task.risk_flags = ["neko_qa_coordination_released"]
     ts.create(qa_task)
@@ -3726,8 +3787,8 @@ def test_run_until_settled_continues_to_neko_for_budget_approval_incident():
     )
 
     assert [action.action.type for action in result.actions_taken] == [
-        HarnessActionType.RUN_DEV,
-        HarnessActionType.RUN_NEKO_SUPERVISOR,
+        HarnessActionType.RUN_SLOT,
+        HarnessActionType.RUN_SLOT,
     ]
     assert runtime.seen == ["backend_dev", "neko_supervisor"]
     assert result.stop_reason == "max_actions"
@@ -3777,7 +3838,7 @@ def _assert_budget_approval_continues_same_session(neko_runtime, *, clear_task_i
 
     approval = TickEngine(task_store=ts, run_store=runs, incident_store=incidents, persona_runtime=neko_runtime).tick_once(task_id="task_1")
     assert approval.actions_taken[0].ok
-    assert approval.actions_taken[0].action.type == HarnessActionType.RUN_NEKO_SUPERVISOR
+    assert approval.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
     assert neko_runtime.seen[0][0] == "neko_supervisor"
     approved_run = runs.get(waiting_run.id)
     assert approved_run.progress["approved_for_continuation"] is True
@@ -3787,7 +3848,7 @@ def _assert_budget_approval_continues_same_session(neko_runtime, *, clear_task_i
     continuation_runtime = InspectContinuationSessionRuntime()
     retry = TickEngine(task_store=ts, run_store=runs, incident_store=incidents, persona_runtime=continuation_runtime).tick_once(task_id="task_1")
     assert retry.actions_taken[0].ok
-    assert retry.actions_taken[0].action.type == HarnessActionType.RUN_DEV
+    assert retry.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
     assert continuation_runtime.seen_session_ids == [("dev", "session_budget")]
 
 
@@ -4059,10 +4120,11 @@ def test_blocked_qa_verdict_without_incident_routes_dev_recovery_instead_of_skip
 
     assert res.skipped == []
     assert res.actions_taken[0].ok
-    assert res.actions_taken[0].action.type.value == "run_dev"
+    assert res.actions_taken[0].action.type.value == "run_slot"
+    assert res.actions_taken[0].action.slot_id == "dev"
     assert runtime.personas[0].id == "dev"
     saved = ts.get("task_1")
-    assert saved.state == TaskState.DEV_READY_FOR_QA
+    assert saved.state == TaskState.READY_FOR_VERIFICATION
     assert len(saved.proof_ids) == 2
     assert proof_store.get(saved.proof_ids[-1]).metadata["status"] == "passed"
 

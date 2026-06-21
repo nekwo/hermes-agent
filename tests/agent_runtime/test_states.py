@@ -5,7 +5,7 @@ def test_task_state_values_are_workflow_positional():
     assert TaskState.CREATED == "created"
     assert TaskState.PM_TRIAGE == "pm_triage"
     assert TaskState.DEV_IMPLEMENTING == "dev_implementing"
-    assert TaskState.QA_APPROVED == "qa_approved"
+    assert TaskState.VERIFIED == "qa_approved"
     assert TaskState.DONE == "done"
 
 

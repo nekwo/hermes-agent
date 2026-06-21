@@ -14,6 +14,7 @@ from hermes_time import now
 
 from .actions import HarnessAction, HarnessActionResult, HarnessActionType
 from .autonomy import record_autonomy_packet
+from .blueprints.routing import apply_decision_outcome, is_blueprint_plan
 from .budget_approval import budget_incident_needs_scope_recovery, eligible_budget_approval_incidents
 from .config import configured_personas, load_agent_runtime_config
 from .locks import HarnessLockUnavailable, tick_lock
@@ -139,14 +140,15 @@ class TickEngine:
                 )
                 if budget_approval_incidents:
                     action = HarnessAction(
-                        HarnessActionType.RUN_NEKO_SUPERVISOR,
+                        HarnessActionType.RUN_SLOT,
                         task.id,
                         reason="needs Neko approval to continue budget-limited Dev run",
+                        slot_id="neko_supervisor",
                     )
                 else:
                     action = self.state_machine.next_action(task)
                 if task.id in open_incidents_by_task and not (
-                    action.type == HarnessActionType.RUN_NEKO_SUPERVISOR
+                    _action_targets(action, "neko_supervisor")
                     and (task.state == TaskState.BLOCKED or budget_approval_incidents or getattr(task, "open_incident_ids", None))
                 ):
                     result.skipped.append(task.id)
@@ -157,7 +159,7 @@ class TickEngine:
                 if action.type == HarnessActionType.NOOP:
                     result.skipped.append(task.id)
                     continue
-                persona_id = _persona_id_for_action(action.type, task=task, config=self.config, run_store=self.run_store)
+                persona_id = _persona_id_for_harness_action(action, task=task, config=self.config, run_store=self.run_store)
                 if persona_id and self.run_store.find_active(task_id=task.id, persona_id=persona_id, stage_id=task.current_stage_id):
                     result.skipped.append(task.id)
                     continue
@@ -172,7 +174,7 @@ class TickEngine:
                     result.actions_taken.append(HarnessActionResult(action, True, action.reason, payload))
                     continue
                 if (
-                    action.type == HarnessActionType.RUN_NEKO_SUPERVISOR
+                    _action_targets(action, "neko_supervisor")
                     and not getattr(task, "open_incident_ids", None)
                     and (
                         task.state == TaskState.BLOCKED
@@ -259,7 +261,7 @@ class TickEngine:
                     if budget_approval_incidents or budget_scope_recovery_incidents:
                         return None
                     action = self.state_machine.next_action(task)
-                    if action.type == HarnessActionType.RUN_NEKO_SUPERVISOR and (
+                    if _action_targets(action, "neko_supervisor") and (
                         task.state == TaskState.BLOCKED or getattr(task, "open_incident_ids", None)
                     ):
                         return None
@@ -385,7 +387,7 @@ class TickEngine:
     def _execute_action(self, action: HarnessAction, task: Task) -> HarnessActionResult:
         if self.persona_runtime is None:
             return HarnessActionResult(action, False, "no persona runtime configured")
-        if action.type == HarnessActionType.RUN_DEV:
+        if _action_targets(action, "dev", "backend_dev"):
             handoff_recovery = _recover_handoff_repair_with_existing_proof(task, proof_store=self.proof_store)
             if handoff_recovery:
                 self.task_store.update(task, actor="harness", reason="deterministic handoff repair proof reuse")
@@ -410,7 +412,7 @@ class TickEngine:
                     )
                 )
                 return HarnessActionResult(action, True, "handoff repair reused existing passed proof; routed to QA", handoff_recovery)
-        persona_id = _persona_id_for_action(action.type, task=task, config=self.config, run_store=self.run_store)
+        persona_id = _persona_id_for_harness_action(action, task=task, config=self.config, run_store=self.run_store)
         persona = _get_persona(self.agent_store, persona_id, self.config)
         worker_store = self.worker_session_store if _enterprise_worker_sessions_enabled(self.config) else None
         assignment = None
@@ -431,7 +433,7 @@ class TickEngine:
                     self.repo_bundle_store.attach_assignment(repo_bundle, assignment.id)
             else:
                 repo_bundle = self.repo_bundle_store.find_for_assignment(assignment)
-            if action.type == HarnessActionType.RUN_DEV and repo_bundle is not None and repo_bundle.state == "queued_waiting_dependency":
+            if _action_targets(action, "dev", "backend_dev") and repo_bundle is not None and repo_bundle.state == "queued_waiting_dependency":
                 # Re-check the dependency at the scheduling gate. Bundles
                 # re-projected after their dependency already delivered are born
                 # queued, and the decision-time wake never fires again for them
@@ -439,7 +441,7 @@ class TickEngine:
                 # behind an already-delivered backend bundle for 48 actions).
                 self.repo_bundle_store.wake_ready_dependencies(task.id)
                 repo_bundle = self.repo_bundle_store.get(task.id, repo_bundle.id)
-            if action.type == HarnessActionType.RUN_DEV and repo_bundle is not None and repo_bundle.state == "queued_waiting_dependency":
+            if _action_targets(action, "dev", "backend_dev") and repo_bundle is not None and repo_bundle.state == "queued_waiting_dependency":
                 return HarnessActionResult(
                     action,
                     True,
@@ -451,7 +453,7 @@ class TickEngine:
                         "wake_condition": repo_bundle.wake_condition,
                     },
                 )
-            if action.type == HarnessActionType.RUN_QA:
+            if _action_targets(action, "qa"):
                 waiting_on = qa_waiting_on(self.repo_bundle_store.list_for_task(task.id))
                 if waiting_on:
                     return HarnessActionResult(
@@ -464,7 +466,7 @@ class TickEngine:
                         },
                     )
         preflight = None
-        if action.type in {HarnessActionType.RUN_DEV, HarnessActionType.RUN_QA} and _is_live_persona_runtime(self.persona_runtime):
+        if _action_targets(action, "dev", "backend_dev", "qa") and _is_live_persona_runtime(self.persona_runtime):
             self._record_preflight_started(task, persona.id)
             preflight = run_preflight(task, stage=_current_stage(task), persona_target=persona.id)
         if preflight is not None and not preflight.ok:
@@ -771,6 +773,19 @@ class TickEngine:
                             proof_ids,
                             proof_store=self.proof_store,
                         )
+                        proof_records = []
+                        for proof_id in proof_ids:
+                            try:
+                                proof_records.append(self.proof_store.get(proof_id))
+                            except Exception:
+                                continue
+                        apply_decision_outcome(
+                            task,
+                            decision,
+                            stage_id=str(decision.payload.get("stage_id") or task.current_stage_id or "").strip() or None,
+                            proofs=proof_records,
+                            reason=decision.summary,
+                        )
                         _record_command_proof_self_heal(
                             task,
                             proof_ids,
@@ -779,14 +794,15 @@ class TickEngine:
                             actor=persona.id,
                             run_id=run.id,
                         )
-                        handoff_applied = _apply_deterministic_proof_handoff(
-                            task,
-                            proof_ids,
-                            decision,
-                            proof_store=self.proof_store,
-                            actor=persona.id,
-                            run_id=run.id,
-                        )
+                        if not is_blueprint_plan(getattr(task, "mission_plan", None)):
+                            handoff_applied = _apply_deterministic_proof_handoff(
+                                task,
+                                proof_ids,
+                                decision,
+                                proof_store=self.proof_store,
+                                actor=persona.id,
+                                run_id=run.id,
+                            )
                         if handoff_applied:
                             task.proof_ids = _dedupe(task.proof_ids, proof_ids)
                         task.updated_at = now()
@@ -910,7 +926,7 @@ class TickEngine:
                         worker_store.update_after_run(worker.id, run, proof_ids_added=proof_ids)
                     refreshed_task = self.task_store.get(task.id)
                     next_action = self.state_machine.next_action(refreshed_task)
-                    next_persona_id = _persona_id_for_action(next_action.type, task=refreshed_task, config=self.config, run_store=self.run_store)
+                    next_persona_id = _persona_id_for_harness_action(next_action, task=refreshed_task, config=self.config, run_store=self.run_store)
                     open_incidents = [incident for incident in self.incident_store.list_open() if incident.task_id == task.id]
                     if envelope is not None:
                         eval_config = observe_enabled_config(role_config) if role_config.observe_only else role_config
@@ -1333,7 +1349,7 @@ def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id
         proof_targets=proof_targets,
         acceptance=list(getattr(stage, "acceptance_criteria", None) or getattr(task, "acceptance_criteria", None) or []),
         non_goals=list(getattr(task, "non_goals", None) or []),
-        allowed_decisions=_allowed_decisions_for_action(action.type),
+        allowed_decisions=_allowed_decisions_for_action(action),
     )
 
 
@@ -1351,8 +1367,8 @@ def _repo_bundle_routing_enabled(config: RuntimeConfig) -> bool:
 def _repo_bundle_for_action(config: RuntimeConfig, store: RepoBundleStore, action: HarnessAction, task: Task, *, persona_id: str):
     if not _repo_bundle_routing_enabled(config):
         return None
-    if action.type not in {HarnessActionType.RUN_DEV, HarnessActionType.RUN_QA}:
-        if action.type == HarnessActionType.RUN_NEKO_SUPERVISOR:
+    if not _action_targets(action, "dev", "backend_dev", "qa"):
+        if _action_targets(action, "neko_supervisor"):
             store.create_or_update_from_task(task)
         return None
     stage = _current_stage(task)
@@ -1410,12 +1426,12 @@ def _mark_repo_bundle_after_decision(config: RuntimeConfig, store: RepoBundleSto
         store.mark_rejected(bundle, reason=getattr(decision, "summary", "") or "Agent reported blocker")
 
 
-def _allowed_decisions_for_action(action_type: HarnessActionType) -> list[str]:
-    if action_type == HarnessActionType.RUN_NEKO_SUPERVISOR:
+def _allowed_decisions_for_action(action: HarnessAction) -> list[str]:
+    if _action_targets(action, "neko_supervisor"):
         return ["propose_acceptance", "handoff_to_dev", "request_context", "block"]
-    if action_type == HarnessActionType.RUN_DEV:
+    if _action_targets(action, "dev", "backend_dev"):
         return ["deliver", "request_test_run", "request_screenshot", "request_video", "report_blocker", "handoff"]
-    if action_type == HarnessActionType.RUN_QA:
+    if _action_targets(action, "qa"):
         return ["report_qa_verdict", "request_test_run", "request_screenshot", "request_video", "block"]
     return []
 
@@ -1583,7 +1599,7 @@ def _recover_handoff_repair_with_existing_proof(task: Task, *, proof_store: Proo
             break
     _sync_typed_plan_stage_status(task, stage_id, StageStatus.READY_FOR_QA)
     task.proof_ids = _dedupe(list(getattr(task, "proof_ids", None) or []), proof_ids)
-    task.state = TaskState.DEV_READY_FOR_QA
+    task.state = TaskState.READY_FOR_VERIFICATION
     task.updated_at = now()
     return {"stage_id": stage_id, "proof_ids": proof_ids, "next_state": task.state.value}
 
@@ -2107,13 +2123,13 @@ def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decisio
     ]
     if not _all_stages_dev_complete(task):
         if _needs_sequential_specialist_join(task):
-            task.state = TaskState.DEV_READY_FOR_QA
+            task.state = TaskState.READY_FOR_VERIFICATION
         else:
             _advance_to_next_dev_stage(task)
             task.state = TaskState.DEV_IMPLEMENTING
     else:
-        task.state = TaskState.DEV_READY_FOR_QA
-    waits_for_launcher_join = task.state == TaskState.DEV_READY_FOR_QA and _needs_cross_stack_launcher_completion(task, proof_store=proof_store)
+        task.state = TaskState.READY_FOR_VERIFICATION
+    waits_for_launcher_join = task.state == TaskState.READY_FOR_VERIFICATION and _needs_cross_stack_launcher_completion(task, proof_store=proof_store)
     contract_packet_id = None
     if waits_for_launcher_join:
         contract_packet_id = _ensure_backend_contract_packet_for_handoff(
@@ -2127,7 +2143,7 @@ def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decisio
         handoff_status = "backend_join_ready"
         handoff_summary = "Passing backend command proof attached; routed to Neko for Launcher join release without another Backend Dev tick."
         next_expected = "neko_cross_stack_launcher_release"
-    elif task.state == TaskState.DEV_READY_FOR_QA:
+    elif task.state == TaskState.READY_FOR_VERIFICATION:
         handoff_status = "ready_for_qa"
         handoff_summary = "Passing command proof attached; routed to QA without another Dev model tick."
         next_expected = "qa_verification"
@@ -2898,14 +2914,27 @@ def choose_next_action(task: Task) -> HarnessAction:
     return MissionStateMachine().next_action(task)
 
 
+def _persona_id_for_harness_action(action: HarnessAction, *, task: Task | None = None, config: RuntimeConfig | None = None, run_store: RunStore | None = None) -> str | None:
+    if action.type == HarnessActionType.RUN_SLOT:
+        slot_id = str(action.slot_id or "").strip()
+        plan = getattr(task, "mission_plan", None) if task is not None else None
+        bindings = getattr(plan, "bindings", None) if plan is not None else None
+        if isinstance(bindings, dict) and slot_id:
+            resolved = str(bindings.get(slot_id) or "").strip()
+            if resolved:
+                return resolved
+        if slot_id == "dev":
+            return _dev_persona_id_for_task(task, config=config, run_store=run_store)
+        return slot_id or None
+    return None
+
+
 def _persona_id_for_action(action_type: HarnessActionType, *, task: Task | None = None, config: RuntimeConfig | None = None, run_store: RunStore | None = None) -> str | None:
-    if action_type == HarnessActionType.RUN_DEV:
-        return _dev_persona_id_for_task(task, config=config, run_store=run_store)
-    return {
-        HarnessActionType.RUN_PM: "pm",
-        HarnessActionType.RUN_QA: "qa",
-        HarnessActionType.RUN_NEKO_SUPERVISOR: "neko_supervisor",
-    }.get(action_type)
+    return None
+
+
+def _action_targets(action: HarnessAction, *slot_ids: str) -> bool:
+    return action.type == HarnessActionType.RUN_SLOT and str(action.slot_id or "").strip() in set(slot_ids)
 
 
 def _dev_persona_id_for_task(task: Task | None, *, config: RuntimeConfig | None = None, run_store: RunStore | None = None) -> str:

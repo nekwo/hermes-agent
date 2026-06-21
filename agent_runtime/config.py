@@ -134,7 +134,12 @@ def configured_personas(cfg: AgentRuntimeConfig | None = None):
             p.toolsets = validate_toolsets(AgentRole(p.role), list(overrides["toolsets"]))
     supervisor = personas.get("neko_supervisor")
     if supervisor is not None:
-        supervisor.hermes_profile = _effective_supervisor_profile(supervisor.hermes_profile, head_profile)
+        explicit_supervisor = _explicit_supervisor_profile_override(cfg)
+        supervisor.hermes_profile = _effective_supervisor_profile(
+            supervisor.hermes_profile,
+            head_profile,
+            fallback_legacy_alice=not explicit_supervisor or bool(str(getattr(cfg, "head_agent_profile", "") or "").strip()),
+        )
     for persona in personas.values():
         _ensure_stage46_required_skills(persona)
     return list(personas.values())
@@ -145,7 +150,15 @@ def _head_agent_profile(cfg: AgentRuntimeConfig) -> str:
     return configured or active_profile_name()
 
 
-def _effective_supervisor_profile(configured_profile: str | None, head_profile: str) -> str:
+def _explicit_supervisor_profile_override(cfg: AgentRuntimeConfig) -> bool:
+    for key in ("neko_supervisor", "alice_supervisor"):
+        raw = cfg.personas.get(key) if isinstance(getattr(cfg, "personas", None), dict) else None
+        if isinstance(raw, dict) and "hermes_profile" in raw:
+            return True
+    return False
+
+
+def _effective_supervisor_profile(configured_profile: str | None, head_profile: str, *, fallback_legacy_alice: bool = True) -> str:
     """Resolve Neko/head supervisor profile without hard-coding Alice.
 
     Existing Tony configs may still say ``alice`` from the Windows runtime.  If
@@ -156,7 +169,7 @@ def _effective_supervisor_profile(configured_profile: str | None, head_profile: 
     value = str(configured_profile or "").strip()
     if not value:
         return head_profile
-    if value == "alice" and not profile_exists("alice"):
+    if fallback_legacy_alice and value == "alice" and not profile_exists("alice"):
         return head_profile
     return value
 

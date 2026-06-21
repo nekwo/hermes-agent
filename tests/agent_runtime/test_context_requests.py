@@ -13,7 +13,7 @@ from agent_runtime.states import RunState, TaskState
 
 def _task():
     ts = now()
-    return Task(id="task_ctx", title="T", description="d", state=TaskState.PM_READY_FOR_DEV, created_at=ts, updated_at=ts, requested_by="tony")
+    return Task(id="task_ctx", title="T", description="d", state=TaskState.READY_FOR_IMPLEMENTATION, created_at=ts, updated_at=ts, requested_by="tony")
 
 
 def _run(task):
@@ -47,7 +47,7 @@ def test_context_request_rejects_unsafe_or_missing_path_without_freezing_schedul
 
     assert req["status"] == "unsupported"
     assert has_unresolved_context_request(task) is False
-    assert action.type.value == "run_dev"
+    assert action.type.value == "run_slot"
     assert action.reason == "needs dev planning"
     assert ctx.mission_hud["terminal_feedback"]["action_result"] == "context_unavailable"
     assert ctx.mission_hud["terminal_feedback"]["failure_reason"] == "path_outside_runtime_root_or_absolute_disallowed"
@@ -199,7 +199,7 @@ def test_duplicate_context_request_is_superseded_and_not_rescheduled(tmp_path):
     assert duplicate["status"] == "superseded"
     assert duplicate["failure_reason"] == "duplicate_context_request"
     assert has_unresolved_context_request(task) is False
-    assert action.type.value == "run_dev"
+    assert action.type.value == "run_slot"
 
 
 def test_context_request_duplicate_fingerprint_includes_repo_scope(tmp_path):
@@ -267,5 +267,5 @@ def test_initial_scope_context_requests_still_route_to_neko(tmp_path):
 
     action = MissionStateMachine().next_action(task)
 
-    assert action.type.value == "run_neko_supervisor"
+    assert action.type.value == "run_slot"
     assert action.reason == "needs Neko Mission Lead scoping"
