@@ -281,6 +281,77 @@ def test_blueprint_cli_non_dry_run_creates_persisted_task(tmp_path):
     assert task_data["mission_plan"]["current_stage_id"] == "build"
 
 
+def test_resolver_finds_existing_persona_for_profile_binding():
+    from agent_runtime.blueprints.resolve import BindingResolver
+    from agent_runtime.models import AgentPersona
+
+    wrapper = AgentPersona(
+        id="launcher_dev",
+        display_name="Launcher Dev",
+        role="dev",
+        model="m",
+        provider="p",
+        api_mode="a",
+        toolsets=[],
+        system_prompt_path="personas/dev/system.md",
+        hermes_profile="gpt-launcher",
+    )
+    resolver = BindingResolver(
+        configured=[wrapper],
+        profile_exists=lambda name: name == "gpt-launcher",
+    )
+    # profile binding resolves to the persona that already wraps the profile
+    assert resolver.resolve("profile:gpt-launcher", slot_role="builder") == "launcher_dev"
+    # direct persona binding resolves to itself
+    assert resolver.resolve("persona:launcher_dev", slot_role="builder") == "launcher_dev"
+
+
+def test_resolver_promotes_unwrapped_profile_into_persisted_persona(tmp_path, monkeypatch):
+    from agent_runtime.blueprints.resolve import BindingResolver
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.store import AgentStore
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    store = AgentStore()
+    dev_template = AgentPersona(
+        id="dev",
+        display_name="Dev",
+        role="dev",
+        model="m",
+        provider="p",
+        api_mode="a",
+        toolsets=[],
+        system_prompt_path="personas/dev/system.md",
+    )
+    resolver = BindingResolver(
+        agent_store=store,
+        configured=[dev_template],
+        profile_exists=lambda name: name == "fresh-profile",
+    )
+
+    persona_id = resolver.resolve("profile:fresh-profile", slot_role="builder")
+    promoted = store.get(persona_id)
+    assert promoted.hermes_profile == "fresh-profile"
+    assert promoted.role == "dev"
+    # find-only mode refuses to promote
+    find_only = BindingResolver(
+        agent_store=AgentStore(),
+        configured=[dev_template],
+        profile_exists=lambda name: name == "other-profile",
+        allow_promote=False,
+    )
+    with pytest.raises(ValueError, match="has no persona"):
+        find_only.resolve("profile:other-profile", slot_role="builder")
+
+
+def test_resolver_rejects_unknown_persona_binding():
+    from agent_runtime.blueprints.resolve import BindingResolver
+
+    resolver = BindingResolver(configured=[], profile_exists=lambda name: False)
+    with pytest.raises(ValueError, match="does not exist"):
+        resolver.resolve("persona:ghost", slot_role="builder")
+
+
 def _blueprint_task(blueprint_id: str, *, bindings: dict[str, str] | None = None) -> Task:
     bp = BlueprintStore().get(blueprint_id)
     bindings = bindings or {"builder": "persona:dev", "verifier": "persona:qa"}

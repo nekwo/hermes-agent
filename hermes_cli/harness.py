@@ -537,10 +537,15 @@ def _cmd_blueprint_run(args) -> int:
     from agent_runtime.mission_plan import mission_plan_summary
     from agent_runtime.state_machine import MissionStateMachine
 
+    from agent_runtime.blueprints.resolve import BindingResolver
+
     try:
         bp = BlueprintStore().get(args.blueprint)
         bindings = _parse_blueprint_bindings(args.bind or [])
-        plan = instantiate_blueprint(bp, goal=args.goal, bindings=bindings)
+        # Dry-run resolves find-only (no persona promotion / no writes); a real run
+        # may promote a bare profile into a persisted persona.
+        resolver = BindingResolver(allow_promote=not args.dry_run)
+        plan = instantiate_blueprint(bp, goal=args.goal, bindings=bindings, resolver=resolver)
     except Exception as exc:
         data = {"ok": False, "error": str(exc)}
         print(emit_json(data) if args.json else data["error"])
