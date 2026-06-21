@@ -85,6 +85,24 @@ def build_parser(parent_subparsers) -> None:
     goal_run.add_argument("--json", action="store_true")
     goal_run.set_defaults(func=_cmd_goal_run)
 
+    blueprint = subs.add_parser("blueprint", help="Validate and run Agent Runtime blueprints headlessly")
+    blueprint_subs = blueprint.add_subparsers(dest="blueprint_command", required=True)
+    blueprint_list = blueprint_subs.add_parser("list", help="List bundled Agent Runtime blueprints")
+    blueprint_list.add_argument("--json", action="store_true")
+    blueprint_list.set_defaults(func=_cmd_blueprint_list)
+    blueprint_validate = blueprint_subs.add_parser("validate", help="Validate one Agent Runtime blueprint by id or path")
+    blueprint_validate.add_argument("blueprint")
+    blueprint_validate.add_argument("--json", action="store_true")
+    blueprint_validate.set_defaults(func=_cmd_blueprint_validate)
+    blueprint_run = blueprint_subs.add_parser("run", help="Instantiate a blueprint; --dry-run validates without executing agents")
+    blueprint_run.add_argument("blueprint")
+    blueprint_run.add_argument("--goal", required=True)
+    blueprint_run.add_argument("--bind", action="append", default=[], help="Bind a slot, e.g. builder=persona:dev or builder=profile:gpt-launcher")
+    blueprint_run.add_argument("--dry-run", action="store_true")
+    blueprint_run.add_argument("--requested-by", default="cli")
+    blueprint_run.add_argument("--json", action="store_true")
+    blueprint_run.set_defaults(func=_cmd_blueprint_run)
+
     task = subs.add_parser("task", help="Manage harness tasks")
     task_subs = task.add_subparsers(dest="task_command")
     create = task_subs.add_parser("create", help="Create a harness task")
@@ -477,6 +495,105 @@ def build_parser(parent_subparsers) -> None:
 def harness_command(args) -> int:
     print("Use `hermes harness --help`.")
     return 0
+
+
+def _cmd_blueprint_list(args) -> int:
+    from agent_runtime.blueprints.store import BlueprintStore, blueprint_summary
+
+    items = [blueprint_summary(bp) for bp in BlueprintStore().list()]
+    data = {"ok": True, "blueprints": items}
+    if args.json:
+        print(emit_json(data))
+    else:
+        for bp in items:
+            print(f"{bp['id']} v{bp['version']}: {bp['title']}")
+    return 0
+
+
+def _cmd_blueprint_validate(args) -> int:
+    from agent_runtime.blueprints.schema import validate_blueprint
+    from agent_runtime.blueprints.store import BlueprintStore, blueprint_summary
+
+    try:
+        bp = BlueprintStore().get(args.blueprint)
+        errors = validate_blueprint(bp)
+    except Exception as exc:
+        data = {"ok": False, "error": str(exc)}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    data = {"ok": not errors, "errors": errors, "blueprint": blueprint_summary(bp)}
+    if args.json:
+        print(emit_json(data))
+    else:
+        print(f"blueprint {bp.id}: {'valid' if not errors else 'invalid'}")
+        for error in errors:
+            print(f"- {error}")
+    return 0 if not errors else 2
+
+
+def _cmd_blueprint_run(args) -> int:
+    from agent_runtime.blueprints.instantiate import instantiate_blueprint
+    from agent_runtime.blueprints.store import BlueprintStore
+    from agent_runtime.mission_plan import mission_plan_summary
+    from agent_runtime.state_machine import MissionStateMachine
+
+    try:
+        bp = BlueprintStore().get(args.blueprint)
+        bindings = _parse_blueprint_bindings(args.bind or [])
+        plan = instantiate_blueprint(bp, goal=args.goal, bindings=bindings)
+    except Exception as exc:
+        data = {"ok": False, "error": str(exc)}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    task = Task(
+        id=f"task_blueprint_{uuid.uuid4().hex[:12]}",
+        title=bp.title,
+        description=args.goal,
+        state=TaskState.CREATED,
+        created_at=now(),
+        updated_at=now(),
+        requested_by=args.requested_by,
+        mission_plan=plan,
+        current_stage_id=plan.current_stage_id,
+    )
+    action = MissionStateMachine().next_action(task)
+    data = {
+        "ok": True,
+        "dry_run": bool(args.dry_run),
+        "blueprint_id": bp.id,
+        "blueprint_version": bp.version,
+        "task_id": task.id,
+        "mission_plan": mission_plan_summary(task),
+        "next_action": {
+            "type": action.type.value,
+            "task_id": action.task_id,
+            "slot_id": action.slot_id,
+            "reason": action.reason,
+        },
+    }
+    if not args.dry_run:
+        TaskStore().create(task)
+        data["created"] = True
+    if args.json:
+        print(emit_json(data))
+    else:
+        prefix = "dry-run" if args.dry_run else "created"
+        print(f"{prefix} blueprint {bp.id} task={task.id} next={action.type.value} slot={action.slot_id or '-'}")
+    return 0
+
+
+def _parse_blueprint_bindings(items: list[str]) -> dict[str, str]:
+    bindings: dict[str, str] = {}
+    for item in items:
+        if "=" not in str(item):
+            raise ValueError("--bind must be slot=persona:<id> or slot=profile:<name>")
+        slot, value = str(item).split("=", 1)
+        slot = slot.strip()
+        value = value.strip()
+        if not slot or not value:
+            raise ValueError("--bind must include a non-empty slot and value")
+        bindings[slot] = value
+    return bindings
 
 
 def _cmd_init(args) -> int:

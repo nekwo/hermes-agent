@@ -20,7 +20,7 @@ def make_task(**overrides):
         id="task_dev_hardening",
         title="Add Backend Dev persona and swarm-ready Mission Control agent model",
         description="Upgrade Launcher Mission Control data types, Launcher UI, Backend Dev profile binding, and future large swarm support across frontend and backend repos.",
-        state=TaskState.PM_READY_FOR_DEV,
+        state=TaskState.READY_FOR_IMPLEMENTATION,
         created_at=ts,
         updated_at=ts,
         requested_by="tony",
@@ -59,7 +59,7 @@ def test_broad_unsliced_specialist_mission_routes_to_neko_before_dev():
     assert needs_supervisor_slicing(task) is True
     action = MissionStateMachine().next_action(task)
 
-    assert action.type == HarnessActionType.RUN_NEKO_SUPERVISOR
+    assert action.type == HarnessActionType.RUN_SLOT
     assert "slice" in action.reason.lower()
 
 
@@ -72,7 +72,7 @@ def test_small_repo_scoped_mission_still_routes_to_dev():
     )
 
     assert needs_supervisor_slicing(task) is False
-    assert MissionStateMachine().next_action(task).type == HarnessActionType.RUN_DEV
+    assert MissionStateMachine().next_action(task).type == HarnessActionType.RUN_SLOT
 
 
 def test_neko_backend_first_cross_stack_slice_routes_to_backend_dev():
@@ -93,7 +93,7 @@ def test_neko_backend_first_cross_stack_slice_routes_to_backend_dev():
     )
 
     assert needs_supervisor_slicing(task) is False
-    assert MissionStateMachine().next_action(task).type == HarnessActionType.RUN_DEV
+    assert MissionStateMachine().next_action(task).type == HarnessActionType.RUN_SLOT
 
 
 def test_recorded_backend_first_handoff_packet_routes_broad_task_to_dev():
@@ -124,7 +124,7 @@ def test_recorded_backend_first_handoff_packet_routes_broad_task_to_dev():
     )
 
     assert needs_supervisor_slicing(task) is False
-    assert MissionStateMachine().next_action(task).type == HarnessActionType.RUN_DEV
+    assert MissionStateMachine().next_action(task).type == HarnessActionType.RUN_SLOT
 
 
 def test_progress_sink_aggregates_tool_loop_patch_test_and_proof_telemetry():

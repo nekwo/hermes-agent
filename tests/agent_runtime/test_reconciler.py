@@ -38,7 +38,7 @@ def _qa_approval(stage_ids):
     )
 
 
-def test_reconciler_flags_legacy_qa_approved_missing_stage_records():
+def test_reconciler_flags_legacy_VERIFIED_missing_stage_records():
     task = _task(TaskState.DEV_TEST_DESIGN)
     apply_planning_decision(task, _qa_approval(["stage_a"]), actor="qa")
     task.stages = []  # Legacy/runtime residue predating stage reconciliation.
@@ -51,7 +51,7 @@ def test_reconciler_flags_legacy_qa_approved_missing_stage_records():
 
 
 def test_reconciler_routes_repeated_unsupported_context_requests_to_neko():
-    task = _task(TaskState.PM_READY_FOR_DEV)
+    task = _task(TaskState.READY_FOR_IMPLEMENTATION)
     task.context_requests = [
         {"id": "ctx_1", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
         {"id": "ctx_2", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
@@ -63,15 +63,15 @@ def test_reconciler_routes_repeated_unsupported_context_requests_to_neko():
 
     assert result.needs_supervisor is True
     assert result.findings[0].kind == "repeated_unsupported_context_requests"
-    assert action.type == HarnessActionType.RUN_NEKO_SUPERVISOR
+    assert action.type == HarnessActionType.RUN_SLOT
     assert "transition reconciliation" in action.reason
 
 
 def test_reconciler_does_not_route_clean_dev_ready_task_to_neko():
-    task = _task(TaskState.PM_READY_FOR_DEV)
+    task = _task(TaskState.READY_FOR_IMPLEMENTATION)
 
     result = reconcile_task(task)
     action = MissionStateMachine().next_action(task)
 
     assert result.findings == []
-    assert action.type == HarnessActionType.RUN_DEV
+    assert action.type == HarnessActionType.RUN_SLOT

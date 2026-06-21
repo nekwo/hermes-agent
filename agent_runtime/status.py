@@ -177,16 +177,16 @@ def _swarm_budget_summary(runs, cfg) -> dict:
 
 def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunStore | None = None, proof_store: ProofStore | None = None, config=None):
     if blocked and _has_budget_scope_recovery_path(incidents or [], run_store or RunStore()):
-        return {**_stopped_progress(task, incidents or [], "self_heal_pending", "neko_supervisor"), "task_id": task.id, "action": "run_neko_supervisor", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
+        return {**_stopped_progress(task, incidents or [], "self_heal_pending", "neko_supervisor"), "task_id": task.id, "action": "run_slot", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
     if blocked and _has_budget_approval_path(incidents or [], run_store or RunStore()):
-        return {**_stopped_progress(task, incidents or [], "self_heal_pending", "neko_supervisor"), "task_id": task.id, "action": "run_neko_supervisor", "reason": "needs Neko approval to continue budget-limited Dev run"}
+        return {**_stopped_progress(task, incidents or [], "self_heal_pending", "neko_supervisor"), "task_id": task.id, "action": "run_slot", "reason": "needs Neko approval to continue budget-limited Dev run"}
     if blocked:
         reason = "budget_continuation_blocked" if _has_budget_incident(incidents or []) else "environment_blocked"
         message = "budget continuation cap reached; human review required" if reason == "budget_continuation_blocked" else "open incident requires human review"
         return {**_stopped_progress(task, incidents or [], reason, "human"), "task_id": task.id, "action": "blocked_by_incident", "reason": message}
     action = MissionStateMachine(proof_store=proof_store, config=config).next_action(task)
     reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
-    return {**_stopped_progress(task, [], reason, _owner_for_action(action.type.value, task=task, run_store=run_store)), "task_id": task.id, "action": action.type.value, "reason": action.reason}
+    return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "task_id": task.id, "action": action.type.value, "reason": action.reason}
 
 
 def _stopped_progress(task, incidents, reason: str, owner: str) -> dict:
@@ -208,22 +208,25 @@ def _stopped_progress(task, incidents, reason: str, owner: str) -> dict:
     }
 
 
-def _owner_for_action(action: str, *, task=None, run_store: RunStore | None = None) -> str:
-    if action == "run_dev" and task is not None:
+def _owner_for_action(action, *, task=None, run_store: RunStore | None = None) -> str:
+    action_value = action.type.value if hasattr(getattr(action, "type", None), "value") else str(action)
+    slot_id = str(getattr(action, "slot_id", "") or "").strip()
+    if action_value == "run_slot" and slot_id == "dev" and task is not None:
         try:
-            from .actions import HarnessActionType
-            from .ticker import _persona_id_for_action
+            from .ticker import _dev_persona_id_for_task
 
-            return _persona_id_for_action(HarnessActionType.RUN_DEV, task=task, run_store=run_store)
+            return _dev_persona_id_for_task(task, run_store=run_store)
         except Exception:
             return "dev"
+    if action_value == "run_slot" and slot_id:
+        return slot_id
     return {
         "run_dev": "dev",
         "run_qa": "qa",
         "run_neko_supervisor": "neko_supervisor",
         "complete_task": "harness",
         "noop": "harness",
-    }.get(action, "harness")
+    }.get(action_value, "harness")
 
 
 def _has_budget_approval_path(incidents, run_store: RunStore) -> bool:

@@ -63,7 +63,7 @@ def test_snapshot_role_stream_projects_decision_summary_thinking_fields(isolate_
             ts=n,
             type="run.progress",
             task_id="thinking_task",
-            run_id="run_dev",
+            run_id="run_slot",
             persona_id="dev",
             payload={
                 "type": "run.progress",
@@ -93,7 +93,7 @@ def test_snapshot_exposes_terminal_and_active_run_execution_truth(isolate_agent_
     runs = RunStore()
     n = now()
     ts.create(Task(id="done", title="Done", description="d", state=TaskState.DONE, created_at=n, updated_at=n, requested_by="tony"))
-    ts.create(Task(id="active", title="Active", description="d", state=TaskState.PM_READY_FOR_DEV, created_at=n, updated_at=n, requested_by="tony"))
+    ts.create(Task(id="active", title="Active", description="d", state=TaskState.READY_FOR_IMPLEMENTATION, created_at=n, updated_at=n, requested_by="tony"))
     runs.open_run("dev", "active", stage_id=None)
 
     snap = build_snapshot(task_store=ts, run_store=runs)
@@ -311,7 +311,7 @@ def test_snapshot_role_streams_use_task_window_not_global_tail(isolate_agent_run
     ts.create(task)
     events.append(Event(n, "mission_plan.updated", task.id, "run_neko", "neko_supervisor", {"summary": "Neko scoped the mission."}))
     for index in range(25):
-        events.append(Event(n, "run.tool.finished", task.id, "run_dev", "dev", {"summary": f"Dev tool event {index}"}))
+        events.append(Event(n, "run.tool.finished", task.id, "run_slot", "dev", {"summary": f"Dev tool event {index}"}))
 
     snap = build_snapshot(task_store=ts, event_log=events)
     roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
@@ -348,7 +348,7 @@ def test_snapshot_next_action_owner_reports_backend_specialist_for_backend_stage
 
     snap = build_snapshot(task_store=ts)
 
-    assert snap["tasks"][0]["next_action"]["action"] == "run_dev"
+    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
     assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "backend_dev"
 
 
@@ -366,7 +366,7 @@ def test_snapshot_routes_budget_approval_to_neko_before_cap(isolate_agent_runtim
 
     snap = build_snapshot(task_store=ts, run_store=runs, incident_store=incidents)
 
-    assert snap["tasks"][0]["next_action"]["action"] == "run_neko_supervisor"
+    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
     assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
 
 
@@ -391,7 +391,7 @@ def test_snapshot_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_
 
     snap = build_snapshot(task_store=ts, run_store=runs, incident_store=incidents)
 
-    assert snap["tasks"][0]["next_action"]["action"] == "run_neko_supervisor"
+    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
     assert snap["tasks"][0]["next_action"]["reason"] == "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
     assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
 
@@ -520,7 +520,7 @@ def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isola
     atomic_json_write(
         archive / "runs" / "run_dev.json",
         {
-            "id": "run_dev",
+            "id": "run_slot",
             "persona_id": "dev",
             "task_id": "task_archived",
             "stage_id": "stage_impl",
@@ -571,7 +571,7 @@ def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isola
     snap = build_snapshot()
 
     archived = snap["archived_tasks"][0]
-    assert archived["runs"][0]["run_id"] == "run_dev"
+    assert archived["runs"][0]["run_id"] == "run_slot"
     assert archived["runs"][0]["decision_summary"] == "Implemented archived transcript mapping."
     assert archived["runs"][0]["decision_rationale"] == "Tests are required before QA handoff."
     assert archived["runs"][0]["reasoning_summary"] == "Tests are required before QA handoff."
@@ -587,7 +587,7 @@ def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isola
         {
             "persona_id": "dev",
             "run_count": 1,
-            "run_ids": ["run_dev"],
+            "run_ids": ["run_slot"],
             "duration_ms": 120000,
             "persona_runtime_ms": 118000,
             "provider_call_ms": 90000,
@@ -693,7 +693,7 @@ def test_snapshot_drops_unsafe_archived_decision_process_text(isolate_agent_runt
     atomic_json_write(
         archive / "runs" / "run_dev.json",
         {
-            "id": "run_dev",
+            "id": "run_slot",
             "persona_id": "dev",
             "task_id": "task_archived",
             "state": "completed",

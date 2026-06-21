@@ -11,7 +11,7 @@ from agent_runtime.repo_bundles import acquire_repo_bundle_locks
 def test_status_counts_open_tasks():
     ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
     s=build_status(task_store=ts)
-    assert s["open_tasks"] == 1 and s["next_actions"][0]["action"] == "run_neko_supervisor"
+    assert s["open_tasks"] == 1 and s["next_actions"][0]["action"] == "run_slot"
     assert s["dirty"] is True
     assert s["open_task_ids"] == ["t"]
     assert s["dirty_state"]["runtime"]["open_task_ids"] == ["t"]
@@ -67,12 +67,12 @@ def test_status_marks_next_action_blocked_by_open_incident():
     assert s["next_actions"][0]["action"] == "blocked_by_incident"
 
 
-def test_status_next_action_uses_mission_state_machine_for_dev_ready_for_qa():
-    ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.DEV_READY_FOR_QA, created_at=n, updated_at=n, requested_by="tony"))
+def test_status_next_action_uses_mission_state_machine_for_READY_FOR_VERIFICATION():
+    ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.READY_FOR_VERIFICATION, created_at=n, updated_at=n, requested_by="tony"))
 
     s=build_status(task_store=ts)
 
-    assert s["next_actions"][0]["action"] == "run_neko_supervisor"
+    assert s["next_actions"][0]["action"] == "run_slot"
     assert s["next_actions"][0]["reason"] == "needs Neko Mission Lead to coordinate multi-Dev QA handoff"
 
 
@@ -85,7 +85,7 @@ def test_status_uses_proof_store_for_resolved_incident_only_qa_blocker():
 
     s=build_status(task_store=ts, proof_store=ps)
 
-    assert s["next_actions"][0]["action"] == "run_qa"
+    assert s["next_actions"][0]["action"] == "run_slot"
     assert s["next_actions"][0]["reason"] == "retry QA after resolved incident-only blocker"
 
 
@@ -116,7 +116,7 @@ def test_status_next_action_owner_reports_backend_specialist_for_backend_stage()
 
     s = build_status(task_store=ts)
 
-    assert s["next_actions"][0]["action"] == "run_dev"
+    assert s["next_actions"][0]["action"] == "run_slot"
     assert s["next_actions"][0]["stopped_progress"]["owner"] == "backend_dev"
 
 
@@ -166,6 +166,6 @@ def test_status_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_ag
 
     s = build_status(task_store=ts, run_store=runs, incident_store=incidents)
 
-    assert s["next_actions"][0]["action"] == "run_neko_supervisor"
+    assert s["next_actions"][0]["action"] == "run_slot"
     assert s["next_actions"][0]["reason"] == "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
     assert s["next_actions"][0]["stopped_progress"]["owner"] == "neko_supervisor"

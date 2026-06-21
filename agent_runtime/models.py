@@ -27,6 +27,7 @@ class MissionPlanStage:
     owner: str
     repo: str
     kind: str
+    owner_slot: str | None = None
     status: StageStatus = StageStatus.READY
     proof_recipe_id: str | None = None
     requires_product_edit: bool = False
@@ -48,6 +49,15 @@ class MissionPlan:
     stages: list[MissionPlanStage] = field(default_factory=list)
     current_stage_id: str | None = None
     revision: int = 0
+    blueprint_id: str | None = None
+    blueprint_version: int | None = None
+    slots: dict[str, dict[str, Any]] = field(default_factory=dict)
+    bindings: dict[str, str] = field(default_factory=dict)
+    binding_sources: dict[str, str] = field(default_factory=dict)
+    edges: list[dict[str, str]] = field(default_factory=list)
+    limits: dict[str, int] = field(default_factory=dict)
+    stage_attempts: dict[str, int] = field(default_factory=dict)
+    on_unhandled: str = "intervention"
 
 
 @dataclass(slots=True)

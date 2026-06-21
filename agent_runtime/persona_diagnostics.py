@@ -377,16 +377,12 @@ def _initial_state_for_persona(persona_id: str) -> TaskState:
     if persona_id == "neko_supervisor":
         return TaskState.CREATED
     if persona_id in {"dev", "backend_dev"}:
-        return TaskState.PM_READY_FOR_DEV
+        return TaskState.READY_FOR_IMPLEMENTATION
     return TaskState.QA_REVIEW_PLAN
 
 
 def _expected_action_for_persona(persona_id: str) -> str:
-    if persona_id == "neko_supervisor":
-        return "run_neko_supervisor"
-    if persona_id in {"dev", "backend_dev"}:
-        return "run_dev"
-    return "run_qa"
+    return "run_slot"
 
 
 def _has_completed_valid_matching_run(runs: list[Any], persona_id: str) -> bool:

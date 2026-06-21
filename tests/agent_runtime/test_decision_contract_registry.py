@@ -119,7 +119,7 @@ def test_registry_hud_shapes_drive_context_builder_menu():
 
 def test_qa_menu_exposes_nested_and_enum_choices():
     task = _task()
-    task.state = TaskState.DEV_READY_FOR_QA
+    task.state = TaskState.READY_FOR_VERIFICATION
     task.requires_visual_proof = True
     task.stages[0].requires_visual_proof = True
     ctx = build_context(task, _run("qa"))

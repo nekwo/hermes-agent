@@ -329,7 +329,7 @@ def test_planner_rejects_unknown_owner_repo_kind_and_cycles():
 
     errors = validate_mission_plan(plan)
 
-    assert any("owner" in error for error in errors)
+    assert not any("owner" in error for error in errors)
     assert any("repo" in error for error in errors)
     assert any("kind" in error for error in errors)
     assert any("dependency cycle" in error for error in errors)

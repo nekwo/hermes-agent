@@ -14,7 +14,6 @@ from .stage_intent import no_product_edit_recipe_id
 from .states import StageStatus
 
 
-ALLOWED_OWNERS = frozenset({"neko_supervisor", "dev", "backend_dev", "qa", "harness", "human"})
 ALLOWED_REPOS = frozenset({"EterniaLauncher", "EterniaBackend", "hermes-agent", "none"})
 ALLOWED_KINDS = frozenset({"planning", "proof_only", "implementation", "qa_verdict", "recovery", "context"})
 READY_STATUSES = frozenset({StageStatus.READY_FOR_QA, StageStatus.PASSED})
@@ -82,8 +81,10 @@ def validate_mission_plan(plan: MissionPlan) -> list[str]:
         if stage.id in ids:
             errors.append(f"duplicate stage id: {stage.id}")
         ids.add(stage.id)
-        if stage.owner not in ALLOWED_OWNERS:
-            errors.append(f"stage {stage.id} owner {stage.owner!r} is not allowed")
+        owner_slot = stage.owner_slot or stage.owner
+        if plan.slots:
+            if owner_slot not in plan.slots:
+                errors.append(f"stage {stage.id} owner_slot {owner_slot!r} is not declared in mission_plan.slots")
         if stage.repo not in ALLOWED_REPOS:
             errors.append(f"stage {stage.id} repo {stage.repo!r} is not allowed")
         if stage.kind not in ALLOWED_KINDS:
@@ -316,6 +317,15 @@ def mission_plan_summary(task: Task) -> dict[str, Any] | None:
         "version": plan.version,
         "current_stage_id": plan.current_stage_id,
         "revision": plan.revision,
+        "blueprint_id": plan.blueprint_id,
+        "blueprint_version": plan.blueprint_version,
+        "slots": dict(plan.slots),
+        "bindings": dict(plan.bindings),
+        "binding_sources": dict(plan.binding_sources),
+        "edges": list(plan.edges),
+        "limits": dict(plan.limits),
+        "stage_attempts": dict(plan.stage_attempts),
+        "on_unhandled": plan.on_unhandled,
         "mission_intent": {
             "title": plan.mission_intent.title,
             "objective": plan.mission_intent.objective,
@@ -328,6 +338,7 @@ def mission_plan_summary(task: Task) -> dict[str, Any] | None:
                 "id": stage.id,
                 "title": stage.title,
                 "owner": stage.owner,
+                "owner_slot": stage.owner_slot or stage.owner,
                 "repo": stage.repo,
                 "kind": stage.kind,
                 "status": stage.status.value,
@@ -380,6 +391,15 @@ def _plan_from_payload(task: Task, raw: dict[str, Any], *, existing: MissionPlan
         stages=stages,
         current_stage_id=str(raw.get("current_stage_id") or "").strip() or (stages[0].id if stages else None),
         revision=int(existing.revision or 0),
+        blueprint_id=str(raw.get("blueprint_id") or existing.blueprint_id or "").strip() or None,
+        blueprint_version=int(raw.get("blueprint_version") or existing.blueprint_version or 0) or None,
+        slots=dict(raw.get("slots") if isinstance(raw.get("slots"), dict) else existing.slots),
+        bindings={str(k): str(v) for k, v in (raw.get("bindings") if isinstance(raw.get("bindings"), dict) else existing.bindings).items()},
+        binding_sources={str(k): str(v) for k, v in (raw.get("binding_sources") if isinstance(raw.get("binding_sources"), dict) else existing.binding_sources).items()},
+        edges=list(raw.get("edges") if isinstance(raw.get("edges"), list) else existing.edges),
+        limits=dict(raw.get("limits") if isinstance(raw.get("limits"), dict) else existing.limits),
+        stage_attempts={str(k): int(v) for k, v in (raw.get("stage_attempts") if isinstance(raw.get("stage_attempts"), dict) else existing.stage_attempts).items()},
+        on_unhandled=str(raw.get("on_unhandled") or existing.on_unhandled or "intervention"),
     )
     errors = validate_mission_plan(plan)
     if errors:
@@ -536,6 +556,7 @@ def _is_persona_diagnostic_self_observation(task: Task, handoff: dict[str, Any])
 def _stage_from_raw(task: Task, raw: dict[str, Any], *, intent: MissionIntent, existing: MissionPlanStage | None = None) -> MissionPlanStage:
     sid = _safe_stage_identifier(str(raw.get("id") or (existing.id if existing else "") or "stage"))
     owner = _canonical_owner(str(raw.get("owner") or (existing.owner if existing else "dev")))
+    owner_slot = str(raw.get("owner_slot") or (existing.owner_slot if existing else "") or owner).strip()
     repo = _canonical_repo(str(raw.get("repo") or (existing.repo if existing else "EterniaLauncher")))
     recipe = str(raw.get("proof_recipe_id") or (existing.proof_recipe_id if existing else "") or "").strip() or None
     if (
@@ -566,6 +587,7 @@ def _stage_from_raw(task: Task, raw: dict[str, Any], *, intent: MissionIntent, e
         title=str(raw.get("title") or (existing.title if existing else sid.replace("_", " ").title())).strip(),
         objective=str(raw.get("objective") or (existing.objective if existing else intent.objective)).strip(),
         owner=owner,
+        owner_slot=owner_slot,
         repo=repo,
         kind=kind,
         status=_stage_status(raw.get("status"), existing.status if existing else StageStatus.READY),
@@ -601,6 +623,7 @@ def _make_stage(
         title=title,
         objective=objective,
         owner=owner,
+        owner_slot=owner,
         repo=repo,
         kind=kind,
         proof_recipe_id=proof_recipe_id,
@@ -861,7 +884,11 @@ def _set_current_stage(plan: MissionPlan, stage_id: str) -> None:
 
 
 def _validate_raw_plan_keys(raw: dict[str, Any]) -> None:
-    allowed_plan_keys = {"version", "enabled", "mission_intent", "stages", "current_stage_id", "_normalization"}
+    allowed_plan_keys = {
+        "version", "enabled", "mission_intent", "stages", "current_stage_id", "_normalization",
+        "blueprint_id", "blueprint_version", "slots", "bindings", "binding_sources",
+        "edges", "limits", "stage_attempts", "on_unhandled",
+    }
     extra = sorted(set(raw) - allowed_plan_keys)
     if extra:
         _merge_raw_normalization(raw, dropped_fields=[f"mission_plan.{key}" for key in extra])
@@ -872,7 +899,7 @@ def _validate_raw_plan_keys(raw: dict[str, Any]) -> None:
         if not isinstance(stages, list):
             raise DecisionPayloadInvalid("mission_plan.stages must be a list")
         allowed_stage_keys = {
-            "id", "title", "objective", "owner", "repo", "kind", "status",
+            "id", "title", "objective", "owner", "owner_slot", "repo", "kind", "status",
             "proof_recipe_id", "requires_product_edit", "requires_visual_proof",
             "depends_on", "blocks_qa_until", "proof_ids", "packet_ids", "blocker_ids", "_normalization",
         }
@@ -1359,7 +1386,7 @@ def _canonical_owner(value: str) -> str:
         "alice_supervisor": "neko_supervisor",
     }
     resolved = mapping.get(text, text)
-    return resolved if resolved in ALLOWED_OWNERS else "dev"
+    return resolved if _safe_id(resolved) else "dev"
 
 
 def _canonical_repo(value: str) -> str:

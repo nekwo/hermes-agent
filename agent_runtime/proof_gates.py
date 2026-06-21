@@ -46,7 +46,7 @@ def task_requires_visual(task: Task) -> bool:
     return bool(task.requires_visual_proof or any(stage.requires_visual_proof for stage in task.stages))
 
 
-def can_dev_ready_for_qa(task: Task, proofs: list[Proof]) -> GateResult:
+def implementation_proof_satisfied(task: Task, proofs: list[Proof]) -> GateResult:
     missing=[]
     has_change = bool([p for p in _proofs_of(proofs, ProofType.COMMIT, ProofType.DIFF, ProofType.DIFF_STAT) if _safe(p)])
     if not has_change and not (task.waiver and task.waiver.get("gate") in {"dev_change_proof", "no_code"}):
@@ -56,7 +56,7 @@ def can_dev_ready_for_qa(task: Task, proofs: list[Proof]) -> GateResult:
     return GateResult(not missing, missing)
 
 
-def can_qa_approve(task: Task, proofs: list[Proof]) -> GateResult:
+def verification_proof_satisfied(task: Task, proofs: list[Proof]) -> GateResult:
     missing=[]
     if has_typed_plan(task):
         typed_ready, typed_missing = blocking_stages_ready_for_qa(task, proof_store=_ListProofStore(proofs))
@@ -79,11 +79,11 @@ class _ListProofStore:
         return self._proofs[proof_id]
 
 
-def can_pm_integrate(task: Task, proofs: list[Proof], incidents: list[Incident]) -> GateResult:
+def integration_proof_satisfied(task: Task, proofs: list[Proof], incidents: list[Incident]) -> GateResult:
     missing=[]
     warnings=[]
-    qa=can_qa_approve(task, proofs)
-    dev=can_dev_ready_for_qa(task, proofs)
+    qa=verification_proof_satisfied(task, proofs)
+    dev=implementation_proof_satisfied(task, proofs)
     missing.extend(dev.missing)
     missing.extend(qa.missing)
     open_critical=[i for i in incidents if i.closed_at is None and i.kind in CRITICAL_INCIDENT_KINDS]

@@ -27,7 +27,7 @@ class OnePersonaEngine:
     def run_until_settled(self, *, task_id, max_actions, max_seconds):
         task = self.task_store.get(task_id)
         action = MissionStateMachine(config=self.config).next_action(task)
-        persona_id = _persona_for_action(action.type, task)
+        persona_id = _persona_for_action(action, task)
         run = self.run_store.open_run(persona_id, task.id, task.current_stage_id)
         run.progress = {"validation_status": "valid", "total_tokens": 123}
         self.run_store.update(run)
@@ -60,7 +60,7 @@ class FailedPersonaEngine:
     def run_until_settled(self, *, task_id, max_actions, max_seconds):
         task = self.task_store.get(task_id)
         action = MissionStateMachine(config=self.config).next_action(task)
-        persona_id = _persona_for_action(action.type, task)
+        persona_id = _persona_for_action(action, task)
         run = self.run_store.open_run(persona_id, task.id, task.current_stage_id)
         run.progress = {"validation_status": "invalid", "total_tokens": 123}
         self.run_store.update(run)
@@ -101,8 +101,8 @@ def test_persona_diagnostic_routes_neko_first(tmp_path, monkeypatch):
     assert result.operation_kind == "diagnostic"
     assert result.operation_mode == "standalone_task"
     assert result.persona_id == "neko_supervisor"
-    assert result.expected_first_action == "run_neko_supervisor"
-    assert result.actual_actions == ["run_neko_supervisor"]
+    assert result.expected_first_action == "run_slot"
+    assert result.actual_actions == ["run_slot"]
     assert result.latest_decision_type == "diagnostic_ack"
     assert result.latest_validation_status == "valid"
     assert result.latest_total_tokens == 123
@@ -221,8 +221,8 @@ def test_persona_diagnostic_routes_backend_dev_with_typed_stage(tmp_path, monkey
 
     assert result.ok is True
     assert result.persona_id == "backend_dev"
-    assert result.expected_first_action == "run_dev"
-    assert result.actual_actions == ["run_dev"]
+    assert result.expected_first_action == "run_slot"
+    assert result.actual_actions == ["run_slot"]
     assert result.stage_id == "diagnostic_backend_dev"
     assert result.stage_owner == "backend_dev"
     assert result.stage_repo == "EterniaBackend"
@@ -231,8 +231,8 @@ def test_persona_diagnostic_routes_backend_dev_with_typed_stage(tmp_path, monkey
 @pytest.mark.parametrize(
     ("persona_id", "expected_persona", "expected_action", "expected_owner", "expected_repo"),
     [
-        ("launcher-dev", "dev", "run_dev", "dev", "EterniaLauncher"),
-        ("qa", "qa", "run_qa", "qa", "EterniaLauncher"),
+        ("launcher-dev", "dev", "run_slot", "dev", "EterniaLauncher"),
+        ("qa", "qa", "run_slot", "qa", "EterniaLauncher"),
     ],
 )
 def test_persona_diagnostic_routes_launcher_dev_and_qa(
@@ -280,12 +280,12 @@ def test_persona_diagnostic_rejects_unknown_persona(tmp_path, monkeypatch):
         )
 
 
-def _persona_for_action(action_type: HarnessActionType, task) -> str:
-    if action_type == HarnessActionType.RUN_NEKO_SUPERVISOR:
-        return "neko_supervisor"
-    if action_type == HarnessActionType.RUN_QA:
-        return "qa"
-    if action_type == HarnessActionType.RUN_DEV:
+def _persona_for_action(action, task) -> str:
+    if action.type != HarnessActionType.RUN_SLOT:
+        raise AssertionError(f"unexpected action {action.type}")
+    if action.slot_id in {"neko_supervisor", "qa", "backend_dev"}:
+        return action.slot_id
+    if action.slot_id == "dev":
         stage = task.mission_plan.stages[0] if task.mission_plan and task.mission_plan.stages else None
         return stage.owner if stage and stage.owner in {"dev", "backend_dev"} else "dev"
-    raise AssertionError(f"unexpected action {action_type}")
+    raise AssertionError(f"unexpected slot {action.slot_id}")

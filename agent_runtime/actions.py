@@ -6,10 +6,7 @@ from typing import Any
 
 
 class HarnessActionType(StrEnum):
-    RUN_PM = "run_pm"
-    RUN_DEV = "run_dev"
-    RUN_QA = "run_qa"
-    RUN_NEKO_SUPERVISOR = "run_neko_supervisor"
+    RUN_SLOT = "run_slot"
     COMPLETE_TASK = "complete_task"
     NOOP = "noop"
     RECOVER_STALE_RUN = "recover_stale_run"
@@ -21,6 +18,7 @@ class HarnessAction:
     task_id: str | None = None
     run_id: str | None = None
     reason: str = ""
+    slot_id: str | None = None
 
 
 @dataclass(slots=True)
