@@ -46,6 +46,16 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "normal",
     },
     {
+        "id": "persona.profile.delete",
+        "target_kind": "persona",
+        "label": "Delete Hermes Profile",
+        "group": "archive",
+        "execution_semantics": "destructive_profile_delete",
+        "required_args": ["profile"],
+        "allowed_args": ["persona_id"],
+        "danger": "destructive",
+    },
+    {
         "id": "task.tick",
         "target_kind": "task",
         "label": "Run Tick",
