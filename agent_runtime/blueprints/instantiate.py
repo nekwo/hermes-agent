@@ -8,11 +8,18 @@ from agent_runtime.states import StageStatus
 from .schema import Blueprint, validate_bindings
 
 
-def instantiate_blueprint(bp: Blueprint, *, goal: str, bindings: dict[str, str]) -> MissionPlan:
+def instantiate_blueprint(bp: Blueprint, *, goal: str, bindings: dict[str, str], resolver=None) -> MissionPlan:
     errors = validate_bindings(bp, bindings)
     if errors:
         raise ValueError("invalid blueprint bindings: " + "; ".join(errors))
-    resolved_bindings = {slot_id: _binding_to_persona_id(value) for slot_id, value in bindings.items()}
+    if resolver is not None:
+        slot_roles = {slot.id: slot.role for slot in bp.slots}
+        resolved_bindings = {
+            slot_id: resolver.resolve(value, slot_role=slot_roles.get(slot_id, "dev"))
+            for slot_id, value in bindings.items()
+        }
+    else:
+        resolved_bindings = {slot_id: _binding_to_persona_id(value) for slot_id, value in bindings.items()}
     stages = [
         MissionPlanStage(
             id=stage.id,
