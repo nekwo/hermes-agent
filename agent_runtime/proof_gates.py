@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from .incidents import CRITICAL_INCIDENT_KINDS
 from .mission_plan import blocking_stages_ready_for_qa, has_typed_plan
-from .models import Incident, Proof, Task
+from .models import Incident, MissionPlanStage, Proof, Task
 from .proof_rules import ProofType
 
 
@@ -40,6 +40,74 @@ def _passed_tests(proofs: list[Proof]) -> list[Proof]:
 
 def _visual_proofs(proofs: list[Proof]) -> list[Proof]:
     return [p for p in _proofs_of(proofs, ProofType.SCREENSHOT, ProofType.VIDEO) if _safe(p) and p.path_or_value]
+
+
+def _stage_proofs(stage: MissionPlanStage, proofs: list[Proof]) -> list[Proof]:
+    stage_id = str(getattr(stage, "id", "") or "").strip()
+    if not stage_id:
+        return proofs
+    scoped = [proof for proof in proofs if not proof.stage_id or proof.stage_id == stage_id]
+    return scoped
+
+
+def _proof_meets_status(proof: Proof, minimum_status: str) -> bool:
+    if not _safe(proof):
+        return False
+    minimum = str(minimum_status or "passed").strip().lower()
+    metadata = getattr(proof, "metadata", {}) or {}
+    status = str(metadata.get("status") or metadata.get("verdict") or "").strip().lower()
+    if proof.type == ProofType.TEST_RUN:
+        if "exit_code" in metadata:
+            return _exit_code(proof) == 0
+        return status in {"passed", "approved", "safe"}
+    if minimum in {"passed", "approved"}:
+        if status:
+            return status in {"passed", "approved", "safe"}
+        return bool(proof.path_or_value)
+    if minimum == "safe":
+        return True
+    return False
+
+
+def stage_proof_satisfied(stage: MissionPlanStage, proofs: list[Proof]) -> GateResult:
+    gate = dict(getattr(stage, "proof_gate", {}) or {})
+    required = bool(gate.get("required", False))
+    required_types = [str(item).strip() for item in gate.get("required_proof_types", []) or [] if str(item).strip()]
+    proof_recipe_id = str(gate.get("proof_recipe_id") or getattr(stage, "proof_recipe_id", "") or "").strip()
+    commands = [str(item).strip() for item in gate.get("commands", []) or [] if str(item).strip()]
+    if proof_recipe_id or commands:
+        required = True
+        if not required_types:
+            required_types = [ProofType.TEST_RUN.value]
+    if getattr(stage, "requires_visual_proof", False) and ProofType.SCREENSHOT.value not in required_types and ProofType.VIDEO.value not in required_types:
+        required_types.append(ProofType.SCREENSHOT.value)
+    if not required and not required_types:
+        return GateResult(True, [])
+
+    minimum_status = str(gate.get("minimum_status") or "passed").strip().lower()
+    missing: list[str] = []
+    scoped = _stage_proofs(stage, proofs)
+    if not required_types:
+        if not any(_proof_meets_status(proof, minimum_status) for proof in scoped):
+            missing.append(f"missing proof with status {minimum_status}")
+        return GateResult(not missing, missing)
+    for proof_type in required_types:
+        try:
+            normalized = ProofType(proof_type)
+        except ValueError:
+            missing.append(f"unknown required proof type {proof_type}")
+            continue
+        if normalized in {ProofType.SCREENSHOT, ProofType.VIDEO}:
+            if not _visual_proofs([proof for proof in scoped if proof.type in {ProofType.SCREENSHOT, ProofType.VIDEO}]):
+                missing.append("missing screenshot or video proof")
+            continue
+        candidates = [proof for proof in scoped if proof.type == normalized]
+        if not candidates:
+            missing.append(f"missing {normalized.value} proof")
+            continue
+        if not any(_proof_meets_status(proof, minimum_status) for proof in candidates):
+            missing.append(f"missing {minimum_status} {normalized.value} proof")
+    return GateResult(not missing, sorted(set(missing)))
 
 
 def task_requires_visual(task: Task) -> bool:

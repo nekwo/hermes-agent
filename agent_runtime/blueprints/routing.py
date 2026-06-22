@@ -6,6 +6,7 @@ from hermes_time import now
 
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.models import MissionPlan, MissionPlanStage, Proof, Task
+from agent_runtime.proof_gates import stage_proof_satisfied
 from agent_runtime.states import StageStatus, TaskState
 
 from .schema import StageOutcome
@@ -33,6 +34,17 @@ def derive_stage_outcome(
     stage: MissionPlanStage,
     proofs: Iterable[Proof] | None = None,
 ) -> StageOutcome | None:
+    if _stage_has_required_gate(stage) and decision.type in {
+        DecisionType.REQUEST_TEST_RUN,
+        DecisionType.REQUEST_QA_REVIEW,
+        DecisionType.COMPLETE,
+        DecisionType.APPROVE,
+        DecisionType.PROPOSE_PATCH,
+    }:
+        gate = stage_proof_satisfied(stage, list(proofs or []))
+        if gate.allowed:
+            return StageOutcome.PASSED
+        return StageOutcome.FAILED
     if decision.type == DecisionType.REPORT_QA_VERDICT:
         verdict = str(decision.payload.get("verdict") or "").strip().lower()
         if verdict in {"approved", "passed", "pass"}:
@@ -172,6 +184,17 @@ def _outcome_from_proofs(proofs: Iterable[Proof]) -> StageOutcome | None:
 def _scope_stage_ready_without_proof(stage: MissionPlanStage) -> bool:
     return stage.kind in {"scope", "context", "investigation", "audit"} and not (
         stage.requires_product_edit or stage.requires_visual_proof or stage.proof_recipe_id
+    )
+
+
+def _stage_has_required_gate(stage: MissionPlanStage) -> bool:
+    gate = getattr(stage, "proof_gate", {}) or {}
+    return bool(
+        gate.get("required")
+        or gate.get("required_proof_types")
+        or gate.get("proof_recipe_id")
+        or gate.get("commands")
+        or getattr(stage, "requires_visual_proof", False)
     )
 
 

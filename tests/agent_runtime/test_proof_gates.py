@@ -1,8 +1,9 @@
 from hermes_time import now
-from agent_runtime.models import Incident, Proof, Task
-from agent_runtime.proof_gates import implementation_proof_satisfied, verification_proof_satisfied, integration_proof_satisfied
+from agent_runtime.models import Incident, MissionPlanStage, Proof, Task
+from agent_runtime.proof_gates import implementation_proof_satisfied, verification_proof_satisfied, integration_proof_satisfied, stage_proof_satisfied
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import TaskState
+from agent_runtime.states import StageStatus
 
 
 def task(visual=False):
@@ -10,6 +11,20 @@ def task(visual=False):
 
 def proof(pt, **meta):
     return Proof(id=f"p{pt}", task_id="t", stage_id=None, type=pt, title=str(pt), path_or_value=meta.pop("path", "x"), created_by="h", created_at=now(), metadata=meta, redaction_status="safe")
+
+
+def stage(**gate):
+    return MissionPlanStage(
+        id="build",
+        title="Build",
+        objective="Build",
+        owner="builder",
+        owner_slot="builder",
+        repo="hermes-agent",
+        kind="implementation",
+        status=StageStatus.READY,
+        proof_gate=gate,
+    )
 
 
 def test_visual_task_requires_screenshot_or_video_and_tests():
@@ -52,3 +67,26 @@ def test_pm_integration_blocks_on_open_incident():
     proofs=[proof(ProofType.TEST_RUN, exit_code=0), proof(ProofType.QA_VERDICT, verdict="approved"), proof(ProofType.COMMIT)]
     inc=Incident(id="i", task_id="t", run_id=None, kind="critical", summary="bad", detail_path=None, opened_at=now())
     assert not integration_proof_satisfied(task(False), proofs, [inc]).allowed
+
+
+def test_stage_proof_gate_requires_declared_test_run_type():
+    result = stage_proof_satisfied(stage(required=True, minimum_status="passed", required_proof_types=["test_run"]), [])
+
+    assert not result.allowed
+    assert "missing test_run proof" in result.missing
+
+
+def test_stage_proof_gate_accepts_passed_stage_scoped_test_run():
+    p = proof(ProofType.TEST_RUN, exit_code=0)
+    p.stage_id = "build"
+
+    result = stage_proof_satisfied(stage(required=True, minimum_status="passed", required_proof_types=["test_run"]), [p])
+
+    assert result.allowed
+
+
+def test_stage_proof_gate_recipe_implies_test_run_proof():
+    result = stage_proof_satisfied(stage(required=True, proof_recipe_id="harness_runtime_status_snapshot"), [])
+
+    assert not result.allowed
+    assert "missing test_run proof" in result.missing

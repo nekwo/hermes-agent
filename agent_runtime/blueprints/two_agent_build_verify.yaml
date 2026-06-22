@@ -17,6 +17,10 @@ stages:
     repo: hermes-agent
     kind: implementation
     blocks_qa_until: true
+    proof_gate:
+      required: true
+      minimum_status: passed
+      required_proof_types: [test_run]
   - id: verify
     title: Verify
     objective: Verify the implementation with concrete evidence.
@@ -25,6 +29,10 @@ stages:
     kind: qa_verdict
     depends_on: [implement]
     blocks_qa_until: false
+    proof_gate:
+      required: true
+      minimum_status: approved
+      required_proof_types: [qa_verdict]
 edges:
   - source: implement
     outcome: passed

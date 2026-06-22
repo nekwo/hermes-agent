@@ -49,6 +49,15 @@ class BlueprintLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class ProofGate:
+    required: bool = False
+    minimum_status: str = "passed"
+    required_proof_types: list[str] = field(default_factory=list)
+    proof_recipe_id: str | None = None
+    commands: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
 class BlueprintStage:
     id: str
     title: str
@@ -59,6 +68,7 @@ class BlueprintStage:
     depends_on: list[str] = field(default_factory=list)
     blocks_qa_until: bool = True
     proof_recipe_id: str | None = None
+    proof_gate: ProofGate = field(default_factory=ProofGate)
     requires_product_edit: bool = False
     requires_visual_proof: bool = False
 
@@ -145,6 +155,7 @@ def validate_blueprint(bp: Blueprint) -> list[str]:
         for dep in stage.depends_on:
             if dep not in stage_ids:
                 errors.append(f"stage {stage.id} depends on unknown stage {dep!r}")
+        errors.extend(_validate_proof_gate(stage))
     for edge in bp.edges:
         if edge.source not in stage_ids:
             errors.append(f"edge source {edge.source!r} is not a known stage")
@@ -181,6 +192,16 @@ def _slot_from_dict(raw: dict[str, Any]) -> BlueprintSlot:
 
 
 def _stage_from_dict(raw: dict[str, Any]) -> BlueprintStage:
+    proof_gate = _proof_gate_from_dict(raw.get("proof_gate") if isinstance(raw.get("proof_gate"), dict) else {})
+    proof_recipe_id = str(raw.get("proof_recipe_id") or proof_gate.proof_recipe_id or "").strip() or None
+    if proof_recipe_id and proof_gate.proof_recipe_id != proof_recipe_id:
+        proof_gate = ProofGate(
+            required=proof_gate.required,
+            minimum_status=proof_gate.minimum_status,
+            required_proof_types=list(proof_gate.required_proof_types),
+            proof_recipe_id=proof_recipe_id,
+            commands=list(proof_gate.commands),
+        )
     return BlueprintStage(
         id=str(raw.get("id") or "").strip(),
         title=str(raw.get("title") or raw.get("id") or "").strip(),
@@ -190,10 +211,43 @@ def _stage_from_dict(raw: dict[str, Any]) -> BlueprintStage:
         repo=str(raw.get("repo") or "none").strip(),
         depends_on=[str(item).strip() for item in raw.get("depends_on", []) or [] if str(item).strip()],
         blocks_qa_until=bool(raw.get("blocks_qa_until", True)),
-        proof_recipe_id=str(raw.get("proof_recipe_id") or "").strip() or None,
+        proof_recipe_id=proof_recipe_id,
+        proof_gate=proof_gate,
         requires_product_edit=bool(raw.get("requires_product_edit", False)),
         requires_visual_proof=bool(raw.get("requires_visual_proof", False)),
     )
+
+
+def _proof_gate_from_dict(raw: dict[str, Any]) -> ProofGate:
+    return ProofGate(
+        required=bool(raw.get("required", False)),
+        minimum_status=str(raw.get("minimum_status") or "passed").strip().lower(),
+        required_proof_types=[str(item).strip() for item in raw.get("required_proof_types", []) or [] if str(item).strip()],
+        proof_recipe_id=str(raw.get("proof_recipe_id") or raw.get("recipe_id") or "").strip() or None,
+        commands=[str(item).strip() for item in raw.get("commands", []) or [] if str(item).strip()],
+    )
+
+
+def _validate_proof_gate(stage: BlueprintStage) -> list[str]:
+    errors: list[str] = []
+    gate = stage.proof_gate
+    if gate.minimum_status not in {"passed", "approved", "safe"}:
+        errors.append(f"stage {stage.id} proof_gate.minimum_status {gate.minimum_status!r} is not allowed")
+    for proof_type in gate.required_proof_types:
+        try:
+            from agent_runtime.proof_rules import ProofType
+
+            ProofType(proof_type)
+        except ValueError:
+            errors.append(f"stage {stage.id} proof_gate.required_proof_types contains unknown type {proof_type!r}")
+    if gate.proof_recipe_id:
+        try:
+            from agent_runtime.proof_recipes import resolve_proof_recipe
+
+            resolve_proof_recipe(gate.proof_recipe_id)
+        except Exception as exc:
+            errors.append(f"stage {stage.id} proof_gate.proof_recipe_id is invalid: {exc}")
+    return errors
 
 
 def _edge_from_dict(raw: dict[str, Any]) -> BlueprintEdge:
