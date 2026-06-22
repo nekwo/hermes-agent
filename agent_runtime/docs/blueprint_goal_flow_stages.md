@@ -1013,6 +1013,11 @@ files · tokens/API calls · elapsed time · final QA verdict · intervention ne
 - Bad agent output is not normalized as success.
 - Results inform which persona should own a slot by default.
 
+### Implementation Notes — Stage 4
+
+- Added `harness blueprint matrix-run <id> --vary slot=a,b,c` with optional base `--bind` values, dry-run mode, and JSON per-case results.
+- Each matrix case instantiates an isolated `MissionPlan`, reports resolved bindings, next action, and basic metrics; non-dry runs persist separate tasks.
+
 ---
 
 ## Stage 5 — Blueprint Library
