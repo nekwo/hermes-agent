@@ -14,11 +14,12 @@ except Exception:  # pragma: no cover - JSON fallback keeps tests/tooling usable
 
 _SAFE_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,63}$")
 _RESERVED_TARGETS = {"done", "intervention"}
-_ALLOWED_ROLES = {"lead", "builder", "verifier", "dev", "backend_dev", "qa", "harness", "human", "specialist"}
+_ALLOWED_ROLES = {"lead", "neko", "builder", "verifier", "dev", "backend_dev", "qa", "harness", "human", "specialist"}
 _ALLOWED_BINDING_PREFIXES = ("persona:", "profile:")
 
 
 class StageOutcome(StrEnum):
+    READY = "ready"
     PASSED = "passed"
     FAILED = "failed"
     BLOCKED = "blocked"
