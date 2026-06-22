@@ -1046,6 +1046,11 @@ agent_runtime/blueprints/
 - Each declares required slots, edges (closed-vocabulary), proof gates, limits.
 - Each has at least one fixture/test (replay against a recorded goal).
 
+### Implementation Notes — Stage 5
+
+- Added bundled `frontend_backend_join` and `visual_ui_qa` blueprints with explicit slots, edges, proof gates, and limits.
+- Added fixture-style replay tests covering all shipped blueprints: `one_agent_smoke`, `two_agent_build_verify`, `neko_dev_qa_basic`, `frontend_backend_join`, and `visual_ui_qa`.
+
 ---
 
 ## Stage 6 — Mission Control UI
