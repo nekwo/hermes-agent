@@ -973,6 +973,12 @@ python -m pytest tests/agent_runtime/blueprints/test_neko_dev_qa_basic.py
 hermes harness blueprint validate agent_runtime/blueprints/neko_dev_qa_basic.yaml
 ```
 
+### Implementation Notes — Stage 3
+
+- Added `neko_dev_qa_basic` as a bundled blueprint with `lead`, `builder`, and `verifier` slots.
+- Added the `ready` `StageOutcome` for scope/no-proof lead stages; routing still follows explicit blueprint edges.
+- Focused tests cover lead-owned start, ready routing, blocked implementation returning to lead, and failed verification edge routing.
+
 ---
 
 ## Stage 4 — Agent Swap Matrix

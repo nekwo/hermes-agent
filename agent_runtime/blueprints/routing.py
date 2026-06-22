@@ -12,6 +12,7 @@ from .schema import StageOutcome
 
 
 OUTCOME_TO_STAGE_STATUS = {
+    StageOutcome.READY: StageStatus.PASSED,
     StageOutcome.PASSED: StageStatus.PASSED,
     StageOutcome.FAILED: StageStatus.NEEDS_FIXES,
     StageOutcome.NEEDS_FIXES: StageStatus.NEEDS_FIXES,
@@ -48,13 +49,15 @@ def derive_stage_outcome(
     if decision.type == DecisionType.REQUEST_TEST_RUN:
         return _outcome_from_proofs(proofs or [])
     if decision.type in {DecisionType.REQUEST_QA_REVIEW, DecisionType.COMPLETE, DecisionType.APPROVE}:
+        if _scope_stage_ready_without_proof(stage):
+            return StageOutcome.READY
         return StageOutcome.PASSED
     if decision.type == DecisionType.PROPOSE_PATCH:
         proof_ids = decision.payload.get("proof_ids")
         if isinstance(proof_ids, list) and proof_ids:
             return StageOutcome.PASSED
-        if stage.kind in {"context", "investigation", "audit"} and not stage.requires_product_edit:
-            return StageOutcome.PASSED
+        if _scope_stage_ready_without_proof(stage):
+            return StageOutcome.READY
         return None
     if decision.type == DecisionType.BLOCK:
         return StageOutcome.BLOCKED
@@ -164,6 +167,12 @@ def _outcome_from_proofs(proofs: Iterable[Proof]) -> StageOutcome | None:
     if all(status in {"passed", "approved", "safe"} for status in statuses):
         return StageOutcome.PASSED
     return StageOutcome.FAILED
+
+
+def _scope_stage_ready_without_proof(stage: MissionPlanStage) -> bool:
+    return stage.kind in {"scope", "context", "investigation", "audit"} and not (
+        stage.requires_product_edit or stage.requires_visual_proof or stage.proof_recipe_id
+    )
 
 
 def _proof_status(proof: Proof) -> str | None:
