@@ -5,7 +5,7 @@ import uuid
 from hermes_time import now
 
 from .models import Proof, Task
-from .proof_gates import verification_proof_satisfied
+from .proof_gates import task_verdict_proof_satisfied
 from .proof_rules import ProofType
 from .store import ProofStore
 
@@ -29,4 +29,4 @@ def record_qa_verdict(task: Task, *, verdict: str, proof_ids: list[str], finding
 
 
 def qa_verdict_allows_approval(task: Task, proofs: list[Proof]) -> bool:
-    return verification_proof_satisfied(task, proofs).allowed
+    return task_verdict_proof_satisfied(task, proofs).allowed

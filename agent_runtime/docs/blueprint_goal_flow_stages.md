@@ -129,7 +129,7 @@ path.** Grouped by subsystem:
 *HUD / skills / proof gates (see "Make the HUD, skills, and proof gates dynamic")*
 - [ ] Role-shaped HUD (`hud_shape_index_for_role`, `role_checklist_hud`) replaced by slot/stage/edge-shaped HUD.
 - [ ] Hardcoded `_STAGE46_REQUIRED_SKILLS` map + `stage46_*` install/readiness path replaced by persona `skills` + per-stage `required_skills`.
-- [ ] Role-named proof-gate functions (`implementation_proof_satisfied`, `verification_proof_satisfied`, `integration_proof_satisfied`) collapsed into one generic `stage_proof_satisfied(stage, proofs)`.
+- [x] Role-named proof-gate functions (`implementation_proof_satisfied`, `verification_proof_satisfied`, `integration_proof_satisfied`) collapsed into one generic `stage_proof_satisfied(stage, proofs)`.
 
 Each box is "done" only when the legacy branch is **deleted**, not merely bypassed.
 A grep for the removed symbol returning zero hits outside tests/migrations is the
@@ -1144,6 +1144,7 @@ proof_gate:
 - `BlueprintStage` now carries a parsed `proof_gate` block with required status, required proof types, recipe id, and inline commands.
 - Blueprint validation resolves `proof_gate.proof_recipe_id` through `resolve_proof_recipe`; instantiated `MissionPlanStage` records the same metadata for snapshots and stored tasks.
 - `stage_proof_satisfied(stage, proofs)` evaluates required proof types generically, and blueprint outcome derivation routes missing required proof as a failed stage outcome.
+- Role-shaped proof gate function names were deleted from code/tests; legacy task-level callers now use neutral gate helpers backed by `stage_proof_satisfied`.
 
 ---
 

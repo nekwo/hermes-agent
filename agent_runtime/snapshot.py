@@ -33,7 +33,7 @@ from .persona_assignments import (
 from .persona_chat_history import persona_chat_history_summary
 from .personas import blocked_tool_names, effective_toolsets
 from .profile_readiness import profile_readiness_for_persona
-from .proof_gates import verification_proof_satisfied
+from .proof_gates import task_verdict_proof_satisfied
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_summary, simplified_phase_for_task
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary, runtime_instances_summary
 from .repo_context import resolve_affected_repo_workdir
@@ -815,7 +815,7 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
 
 
 def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None):
-    gate = verification_proof_satisfied(task, proofs)
+    gate = task_verdict_proof_satisfied(task, proofs)
     current = next((s for s in task.stages if s.id == task.current_stage_id), None)
     untriaged = untriaged_issue_discoveries(task)
     child_count = len([item for item in (all_tasks or []) if getattr(item, "parent_task_id", None) == task.id])
