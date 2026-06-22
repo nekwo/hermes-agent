@@ -9535,6 +9535,10 @@ class ProfileDescribeAuto(BaseModel):
     overwrite: bool = False
 
 
+class ProfilePromoteRequest(BaseModel):
+    slot_role: str = "builder"
+
+
 class BlueprintRunRequest(BaseModel):
     goal: str
     bindings: Dict[str, str] = {}
@@ -9947,6 +9951,37 @@ async def create_profile_endpoint(body: ProfileCreate):
         "skills_disabled": skills_disabled,
         "hub_installs": hub_installs,
     }
+
+
+@app.post("/api/profiles/{name}/promote")
+async def promote_profile_endpoint(name: str, body: ProfilePromoteRequest):
+    from hermes_cli import profiles as profiles_mod
+
+    try:
+        profile_name = profiles_mod.normalize_profile_name(name)
+        if not profiles_mod.profile_exists(profile_name):
+            raise HTTPException(status_code=404, detail=f"Profile '{profile_name}' does not exist")
+        from agent_runtime.blueprints.resolve import promote_profile_to_persona
+
+        persona = promote_profile_to_persona(profile_name, slot_role=body.slot_role)
+        return {
+            "ok": True,
+            "profile": profile_name,
+            "persona_id": persona.id,
+            "persona": {
+                "id": persona.id,
+                "display_name": persona.display_name,
+                "role": persona.role,
+                "hermes_profile": persona.hermes_profile,
+            },
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        _log.exception("POST /api/profiles/%s/promote failed", name)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/profiles/active")

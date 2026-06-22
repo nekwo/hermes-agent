@@ -1359,6 +1359,12 @@ the live on-disk profile list with `backs_persona_id` overlays
 This slice is small (~a day) and unblocks the slot dropdowns. It does **not** require
 the graph engine and can ship first.
 
+### Implementation Notes — Prerequisite Slice
+
+- Added `persona.profile.create` and `persona.profile.promote` capability descriptors; profile create maps to the existing `/api/profiles` endpoint.
+- Added explicit `POST /api/profiles/{name}/promote`, backed by the same `AgentStore.save` promotion path used by blueprint binding resolution.
+- `delete_profile` now rejects live blueprint-bound profiles and marks persisted personas that pointed at a deleted profile as orphaned.
+
 ---
 
 ## Recommended Build Order

@@ -94,22 +94,52 @@ class BindingResolver:
         raise ValueError("binding must start with persona: or profile:")
 
     def _promote(self, profile_name: str, slot_role: str, personas: dict[str, AgentPersona]) -> str:
-        template_id = _ROLE_TEMPLATE.get(slot_role, "dev")
-        template = personas.get(template_id) or personas.get("dev") or next(iter(personas.values()), None)
-        if template is None:
-            raise ValueError(
-                f"cannot promote profile {profile_name!r}: no template persona for role {slot_role!r}"
-            )
-        new_id = profile_name if profile_name not in personas else f"{profile_name}_{slot_role}"
-        persona = replace(
-            template,
-            id=new_id,
-            display_name=f"{profile_name} ({slot_role})",
-            hermes_profile=profile_name,
-            skills=list(template.skills),
-            toolsets=list(template.toolsets),
-            required_mcp_servers=list(template.required_mcp_servers),
+        persona = promote_profile_to_persona(
+            profile_name,
+            slot_role=slot_role,
+            personas=personas,
+            agent_store=self.agent_store,
         )
-        self.agent_store.save(persona)
-        personas[new_id] = persona
-        return new_id
+        personas[persona.id] = persona
+        return persona.id
+
+
+def promote_profile_to_persona(
+    profile_name: str,
+    *,
+    slot_role: str,
+    personas: dict[str, AgentPersona] | None = None,
+    agent_store=None,
+) -> AgentPersona:
+    from agent_runtime.store import AgentStore
+
+    store = agent_store if agent_store is not None else AgentStore()
+    known = dict(personas or {})
+    if not known:
+        try:
+            for persona in store.list_all():
+                known[persona.id] = persona
+        except Exception:
+            pass
+        from agent_runtime.config import configured_personas
+
+        for persona in configured_personas():
+            known.setdefault(persona.id, persona)
+    template_id = _ROLE_TEMPLATE.get(slot_role, "dev")
+    template = known.get(template_id) or known.get("dev") or next(iter(known.values()), None)
+    if template is None:
+        raise ValueError(
+            f"cannot promote profile {profile_name!r}: no template persona for role {slot_role!r}"
+        )
+    new_id = profile_name if profile_name not in known else f"{profile_name}_{slot_role}"
+    persona = replace(
+        template,
+        id=new_id,
+        display_name=f"{profile_name} ({slot_role})",
+        hermes_profile=profile_name,
+        skills=list(template.skills),
+        toolsets=list(template.toolsets),
+        required_mcp_servers=list(template.required_mcp_servers),
+        readiness={},
+    )
+    return store.save(persona)
