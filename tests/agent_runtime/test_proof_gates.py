@@ -1,6 +1,6 @@
 from hermes_time import now
 from agent_runtime.models import Incident, MissionPlanStage, Proof, Task
-from agent_runtime.proof_gates import implementation_proof_satisfied, verification_proof_satisfied, integration_proof_satisfied, stage_proof_satisfied
+from agent_runtime.proof_gates import task_delivery_proof_satisfied, task_verdict_proof_satisfied, task_release_proof_satisfied, stage_proof_satisfied
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import TaskState
 from agent_runtime.states import StageStatus
@@ -29,20 +29,20 @@ def stage(**gate):
 
 def test_visual_task_requires_screenshot_or_video_and_tests():
     proofs=[proof(ProofType.TEST_RUN, exit_code=0), proof(ProofType.QA_VERDICT, verdict="approved")]
-    r=verification_proof_satisfied(task(True), proofs)
+    r=task_verdict_proof_satisfied(task(True), proofs)
     assert not r.allowed and "missing screenshot or video proof" in r.missing
 
 
 def test_non_visual_task_passes_with_test_and_verdict():
     proofs=[proof(ProofType.TEST_RUN, exit_code=0), proof(ProofType.QA_VERDICT, verdict="approved")]
-    assert verification_proof_satisfied(task(False), proofs).allowed
+    assert task_verdict_proof_satisfied(task(False), proofs).allowed
 
 
 
 def test_null_exit_code_test_proof_is_treated_as_not_passed_not_crash():
     proofs=[proof(ProofType.TEST_RUN, exit_code=None), proof(ProofType.QA_VERDICT, verdict="approved")]
 
-    result = verification_proof_satisfied(task(False), proofs)
+    result = task_verdict_proof_satisfied(task(False), proofs)
 
     assert not result.allowed
     assert "missing passed test proof" in result.missing
@@ -53,8 +53,8 @@ def test_invalid_exit_code_test_proofs_are_not_passing_and_do_not_crash():
     for raw_exit_code in (None, "not-an-int", False, True, float("inf"), object()):
         proofs=[proof(ProofType.TEST_RUN, exit_code=raw_exit_code), proof(ProofType.QA_VERDICT, verdict="approved")]
 
-        qa_result = verification_proof_satisfied(task(False), proofs)
-        dev_result = implementation_proof_satisfied(task(False), proofs)
+        qa_result = task_verdict_proof_satisfied(task(False), proofs)
+        dev_result = task_delivery_proof_satisfied(task(False), proofs)
 
         assert not qa_result.allowed
         assert "missing passed test proof" in qa_result.missing
@@ -66,7 +66,7 @@ def test_invalid_exit_code_test_proofs_are_not_passing_and_do_not_crash():
 def test_pm_integration_blocks_on_open_incident():
     proofs=[proof(ProofType.TEST_RUN, exit_code=0), proof(ProofType.QA_VERDICT, verdict="approved"), proof(ProofType.COMMIT)]
     inc=Incident(id="i", task_id="t", run_id=None, kind="critical", summary="bad", detail_path=None, opened_at=now())
-    assert not integration_proof_satisfied(task(False), proofs, [inc]).allowed
+    assert not task_release_proof_satisfied(task(False), proofs, [inc]).allowed
 
 
 def test_stage_proof_gate_requires_declared_test_run_type():

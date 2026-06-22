@@ -9,7 +9,7 @@ from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid,
 from agent_runtime.models import AgentPersona, AgentRun, Incident, Proof, Task, TaskStage
 from agent_runtime.plan_review import PlanReviewVerdict
 from agent_runtime.planning import apply_planning_decision
-from agent_runtime.proof_gates import verification_proof_satisfied
+from agent_runtime.proof_gates import task_verdict_proof_satisfied
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
@@ -59,7 +59,7 @@ def _proof(pt, redaction_status="safe", **meta):
 def test_unsafe_or_unscanned_proofs_do_not_satisfy_qa_gate():
     t = _task(TaskState.QA_TESTING)
     unsafe = [_proof(ProofType.TEST_RUN, "unsafe", exit_code=0), _proof(ProofType.QA_VERDICT, "needs_scan", verdict="approved")]
-    result = verification_proof_satisfied(t, unsafe)
+    result = task_verdict_proof_satisfied(t, unsafe)
     assert not result.allowed
     assert "missing passed test proof" in result.missing
     assert "missing approved QA verdict" in result.missing

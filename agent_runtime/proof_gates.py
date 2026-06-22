@@ -34,10 +34,6 @@ def _exit_code(proof: Proof) -> int:
         return 1
 
 
-def _passed_tests(proofs: list[Proof]) -> list[Proof]:
-    return [p for p in _proofs_of(proofs, ProofType.TEST_RUN) if _safe(p) and _exit_code(p) == 0]
-
-
 def _visual_proofs(proofs: list[Proof]) -> list[Proof]:
     return [p for p in _proofs_of(proofs, ProofType.SCREENSHOT, ProofType.VIDEO) if _safe(p) and p.path_or_value]
 
@@ -114,28 +110,44 @@ def task_requires_visual(task: Task) -> bool:
     return bool(task.requires_visual_proof or any(stage.requires_visual_proof for stage in task.stages))
 
 
-def implementation_proof_satisfied(task: Task, proofs: list[Proof]) -> GateResult:
+def task_delivery_proof_satisfied(task: Task, proofs: list[Proof]) -> GateResult:
     missing=[]
     has_change = bool([p for p in _proofs_of(proofs, ProofType.COMMIT, ProofType.DIFF, ProofType.DIFF_STAT) if _safe(p)])
     if not has_change and not (task.waiver and task.waiver.get("gate") in {"dev_change_proof", "no_code"}):
         missing.append("missing commit or diff proof")
-    if not _passed_tests(proofs) and not (task.waiver and task.waiver.get("gate") == "tests"):
+    test_gate = stage_proof_satisfied(
+        _synthetic_gate_stage("delivery", required_proof_types=[ProofType.TEST_RUN.value]),
+        proofs,
+    )
+    if not test_gate.allowed and not (task.waiver and task.waiver.get("gate") == "tests"):
         missing.append("missing passed test proof")
     return GateResult(not missing, missing)
 
 
-def verification_proof_satisfied(task: Task, proofs: list[Proof]) -> GateResult:
+def task_verdict_proof_satisfied(task: Task, proofs: list[Proof]) -> GateResult:
     missing=[]
     if has_typed_plan(task):
         typed_ready, typed_missing = blocking_stages_ready_for_qa(task, proof_store=_ListProofStore(proofs))
         missing.extend(typed_missing)
-    verdicts=[p for p in _proofs_of(proofs, ProofType.QA_VERDICT) if _safe(p) and p.metadata.get("verdict") == "approved"]
-    if not verdicts:
+    verdict_gate = stage_proof_satisfied(
+        _synthetic_gate_stage("verdict", required_proof_types=[ProofType.QA_VERDICT.value]),
+        proofs,
+    )
+    if not verdict_gate.allowed:
         missing.append("missing approved QA verdict")
-    if not _passed_tests(proofs) and not (task.waiver and task.waiver.get("gate") == "tests"):
+    test_gate = stage_proof_satisfied(
+        _synthetic_gate_stage("verdict_tests", required_proof_types=[ProofType.TEST_RUN.value]),
+        proofs,
+    )
+    if not test_gate.allowed and not (task.waiver and task.waiver.get("gate") == "tests"):
         missing.append("missing passed test proof")
-    if task_requires_visual(task) and not _visual_proofs(proofs):
-        missing.append("missing screenshot or video proof")
+    if task_requires_visual(task):
+        visual_gate = stage_proof_satisfied(
+            _synthetic_gate_stage("verdict_visual", required_proof_types=[ProofType.SCREENSHOT.value]),
+            proofs,
+        )
+        if not visual_gate.allowed:
+            missing.append("missing screenshot or video proof")
     return GateResult(not missing, missing)
 
 
@@ -147,14 +159,30 @@ class _ListProofStore:
         return self._proofs[proof_id]
 
 
-def integration_proof_satisfied(task: Task, proofs: list[Proof], incidents: list[Incident]) -> GateResult:
+def task_release_proof_satisfied(task: Task, proofs: list[Proof], incidents: list[Incident]) -> GateResult:
     missing=[]
     warnings=[]
-    qa=verification_proof_satisfied(task, proofs)
-    dev=implementation_proof_satisfied(task, proofs)
+    qa=task_verdict_proof_satisfied(task, proofs)
+    dev=task_delivery_proof_satisfied(task, proofs)
     missing.extend(dev.missing)
     missing.extend(qa.missing)
     open_critical=[i for i in incidents if i.closed_at is None and i.kind in CRITICAL_INCIDENT_KINDS]
     if open_critical:
         missing.append("open critical incidents")
     return GateResult(not missing, sorted(set(missing)), warnings)
+
+
+def _synthetic_gate_stage(stage_id: str, *, required_proof_types: list[str]) -> MissionPlanStage:
+    return MissionPlanStage(
+        id="",
+        title=stage_id,
+        objective=stage_id,
+        owner="harness",
+        repo="hermes-agent",
+        kind="proof_gate",
+        proof_gate={
+            "required": True,
+            "minimum_status": "passed",
+            "required_proof_types": required_proof_types,
+        },
+    )
