@@ -1092,6 +1092,11 @@ prerequisite profile slice (create + promote + orphan handling).
 - Swapping agents is a UI action, not a code edit.
 - Graph status updates after snapshot refresh; failed/blocked stage is obvious.
 
+### Implementation Notes — Stage 6
+
+- Added backend API endpoints `GET /api/blueprints` and `POST /api/blueprints/{id}/run` for Mission Control integration.
+- Snapshot payloads expose bundled `blueprints`, recent `blueprint_runs`, and per-task `mission_plan` graph state; Flutter UI controls remain downstream.
+
 ---
 
 ## Stage 7 — Proof Gates as First-Class Nodes
