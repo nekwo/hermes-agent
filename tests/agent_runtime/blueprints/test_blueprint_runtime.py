@@ -412,6 +412,37 @@ def test_resolver_promotes_unwrapped_profile_into_persisted_persona(tmp_path, mo
         find_only.resolve("profile:other-profile", slot_role="builder")
 
 
+def test_save_blueprint_round_trips_and_rejects_invalid(tmp_path):
+    from agent_runtime.blueprints.schema import blueprint_from_dict
+    from agent_runtime.blueprints.store import BlueprintStore, blueprint_to_dict, save_blueprint
+
+    spec = {
+        "id": "edit_smoke",
+        "version": 2,
+        "title": "Edit Smoke",
+        "slots": [{"id": "builder", "role": "builder"}],
+        "stages": [{"id": "build", "title": "Build", "objective": "Build", "owner_slot": "builder"}],
+        "edges": [
+            {"source": "build", "outcome": "passed", "target": "done"},
+            {"source": "build", "outcome": "blocked", "target": "intervention"},
+        ],
+        "limits": {"max_attempts_per_stage": 1, "max_total_stages": 2},
+    }
+    bp = blueprint_from_dict(spec)
+    path = save_blueprint(bp, root=tmp_path)
+    assert path.exists()
+
+    # reloaded from disk by the store and round-trips to the same canonical dict
+    reloaded = BlueprintStore(roots=[tmp_path]).get("edit_smoke")
+    assert reloaded.version == 2
+    assert blueprint_to_dict(reloaded) == blueprint_to_dict(bp)
+
+    # an invalid spec (edge to unknown stage) is rejected before any write
+    bad = dict(spec, edges=[{"source": "build", "outcome": "passed", "target": "ghost"}])
+    with pytest.raises(ValueError, match="not a known stage or terminal target"):
+        blueprint_from_dict(bad)
+
+
 def test_resolver_rejects_unknown_persona_binding():
     from agent_runtime.blueprints.resolve import BindingResolver
 
