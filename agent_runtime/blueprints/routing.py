@@ -127,6 +127,9 @@ def apply_stage_outcome(task: Task, stage_id: str, outcome: StageOutcome, *, rea
         task.current_stage_id = None
         plan.revision = int(plan.revision or 0) + 1
         task.updated_at = now()
+        from .runs import BlueprintRunStore
+
+        BlueprintRunStore().record_task_terminal(task, result="passed", ended_at=task.updated_at)
         return "done"
     if target == "intervention":
         return _route_intervention(task, plan, stage, reason=reason)
