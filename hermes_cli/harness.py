@@ -102,6 +102,10 @@ def build_parser(parent_subparsers) -> None:
     blueprint_run.add_argument("--requested-by", default="cli")
     blueprint_run.add_argument("--json", action="store_true")
     blueprint_run.set_defaults(func=_cmd_blueprint_run)
+    blueprint_save = blueprint_subs.add_parser("save", help="Create or update a blueprint from a JSON/YAML spec file (validated before write)")
+    blueprint_save.add_argument("--spec-file", required=True, help="Path to a JSON or YAML blueprint spec")
+    blueprint_save.add_argument("--json", action="store_true")
+    blueprint_save.set_defaults(func=_cmd_blueprint_save)
     blueprint_matrix = blueprint_subs.add_parser("matrix-run", help="Instantiate one blueprint across varied slot bindings")
     blueprint_matrix.add_argument("blueprint")
     blueprint_matrix.add_argument("--goal", required=True)
@@ -538,6 +542,32 @@ def _cmd_blueprint_validate(args) -> int:
         for error in errors:
             print(f"- {error}")
     return 0 if not errors else 2
+
+
+def _cmd_blueprint_save(args) -> int:
+    import json as _json
+
+    from agent_runtime.blueprints.schema import blueprint_from_dict
+    from agent_runtime.blueprints.store import blueprint_summary, save_blueprint
+
+    try:
+        spec_path = Path(args.spec_file)
+        text = spec_path.read_text(encoding="utf-8")
+        if spec_path.suffix.lower() in {".yaml", ".yml"}:
+            import yaml
+
+            raw = yaml.safe_load(text) or {}
+        else:
+            raw = _json.loads(text)
+        bp = blueprint_from_dict(raw)  # validates; raises ValueError on an invalid graph
+        path = save_blueprint(bp)
+    except Exception as exc:
+        data = {"ok": False, "error": str(exc)}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    data = {"ok": True, "blueprint_id": bp.id, "version": bp.version, "path": str(path), "blueprint": blueprint_summary(bp)}
+    print(emit_json(data) if args.json else f"saved blueprint {bp.id} -> {path}")
+    return 0
 
 
 def _cmd_blueprint_run(args) -> int:

@@ -53,7 +53,35 @@ def blueprint_summary(bp: Blueprint) -> dict:
         "description": bp.description,
         "slots": [asdict(slot) for slot in bp.slots],
         "stages": [asdict(stage) for stage in bp.stages],
-        "edges": [asdict(edge) for edge in bp.edges],
+        "edges": [_edge_to_dict(edge) for edge in bp.edges],
         "limits": asdict(bp.limits),
         "on_unhandled": bp.on_unhandled,
     }
+
+
+def _edge_to_dict(edge) -> dict:
+    # outcome is a StrEnum; emit its plain value so the dict is yaml/json-safe.
+    return {"source": edge.source, "outcome": edge.outcome.value, "target": edge.target}
+
+
+def blueprint_to_dict(bp: Blueprint) -> dict:
+    """Plain, serialization-safe dict (no enums) suitable for YAML/JSON round-trip."""
+    return blueprint_summary(bp)
+
+
+def save_blueprint(bp: Blueprint, *, root: str | Path | None = None) -> Path:
+    """Validate-then-write a blueprint as YAML into the catalog.
+
+    The caller is expected to have built ``bp`` via ``blueprint_from_dict`` (which
+    validates); this writes the canonical ``<id>.yaml`` file.
+    """
+    import yaml
+
+    target_root = Path(root) if root is not None else Path(__file__).resolve().parent
+    target_root.mkdir(parents=True, exist_ok=True)
+    path = target_root / f"{bp.id}.yaml"
+    path.write_text(
+        yaml.safe_dump(blueprint_to_dict(bp), sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    return path
