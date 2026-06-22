@@ -55,3 +55,22 @@ def test_blueprint_run_endpoint_persists_task(client):
     task = TaskStore().get(data["task_id"])
     assert task.mission_plan.blueprint_id == "one_agent_smoke"
     assert task.mission_plan.current_stage_id == "build"
+
+
+def test_profile_promote_endpoint_persists_persona(client, monkeypatch):
+    from hermes_cli import profiles as profiles_mod
+
+    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name == "fresh")
+
+    response = client.post("/api/profiles/fresh/promote", json={"slot_role": "builder"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is True
+    assert data["persona_id"] == "fresh"
+
+    from agent_runtime.store import AgentStore
+
+    persona = AgentStore().get("fresh")
+    assert persona.hermes_profile == "fresh"
+    assert persona.role == "dev"

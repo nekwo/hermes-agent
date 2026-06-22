@@ -480,6 +480,93 @@ class TestDeleteProfile:
         assert profile_dir.is_dir()
         assert get_active_profile() == "default"
 
+    def test_rejects_delete_when_profile_bound_in_live_blueprint_task(self, profile_env, tmp_path, monkeypatch):
+        profile_dir = create_profile("coder", no_alias=True)
+        monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+        from hermes_time import now
+        from agent_runtime.models import AgentPersona, MissionIntent, MissionPlan, MissionPlanStage, Task
+        from agent_runtime.states import TaskState
+        from agent_runtime.store import AgentStore, TaskStore
+
+        AgentStore().save(
+            AgentPersona(
+                id="coder_persona",
+                display_name="Coder",
+                role="dev",
+                model=None,
+                provider=None,
+                api_mode=None,
+                toolsets=[],
+                system_prompt_path="personas/dev/system.md",
+                hermes_profile="coder",
+            )
+        )
+        n = now()
+        TaskStore().create(
+            Task(
+                id="task_bound_profile",
+                title="Bound",
+                description="Bound",
+                state=TaskState.CREATED,
+                created_at=n,
+                updated_at=n,
+                requested_by="test",
+                mission_plan=MissionPlan(
+                    mission_intent=MissionIntent(title="Bound", objective="Bound"),
+                    blueprint_id="one_agent_smoke",
+                    blueprint_version=1,
+                    bindings={"builder": "coder_persona"},
+                    binding_sources={"builder": "profile:coder"},
+                    stages=[
+                        MissionPlanStage(
+                            id="build",
+                            title="Build",
+                            objective="Build",
+                            owner="builder",
+                            owner_slot="builder",
+                            repo="hermes-agent",
+                            kind="implementation",
+                        )
+                    ],
+                ),
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="bound in live blueprint"):
+            delete_profile("coder", yes=True)
+        assert profile_dir.is_dir()
+
+    def test_delete_marks_persisted_profile_persona_orphaned(self, profile_env, tmp_path, monkeypatch):
+        profile_dir = create_profile("coder", no_alias=True)
+        monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+        from agent_runtime.models import AgentPersona
+        from agent_runtime.store import AgentStore
+
+        store = AgentStore()
+        store.save(
+            AgentPersona(
+                id="coder_persona",
+                display_name="Coder",
+                role="dev",
+                model=None,
+                provider=None,
+                api_mode=None,
+                toolsets=[],
+                system_prompt_path="personas/dev/system.md",
+                hermes_profile="coder",
+            )
+        )
+
+        with patch("hermes_cli.profiles._cleanup_gateway_service"):
+            delete_profile("coder", yes=True)
+
+        assert not profile_dir.is_dir()
+        persona = store.get("coder_persona")
+        assert persona.readiness["orphaned"] is True
+        assert persona.readiness["orphaned_profile"] == "coder"
+
 
 # ===================================================================
 # TestListProfiles

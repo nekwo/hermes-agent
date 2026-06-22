@@ -19,6 +19,8 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert "persona.instance.message" in ids
     assert "persona.instance.open_chat" in ids
     assert "persona.instance.run_once" in ids
+    assert "persona.profile.create" in ids
+    assert "persona.profile.promote" in ids
     assert "task.run_until_settled" in ids
     assert "daemon.start" in ids
     assert "shell.anything" not in ids
