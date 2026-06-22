@@ -13,6 +13,7 @@ from hermes_time import now
 from agent_runtime.actions import HarnessActionType
 from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.blueprints.routing import apply_decision_outcome, apply_stage_outcome, derive_stage_outcome, next_target
+from agent_runtime.blueprints.runs import BlueprintRunStore
 from agent_runtime.blueprints.schema import StageOutcome, blueprint_from_dict, validate_bindings, validate_blueprint
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.mission_plan import mission_plan_summary, validate_mission_plan
@@ -177,6 +178,28 @@ def test_blueprint_verify_passed_routes_to_done():
     assert result == "done"
     assert task.mission_plan.current_stage_id is None
     assert MissionStateMachine().next_action(task).type == HarnessActionType.COMPLETE_TASK
+
+
+def test_blueprint_terminal_run_writes_versioned_record(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    first = _blueprint_task("two_agent_build_verify")
+    first.id = "task_blueprint_record_first"
+
+    apply_stage_outcome(first, "implement", StageOutcome.PASSED, reason="implemented")
+    assert apply_stage_outcome(first, "verify", StageOutcome.PASSED, reason="verified") == "done"
+
+    second = _blueprint_task("two_agent_build_verify", bindings={"builder": "persona:backend_dev", "verifier": "persona:qa"})
+    second.id = "task_blueprint_record_second"
+    second.mission_plan.blueprint_version = 2
+    apply_stage_outcome(second, "implement", StageOutcome.PASSED, reason="implemented")
+    assert apply_stage_outcome(second, "verify", StageOutcome.PASSED, reason="verified") == "done"
+
+    records = BlueprintRunStore().list_all()
+    assert [record.task_id for record in records] == ["task_blueprint_record_first", "task_blueprint_record_second"]
+    assert [record.blueprint_version for record in records] == [1, 2]
+    assert records[0].bindings == {"builder": "dev", "verifier": "qa"}
+    assert records[1].bindings == {"builder": "backend_dev", "verifier": "qa"}
+    assert records[0].per_stage_outcomes == {"implement": "passed", "verify": "passed"}
 
 
 def test_blueprint_on_unhandled_route_is_honored():

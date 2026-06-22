@@ -1,5 +1,6 @@
 from hermes_time import now
 from utils import atomic_json_write
+from agent_runtime.blueprints.runs import BlueprintRunStore
 from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.snapshot import build_snapshot, write_snapshot
@@ -17,6 +18,46 @@ def test_snapshot_contains_task_summary_and_no_raw_logs(isolate_agent_runtime_ro
     assert snap["dirty_state"]["runtime"]["open_task_ids"] == ["t"]
     write_snapshot(snap)
     assert (isolate_agent_runtime_root / "snapshot.json").exists()
+
+
+def test_snapshot_projects_blueprint_run_records(isolate_agent_runtime_root):
+    n = now()
+    task = Task(
+        id="task_blueprint_snapshot",
+        title="Blueprint snapshot",
+        description="record projection",
+        state=TaskState.DONE,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Blueprint snapshot", objective="record projection"),
+            blueprint_id="one_agent_smoke",
+            blueprint_version=1,
+            bindings={"builder": "dev"},
+            binding_sources={"builder": "persona:dev"},
+            stages=[
+                MissionPlanStage(
+                    id="build",
+                    title="Build",
+                    objective="Build",
+                    owner="builder",
+                    owner_slot="builder",
+                    repo="hermes-agent",
+                    kind="implementation",
+                    status=StageStatus.PASSED,
+                )
+            ],
+        ),
+    )
+    BlueprintRunStore().record_task_terminal(task, result="passed", ended_at=n)
+
+    snap = build_snapshot()
+
+    assert snap["blueprint_runs"][0]["task_id"] == "task_blueprint_snapshot"
+    assert snap["blueprint_runs"][0]["blueprint_id"] == "one_agent_smoke"
+    assert snap["blueprint_runs"][0]["per_stage_outcomes"] == {"build": "passed"}
+    assert any(item["id"] == "one_agent_smoke" for item in snap["blueprints"])
 
 
 def test_snapshot_unscoped_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root):

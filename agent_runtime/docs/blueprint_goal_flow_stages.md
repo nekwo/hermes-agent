@@ -1197,6 +1197,12 @@ result: passed
 - Old results remain understandable after blueprint changes.
 - Mission Control can compare runs across versions.
 
+### Implementation Notes — Stage 9
+
+- Added `BlueprintRunStore` and `BlueprintRunRecord` under `agent_runtime/blueprints/runs.py`.
+- Blueprint graph terminal routing writes an idempotent run record with blueprint id/version, requested and resolved bindings, per-stage outcomes, timestamps, and result.
+- Snapshot payloads now include bundled `blueprints` and recent `blueprint_runs` for compare-run surfaces.
+
 ---
 
 ## Stage 10 — Enterprise Hardening + Legacy Deletion

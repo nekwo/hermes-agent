@@ -9,6 +9,8 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
+from .blueprints.runs import BlueprintRunStore, blueprint_run_summary
+from .blueprints.store import BlueprintStore, blueprint_summary
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .capabilities import capability_descriptors
 from .config import configured_personas, load_agent_runtime_config
@@ -94,11 +96,13 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     proof_batch_store = ProofBatchStore(event_log=event_log)
     repo_bundle_store = RepoBundleStore(event_log=event_log)
     runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
+    blueprint_run_store = BlueprintRunStore()
     role_envelopes = role_envelope_store.list_all()
     role_checklists = role_checklist_store.list_all()
     proof_batches = proof_batch_store.list_all()
     repo_bundles = repo_bundle_store.list_all()
     runtime_instances = runtime_instance_store.list_all()
+    blueprint_runs = blueprint_run_store.list_all()
     agent_summaries = [_agent_summary(a) for a in agents]
     available_personas = _available_persona_summary(agents)
     proofs = []
@@ -171,6 +175,8 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         "archived_tasks": _archived_task_summaries(),
         "agents": agent_summaries,
         "available_personas": available_personas,
+        "blueprints": [blueprint_summary(bp) for bp in BlueprintStore().list()],
+        "blueprint_runs": [blueprint_run_summary(record) for record in blueprint_runs[-50:]],
         "runtime_paths_diagnostic": _runtime_paths_diagnostic(available_personas),
         "worker_sessions": [worker_session_summary(worker) for worker in workers],
         "role_envelopes": [role_envelope_summary(item, checklist_store=role_checklist_store) for item in role_envelopes],
