@@ -24,6 +24,7 @@ _ROLE_TEMPLATE = {
     "dev": "dev",
     "backend_dev": "backend_dev",
     "verifier": "qa",
+    "reviewer": "qa",
     "qa": "qa",
     "lead": "neko_supervisor",
     "neko": "neko_supervisor",
