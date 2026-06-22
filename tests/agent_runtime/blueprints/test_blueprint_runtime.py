@@ -295,6 +295,37 @@ def test_blueprint_cli_non_dry_run_creates_persisted_task(tmp_path):
     assert task_data["mission_plan"]["current_stage_id"] == "build"
 
 
+def test_blueprint_cli_matrix_run_reports_isolated_cases(tmp_path):
+    env = os.environ.copy()
+    env["HERMES_AGENT_RUNTIME_ROOT"] = str(tmp_path / "runtime")
+    cmd = [
+        sys.executable,
+        "-m",
+        "hermes_cli.main",
+        "harness",
+        "blueprint",
+        "matrix-run",
+        "two_agent_build_verify",
+        "--goal",
+        "swap smoke",
+        "--bind",
+        "verifier=persona:qa",
+        "--vary",
+        "builder=persona:dev,persona:backend_dev",
+        "--dry-run",
+        "--json",
+    ]
+    completed = subprocess.run(cmd, cwd=Path(__file__).resolve().parents[3], env=env, capture_output=True, text=True, timeout=30)
+
+    assert completed.returncode == 0, completed.stderr
+    data = json.loads(completed.stdout)
+    assert data["ok"] is True
+    assert data["dry_run"] is True
+    assert data["case_count"] == 2
+    assert [item["bindings"]["builder"] for item in data["results"]] == ["persona:dev", "persona:backend_dev"]
+    assert all(item["next_action"]["type"] == "run_slot" for item in data["results"])
+
+
 def test_resolver_finds_existing_persona_for_profile_binding():
     from agent_runtime.blueprints.resolve import BindingResolver
     from agent_runtime.models import AgentPersona

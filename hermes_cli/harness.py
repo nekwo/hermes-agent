@@ -102,6 +102,15 @@ def build_parser(parent_subparsers) -> None:
     blueprint_run.add_argument("--requested-by", default="cli")
     blueprint_run.add_argument("--json", action="store_true")
     blueprint_run.set_defaults(func=_cmd_blueprint_run)
+    blueprint_matrix = blueprint_subs.add_parser("matrix-run", help="Instantiate one blueprint across varied slot bindings")
+    blueprint_matrix.add_argument("blueprint")
+    blueprint_matrix.add_argument("--goal", required=True)
+    blueprint_matrix.add_argument("--bind", action="append", default=[], help="Base slot binding, e.g. verifier=persona:qa")
+    blueprint_matrix.add_argument("--vary", action="append", default=[], help="Vary a slot across comma-separated bindings, e.g. builder=persona:dev,profile:gpt-launcher")
+    blueprint_matrix.add_argument("--dry-run", action="store_true")
+    blueprint_matrix.add_argument("--requested-by", default="cli")
+    blueprint_matrix.add_argument("--json", action="store_true")
+    blueprint_matrix.set_defaults(func=_cmd_blueprint_matrix_run)
 
     task = subs.add_parser("task", help="Manage harness tasks")
     task_subs = task.add_subparsers(dest="task_command")
@@ -587,6 +596,88 @@ def _cmd_blueprint_run(args) -> int:
     return 0
 
 
+def _cmd_blueprint_matrix_run(args) -> int:
+    from agent_runtime.blueprints.instantiate import instantiate_blueprint
+    from agent_runtime.blueprints.resolve import BindingResolver
+    from agent_runtime.blueprints.store import BlueprintStore
+    from agent_runtime.mission_plan import mission_plan_summary
+    from agent_runtime.state_machine import MissionStateMachine
+
+    try:
+        bp = BlueprintStore().get(args.blueprint)
+        base_bindings = _parse_blueprint_bindings(args.bind or [])
+        variations = _parse_blueprint_variations(args.vary or [])
+        cases = _matrix_binding_cases(base_bindings, variations)
+    except Exception as exc:
+        data = {"ok": False, "error": str(exc)}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    resolver = BindingResolver(allow_promote=not args.dry_run)
+    results = []
+    ok = True
+    for index, bindings in enumerate(cases, start=1):
+        task_id = f"task_blueprint_matrix_{uuid.uuid4().hex[:12]}"
+        try:
+            plan = instantiate_blueprint(bp, goal=args.goal, bindings=bindings, resolver=resolver)
+            task = Task(
+                id=task_id,
+                title=f"{bp.title} Matrix {index}",
+                description=args.goal,
+                state=TaskState.CREATED,
+                created_at=now(),
+                updated_at=now(),
+                requested_by=args.requested_by,
+                mission_plan=plan,
+                current_stage_id=plan.current_stage_id,
+            )
+            action = MissionStateMachine().next_action(task)
+            if not args.dry_run:
+                TaskStore().create(task)
+            results.append(
+                {
+                    "case": index,
+                    "ok": True,
+                    "created": not bool(args.dry_run),
+                    "task_id": task.id,
+                    "bindings": dict(bindings),
+                    "resolved_bindings": dict(plan.bindings),
+                    "metrics": {
+                        "stage_count": len(plan.stages),
+                        "edge_count": len(plan.edges),
+                        "attempts": dict(plan.stage_attempts),
+                    },
+                    "next_action": {
+                        "type": action.type.value,
+                        "task_id": action.task_id,
+                        "slot_id": action.slot_id,
+                        "reason": action.reason,
+                    },
+                    "mission_plan": mission_plan_summary(task),
+                }
+            )
+        except Exception as exc:
+            ok = False
+            results.append({"case": index, "ok": False, "created": False, "task_id": task_id, "bindings": dict(bindings), "error": str(exc)})
+    data = {
+        "ok": ok,
+        "dry_run": bool(args.dry_run),
+        "blueprint_id": bp.id,
+        "blueprint_version": bp.version,
+        "case_count": len(results),
+        "vary": variations,
+        "results": results,
+    }
+    if args.json:
+        print(emit_json(data))
+    else:
+        print(f"{'dry-run ' if args.dry_run else ''}matrix blueprint {bp.id}: {len(results)} case(s)")
+        for item in results:
+            status = "ok" if item.get("ok") else "failed"
+            slot = ((item.get("next_action") or {}).get("slot_id") if item.get("ok") else "-") or "-"
+            print(f"- case {item['case']}: {status} task={item['task_id']} next_slot={slot}")
+    return 0 if ok else 2
+
+
 def _parse_blueprint_bindings(items: list[str]) -> dict[str, str]:
     bindings: dict[str, str] = {}
     for item in items:
@@ -599,6 +690,34 @@ def _parse_blueprint_bindings(items: list[str]) -> dict[str, str]:
             raise ValueError("--bind must include a non-empty slot and value")
         bindings[slot] = value
     return bindings
+
+
+def _parse_blueprint_variations(items: list[str]) -> dict[str, list[str]]:
+    variations: dict[str, list[str]] = {}
+    for item in items:
+        if "=" not in str(item):
+            raise ValueError("--vary must be slot=value1,value2")
+        slot, values = str(item).split("=", 1)
+        slot = slot.strip()
+        choices = [value.strip() for value in values.split(",") if value.strip()]
+        if not slot or not choices:
+            raise ValueError("--vary must include a non-empty slot and at least one binding")
+        variations[slot] = choices
+    if not variations:
+        raise ValueError("matrix-run requires at least one --vary slot=value1,value2")
+    return variations
+
+
+def _matrix_binding_cases(base: dict[str, str], variations: dict[str, list[str]]) -> list[dict[str, str]]:
+    from itertools import product
+
+    slots = list(variations)
+    cases: list[dict[str, str]] = []
+    for choices in product(*(variations[slot] for slot in slots)):
+        bindings = dict(base)
+        bindings.update({slot: value for slot, value in zip(slots, choices)})
+        cases.append(bindings)
+    return cases
 
 
 def _cmd_init(args) -> int:
