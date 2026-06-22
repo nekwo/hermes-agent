@@ -1124,6 +1124,12 @@ proof_gate:
 - Missing proof blocks completion; proof attaches to the stage that required it.
 - QA can distinguish: proof missing / failed / passed-but-scope-wrong / not required.
 
+### Implementation Notes — Stage 7
+
+- `BlueprintStage` now carries a parsed `proof_gate` block with required status, required proof types, recipe id, and inline commands.
+- Blueprint validation resolves `proof_gate.proof_recipe_id` through `resolve_proof_recipe`; instantiated `MissionPlanStage` records the same metadata for snapshots and stored tasks.
+- `stage_proof_satisfied(stage, proofs)` evaluates required proof types generically, and blueprint outcome derivation routes missing required proof as a failed stage outcome.
+
 ---
 
 ## Stage 8 — Full Production Mission Flow

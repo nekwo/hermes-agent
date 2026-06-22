@@ -23,6 +23,8 @@ stages:
     repo: hermes-agent
     kind: scope
     blocks_qa_until: false
+    proof_gate:
+      required: false
   - id: implement
     title: Implement
     objective: Implement the scoped work and attach proof.
@@ -31,6 +33,10 @@ stages:
     kind: implementation
     depends_on: [scope]
     blocks_qa_until: true
+    proof_gate:
+      required: true
+      minimum_status: passed
+      required_proof_types: [test_run]
   - id: verify
     title: Verify
     objective: Verify implementation and proof.
@@ -39,6 +45,10 @@ stages:
     kind: qa_verdict
     depends_on: [implement]
     blocks_qa_until: false
+    proof_gate:
+      required: true
+      minimum_status: approved
+      required_proof_types: [qa_verdict]
 edges:
   - source: scope
     outcome: ready

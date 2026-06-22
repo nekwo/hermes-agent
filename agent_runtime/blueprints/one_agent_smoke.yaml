@@ -15,6 +15,10 @@ stages:
     repo: hermes-agent
     kind: implementation
     blocks_qa_until: true
+    proof_gate:
+      required: true
+      minimum_status: passed
+      required_proof_types: [test_run]
 edges:
   - source: build
     outcome: passed
