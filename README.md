@@ -218,6 +218,11 @@ scripts/run_tests.sh
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+The base software is MIT — see [LICENSE](LICENSE).
+
+Modifications and additions contributed in this repository are licensed for
+personal, non-commercial review and evaluation only — see
+[LICENSE-CONTRIBUTIONS](LICENSE-CONTRIBUTIONS.md). The MIT terms continue to
+govern the upstream base.
 
 Built by [Nous Research](https://nousresearch.com).
