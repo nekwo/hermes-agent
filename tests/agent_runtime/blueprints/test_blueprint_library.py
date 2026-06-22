@@ -43,6 +43,26 @@ BLUEPRINT_REPLAYS = {
         "first_slot": "builder",
         "steps": [("implement_ui", StageOutcome.PASSED), ("visual_verify", StageOutcome.PASSED)],
     },
+    "full_production_flow": {
+        "bindings": {
+            "lead": "persona:neko_supervisor",
+            "backend": "persona:backend_dev",
+            "frontend": "persona:dev",
+            "verifier": "persona:qa",
+            "reviewer": "persona:qa",
+        },
+        "first_slot": "lead",
+        "steps": [
+            ("scope", StageOutcome.READY),
+            ("backend_contract", StageOutcome.PASSED),
+            ("frontend_implementation", StageOutcome.PASSED),
+            ("local_self_test", StageOutcome.PASSED),
+            ("qa_verify", StageOutcome.PASSED),
+            ("staging_smoke", StageOutcome.PASSED),
+            ("production_rollout_proof", StageOutcome.PASSED),
+            ("final_verdict", StageOutcome.PASSED),
+        ],
+    },
 }
 
 

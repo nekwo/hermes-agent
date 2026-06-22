@@ -1169,6 +1169,12 @@ stages: [scope, backend_contract, frontend_implementation, local_self_test,
 - Production release requires ordered promotion proof; QA owns final verdict.
 - Lead owns routing, not implementation; operator gets intervention only when needed.
 
+### Implementation Notes — Stage 8
+
+- Added `full_production_flow` with five slots (`lead`, `backend`, `frontend`, `verifier`, `reviewer`) and ordered backend/frontend/local QA/staging/production/final-verdict stages.
+- Added `reviewer` slot role support and mapped reviewer profile promotion to the QA persona template.
+- Library replay tests now cover the full production flow happy path.
+
 ---
 
 ## Stage 9 — Blueprint Versioning and Replay
