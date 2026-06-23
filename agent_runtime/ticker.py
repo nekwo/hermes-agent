@@ -1598,7 +1598,7 @@ def _proof_statuses(proof_ids: list[str], *, proof_store: ProofStore) -> list[st
 def _existing_passed_final_gate_proof_ids(task: Task, stage_id: str | None, *, proof_store: ProofStore) -> list[str]:
     stage_proof_ids = [
         proof_id
-        for stage in list(getattr(task, "stages", None) or [])
+        for stage in _runtime_stage_records(task)
         if not stage_id or stage.id == stage_id
         for proof_id in list(getattr(stage, "proof_ids", None) or [])
     ]
@@ -1644,23 +1644,31 @@ def _recover_handoff_repair_with_existing_proof(task: Task, *, proof_store: Proo
     proof_ids = _existing_passed_final_gate_proof_ids(task, stage_id, proof_store=proof_store)
     if not proof_ids:
         return None
-    for stage in list(getattr(task, "stages", None) or []):
-        if stage.id == stage_id:
-            stage.status = StageStatus.READY_FOR_QA
-            stage.updated_at = now()
-            break
-    _sync_typed_plan_stage_status(task, stage_id, StageStatus.READY_FOR_QA)
+    _set_stage_status(task, stage_id, StageStatus.READY_FOR_QA)
     task.proof_ids = _dedupe(list(getattr(task, "proof_ids", None) or []), proof_ids)
     task.state = TaskState.RUNNING
     task.updated_at = now()
     return {"stage_id": stage_id, "proof_ids": proof_ids, "next_state": task.state.value}
 
 
-def _sync_typed_plan_stage_status(task: Task, stage_id: str, status: StageStatus) -> None:
+def _runtime_stage_records(task: Task) -> list:
     plan = getattr(task, "mission_plan", None)
-    if plan is None:
-        return
-    for stage in list(getattr(plan, "stages", None) or []):
+    if plan is not None and getattr(plan, "enabled", False):
+        return list(getattr(plan, "stages", None) or [])
+    return list(getattr(task, "stages", None) or [])
+
+
+def _set_current_stage_id(task: Task, stage_id: str | None) -> None:
+    task.current_stage_id = stage_id
+    plan = getattr(task, "mission_plan", None)
+    if plan is not None and getattr(plan, "enabled", False):
+        known = {stage.id for stage in list(getattr(plan, "stages", None) or [])}
+        plan.current_stage_id = stage_id if stage_id in known else None
+        plan.revision = int(getattr(plan, "revision", 0) or 0) + 1
+
+
+def _set_stage_status(task: Task, stage_id: str, status: StageStatus) -> None:
+    for stage in _runtime_stage_records(task):
         if stage.id == stage_id:
             stage.status = status
             stage.updated_at = now()
@@ -1704,7 +1712,7 @@ def _validate_request_test_run_targets_current_stage(task: Task, decision) -> No
     if has_typed_plan(task):
         typed_current_stage_id = str(getattr(getattr(task, "mission_plan", None), "current_stage_id", "") or "").strip()
     recipe_id = str(decision.payload.get("recipe_id") or "").strip()
-    requested_stage = next((stage for stage in getattr(task, "stages", []) or [] if stage.id == requested_stage_id), None)
+    requested_stage = next((stage for stage in _runtime_stage_records(task) if stage.id == requested_stage_id), None)
     typed_stage = current_plan_stage(task) if has_typed_plan(task) else None
     if (
         typed_stage is not None
@@ -2077,12 +2085,8 @@ def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decisio
     if mismatched_labels:
         task.proof_ids = _dedupe(list(getattr(task, "proof_ids", None) or []), proof_ids)
         if stage_id:
-            task.current_stage_id = stage_id
-            for stage in task.stages:
-                if stage.id == stage_id:
-                    stage.status = StageStatus.BLOCKED
-                    stage.updated_at = now()
-                    break
+            _set_current_stage_id(task, stage_id)
+            _set_stage_status(task, stage_id, StageStatus.BLOCKED)
         if "command_proof_repo_mismatch" not in task.risk_flags:
             task.risk_flags.append("command_proof_repo_mismatch")
         task.state = TaskState.BLOCKED
@@ -2115,18 +2119,12 @@ def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decisio
         task.proof_ids = _dedupe(list(getattr(task, "proof_ids", None) or []), proof_ids)
         target_stage_id = _proof_command_stage_mismatch_target_stage_id(task, proofs, stage_id=stage_id) or stage_id
         if target_stage_id:
-            task.current_stage_id = target_stage_id
-            for stage in task.stages:
-                if stage.id == target_stage_id:
-                    stage.status = StageStatus.IMPLEMENTING
-                    stage.updated_at = now()
-                    break
+            _set_current_stage_id(task, target_stage_id)
+            _set_stage_status(task, target_stage_id, StageStatus.IMPLEMENTING)
             if stage_id and stage_id != target_stage_id:
-                for stage in task.stages:
-                    if stage.id == stage_id and stage.status == StageStatus.IMPLEMENTING:
-                        stage.status = StageStatus.BLOCKED
-                        stage.updated_at = now()
-                        break
+                stage = _stage_for_command_proof(task, stage_id)
+                if stage is not None and stage.status == StageStatus.IMPLEMENTING:
+                    _set_stage_status(task, stage_id, StageStatus.BLOCKED)
         if "command_proof_stage_mismatch" not in task.risk_flags:
             task.risk_flags.append("command_proof_stage_mismatch")
         task.state = TaskState.RUNNING
@@ -2156,13 +2154,8 @@ def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decisio
         return False
 
     if stage_id:
-        task.current_stage_id = stage_id
-        for stage in task.stages:
-            if stage.id == stage_id:
-                stage.status = StageStatus.READY_FOR_QA
-                stage.updated_at = now()
-                break
-        _sync_typed_plan_stage_status(task, stage_id, StageStatus.READY_FOR_QA)
+        _set_current_stage_id(task, stage_id)
+        _set_stage_status(task, stage_id, StageStatus.READY_FOR_QA)
     task.risk_flags = [
         flag
         for flag in (getattr(task, "risk_flags", None) or [])
@@ -2556,7 +2549,7 @@ def _stage_requires_bridge_archive_regression(task: Task, stage_id: str) -> bool
 
 
 def _is_red_stage(task: Task, stage_id: str) -> bool:
-    for stage in task.stages:
+    for stage in _runtime_stage_records(task):
         if stage.id == stage_id:
             text = " ".join(str(value or "") for value in (stage.id, stage.title, stage.objective)).lower()
             return any(marker in text for marker in ("red", "failing test", "prove tests fail"))
@@ -2812,7 +2805,7 @@ def _safe_repair_error(message: str) -> str | None:
 def _current_stage(task: Task):
     if not getattr(task, "current_stage_id", None):
         return None
-    return next((stage for stage in getattr(task, "stages", []) or [] if stage.id == task.current_stage_id), None)
+    return next((stage for stage in _runtime_stage_records(task) if stage.id == task.current_stage_id), None)
 
 
 def _is_live_persona_runtime(runtime) -> bool:
@@ -3327,7 +3320,7 @@ def _stage_for_command_proof(task: Task, stage_id: str | None):
     target = str(stage_id or getattr(task, "current_stage_id", "") or "").strip()
     if not target:
         return None
-    for stage in getattr(task, "stages", []) or []:
+    for stage in _runtime_stage_records(task):
         if stage.id == target:
             return stage
     return None

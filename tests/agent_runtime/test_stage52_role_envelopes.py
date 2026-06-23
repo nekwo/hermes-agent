@@ -69,7 +69,7 @@ class ChecklistProofRuntime:
             summary="Collect proof and self-approve bounded work.",
             rationale="The active checklist item is complete once the deterministic proof passes.",
             payload={
-                "stage_id": "stage_1",
+                "stage_id": "implement",
                 "commands": ["printf stage52-ok\\n"],
                 "active_checklist_item_id": self.item_id,
                 "self_approval_status": "ready_for_qa",
@@ -546,7 +546,7 @@ def test_tick_records_envelope_checklist_and_proof_batch_when_enabled():
     assert len(batches) == 1
     assert envelopes[0].proof_batch_id == batches[0].proof_batch_id
     assert checklists[0].revision == 1
-    assert batches[0].proof_ids == [f"proof_{task.id}_stage_1"]
+    assert batches[0].proof_ids == [f"proof_{task.id}_implement"]
 
 
 def test_tick_does_not_record_stage52_state_when_disabled():
@@ -590,7 +590,7 @@ def test_snapshot_surfaces_stage52_state_for_mission_control():
     assert snap["proof_batches"]
     assert item["role_envelopes"][0]["role_id"] == "dev"
     assert item["role_checklists"][0]["items"][0]["item_id"] == "inspect"
-    assert item["proof_batches"][0]["proof_ids"] == [f"proof_{task.id}_stage_1"]
+    assert item["proof_batches"][0]["proof_ids"] == [f"proof_{task.id}_implement"]
 
 
 def test_context_hud_injects_task_list_after_checklist_exists():
