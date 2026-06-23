@@ -117,7 +117,7 @@ def test_stage46_skill_cli_defaults_to_persona_profiles(monkeypatch, capsys):
     )
 
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: object())
-    monkeypatch.setattr(harness, "configured_personas", lambda _cfg: ["qa"])
+    monkeypatch.setattr(harness, "ensure_persisted_personas", lambda _cfg: ["qa"])
     monkeypatch.setattr(harness, "install_stage46_skills_for_personas", lambda _personas: calls.append("personas") or [result])
     monkeypatch.setattr(harness, "install_stage46_skills", lambda: calls.append("active") or [result])
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
-from .config import AgentRuntimeConfig, configured_personas, load_agent_runtime_config
+from .config import AgentRuntimeConfig, persona_records_from_config, load_agent_runtime_config
 
 CURRENT_RUNTIME_SCHEMA_VERSION = 1
 
@@ -180,7 +180,7 @@ def _redaction_safe_config(data: dict[str, Any]) -> dict[str, Any]:
 
 def _effective_persona_summary(cfg: AgentRuntimeConfig) -> dict[str, Any]:
     summary: dict[str, Any] = {}
-    for persona in configured_personas(cfg):
+    for persona in persona_records_from_config(cfg):
         summary[persona.id] = {
             "role": persona.role,
             "hermes_profile": persona.hermes_profile,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from agent_runtime.config import AgentRuntimeConfig, configured_personas
+from agent_runtime.config import AgentRuntimeConfig, persona_records_from_config
 from agent_runtime.decision_schema import DecisionPayloadInvalid, parse_structured_decision, validate_decision_for_role
 from agent_runtime.models import AgentPersona
 from agent_runtime.personas import AgentRole, blocked_tool_names, default_personas, effective_toolsets
@@ -46,7 +46,7 @@ def test_default_specialist_persona_collection_includes_backend_dev_and_frontend
     assert "write_file" not in blocked_tool_names(backend)
 
 
-def test_configured_personas_support_collection_specialists_without_dropping_unknown_dev_like_agent():
+def test_persona_records_from_config_support_collection_specialists_without_dropping_unknown_dev_like_agent():
     cfg = AgentRuntimeConfig(
         personas={
             "backend_dev": {
@@ -63,7 +63,7 @@ def test_configured_personas_support_collection_specialists_without_dropping_unk
         }
     )
 
-    personas = _by_id(configured_personas(cfg))
+    personas = _by_id(persona_records_from_config(cfg))
 
     assert personas["backend_dev"].hermes_profile == "backend-dev"
     assert personas["ml_dev"].display_name == "ML Dev"

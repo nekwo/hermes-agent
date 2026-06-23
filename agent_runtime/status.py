@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .config import configured_personas, load_agent_runtime_config
+from .config import ensure_persisted_personas, load_agent_runtime_config
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .daemon import read_daemon_status
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
@@ -40,7 +40,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     workers = worker_session_store.list_all()
     incidents = incident_store.list_all()
     cfg = load_agent_runtime_config()
-    agents = agent_store.list_all() or configured_personas(cfg)
+    agents = agent_store.list_all() or ensure_persisted_personas(cfg)
     proofs = []
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))

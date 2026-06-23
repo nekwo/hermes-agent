@@ -16,7 +16,7 @@ from .actions import HarnessAction, HarnessActionResult, HarnessActionType
 from .autonomy import record_autonomy_packet
 from .blueprints.routing import apply_decision_outcome, is_blueprint_plan
 from .budget_approval import budget_incident_needs_scope_recovery, eligible_budget_approval_incidents
-from .config import configured_personas, load_agent_runtime_config
+from .config import ensure_persisted_personas, get_persisted_persona, load_agent_runtime_config
 from .locks import HarnessLockUnavailable, tick_lock
 from .events import EventLog
 from .final_gate import build_final_gate_decision
@@ -3039,7 +3039,7 @@ def _dev_persona_id_for_task(task: Task | None, *, config: RuntimeConfig | None 
 
     cfg = config if hasattr(config, "personas") else load_agent_runtime_config()
     try:
-        personas = configured_personas(cfg)
+        personas = ensure_persisted_personas(cfg)
     except Exception:
         personas = []
     for persona in personas:
@@ -3229,7 +3229,7 @@ def _get_persona(agent_store: AgentStore, persona_id: str, config: RuntimeConfig
     if persona_id in stored:
         return stored[persona_id]
     cfg = config if hasattr(config, "personas") else load_agent_runtime_config()
-    return next(p for p in configured_personas(cfg) if p.id == persona_id)
+    return get_persisted_persona(persona_id, cfg)
 
 
 def _dedupe(existing: list[str], incoming: list[str]) -> list[str]:

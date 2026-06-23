@@ -86,7 +86,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     return cfg
 
 
-def configured_personas(cfg: AgentRuntimeConfig | None = None):
+def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
     personas = {p.id: p for p in default_personas()}
     head_profile = _head_agent_profile(cfg)
@@ -135,6 +135,38 @@ def configured_personas(cfg: AgentRuntimeConfig | None = None):
             fallback_legacy_alice=not explicit_supervisor or bool(str(getattr(cfg, "head_agent_profile", "") or "").strip()),
         )
     return list(personas.values())
+
+
+def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
+    """Materialize configured/default personas, then return persisted personas.
+
+    Stage 10 retires runtime fallback paths that silently use config defaults when
+    the store is empty. This helper is the bootstrap boundary: callers that need
+    runnable personas persist the resolved persona records first, then operate on
+    the store as the source of truth.
+    """
+    from .store import AgentStore
+
+    cfg = cfg or load_agent_runtime_config()
+    store = AgentStore()
+    stored = {persona.id: persona for persona in store.list_all()}
+    resolved = {persona.id: persona for persona in persona_records_from_config(cfg)}
+    changed = False
+    for persona_id, persona in resolved.items():
+        if persona_id not in stored:
+            stored[persona_id] = store.save(persona)
+            changed = True
+    if changed:
+        stored = {persona.id: persona for persona in store.list_all()}
+    return list(stored.values())
+
+
+def get_persisted_persona(persona_id: str, cfg: AgentRuntimeConfig | None = None):
+    persona_id = str(persona_id or "").strip()
+    for persona in ensure_persisted_personas(cfg):
+        if persona.id == persona_id:
+            return persona
+    raise StopIteration(persona_id)
 
 
 def _head_agent_profile(cfg: AgentRuntimeConfig) -> str:

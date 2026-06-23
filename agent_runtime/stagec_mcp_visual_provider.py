@@ -486,9 +486,9 @@ def _profile_home_for(*, persona_target: str, profile_name: str | None) -> Path 
     if profile_name:
         return _profile_dir_if_exists(profile_name)
     try:
-        from .config import configured_personas
+        from .config import ensure_persisted_personas
 
-        for persona in configured_personas():
+        for persona in ensure_persisted_personas():
             if persona.id == persona_target or persona.role == persona_target:
                 if persona.hermes_profile:
                     return _profile_dir_if_exists(persona.hermes_profile)

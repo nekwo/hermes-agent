@@ -1,10 +1,10 @@
-from agent_runtime.config import load_agent_runtime_config, configured_personas
+from agent_runtime.config import load_agent_runtime_config, persona_records_from_config
 
 
 def test_config_merges_persona_overrides(tmp_path):
     p=tmp_path/"config.yaml"; p.write_text("agent_runtime:\n  default_model: gpt-x\n  personas:\n    pm:\n      toolsets: [file, terminal, todo]\n", encoding="utf-8")
     cfg=load_agent_runtime_config(p)
-    pm=next(p for p in configured_personas(cfg) if p.id=="pm")
+    pm=next(p for p in persona_records_from_config(cfg) if p.id=="pm")
     assert pm.model == "gpt-x"
     assert pm.toolsets == ["file", "todo"]
 
@@ -25,7 +25,7 @@ def test_config_merges_profile_skills_and_readiness_fields(tmp_path):
     )
 
     cfg = load_agent_runtime_config(p)
-    qa = next(persona for persona in configured_personas(cfg) if persona.id == "qa")
+    qa = next(persona for persona in persona_records_from_config(cfg) if persona.id == "qa")
 
     assert qa.display_name == "Visual QA Agent"
     assert qa.autonomy == "autonomous"
@@ -52,7 +52,7 @@ def test_config_allows_dev_launcher_to_opt_into_profile_memory(tmp_path):
     )
 
     cfg = load_agent_runtime_config(p)
-    dev = next(persona for persona in configured_personas(cfg) if persona.id == "dev")
+    dev = next(persona for persona in persona_records_from_config(cfg) if persona.id == "dev")
 
     assert dev.display_name == "Launcher Dev Agent"
     assert dev.autonomy == "autonomous"
@@ -74,7 +74,7 @@ def test_config_allows_explicit_core_context_file_opt_in(tmp_path):
     )
 
     cfg = load_agent_runtime_config(p)
-    backend_dev = next(persona for persona in configured_personas(cfg) if persona.id == "backend_dev")
+    backend_dev = next(persona for persona in persona_records_from_config(cfg) if persona.id == "backend_dev")
 
     assert backend_dev.include_core_context_files is True
 
@@ -94,7 +94,7 @@ def test_config_merges_specialist_dev_repo_scope_fields(tmp_path):
     )
 
     cfg = load_agent_runtime_config(p)
-    backend_dev = next(persona for persona in configured_personas(cfg) if persona.id == "backend_dev")
+    backend_dev = next(persona for persona in persona_records_from_config(cfg) if persona.id == "backend_dev")
 
     assert backend_dev.role == "dev"
     assert backend_dev.display_name == "Backend Dev Agent"
@@ -205,7 +205,7 @@ def test_config_persona_skill_overrides_are_authoritative(tmp_path):
         encoding="utf-8",
     )
 
-    personas = {persona.id: persona for persona in configured_personas(load_agent_runtime_config(p))}
+    personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
     assert personas["neko_supervisor"].skills == ["agent-runtime-harness"]
     assert personas["dev"].skills == ["launcher-stagec-mcp-screenshot"]
@@ -224,7 +224,7 @@ def test_neko_supervisor_uses_configured_head_agent_profile_when_not_explicit(tm
         encoding="utf-8",
     )
 
-    personas = {persona.id: persona for persona in configured_personas(load_agent_runtime_config(p))}
+    personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
     assert personas["neko_supervisor"].hermes_profile == "captain"
     assert personas["neko_supervisor"].skills == ["agent-runtime-harness"]
@@ -243,7 +243,7 @@ def test_neko_supervisor_legacy_alice_profile_falls_back_to_head_agent_when_miss
         encoding="utf-8",
     )
 
-    personas = {persona.id: persona for persona in configured_personas(load_agent_runtime_config(p))}
+    personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
     assert personas["neko_supervisor"].hermes_profile == "alice-mac"
 
@@ -260,7 +260,7 @@ def test_neko_supervisor_preserves_existing_explicit_alice_profile(tmp_path, mon
         encoding="utf-8",
     )
 
-    personas = {persona.id: persona for persona in configured_personas(load_agent_runtime_config(p))}
+    personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
     assert personas["neko_supervisor"].hermes_profile == "alice"
 
@@ -275,6 +275,6 @@ def test_config_accepts_json_encoded_skill_list_from_cli_config_set(tmp_path):
         encoding="utf-8",
     )
 
-    personas = {persona.id: persona for persona in configured_personas(load_agent_runtime_config(p))}
+    personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
     assert personas["neko_supervisor"].skills == ["agent-runtime-harness", "harness-mission-lead"]

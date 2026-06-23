@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from agent_runtime.config import configured_personas
+from agent_runtime.config import persona_records_from_config
 from agent_runtime.personas import AgentRole, blocked_tool_names, effective_toolsets
 from agent_runtime.snapshot import _agent_summary
 
 
 def _personas_by_id():
-    return {persona.id: persona for persona in configured_personas()}
+    return {persona.id: persona for persona in persona_records_from_config()}
 
 
 def test_default_personas_include_frontend_compatible_dev_and_backend_dev_bindings():
@@ -60,7 +60,7 @@ def test_snapshot_agent_summaries_are_collection_based_and_redaction_safe(monkey
             "missing_mcp_servers": [],
         },
     )
-    summaries = [_agent_summary(persona) for persona in configured_personas()]
+    summaries = [_agent_summary(persona) for persona in persona_records_from_config()]
     by_id = {summary["persona_id"]: summary for summary in summaries}
 
     assert by_id["dev"]["display_name"] in {"Launcher Dev Agent", "Frontend Dev"}
