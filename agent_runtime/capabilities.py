@@ -53,9 +53,27 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "label": "Open Agent Chat",
         "group": "lifecycle",
         "execution_semantics": "control_state_change",
-        "allowed_args": ["add_instance", "attachments", "auto_run", "display_name", "kill_active", "max_actions", "max_seconds", "message", "placement_id", "session_id"],
+        "allowed_args": [
+            "add_instance",
+            "attachments",
+            "auto_run",
+            "coordinator_id",
+            "coordinator_max_spawns",
+            "coordinator_may_kill_others",
+            "coordinator_may_kill_own",
+            "coordinator_no_kill_own",
+            "coordinator_spawns_used",
+            "display_name",
+            "kill_active",
+            "max_actions",
+            "max_seconds",
+            "message",
+            "placement_id",
+            "requested_by",
+            "session_id",
+        ],
         "default_args": {"title": "New operator chat", "message": "New operator chat opened. Wait for operator input.", "auto_run": False, "max_actions": 1, "max_seconds": 240},
-        "danger": "normal",
+        "danger": "warning",
     },
     {
         "id": "persona.instance.open_chat",
@@ -64,8 +82,19 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "group": "lifecycle",
         "execution_semantics": "control_state_change",
         "required_args": ["persona_id", "session_id"],
-        "allowed_args": ["add_instance", "kill_active", "placement_id"],
-        "danger": "normal",
+        "allowed_args": [
+            "add_instance",
+            "coordinator_id",
+            "coordinator_max_spawns",
+            "coordinator_may_kill_others",
+            "coordinator_may_kill_own",
+            "coordinator_no_kill_own",
+            "coordinator_spawns_used",
+            "kill_active",
+            "placement_id",
+            "requested_by",
+        ],
+        "danger": "warning",
     },
     {
         "id": "persona.profile.create",
@@ -201,6 +230,15 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "group": "steer",
         "execution_semantics": "control_state_change",
         "required_args": ["reason"],
+        "allowed_args": [
+            "coordinator_id",
+            "coordinator_max_spawns",
+            "coordinator_may_kill_others",
+            "coordinator_may_kill_own",
+            "coordinator_no_kill_own",
+            "coordinator_spawns_used",
+            "requested_by",
+        ],
         "danger": "destructive",
     },
     {
@@ -264,6 +302,15 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "group": "archive",
         "execution_semantics": "archive_or_close",
         "required_args": ["reason"],
+        "allowed_args": [
+            "coordinator_id",
+            "coordinator_max_spawns",
+            "coordinator_may_kill_others",
+            "coordinator_may_kill_own",
+            "coordinator_no_kill_own",
+            "coordinator_spawns_used",
+            "requested_by",
+        ],
         "danger": "warning",
     },
     {
@@ -320,7 +367,9 @@ def _arg_schema_for(item: dict[str, Any]) -> dict[str, Any]:
             }
         elif name in {"max_actions", "max_seconds", "lease_seconds"}:
             properties[name] = {"type": "integer", "minimum": 1}
-        elif name in {"rescope", "foreground", "auto_run", "kill_active", "add_instance"}:
+        elif name in {"coordinator_max_spawns", "coordinator_spawns_used"}:
+            properties[name] = {"type": "integer", "minimum": 0}
+        elif name in {"rescope", "foreground", "auto_run", "kill_active", "add_instance", "coordinator_may_kill_own", "coordinator_no_kill_own", "coordinator_may_kill_others"}:
             properties[name] = {"type": "boolean"}
         else:
             properties[name] = {"type": "string", "minLength": 1}

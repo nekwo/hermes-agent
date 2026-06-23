@@ -105,6 +105,13 @@ class SwarmConfig:
 
 
 @dataclass(slots=True)
+class CoordinatorPermissionConfig:
+    max_spawns: int = 0
+    may_kill_own: bool = True
+    may_kill_others: bool = False
+
+
+@dataclass(slots=True)
 class RuntimeConfig:
     schema_version: int = 1
     heartbeat_ttl_seconds: int = 900
@@ -144,4 +151,5 @@ class RuntimeConfig:
     repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
+    coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
 
