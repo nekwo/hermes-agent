@@ -52,7 +52,7 @@ class PersonaInstanceStore:
 
     def create_free_floating(self, persona_or_template: AgentPersona | str) -> PersonaInstance:
         persona_id, role, display_name, profile_id = _free_floating_identity(persona_or_template)
-        instance_id = free_floating_persona_instance_id_for(persona_id)
+        instance_id = unique_operator_persona_instance_id()
         try:
             instance = self.get(instance_id)
         except Exception:
@@ -133,7 +133,15 @@ class PersonaInstanceStore:
         self._write(instance)
         return self.get(instance.id)
 
-    def open_chat(self, *, persona_id: str, session_id: str) -> PersonaInstance:
+    def open_chat(
+        self,
+        *,
+        persona_id: str,
+        session_id: str,
+        persona_instance_id: str | None = None,
+        display_name: str | None = None,
+        profile_id: str | None = None,
+    ) -> PersonaInstance:
         """Bind a persona instance to a durable chat session without running a turn.
 
         Persona instances are intentionally chat-shaped: selecting an old chat can
@@ -142,29 +150,39 @@ class PersonaInstanceStore:
         execution. This helper is a state transition only; it never fabricates a
         task, worker, run, or transcript.
         """
-        normalized_persona = safe_assignment_token(persona_id)
+        normalized_persona = _normalize_instance_source_persona(persona_id)
         normalized_session = safe_assignment_text(session_id, limit=200)
         if not normalized_persona:
             raise ValueError("persona_id is required")
         if not normalized_session:
             raise ValueError("session_id is required")
 
-        instance_id = persona_instance_id_for(normalized_persona)
+        normalized_instance = safe_assignment_token(persona_instance_id) if persona_instance_id else None
+        instance_id = normalized_instance or persona_instance_id_for(normalized_persona)
+        safe_display_name = safe_assignment_text(display_name, limit=120) if display_name is not None else None
+        safe_profile_id = safe_assignment_token(profile_id) if profile_id is not None else None
         try:
             instance = self.get(instance_id)
         except Exception:
             ts = now()
+            role = "profile" if normalized_persona.startswith("profile:") else normalized_persona
             instance = PersonaInstance(
                 id=instance_id,
                 persona_id=normalized_persona,
-                role=normalized_persona,
-                display_name=normalized_persona,
-                profile_id=None,
+                role=role,
+                display_name=safe_display_name or _display_name_for_template(normalized_persona.split(":", 1)[1] if normalized_persona.startswith("profile:") else normalized_persona),
+                profile_id=safe_profile_id or (normalized_persona.split(":", 1)[1] if normalized_persona.startswith("profile:") else None),
                 runtime_root=str(paths.store_root()),
                 state=WorkerSessionState.IDLE,
                 updated_at=ts,
             )
 
+        if safe_display_name:
+            instance.display_name = safe_display_name
+        if safe_profile_id:
+            instance.profile_id = safe_profile_id
+        elif normalized_persona.startswith("profile:") and not instance.profile_id:
+            instance.profile_id = normalized_persona.split(":", 1)[1]
         instance.mode = "chat"
         instance.session_id = normalized_session
         instance.current_task_id = None
@@ -173,6 +191,23 @@ class PersonaInstanceStore:
         updated = self.update(instance)
         self._event("persona_instance.chat_opened", updated, {"session_id": normalized_session})
         return updated
+
+    def create_operator_chat(
+        self,
+        *,
+        persona_id: str,
+        display_name: str,
+        session_id: str | None = None,
+    ) -> PersonaInstance:
+        normalized_persona = _normalize_instance_source_persona(persona_id)
+        instance_id = unique_operator_persona_instance_id()
+        return self.open_chat(
+            persona_id=normalized_persona,
+            persona_instance_id=instance_id,
+            session_id=session_id or persona_chat_session_id_for(instance_id),
+            display_name=display_name,
+            profile_id=_profile_id_for_persona_or_template(normalized_persona),
+        )
 
     def update_from_worker(self, worker: WorkerSession) -> PersonaInstance:
         instance_id = persona_instance_id_for(worker.persona_id)
@@ -457,6 +492,15 @@ def persona_instance_id_for(persona_id: str) -> str:
     return f"personainst_{safe_assignment_token(persona_id) or 'persona'}"
 
 
+def unique_operator_persona_instance_id() -> str:
+    return f"personainst_operator_{uuid.uuid4().hex[:16]}"
+
+
+def persona_chat_session_id_for(persona_instance_id: str) -> str:
+    normalized = safe_assignment_token(persona_instance_id) or "persona"
+    return f"persona_chat_{normalized}"
+
+
 def free_floating_persona_instance_id_for(persona_or_template_id: str) -> str:
     normalized = str(persona_or_template_id or "").strip() or "persona"
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
@@ -484,6 +528,21 @@ def _display_name_for_template(profile: str) -> str:
     return " ".join(part.capitalize() for part in profile.replace("_", "-").split("-") if part) or "Profile"
 
 
+def _normalize_instance_source_persona(persona_or_template_id: str) -> str:
+    raw = str(persona_or_template_id or "").strip()
+    if raw.lower().startswith("profile:"):
+        profile = safe_assignment_token(raw.split(":", 1)[1])
+        return f"profile:{profile}" if profile else "profile:persona"
+    return safe_assignment_token(raw) or "persona"
+
+
+def _profile_id_for_persona_or_template(persona_or_template_id: str) -> str | None:
+    raw = str(persona_or_template_id or "").strip()
+    if raw.lower().startswith("profile:"):
+        return safe_assignment_token(raw.split(":", 1)[1]) or None
+    return None
+
+
 def persona_instance_runtime_enabled(config) -> bool:
     enterprise = getattr(config, "enterprise_worker_sessions", None)
     return bool(getattr(enterprise, "enabled", False) and getattr(enterprise, "persona_instance_runtime", False))
@@ -494,21 +553,34 @@ def persona_assignment_store_enabled(config) -> bool:
     return bool(getattr(enterprise, "enabled", False) and getattr(enterprise, "persona_assignment_store", False))
 
 
-def persona_instance_summary(instance: PersonaInstance) -> dict[str, Any]:
+def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | None = None) -> dict[str, Any]:
     state = instance.state.value if hasattr(instance.state, "value") else str(instance.state)
+    profile_id = instance.profile_id or getattr(persona, "hermes_profile", None)
     return {
+        "agent_profile_id": instance.id,
+        "agent_profile_display_name": instance.display_name,
+        "source_persona_id": instance.persona_id,
+        "source_profile_id": profile_id,
         "persona_instance_id": instance.id,
         "persona_id": instance.persona_id,
         "role": instance.role,
         "display_name": instance.display_name,
-        "profile_id": instance.profile_id,
+        "profile_id": profile_id,
+        "backing_profile": profile_id,
+        "repo_scope_label": getattr(persona, "repo_scope_label", None),
+        "skills": list(getattr(persona, "skills", []) or []),
+        "toolsets": list(getattr(persona, "toolsets", []) or []),
         "runtime_root": instance.runtime_root,
         "state": state,
+        "lifecycle_mode": instance.mode,
         "mode": instance.mode,
+        "current_work_assignment_id": instance.current_assignment_id,
         "current_assignment_id": instance.current_assignment_id,
+        "attached_task_id": instance.current_task_id,
         "current_task_id": instance.current_task_id,
         "active_worker_session_id": instance.active_worker_session_id,
         "active_run_id": instance.active_run_id,
+        "chat_session_id": instance.session_id,
         "session_id": instance.session_id,
         "context_receipt_id": instance.context_receipt_id,
         "compression_receipt_id": instance.compression_receipt_id,
@@ -524,6 +596,7 @@ def persona_instance_summary(instance: PersonaInstance) -> dict[str, Any]:
 
 def persona_assignment_summary(assignment: PersonaAssignment) -> dict[str, Any]:
     return {
+        "agent_profile_id": assignment.persona_instance_id,
         "assignment_id": assignment.id,
         "persona_instance_id": assignment.persona_instance_id,
         "persona_id": assignment.persona_id,

@@ -25,7 +25,7 @@ from agent_runtime.events import EventLog
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
 from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
 from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
-from agent_runtime.models import Task
+from agent_runtime.models import AgentPersona, Task
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     PersonaAssignmentSpec,
@@ -33,6 +33,7 @@ from agent_runtime.persona_assignments import (
     PersonaInstanceStore,
     persona_assignment_store_enabled,
     persona_assignment_summary,
+    persona_chat_session_id_for,
     persona_instance_runtime_enabled,
     persona_instance_summary,
     persona_instance_id_for,
@@ -320,12 +321,14 @@ def build_parser(parent_subparsers) -> None:
 
     persona_instance = persona_subs.add_parser("instance", help="Create, message, run, close, and archive free-floating persona instances")
     persona_instance_subs = persona_instance.add_subparsers(dest="persona_instance_command")
-    persona_instance_create = persona_instance_subs.add_parser("create", help="Create a free-floating persona assignment without ticking")
+    persona_instance_create = persona_instance_subs.add_parser("create", help="Create an Agent Profile or queue a free-floating persona assignment")
     persona_instance_create.add_argument("--persona", dest="persona_id", required=True)
     persona_instance_create.add_argument("--title", required=True)
     persona_instance_create.add_argument("--message", required=True)
     persona_instance_create.add_argument("--requested-by", default="cli")
     persona_instance_create.add_argument("--client-message-id", default=None)
+    persona_instance_create.add_argument("--display-name", default=None)
+    persona_instance_create.add_argument("--session-id", default=None)
     persona_instance_create.add_argument("--auto-run", action="store_true", help="Immediately run one bounded chat turn after queuing the message")
     persona_instance_create.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     persona_instance_create.add_argument("--max-actions", type=int, default=1)
@@ -891,7 +894,7 @@ def _cmd_persona_message(args) -> int:
         data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
         print(emit_json(data) if args.json else data["error"])
         return 2
-    persona_id = _normalize_cli_persona_id(args.persona_id)
+    persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
     try:
         task = TaskStore().get(args.task_id)
     except Exception:
@@ -924,6 +927,36 @@ def _cmd_persona_message(args) -> int:
 
 
 def _cmd_persona_instance_create(args) -> int:
+    display_name = safe_assignment_text(getattr(args, "display_name", None), limit=120)
+    if display_name:
+        cfg = load_agent_runtime_config()
+        if not persona_assignment_store_enabled(cfg):
+            data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
+            print(emit_json(data) if args.json else data["error"])
+            return 2
+        persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
+        instance = PersonaInstanceStore().create_operator_chat(
+            persona_id=persona_id,
+            display_name=display_name or safe_assignment_text(args.title, limit=120) or persona_id,
+            session_id=getattr(args, "session_id", None),
+        )
+        data = {
+            "ok": True,
+            "agent_profile_id": instance.id,
+            "persona_instance_id": instance.id,
+            "source_persona_id": instance.persona_id,
+            "persona_id": instance.persona_id,
+            "source_profile_id": instance.profile_id,
+            "agent_profile_display_name": instance.display_name,
+            "display_name": instance.display_name,
+            "lifecycle_mode": instance.mode,
+            "mode": instance.mode,
+            "chat_session_id": instance.session_id,
+            "session_id": instance.session_id,
+            "next_expected": "agent profile created; refresh Harness snapshot for the profile, chat, and scene placement state",
+        }
+        print(emit_json(data) if args.json else f"created {instance.id} on chat {instance.session_id}")
+        return 0
     return _queue_free_floating_assignment(
         persona_id=args.persona_id,
         title=args.title,
@@ -1093,6 +1126,7 @@ def _queue_free_floating_assignment(
     )
     data = {
         "ok": True,
+        "agent_profile_id": assignment.persona_instance_id,
         "assignment_id": assignment.id,
         "persona_instance_id": assignment.persona_instance_id,
         "persona_id": normalized_persona,
@@ -1104,7 +1138,9 @@ def _queue_free_floating_assignment(
         "archive_scope": assignment.archive_scope,
         "client_message_id": assignment.client_message_id,
         "execution_state": "queued",
+        "lifecycle_mode": "free_floating",
         "auto_run": bool(auto_run),
+        "chat_session_id": session_id,
         "session_id": session_id,
         "turn_id": None,
         "run_ids": [],
@@ -1163,8 +1199,7 @@ def _default_persona_session_db():
 
 
 def _persona_chat_session_id(persona_instance_id: str) -> str:
-    normalized = safe_assignment_token(persona_instance_id) or "persona"
-    return f"persona_chat_{normalized}"
+    return persona_chat_session_id_for(persona_instance_id)
 
 
 def _bind_free_floating_chat_session(
@@ -1196,7 +1231,8 @@ def _bind_free_floating_chat_session(
     if not session_id:
         session_id = _persona_chat_session_id(normalized_instance)
     instance.session_id = session_id
-    instance.mode = "free_floating"
+    if instance.mode != "chat" or not normalized_instance.startswith("personainst_operator_"):
+        instance.mode = "free_floating"
     instance.current_task_id = None
     instance.active_worker_session_id = None
     instance.current_assignment_id = assignment_id
@@ -1256,11 +1292,59 @@ def _append_persona_assistant_text(*, session_db, session_id: str, text: str) ->
 
 
 def _persona_by_id(cfg, persona_id: str):
-    normalized = _normalize_cli_persona_id(persona_id)
-    for persona in configured_personas(cfg):
+    raw = str(persona_id or "").strip()
+    personas = list(configured_personas(cfg))
+    if raw.lower().startswith("profile:"):
+        profile_id = safe_assignment_token(raw.split(":", 1)[1])
+        if not profile_id:
+            return None
+        for persona in personas:
+            if str(getattr(persona, "hermes_profile", "") or "") == profile_id:
+                return AgentPersona(
+                    id=f"profile:{profile_id}",
+                    display_name=f"{_display_name_for_profile(profile_id)} Agent",
+                    role=str(getattr(persona, "role", None) or "dev"),
+                    model=getattr(persona, "model", None),
+                    provider=getattr(persona, "provider", None),
+                    api_mode=getattr(persona, "api_mode", None),
+                    toolsets=list(getattr(persona, "toolsets", []) or []),
+                    system_prompt_path=str(getattr(persona, "system_prompt_path", "") or ""),
+                    autonomy=str(getattr(persona, "autonomy", "review") or "review"),
+                    hermes_profile=profile_id,
+                    skills=list(getattr(persona, "skills", []) or []),
+                    soul_overlay_path=getattr(persona, "soul_overlay_path", None),
+                    required_mcp_servers=list(getattr(persona, "required_mcp_servers", []) or []),
+                    include_profile_memory=True,
+                    include_core_context_files=bool(getattr(persona, "include_core_context_files", False)),
+                    repo_scope=getattr(persona, "repo_scope", None),
+                    repo_scope_label=getattr(persona, "repo_scope_label", None),
+                    iteration_budget=getattr(persona, "iteration_budget", None),
+                    max_wall_seconds=getattr(persona, "max_wall_seconds", None),
+                    max_api_calls=getattr(persona, "max_api_calls", None),
+                    max_total_tokens=getattr(persona, "max_total_tokens", None),
+                    readiness=dict(getattr(persona, "readiness", {}) or {}),
+                )
+        return AgentPersona(
+            id=f"profile:{profile_id}",
+            display_name=f"{_display_name_for_profile(profile_id)} Agent",
+            role="dev",
+            model=getattr(cfg, "default_model", None),
+            provider=getattr(cfg, "default_provider", None),
+            api_mode=getattr(cfg, "default_api_mode", None),
+            toolsets=[],
+            system_prompt_path="",
+            hermes_profile=profile_id,
+            include_profile_memory=True,
+        )
+    normalized = _normalize_cli_persona_id(raw)
+    for persona in personas:
         if getattr(persona, "id", None) == normalized:
             return persona
     return None
+
+
+def _display_name_for_profile(profile_id: str) -> str:
+    return " ".join(part.capitalize() for part in profile_id.replace("_", "-").split("-") if part) or "Profile"
 
 
 def _persona_chat_message_with_history(*, session_db, session_id: str, message: str) -> str:
@@ -1393,7 +1477,8 @@ def _run_free_floating_assignment_once(
         instance.active_run_id = None
         instance.current_assignment_id = None
         instance.state = WorkerSessionState.IDLE
-        instance.mode = "free_floating"
+        if instance.mode != "chat" or not persona_instance_id.startswith("personainst_operator_"):
+            instance.mode = "free_floating"
         instance.session_id = session_id
         instance_store.update(instance)
     except Exception:

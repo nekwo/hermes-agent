@@ -17,6 +17,8 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert envelope["write_boundary"] == "hermes harness --json"
     assert len(ids) == len(set(ids))
     assert "persona.instance.message" in ids
+    assert "persona.profile.instantiate" in ids
+    assert "persona.instance.create" in ids
     assert "persona.instance.open_chat" in ids
     assert "persona.instance.run_once" in ids
     assert "persona.profile.create" in ids

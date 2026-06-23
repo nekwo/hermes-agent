@@ -14,6 +14,7 @@ from agent_runtime.persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
     free_floating_persona_instance_id_for,
+    persona_chat_session_id_for,
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
 from agent_runtime.proof_rules import ProofType
@@ -108,6 +109,25 @@ class NekoAcceptanceRuntime:
         )
 
 
+class _FakeSessionDB:
+    def __init__(self, messages_by_session: dict[str, list[dict]]):
+        self.messages_by_session = messages_by_session
+
+    def list_sessions_rich(self, source=None, limit=100, **_kwargs):
+        return [
+            {
+                "id": session_id,
+                "session_id": session_id,
+                "source": "agent_runtime_persona_chat",
+                "title": session_id,
+            }
+            for session_id in self.messages_by_session
+        ][:limit]
+
+    def get_messages(self, session_id, include_inactive=False):
+        return self.messages_by_session.get(session_id, [])
+
+
 def test_persona_instance_store_derives_singleton_from_worker_session(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     workers = WorkerSessionStore()
@@ -141,13 +161,15 @@ def test_persona_instance_derivation_clears_stale_worker_projection(isolate_agen
     assert instance.session_id is None
 
 
-def test_create_free_floating_instance_is_stable_idle_and_worker_independent(isolate_agent_runtime_root):
+def test_create_free_floating_instance_is_unique_idle_and_worker_independent(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     first = store.create_free_floating("profile:reviewer")
     second = store.create_free_floating("profile:reviewer")
 
-    assert first.id == second.id
-    assert first.id == free_floating_persona_instance_id_for("profile:reviewer")
+    assert first.id != second.id
+    assert first.id.startswith("personainst_operator_")
+    assert second.id.startswith("personainst_operator_")
+    assert first.id != free_floating_persona_instance_id_for("profile:reviewer")
     assert first.id != "personainst_profile_reviewer"
     assert first.persona_id == "profile:reviewer"
     assert first.role == "profile"
@@ -163,6 +185,70 @@ def test_create_free_floating_instance_is_stable_idle_and_worker_independent(iso
     assert by_id[first.id].persona_id == "profile:reviewer"
     assert by_id[first.id].mode == "free_floating"
     assert by_id[first.id].state == WorkerSessionState.IDLE
+
+
+def test_create_operator_chat_from_same_template_gets_distinct_sessions(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+
+    first = store.create_operator_chat(
+        persona_id="profile:reviewer",
+        display_name="Reviewer One",
+    )
+    second = store.create_operator_chat(
+        persona_id="profile:reviewer",
+        display_name="Reviewer Two",
+    )
+
+    assert first.id != second.id
+    assert first.session_id == persona_chat_session_id_for(first.id)
+    assert second.session_id == persona_chat_session_id_for(second.id)
+    assert first.session_id != second.session_id
+    assert first.mode == "chat"
+    assert second.mode == "chat"
+    assert first.persona_id == "profile:reviewer"
+    assert first.profile_id == "reviewer"
+    assert second.profile_id == "reviewer"
+    assert first.display_name == "Reviewer One"
+    assert second.display_name == "Reviewer Two"
+
+
+def test_operator_chat_history_binds_by_unique_session(isolate_agent_runtime_root):
+    from hermes_state import SessionDB
+
+    store = PersonaInstanceStore()
+    first = store.create_operator_chat(
+        persona_id="profile:reviewer",
+        display_name="Reviewer One",
+    )
+    second = store.create_operator_chat(
+        persona_id="profile:reviewer",
+        display_name="Reviewer Two",
+    )
+    db = SessionDB()
+    for session_id, text in (
+        (first.session_id, "first only"),
+        (second.session_id, "second only"),
+    ):
+        db.create_session(
+            session_id=session_id,
+            source="agent_runtime_persona_chat",
+            model=None,
+            system_prompt="test persona chat",
+        )
+        db.append_message(session_id=session_id, role="assistant", content=text)
+
+    rows = persona_chat_history_summary(
+        persona_instances=store.list_all(),
+        session_db=db,
+    )
+
+    messages_by_instance = {
+        row["persona_instance_id"]: [message["safe_text"] for message in row["messages"]]
+        for row in rows
+        if row["messages"]
+    }
+    assert messages_by_instance[first.id] == ["first only"]
+    assert messages_by_instance[second.id] == ["second only"]
 
 
 def test_assignment_store_create_or_resume_uses_signal_hash(isolate_agent_runtime_root):
@@ -332,8 +418,12 @@ def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, is
     by_id = {item["persona_instance_id"]: item for item in snapshot["persona_instances"]}
 
     assert created.id in by_id
+    assert by_id[created.id]["agent_profile_id"] == created.id
     assert by_id[created.id]["persona_id"] == "profile:reviewer"
+    assert by_id[created.id]["source_persona_id"] == "profile:reviewer"
+    assert by_id[created.id]["source_profile_id"] == "reviewer"
     assert by_id[created.id]["state"] == "idle"
+    assert by_id[created.id]["lifecycle_mode"] == "free_floating"
     assert by_id[created.id]["mode"] == "free_floating"
     assert by_id[created.id]["active_worker_session_id"] is None
 
@@ -361,7 +451,8 @@ def test_persona_instance_create_cli_creates_free_floating_assignment_without_ti
     assert assignments[0].task_id is None
     assert assignments[0].kind == "free_floating_message"
     assert assignments[0].production_proof_eligible is False
-    assert assignments[0].persona_instance_id == free_floating_persona_instance_id_for("dev")
+    assert assignments[0].persona_instance_id.startswith("personainst_operator_")
+    assert assignments[0].persona_instance_id != free_floating_persona_instance_id_for("dev")
     instance = PersonaInstanceStore().get(assignments[0].persona_instance_id)
     assert instance.mode == "free_floating"
     assert instance.current_assignment_id == assignments[0].id
@@ -670,7 +761,7 @@ def test_persona_chat_transcript_records_operator_and_assistant_turn(isolate_age
     from hermes_cli import harness
 
     db = _TranscriptDB()
-    session_id = f"persona_chat_{free_floating_persona_instance_id_for('dev')}"
+    session_id = "persona_chat_personainst_dev"
     db.create_session(session_id, "agent_runtime_persona_chat")
     harness._append_persona_operator_turn(
         session_db=db,
@@ -737,7 +828,8 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
     # Chat-first path: no decision contract, the agent saw the raw operator text.
     assert "hey, how are you" in captured["chat_message"]
 
-    session_id = f"persona_chat_{free_floating_persona_instance_id_for('dev')}"
+    assert len(db.messages) == 1
+    session_id = next(iter(db.messages))
     roles = [item["role"] for item in db.messages.get(session_id, [])]
     assert roles == ["user", "assistant"]
     assert db.messages[session_id][0]["content"] == "hey, how are you"
@@ -749,6 +841,69 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
     assert assignments[0].state == "completed"
     assert assignments[0].task_id is None
     assert RunStore().list_all() == []
+
+
+def test_profile_backed_operator_chat_auto_run_resolves_profile_persona(monkeypatch, isolate_agent_runtime_root):
+    from types import SimpleNamespace
+
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    captured: dict = {}
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            captured["runtime_kwargs"] = kwargs
+
+        def chat_reply(self, persona, message, **kwargs):
+            captured["persona"] = persona
+            captured["chat_message"] = message
+            return SimpleNamespace(final_response="Alice is online.")
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    instance = PersonaInstanceStore().create_operator_chat(
+        persona_id="profile:alice",
+        display_name="Alice Agent",
+    )
+
+    code = harness._cmd_persona_instance_message(
+        SimpleNamespace(
+            persona_instance_id=instance.id,
+            title="Alice chat",
+            message="hi alice",
+            requested_by="test",
+            json=True,
+            auto_run=True,
+            max_actions=1,
+            max_seconds=5.0,
+            client_message_id="client_alice_1",
+            stream=False,
+        )
+    )
+
+    assert code == 0
+    assert captured["runtime_kwargs"].get("session_db") is db
+    assert captured["persona"].id == "profile:alice"
+    assert captured["persona"].hermes_profile == "alice"
+    assert captured["persona"].include_profile_memory is True
+    assert "hi alice" in captured["chat_message"]
+
+    assignments = PersonaAssignmentStore().list_for_persona("profile:alice")
+    assert len(assignments) == 1
+    assert assignments[0].state == "completed"
+    assert assignments[0].persona_instance_id == instance.id
+
+    updated = PersonaInstanceStore().get(instance.id)
+    assert updated.display_name == "Alice Agent"
+    assert updated.mode == "chat"
+    assert updated.session_id == instance.session_id
+    assert db.messages[updated.session_id][-1]["content"] == "Alice is online."
 
 
 def test_free_floating_auto_run_streams_ndjson_and_final_payload(
@@ -815,7 +970,8 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
     assert lines[-1]["run_ids"] == []
     assert lines[-1]["task_id"] is None
     assert lines[-1]["assignment_id"]
-    assert lines[-1]["persona_instance_id"] == free_floating_persona_instance_id_for("dev")
+    assert lines[-1]["persona_instance_id"].startswith("personainst_operator_")
+    assert lines[-1]["persona_instance_id"] != free_floating_persona_instance_id_for("dev")
     assert lines[-1]["client_message_id"] == "client_1"
 
 
