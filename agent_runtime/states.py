@@ -16,24 +16,6 @@ class TaskState(StrEnum):
         return None
 
 
-class AgentState(StrEnum):
-    IDLE = "idle"
-    ASSIGNED = "assigned"
-    READING_CONTEXT = "reading_context"
-    AUDITING = "auditing"
-    PLANNING = "planning"
-    DESIGNING_TESTS = "designing_tests"
-    IMPLEMENTING = "implementing"
-    REVIEWING = "reviewing"
-    TESTING = "testing"
-    CAPTURING_PROOF = "capturing_proof"
-    WAITING_FOR_APPROVAL = "waiting_for_approval"
-    WAITING_FOR_FIXES = "waiting_for_fixes"
-    BLOCKED = "blocked"
-    CRASHED = "crashed"
-    COMPLETE = "complete"
-
-
 class RunState(StrEnum):
     QUEUED = "queued"
     STARTING = "starting"

@@ -1,4 +1,4 @@
-from agent_runtime.states import AgentState, RunState, StageStatus, TaskState
+from agent_runtime.states import RunState, StageStatus, TaskState
 
 
 def test_task_state_values_are_workflow_positional():
@@ -14,7 +14,5 @@ def test_legacy_task_state_values_deserialize_to_running():
 
 
 def test_agent_run_and_stage_states_have_expected_values():
-    assert AgentState.CAPTURING_PROOF == "capturing_proof"
-    assert AgentState.CRASHED == "crashed"
     assert RunState.WAITING_ON_APPROVAL == "waiting_on_approval"
     assert StageStatus.REWORK == "needs_fixes"
