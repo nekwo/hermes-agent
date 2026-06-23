@@ -23,6 +23,7 @@ from .mission_plan import (
     current_plan_stage,
     ensure_mission_plan,
     has_typed_plan,
+    is_mission_lead_actor,
     mark_plan_stage_from_decision,
     release_next_stage,
 )
@@ -87,7 +88,7 @@ def _coerce_neko_budget_acceptance_to_continuation(
     approval side effect: preserve Neko's tightened scope, approve the linked
     run, close the incident, and route back to Dev implementation.
     """
-    if actor != "neko_supervisor" or decision.type != DecisionType.PROPOSE_ACCEPTANCE or incident_store is None:
+    if not is_mission_lead_actor(task, actor) or decision.type != DecisionType.PROPOSE_ACCEPTANCE or incident_store is None:
         return False
     incident_ids = list(getattr(task, "open_incident_ids", []) or [])
     if not incident_ids and hasattr(incident_store, "list_open"):
@@ -165,7 +166,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
     log = event_log or EventLog()
     if _coerce_neko_budget_acceptance_to_continuation(task, decision, actor=actor, incident_store=incident_store, log=log, run_id=run_id):
         return task
-    if mission_plan_flow and actor == "neko_supervisor" and decision.type == DecisionType.PROPOSE_ACCEPTANCE:
+    if mission_plan_flow and is_mission_lead_actor(task, actor) and decision.type == DecisionType.PROPOSE_ACCEPTANCE:
         ensure_mission_plan(task, decision.payload, actor=actor)
         target = release_next_stage(task, str(decision.payload.get("release_stage_id") or "").strip() or None)
         if target is not None:
@@ -196,7 +197,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
         )
         return task
     if decision.type == DecisionType.PROPOSE_ACCEPTANCE:
-        if actor == "neko_supervisor" and task.state == TaskState.RUNNING and _all_stages_dev_complete(task):
+        if is_mission_lead_actor(task, actor) and task.state == TaskState.RUNNING and _all_stages_dev_complete(task):
             if _needs_cross_stack_launcher_completion(task, proof_store=proof_store):
                 if not _has_backend_contract_proof(task, proof_store=proof_store):
                     _block_launcher_release_until_backend_proof(task, log=log, actor=actor, run_id=run_id)
@@ -302,14 +303,14 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             return task
         _apply_acceptance(task, decision.payload)
         if (
-            actor == "neko_supervisor"
+            is_mission_lead_actor(task, actor)
             and _payload_is_launcher_handoff(decision.payload)
             and _is_cross_stack_backend_first(task)
             and not _has_backend_contract_proof(task, proof_store=proof_store)
         ):
             _block_launcher_release_until_backend_proof(task, log=log, actor=actor, run_id=run_id)
             return task
-        if actor == "neko_supervisor" and _payload_is_launcher_handoff(decision.payload):
+        if is_mission_lead_actor(task, actor) and _payload_is_launcher_handoff(decision.payload):
             _ensure_launcher_handoff_stage(task, decision.payload, actor=actor, log=log)
             _repair_bounded_visual_proof_stage_from_neko_handoff(task, decision.payload, actor=actor, log=log)
             task.affected_repos = ["EterniaLauncher"]
@@ -323,9 +324,9 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             if not _payload_is_visual_recovery_handoff(decision.payload):
                 launcher_flags.append("sequential_specialist_handoff")
             _dedupe_extend(task.risk_flags, launcher_flags)
-        if actor == "neko_supervisor" and _payload_is_no_edit_proof_handoff(decision.payload):
+        if is_mission_lead_actor(task, actor) and _payload_is_no_edit_proof_handoff(decision.payload):
             _ensure_no_edit_proof_handoff_stage(task, decision.payload, actor=actor, log=log)
-        if actor == "neko_supervisor" and _should_release_backend_first_slice(task):
+        if is_mission_lead_actor(task, actor) and _should_release_backend_first_slice(task):
             task.affected_repos = ["EterniaBackend"]
             _dedupe_extend(task.risk_flags, ["cross_stack_contract_handoff", "backend_contract_first"])
             log.append(
@@ -342,7 +343,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                     },
                 )
             )
-        if actor == "neko_supervisor":
+        if is_mission_lead_actor(task, actor):
             _ensure_scoped_dev_handoff_stage(task, decision.payload, actor=actor, log=log)
         task.state = TaskState.RUNNING
         task.updated_at = now()
@@ -597,19 +598,19 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
         # the intervention visible through observability/context-request signals
         # without inventing proof or bypassing gates.
         task.state = TaskState.BLOCKED
-        if actor == "neko_supervisor":
+        if is_mission_lead_actor(task, actor):
             mark_block_recovery_attempt(task)
         task.updated_at = now()
     elif decision.type == DecisionType.BLOCK:
         task.state = TaskState.BLOCKED
-        if actor == "neko_supervisor":
+        if is_mission_lead_actor(task, actor):
             mark_block_recovery_attempt(task)
         task.updated_at = now()
     return task
 
 
 def _coerce_neko_needs_context_to_handoff_continuation(task: Task, decision: AgentDecision, *, actor: str, log: EventLog, run_id: str | None, proof_store=None) -> bool:
-    if actor != "neko_supervisor" or decision.type != DecisionType.NEEDS_CONTEXT:
+    if not is_mission_lead_actor(task, actor) or decision.type != DecisionType.NEEDS_CONTEXT:
         return False
     if getattr(task, "open_incident_ids", None):
         return False
@@ -1995,7 +1996,7 @@ def _existing_launcher_handoff_stage(task: Task, payload: dict[str, Any]) -> Tas
 
 
 def _repair_bounded_visual_proof_stage_from_neko_handoff(task: Task, payload: dict[str, Any], *, actor: str, log: EventLog) -> None:
-    if actor != "neko_supervisor":
+    if not is_mission_lead_actor(task, actor):
         return
     handoff = payload.get("handoff_packet")
     if not isinstance(handoff, dict):

@@ -15,6 +15,7 @@ from .models import Event, Task, TaskStage
 from .mission_plan import (
     current_plan_stage,
     has_typed_plan,
+    is_mission_lead_actor,
     release_next_stage,
 )
 from .packets import record_decision_packets
@@ -127,7 +128,7 @@ class MissionStateMachine:
                 has_open_incident = False
         incident_resolution_acceptance = (
             blueprint_owned
-            and actor == "neko_supervisor"
+            and is_mission_lead_actor(mission, actor)
             and decision.type == DecisionType.PROPOSE_ACCEPTANCE
             and has_open_incident
         )

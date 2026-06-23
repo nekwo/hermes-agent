@@ -35,6 +35,41 @@ def has_typed_plan(task: Task) -> bool:
     return bool(plan and plan.enabled and plan.stages)
 
 
+def is_mission_lead_actor(task: Task, actor: str | None) -> bool:
+    actor_id = str(actor or "").strip()
+    if not actor_id:
+        return False
+    plan = getattr(task, "mission_plan", None)
+    if not plan:
+        return actor_id == "neko_supervisor"
+    lead_ids: set[str] = set()
+    slots = getattr(plan, "slots", None) or {}
+    bindings = getattr(plan, "bindings", None) or {}
+    for slot_id, raw_slot in slots.items():
+        slot = raw_slot if isinstance(raw_slot, dict) else {}
+        role = str(slot.get("role") or "").strip()
+        slot_name = str(slot_id or "").strip()
+        if role in {"lead", "neko", "pm"} or slot_name in {"lead", "neko_supervisor"}:
+            lead_ids.add(_binding_persona_id(str(bindings.get(slot_name) or slot_name)))
+    if lead_ids:
+        return actor_id in lead_ids
+    for stage in getattr(plan, "stages", []) or []:
+        owner = str(getattr(stage, "owner", "") or "").strip()
+        owner_slot = str(getattr(stage, "owner_slot", "") or "").strip()
+        if owner == "neko_supervisor":
+            lead_ids.add(_binding_persona_id(str(bindings.get(owner_slot) or owner)))
+        elif owner_slot in {"lead", "neko_supervisor"}:
+            lead_ids.add(_binding_persona_id(str(bindings.get(owner_slot) or owner or owner_slot)))
+    return actor_id in (lead_ids or {"neko_supervisor"})
+
+
+def _binding_persona_id(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("persona:"):
+        return text.split(":", 1)[1].strip()
+    return text
+
+
 def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, actor: str | None = None) -> MissionPlan:
     payload = payload if isinstance(payload, dict) else {}
     existing = getattr(task, "mission_plan", None)
