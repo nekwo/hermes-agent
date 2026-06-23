@@ -34,15 +34,13 @@ def test_task_store_create_update_round_trip_and_records_events():
     store = TaskStore()
     task = store.create(make_task())
 
-    apply_transition(task, TaskState.PM_TRIAGE, actor="pm", reason="triage")
+    apply_transition(task, TaskState.RUNNING, actor="pm", reason="triage")
     store.update(task, actor="pm", reason="triage")
-    apply_transition(task, TaskState.READY_FOR_WORK, actor="pm", reason="ready")
-    store.update(task, actor="pm", reason="ready")
 
-    assert store.get("task_abc").state == TaskState.READY_FOR_WORK
+    assert store.get("task_abc").state == TaskState.RUNNING
     events = EventLog().tail(10)
-    assert [evt.type for evt in events] == ["task.created", "task.transition", "task.transition"]
-    assert events[-1].payload == {"from": "pm_triage", "to": "pm_ready_for_dev", "actor": "pm", "reason": "ready"}
+    assert [evt.type for evt in events] == ["task.created", "task.transition"]
+    assert events[-1].payload == {"from": "created", "to": "running", "actor": "pm", "reason": "triage"}
 
 
 def test_task_store_invalid_get_raises_not_found():
@@ -52,7 +50,7 @@ def test_task_store_invalid_get_raises_not_found():
 
 def test_task_store_filters_open_and_by_state():
     store = TaskStore()
-    store.create(make_task("task_open", TaskState.PM_TRIAGE))
+    store.create(make_task("task_open", TaskState.RUNNING))
     store.create(make_task("task_done", TaskState.DONE))
     store.create(make_task("task_blocked", TaskState.BLOCKED))
 
@@ -125,7 +123,7 @@ def test_task_store_list_all_tolerates_concurrent_archive_move(monkeypatch):
 
 def test_task_store_cancel_marks_task_cancelled_with_reason_event():
     store = TaskStore()
-    store.create(make_task("task_cancel", TaskState.READY_FOR_WORK))
+    store.create(make_task("task_cancel", TaskState.RUNNING))
 
     cancelled = store.cancel("task_cancel", reason="operator stopped runaway smoke", actor="alice")
 
@@ -150,7 +148,7 @@ def test_task_store_cancel_redacts_sensitive_reason_and_preserves_terminal_task(
 def test_archive_active_refusal_creates_no_empty_batch_and_explains_reason(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     store = TaskStore()
-    store.create(make_task("task_active", TaskState.DEV_IMPLEMENTING))
+    store.create(make_task("task_active", TaskState.RUNNING))
 
     result = store.archive("task_active", actor="cli", reason="operator archive")
 
@@ -161,7 +159,7 @@ def test_archive_active_refusal_creates_no_empty_batch_and_explains_reason(tmp_p
     assert result["skipped_tasks"][0]["reason"] == "not_terminal"
     assert "only done/cancelled tasks" in result["skipped_tasks"][0]["message"]
     assert not (tmp_path / "runtime" / "deleted_archive").exists()
-    assert store.get("task_active").state == TaskState.DEV_IMPLEMENTING
+    assert store.get("task_active").state == TaskState.RUNNING
 
 
 def test_archive_writes_prepare_and_final_manifest_before_archived_event(tmp_path, monkeypatch):

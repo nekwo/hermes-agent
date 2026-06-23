@@ -3,24 +3,17 @@ from enum import StrEnum
 
 class TaskState(StrEnum):
     CREATED = "created"
-    PM_TRIAGE = "pm_triage"
-    READY_FOR_WORK = "pm_ready_for_dev"
-    DEV_AUDIT = "dev_audit"
-    DEV_STAGE_PLANNING = "dev_stage_planning"
-    DEV_TEST_DESIGN = "dev_test_design"
-    QA_REVIEW_PLAN = "qa_review_plan"
-    DEV_IMPLEMENTING = "dev_implementing"
-    READY_FOR_REVIEW = "dev_ready_for_qa"
-    QA_TESTING = "qa_testing"
-    REWORK_REQUESTED = "qa_needs_fixes"
-    APPROVED = "qa_approved"
-    EVIDENCE_REVIEW = "pm_proof_review"
-    PM_READY_FOR_INTEGRATION = "pm_ready_for_integration"
-    INTEGRATING = "integrating"
+    RUNNING = "running"
     DONE = "done"
     BLOCKED = "blocked"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str) and value in _LEGACY_RUNNING_TASK_STATE_VALUES:
+            return cls.RUNNING
+        return None
 
 
 class AgentState(StrEnum):
@@ -84,3 +77,23 @@ class StageStatus(StrEnum):
     PASSED = "passed"
     REWORK = "needs_fixes"
     BLOCKED = "blocked"
+
+
+_LEGACY_RUNNING_TASK_STATE_VALUES = frozenset(
+    {
+        "pm_triage",
+        "pm_ready_for_dev",
+        "dev_audit",
+        "dev_stage_planning",
+        "dev_test_design",
+        "qa_review_plan",
+        "dev_implementing",
+        "dev_ready_for_qa",
+        "qa_testing",
+        "qa_needs_fixes",
+        "qa_approved",
+        "pm_proof_review",
+        "pm_ready_for_integration",
+        "integrating",
+    }
+)

@@ -21,7 +21,7 @@ from agent_runtime.store import ProofStore
 
 def make_task() -> Task:
     ts = now()
-    return Task(id="task_1", title="T", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=ts, updated_at=ts, requested_by="tony")
+    return Task(id="task_1", title="T", description="d", state=TaskState.RUNNING, created_at=ts, updated_at=ts, requested_by="tony")
 
 
 def make_smoke_task() -> Task:
@@ -30,7 +30,7 @@ def make_smoke_task() -> Task:
         id="task_smoke",
         title="Stage 46 backend smoke",
         description="No product edits; collect bounded smoke proof only.",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=ts,
         updated_at=ts,
         requested_by="tony",
@@ -44,7 +44,7 @@ def make_launcher_contract_task() -> Task:
         id="task_launcher_contract",
         title="Stage 47 Launcher contract smoke",
         description="Launcher must consume the joined backend proof packet before QA.",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=ts,
         updated_at=ts,
         requested_by="tony",

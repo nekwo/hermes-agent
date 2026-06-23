@@ -92,6 +92,7 @@ def _align_default_plan_to_task_state(task: Task, plan: MissionPlan) -> None:
         "dev_test_design",
         "dev_implementing",
         "qa_needs_fixes",
+        "running",
     } and "implement" in by_id:
         if "scope" in by_id:
             by_id["scope"].status = StageStatus.PASSED

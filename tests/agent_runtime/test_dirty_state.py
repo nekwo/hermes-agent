@@ -32,7 +32,7 @@ def test_dirty_state_reports_runtime_temp_state():
     ts = TaskStore()
     runs = RunStore()
     stamp = now()
-    task = ts.create(Task(id="task_burn_old", title="Old burn-in", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=stamp, updated_at=stamp, requested_by="stage47_burn_in"))
+    task = ts.create(Task(id="task_burn_old", title="Old burn-in", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="stage47_burn_in"))
     runs.open_run("dev", task.id)
 
     state = build_dirty_state(tasks=ts.list_all(), runs=runs.list_all(), repos=[])
@@ -47,8 +47,8 @@ def test_new_goal_hygiene_cancels_stage47_temp_state_and_orphan_runs():
     ts = TaskStore()
     runs = RunStore()
     stamp = now()
-    temp = ts.create(Task(id="task_burn_old", title="Old burn-in", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=stamp, updated_at=stamp, requested_by="stage47_burn_in"))
-    keep = ts.create(Task(id="task_real", title="Real goal", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=stamp, updated_at=stamp, requested_by="tony"))
+    temp = ts.create(Task(id="task_burn_old", title="Old burn-in", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="stage47_burn_in"))
+    keep = ts.create(Task(id="task_real", title="Real goal", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony"))
     temp_run = runs.open_run("dev", temp.id)
     runs.open_run("dev", keep.id)
     orphan = AgentRun(id="run_orphan", persona_id="qa", task_id="missing_task", stage_id=None, state=RunState.RUNNING, started_at=stamp, last_heartbeat_at=stamp - timedelta(seconds=999))
@@ -72,7 +72,7 @@ def test_new_goal_hygiene_cancels_stage47_temp_state_and_orphan_runs():
     assert temp_run.id in report["cancelled_run_ids"]
     assert runs.get(temp_run.id).state == RunState.CANCELLED
     assert ts.get(temp.id).state == TaskState.CANCELLED
-    assert ts.get(keep.id).state == TaskState.DEV_IMPLEMENTING
+    assert ts.get(keep.id).state == TaskState.RUNNING
     assert runs.find_active(task_id=keep.id)
 
 

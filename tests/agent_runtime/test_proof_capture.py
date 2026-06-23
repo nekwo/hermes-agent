@@ -18,7 +18,7 @@ def test_captured_artifact_metadata_omits_none_dimensions():
 
 
 def _task():
-    return Task(id="task_visual", title="Visual", description="Visual", state=TaskState.QA_TESTING, created_at=now(), updated_at=now(), requested_by="test")
+    return Task(id="task_visual", title="Visual", description="Visual", state=TaskState.RUNNING, created_at=now(), updated_at=now(), requested_by="test")
 
 
 def _request():

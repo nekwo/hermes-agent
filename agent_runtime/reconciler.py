@@ -95,7 +95,7 @@ def _repeated_unsupported_context_requests(task: Task) -> list[ReconciliationFin
 def _approved_plan_still_in_design(task: Task) -> list[ReconciliationFinding]:
     state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
     review = getattr(task, "plan_review", None)
-    if state != TaskState.DEV_TEST_DESIGN or review is None or review.verdict != PlanReviewVerdict.APPROVED:
+    if state != TaskState.RUNNING or review is None or review.verdict != PlanReviewVerdict.APPROVED:
         return []
     gate = can_enter_dev_implementing(task)
     if gate.allowed:

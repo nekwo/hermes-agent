@@ -95,7 +95,7 @@ def test_delivery_packet_rejects_unknown_self_test_evidence_ids():
         id=run.task_id,
         title="Mission Control test",
         description="d",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=now(),
         updated_at=now(),
         requested_by="tony",

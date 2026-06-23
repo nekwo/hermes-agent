@@ -24,7 +24,7 @@ from agent_runtime.profile_runner import RunBudgetExceeded
 
 def test_request_test_run_allows_typed_current_stage_when_legacy_current_stage_is_stale():
     task = make_task_with_id("task_typed_current_stage")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     typed_stage_id = "verify_the_hermes_harness_mission_control_log_snapshot_contract"
     task.current_stage_id = "launcher_implementation"
     task.stages = [
@@ -68,7 +68,7 @@ def test_request_test_run_allows_typed_current_stage_when_legacy_current_stage_i
 
 def test_no_progress_guard_routes_dev_repetition_to_neko():
     task = make_task_with_id("task_no_progress_guard")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     engine = TickEngine(task_store=TaskStore(), persona_runtime=FakeRuntime())
     envelope = engine.role_envelope_store.open_or_resume(
@@ -90,7 +90,7 @@ def test_no_progress_guard_routes_dev_repetition_to_neko():
 
 def test_request_test_run_rejects_no_edit_investigation_context_without_gate():
     task = make_task_with_id("task_context_investigation")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "backend_investigation"
     task.stages = [
         TaskStage(
@@ -149,7 +149,7 @@ def test_repeated_request_file_reads_rejected_after_no_edit_investigation_contex
     from agent_runtime.planning import apply_planning_decision
 
     task = make_task_with_id("task_context_investigation")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "backend_investigation"
     task.context_requests = [
         {"id": "ctx_1", "actor": "backend_dev", "stage_id": "backend_investigation", "status": "fulfilled"},
@@ -478,6 +478,28 @@ def make_task():
     ts=now(); return Task(id="task_1", title="T", description="d", state=TaskState.CREATED, created_at=ts, updated_at=ts, requested_by="tony")
 
 
+def mark_graph_complete(task: Task) -> Task:
+    task.current_stage_id = None
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title=task.title, objective=task.description),
+        current_stage_id=None,
+        blueprint_id="neko_dev_qa_basic",
+        stages=[
+            MissionPlanStage(
+                id="qa_release",
+                title="QA Release",
+                objective="Verify mission.",
+                owner="qa",
+                owner_slot="qa",
+                repo="hermes-agent",
+                kind="qa_verdict",
+                status=StageStatus.PASSED,
+            )
+        ],
+    )
+    return task
+
+
 def make_task_with_id(task_id: str):
     task = make_task()
     task.id = task_id
@@ -489,7 +511,7 @@ def test_tick_advances_created_task_with_fake_pm():
     res=TickEngine(task_store=ts, persona_runtime=FakeRuntime()).tick_once()
     assert res.actions_taken[0].ok
     assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
-    assert ts.get("task_1").state == TaskState.DEV_IMPLEMENTING
+    assert ts.get("task_1").state == TaskState.RUNNING
 
 
 def test_targeted_tick_runs_named_task_instead_of_older_open_task():
@@ -500,7 +522,7 @@ def test_targeted_tick_runs_named_task_instead_of_older_open_task():
     res = TickEngine(task_store=ts, persona_runtime=FakeRuntime()).tick_once(task_id="task_z_target")
 
     assert [action.payload["run_id"] for action in res.actions_taken]
-    assert ts.get("task_z_target").state == TaskState.DEV_IMPLEMENTING
+    assert ts.get("task_z_target").state == TaskState.RUNNING
     assert ts.get("task_0_old").state == TaskState.CREATED
     assert res.tasks_seen == 1
 
@@ -541,7 +563,7 @@ def test_tick_persists_active_run_provider_model_metadata_before_runtime_call():
 
 def test_tick_uses_persona_specific_live_budget_for_dev_runs():
     task = make_task()
-    task.state = TaskState.READY_FOR_WORK
+    task.state = TaskState.RUNNING
     ts = TaskStore(); ts.create(task)
     runs = RunStore()
     runtime = FakeRuntime()
@@ -696,7 +718,7 @@ def test_live_dev_tick_emits_preflight_started_before_dispatch():
     ts = TaskStore()
     task = make_task()
     task.id = "task_preflight_event"
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     ts.create(task)
 
     TickEngine(task_store=ts, persona_runtime=GPTPersonaRuntime()).tick_once(task_id=task.id)
@@ -754,7 +776,7 @@ def test_invalid_packet_contract_returns_repair_hud_inside_same_run():
     incidents = IncidentStore()
     proof_store = ProofStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(
@@ -798,7 +820,7 @@ def test_invalid_packet_contract_returns_repair_hud_inside_same_run():
     assert run.state == RunState.COMPLETED
     assert run.llm["validation_status"] == "valid"
     assert run.llm["schema_repair_attempts"] == 1
-    assert ts.get("task_1").state == TaskState.READY_FOR_REVIEW
+    assert ts.get("task_1").state == TaskState.RUNNING
     assert proof_store.get("proof_task_1_stage_1").metadata["status"] == "passed"
     assert not engine.incident_store.list_open()
     progress_events = [
@@ -836,7 +858,7 @@ def test_persona_runtime_raised_contract_error_returns_repair_hud_inside_same_ru
     assert run.llm["validation_status"] == "valid"
     assert run.llm["schema_repair_attempts"] == 1
     assert not incidents.list_open()
-    assert ts.get("task_1").state == TaskState.DEV_IMPLEMENTING
+    assert ts.get("task_1").state == TaskState.RUNNING
 
 
 def test_visual_screenshot_contract_repair_event_names_exact_invalid_field():
@@ -990,7 +1012,7 @@ def test_duplicate_visual_request_repairs_to_verdict_instead_of_recapturing():
     assert run.llm["schema_repair_attempts"] == 1
     assert run.final_decision["type"] == "report_qa_verdict"
     saved = ts.get(task.id)
-    assert saved.state == TaskState.APPROVED
+    assert saved.state == TaskState.RUNNING
     assert saved.stages[0].status == StageStatus.PASSED
     assert [proof.id for proof in proof_store.list_for_task(task.id) if proof.type == ProofType.SCREENSHOT] == ["proof_screenshot"]
 
@@ -1000,7 +1022,7 @@ def test_repeated_invalid_packet_contract_escalates_after_bounded_repair():
     runs = RunStore()
     proof_store = ProofStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(
@@ -1046,7 +1068,7 @@ def test_role_session_observe_only_records_would_continue_without_second_invocat
     runs = RunStore()
     proof_store = ProofStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(
@@ -1079,7 +1101,7 @@ def test_continuous_role_session_runs_two_same_owner_decisions_in_one_run():
     runs = RunStore()
     proof_store = ProofStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(
@@ -1123,7 +1145,7 @@ def test_continuous_role_session_runs_two_same_owner_decisions_in_one_run():
 def test_dev_missing_proof_handoff_routes_to_neko_repair_instead_of_dead_skip():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_TEST_DESIGN
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(
@@ -1184,7 +1206,7 @@ def test_transient_provider_ttfb_retries_once_and_records_attempt_visibility():
     assert res.actions_taken[0].ok
     assert runtime.calls == 2
     assert engine.incident_store.list_open() == []
-    assert ts.get("task_1").state == TaskState.DEV_IMPLEMENTING
+    assert ts.get("task_1").state == TaskState.RUNNING
     runs = sorted(engine.run_store.list_for_task("task_1"), key=lambda run: run.started_at)
     assert [run.state.value for run in runs] == ["failed", "completed"]
     assert runs[0].error["retryable"] is True
@@ -1220,7 +1242,7 @@ def test_run_until_settled_allows_neko_to_repair_blocked_incident():
     assert res.actions_taken[0].ok
     assert res.stop_reason == "max_actions"
     assert incidents.list_open() == []
-    assert ts.get("task_1").state == TaskState.DEV_TEST_DESIGN
+    assert ts.get("task_1").state == TaskState.RUNNING
     assert ts.get("task_1").open_incident_ids == []
 
 
@@ -1355,7 +1377,8 @@ def test_tick_allows_new_run_after_existing_run_is_terminal():
 def test_tick_deterministically_closes_APPROVED_mission_with_proof_without_persona_runtime():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.APPROVED
+    task.state = TaskState.RUNNING
+    mark_graph_complete(task)
     task.proof_ids = ["proof_test", "proof_qa"]
     ts.create(task)
 
@@ -1372,7 +1395,7 @@ def test_tick_closes_typed_mission_when_qa_stage_passed_even_if_top_state_lags()
     ts = TaskStore()
     proofs = ProofStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "harness_runtime_status_snapshot"
     task.proof_ids = ["proof_command", "proof_qa"]
     task.mission_plan = MissionPlan(
@@ -1456,7 +1479,7 @@ def test_tick_routes_noncritical_intervention_to_neko_supervisor_instead_of_skip
     assert res.actions_taken[0].ok
     assert runtime.personas[0].id == "neko_supervisor"
     assert incidents.get("inc_qa").closed_at is not None
-    assert ts.get("task_1").state == TaskState.PM_READY_FOR_INTEGRATION
+    assert ts.get("task_1").state == TaskState.RUNNING
     assert ts.get("task_1").open_incident_ids == []
 
 
@@ -1476,7 +1499,7 @@ class NekoNeedsContextRuntime:
 
 
 def test_neko_needs_context_blocks_instead_of_daemon_looping():
-    ts=TaskStore(); task=make_task(); task.state=TaskState.READY_FOR_WORK
+    ts=TaskStore(); task=make_task(); task.state=TaskState.RUNNING
     task.context_requests = [
         {"id": "ctx_1", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
         {"id": "ctx_2", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
@@ -1839,7 +1862,7 @@ class PassingProofRunner:
 def test_failed_command_proof_is_attached_but_not_promoted_to_ready_stage():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [TaskStage(id="stage_1", title="S1", objective="o", status=StageStatus.IMPLEMENTING, acceptance_criteria=["ok"], test_plan=["cmd"])]
     ts.create(task)
@@ -1861,7 +1884,7 @@ def test_normal_worker_flow_auto_runs_final_gate_after_patch_delivery():
     task = make_task()
     task.title = "Mission Control DM bubble terminal rows"
     task.description = "Upgrade Launcher Mission Control event rows into compact DM bubbles."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaLauncher"]
     task.current_stage_id = "mc_terminal_dm_bubble_rows"
     task.stages = [
@@ -1896,7 +1919,7 @@ def test_normal_worker_flow_auto_runs_final_gate_after_patch_delivery():
     assert runner.calls[0]["commands"] == ["flutter test test/features/mission_control/mission_control_page_test.dart"]
     assert runner.calls[0]["proof_intent"] == "auto_final_gate_after_delivery"
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_REVIEW
+    assert stored.state == TaskState.RUNNING
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.proof_ids == ["proof_auto_task_1_mc_terminal_dm_bubble_rows"]
     proof = proofs.get(stored.proof_ids[0])
@@ -1911,7 +1934,7 @@ def test_normal_worker_flow_auto_runs_repo_default_final_gate_when_stage_test_pl
     task = make_task()
     task.title = "Commit and deploy-check backend slice"
     task.description = "Commit the approved backend product-edit slice and let Harness run deploy check."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
     task.current_stage_id = "backend_implementation"
     task.mission_plan = MissionPlan(
@@ -1958,7 +1981,7 @@ def test_normal_worker_flow_auto_runs_repo_default_final_gate_when_stage_test_pl
     assert runner.calls[0]["commands"] == [".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"]
     assert runner.calls[0]["proof_intent"] == "auto_final_gate_after_delivery"
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_REVIEW
+    assert stored.state == TaskState.RUNNING
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.proof_ids == ["proof_auto_task_1_backend_implementation"]
 
@@ -1968,7 +1991,7 @@ def test_normal_worker_flow_reuses_existing_passed_final_gate_after_handoff_repa
     task = make_task()
     task.title = "NSFW handoff repair"
     task.description = "Repair delivery handoff only; existing focused proof already passed."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
     task.current_stage_id = "backend_implementation"
     task.stages = [
@@ -2023,7 +2046,7 @@ def test_normal_worker_flow_reuses_existing_passed_final_gate_after_handoff_repa
     assert res.actions_taken[0].ok
     assert runner.calls == []
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_REVIEW
+    assert stored.state == TaskState.RUNNING
     assert stored.proof_ids == ["proof_existing_passed"]
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     events = EventLog().for_task("task_1", limit=0)
@@ -2041,7 +2064,7 @@ def test_handoff_repair_with_existing_passed_proof_routes_to_qa_without_dev_run(
     task = make_task()
     task.title = "NSFW handoff repair"
     task.description = "Delivery metadata repair only; use existing passed proof."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
     task.current_stage_id = "backend_implementation"
     task.risk_flags = ["This is a delivery metadata repair only; use existing passed proof proof_existing_passed."]
@@ -2113,7 +2136,7 @@ def test_handoff_repair_with_existing_passed_proof_routes_to_qa_without_dev_run(
     assert res.actions_taken[0].ok
     assert res.actions_taken[0].summary == "handoff repair reused existing passed proof; routed to QA"
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_REVIEW
+    assert stored.state == TaskState.RUNNING
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.mission_plan.stages[0].status == StageStatus.READY_FOR_QA
     events = EventLog().for_task("task_1", limit=0)
@@ -2123,7 +2146,7 @@ def test_handoff_repair_with_existing_passed_proof_routes_to_qa_without_dev_run(
 def test_normal_worker_flow_no_edit_investigation_delivery_advances_to_qa_without_command_proof():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
     task.current_stage_id = "backend_investigation"
     task.context_requests = [
@@ -2159,7 +2182,7 @@ def test_normal_worker_flow_no_edit_investigation_delivery_advances_to_qa_withou
 
     assert res.actions_taken[0].ok
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_REVIEW
+    assert stored.state == TaskState.RUNNING
     assert stored.mission_plan.stages[0].status == StageStatus.PASSED
     assert engine.state_machine.next_action(stored).type == HarnessActionType.RUN_SLOT
     assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "deliver_findings"
@@ -2191,7 +2214,7 @@ def test_run_until_settled_drives_neko_dev_qa_and_deterministic_complete():
 def test_backend_affected_repo_routes_run_dev_to_backend_dev():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
     ts.create(task)
     runtime = CapturingFailureRuntime()
@@ -2207,7 +2230,7 @@ def test_backend_affected_repo_routes_run_dev_to_backend_dev():
 def test_backend_stage_that_mentions_launcher_release_still_routes_to_backend_dev():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
     task.current_stage_id = "stage_47_backend_contract_proof"
     task.stages = [
@@ -2233,7 +2256,7 @@ def test_backend_stage_that_mentions_launcher_release_still_routes_to_backend_de
 def test_run_until_settled_blocks_orchestration_only_backend_plan_without_repeating():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.READY_FOR_WORK
+    task.state = TaskState.RUNNING
     task.requested_by = "stage47_burn_in"
     task.affected_repos = ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
     task.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "bounded_complex_burn_in"]
@@ -2258,7 +2281,7 @@ def test_run_until_settled_blocks_orchestration_only_backend_plan_without_repeat
 def test_latest_launcher_handoff_overrides_mixed_backend_affected_repos():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.READY_FOR_WORK
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = ["EterniaLauncher", "EterniaBackend", "hermes-agent"]
     ts.create(task)
@@ -2295,7 +2318,7 @@ def test_latest_launcher_handoff_overrides_mixed_backend_affected_repos():
 def test_launcher_stage_identity_overrides_stale_unscoped_backend_handoff():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.READY_FOR_WORK
+    task.state = TaskState.RUNNING
     task.current_stage_id = "launcher_contract_smoke"
     task.affected_repos = ["EterniaLauncher"]
     task.stages = [
@@ -2340,7 +2363,7 @@ def test_launcher_stage_identity_overrides_stale_unscoped_backend_handoff():
 def test_stale_approved_dev_continuation_does_not_override_backend_routing():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
     ts.create(task)
     runs = RunStore()
@@ -2362,7 +2385,7 @@ def test_stale_approved_dev_continuation_does_not_override_backend_routing():
 def test_matching_approved_backend_continuation_reuses_backend_session():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
     ts.create(task)
     runs = RunStore()
@@ -2391,7 +2414,7 @@ def test_matching_approved_backend_continuation_reuses_backend_session():
 def test_run_until_settled_stops_on_open_incident_after_failed_action(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = [str(tmp_path / "missing-product-repo")]
     ts.create(task)
@@ -2403,7 +2426,7 @@ def test_run_until_settled_stops_on_open_incident_after_failed_action(tmp_path):
     assert len(res.actions_taken) == 1
     assert not res.actions_taken[0].ok
     assert res.open_incidents == 1
-    assert ts.get("task_1").state == TaskState.DEV_IMPLEMENTING
+    assert ts.get("task_1").state == TaskState.RUNNING
 
 
 def test_settled_boundary_allows_neko_scope_recovery_for_read_search_budget_loop(isolate_agent_runtime_root):
@@ -2411,7 +2434,7 @@ def test_settled_boundary_allows_neko_scope_recovery_for_read_search_budget_loop
     runs = RunStore()
     incidents = IncidentStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "backend_implementation"
     task.open_incident_ids = ["inc_loop"]
     ts.create(task)
@@ -2452,7 +2475,7 @@ def test_run_until_settled_honors_max_actions_without_runaway_loop():
 
     assert res.stop_reason == "max_actions"
     assert len(res.actions_taken) == 1
-    assert ts.get("task_1").state == TaskState.DEV_IMPLEMENTING
+    assert ts.get("task_1").state == TaskState.RUNNING
 
 
 def test_run_until_settled_enforces_max_actions_even_when_tick_config_allows_more():
@@ -2466,7 +2489,7 @@ def test_run_until_settled_enforces_max_actions_even_when_tick_config_allows_mor
 
     assert res.stop_reason == "max_actions"
     assert len(res.actions_taken) == 1
-    assert ts.get("task_a").state == TaskState.DEV_IMPLEMENTING
+    assert ts.get("task_a").state == TaskState.RUNNING
     assert ts.get("task_b").state == TaskState.CREATED
 
 
@@ -2571,7 +2594,7 @@ class RequestTestThenHandoffRuntime:
 def test_tick_collects_command_proof_for_request_test_run(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
@@ -2581,7 +2604,7 @@ def test_tick_collects_command_proof_for_request_test_run(tmp_path):
 
     assert res.actions_taken[0].ok
     saved = ts.get("task_1")
-    assert saved.state == TaskState.READY_FOR_REVIEW
+    assert saved.state == TaskState.RUNNING
     assert len(saved.proof_ids) == 1
     assert saved.stages[0].status == StageStatus.PASSED
     assert saved.current_stage_id == "verify"
@@ -2615,7 +2638,7 @@ def test_tick_passes_proof_intent_and_environment_fingerprint_metadata_to_runner
     ts = TaskStore()
     proofs = ProofStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.harness_self_heal = {
         "stages": {
@@ -2643,7 +2666,7 @@ def test_tick_passes_proof_intent_and_environment_fingerprint_metadata_to_runner
 def test_tick_collects_command_proof_in_task_affected_repo_when_no_explicit_workdir(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = [str(tmp_path)]
     ts.create(task)
@@ -2668,7 +2691,7 @@ def test_tick_collects_launcher_stage_command_proof_in_launcher_repo_when_scope_
     launcher_repo.mkdir()
     ts = TaskStore()
     task = make_task_with_id("task_launcher_stage_scope")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "launcher_contract_smoke"
     task.affected_repos = [str(backend_repo), str(launcher_repo)]
     task.stages = [
@@ -2705,7 +2728,7 @@ def test_flutter_bridge_regression_stage_uses_launcher_workdir_despite_harness_o
     launcher_repo = tmp_path / "EterniaLauncher"
     launcher_repo.mkdir()
     task = make_task_with_id("task_bridge_stage_scope")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_bridge_archive_regression"
     task.affected_repos = [str(launcher_repo)]
     task.stages = [
@@ -2732,7 +2755,7 @@ def test_tick_collects_backend_stage_command_proof_in_backend_repo_despite_launc
     launcher_repo.mkdir()
     ts = TaskStore()
     task = make_task_with_id("task_backend_stage_scope")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "backend_no_op_route_proof"
     task.affected_repos = [str(backend_repo), str(launcher_repo)]
     task.stages = [
@@ -2822,7 +2845,7 @@ def test_tick_blocks_passing_backend_stage_proof_from_wrong_repo_workdir():
     ts = TaskStore()
     proofs = ProofStore()
     task = make_task_with_id("task_backend_wrong_repo")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "backend_no_op_route_proof"
     task.affected_repos = ["EterniaBackend", "EterniaLauncher"]
     task.stages = [
@@ -2855,7 +2878,7 @@ def test_bridge_archive_stage_wrong_page_proof_does_not_advance():
     ts = TaskStore()
     proofs = ProofStore()
     task = make_task_with_id("task_bridge_wrong_command")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_bridge_archive_regression"
     task.affected_repos = ["EterniaLauncher"]
     task.stages = [
@@ -2885,7 +2908,7 @@ def test_bridge_archive_stage_wrong_page_proof_does_not_advance():
 
     assert res.actions_taken[0].ok
     saved = ts.get("task_bridge_wrong_command")
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "stage_bridge_archive_regression"
     assert saved.stages[0].status == StageStatus.IMPLEMENTING
     assert saved.proof_ids == ["proof_wrong_stage_command"]
@@ -2896,7 +2919,7 @@ def test_bridge_archive_stage_request_qa_review_rejects_wrong_existing_page_proo
     ts = TaskStore()
     proofs = ProofStore()
     task = make_task_with_id("task_bridge_wrong_qa_handoff")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_bridge_archive_regression"
     task.affected_repos = ["EterniaLauncher"]
     task.proof_ids = ["proof_page_bridge"]
@@ -2951,7 +2974,7 @@ def test_bridge_archive_stage_request_qa_review_rejects_wrong_existing_page_proo
     assert res.actions_taken[0].payload["decision"] == "request_test_run"
     assert runtime.calls == 2
     saved = ts.get("task_bridge_wrong_qa_handoff")
-    assert saved.state == TaskState.READY_FOR_REVIEW
+    assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "verify"
     assert saved.stages[0].status == StageStatus.READY_FOR_QA
     assert saved.proof_ids == ["proof_page_bridge", "proof_wrong_stage_command"]
@@ -2965,7 +2988,7 @@ def test_request_test_run_autocorrects_later_stage_to_unambiguous_current_stage_
     ts = TaskStore()
     proofs = ProofStore()
     task = make_task_with_id("task_skip_stage_guard")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_bridge_archive_regression"
     task.affected_repos = ["EterniaLauncher"]
     task.stages = [
@@ -2998,7 +3021,7 @@ def test_request_test_run_autocorrects_later_stage_to_unambiguous_current_stage_
 
     assert res.actions_taken[0].ok
     saved = ts.get("task_skip_stage_guard")
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "stage_launcher_analyze_and_visual_proof"
     assert saved.stages[0].status == StageStatus.READY_FOR_QA
     assert saved.stages[1].status == StageStatus.READY
@@ -3019,7 +3042,7 @@ def test_downstream_visual_block_autocorrects_to_current_stage_command_proof():
     ts = TaskStore()
     proofs = ProofStore()
     task = make_task_with_id("task_visual_block_before_bridge")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_bridge_archive_regression"
     task.affected_repos = ["EterniaLauncher"]
     task.stages = [
@@ -3053,7 +3076,7 @@ def test_downstream_visual_block_autocorrects_to_current_stage_command_proof():
     assert res.actions_taken[0].ok
     assert res.actions_taken[0].payload["decision"] == "request_test_run"
     saved = ts.get("task_visual_block_before_bridge")
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "stage_launcher_analyze_and_visual_proof"
     assert saved.stages[0].status == StageStatus.READY_FOR_QA
     assert saved.stages[1].status == StageStatus.READY
@@ -3069,7 +3092,7 @@ def test_downstream_visual_block_autocorrects_to_current_stage_command_proof():
 def test_request_test_run_cannot_skip_incomplete_current_stage_without_unambiguous_command():
     ts = TaskStore()
     task = make_task_with_id("task_skip_stage_guard_ambiguous")
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_bridge_archive_regression"
     task.affected_repos = ["EterniaLauncher"]
     task.stages = [
@@ -3107,7 +3130,7 @@ def test_smoke_marker_proof_reroutes_back_to_incomplete_product_edit_stage():
     task = make_task_with_id("task_dm_bubble_smoke_reroute")
     task.title = "Mission Control DM bubble terminal rows"
     task.description = "Upgrade Launcher Mission Control event rows into compact DM bubbles."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "launcher_contract_smoke"
     task.affected_repos = ["EterniaLauncher"]
     task.stages = [
@@ -3140,7 +3163,7 @@ def test_smoke_marker_proof_reroutes_back_to_incomplete_product_edit_stage():
 
     assert res.actions_taken[0].ok
     saved = ts.get("task_dm_bubble_smoke_reroute")
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "mc_terminal_dm_bubble_rows"
     assert saved.stages[0].status == StageStatus.IMPLEMENTING
     assert saved.stages[1].status == StageStatus.READY_FOR_QA
@@ -3151,7 +3174,7 @@ def test_smoke_marker_proof_reroutes_back_to_incomplete_product_edit_stage():
 def test_tick_collects_command_proof_in_harness_repo_alias_when_no_explicit_workdir():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = ["agent-runtime-harness"]
     ts.create(task)
@@ -3173,7 +3196,7 @@ def test_tick_collects_command_proof_in_harness_repo_alias_when_no_explicit_work
 def test_tick_collects_command_proof_in_hermes_agent_alias_when_no_explicit_workdir():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = ["hermes-agent"]
     ts.create(task)
@@ -3195,7 +3218,7 @@ def test_tick_collects_command_proof_in_hermes_agent_alias_when_no_explicit_work
 def test_tick_opens_incident_when_command_proof_affected_repo_is_missing(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = [str(tmp_path / "missing-product-repo")]
     ts.create(task)
@@ -3204,7 +3227,7 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_missing(tmp_pat
     res = engine.tick_once()
 
     assert not res.actions_taken[0].ok
-    assert ts.get("task_1").state == TaskState.DEV_IMPLEMENTING
+    assert ts.get("task_1").state == TaskState.RUNNING
     incident = engine.incident_store.list_open()[0]
     assert incident.kind == "harness_action_failure"
     run = engine.run_store.get(res.actions_taken[0].payload["run_id"])
@@ -3216,7 +3239,7 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_missing(tmp_pat
 def test_tick_opens_incident_when_command_proof_affected_repo_is_ambiguous_alias():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = ["mission-control"]
     ts.create(task)
@@ -3240,7 +3263,7 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_path_like_alias
         ts = TaskStore()
         task = make_task()
         task.id = f"task_path_like_{index}"
-        task.state = TaskState.DEV_IMPLEMENTING
+        task.state = TaskState.RUNNING
         task.current_stage_id = "stage_1"
         task.affected_repos = [repo_alias]
         ts.create(task)
@@ -3259,7 +3282,7 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_path_like_alias
 def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_implementation_qa(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.READY_FOR_WORK
+    task.state = TaskState.RUNNING
     task.acceptance_criteria = ["smoke-ok proof exists"]
     ts.create(task)
     runtime = RequestTestThenHandoffRuntime()
@@ -3270,7 +3293,7 @@ def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_impleme
     after_proof = ts.get("task_1")
 
     assert first.actions_taken[0].ok
-    assert after_proof.state == TaskState.READY_FOR_REVIEW
+    assert after_proof.state == TaskState.RUNNING
     assert after_proof.current_stage_id == "verify"
     assert [stage.id for stage in after_proof.stages] == ["scope", "implement", "verify"]
     assert after_proof.stages[1].status == StageStatus.IMPLEMENTING
@@ -3390,7 +3413,7 @@ class FailingThenBlockingRuntime:
 def test_request_test_run_failed_proof_stays_in_dev_for_fix_pass(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=FailingRequestTestRunRuntime())
@@ -3400,7 +3423,7 @@ def test_request_test_run_failed_proof_stays_in_dev_for_fix_pass(tmp_path):
     saved = ts.get("task_1")
 
     assert res.actions_taken[0].ok
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert saved.stages[1].status == StageStatus.IMPLEMENTING
     assert len(saved.proof_ids) == 1
     failed_proofs = engine.proof_store.list_for_task("task_1")
@@ -3415,7 +3438,7 @@ def test_request_test_run_failed_proof_stays_in_dev_for_fix_pass(tmp_path):
 def test_failed_command_proof_is_retry_context_and_clears_after_pass(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     ts.create(task)
     runtime = FailingThenPassingRetryRuntime()
@@ -3432,7 +3455,7 @@ def test_failed_command_proof_is_retry_context_and_clears_after_pass(tmp_path):
     assert len(runtime.contexts[1].proof_ids) == 1
     assert runtime.contexts[1].proof_ids[0] == after_failure.proof_ids[0]
     assert runtime.contexts[1].autonomy_packet["failed_proof_ids"] == [after_failure.proof_ids[0]]
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert len(saved.proof_ids) == 2
     assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "failed"]
     assert "last_failed_proof_ids" in saved.harness_self_heal["stages"]["stage_1"]
@@ -3441,7 +3464,7 @@ def test_failed_command_proof_is_retry_context_and_clears_after_pass(tmp_path):
 def test_failed_command_proof_retry_auto_attaches_context_when_model_omits_id(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     ts.create(task)
     runtime = FailingThenPassingAutoAttachedRetryRuntime()
@@ -3456,7 +3479,7 @@ def test_failed_command_proof_retry_auto_attaches_context_when_model_omits_id(tm
     assert first.actions_taken[0].ok
     assert second.actions_taken[0].ok
     assert runtime.contexts[1].autonomy_packet["failed_proof_ids"] == [after_failure.proof_ids[0]]
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "failed"]
     events = [event for event in EventLog().for_task("task_1", limit=50) if event.payload.get("step") == "failed_proof_auto_attached"]
     assert events
@@ -3466,7 +3489,7 @@ def test_failed_command_proof_retry_auto_attaches_context_when_model_omits_id(tm
 def test_second_same_stage_failed_command_proof_routes_to_neko(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=FailingTwiceRetryRuntime())
@@ -3488,7 +3511,7 @@ def test_second_same_stage_failed_command_proof_routes_to_neko(tmp_path):
 def test_dev_block_after_failed_proof_routes_to_neko_self_heal(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     ts.create(task)
     runtime = FailingThenBlockingRuntime()
@@ -3511,7 +3534,7 @@ def test_dev_block_after_failed_proof_routes_to_neko_self_heal(tmp_path):
 def test_request_test_run_failed_proof_advances_explicit_red_stage(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(id="stage_1", title="RED Launcher tests", objective="prove tests fail before implementation", status=StageStatus.IMPLEMENTING, test_plan=["pytest red"]),
@@ -3526,7 +3549,7 @@ def test_request_test_run_failed_proof_advances_explicit_red_stage(tmp_path):
 
     assert res.actions_taken[0].ok
     assert engine.proof_store.get(saved.proof_ids[0]).metadata["status"] == "failed"
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "stage_1"
     assert [stage.status for stage in saved.stages] == [StageStatus.REWORK, StageStatus.READY, StageStatus.READY]
 
@@ -3534,7 +3557,7 @@ def test_request_test_run_failed_proof_advances_explicit_red_stage(tmp_path):
 def test_request_test_run_multi_stage_advances_next_stage_without_global_qa(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(id="stage_1", title="One", objective="one", status=StageStatus.READY, test_plan=["printf one"]),
@@ -3548,7 +3571,7 @@ def test_request_test_run_multi_stage_advances_next_stage_without_global_qa(tmp_
     saved = ts.get("task_1")
 
     assert res.actions_taken[0].ok
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "stage_2"
     assert [stage.status for stage in saved.stages] == [StageStatus.READY_FOR_QA, StageStatus.READY, StageStatus.READY]
 
@@ -3581,7 +3604,7 @@ def test_request_test_run_does_not_handoff_after_run_cancelled_during_proof_coll
     runs = RunStore()
     proofs = ProofStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     ts.create(task)
     engine = TickEngine(
@@ -3597,7 +3620,7 @@ def test_request_test_run_does_not_handoff_after_run_cancelled_during_proof_coll
 
     assert not res.actions_taken[0].ok
     assert res.actions_taken[0].summary == "run reached terminal state during proof collection"
-    assert saved.state == TaskState.DEV_IMPLEMENTING
+    assert saved.state == TaskState.RUNNING
     assert saved.proof_ids == []
     assert runs.list_for_task("task_1")[0].state == RunState.CANCELLED
 
@@ -3647,8 +3670,25 @@ def test_followup_neko_mission_lead_steering_reuses_previous_neko_session():
 def test_followup_qa_and_neko_steering_reuse_prior_persona_sessions():
     ts = TaskStore()
     qa_task = make_task_with_id("task_qa")
-    qa_task.state = TaskState.READY_FOR_REVIEW
-    qa_task.current_stage_id = "stage_1"
+    qa_task.state = TaskState.RUNNING
+    qa_task.current_stage_id = "qa_release"
+    qa_task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title=qa_task.title, objective=qa_task.description),
+        current_stage_id="qa_release",
+        blueprint_id="neko_dev_qa_basic",
+        stages=[
+            MissionPlanStage(
+                id="qa_release",
+                title="QA Release",
+                    objective="Verify mission.",
+                    owner="qa",
+                    owner_slot="qa",
+                    repo="hermes-agent",
+                    kind="qa_verdict",
+                    status=StageStatus.READY,
+            )
+        ],
+    )
     qa_task.risk_flags = ["neko_qa_coordination_released"]
     ts.create(qa_task)
     neko_task = make_task_with_id("task_neko")
@@ -3656,7 +3696,7 @@ def test_followup_qa_and_neko_steering_reuse_prior_persona_sessions():
     neko_task.open_incident_ids = ["inc_neko"]
     ts.create(neko_task)
     runs = RunStore()
-    old_qa = runs.open_run("qa", "task_qa", stage_id="stage_1", session_id="session_qa_prior")
+    old_qa = runs.open_run("qa", "task_qa", stage_id="qa_release", session_id="session_qa_prior")
     runs.close_run(old_qa.id, state=RunState.FAILED, error={"type": "test"})
     old_neko = runs.open_run("neko_supervisor", "task_neko", stage_id=None, session_id="session_neko_prior")
     runs.close_run(old_neko.id, state=RunState.FAILED, error={"type": "test"})
@@ -3764,7 +3804,7 @@ def test_run_until_settled_continues_to_neko_for_budget_approval_incident():
     runs = RunStore()
     incidents = IncidentStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(
@@ -3810,7 +3850,7 @@ def _assert_budget_approval_continues_same_session(neko_runtime, *, clear_task_i
     runs = RunStore()
     incidents = IncidentStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(
@@ -3875,7 +3915,7 @@ def test_budget_approval_continuation_gets_incremental_token_headroom():
     runs = RunStore()
     incidents = IncidentStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(
@@ -3920,7 +3960,7 @@ def test_dev_continuation_carries_prior_stage_progress_flags():
     runs = RunStore()
     incidents = IncidentStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.stages = [
         TaskStage(
@@ -4043,7 +4083,7 @@ def test_tick_opens_run_with_configured_live_iteration_budget():
 def test_request_test_run_emits_budget_warning_for_expensive_dev_run(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=HighBudgetDevRuntime())
@@ -4121,7 +4161,7 @@ def test_blocked_qa_verdict_without_incident_routes_dev_recovery_instead_of_skip
     assert res.actions_taken[0].action.slot_id == "dev"
     assert runtime.personas[0].id == "dev"
     saved = ts.get("task_1")
-    assert saved.state == TaskState.READY_FOR_REVIEW
+    assert saved.state == TaskState.RUNNING
     assert len(saved.proof_ids) == 2
     assert proof_store.get(saved.proof_ids[-1]).metadata["status"] == "passed"
 
@@ -4261,7 +4301,7 @@ class RequestTwoProofCommandsRuntime:
 def test_tick_persists_incremental_command_proof_when_later_command_fails():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     ts.create(task)
     proof_store = ProofStore()
@@ -4285,7 +4325,7 @@ def test_multi_agent_autonomy_runs_backend_neko_launcher_neko_qa_to_done():
     task = make_task()
     task.description = "Ship backend contract then Launcher UI with independent QA."
     task.acceptance_criteria = ["backend proof", "frontend proof", "qa proof"]
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "backend_contract"
     task.affected_repos = ["EterniaBackend"]
     task.risk_flags = ["sequential_specialists_required", "backend_contract_first", "launcher_visual_proof_required_after_join_gate"]

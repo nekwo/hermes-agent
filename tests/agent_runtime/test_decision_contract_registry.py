@@ -37,7 +37,7 @@ def _task() -> Task:
         id="task_contract_registry",
         title="Launcher contract smoke",
         description="Validate registry HUD shapes.",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=ts,
         updated_at=ts,
         requested_by="test",
@@ -119,7 +119,7 @@ def test_registry_hud_shapes_drive_context_builder_menu():
 
 def test_qa_menu_exposes_nested_and_enum_choices():
     task = _task()
-    task.state = TaskState.READY_FOR_REVIEW
+    task.state = TaskState.RUNNING
     task.requires_visual_proof = True
     task.stages[0].requires_visual_proof = True
     ctx = build_context(task, _run("qa"))

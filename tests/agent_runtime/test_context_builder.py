@@ -19,7 +19,7 @@ def make_task():
         id="task_abc",
         title="Build harness",
         description="Make agent runtime reliable",
-        state=TaskState.DEV_STAGE_PLANNING,
+        state=TaskState.RUNNING,
         created_at=ts,
         updated_at=ts,
         requested_by="tony",
@@ -312,7 +312,7 @@ def test_simplified_agent_hud_role_contracts_are_closed_choice():
         id="task_contract_roles",
         title="Role contracts",
         description="Verify simplified role contracts.",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=now(),
         updated_at=now(),
         requested_by="test",
@@ -379,7 +379,7 @@ def test_context_projects_latest_packet_from_event_log_after_resume():
 def test_launcher_contract_join_context_carries_backend_delivery_and_events():
     log = EventLog()
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.current_stage_id = "launcher_contract_smoke"
     task.proof_ids = ["proof_backend"]
     task.stages = [
@@ -467,7 +467,7 @@ def test_launcher_contract_join_context_carries_backend_delivery_and_events():
 def test_qa_release_context_carries_latest_upstream_delivery_packet():
     log = EventLog()
     task = make_task()
-    task.state = TaskState.READY_FOR_REVIEW
+    task.state = TaskState.RUNNING
     task.current_stage_id = "backend_investigation"
     task.stages = [
         TaskStage(id="backend_investigation", title="Backend Investigation", objective="Investigate", status=StageStatus.READY_FOR_QA),
@@ -515,7 +515,7 @@ def test_qa_release_context_carries_latest_upstream_delivery_packet():
 def test_qa_release_context_prefers_newest_delivery_over_stale_stage_local_packet():
     log = EventLog()
     task = make_task()
-    task.state = TaskState.READY_FOR_REVIEW
+    task.state = TaskState.RUNNING
     task.current_stage_id = "qa_release"
     task.stages = [
         TaskStage(id="backend_investigation", title="Backend Investigation", objective="Investigate", status=StageStatus.READY_FOR_QA),
@@ -578,7 +578,7 @@ def test_qa_release_context_prefers_newest_delivery_over_stale_stage_local_packe
 def test_dev_recovery_context_carries_latest_cross_stage_qa_review():
     log = EventLog()
     task = make_task()
-    task.state = TaskState.REWORK_REQUESTED
+    task.state = TaskState.RUNNING
     task.current_stage_id = "backend_investigation"
     task.stages = [
         TaskStage(id="backend_investigation", title="Backend Investigation", objective="Investigate", status=StageStatus.REWORK),
@@ -782,7 +782,7 @@ def test_validation_repair_hud_points_unknown_payload_keys_to_closed_menu():
 
 def test_dev_mission_hud_exposes_closed_request_test_run_choice_and_commands():
     task = make_task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.stages[0].test_plan = ["pytest tests/agent_runtime/test_context_builder.py -q"]
 
     ctx = build_context(task, make_run())
@@ -814,7 +814,7 @@ def test_dev_mission_hud_prefers_patch_before_proof_for_product_edit_stage():
     task = make_task()
     task.title = "Mission Control DM bubble terminal rows"
     task.description = "Upgrade Launcher Mission Control event rows into compact DM bubbles."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaLauncher"]
     task.stages[0] = TaskStage(
         id="mc_terminal_dm_bubble_rows",
@@ -829,7 +829,8 @@ def test_dev_mission_hud_prefers_patch_before_proof_for_product_edit_stage():
     run = make_run()
     run.stage_id = "mc_terminal_dm_bubble_rows"
 
-    ctx = build_context(task, run)
+    cfg = RuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=True))
+    ctx = build_context(task, run, config=cfg)
 
     hud = ctx.mission_hud
     assert hud["next_required_move"]["shape_id"] == "dev.propose_patch"
@@ -840,7 +841,7 @@ def test_normal_worker_flow_hides_request_gate_until_product_edit_delivery():
     task = make_task()
     task.title = "Mission Control DM bubble terminal rows"
     task.description = "Upgrade Launcher Mission Control event rows into compact DM bubbles."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaLauncher"]
     task.stages[0] = TaskStage(
         id="mc_terminal_dm_bubble_rows",
@@ -881,7 +882,7 @@ def test_normal_worker_flow_committed_verification_stage_prefers_request_gate():
         "hermes-agent implementation/code-change proof. Since the code fix is already committed, "
         "Dev may inspect the committed implementation and run focused tests rather than patching again."
     )
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["hermes-agent"]
     stage_id = "verify_the_committed_hermes_agent_stage_53_goal_runner_receipt_fix"
     task.stages[0] = TaskStage(
@@ -924,7 +925,7 @@ def test_normal_worker_flow_exposes_request_gate_for_no_edit_command_stage():
     task = make_task()
     task.title = "Stage 49 live contract registry certification retry"
     task.description = "No product edits. Verify canonical contract examples."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["hermes-agent"]
     task.stages[0] = TaskStage(
         id="stage49_contract_registry_verify_examples",
@@ -954,7 +955,7 @@ def test_normal_worker_flow_exposes_recipe_gate_for_no_edit_recipe_stage():
     task = make_task()
     task.title = "Stage 50 live normal-worker no-edit certification"
     task.description = "No product edits. Certify Harness status."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["hermes-agent"]
     task.stages[0] = TaskStage(
         id="harness_runtime_status_snapshot",
@@ -985,7 +986,7 @@ def test_normal_worker_flow_infers_recipe_gate_from_generic_no_edit_stage():
     task = make_task()
     task.title = "Fix Mission Control role terminal UI after backend stream smoke"
     task.description = "Make the Launcher UI show Neko, Backend Dev, Launcher Dev, and QA live terminal events."
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
     task.stages[0] = TaskStage(
         id="eterniabackend_fresh_scope",
@@ -1331,7 +1332,7 @@ def test_typed_plan_stale_harness_log_implementation_stage_self_heals_to_request
 
 def test_dev_mission_hud_requires_stage_plan_when_no_executable_stage_exists():
     task = make_task()
-    task.state = TaskState.READY_FOR_WORK
+    task.state = TaskState.RUNNING
     task.stages = []
     task.current_stage_id = None
     run = make_run()
@@ -1348,7 +1349,7 @@ def test_dev_mission_hud_requires_stage_plan_when_no_executable_stage_exists():
 
 def test_neko_mission_hud_exposes_visual_recovery_choice_without_patch_options():
     task = make_task()
-    task.state = TaskState.READY_FOR_WORK
+    task.state = TaskState.RUNNING
     task.title = "Mission Control fullscreen visual proof"
     task.harness_self_heal = {"stages": {"stage_1": {"last_failed_proof_ids": ["proof_failed_visual"]}}}
     task.stages[0].requires_visual_proof = True
@@ -1367,7 +1368,7 @@ def test_neko_mission_hud_exposes_visual_recovery_choice_without_patch_options()
 
 def test_qa_mission_hud_exposes_screenshot_and_verdict_choices():
     task = make_task()
-    task.state = TaskState.READY_FOR_REVIEW
+    task.state = TaskState.RUNNING
     task.requires_visual_proof = True
     task.stages[0].requires_visual_proof = True
     run = make_run()

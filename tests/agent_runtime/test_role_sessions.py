@@ -20,7 +20,7 @@ from agent_runtime.runtime_config import ContinuousRoleSessionConfig
 from agent_runtime.states import RunState, TaskState
 
 
-def _task(*, state=TaskState.DEV_IMPLEMENTING, stage_id="stage_1"):
+def _task(*, state=TaskState.RUNNING, stage_id="stage_1"):
     ts = now()
     return Task(
         id="task_1",

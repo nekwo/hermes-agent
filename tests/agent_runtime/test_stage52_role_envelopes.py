@@ -25,7 +25,7 @@ from agent_runtime.store import ProofStore, RunStore, TaskStore
 from agent_runtime.ticker import TickEngine
 
 
-def _task(task_id: str = "task_stage52", state: TaskState = TaskState.DEV_IMPLEMENTING) -> Task:
+def _task(task_id: str = "task_stage52", state: TaskState = TaskState.RUNNING) -> Task:
     ts = now()
     return Task(
         id=task_id,

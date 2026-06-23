@@ -24,11 +24,11 @@ def make_task(state=TaskState.CREATED):
 @pytest.mark.parametrize(
     ("from_state", "to_state"),
     [
-        (TaskState.CREATED, TaskState.PM_TRIAGE),
-        (TaskState.READY_FOR_WORK, TaskState.DEV_AUDIT),
-        (TaskState.REWORK_REQUESTED, TaskState.DEV_IMPLEMENTING),
-        (TaskState.FAILED, TaskState.PM_TRIAGE),
-        (TaskState.BLOCKED, TaskState.DEV_IMPLEMENTING),
+        (TaskState.CREATED, TaskState.RUNNING),
+        (TaskState.RUNNING, TaskState.BLOCKED),
+        (TaskState.RUNNING, TaskState.DONE),
+        (TaskState.RUNNING, TaskState.FAILED),
+        (TaskState.BLOCKED, TaskState.RUNNING),
     ],
 )
 def test_allowed_transitions_update_state_and_timestamp(from_state, to_state):
@@ -44,12 +44,10 @@ def test_allowed_transitions_update_state_and_timestamp(from_state, to_state):
 @pytest.mark.parametrize(
     ("from_state", "to_state"),
     [
-        (TaskState.CREATED, TaskState.DEV_IMPLEMENTING),
-        (TaskState.READY_FOR_WORK, TaskState.DEV_IMPLEMENTING),
-        (TaskState.APPROVED, TaskState.DONE),
-        (TaskState.DONE, TaskState.PM_TRIAGE),
-        (TaskState.CANCELLED, TaskState.PM_TRIAGE),
-        (TaskState.FAILED, TaskState.DEV_IMPLEMENTING),
+        (TaskState.RUNNING, TaskState.RUNNING),
+        (TaskState.DONE, TaskState.RUNNING),
+        (TaskState.CANCELLED, TaskState.RUNNING),
+        (TaskState.FAILED, TaskState.RUNNING),
         (TaskState.BLOCKED, TaskState.DONE),
     ],
 )

@@ -15,7 +15,7 @@ from agent_runtime.ticker import TickEngine
 from hermes_cli import harness as harness_cli
 
 
-def make_task(state=TaskState.DEV_STAGE_PLANNING):
+def make_task(state=TaskState.RUNNING):
     ts = now()
     return Task(
         id="task_parent",
@@ -113,7 +113,7 @@ def test_pm_triage_fork_child_creates_exactly_one_child_and_keeps_parent_moving(
     parent = parent_store.get("task_parent")
     discovery = parent.issue_discoveries[0]
     children = [task for task in parent_store.list_all() if task.parent_task_id == "task_parent"]
-    assert parent.state == TaskState.DEV_STAGE_PLANNING
+    assert parent.state == TaskState.RUNNING
     assert discovery["triage_status"] == "forked"
     assert discovery["child_task_id"] == children[0].id
     assert len(children) == 1
@@ -206,7 +206,7 @@ def test_pm_triage_blocks_parent_and_opens_incident_for_blocker():
 def test_severe_untriaged_discovery_routes_to_neko_mission_lead_before_dev():
     from agent_runtime.state_machine import MissionStateMachine
     from agent_runtime.actions import HarnessActionType
-    task = make_task(TaskState.DEV_STAGE_PLANNING)
+    task = make_task(TaskState.RUNNING)
     apply_planning_decision(task, discovery_decision(severity="critical", relationship_hint="fork_child"), actor="dev")
 
     action = MissionStateMachine().next_action(task)
@@ -235,7 +235,7 @@ def test_context_snapshot_and_observability_show_safe_discovery_handles():
 
 def test_child_proof_does_not_satisfy_parent_gate():
     parent_store = TaskStore(); proof_store = ProofStore(); ts = now()
-    parent = make_task(TaskState.READY_FOR_REVIEW); child = make_task(TaskState.READY_FOR_REVIEW)
+    parent = make_task(TaskState.RUNNING); child = make_task(TaskState.RUNNING)
     child.id = "task_child"; child.parent_task_id = parent.id
     parent_store.create(parent); parent_store.create(child)
     proof_store.attach(Proof(id="proof_child_test", task_id=child.id, stage_id=None, type=ProofType.TEST_RUN, title="child test", path_or_value="ok", created_by="qa", created_at=ts, redaction_status="safe"))
@@ -259,7 +259,7 @@ class TriageRuntime:
 
 
 def test_tick_flow_reports_then_forks_child_with_fake_personas():
-    task_store = TaskStore(); task_store.create(make_task(TaskState.DEV_STAGE_PLANNING))
+    task_store = TaskStore(); task_store.create(make_task(TaskState.RUNNING))
     dev_result = TickEngine(task_store=task_store, persona_runtime=DiscoveryRuntime()).tick_once()
     parent = task_store.get("task_parent")
     discovery_id = parent.issue_discoveries[0]["id"]

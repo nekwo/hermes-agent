@@ -11,7 +11,7 @@ def test_final_gate_preserves_multiline_heredoc_commands():
         id="task_gate",
         title="Backend proof",
         description="Run focused backend proof.",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=stamp,
         updated_at=stamp,
         requested_by="test",

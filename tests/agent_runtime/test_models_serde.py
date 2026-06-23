@@ -160,7 +160,7 @@ def test_task_with_typed_mission_plan_round_trips():
         id="task_typed",
         title="Fix Mission Control",
         description="Fix all role streams",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=ts,
         updated_at=ts,
         requested_by="tony",

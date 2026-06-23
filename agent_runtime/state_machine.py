@@ -98,7 +98,7 @@ class MissionStateMachine:
             return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to resolve context request")
         if needs_supervisor_slicing(mission):
             return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to slice broad specialist mission before delivery")
-        if state != TaskState.REWORK_REQUESTED and current.status in {StageStatus.READY_FOR_QA, StageStatus.PASSED}:
+        if current.status in {StageStatus.READY_FOR_QA, StageStatus.PASSED}:
             apply_stage_outcome(mission, current.id, StageOutcome.PASSED, reason=f"blueprint stage {current.id} already ready")
             current = current_plan_stage(mission)
             if current is None:
