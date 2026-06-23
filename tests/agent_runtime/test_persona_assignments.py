@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from hermes_time import now
 
 from agent_runtime.decision_schema import AgentDecision, DecisionType
@@ -10,17 +12,17 @@ from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, Proof, Task
 from agent_runtime.persona_assignments import (
+    ChatBusyError,
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,
-    free_floating_persona_instance_id_for,
-    persona_chat_session_id_for,
+    persona_instance_id_for,
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import build_snapshot
-from agent_runtime.states import TaskState, WorkerSessionState
+from agent_runtime.states import RunState, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import AgentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.ticker import TickEngine
@@ -161,16 +163,12 @@ def test_persona_instance_derivation_clears_stale_worker_projection(isolate_agen
     assert instance.session_id is None
 
 
-def test_create_free_floating_instance_is_unique_idle_and_worker_independent(isolate_agent_runtime_root):
+def test_create_free_floating_instance_reuses_canonical_idle_placement(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     first = store.create_free_floating("profile:reviewer")
     second = store.create_free_floating("profile:reviewer")
 
-    assert first.id != second.id
-    assert first.id.startswith("personainst_operator_")
-    assert second.id.startswith("personainst_operator_")
-    assert first.id != free_floating_persona_instance_id_for("profile:reviewer")
-    assert first.id != "personainst_profile_reviewer"
+    assert first.id == second.id == persona_instance_id_for("profile:reviewer")
     assert first.persona_id == "profile:reviewer"
     assert first.role == "profile"
     assert first.profile_id == "reviewer"
@@ -199,9 +197,9 @@ def test_create_operator_chat_from_same_template_gets_distinct_sessions(isolate_
         display_name="Reviewer Two",
     )
 
-    assert first.id != second.id
-    assert first.session_id == persona_chat_session_id_for(first.id)
-    assert second.session_id == persona_chat_session_id_for(second.id)
+    assert first.id == second.id == persona_instance_id_for("profile:reviewer")
+    assert first.session_id.startswith(f"persona_chat_{first.id}_")
+    assert second.session_id.startswith(f"persona_chat_{second.id}_")
     assert first.session_id != second.session_id
     assert first.mode == "chat"
     assert second.mode == "chat"
@@ -242,13 +240,14 @@ def test_operator_chat_history_binds_by_unique_session(isolate_agent_runtime_roo
         session_db=db,
     )
 
-    messages_by_instance = {
-        row["persona_instance_id"]: [message["safe_text"] for message in row["messages"]]
+    messages_by_session = {
+        row["session_id"]: [message["safe_text"] for message in row["messages"]]
         for row in rows
         if row["messages"]
     }
-    assert messages_by_instance[first.id] == ["first only"]
-    assert messages_by_instance[second.id] == ["second only"]
+    assert messages_by_session[first.session_id] == ["first only"]
+    assert messages_by_session[second.session_id] == ["second only"]
+    assert {row["persona_instance_id"] for row in rows if row["messages"]} == {first.id}
 
 
 def test_assignment_store_create_or_resume_uses_signal_hash(isolate_agent_runtime_root):
@@ -422,6 +421,7 @@ def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, is
     assert by_id[created.id]["persona_id"] == "profile:reviewer"
     assert by_id[created.id]["source_persona_id"] == "profile:reviewer"
     assert by_id[created.id]["source_profile_id"] == "reviewer"
+    assert created.id == "personainst_profile_reviewer"
     assert by_id[created.id]["state"] == "idle"
     assert by_id[created.id]["lifecycle_mode"] == "free_floating"
     assert by_id[created.id]["mode"] == "free_floating"
@@ -441,6 +441,16 @@ def test_persona_instance_create_cli_creates_free_floating_assignment_without_ti
             title="Launcher Dev sandbox",
             message="Check the persona without a product task.",
             requested_by="test",
+            client_message_id=None,
+            display_name=None,
+            session_id=None,
+            kill_active=False,
+            add_instance=False,
+            placement_id=None,
+            auto_run=False,
+            max_actions=1,
+            max_seconds=240.0,
+            stream=False,
             json=True,
         )
     )
@@ -451,8 +461,7 @@ def test_persona_instance_create_cli_creates_free_floating_assignment_without_ti
     assert assignments[0].task_id is None
     assert assignments[0].kind == "free_floating_message"
     assert assignments[0].production_proof_eligible is False
-    assert assignments[0].persona_instance_id.startswith("personainst_operator_")
-    assert assignments[0].persona_instance_id != free_floating_persona_instance_id_for("dev")
+    assert assignments[0].persona_instance_id == "personainst_dev"
     instance = PersonaInstanceStore().get(assignments[0].persona_instance_id)
     assert instance.mode == "free_floating"
     assert instance.current_assignment_id == assignments[0].id
@@ -470,6 +479,7 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
         Namespace(
             persona_id="launcher-dev",
             session_id="chat_old_123",
+            kill_active=False,
             json=True,
         )
     )
@@ -482,6 +492,69 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     assert instance.active_run_id is None
     assert PersonaAssignmentStore().list_all() == []
     assert RunStore().list_all() == []
+
+
+def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runtime_root):
+    instance_store = PersonaInstanceStore()
+    workers = WorkerSessionStore()
+    runs = RunStore()
+    worker = workers.open(task_id="task_live", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_live")
+    run = runs.open_run("dev", "task_live", "stage_1", session_id="persona_chat_personainst_dev_live")
+    worker = workers.assign_run(worker.id, run)
+    instance_store.update_from_worker(worker)
+
+    with pytest.raises(ChatBusyError) as exc:
+        instance_store.open_chat(persona_id="dev", session_id="persona_chat_personainst_dev_new")
+
+    assert exc.value.active_run_id == run.id
+    assert exc.value.active_worker_session_id == worker.id
+    instance = instance_store.get("personainst_dev")
+    assert instance.active_run_id == run.id
+    assert instance.active_worker_session_id == worker.id
+    assert instance.current_task_id == "task_live"
+    assert runs.get(run.id).state == RunState.RUNNING
+    assert workers.get(worker.id).state == WorkerSessionState.RUNNING
+
+
+def test_open_chat_with_kill_active_terminates_run_and_worker_before_swap(isolate_agent_runtime_root):
+    instance_store = PersonaInstanceStore()
+    workers = WorkerSessionStore()
+    runs = RunStore()
+    worker = workers.open(task_id="task_live", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_live")
+    run = runs.open_run("dev", "task_live", "stage_1", session_id="persona_chat_personainst_dev_live")
+    worker = workers.assign_run(worker.id, run)
+    instance_store.update_from_worker(worker)
+
+    updated = instance_store.open_chat(
+        persona_id="dev",
+        session_id="persona_chat_personainst_dev_replacement",
+        kill_active=True,
+    )
+
+    assert runs.get(run.id).state == RunState.CANCELLED
+    assert workers.get(worker.id).state == WorkerSessionState.CLOSED
+    assert updated.id == "personainst_dev"
+    assert updated.session_id == "persona_chat_personainst_dev_replacement"
+    assert updated.current_task_id is None
+    assert updated.active_run_id is None
+    assert updated.active_worker_session_id is None
+
+
+def test_add_instance_mints_distinct_placement_backed_instance(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    primary = store.create_operator_chat(persona_id="profile:reviewer", display_name="Reviewer")
+    additional = store.add_instance(
+        persona_id="profile:reviewer",
+        placement_id="reviewer_agent_2",
+        display_name="Reviewer 2",
+    )
+
+    assert primary.id == "personainst_profile_reviewer"
+    assert additional.id == "personainst_reviewer_agent_2"
+    assert additional.persona_id == "profile:reviewer"
+    assert additional.profile_id == "reviewer"
+    assert additional.session_id.startswith("persona_chat_personainst_reviewer_agent_2_")
+    assert store.get(primary.id).session_id == primary.session_id
 
 
 class _FakeSessionDB:
@@ -728,12 +801,19 @@ class _TranscriptDB:
         self.titles[session_id] = title
 
 
-def test_free_floating_chat_session_binding_reuses_instance_session(monkeypatch, isolate_agent_runtime_root):
+def test_free_floating_chat_session_binding_reuses_resume_and_opens_fresh_chat(monkeypatch, isolate_agent_runtime_root):
     from hermes_cli import harness
 
     db = _TranscriptDB()
     instance_store = PersonaInstanceStore()
     first = harness._bind_free_floating_chat_session(
+        instance_store=instance_store,
+        session_db=db,
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        assignment_id="assign_1",
+    )
+    resumed = harness._bind_free_floating_chat_session(
         instance_store=instance_store,
         session_db=db,
         persona_id="dev",
@@ -748,11 +828,13 @@ def test_free_floating_chat_session_binding_reuses_instance_session(monkeypatch,
         assignment_id="assign_2",
     )
 
-    assert first == "persona_chat_personainst_dev"
-    assert second == first
-    assert sorted(db.sessions) == [first]
+    assert first.startswith("persona_chat_personainst_dev_")
+    assert resumed == first
+    assert second.startswith("persona_chat_personainst_dev_")
+    assert second != first
+    assert sorted(db.sessions) == sorted([first, second])
     instance = instance_store.get("personainst_dev")
-    assert instance.session_id == first
+    assert instance.session_id == second
     assert instance.current_assignment_id == "assign_2"
     assert instance.mode == "free_floating"
 
@@ -970,8 +1052,7 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
     assert lines[-1]["run_ids"] == []
     assert lines[-1]["task_id"] is None
     assert lines[-1]["assignment_id"]
-    assert lines[-1]["persona_instance_id"].startswith("personainst_operator_")
-    assert lines[-1]["persona_instance_id"] != free_floating_persona_instance_id_for("dev")
+    assert lines[-1]["persona_instance_id"] == "personainst_dev"
     assert lines[-1]["client_message_id"] == "client_1"
 
 

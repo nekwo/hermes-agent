@@ -28,6 +28,7 @@ from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_neede
 from agent_runtime.models import AgentPersona, Task
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
+    ChatBusyError,
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,
@@ -329,6 +330,9 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.add_argument("--client-message-id", default=None)
     persona_instance_create.add_argument("--display-name", default=None)
     persona_instance_create.add_argument("--session-id", default=None)
+    persona_instance_create.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
+    persona_instance_create.add_argument("--add-instance", action="store_true", help="Create an additional placement-backed instance instead of targeting the primary placement")
+    persona_instance_create.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
     persona_instance_create.add_argument("--auto-run", action="store_true", help="Immediately run one bounded chat turn after queuing the message")
     persona_instance_create.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     persona_instance_create.add_argument("--max-actions", type=int, default=1)
@@ -338,6 +342,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_open = persona_instance_subs.add_parser("open-chat", help="Bind a persona instance to a durable chat session without ticking")
     persona_instance_open.add_argument("--persona", dest="persona_id", required=True)
     persona_instance_open.add_argument("--session-id", required=True)
+    persona_instance_open.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_open.add_argument("--json", action="store_true")
     persona_instance_open.set_defaults(func=_cmd_persona_instance_open_chat)
     persona_instance_message = persona_instance_subs.add_parser("message", help="Queue a message to a free-floating persona instance without ticking")
@@ -928,6 +933,9 @@ def _cmd_persona_message(args) -> int:
 
 def _cmd_persona_instance_create(args) -> int:
     display_name = safe_assignment_text(getattr(args, "display_name", None), limit=120)
+    kill_active = bool(getattr(args, "kill_active", False))
+    add_instance = bool(getattr(args, "add_instance", False))
+    placement_id = safe_assignment_token(getattr(args, "placement_id", None))
     if display_name:
         cfg = load_agent_runtime_config()
         if not persona_assignment_store_enabled(cfg):
@@ -935,11 +943,29 @@ def _cmd_persona_instance_create(args) -> int:
             print(emit_json(data) if args.json else data["error"])
             return 2
         persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
-        instance = PersonaInstanceStore().create_operator_chat(
-            persona_id=persona_id,
-            display_name=display_name or safe_assignment_text(args.title, limit=120) or persona_id,
-            session_id=getattr(args, "session_id", None),
-        )
+        try:
+            if add_instance:
+                if not placement_id:
+                    data = {"ok": False, "error": "placement_id is required when add_instance is true"}
+                    print(emit_json(data) if args.json else data["error"])
+                    return 2
+                instance = PersonaInstanceStore().add_instance(
+                    persona_id=persona_id,
+                    placement_id=placement_id,
+                    display_name=display_name or safe_assignment_text(args.title, limit=120) or persona_id,
+                    session_id=getattr(args, "session_id", None),
+                )
+            else:
+                instance = PersonaInstanceStore().create_operator_chat(
+                    persona_id=persona_id,
+                    display_name=display_name or safe_assignment_text(args.title, limit=120) or persona_id,
+                    session_id=getattr(args, "session_id", None),
+                    kill_active=kill_active,
+                )
+        except ChatBusyError as exc:
+            data = _chat_busy_payload(exc)
+            print(emit_json(data) if args.json else data["error"])
+            return 2
         data = {
             "ok": True,
             "agent_profile_id": instance.id,
@@ -953,6 +979,10 @@ def _cmd_persona_instance_create(args) -> int:
             "mode": instance.mode,
             "chat_session_id": instance.session_id,
             "session_id": instance.session_id,
+            "chat_busy": False,
+            "killed_previous": bool(kill_active),
+            "add_instance": add_instance,
+            "placement_id": placement_id or None,
             "next_expected": "agent profile created; refresh Harness snapshot for the profile, chat, and scene placement state",
         }
         print(emit_json(data) if args.json else f"created {instance.id} on chat {instance.session_id}")
@@ -968,6 +998,9 @@ def _cmd_persona_instance_create(args) -> int:
         max_seconds=getattr(args, "max_seconds", 240.0),
         client_message_id=getattr(args, "client_message_id", None),
         stream=getattr(args, "stream", False),
+        kill_active=kill_active,
+        add_instance=add_instance,
+        placement_id=placement_id,
     )
 
 
@@ -978,17 +1011,42 @@ def _cmd_persona_instance_open_chat(args) -> int:
         print(emit_json(data) if args.json else data["error"])
         return 2
     persona_id = _normalize_cli_persona_id(args.persona_id)
-    instance = PersonaInstanceStore().open_chat(persona_id=persona_id, session_id=args.session_id)
+    try:
+        instance = PersonaInstanceStore().open_chat(
+            persona_id=persona_id,
+            session_id=args.session_id,
+            kill_active=bool(getattr(args, "kill_active", False)),
+        )
+    except ChatBusyError as exc:
+        data = _chat_busy_payload(exc)
+        print(emit_json(data) if args.json else data["error"])
+        return 2
     data = {
         "ok": True,
         "persona_instance_id": instance.id,
         "persona_id": instance.persona_id,
         "mode": instance.mode,
         "session_id": instance.session_id,
+        "chat_busy": False,
+        "killed_previous": bool(getattr(args, "kill_active", False)),
         "next_expected": "resume or send on this chat session to boot the persona instance history",
     }
     print(emit_json(data) if args.json else f"opened {instance.id} on chat {instance.session_id}")
     return 0
+
+
+def _chat_busy_payload(exc: ChatBusyError) -> dict[str, object]:
+    return {
+        "ok": False,
+        "status": "chat_busy",
+        "chat_busy": True,
+        "error": "chat_busy",
+        "persona_instance_id": exc.instance.id,
+        "persona_id": exc.instance.persona_id,
+        "active_run_id": exc.active_run_id,
+        "active_worker_session_id": exc.active_worker_session_id,
+        "next_expected": "choose add_instance to keep the current chat, or retry with kill_active to cancel the current run/worker and replace it",
+    }
 
 
 def _cmd_persona_instance_message(args) -> int:
@@ -1086,6 +1144,9 @@ def _queue_free_floating_assignment(
     max_seconds: float = 240.0,
     client_message_id: str | None = None,
     stream: bool = False,
+    kill_active: bool = False,
+    add_instance: bool = False,
+    placement_id: str | None = None,
 ) -> int:
     cfg = load_agent_runtime_config()
     if not persona_assignment_store_enabled(cfg):
@@ -1099,7 +1160,21 @@ def _queue_free_floating_assignment(
     instance_store = PersonaInstanceStore()
     instance_store.derive_from_workers(configured_personas(cfg), WorkerSessionStore().list_all())
     if persona_instance_id is None:
-        persona_instance_id = instance_store.create_free_floating(normalized_persona).id
+        if add_instance:
+            if not placement_id:
+                data = {"ok": False, "error": "placement_id is required when add_instance is true"}
+                if stream:
+                    _emit_chat_final(data)
+                else:
+                    print(emit_json(data) if json_output else data["error"])
+                return 2
+            persona_instance_id = instance_store.add_instance(
+                persona_id=normalized_persona,
+                placement_id=placement_id,
+                display_name=safe_assignment_text(title, limit=120) or None,
+            ).id
+        else:
+            persona_instance_id = instance_store.create_free_floating(normalized_persona).id
     assignment_store = PersonaAssignmentStore()
     assignment = assignment_store.create_or_resume(
         PersonaAssignmentSpec(
@@ -1117,13 +1192,22 @@ def _queue_free_floating_assignment(
         )
     )
     session_db = _default_persona_session_db()
-    session_id = _bind_free_floating_chat_session(
-        instance_store=instance_store,
-        session_db=session_db,
-        persona_id=normalized_persona,
-        persona_instance_id=assignment.persona_instance_id,
-        assignment_id=assignment.id,
-    )
+    try:
+        session_id = _bind_free_floating_chat_session(
+            instance_store=instance_store,
+            session_db=session_db,
+            persona_id=normalized_persona,
+            persona_instance_id=assignment.persona_instance_id,
+            assignment_id=assignment.id,
+            kill_active=kill_active,
+        )
+    except ChatBusyError as exc:
+        data = _chat_busy_payload(exc)
+        if stream:
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if json_output else data["error"])
+        return 2
     data = {
         "ok": True,
         "agent_profile_id": assignment.persona_instance_id,
@@ -1142,6 +1226,10 @@ def _queue_free_floating_assignment(
         "auto_run": bool(auto_run),
         "chat_session_id": session_id,
         "session_id": session_id,
+        "chat_busy": False,
+        "killed_previous": bool(kill_active),
+        "add_instance": bool(add_instance),
+        "placement_id": placement_id or None,
         "turn_id": None,
         "run_ids": [],
         "next_expected": "agent turn queued; run harness persona instance run-once if auto_run is false",
@@ -1209,32 +1297,35 @@ def _bind_free_floating_chat_session(
     persona_id: str,
     persona_instance_id: str,
     assignment_id: str | None = None,
+    kill_active: bool = False,
 ) -> str:
     requested_persona = _normalize_cli_persona_or_template_id(persona_id)
     normalized_persona = requested_persona
     normalized_instance = safe_assignment_token(persona_instance_id) or persona_instance_id_for(requested_persona)
+    session_id = ""
+    previous_mode = None
     try:
         instance = instance_store.get(normalized_instance)
         normalized_persona = instance.persona_id
-        session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
+        previous_mode = safe_assignment_token(getattr(instance, "mode", None))
+        existing_session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
+        existing_assignment_id = safe_assignment_token(getattr(instance, "current_assignment_id", None))
+        if existing_session_id and (not existing_assignment_id or existing_assignment_id == safe_assignment_token(assignment_id)):
+            session_id = existing_session_id
     except Exception:
-        if normalized_instance.startswith("personainst_operator_"):
-            instance = instance_store.create_free_floating(requested_persona)
-            normalized_persona = instance.persona_id
-            normalized_instance = instance.id
-        else:
-            instance = instance_store.open_chat(
-                persona_id=requested_persona,
-                session_id=_persona_chat_session_id(normalized_instance),
-            )
-        session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
+        instance = None
     if not session_id:
         session_id = _persona_chat_session_id(normalized_instance)
-    instance.session_id = session_id
-    if instance.mode != "chat" or not normalized_instance.startswith("personainst_operator_"):
-        instance.mode = "free_floating"
+    instance = instance_store.open_chat(
+        persona_id=normalized_persona,
+        persona_instance_id=normalized_instance,
+        session_id=session_id,
+        kill_active=kill_active,
+    )
+    instance.mode = "chat" if previous_mode == "chat" else "free_floating"
     instance.current_task_id = None
     instance.active_worker_session_id = None
+    instance.active_run_id = None
     instance.current_assignment_id = assignment_id
     instance_store.update(instance)
     if session_db is not None:
@@ -1477,7 +1568,7 @@ def _run_free_floating_assignment_once(
         instance.active_run_id = None
         instance.current_assignment_id = None
         instance.state = WorkerSessionState.IDLE
-        if instance.mode != "chat" or not persona_instance_id.startswith("personainst_operator_"):
+        if instance.mode != "chat":
             instance.mode = "free_floating"
         instance.session_id = session_id
         instance_store.update(instance)
@@ -1545,13 +1636,17 @@ def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, j
 
 def _persona_id_from_instance_id(persona_instance_id: str) -> str:
     token = safe_assignment_token(persona_instance_id)
-    if token.startswith("personainst_operator_"):
-        try:
-            return PersonaInstanceStore().get(token).persona_id
-        except Exception as exc:
-            raise ValueError(f"unsupported persona instance {persona_instance_id!r}") from exc
+    try:
+        return PersonaInstanceStore().get(token).persona_id
+    except Exception:
+        pass
     if token.startswith("personainst_"):
-        return _normalize_cli_persona_id(token.removeprefix("personainst_"))
+        raw = token.removeprefix("personainst_")
+        if raw.startswith("profile_"):
+            profile = safe_assignment_token(raw.removeprefix("profile_"))
+            if profile:
+                return f"profile:{profile}"
+        return _normalize_cli_persona_id(raw)
     try:
         return _normalize_cli_persona_id(token)
     except ValueError as exc:

@@ -1,8 +1,11 @@
 from hermes_time import now
 from utils import atomic_json_write
 from agent_runtime.blueprints.runs import BlueprintRunStore
+from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
+from agent_runtime.persona_assignments import PersonaInstanceStore
 from agent_runtime.proof_rules import ProofType
+from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import build_snapshot, write_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
@@ -519,6 +522,29 @@ def test_snapshot_exposes_available_profile_personas_without_changing_agents(tmp
     assert by_id["profile:alice"]["description"] == "Alice mission lead profile"
     assert "backs_persona_id" not in by_id["profile:reviewer"]
     assert "reviewer" not in by_id
+
+
+def test_snapshot_exposes_canonical_persona_instance_ids(monkeypatch, isolate_agent_runtime_root):
+    import agent_runtime.snapshot as snapshot_mod
+
+    cfg = AgentRuntimeConfig(
+        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
+            enabled=True,
+            worker_session_store=True,
+            persona_instance_runtime=True,
+            persona_assignment_store=True,
+        )
+    )
+    monkeypatch.setattr(snapshot_mod, "load_agent_runtime_config", lambda: cfg)
+    created = PersonaInstanceStore().create_free_floating("profile:reviewer")
+
+    snap = build_snapshot()
+    by_id = {item["persona_instance_id"]: item for item in snap["persona_instances"]}
+
+    assert created.id == "personainst_profile_reviewer"
+    assert by_id[created.id]["agent_profile_id"] == "personainst_profile_reviewer"
+    assert by_id[created.id]["persona_id"] == "profile:reviewer"
+    assert by_id[created.id]["lifecycle_mode"] == "free_floating"
 
 
 def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root):

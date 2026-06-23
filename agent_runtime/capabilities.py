@@ -43,7 +43,7 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "group": "lifecycle",
         "execution_semantics": "control_state_change",
         "required_args": ["display_name"],
-        "allowed_args": ["attachments", "auto_run", "max_actions", "max_seconds", "message", "session_id"],
+        "allowed_args": ["attachments", "auto_run", "kill_active", "max_actions", "max_seconds", "message", "session_id"],
         "default_args": {"title": "Create Agent Profile", "message": "Create Mission Control agent profile.", "auto_run": False, "max_actions": 1, "max_seconds": 240},
         "danger": "normal",
     },
@@ -53,7 +53,7 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "label": "Open Agent Chat",
         "group": "lifecycle",
         "execution_semantics": "control_state_change",
-        "allowed_args": ["attachments", "auto_run", "display_name", "max_actions", "max_seconds", "message", "session_id"],
+        "allowed_args": ["add_instance", "attachments", "auto_run", "display_name", "kill_active", "max_actions", "max_seconds", "message", "placement_id", "session_id"],
         "default_args": {"title": "New operator chat", "message": "New operator chat opened. Wait for operator input.", "auto_run": False, "max_actions": 1, "max_seconds": 240},
         "danger": "normal",
     },
@@ -319,7 +319,7 @@ def _arg_schema_for(item: dict[str, Any]) -> dict[str, Any]:
             }
         elif name in {"max_actions", "max_seconds", "lease_seconds"}:
             properties[name] = {"type": "integer", "minimum": 1}
-        elif name in {"rescope", "foreground", "auto_run"}:
+        elif name in {"rescope", "foreground", "auto_run", "kill_active", "add_instance"}:
             properties[name] = {"type": "boolean"}
         else:
             properties[name] = {"type": "string", "minLength": 1}

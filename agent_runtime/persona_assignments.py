@@ -13,10 +13,27 @@ from . import paths
 from .events import EventLog
 from .models import AgentPersona, Event, PersonaAssignment, PersonaInstance, WorkerSession
 from .serde import from_jsonable, to_jsonable
-from .states import WorkerSessionState
+from .states import RunState, WorkerSessionState
 
 TERMINAL_ASSIGNMENT_STATES = frozenset({"completed", "blocked", "cancelled"})
 ACTIVE_ASSIGNMENT_STATES = frozenset({"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"})
+LIVE_RUN_STATES = frozenset(
+    {
+        RunState.QUEUED,
+        RunState.STARTING,
+        RunState.RUNNING,
+        RunState.WAITING_ON_TOOL,
+        RunState.WAITING_ON_APPROVAL,
+    }
+)
+
+
+class ChatBusyError(RuntimeError):
+    def __init__(self, instance: PersonaInstance, *, active_run_id: str | None, active_worker_session_id: str | None):
+        super().__init__("chat_busy")
+        self.instance = instance
+        self.active_run_id = active_run_id
+        self.active_worker_session_id = active_worker_session_id
 
 
 @dataclass(slots=True)
@@ -52,7 +69,7 @@ class PersonaInstanceStore:
 
     def create_free_floating(self, persona_or_template: AgentPersona | str) -> PersonaInstance:
         persona_id, role, display_name, profile_id = _free_floating_identity(persona_or_template)
-        instance_id = unique_operator_persona_instance_id()
+        instance_id = persona_instance_id_for(persona_id)
         try:
             instance = self.get(instance_id)
         except Exception:
@@ -77,13 +94,7 @@ class PersonaInstanceStore:
             "display_name": display_name,
             "profile_id": profile_id,
             "runtime_root": str(paths.store_root()),
-            "state": WorkerSessionState.IDLE,
             "mode": "free_floating",
-            "current_task_id": None,
-            "active_worker_session_id": None,
-            "active_run_id": None,
-            "context_receipt_id": None,
-            "compression_receipt_id": None,
         }.items():
             if getattr(instance, attr) != value:
                 setattr(instance, attr, value)
@@ -141,6 +152,7 @@ class PersonaInstanceStore:
         persona_instance_id: str | None = None,
         display_name: str | None = None,
         profile_id: str | None = None,
+        kill_active: bool = False,
     ) -> PersonaInstance:
         """Bind a persona instance to a durable chat session without running a turn.
 
@@ -176,6 +188,8 @@ class PersonaInstanceStore:
                 state=WorkerSessionState.IDLE,
                 updated_at=ts,
             )
+        else:
+            self._guard_or_replace_chat(instance, kill_active=kill_active)
 
         if safe_display_name:
             instance.display_name = safe_display_name
@@ -185,6 +199,7 @@ class PersonaInstanceStore:
             instance.profile_id = normalized_persona.split(":", 1)[1]
         instance.mode = "chat"
         instance.session_id = normalized_session
+        instance.current_assignment_id = None
         instance.current_task_id = None
         instance.active_worker_session_id = None
         instance.active_run_id = None
@@ -198,15 +213,60 @@ class PersonaInstanceStore:
         persona_id: str,
         display_name: str,
         session_id: str | None = None,
+        kill_active: bool = False,
     ) -> PersonaInstance:
         normalized_persona = _normalize_instance_source_persona(persona_id)
-        instance_id = unique_operator_persona_instance_id()
+        instance_id = persona_instance_id_for(normalized_persona)
         return self.open_chat(
             persona_id=normalized_persona,
             persona_instance_id=instance_id,
             session_id=session_id or persona_chat_session_id_for(instance_id),
             display_name=display_name,
             profile_id=_profile_id_for_persona_or_template(normalized_persona),
+            kill_active=kill_active,
+        )
+
+    def add_instance(
+        self,
+        *,
+        persona_id: str,
+        placement_id: str,
+        display_name: str | None = None,
+        session_id: str | None = None,
+    ) -> PersonaInstance:
+        normalized_persona = _normalize_instance_source_persona(persona_id)
+        normalized_placement = safe_assignment_token(placement_id)
+        if not normalized_placement:
+            raise ValueError("placement_id is required for an additional persona instance")
+        instance_id = persona_instance_id_for_placement(normalized_placement)
+        try:
+            existing = self.get(instance_id)
+        except Exception:
+            existing = None
+        if existing is not None and existing.persona_id != normalized_persona:
+            raise ValueError(f"placement already belongs to {existing.persona_id}: {normalized_placement}")
+        return self.open_chat(
+            persona_id=normalized_persona,
+            persona_instance_id=instance_id,
+            session_id=session_id or persona_chat_session_id_for(instance_id),
+            display_name=display_name,
+            profile_id=_profile_id_for_persona_or_template(normalized_persona),
+            kill_active=False,
+        )
+
+    def _guard_or_replace_chat(self, instance: PersonaInstance, *, kill_active: bool) -> None:
+        active_run_id, active_worker_session_id = _live_chat_bindings(instance)
+        if not active_run_id and not active_worker_session_id:
+            return
+        if not kill_active:
+            raise ChatBusyError(
+                instance,
+                active_run_id=active_run_id,
+                active_worker_session_id=active_worker_session_id,
+            )
+        _terminate_live_chat_bindings(
+            active_run_id=active_run_id,
+            active_worker_session_id=active_worker_session_id,
         )
 
     def update_from_worker(self, worker: WorkerSession) -> PersonaInstance:
@@ -492,19 +552,52 @@ def persona_instance_id_for(persona_id: str) -> str:
     return f"personainst_{safe_assignment_token(persona_id) or 'persona'}"
 
 
-def unique_operator_persona_instance_id() -> str:
-    return f"personainst_operator_{uuid.uuid4().hex[:16]}"
+def persona_instance_id_for_placement(placement_id: str) -> str:
+    return f"personainst_{safe_assignment_token(placement_id) or 'persona'}"
 
 
 def persona_chat_session_id_for(persona_instance_id: str) -> str:
     normalized = safe_assignment_token(persona_instance_id) or "persona"
-    return f"persona_chat_{normalized}"
+    return f"persona_chat_{normalized}_{uuid.uuid4().hex[:12]}"
 
 
-def free_floating_persona_instance_id_for(persona_or_template_id: str) -> str:
-    normalized = str(persona_or_template_id or "").strip() or "persona"
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
-    return f"personainst_operator_{digest}"
+def _live_chat_bindings(instance: PersonaInstance) -> tuple[str | None, str | None]:
+    active_run_id = None
+    active_worker_session_id = None
+    if instance.active_run_id:
+        try:
+            from .store import RunStore
+
+            run = RunStore().get(instance.active_run_id)
+            if run.state in LIVE_RUN_STATES:
+                active_run_id = run.id
+        except Exception:
+            active_run_id = instance.active_run_id
+    if instance.active_worker_session_id:
+        try:
+            from .worker_sessions import ACTIVE_WORKER_STATES, WorkerSessionStore
+
+            worker = WorkerSessionStore().get(instance.active_worker_session_id)
+            if worker.state in ACTIVE_WORKER_STATES:
+                active_worker_session_id = worker.id
+        except Exception:
+            active_worker_session_id = instance.active_worker_session_id
+    return active_run_id, active_worker_session_id
+
+
+def _terminate_live_chat_bindings(*, active_run_id: str | None, active_worker_session_id: str | None) -> None:
+    if active_run_id:
+        from .store import RunStore
+
+        RunStore().cancel(active_run_id, reason="operator replaced active persona chat")
+    if active_worker_session_id:
+        from .worker_sessions import WorkerSessionState, WorkerSessionStore
+
+        WorkerSessionStore().close(
+            active_worker_session_id,
+            reason="operator replaced active persona chat",
+            state=WorkerSessionState.CLOSED,
+        )
 
 
 def _free_floating_identity(persona_or_template: AgentPersona | str) -> tuple[str, str, str, str | None]:

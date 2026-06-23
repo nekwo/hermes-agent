@@ -262,14 +262,24 @@ def _infer_persona_id(raw: dict[str, Any], *, session_id: str) -> str | None:
         return safe_assignment_token(system_prompt.split(marker, 1)[1])
     prefix = "persona_chat_personainst_"
     if session_id.startswith(prefix):
-        return safe_assignment_token(session_id[len(prefix) :])
+        return _persona_token_from_chat_session_tail(session_id[len(prefix) :])
     prefix = "persona_chat_"
     if session_id.startswith(prefix):
         value = session_id[len(prefix) :]
         if value.startswith("personainst_"):
             value = value[len("personainst_") :]
-        return safe_assignment_token(value)
+        return _persona_token_from_chat_session_tail(value)
     return None
+
+
+def _persona_token_from_chat_session_tail(value: str) -> str | None:
+    token = safe_assignment_token(value)
+    if not token:
+        return None
+    parts = token.rsplit("_", 1)
+    if len(parts) == 2 and len(parts[1]) == 12 and all(ch in "0123456789abcdef" for ch in parts[1].lower()):
+        token = parts[0]
+    return safe_assignment_token(token)
 
 
 def _fallback_title(raw: dict[str, Any], *, persona_id: str) -> str:
