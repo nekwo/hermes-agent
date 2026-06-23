@@ -603,8 +603,9 @@ def test_context_hud_injects_task_list_after_checklist_exists():
 
     ctx = build_context(task, run, config=_config(True))
 
-    assert ctx.mission_hud["role_task_list"]["current_item_id"] == "inspect"
-    assert "valid_item_ids" in ctx.mission_hud["role_task_list"]
+    assert ctx.mission_hud["stage_task_list"]["current_item_id"] == "inspect"
+    assert ctx.mission_hud["stage_task_list"]["stage_id"] == "stage_1"
+    assert "valid_item_ids" in ctx.mission_hud["stage_task_list"]
 
 
 def test_archive_preserves_role_state_evidence(isolate_agent_runtime_root):

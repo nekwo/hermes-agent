@@ -58,6 +58,16 @@ def test_stage46_personas_expose_mission_dev_and_qa_skills():
     assert "harness-qa-verdict" in personas["qa"].skills
 
 
+def test_stage46_install_uses_persona_declared_skills_not_role_map():
+    from agent_runtime.skill_install import stage46_required_skills_for_persona
+
+    dev_without_stage46 = _persona(id="dev", skills=["aaa-feature-delivery"])
+    dev_with_stage46 = _persona(id="dev", skills=["aaa-feature-delivery", "harness-dev-delivery"])
+
+    assert stage46_required_skills_for_persona(dev_without_stage46) == []
+    assert stage46_required_skills_for_persona(dev_with_stage46) == ["harness-dev-delivery"]
+
+
 def test_stage59_hud_skill_sections_exist_in_role_skills():
     root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "stage46-skills"
     expected = {
