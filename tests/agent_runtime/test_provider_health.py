@@ -75,7 +75,7 @@ def test_live_persona_preflight_raises_before_runner_when_provider_dependency_co
         issues=[{"kind": "runtime_dependency_corrupt", "package": "jiter.from_json", "summary": "broken"}],
     ))
     ts = now()
-    task = Task(id="task_health", title="Health", description="d", state=TaskState.DEV_STAGE_PLANNING, created_at=ts, updated_at=ts, requested_by="tony")
+    task = Task(id="task_health", title="Health", description="d", state=TaskState.RUNNING, created_at=ts, updated_at=ts, requested_by="tony")
     run = AgentRun(id="run_health", persona_id="dev", task_id=task.id, stage_id=None, state=RunState.RUNNING, started_at=ts, last_heartbeat_at=ts)
     runtime = GPTPersonaRuntime(agent_factory=ShouldNotRunAgent)
 

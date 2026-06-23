@@ -17,7 +17,7 @@ from agent_runtime.store import AgentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.ticker import TickEngine
 
 
-def _task(state=TaskState.QA_REVIEW_PLAN):
+def _task(state=TaskState.RUNNING):
     ts = now()
     return Task(
         id="task_gap",
@@ -49,7 +49,7 @@ def test_explicit_plan_approval_enters_dev_implementing():
     apply_planning_decision(t, _decision({"review_scope": "plan", "reviewed_stage_ids": ["stage_1"], "proof_requirements_confirmed": True, "test_plan_confirmed": True}), actor="qa")
     assert t.plan_review.verdict == PlanReviewVerdict.APPROVED
     assert t.plan_review.reviewed_stage_ids == ["stage_1"]
-    assert t.state == TaskState.DEV_IMPLEMENTING
+    assert t.state == TaskState.RUNNING
 
 
 def _proof(pt, redaction_status="safe", **meta):
@@ -57,7 +57,7 @@ def _proof(pt, redaction_status="safe", **meta):
 
 
 def test_unsafe_or_unscanned_proofs_do_not_satisfy_qa_gate():
-    t = _task(TaskState.QA_TESTING)
+    t = _task(TaskState.RUNNING)
     unsafe = [_proof(ProofType.TEST_RUN, "unsafe", exit_code=0), _proof(ProofType.QA_VERDICT, "needs_scan", verdict="approved")]
     result = task_verdict_proof_satisfied(t, unsafe)
     assert not result.allowed
@@ -121,7 +121,7 @@ def test_global_default_persona_config_applies_without_per_persona_overrides():
 
 
 def test_pm_cannot_rescope_after_qa_approval_with_proof():
-    t = _task(TaskState.APPROVED)
+    t = _task(TaskState.RUNNING)
     t.proof_ids = ["proof_test", "proof_qa"]
     t.stages[0].status = StageStatus.PASSED
     original_description = t.description
@@ -141,7 +141,7 @@ def test_pm_cannot_rescope_after_qa_approval_with_proof():
 
 
 def test_dev_request_qa_review_before_all_stages_complete_stays_in_dev():
-    t = _task(TaskState.DEV_IMPLEMENTING)
+    t = _task(TaskState.RUNNING)
     t.stages.append(TaskStage(id="stage_2", title="S2", objective="o2", status=StageStatus.READY, acceptance_criteria=["ok2"], test_plan=["pytest 2"]))
     store = ProofStore()
     proof = _proof(ProofType.TEST_RUN, exit_code=0, status="passed")
@@ -158,11 +158,11 @@ def test_dev_request_qa_review_before_all_stages_complete_stays_in_dev():
 
     assert t.stages[0].status == StageStatus.READY_FOR_QA
     assert t.current_stage_id == "stage_2"
-    assert t.state == TaskState.DEV_IMPLEMENTING
+    assert t.state == TaskState.RUNNING
 
 
 def test_dev_request_qa_review_after_all_stages_complete_enters_neko_coordination_checkpoint():
-    t = _task(TaskState.DEV_IMPLEMENTING)
+    t = _task(TaskState.RUNNING)
     t.stages.append(TaskStage(id="stage_2", title="S2", objective="o2", status=StageStatus.READY_FOR_QA, acceptance_criteria=["ok2"], test_plan=["pytest 2"]))
     store = ProofStore()
     proof = _proof(ProofType.TEST_RUN, exit_code=0, status="passed")
@@ -178,7 +178,7 @@ def test_dev_request_qa_review_after_all_stages_complete_enters_neko_coordinatio
     apply_planning_decision(t, decision, actor="dev", proof_store=store)
 
     assert all(stage.status == StageStatus.READY_FOR_QA for stage in t.stages)
-    assert t.state == TaskState.READY_FOR_REVIEW
+    assert t.state == TaskState.RUNNING
 
     action = TickEngine().state_machine.next_action(t)
 
@@ -188,7 +188,7 @@ def test_dev_request_qa_review_after_all_stages_complete_enters_neko_coordinatio
 
 
 def test_neko_qa_coordination_release_allows_qa_verification():
-    t = _task(TaskState.READY_FOR_REVIEW)
+    t = _task(TaskState.RUNNING)
     t.stages[0].status = StageStatus.READY_FOR_QA
     t.proof_ids = ["proof_test_safe"]
     decision = AgentDecision(
@@ -201,7 +201,7 @@ def test_neko_qa_coordination_release_allows_qa_verification():
     apply_planning_decision(t, decision, actor="neko_supervisor")
     action = TickEngine().state_machine.next_action(t)
 
-    assert t.state == TaskState.READY_FOR_REVIEW
+    assert t.state == TaskState.RUNNING
     assert "neko_qa_coordination_released" in t.risk_flags
     assert action.type.value == "run_slot"
     assert action.slot_id == "qa"
@@ -257,7 +257,7 @@ def test_neko_visual_recovery_repairs_stale_mission_control_stagec_test_plan(mon
 
     stage = t.stages[0]
     plan_text = "\n".join(stage.test_plan)
-    assert t.state == TaskState.READY_FOR_WORK
+    assert t.state == TaskState.RUNNING
     assert stage.requires_visual_proof is True
     assert len(stage.test_plan) == 2
     assert "flutter analyze lib/features/mission_control" in stage.test_plan
@@ -277,7 +277,7 @@ def test_neko_visual_recovery_repairs_stale_mission_control_stagec_test_plan(mon
 def test_neko_visual_recovery_targets_noncomplete_visual_stage_not_prior_ui_stage(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profiles" / "alice"))
-    t = _task(TaskState.READY_FOR_WORK)
+    t = _task(TaskState.RUNNING)
     t.title = "Upgrade Launcher Mission Control agent terminal event view"
     t.description = "Mission Control needs fullscreen Stage C screenshot proof."
     t.current_stage_id = "stage_agent_event_feed_ui"
@@ -329,7 +329,7 @@ def test_neko_visual_recovery_targets_noncomplete_visual_stage_not_prior_ui_stag
 
     apply_planning_decision(t, decision, actor="neko_supervisor")
 
-    assert t.state == TaskState.READY_FOR_WORK
+    assert t.state == TaskState.RUNNING
     assert t.current_stage_id == "stage_launcher_analyze_and_visual_proof"
     assert "cross_stack_backend_proof_missing_before_launcher_release" not in t.risk_flags
     assert "sequential_specialist_handoff" not in t.risk_flags
@@ -343,7 +343,7 @@ def test_neko_visual_recovery_targets_noncomplete_visual_stage_not_prior_ui_stag
 
 
 def test_visual_stage_request_qa_review_does_not_require_bridge_snapshot_command():
-    t = _task(TaskState.DEV_IMPLEMENTING)
+    t = _task(TaskState.RUNNING)
     t.current_stage_id = "stage_launcher_analyze_and_visual_proof"
     t.stages = [
         TaskStage(
@@ -402,13 +402,13 @@ def test_visual_stage_request_qa_review_does_not_require_bridge_snapshot_command
 
     apply_planning_decision(t, decision, actor="dev", proof_store=store)
 
-    assert t.state == TaskState.READY_FOR_REVIEW
+    assert t.state == TaskState.RUNNING
     assert t.stages[-1].status == StageStatus.READY_FOR_QA
     assert visual_proof.id in t.proof_ids
 
 
 def test_request_test_run_from_premature_dev_ready_returns_to_dev_implementing():
-    t = _task(TaskState.READY_FOR_REVIEW)
+    t = _task(TaskState.RUNNING)
     t.stages[0].status = StageStatus.READY_FOR_QA
     t.stages.append(TaskStage(id="stage_2", title="S2", objective="o2", status=StageStatus.IMPLEMENTING, acceptance_criteria=["ok2"], test_plan=["pytest 2"]))
     t.current_stage_id = "stage_2"
@@ -421,12 +421,12 @@ def test_request_test_run_from_premature_dev_ready_returns_to_dev_implementing()
 
     apply_planning_decision(t, decision, actor="dev")
 
-    assert t.state == TaskState.DEV_IMPLEMENTING
+    assert t.state == TaskState.RUNNING
     assert t.current_stage_id == "stage_2"
 
 
 def test_qa_approval_marks_all_stages_passed_only_after_full_stage_handoff():
-    t = _task(TaskState.READY_FOR_REVIEW)
+    t = _task(TaskState.RUNNING)
     t.stages.append(TaskStage(id="stage_2", title="S2", objective="o2", status=StageStatus.READY_FOR_QA, acceptance_criteria=["ok2"], test_plan=["pytest 2"]))
     t.stages[0].status = StageStatus.READY_FOR_QA
     store = ProofStore()
@@ -441,12 +441,12 @@ def test_qa_approval_marks_all_stages_passed_only_after_full_stage_handoff():
 
     apply_planning_decision(t, decision, actor="qa", proof_store=store)
 
-    assert t.state == TaskState.APPROVED
+    assert t.state == TaskState.RUNNING
     assert [stage.status for stage in t.stages] == [StageStatus.PASSED, StageStatus.PASSED]
 
 
 def test_complete_task_is_blocked_until_all_stages_passed():
-    t = _task(TaskState.APPROVED)
+    t = _task(TaskState.RUNNING)
     t.proof_ids = ["proof_test", "proof_qa"]
     t.stages.append(TaskStage(id="stage_2", title="S2", objective="o2", status=StageStatus.READY, acceptance_criteria=["ok2"], test_plan=["pytest 2"]))
 
@@ -458,7 +458,7 @@ def test_complete_task_is_blocked_until_all_stages_passed():
 
 
 def test_pm_approve_after_qa_approval_closes_instead_of_reopening_review():
-    t = _task(TaskState.APPROVED)
+    t = _task(TaskState.RUNNING)
     t.proof_ids = ["proof_test", "proof_qa"]
     t.stages[0].status = StageStatus.PASSED
     decision = AgentDecision(
@@ -474,7 +474,7 @@ def test_pm_approve_after_qa_approval_closes_instead_of_reopening_review():
 
 
 def test_qa_blocked_implementation_verdict_marks_task_recoverable_for_dev():
-    t = _task(TaskState.READY_FOR_REVIEW)
+    t = _task(TaskState.RUNNING)
     store = ProofStore()
     store.attach(_proof(ProofType.TEST_RUN, exit_code=1, status="failed"))
     decision = AgentDecision(

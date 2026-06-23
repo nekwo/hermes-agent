@@ -46,7 +46,7 @@ def _task():
         id="task_qa",
         title="QA proof-first smoke",
         description="Verify QA stops at proof-backed verdict.",
-        state=TaskState.READY_FOR_REVIEW,
+        state=TaskState.RUNNING,
         created_at=now(),
         updated_at=now(),
         requested_by="test",
@@ -138,7 +138,7 @@ def test_no_edit_context_dev_run_blocks_repo_search_tools(monkeypatch):
     run = _run("backend_dev")
     run.stage_id = "backend_investigation"
     task = _task()
-    task.state = TaskState.DEV_IMPLEMENTING
+    task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
     task.current_stage_id = "backend_investigation"
     task.mission_plan = MissionPlan(

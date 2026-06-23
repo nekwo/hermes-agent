@@ -48,7 +48,7 @@ def _persona(persona_id: str = "dev") -> AgentPersona:
     )
 
 
-def _task(task_id: str = "task_assign", state: TaskState = TaskState.DEV_IMPLEMENTING) -> Task:
+def _task(task_id: str = "task_assign", state: TaskState = TaskState.RUNNING) -> Task:
     ts = now()
     return Task(
         id=task_id,

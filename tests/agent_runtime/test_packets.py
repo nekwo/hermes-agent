@@ -14,7 +14,7 @@ def _task() -> Task:
         id="task_packet",
         title="Packet contract",
         description="Verify handoff repair fields survive normalization.",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=ts,
         updated_at=ts,
         requested_by="test",

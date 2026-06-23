@@ -43,7 +43,7 @@ def test_observability_flags_stale_daemon_stalled_run_and_repeated_context_reque
         id="task_obs",
         title="Mission",
         description="d",
-        state=TaskState.READY_FOR_WORK,
+        state=TaskState.RUNNING,
         created_at=ts - timedelta(hours=2),
         updated_at=ts - timedelta(minutes=30),
         requested_by="human",
@@ -332,7 +332,7 @@ def test_recent_events_drop_unsafe_values_from_new_dev_work_fields():
 
 def test_active_runs_include_queued_starting_running_and_waiting_states():
     ts = now()
-    task = Task(id="task_active", title="Mission", description="d", state=TaskState.READY_FOR_WORK, created_at=ts, updated_at=ts, requested_by="human")
+    task = Task(id="task_active", title="Mission", description="d", state=TaskState.RUNNING, created_at=ts, updated_at=ts, requested_by="human")
     runs = [
         AgentRun(id="run_queued", persona_id="dev", task_id=task.id, stage_id="stage_1", state=RunState.QUEUED, started_at=ts, last_heartbeat_at=ts),
         AgentRun(id="run_starting", persona_id="dev", task_id=task.id, stage_id="stage_2", state=RunState.STARTING, started_at=ts, last_heartbeat_at=ts),
@@ -353,7 +353,7 @@ def test_active_runs_include_queued_starting_running_and_waiting_states():
 
 def test_active_run_summary_includes_current_tool_command_label():
     ts = now()
-    task = Task(id="task_active_tool", title="Mission", description="d", state=TaskState.READY_FOR_WORK, created_at=ts, updated_at=ts, requested_by="human")
+    task = Task(id="task_active_tool", title="Mission", description="d", state=TaskState.RUNNING, created_at=ts, updated_at=ts, requested_by="human")
     run = AgentRun(
         id="run_active_tool",
         persona_id="dev",

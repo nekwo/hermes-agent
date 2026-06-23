@@ -137,7 +137,7 @@ def test_snapshot_exposes_terminal_and_active_run_execution_truth(isolate_agent_
     runs = RunStore()
     n = now()
     ts.create(Task(id="done", title="Done", description="d", state=TaskState.DONE, created_at=n, updated_at=n, requested_by="tony"))
-    ts.create(Task(id="active", title="Active", description="d", state=TaskState.READY_FOR_WORK, created_at=n, updated_at=n, requested_by="tony"))
+    ts.create(Task(id="active", title="Active", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
     runs.open_run("dev", "active", stage_id=None)
 
     snap = build_snapshot(task_store=ts, run_store=runs)
@@ -202,7 +202,7 @@ def test_snapshot_exposes_typed_mission_role_and_stage_streams(isolate_agent_run
         id="typed",
         title="Fix Mission Control terminals",
         description="d",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=n,
         updated_at=n,
         requested_by="tony",
@@ -267,7 +267,7 @@ def test_snapshot_typed_plan_keeps_empty_backend_stream_selectable(isolate_agent
         id="typed_missing_backend",
         title="Fix Mission Control role logs",
         description="Show Neko, Backend Dev, Launcher Dev, and QA logs even when one role has no events yet.",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=n,
         updated_at=n,
         requested_by="tony",
@@ -321,7 +321,7 @@ def test_snapshot_role_streams_use_task_window_not_global_tail(isolate_agent_run
         id="typed_stream_tail",
         title="Fix Mission Control role logs",
         description="Keep every role visible even after one role emits many events.",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=n,
         updated_at=n,
         requested_by="tony",
@@ -372,7 +372,7 @@ def test_snapshot_next_action_owner_reports_backend_specialist_for_backend_stage
             id="backend",
             title="Stage 47",
             description="d",
-            state=TaskState.DEV_IMPLEMENTING,
+            state=TaskState.RUNNING,
             created_at=n,
             updated_at=n,
             requested_by="tony",
@@ -401,7 +401,7 @@ def test_snapshot_routes_budget_approval_to_neko_before_cap(isolate_agent_runtim
     runs = RunStore()
     incidents = IncidentStore()
     n = now()
-    ts.create(Task(id="budget", title="Budget", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=n, updated_at=n, requested_by="tony"))
+    ts.create(Task(id="budget", title="Budget", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
     waiting = runs.open_run("dev", "budget", stage_id="stage_1", session_id="session_budget")
     waiting.state = RunState.WAITING_ON_APPROVAL
     waiting.error = {"type": "run_budget_exceeded"}
@@ -419,7 +419,7 @@ def test_snapshot_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_
     runs = RunStore()
     incidents = IncidentStore()
     n = now()
-    ts.create(Task(id="budget", title="Budget", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=n, updated_at=n, requested_by="tony", open_incident_ids=["inc_loop"]))
+    ts.create(Task(id="budget", title="Budget", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony", open_incident_ids=["inc_loop"]))
     waiting = runs.open_run("backend_dev", "budget", stage_id="backend_implementation", session_id="session_budget")
     waiting.progress = {
         "loop_warning": "read_search_without_patch_threshold",

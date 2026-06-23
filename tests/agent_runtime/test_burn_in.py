@@ -75,7 +75,7 @@ class StalledBurnInEngine:
             finished_at=now(),
             task_id=task_id,
             stop_reason="active_run",
-            final_task_state=TaskState.DEV_IMPLEMENTING.value,
+            final_task_state=TaskState.RUNNING.value,
             max_actions=max_actions,
         )
 
@@ -116,7 +116,7 @@ class BudgetContinuationBurnInEngine:
                 finished_at=now(),
                 task_id=task_id,
                 stop_reason="action_failed",
-                final_task_state=TaskState.DEV_IMPLEMENTING.value,
+                final_task_state=TaskState.RUNNING.value,
                 max_actions=max_actions,
             )
         waiting = self.run_store.list_for_task(task_id)[0]
@@ -196,7 +196,7 @@ class BudgetCapReachedBurnInEngine:
             finished_at=now(),
             task_id=task_id,
             stop_reason="action_failed",
-            final_task_state=TaskState.DEV_IMPLEMENTING.value,
+            final_task_state=TaskState.RUNNING.value,
             max_actions=max_actions,
         )
 
@@ -314,7 +314,7 @@ def test_burn_in_create_cleans_previous_stage47_temp_state():
     ts = TaskStore()
     runs = RunStore()
     stamp = now()
-    old = ts.create(Task(id="task_burn_previous", title="Previous burn-in", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=stamp, updated_at=stamp, requested_by="stage47_burn_in"))
+    old = ts.create(Task(id="task_burn_previous", title="Previous burn-in", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="stage47_burn_in"))
     run = runs.open_run("dev", old.id)
 
     manifest = create_burn_in(case_id="noop-orchestration")

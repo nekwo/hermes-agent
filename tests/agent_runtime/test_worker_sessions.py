@@ -13,14 +13,14 @@ from agent_runtime.autonomy import record_autonomy_packet
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.context_builder import build_context
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.models import AgentPersona, Proof, Task
+from agent_runtime.models import AgentPersona, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
 from agent_runtime.observability import build_observability
 from agent_runtime.proof_recipes import RECIPES
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.proof_runner import CommandProofRunner
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import build_snapshot
-from agent_runtime.states import RunState, TaskState, WorkerSessionState
+from agent_runtime.states import RunState, StageStatus, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import ProofStore, RunStore, TaskStore
 from agent_runtime.ticker import TickEngine
@@ -30,7 +30,7 @@ from agent_runtime.worker_sessions import WorkerSessionStore, worker_context_man
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _task(task_id: str = "task_worker", state: TaskState = TaskState.DEV_IMPLEMENTING) -> Task:
+def _task(task_id: str = "task_worker", state: TaskState = TaskState.RUNNING) -> Task:
     ts = now()
     return Task(
         id=task_id,
@@ -43,6 +43,28 @@ def _task(task_id: str = "task_worker", state: TaskState = TaskState.DEV_IMPLEME
         affected_repos=["hermes-agent"],
         current_stage_id="stage_1",
     )
+
+
+def _mark_graph_complete(task: Task) -> Task:
+    task.current_stage_id = None
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title=task.title, objective=task.description),
+        current_stage_id=None,
+        blueprint_id="neko_dev_qa_basic",
+        stages=[
+            MissionPlanStage(
+                id="qa_release",
+                title="QA Release",
+                objective="Verify mission.",
+                owner="qa",
+                owner_slot="qa",
+                repo="hermes-agent",
+                kind="qa_verdict",
+                status=StageStatus.PASSED,
+            )
+        ],
+    )
+    return task
 
 
 def _persona(persona_id: str = "dev") -> AgentPersona:
@@ -408,7 +430,7 @@ def test_archive_refuses_active_worker_then_preserves_closed_worker_context_and_
 def test_complete_task_action_closes_active_workers():
     tasks = TaskStore()
     workers = WorkerSessionStore()
-    task = _task("task_complete_worker", state=TaskState.APPROVED)
+    task = _mark_graph_complete(_task("task_complete_worker", state=TaskState.RUNNING))
     task.proof_ids = ["proof_ok"]
     tasks.create(task)
     worker = workers.open(task_id=task.id, persona=_persona(), stage_id="stage_1", session_id="session_safe")

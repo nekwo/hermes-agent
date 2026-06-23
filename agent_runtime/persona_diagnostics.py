@@ -380,8 +380,8 @@ def _initial_state_for_persona(persona_id: str) -> TaskState:
     if persona_id == "neko_supervisor":
         return TaskState.CREATED
     if persona_id in {"dev", "backend_dev"}:
-        return TaskState.READY_FOR_WORK
-    return TaskState.QA_REVIEW_PLAN
+        return TaskState.RUNNING
+    return TaskState.RUNNING
 
 
 def _expected_action_for_persona(persona_id: str) -> str:

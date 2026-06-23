@@ -66,7 +66,7 @@ def make_task_and_run():
         id="task_abc",
         title="Build harness",
         description="Make agent runtime reliable",
-        state=TaskState.DEV_STAGE_PLANNING,
+        state=TaskState.RUNNING,
         created_at=ts,
         updated_at=ts,
         requested_by="tony",

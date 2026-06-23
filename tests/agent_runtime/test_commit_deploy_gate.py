@@ -16,7 +16,7 @@ def make_edit_task(task_id="task_gate", requires_product_edit=True):
         id=task_id,
         title="Edit slice",
         description="d",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=ts,
         updated_at=ts,
         requested_by="tony",

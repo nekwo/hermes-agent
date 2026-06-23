@@ -126,7 +126,7 @@ def apply_stage_outcome(task: Task, stage_id: str, outcome: StageOutcome, *, rea
         plan.current_stage_id = None
         task.current_stage_id = None
         if stage.owner == "qa":
-            task.state = TaskState.APPROVED
+            task.state = TaskState.RUNNING
         plan.revision = int(plan.revision or 0) + 1
         task.updated_at = now()
         from .runs import BlueprintRunStore
@@ -143,9 +143,9 @@ def apply_stage_outcome(task: Task, stage_id: str, outcome: StageOutcome, *, rea
     plan.current_stage_id = next_stage.id
     task.current_stage_id = next_stage.id
     if next_stage.owner == "qa":
-        task.state = TaskState.READY_FOR_REVIEW
+        task.state = TaskState.RUNNING
     elif next_stage.owner in {"dev", "backend_dev"}:
-        task.state = TaskState.DEV_IMPLEMENTING
+        task.state = TaskState.RUNNING
     if next_stage.status in {StageStatus.PASSED, StageStatus.READY_FOR_QA, StageStatus.BLOCKED, StageStatus.REWORK}:
         next_stage.status = StageStatus.REWORK if outcome in RETRY_OUTCOMES else StageStatus.READY
     elif next_stage.status == StageStatus.DRAFT:

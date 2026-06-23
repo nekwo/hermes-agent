@@ -110,12 +110,12 @@ def _coerce_neko_budget_acceptance_to_continuation(
                 reason=str(decision.payload.get("summary") or decision.summary or "Neko narrowed scope after Dev read/search loop without delivery"),
             )
             task.open_incident_ids = [item for item in task.open_incident_ids if item != incident_id]
-            task.state = TaskState.DEV_IMPLEMENTING
+            task.state = TaskState.RUNNING
             task.updated_at = now()
             payload = {
                 "incident_id": incident_id,
                 "resolution": "Neko narrowed scope; Harness cancelled exhausted Dev run and routed a fresh Dev attempt",
-                "next_state": TaskState.DEV_IMPLEMENTING.value,
+                "next_state": TaskState.RUNNING.value,
                 "approval_type": "scope_recovery",
                 "next_expected": "dev_fresh_scope_retry",
                 "coerced_from_decision": DecisionType.PROPOSE_ACCEPTANCE.value,
@@ -136,7 +136,7 @@ def _coerce_neko_budget_acceptance_to_continuation(
             reason=str(decision.payload.get("summary") or decision.summary or "Neko approved bounded same-session Dev continuation"),
         )
         task.open_incident_ids = [item for item in task.open_incident_ids if item != incident_id]
-        task.state = TaskState.DEV_IMPLEMENTING
+        task.state = TaskState.RUNNING
         task.updated_at = now()
         log.append(
             Event(
@@ -148,7 +148,7 @@ def _coerce_neko_budget_acceptance_to_continuation(
                 {
                     "incident_id": incident_id,
                     "resolution": "Neko scoped bounded continuation; Harness approved same-session Dev continuation",
-                    "next_state": TaskState.DEV_IMPLEMENTING.value,
+                    "next_state": TaskState.RUNNING.value,
                     "approved_run_id": approved.id,
                     "approval_type": "budget_continuation",
                     "next_expected": "dev_same_session_continuation",
@@ -171,13 +171,13 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
         if target is not None:
             task.affected_repos = [] if target.repo == "none" else [target.repo]
             if target.owner == "qa":
-                task.state = TaskState.READY_FOR_REVIEW
+                task.state = TaskState.RUNNING
             elif target.owner in {"dev", "backend_dev"}:
-                task.state = TaskState.READY_FOR_WORK if task.state in {TaskState.CREATED, TaskState.PM_TRIAGE} else TaskState.DEV_IMPLEMENTING
+                task.state = TaskState.RUNNING if task.state in {TaskState.CREATED, TaskState.RUNNING} else TaskState.RUNNING
             elif target.owner == "human":
                 task.state = TaskState.BLOCKED
             else:
-                task.state = TaskState.READY_FOR_WORK
+                task.state = TaskState.RUNNING
         task.updated_at = now()
         log.append(
             Event(
@@ -196,7 +196,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
         )
         return task
     if decision.type == DecisionType.PROPOSE_ACCEPTANCE:
-        if actor == "neko_supervisor" and task.state == TaskState.READY_FOR_REVIEW:
+        if actor == "neko_supervisor" and task.state == TaskState.RUNNING and _all_stages_dev_complete(task):
             if _needs_cross_stack_launcher_completion(task, proof_store=proof_store):
                 if not _has_backend_contract_proof(task, proof_store=proof_store):
                     _block_launcher_release_until_backend_proof(task, log=log, actor=actor, run_id=run_id)
@@ -206,7 +206,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                     _ensure_launcher_handoff_stage(task, decision.payload, actor=actor, log=log)
                     task.risk_flags = [flag for flag in task.risk_flags if flag != QA_COORDINATION_RELEASED_FLAG]
                     _dedupe_extend(task.risk_flags, [LAUNCHER_RELEASED_BY_NEKO_FLAG])
-                    task.state = TaskState.DEV_IMPLEMENTING
+                    task.state = TaskState.RUNNING
                     task.updated_at = now()
                     log.append(
                         Event(
@@ -217,7 +217,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                             actor,
                             {
                                 "source": "neko_cross_stack_join_gate",
-                                "next_state": TaskState.DEV_IMPLEMENTING.value,
+                                "next_state": TaskState.RUNNING.value,
                                 "next_expected": "launcher_dev_verification",
                                 "proof_ids": len(task.proof_ids),
                             },
@@ -277,7 +277,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                     actor,
                     {
                         "source": "neko_qa_coordination",
-                        "next_state": TaskState.READY_FOR_REVIEW.value,
+                        "next_state": TaskState.RUNNING.value,
                         "next_expected": "qa_verification",
                         "proof_ids": len(task.proof_ids),
                     },
@@ -285,7 +285,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             )
             return task
         if (
-            task.state in {TaskState.APPROVED, TaskState.EVIDENCE_REVIEW, TaskState.PM_READY_FOR_INTEGRATION}
+            task.state in {TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING}
             and task.proof_ids
             and _all_stages_passed(task)
             and not _needs_cross_stack_launcher_completion(task, proof_store=proof_store)
@@ -294,11 +294,11 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             task.updated_at = now()
             log.append(Event(now(), "task.transition", task.id, run_id, actor, {"source": "pm_post_qa_proof_guard", "to": TaskState.DONE.value, "proof_ids": len(task.proof_ids)}))
             return task
-        if task.state in {TaskState.APPROVED, TaskState.EVIDENCE_REVIEW, TaskState.PM_READY_FOR_INTEGRATION} and task.proof_ids:
+        if task.state in {TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING} and task.proof_ids:
             _advance_to_next_dev_stage(task)
-            task.state = TaskState.DEV_IMPLEMENTING
+            task.state = TaskState.RUNNING
             task.updated_at = now()
-            log.append(Event(now(), "task.transition", task.id, run_id, actor, {"source": "pm_post_qa_remaining_stage_guard", "to": TaskState.DEV_IMPLEMENTING.value, "proof_ids": len(task.proof_ids)}))
+            log.append(Event(now(), "task.transition", task.id, run_id, actor, {"source": "pm_post_qa_remaining_stage_guard", "to": TaskState.RUNNING.value, "proof_ids": len(task.proof_ids)}))
             return task
         _apply_acceptance(task, decision.payload)
         if (
@@ -344,7 +344,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             )
         if actor == "neko_supervisor":
             _ensure_scoped_dev_handoff_stage(task, decision.payload, actor=actor, log=log)
-        task.state = TaskState.READY_FOR_WORK
+        task.state = TaskState.RUNNING
         task.updated_at = now()
         log.append(Event(now(), "task.pm_fleshed", task.id, None, actor, {"criteria": len(task.acceptance_criteria)}))
     elif decision.type == DecisionType.REQUEST_FILE_READS:
@@ -467,29 +467,29 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             raise DecisionPayloadInvalid(
                 "Dev stage plan loop guard failed: the plan contained only Neko/Launcher/QA orchestration stages; Dev must provide an executable proof stage or request_test_run."
             )
-        if task.state in {TaskState.READY_FOR_WORK, TaskState.DEV_AUDIT}:
-            task.state = TaskState.DEV_STAGE_PLANNING
+        if task.state in {TaskState.RUNNING, TaskState.RUNNING}:
+            task.state = TaskState.RUNNING
         if task.stages and all(stage.test_plan for stage in task.stages):
-            task.state = TaskState.DEV_IMPLEMENTING if _dev_plan_can_enter_implementation(task, actor=actor) else TaskState.DEV_TEST_DESIGN
+            task.state = TaskState.RUNNING if _dev_plan_can_enter_implementation(task, actor=actor) else TaskState.RUNNING
         task.updated_at = now()
     elif decision.type == DecisionType.REQUEST_TEST_RUN:
         _materialize_test_run_stage(task, decision.payload, actor=actor, log=log)
         if mission_plan_flow and has_typed_plan(task):
             mark_plan_stage_from_decision(task, decision, actor=actor, proof_store=proof_store)
-        if task.state in {TaskState.READY_FOR_WORK, TaskState.DEV_AUDIT, TaskState.DEV_STAGE_PLANNING, TaskState.DEV_TEST_DESIGN, TaskState.DEV_IMPLEMENTING, TaskState.READY_FOR_REVIEW, TaskState.REWORK_REQUESTED}:
-            task.state = TaskState.DEV_IMPLEMENTING
+        if task.state in {TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING}:
+            task.state = TaskState.RUNNING
         elif task.state == TaskState.BLOCKED:
-            task.state = TaskState.DEV_IMPLEMENTING
+            task.state = TaskState.RUNNING
         task.updated_at = now()
     elif decision.type == DecisionType.CORRECT_STAGE:
         _apply_stage_correction(task, decision.payload, actor=actor, log=log)
-        if task.state == TaskState.QA_REVIEW_PLAN:
-            task.state = TaskState.DEV_TEST_DESIGN if all(stage.test_plan for stage in task.stages) else TaskState.DEV_STAGE_PLANNING
+        if task.state == TaskState.RUNNING:
+            task.state = TaskState.RUNNING if all(stage.test_plan for stage in task.stages) else TaskState.RUNNING
         task.updated_at = now()
     elif decision.type in {DecisionType.APPROVE, DecisionType.REPORT_QA_VERDICT}:
         if (
             decision.type == DecisionType.APPROVE
-            and task.state in {TaskState.APPROVED, TaskState.EVIDENCE_REVIEW, TaskState.PM_READY_FOR_INTEGRATION}
+            and task.state in {TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING}
             and task.proof_ids
             and _all_stages_passed(task)
             and not _needs_cross_stack_launcher_completion(task, proof_store=proof_store)
@@ -498,11 +498,11 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             task.updated_at = now()
             log.append(Event(now(), "task.transition", task.id, run_id, actor, {"source": "pm_post_qa_approve_guard", "to": TaskState.DONE.value, "proof_ids": len(task.proof_ids)}))
             return task
-        if decision.type == DecisionType.APPROVE and task.state in {TaskState.APPROVED, TaskState.EVIDENCE_REVIEW, TaskState.PM_READY_FOR_INTEGRATION} and task.proof_ids:
+        if decision.type == DecisionType.APPROVE and task.state in {TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING} and task.proof_ids:
             _advance_to_next_dev_stage(task)
-            task.state = TaskState.DEV_IMPLEMENTING
+            task.state = TaskState.RUNNING
             task.updated_at = now()
-            log.append(Event(now(), "task.transition", task.id, run_id, actor, {"source": "pm_post_qa_approve_remaining_stage_guard", "to": TaskState.DEV_IMPLEMENTING.value, "proof_ids": len(task.proof_ids)}))
+            log.append(Event(now(), "task.transition", task.id, run_id, actor, {"source": "pm_post_qa_approve_remaining_stage_guard", "to": TaskState.RUNNING.value, "proof_ids": len(task.proof_ids)}))
             return task
         if decision.payload.get("review_scope", "plan") == "implementation":
             _apply_implementation_review(task, decision.payload, actor=actor, proof_store=proof_store)
@@ -511,10 +511,10 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
         else:
             _apply_plan_review(task, decision.payload, actor=actor, log=log)
             gate = can_enter_dev_implementing(task)
-            if gate.allowed and task.state == TaskState.QA_REVIEW_PLAN:
-                task.state = TaskState.DEV_IMPLEMENTING
-            elif not gate.allowed and task.state == TaskState.QA_REVIEW_PLAN:
-                task.state = TaskState.DEV_TEST_DESIGN
+            if gate.allowed and task.state == TaskState.RUNNING:
+                task.state = TaskState.RUNNING
+            elif not gate.allowed and task.state == TaskState.RUNNING:
+                task.state = TaskState.RUNNING
         task.updated_at = now()
     elif decision.type == DecisionType.PROPOSE_PATCH:
         if proof_store is not None and not decision.payload.get("proof_ids") and not normal_worker_flow:
@@ -535,7 +535,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                 mark_plan_stage_from_decision(task, decision, actor=actor, proof_store=proof_store)
                 stage = current_plan_stage(task)
                 if stage is not None and stage.kind in {"context", "investigation", "audit"} and not stage_requires_product_edit(task, stage):
-                    task.state = TaskState.READY_FOR_REVIEW
+                    task.state = TaskState.RUNNING
                     task.updated_at = now()
                     log.append(Event(now(), "patch.proposed", task.id, None, actor, {"requires_approval": decision.requires_approval, "normal_worker_flow": True, "no_edit_findings_delivery": True}))
                     return task
@@ -545,7 +545,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                         stage.status = StageStatus.IMPLEMENTING
                         stage.updated_at = now()
                         break
-            task.state = TaskState.DEV_IMPLEMENTING
+            task.state = TaskState.RUNNING
             task.updated_at = now()
             log.append(Event(now(), "patch.proposed", task.id, None, actor, {"requires_approval": decision.requires_approval, "normal_worker_flow": True}))
             return task
@@ -559,13 +559,13 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             mark_plan_stage_from_decision(task, decision, actor=actor, proof_store=proof_store)
         if not _all_stages_dev_complete(task):
             _advance_to_next_dev_stage(task)
-        task.state = TaskState.READY_FOR_REVIEW if _all_stages_dev_complete(task) else TaskState.DEV_IMPLEMENTING
+        task.state = TaskState.RUNNING if _all_stages_dev_complete(task) else TaskState.RUNNING
         task.updated_at = now()
         log.append(Event(now(), "patch.proposed", task.id, None, actor, {"requires_approval": decision.requires_approval}))
     elif decision.type == DecisionType.REQUEST_QA_REVIEW:
         proof_ids = decision.payload.get("proof_ids", [])
         stage_id = str(decision.payload.get("stage_id") or task.current_stage_id or "").strip()
-        if task.state in {TaskState.DEV_IMPLEMENTING, TaskState.REWORK_REQUESTED} or proof_ids:
+        if task.state in {TaskState.RUNNING, TaskState.RUNNING} or proof_ids:
             _validate_qa_handoff_proof_readiness(task, proof_ids, proof_store=proof_store, stage_id=stage_id)
             _validate_commit_deploy_gate(task, decision, proof_store=proof_store, stage_id=stage_id)
             _merge_existing_proof_ids(task, proof_ids, proof_store=proof_store)
@@ -580,14 +580,14 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                         break
             if not _all_stages_dev_complete(task):
                 if _needs_sequential_specialist_join(task):
-                    task.state = TaskState.READY_FOR_REVIEW
+                    task.state = TaskState.RUNNING
                 else:
                     _advance_to_next_dev_stage(task)
-                    task.state = TaskState.DEV_IMPLEMENTING
+                    task.state = TaskState.RUNNING
             else:
-                task.state = TaskState.READY_FOR_REVIEW
+                task.state = TaskState.RUNNING
         else:
-            task.state = TaskState.QA_REVIEW_PLAN
+            task.state = TaskState.RUNNING
         task.updated_at = now()
     elif decision.type in {DecisionType.NEEDS_CONTEXT, DecisionType.REQUEST_HUMAN}:
         if _coerce_neko_needs_context_to_handoff_continuation(task, decision, actor=actor, log=log, run_id=run_id, proof_store=proof_store):
@@ -636,7 +636,7 @@ def _coerce_neko_needs_context_to_handoff_continuation(task: Task, decision: Age
         launcher_handoff_requested
     )
     proof_backed_join = (
-        task.state == TaskState.READY_FOR_REVIEW
+        task.state == TaskState.RUNNING
         and _is_cross_stack_backend_first(task)
         and _has_backend_contract_proof(task, proof_store=proof_store)
         and _has_backend_contract_delivery_packet(task, event_log=log)
@@ -644,7 +644,7 @@ def _coerce_neko_needs_context_to_handoff_continuation(task: Task, decision: Age
         and (launcher_handoff_requested or not _has_launcher_stage(task))
     )
     proof_backed_missing_packet = (
-        task.state == TaskState.READY_FOR_REVIEW
+        task.state == TaskState.RUNNING
         and _is_cross_stack_backend_first(task)
         and _has_backend_contract_proof(task, proof_store=proof_store)
         and not _has_backend_contract_delivery_packet(task, event_log=log)
@@ -661,7 +661,7 @@ def _coerce_neko_needs_context_to_handoff_continuation(task: Task, decision: Age
     task.affected_repos = ["EterniaLauncher"]
     _dedupe_extend(task.risk_flags, ["sequential_specialist_handoff", "post_scope_wait_coerced_to_handoff", LAUNCHER_RELEASED_BY_NEKO_FLAG])
     task.risk_flags = [flag for flag in task.risk_flags if flag not in {QA_COORDINATION_RELEASED_FLAG, "cross_stack_launcher_release_missing"}]
-    task.state = TaskState.READY_FOR_WORK
+    task.state = TaskState.RUNNING
     task.updated_at = now()
     source = "proof_backed_neko_needs_context_launcher_handoff" if proof_backed_join else "post_scope_needs_context_handoff_continuation"
     log.append(
@@ -674,7 +674,7 @@ def _coerce_neko_needs_context_to_handoff_continuation(task: Task, decision: Age
             {
                 "source": source,
                 "from_decision": decision.type.value,
-                "next_state": TaskState.READY_FOR_WORK.value,
+                "next_state": TaskState.RUNNING.value,
                 "next_expected": "launcher_dev_verification",
                 "summary": "Proof-backed Neko context wait converted to deterministic Launcher Dev handoff because required Launcher proof is the next missing artifact.",
             },
@@ -742,7 +742,7 @@ def _route_backend_contract_packet_repair(task: Task, *, actor: str, log: EventL
         log.append(Event(now(), "task.stage_updated", task.id, None, actor, {"stage_id": sid, "source": "backend_contract_packet_repair"}))
     task.current_stage_id = sid
     task.affected_repos = ["EterniaBackend"]
-    task.state = TaskState.READY_FOR_WORK
+    task.state = TaskState.RUNNING
     _dedupe_extend(task.risk_flags, ["backend_contract_packet_missing_repair"])
     task.risk_flags = [flag for flag in task.risk_flags if flag not in {QA_COORDINATION_RELEASED_FLAG, LAUNCHER_RELEASED_BY_NEKO_FLAG}]
     task.updated_at = now()
@@ -755,7 +755,7 @@ def _route_backend_contract_packet_repair(task: Task, *, actor: str, log: EventL
             actor,
             {
                 "source": "neko_cross_stack_join_gate",
-                "next_state": TaskState.READY_FOR_WORK.value,
+                "next_state": TaskState.RUNNING.value,
                 "next_expected": "backend_dev_contract_packet_repair",
                 "summary": "Backend proof exists, but the backend-to-Launcher contract packet is missing; routed back to Backend Dev.",
                 "proof_ids": len(getattr(task, "proof_ids", []) or []),
@@ -893,7 +893,7 @@ def _dev_replanned_materialized_proof_stage(task: Task, *, actor: str) -> bool:
     if stage is None:
         return False
     state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
-    if state not in {TaskState.DEV_IMPLEMENTING, TaskState.REWORK_REQUESTED}:
+    if state not in {TaskState.RUNNING, TaskState.RUNNING}:
         return False
     return bool(getattr(stage, "test_plan", None))
 
@@ -1134,16 +1134,16 @@ def _apply_implementation_review(task: Task, payload: dict[str, Any], *, actor: 
         _dedupe_extend(task.proof_ids, [qa_proof.id])
     if verdict == "approved":
         if not _all_stages_dev_complete(task):
-            task.state = TaskState.DEV_IMPLEMENTING
+            task.state = TaskState.RUNNING
             _advance_to_next_dev_stage(task)
             return
         for stage in task.stages:
             if stage.status in DEV_COMPLETE_STAGE_STATUSES:
                 stage.status = StageStatus.PASSED
                 stage.updated_at = now()
-        task.state = TaskState.APPROVED
+        task.state = TaskState.RUNNING
     elif verdict == "needs_fixes":
-        task.state = TaskState.REWORK_REQUESTED
+        task.state = TaskState.RUNNING
     else:
         task.state = TaskState.BLOCKED
         if "qa_blocked_verdict_needs_dev_recovery" not in task.risk_flags:

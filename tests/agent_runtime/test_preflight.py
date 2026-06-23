@@ -14,7 +14,7 @@ def task(**overrides):
         "id": "task_preflight",
         "title": "Backend docker proof",
         "description": "Run docker compose proof",
-        "state": TaskState.DEV_IMPLEMENTING,
+        "state": TaskState.RUNNING,
         "created_at": now(),
         "updated_at": now(),
         "requested_by": "test",

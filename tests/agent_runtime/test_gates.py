@@ -6,7 +6,7 @@ from agent_runtime.states import TaskState, StageStatus
 
 
 def make_task(review=False):
-    ts=now(); t=Task(id="t", title="T", description="d", state=TaskState.QA_REVIEW_PLAN, created_at=ts, updated_at=ts, requested_by="tony", stages=[TaskStage(id="s1", title="S", objective="O", status=StageStatus.READY, acceptance_criteria=["ok"], test_plan=["pytest"])])
+    ts=now(); t=Task(id="t", title="T", description="d", state=TaskState.RUNNING, created_at=ts, updated_at=ts, requested_by="tony", stages=[TaskStage(id="s1", title="S", objective="O", status=StageStatus.READY, acceptance_criteria=["ok"], test_plan=["pytest"])])
     if review:
         t.plan_review=PlanReview(id="r", task_id="t", reviewer_agent_id="qa", verdict=PlanReviewVerdict.APPROVED, reviewed_stage_ids=["s1"], proof_requirements_confirmed=True, test_plan_confirmed=True)
     return t

@@ -13,7 +13,7 @@ from agent_runtime.states import RunState, TaskState
 
 def _task():
     ts = now()
-    return Task(id="task_ctx", title="T", description="d", state=TaskState.READY_FOR_WORK, created_at=ts, updated_at=ts, requested_by="tony")
+    return Task(id="task_ctx", title="T", description="d", state=TaskState.RUNNING, created_at=ts, updated_at=ts, requested_by="tony")
 
 
 def _run(task):

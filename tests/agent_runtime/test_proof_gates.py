@@ -7,7 +7,7 @@ from agent_runtime.states import StageStatus
 
 
 def task(visual=False):
-    ts=now(); return Task(id="t", title="T", description="d", state=TaskState.QA_TESTING, created_at=ts, updated_at=ts, requested_by="tony", requires_visual_proof=visual)
+    ts=now(); return Task(id="t", title="T", description="d", state=TaskState.RUNNING, created_at=ts, updated_at=ts, requested_by="tony", requires_visual_proof=visual)
 
 def proof(pt, **meta):
     return Proof(id=f"p{pt}", task_id="t", stage_id=None, type=pt, title=str(pt), path_or_value=meta.pop("path", "x"), created_by="h", created_at=now(), metadata=meta, redaction_status="safe")

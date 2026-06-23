@@ -68,7 +68,17 @@ def test_status_marks_next_action_blocked_by_open_incident():
 
 
 def test_status_next_action_uses_mission_state_machine_for_READY_FOR_REVIEW():
-    ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.READY_FOR_REVIEW, created_at=n, updated_at=n, requested_by="tony"))
+    ts=TaskStore(); n=now(); ts.create(Task(
+        id="t",
+        title="T",
+        description="d",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        current_stage_id="stage_1",
+        stages=[TaskStage(id="stage_1", title="S", objective="O", status=StageStatus.READY_FOR_QA)],
+    ))
 
     s=build_status(task_store=ts)
 
@@ -96,7 +106,7 @@ def test_status_next_action_owner_reports_backend_specialist_for_backend_stage()
         id="t",
         title="Stage 47",
         description="d",
-        state=TaskState.DEV_IMPLEMENTING,
+        state=TaskState.RUNNING,
         created_at=n,
         updated_at=n,
         requested_by="tony",
@@ -125,7 +135,7 @@ def test_status_blocks_budget_incident_after_continuation_cap():
     runs = RunStore()
     incidents = IncidentStore()
     n = now()
-    ts.create(Task(id="t", title="T", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=n, updated_at=n, requested_by="tony"))
+    ts.create(Task(id="t", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
     for idx in range(2):
         approved = runs.open_run("dev", "t", stage_id="stage_1", session_id="session_budget")
         approved.state = RunState.WAITING_ON_APPROVAL
@@ -150,7 +160,7 @@ def test_status_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_ag
     runs = RunStore()
     incidents = IncidentStore()
     n = now()
-    ts.create(Task(id="t", title="T", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=n, updated_at=n, requested_by="tony", open_incident_ids=["inc_loop"]))
+    ts.create(Task(id="t", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony", open_incident_ids=["inc_loop"]))
     waiting = runs.open_run("backend_dev", "t", stage_id="backend_implementation", session_id="session_budget")
     waiting.progress = {
         "loop_warning": "read_search_without_patch_threshold",

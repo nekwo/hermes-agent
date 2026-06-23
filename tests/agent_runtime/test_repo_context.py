@@ -8,7 +8,7 @@ from hermes_time import now
 
 def _task_with_repos(repos):
     ts = now()
-    task = Task(id="task_repo", title="Repo", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=ts, updated_at=ts, requested_by="tony")
+    task = Task(id="task_repo", title="Repo", description="d", state=TaskState.RUNNING, created_at=ts, updated_at=ts, requested_by="tony")
     task.affected_repos = repos
     return task
 
