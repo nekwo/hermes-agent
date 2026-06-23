@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .incidents import CRITICAL_INCIDENT_KINDS
-from .mission_plan import blocking_stages_ready_for_qa, has_typed_plan
+from .mission_plan import blocking_stages_ready_for_qa, has_typed_plan, task_stage_records
 from .models import Incident, MissionPlanStage, Proof, Task
 from .proof_rules import ProofType
 
@@ -108,7 +108,7 @@ def stage_proof_satisfied(stage: MissionPlanStage, proofs: list[Proof]) -> GateR
 
 
 def task_requires_visual(task: Task) -> bool:
-    return bool(task.requires_visual_proof or any(stage.requires_visual_proof for stage in task.stages))
+    return bool(task.requires_visual_proof or any(stage.requires_visual_proof for stage in task_stage_records(task)))
 
 
 def task_delivery_proof_satisfied(task: Task, proofs: list[Proof]) -> GateResult:

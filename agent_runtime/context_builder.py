@@ -16,6 +16,7 @@ from .decision_payload_contracts import payload_contract
 from .events import EventLog
 from .mission_plan import blocking_stages_ready_for_qa, current_plan_stage, has_typed_plan, mission_plan_summary
 from .models import AgentRun, Event, Proof, Task, TaskStage
+from .mission_plan import task_stage_records
 from .objective_templates import render_objective
 from .packets import HANDOFF_MODES, HANDOFF_OWNERS, HANDOFF_REPOS, QA_NEXT_OWNERS, latest_packet, latest_packets_for_task
 from .profile_context import active_profile_name
@@ -63,9 +64,9 @@ def build_context(
 ) -> AgentContext:
     current_stage = None
     if task.current_stage_id:
-        current_stage = next((stage for stage in task.stages if stage.id == task.current_stage_id), None)
+        current_stage = next((stage for stage in task_stage_records(task) if stage.id == task.current_stage_id), None)
     if current_stage is None and run.stage_id:
-        current_stage = next((stage for stage in task.stages if stage.id == run.stage_id), None)
+        current_stage = next((stage for stage in task_stage_records(task) if stage.id == run.stage_id), None)
     selected_proof_ids = proof_ids if proof_ids is not None else list(task.proof_ids)
     event_log = event_log or EventLog()
     stage_id = run.stage_id or task.current_stage_id
@@ -197,9 +198,9 @@ def render_context(ctx: AgentContext) -> str:
         lines.extend(["", "## Latest Delivery Packet", "```json", _context_json(ctx.latest_delivery), "```"])
     if ctx.latest_qa_review:
         lines.extend(["", "## Latest QA Review Packet", "```json", _context_json(ctx.latest_qa_review), "```"])
-    if ctx.task.stages:
+    if task_stage_records(ctx.task):
         lines.extend(["", "## All Stages"])
-        for stage in ctx.task.stages:
+        for stage in task_stage_records(ctx.task):
             status = stage.status.value if hasattr(stage.status, "value") else str(stage.status)
             lines.extend(
                 [
@@ -683,7 +684,7 @@ def _context_objective_stage(task: Task, run: AgentRun):
         return typed
     stage_id = run.stage_id or task.current_stage_id
     if stage_id:
-        return next((stage for stage in task.stages if stage.id == stage_id), None)
+        return next((stage for stage in task_stage_records(task) if stage.id == stage_id), None)
     return None
 
 
@@ -1175,7 +1176,7 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
             "stage_id": stage_id,
         }
     if role == "dev":
-        if not stage_id or not getattr(task, "stages", None):
+        if not stage_id or not task_stage_records(task):
             return {
                 "decision_type": "propose_stage_plan",
                 "shape_id": "dev.propose_stage_plan",
@@ -1361,7 +1362,7 @@ def _current_stage_command_hints(task: Task, run: AgentRun, *, role: str) -> lis
     if role != "dev":
         return []
     stage_id = str(run.stage_id or task.current_stage_id or "").strip()
-    stage = next((item for item in getattr(task, "stages", []) or [] if item.id == stage_id), None)
+    stage = next((item for item in task_stage_records(task) or [] if item.id == stage_id), None)
     if stage is None:
         return []
     if stage_requires_product_edit(task, stage) and not stage_is_committed_verification_gate(task, stage):
@@ -1381,7 +1382,7 @@ def _truncate_command_hint(command: str) -> str:
 
 
 def _task_or_stage_mentions_visual(task: Task, stage_id: str | None) -> bool:
-    stage = next((item for item in getattr(task, "stages", []) or [] if item.id == stage_id), None)
+    stage = next((item for item in task_stage_records(task) or [] if item.id == stage_id), None)
     if bool(getattr(task, "requires_visual_proof", False)) or bool(getattr(stage, "requires_visual_proof", False)):
         return True
     values = [

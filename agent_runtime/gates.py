@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .mission_plan import task_stage_records
 from .models import Task
 from .plan_review import PlanReviewVerdict
 
@@ -17,9 +18,10 @@ def can_enter_dev_implementing(task: Task) -> GateResult:
     if task.waiver and task.waiver.get("gate") == "qa_plan_review":
         return GateResult(True, [], [f"waived by {task.waiver.get('actor', 'unknown')}"])
     missing: list[str] = []
-    if not task.stages:
+    stages = task_stage_records(task)
+    if not stages:
         missing.append("missing stage plan")
-    for stage in task.stages:
+    for stage in stages:
         if not stage.acceptance_criteria:
             missing.append(f"stage {stage.id} missing acceptance criteria")
         if not stage.test_plan:
@@ -29,7 +31,7 @@ def can_enter_dev_implementing(task: Task) -> GateResult:
         missing.append("missing approved QA plan review")
     else:
         reviewed = set(review.reviewed_stage_ids)
-        for stage in task.stages:
+        for stage in stages:
             if stage.id not in reviewed:
                 missing.append(f"stage {stage.id} not reviewed by QA")
         if not review.test_plan_confirmed:

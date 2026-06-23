@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .gates import can_enter_dev_implementing
+from .mission_plan import task_stage_records
 from .models import Task
 from .plan_review import PlanReviewVerdict
 from .states import TaskState
@@ -47,7 +48,7 @@ def _qa_approved_stage_mismatch(task: Task) -> list[ReconciliationFinding]:
     review = getattr(task, "plan_review", None)
     if review is None or review.verdict != PlanReviewVerdict.APPROVED:
         return []
-    stage_ids = {stage.id for stage in task.stages}
+    stage_ids = {stage.id for stage in task_stage_records(task)}
     missing = [stage_id for stage_id in review.reviewed_stage_ids if stage_id not in stage_ids]
     if not missing:
         return []
