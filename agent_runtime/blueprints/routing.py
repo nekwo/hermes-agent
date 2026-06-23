@@ -34,17 +34,6 @@ def derive_stage_outcome(
     stage: MissionPlanStage,
     proofs: Iterable[Proof] | None = None,
 ) -> StageOutcome | None:
-    if _stage_has_required_gate(stage) and decision.type in {
-        DecisionType.REQUEST_TEST_RUN,
-        DecisionType.REQUEST_QA_REVIEW,
-        DecisionType.COMPLETE,
-        DecisionType.APPROVE,
-        DecisionType.PROPOSE_PATCH,
-    }:
-        gate = stage_proof_satisfied(stage, list(proofs or []))
-        if gate.allowed:
-            return StageOutcome.PASSED
-        return StageOutcome.MISSING_INPUT
     if decision.type == DecisionType.REPORT_QA_VERDICT:
         verdict = str(decision.payload.get("verdict") or "").strip().lower()
         if verdict in {"approved", "passed", "pass"}:
@@ -58,6 +47,17 @@ def derive_stage_outcome(
         if verdict in {"missing_input", "missing-input"}:
             return StageOutcome.MISSING_INPUT
         return StageOutcome.FAILED
+    if _stage_has_required_gate(stage) and decision.type in {
+        DecisionType.REQUEST_TEST_RUN,
+        DecisionType.REQUEST_QA_REVIEW,
+        DecisionType.COMPLETE,
+        DecisionType.APPROVE,
+        DecisionType.PROPOSE_PATCH,
+    }:
+        gate = stage_proof_satisfied(stage, list(proofs or []))
+        if gate.allowed:
+            return StageOutcome.PASSED
+        return StageOutcome.MISSING_INPUT
     if decision.type == DecisionType.REQUEST_TEST_RUN:
         return _outcome_from_proofs(proofs or [])
     if decision.type in {DecisionType.PROPOSE_ACCEPTANCE, DecisionType.REQUEST_QA_REVIEW, DecisionType.COMPLETE, DecisionType.APPROVE}:
@@ -125,6 +125,8 @@ def apply_stage_outcome(task: Task, stage_id: str, outcome: StageOutcome, *, rea
         stage.status = StageStatus.PASSED
         plan.current_stage_id = None
         task.current_stage_id = None
+        if stage.owner == "qa":
+            task.state = TaskState.APPROVED
         plan.revision = int(plan.revision or 0) + 1
         task.updated_at = now()
         from .runs import BlueprintRunStore
@@ -140,10 +142,16 @@ def apply_stage_outcome(task: Task, stage_id: str, outcome: StageOutcome, *, rea
 
     plan.current_stage_id = next_stage.id
     task.current_stage_id = next_stage.id
+    if next_stage.owner == "qa":
+        task.state = TaskState.READY_FOR_REVIEW
+    elif next_stage.owner in {"dev", "backend_dev"}:
+        task.state = TaskState.DEV_IMPLEMENTING
     if next_stage.status in {StageStatus.PASSED, StageStatus.READY_FOR_QA, StageStatus.BLOCKED, StageStatus.REWORK}:
         next_stage.status = StageStatus.REWORK if outcome in RETRY_OUTCOMES else StageStatus.READY
     elif next_stage.status == StageStatus.DRAFT:
         next_stage.status = StageStatus.READY
+    if next_stage.owner in {"dev", "backend_dev"} and next_stage.status == StageStatus.READY:
+        next_stage.status = StageStatus.IMPLEMENTING
     next_stage.updated_at = now()
     plan.revision = int(plan.revision or 0) + 1
     task.updated_at = now()
@@ -162,6 +170,8 @@ def apply_decision_outcome(
     if not is_blueprint_plan(plan):
         return None
     stage = _stage_by_id(plan, stage_id or plan.current_stage_id or getattr(task, "current_stage_id", None))
+    if stage is None:
+        stage = _stage_by_id(plan, plan.current_stage_id or getattr(task, "current_stage_id", None))
     if stage is None:
         return None
     outcome = derive_stage_outcome(decision, stage, proofs=proofs)

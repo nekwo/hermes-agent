@@ -48,7 +48,7 @@ def test_context_request_rejects_unsafe_or_missing_path_without_freezing_schedul
     assert req["status"] == "unsupported"
     assert has_unresolved_context_request(task) is False
     assert action.type.value == "run_slot"
-    assert action.reason == "needs dev planning"
+    assert action.reason == "blueprint stage implement needs slot dev"
     assert ctx.mission_hud["terminal_feedback"]["action_result"] == "context_unavailable"
     assert ctx.mission_hud["terminal_feedback"]["failure_reason"] == "path_outside_runtime_root_or_absolute_disallowed"
     assert ctx.mission_hud["terminal_feedback"]["next_expected"] == "request_one_narrower_repo_relative_path_or_block_with_exact_feedback"
@@ -268,4 +268,4 @@ def test_initial_scope_context_requests_still_route_to_neko(tmp_path):
     action = MissionStateMachine().next_action(task)
 
     assert action.type.value == "run_slot"
-    assert action.reason == "needs Neko Mission Lead scoping"
+    assert action.reason == "blueprint stage scope needs slot neko_supervisor"

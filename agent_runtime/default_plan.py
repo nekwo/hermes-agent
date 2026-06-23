@@ -33,6 +33,8 @@ def build_default_mission_plan(
     merged_bindings = {**DEFAULT_TASK_BLUEPRINT_BINDINGS, **dict(bindings or {})}
     plan = instantiate_blueprint(bp, goal=task.description or task.title, bindings=merged_bindings)
     _alias_default_slots_to_personas(plan)
+    _specialize_default_implementation_stage(task, plan)
+    _ensure_default_retry_edges(plan)
     _align_default_plan_to_task_state(task, plan)
     if plan.mission_intent is not None:
         plan.mission_intent.title = task.title
@@ -106,6 +108,30 @@ def _align_default_plan_to_task_state(task: Task, plan: MissionPlan) -> None:
         plan.current_stage_id = None
 
 
+def _specialize_default_implementation_stage(task: Task, plan: MissionPlan) -> None:
+    repos = {_repo_for_text(str(item)) for item in (getattr(task, "affected_repos", None) or [])}
+    flags = {str(item).strip().lower() for item in (getattr(task, "risk_flags", None) or [])}
+    implement = next((stage for stage in plan.stages if stage.id == "implement"), None)
+    if implement is None:
+        return
+    if "EterniaBackend" in repos and ("EterniaLauncher" not in repos or "backend_contract_first" in flags):
+        implement.owner = "backend_dev"
+        implement.owner_slot = "backend_dev"
+        implement.repo = "EterniaBackend"
+        plan.slots.setdefault("backend_dev", {"role": "backend_dev", "required": True, "description": "Backend implementation specialist."})
+        plan.bindings.setdefault("backend_dev", "backend_dev")
+        plan.binding_sources.setdefault("backend_dev", "persona:backend_dev")
+
+
+def _ensure_default_retry_edges(plan: MissionPlan) -> None:
+    if plan.blueprint_id != DEFAULT_TASK_BLUEPRINT_ID:
+        return
+    existing = {(str(edge.get("source") or ""), str(edge.get("outcome") or "")) for edge in plan.edges or []}
+    for outcome in ("failed", "needs_fixes", "missing_input"):
+        if ("implement", outcome) not in existing:
+            plan.edges.append({"source": "implement", "outcome": outcome, "target": "implement"})
+
+
 def _plan_from_legacy_task_stages(task: Task) -> MissionPlan | None:
     if not getattr(task, "stages", None):
         return None
@@ -130,6 +156,26 @@ def _plan_from_legacy_task_stages(task: Task) -> MissionPlan | None:
                 updated_at=legacy.updated_at or now(),
             )
         )
+    if stages and not any(stage.owner == "qa" for stage in stages):
+        slots.setdefault("qa", {"role": "qa", "required": True, "description": "Migrated legacy owner qa."})
+        stages.append(
+            MissionPlanStage(
+                id="verify",
+                title="QA verification",
+                objective="Verify the migrated legacy mission stages and attached proof.",
+                owner="qa",
+                owner_slot="qa",
+                repo="hermes-agent",
+                kind="qa_verdict",
+                status=StageStatus.READY,
+                blocks_qa_until=False,
+                created_at=now(),
+                updated_at=now(),
+            )
+        )
+    for index, stage in enumerate(stages):
+        if index > 0 and stage.owner != "qa" and not stage.depends_on:
+            stage.depends_on = [stages[index - 1].id]
     current_id = task.current_stage_id if task.current_stage_id and any(stage.id == task.current_stage_id for stage in stages) else stages[0].id
     return MissionPlan(
         enabled=True,
@@ -148,29 +194,52 @@ def _plan_from_legacy_task_stages(task: Task) -> MissionPlan | None:
         slots=slots,
         bindings={slot: slot for slot in slots},
         binding_sources={slot: f"persona:{slot}" for slot in slots},
-        edges=[],
+        edges=_linear_edges_for_migrated_stages(stages),
         limits={"max_attempts_per_stage": 3, "max_total_stages": 16},
         on_unhandled="intervention",
     )
 
 
+def _linear_edges_for_migrated_stages(stages: list[MissionPlanStage]) -> list[dict[str, str]]:
+    edges: list[dict[str, str]] = []
+    for index, stage in enumerate(stages):
+        target = stages[index + 1].id if index + 1 < len(stages) else "done"
+        edges.append({"source": stage.id, "outcome": "ready", "target": target})
+        edges.append({"source": stage.id, "outcome": "passed", "target": target})
+        edges.append({"source": stage.id, "outcome": "needs_fixes", "target": stage.id})
+        edges.append({"source": stage.id, "outcome": "failed", "target": stage.id})
+        edges.append({"source": stage.id, "outcome": "missing_input", "target": stage.id})
+        edges.append({"source": stage.id, "outcome": "blocked", "target": "intervention"})
+    return edges
+
+
 def _owner_for_legacy_stage(stage) -> str:
-    text = " ".join(
+    id_title = " ".join([str(getattr(stage, "id", "") or ""), str(getattr(stage, "title", "") or "")]).lower()
+    path_plan = " ".join(
         [
-            str(getattr(stage, "id", "") or ""),
-            str(getattr(stage, "title", "") or ""),
-            str(getattr(stage, "objective", "") or ""),
+            " ".join(str(item) for item in (getattr(stage, "affected_paths", None) or [])),
             " ".join(str(item) for item in (getattr(stage, "test_plan", None) or [])),
         ]
     ).lower()
-    status = getattr(stage, "status", None)
-    if status in {StageStatus.READY_FOR_QA, StageStatus.PASSED} or "qa" in text or "verify" in text:
+    text = " ".join([id_title, str(getattr(stage, "objective", "") or "").lower(), path_plan])
+    if "qa" in text or "verify" in text:
         return "qa"
-    if "backend" in text or "eterniabackend" in text:
+    if "backend" in id_title or "eterniabackend" in id_title or "backend" in path_plan or "eterniabackend" in path_plan:
         return "backend_dev"
     if "neko" in text or "scope" in text:
         return "neko_supervisor"
     return "dev"
+
+
+def _repo_for_text(value: str) -> str:
+    lowered = str(value or "").lower()
+    if "backend" in lowered:
+        return "EterniaBackend"
+    if "launcher" in lowered:
+        return "EterniaLauncher"
+    if "hermes" in lowered:
+        return "hermes-agent"
+    return lowered
 
 
 def _repo_for_legacy_stage(task: Task, stage) -> str:

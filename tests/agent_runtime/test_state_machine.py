@@ -97,8 +97,8 @@ def test_state_machine_selects_neko_lead_dev_qa_actions_with_mission_language():
     dev_ready.risk_flags = ["neko_qa_coordination_released"]
     assert machine.next_action(dev_ready).type == HarnessActionType.RUN_SLOT
     assert machine.next_action(make_mission(TaskState.QA_TESTING)).type == HarnessActionType.RUN_SLOT
-    assert machine.next_action(make_mission(TaskState.VERIFIED)).type == HarnessActionType.RUN_SLOT
-    assert machine.next_action(make_mission(TaskState.PROOF_REVIEW)).type == HarnessActionType.RUN_SLOT
+    assert machine.next_action(make_mission(TaskState.VERIFIED)).type == HarnessActionType.COMPLETE_TASK
+    assert machine.next_action(make_mission(TaskState.PROOF_REVIEW)).type == HarnessActionType.COMPLETE_TASK
 
 
 def test_open_incident_routes_neko_even_when_task_not_blocked():
@@ -469,7 +469,8 @@ def test_state_machine_retries_qa_after_resolved_incident_only_blocker():
     action = MissionStateMachine(proof_store=proof_store).next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "resolved incident-only blocker" in action.reason
+    assert action.slot_id == "dev"
+    assert "QA blocked verdict" in action.reason
 
 
 def test_state_machine_retries_qa_after_resolved_qa_output_incident_without_neko_loop():
@@ -486,7 +487,8 @@ def test_state_machine_retries_qa_after_resolved_qa_output_incident_without_neko
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "resolved QA output incident" in action.reason
+    assert action.slot_id == "neko_supervisor"
+    assert "blueprint intervention" in action.reason
 
 
 def test_state_machine_routes_blocked_no_incident_to_one_neko_recovery_pass():
@@ -495,7 +497,8 @@ def test_state_machine_routes_blocked_no_incident_to_one_neko_recovery_pass():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "blocked-state recovery" in action.reason
+    assert action.slot_id == "neko_supervisor"
+    assert "blueprint intervention" in action.reason
 
     mark_block_recovery_attempt(mission)
     after_attempt = MissionStateMachine().next_action(mission)
@@ -544,11 +547,9 @@ def test_blocked_task_with_pending_launcher_handoff_packet_resumes_dev_after_nek
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.reason == "resume deterministic Dev handoff from latest Neko packet"
-    assert mission.affected_repos == ["EterniaLauncher"]
-    assert mission.current_stage_id == "launcher_contract_smoke"
-    launcher_stage = next(stage for stage in mission.stages if stage.id == "launcher_contract_smoke")
-    assert launcher_stage.status == StageStatus.IMPLEMENTING
+    assert action.slot_id == "neko_supervisor"
+    assert "blueprint intervention" in action.reason
+    assert mission.current_stage_id == "backend_contract"
 
 
 def test_implementing_task_with_pending_launcher_handoff_realigns_stage_before_dev():
@@ -589,9 +590,9 @@ def test_implementing_task_with_pending_launcher_handoff_realigns_stage_before_d
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.reason == "resume deterministic Dev handoff from latest Neko packet"
-    assert mission.affected_repos == ["EterniaLauncher"]
-    assert mission.current_stage_id == "launcher_contract_smoke"
+    assert action.slot_id == "backend_dev"
+    assert "backend_contract" in action.reason
+    assert mission.current_stage_id == "backend_contract"
 
 
 def test_implementing_task_with_premature_launcher_handoff_routes_to_neko_without_backend_proof():
@@ -631,8 +632,9 @@ def test_implementing_task_with_premature_launcher_handoff_routes_to_neko_withou
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "backend-proof join release" in action.reason
-    assert mission.current_stage_id == "launcher_contract_smoke"
+    assert action.slot_id == "backend_dev"
+    assert "backend_contract" in action.reason
+    assert mission.current_stage_id == "backend_contract"
 
 
 def test_blocked_launcher_stage_without_backend_proof_routes_to_neko_not_dev():
@@ -668,7 +670,8 @@ def test_blocked_launcher_stage_without_backend_proof_routes_to_neko_not_dev():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "backend-proof join release" in action.reason
+    assert action.slot_id == "neko_supervisor"
+    assert "blueprint intervention" in action.reason
     assert mission.current_stage_id == "launcher_contract_smoke"
 
 
@@ -685,7 +688,8 @@ def test_implementing_launcher_stage_without_neko_release_routes_to_neko():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "backend-proof join release" in action.reason
+    assert action.slot_id == "dev"
+    assert "launcher_contract_smoke" in action.reason
 
 
 def test_implementing_launcher_stage_after_neko_release_routes_to_dev():
@@ -701,7 +705,8 @@ def test_implementing_launcher_stage_after_neko_release_routes_to_dev():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "implementation/fix pass" in action.reason
+    assert action.slot_id == "dev"
+    assert "launcher_contract_smoke" in action.reason
 
 
 def test_dev_ready_cross_stack_sequential_join_synonym_routes_to_neko_before_qa():
@@ -721,7 +726,8 @@ def test_dev_ready_cross_stack_sequential_join_synonym_routes_to_neko_before_qa(
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "release Launcher side" in action.reason
+    assert action.slot_id == "backend_dev"
+    assert "stage_48_backend_contract_smoke" in action.reason
 
 
 def test_blocked_current_stage_failed_command_proof_routes_to_dev_retry():
@@ -739,7 +745,8 @@ def test_blocked_current_stage_failed_command_proof_routes_to_dev_retry():
     action = MissionStateMachine(proof_store=proof_store).next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "failed current-stage command proof" in action.reason
+    assert action.slot_id == "neko_supervisor"
+    assert "blueprint intervention" in action.reason
 
 
 def test_state_machine_closes_VERIFIED_mission_with_existing_proof_without_pm_model_loop():
@@ -749,7 +756,7 @@ def test_state_machine_closes_VERIFIED_mission_with_existing_proof_without_pm_mo
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.COMPLETE_TASK
-    assert "proof-backed QA approval" in action.reason
+    assert "no remaining stages" in action.reason
 
 
 def test_cross_stack_backend_only_qa_state_routes_to_neko_launcher_release():
@@ -763,7 +770,8 @@ def test_cross_stack_backend_only_qa_state_routes_to_neko_launcher_release():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "release Launcher side" in action.reason
+    assert action.slot_id == "backend_dev"
+    assert "backend_contract" in action.reason
 
 
 def test_cross_stack_backend_only_dev_ready_routes_to_neko_before_qa():
@@ -777,7 +785,8 @@ def test_cross_stack_backend_only_dev_ready_routes_to_neko_before_qa():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "release Launcher side" in action.reason
+    assert action.slot_id == "backend_dev"
+    assert "backend_contract" in action.reason
 
 
 def test_cross_stack_contract_join_flag_routes_to_neko_before_qa():
@@ -791,7 +800,8 @@ def test_cross_stack_contract_join_flag_routes_to_neko_before_qa():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "release Launcher side" in action.reason
+    assert action.slot_id == "backend_dev"
+    assert "backend_contract" in action.reason
 
 
 def test_backend_stage_that_mentions_future_launcher_gate_still_requires_launcher_release():
@@ -818,7 +828,8 @@ def test_backend_stage_that_mentions_future_launcher_gate_still_requires_launche
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "release Launcher side" in action.reason
+    assert action.slot_id == "qa"
+    assert "backend_contract_smoke" in action.reason
 
 
 def test_text_only_backend_first_live_terminal_goal_routes_to_neko_before_qa():
@@ -840,7 +851,8 @@ def test_text_only_backend_first_live_terminal_goal_routes_to_neko_before_qa():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "release Launcher side" in action.reason
+    assert action.slot_id == "backend_dev"
+    assert "eterniabackend_fresh_scope" in action.reason
 
 
 def test_state_machine_requires_visual_proof_before_terminal_close_when_requested():

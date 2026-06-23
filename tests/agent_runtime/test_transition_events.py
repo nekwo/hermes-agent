@@ -31,4 +31,4 @@ def test_pm_decision_emits_exactly_one_transition_event():
     transitions = [event for event in EventLog().tail(20) if event.type == "task.transition" and event.task_id == task.id]
     assert len(transitions) == 1
     assert transitions[0].payload["from"] == "created"
-    assert transitions[0].payload["to"] == "pm_ready_for_dev"
+    assert transitions[0].payload["to"] == "dev_implementing"
