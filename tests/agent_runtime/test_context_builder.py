@@ -63,6 +63,131 @@ def test_context_includes_stage53_simplified_agent_hud():
     assert "decision_menu" in ctx.mission_hud
 
 
+def test_rendered_context_uses_stage_output_template_instead_of_raw_description():
+    task = make_task()
+    task.description = "Raw task description should be input, not the whole first message."
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title=task.title, objective=task.description),
+        current_stage_id="implement_socket",
+        stages=[
+            MissionPlanStage(
+                id="implement_socket",
+                title="Implement Socket",
+                objective="Implement the output-socket driven objective.",
+                owner="dev",
+                owner_slot="builder",
+                repo="hermes-agent",
+                kind="implementation",
+                output_type="code feature",
+                proof_gate={"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"]},
+            )
+        ],
+        slots={"builder": {"role": "builder", "required": True}},
+    )
+    task.current_stage_id = "implement_socket"
+    run = make_run()
+    run.stage_id = "implement_socket"
+
+    rendered = render_context(build_context(task, run))
+
+    assert "## Objective" in rendered
+    assert "Build this node." in rendered
+    assert "Deliver: a working code change with focused proof." in rendered
+    assert "Objective: Implement the output-socket driven objective." in rendered
+    assert "## Description" not in rendered
+
+
+def test_downstream_objective_template_uses_upstream_packet_as_input():
+    log = EventLog()
+    task = make_task()
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title=task.title, objective=task.description),
+        current_stage_id="verify_socket",
+        stages=[
+            MissionPlanStage(
+                id="implement_socket",
+                title="Implement Socket",
+                objective="Implement the feature.",
+                owner="dev",
+                owner_slot="builder",
+                repo="hermes-agent",
+                kind="implementation",
+                output_type="code feature",
+            ),
+            MissionPlanStage(
+                id="verify_socket",
+                title="Verify Socket",
+                objective="Verify the upstream output.",
+                owner="qa",
+                owner_slot="verifier",
+                repo="hermes-agent",
+                kind="qa_verdict",
+                output_type="qa verdict",
+                proof_gate={"required": True, "minimum_status": "approved", "required_proof_types": ["qa_verdict"]},
+                depends_on=["implement_socket"],
+            ),
+        ],
+        slots={"builder": {"role": "builder", "required": True}, "verifier": {"role": "verifier", "required": True}},
+    )
+    task.current_stage_id = "verify_socket"
+    run = make_run()
+    run.persona_id = "qa"
+    run.stage_id = "verify_socket"
+    packet = make_packet(
+        task=task,
+        decision=AgentDecision(type=DecisionType.PROPOSE_ACCEPTANCE, summary="delivered", rationale="done", payload={}),
+        packet_type="delivery",
+        body={"work_status": "patch_proposed", "summary": "upstream build output is ready"},
+        actor="dev",
+        run_id="run_dev",
+        stage_id="implement_socket",
+    )
+    record_packet(packet, event_log=log)
+
+    rendered = render_context(build_context(task, run, event_log=log))
+
+    assert "Verify this node." in rendered
+    assert "Deliver: a proof-backed QA verdict." in rendered
+    assert "upstream build output is ready" in rendered
+
+
+def test_agent_hud_current_assignment_is_stage_shaped_from_proof_gate():
+    task = make_task()
+    task.description = "Task-level description should not shape current assignment."
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title=task.title, objective=task.description),
+        current_stage_id="design_socket",
+        stages=[
+            MissionPlanStage(
+                id="design_socket",
+                title="Design Socket",
+                objective="Write the design artifact.",
+                owner="dev",
+                owner_slot="builder",
+                repo="hermes-agent",
+                kind="context",
+                output_type="design document",
+                proof_gate={"required": True, "minimum_status": "passed", "required_proof_types": ["artifact"]},
+            )
+        ],
+        slots={"builder": {"role": "builder", "required": True}},
+        edges=[{"source": "design_socket", "outcome": "passed", "target": "done"}],
+    )
+    task.current_stage_id = "design_socket"
+    run = make_run()
+    run.stage_id = "design_socket"
+
+    hud = build_context(task, run).mission_hud
+    assignment = hud["agent_hud"]["current_assignment"]
+
+    assert assignment["stage_id"] == "design_socket"
+    assert assignment["owner_slot"] == "builder"
+    assert assignment["objective"] == "Write the design artifact."
+    assert assignment["output_type"] == "design document"
+    assert assignment["required_proof_types"] == ["artifact"]
+    assert assignment["outgoing_edges"] == [{"outcome": "passed", "target": "done"}]
+
+
 def test_context_agent_hud_surfaces_advisory_evidence_stack():
     task = make_task()
     task.harness_self_heal = {

@@ -16,6 +16,7 @@ from .decision_payload_contracts import payload_contract
 from .events import EventLog
 from .mission_plan import blocking_stages_ready_for_qa, current_plan_stage, has_typed_plan, mission_plan_summary
 from .models import AgentRun, Event, Proof, Task, TaskStage
+from .objective_templates import render_objective
 from .packets import HANDOFF_MODES, HANDOFF_OWNERS, HANDOFF_REPOS, QA_NEXT_OWNERS, latest_packet, latest_packets_for_task
 from .profile_context import active_profile_name
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_summary, simplified_phase_for_task
@@ -113,6 +114,7 @@ def build_context(
 
 
 def render_context(ctx: AgentContext) -> str:
+    objective_stage = _context_objective_stage(ctx.task, ctx.run)
     lines = [
         "# Agent Runtime Tick Context",
         "",
@@ -123,8 +125,14 @@ def render_context(ctx: AgentContext) -> str:
         f"- requested_by: {ctx.task.requested_by}",
         f"- requires_visual_proof: {ctx.task.requires_visual_proof}",
         "",
-        "## Description",
-        ctx.task.description,
+        "## Objective",
+        render_objective(
+            objective_stage,
+            goal=ctx.task,
+            input_artifact=_objective_input_artifact(ctx, objective_stage),
+            role=_stage_role(ctx.task, ctx.run, objective_stage),
+            output_type=_stage_output_type(objective_stage),
+        ),
         "",
         "## Acceptance Criteria",
     ]
@@ -669,6 +677,79 @@ def _safe_proof_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
+def _context_objective_stage(task: Task, run: AgentRun):
+    typed = current_plan_stage(task) if has_typed_plan(task) else None
+    if typed is not None:
+        return typed
+    stage_id = run.stage_id or task.current_stage_id
+    if stage_id:
+        return next((stage for stage in task.stages if stage.id == stage_id), None)
+    return None
+
+
+def _objective_input_artifact(ctx: AgentContext, stage) -> str | None:
+    depends_on = list(getattr(stage, "depends_on", []) or []) if stage is not None else []
+    if not depends_on:
+        return None
+    for packet in (ctx.latest_delivery, ctx.latest_qa_review, ctx.latest_handoff_packet):
+        if isinstance(packet, dict):
+            body = packet.get("body") if isinstance(packet.get("body"), dict) else packet
+            if body:
+                return _context_json(body)[:1200]
+    return None
+
+
+def _stage_role(task: Task, run: AgentRun, stage) -> str:
+    owner_slot = str(getattr(stage, "owner_slot", "") or getattr(stage, "owner", "") or "").strip()
+    plan = getattr(task, "mission_plan", None)
+    slots = getattr(plan, "slots", {}) if plan is not None else {}
+    slot_info = slots.get(owner_slot) if isinstance(slots, dict) else None
+    if isinstance(slot_info, dict) and slot_info.get("role"):
+        return str(slot_info["role"])
+    return owner_slot or _hud_role(run)
+
+
+def _stage_output_type(stage) -> str:
+    explicit = str(getattr(stage, "output_type", "") or "").strip()
+    if explicit:
+        return explicit
+    gate = _stage_proof_gate(stage)
+    required = {str(item) for item in gate.get("required_proof_types", []) or []}
+    kind = str(getattr(stage, "kind", "") or "").strip().lower().replace("_", " ")
+    if "qa_verdict" in required or kind == "qa verdict":
+        return "qa verdict"
+    if required & {"test_run", "diff", "diff_stat", "commit"} or kind in {"implementation", "proof only"}:
+        return "code feature"
+    if required & {"artifact", "text", "url"} or kind in {"scope", "context", "investigation"}:
+        return "design document"
+    return "design document"
+
+
+def _stage_proof_gate(stage) -> dict[str, Any]:
+    gate = getattr(stage, "proof_gate", None)
+    if isinstance(gate, dict):
+        return dict(gate)
+    test_plan = list(getattr(stage, "test_plan", []) or []) if stage is not None else []
+    if test_plan:
+        return {"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"], "commands": test_plan}
+    return {"required": False, "required_proof_types": [], "minimum_status": "passed"}
+
+
+def _stage_outgoing_edges(task: Task, stage) -> list[dict[str, str]]:
+    if stage is None:
+        return []
+    stage_id = str(getattr(stage, "id", "") or "")
+    plan = getattr(task, "mission_plan", None)
+    edges = getattr(plan, "edges", []) if plan is not None else []
+    if not isinstance(edges, list):
+        return []
+    return [
+        {"outcome": str(edge.get("outcome") or ""), "target": str(edge.get("target") or "")}
+        for edge in edges
+        if isinstance(edge, dict) and str(edge.get("source") or "") == stage_id
+    ]
+
+
 def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], *, config=None, proof_store=None) -> dict[str, Any] | None:
     handoff = (packets.get("handoff_packet") or {}).get("body") if isinstance(packets.get("handoff_packet"), dict) else None
     handoff = handoff if isinstance(handoff, dict) else {}
@@ -739,10 +820,14 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
             "repo": typed_stage.repo,
             "kind": typed_stage.kind,
             "status": typed_stage.status.value,
+            "output_type": _stage_output_type(typed_stage),
             "proof_recipe_id": typed_stage.proof_recipe_id,
+            "proof_gate": _stage_proof_gate(typed_stage),
+            "required_proof_types": list((_stage_proof_gate(typed_stage)).get("required_proof_types", []) or []),
             "requires_product_edit": typed_stage.requires_product_edit,
             "requires_visual_proof": typed_stage.requires_visual_proof,
             "depends_on": list(typed_stage.depends_on),
+            "outgoing_edges": _stage_outgoing_edges(task, typed_stage),
         } if typed_stage is not None else None
         hud["typed_qa_gate"] = {
             "ready": ready,
@@ -826,6 +911,10 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str) -> dict[str, 
     repo_bundles = RepoBundleStore().list_for_task(task.id)
     active_bundle_id = str((run.progress or {}).get("repo_bundle_id") or "").strip() if isinstance(run.progress, dict) else ""
     active_bundle = next((bundle for bundle in repo_bundles if bundle.id == active_bundle_id), None)
+    stage = _context_objective_stage(task, run)
+    proof_gate = _stage_proof_gate(stage)
+    output_type = _stage_output_type(stage)
+    stage_id = str(getattr(stage, "id", "") or "")
     hud = {
         "schema_version": 1,
         "mode": "stage53_simplified",
@@ -834,8 +923,15 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str) -> dict[str, 
         "current_assignment": {
             "task_id": task.id,
             "title": task.title,
-            "objective": task.description,
-            "acceptance": list(task.acceptance_criteria or []),
+            "stage_id": stage_id or None,
+            "stage_title": str(getattr(stage, "title", "") or "") or None,
+            "owner_slot": str(getattr(stage, "owner_slot", "") or getattr(stage, "owner", "") or "") or None,
+            "objective": str(getattr(stage, "objective", "") or task.description),
+            "acceptance": list(getattr(stage, "acceptance_criteria", None) or task.acceptance_criteria or []),
+            "output_type": output_type,
+            "proof_gate": proof_gate,
+            "required_proof_types": list(proof_gate.get("required_proof_types", []) or []),
+            "outgoing_edges": _stage_outgoing_edges(task, stage),
             "affected_repos": safe_affected_repo_labels(getattr(task, "affected_repos", []) or []),
             "requires_visual_proof": bool(getattr(task, "requires_visual_proof", False)),
             "active_assignment_id": (run.progress or {}).get("assignment_id") if isinstance(run.progress, dict) else None,
