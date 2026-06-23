@@ -8,6 +8,7 @@ from typing import Any, Callable
 from hermes_time import now
 
 from .blueprints import BlueprintStore, instantiate_blueprint
+from .default_plan import DEFAULT_TASK_BLUEPRINT_BINDINGS, DEFAULT_TASK_BLUEPRINT_ID
 from .goal_hygiene import prepare_new_goal_runtime
 from .locks import HarnessLockUnavailable, tick_lock
 from .models import Task
@@ -18,12 +19,8 @@ from .ticker import TickEngine, RunUntilSettledResult
 from .worklog import append_persona_worklog
 
 
-DEFAULT_GOAL_BLUEPRINT_ID = "neko_dev_qa_basic"
-DEFAULT_GOAL_BINDINGS = {
-    "lead": "persona:neko_supervisor",
-    "builder": "persona:dev",
-    "verifier": "persona:qa",
-}
+DEFAULT_GOAL_BLUEPRINT_ID = DEFAULT_TASK_BLUEPRINT_ID
+DEFAULT_GOAL_BINDINGS = DEFAULT_TASK_BLUEPRINT_BINDINGS
 
 
 @dataclass(slots=True)

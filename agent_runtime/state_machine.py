@@ -230,7 +230,8 @@ class MissionStateMachine:
         apply_planning_decision(mission, decision, actor=actor, task_store=task_store, incident_store=incident_store, proof_store=proof_store, run_id=run_id, normal_worker_flow=normal_worker_flow, mission_plan_flow=mission_plan_flow)
         record_decision_packets(mission, decision, actor=actor, run_id=run_id, stage_id=getattr(mission, "current_stage_id", None))
         if blueprint_owned and decision.type != DecisionType.REQUEST_TEST_RUN:
-            apply_decision_outcome(mission, decision, reason=decision.summary)
+            proofs = proof_store.list_for_task(mission.id) if proof_store is not None else None
+            apply_decision_outcome(mission, decision, proofs=proofs, reason=decision.summary)
         after = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         events: list[Event] = []
         if before != after:
