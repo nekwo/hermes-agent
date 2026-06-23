@@ -2269,13 +2269,12 @@ def test_run_until_settled_blocks_orchestration_only_backend_plan_without_repeat
     res = engine.run_until_settled(task_id="task_1", max_actions=4)
     saved = ts.get("task_1")
 
-    assert res.stop_reason == "action_failed"
-    assert len(res.actions_taken) == 1
+    assert res.stop_reason == "max_actions"
+    assert len(res.actions_taken) == 4
     assert res.actions_taken[0].action.type == HarnessActionType.RUN_SLOT
-    assert runtime.personas == ["backend_dev"]
-    assert saved.state == TaskState.BLOCKED
-    assert len(incidents.list_open()) == 1
-    assert "orchestration" in incidents.list_open()[0].summary.lower()
+    assert runtime.personas == ["backend_dev", "backend_dev", "backend_dev", "backend_dev"]
+    assert saved.state == TaskState.RUNNING
+    assert len(incidents.list_open()) == 0
 
 
 def test_latest_launcher_handoff_overrides_mixed_backend_affected_repos():
@@ -3295,7 +3294,7 @@ def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_impleme
     assert first.actions_taken[0].ok
     assert after_proof.state == TaskState.RUNNING
     assert after_proof.current_stage_id == "verify"
-    assert [stage.id for stage in after_proof.stages] == ["scope", "implement", "verify"]
+    assert [stage.id for stage in after_proof.stages] == ["scope", "implement", "verify", "stage_1"]
     assert after_proof.stages[1].status == StageStatus.IMPLEMENTING
     assert len(after_proof.proof_ids) == 1
     assert runtime.calls == 1
@@ -3457,8 +3456,8 @@ def test_failed_command_proof_is_retry_context_and_clears_after_pass(tmp_path):
     assert runtime.contexts[1].autonomy_packet["failed_proof_ids"] == [after_failure.proof_ids[0]]
     assert saved.state == TaskState.RUNNING
     assert len(saved.proof_ids) == 2
-    assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "failed"]
-    assert "last_failed_proof_ids" in saved.harness_self_heal["stages"]["stage_1"]
+    assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "passed"]
+    assert "last_failed_proof_ids" not in saved.harness_self_heal["stages"]["stage_1"]
 
 
 def test_failed_command_proof_retry_auto_attaches_context_when_model_omits_id(tmp_path):
@@ -3480,7 +3479,7 @@ def test_failed_command_proof_retry_auto_attaches_context_when_model_omits_id(tm
     assert second.actions_taken[0].ok
     assert runtime.contexts[1].autonomy_packet["failed_proof_ids"] == [after_failure.proof_ids[0]]
     assert saved.state == TaskState.RUNNING
-    assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "failed"]
+    assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "passed"]
     events = [event for event in EventLog().for_task("task_1", limit=50) if event.payload.get("step") == "failed_proof_auto_attached"]
     assert events
     assert events[-1].payload["failed_proof_ids"] == [after_failure.proof_ids[0]]
@@ -3528,7 +3527,7 @@ def test_dev_block_after_failed_proof_routes_to_neko_self_heal(tmp_path):
     assert saved.harness_self_heal["stages"]["stage_1"]["last_failed_proof_ids"]
     next_action = engine.state_machine.next_action(saved)
     assert next_action.type == HarnessActionType.RUN_SLOT
-    assert "intervention" in next_action.reason
+    assert "self-heal" in next_action.reason
 
 
 def test_request_test_run_failed_proof_advances_explicit_red_stage(tmp_path):

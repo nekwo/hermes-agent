@@ -35,6 +35,120 @@ def has_typed_plan(task: Task) -> bool:
     return bool(plan and plan.enabled and plan.stages)
 
 
+def task_stage_records(task: Task) -> list[MissionPlanStage | TaskStage]:
+    plan = getattr(task, "mission_plan", None)
+    if plan and plan.enabled:
+        _merge_legacy_stage_data_into_plan(task, plan)
+        return plan.stages
+    return getattr(task, "stages", []) or []
+
+
+def _merge_legacy_stage_data_into_plan(task: Task, plan: MissionPlan) -> None:
+    legacy_stages = list(getattr(task, "stages", []) or [])
+    if not legacy_stages:
+        return
+    by_id = {stage.id: stage for stage in plan.stages}
+    changed = False
+    for legacy in legacy_stages:
+        typed = by_id.get(legacy.id)
+        if typed is None:
+            typed = _plan_stage_from_task_stage(task, legacy)
+            plan.stages.append(typed)
+            _ensure_dynamic_stage_edges(plan, typed)
+            by_id[typed.id] = typed
+            changed = True
+        for field in ("affected_paths", "acceptance_criteria", "test_plan", "audit_notes", "corrections"):
+            incoming = list(getattr(legacy, field, []) or [])
+            if incoming and not getattr(typed, field, None):
+                setattr(typed, field, incoming)
+                changed = True
+        if legacy.requires_visual_proof is not None and typed.requires_visual_proof != bool(legacy.requires_visual_proof):
+            typed.requires_visual_proof = bool(legacy.requires_visual_proof)
+            changed = True
+    if changed:
+        plan.revision = int(getattr(plan, "revision", 0) or 0) + 1
+
+
+def current_task_stage_record(task: Task) -> MissionPlanStage | TaskStage | None:
+    stage_id = str(getattr(task, "current_stage_id", "") or "").strip()
+    if not stage_id:
+        return None
+    return next((stage for stage in task_stage_records(task) if stage.id == stage_id), None)
+
+
+def append_task_stage_record(task: Task, stage: MissionPlanStage | TaskStage) -> None:
+    plan = getattr(task, "mission_plan", None)
+    if plan and plan.enabled:
+        typed = _plan_stage_from_task_stage(task, stage)
+        plan.stages.append(typed)
+        _ensure_dynamic_stage_edges(plan, typed)
+        _sync_task_stage_compat_from_plan(task)
+        return
+    task.stages.append(stage if isinstance(stage, TaskStage) else _task_stage_from_plan_stage(task, stage))
+
+
+def _ensure_dynamic_stage_edges(plan: MissionPlan, stage: MissionPlanStage) -> None:
+    if any(edge.get("source") == stage.id for edge in plan.edges):
+        return
+    target = next((item.id for item in plan.stages if item.kind == "qa_verdict" and item.id != stage.id), "done")
+    if target != "done":
+        qa_stage = next((item for item in plan.stages if item.id == target), None)
+        if qa_stage is not None and stage.id not in qa_stage.depends_on:
+            qa_stage.depends_on.append(stage.id)
+    plan.edges.extend(
+        [
+            {"source": stage.id, "outcome": "ready", "target": target},
+            {"source": stage.id, "outcome": "passed", "target": target},
+            {"source": stage.id, "outcome": "needs_fixes", "target": stage.id},
+            {"source": stage.id, "outcome": "failed", "target": stage.id},
+            {"source": stage.id, "outcome": "missing_input", "target": stage.id},
+            {"source": stage.id, "outcome": "blocked", "target": "intervention"},
+        ]
+    )
+
+
+def _plan_stage_from_task_stage(task: Task, stage: MissionPlanStage | TaskStage) -> MissionPlanStage:
+    if isinstance(stage, MissionPlanStage):
+        return stage
+    owner = "qa" if "qa" in f"{stage.id} {stage.title}".lower() else "dev"
+    repo = (getattr(task, "affected_repos", None) or ["hermes-agent"])[0] if getattr(task, "affected_repos", None) else "hermes-agent"
+    return MissionPlanStage(
+        id=stage.id,
+        title=stage.title,
+        objective=stage.objective,
+        owner=owner,
+        owner_slot=owner,
+        repo=repo,
+        kind="qa_verdict" if owner == "qa" else "implementation",
+        status=stage.status,
+        requires_visual_proof=bool(stage.requires_visual_proof),
+        affected_paths=list(stage.affected_paths or []),
+        acceptance_criteria=list(stage.acceptance_criteria or []),
+        test_plan=list(stage.test_plan or []),
+        audit_notes=list(stage.audit_notes or []),
+        corrections=list(stage.corrections or []),
+        created_at=stage.created_at,
+        updated_at=stage.updated_at,
+    )
+
+
+def _task_stage_from_plan_stage(task: Task, stage: MissionPlanStage) -> TaskStage:
+    return TaskStage(
+        id=stage.id,
+        title=stage.title,
+        objective=stage.objective,
+        status=stage.status,
+        affected_paths=list(getattr(stage, "affected_paths", []) or []),
+        acceptance_criteria=list(getattr(stage, "acceptance_criteria", []) or []),
+        test_plan=list(getattr(stage, "test_plan", []) or []),
+        audit_notes=list(getattr(stage, "audit_notes", []) or []),
+        corrections=list(getattr(stage, "corrections", []) or []),
+        requires_visual_proof=stage.requires_visual_proof,
+        created_at=stage.created_at,
+        updated_at=stage.updated_at,
+    )
+
+
 def is_mission_lead_actor(task: Task, actor: str | None) -> bool:
     actor_id = str(actor or "").strip()
     if not actor_id:
@@ -183,6 +297,10 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
                 created_at=typed.created_at or now(),
                 updated_at=typed.updated_at or now(),
             )
+            for field in ("affected_paths", "acceptance_criteria", "test_plan", "audit_notes", "corrections"):
+                typed_value = list(getattr(typed, field, []) or [])
+                if typed_value:
+                    setattr(existing, field, typed_value)
         else:
             existing.title = typed.title
             existing.objective = typed.objective
@@ -195,6 +313,12 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
             if defaults.get("affected_paths") and not existing.affected_paths:
                 existing.affected_paths = list(defaults["affected_paths"])
             existing.updated_at = typed.updated_at or existing.updated_at or now()
+            for field in ("affected_paths", "acceptance_criteria", "test_plan", "audit_notes", "corrections"):
+                typed_value = list(getattr(typed, field, []) or [])
+                if typed_value:
+                    setattr(existing, field, typed_value)
+                else:
+                    setattr(typed, field, list(getattr(existing, field, []) or []))
         projected.append(existing)
     task.stages = projected
     task.current_stage_id = plan.current_stage_id
