@@ -7,6 +7,12 @@ description: Choose fast, correct Flutter analyze and Launcher proof commands fo
 
 Use this skill after `harness-dev-delivery` when the current Launcher stage needs static analysis, no-edit smoke, contract-consumption proof, or a focused proof command.
 
+## Stage 76C Proof Posture
+
+- Read `mission_hud.agent_hud.evidence_stack` before choosing a proof command. Missing proof, stale proof, or a blocked-stage entry is advisory evidence for Neko/the goal owner to adjudicate, not a terminal release gate in this skill.
+- If proof is missing, choose the narrowest command that can create the missing evidence, or return a bounded blocker through the visible HUD action. Do not claim completion from prose, and do not treat missing proof as a dead-end.
+- If the HUD already records a blocked escalation, answer with the smallest recovery proof/input step or exact environment blocker; the Harness keeps the task recoverable.
+
 ## First Preflight For Launcher Windows / Stage C Proof
 
 - Before any Windows debug rebuild, Marionette freshness check, Stage C MCP launch/attach, screenshot, or video proof, check for already-running `eternia_launcher.exe` and stale `stagec_qa_mcp_server.exe` processes first.
@@ -30,7 +36,7 @@ Use this skill after `harness-dev-delivery` when the current Launcher stage need
 - For Mission Control page/event-view rendering changes, use the focused page/widget proof: `flutter test test/features/mission_control/mission_control_page_test.dart`.
 - For Mission Control bridge/archive/snapshot stages, do not recycle the page/widget proof. Use the bridge regression proof: `flutter test test/features/mission_control/mission_control_snapshot_test.dart test/features/mission_control/mission_control_bridge_test.dart`.
 - Never use `flutter --version`, `flutter doctor`, `where flutter`, or `which flutter` as Launcher contract proof. Those are preflight signals only.
-- In normal worker flow for product-edit stages, run the narrow analyze/widget command in-session first, then deliver with `propose_patch`; Harness runs the final gate after delivery. Use Harness `request_test_run` only when the HUD exposes `request_gate`, for no-edit/certification proof, QA missing proof, or failed final-gate recovery.
+- In normal worker flow for product-edit stages, run the narrow analyze/widget command in-session first, then deliver with `propose_patch`; Harness runs the final gate after delivery. Use Harness `request_test_run` only when the HUD exposes `request_gate`, for no-edit/certification proof, QA missing proof, or failed final-gate recovery. Missing proof should become explicit HUD evidence or a focused proof request, not a terminal block.
 
 ## Stage C Mission Control Screenshot Command Shape
 

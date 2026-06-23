@@ -240,7 +240,7 @@ def _normalize_stop(task_state: TaskState, settled: RunUntilSettledResult) -> tu
         return "task_cancelled", 1, ["Inspect cancellation reason and decide whether to create a replacement goal."]
     if task_state == TaskState.FAILED:
         return "task_failed", 1, ["Inspect run errors and attached incidents."]
-    if raw == "task_blocked" or task_state == TaskState.BLOCKED:
+    if raw == "task_blocked":
         return "task_blocked", 1, ["Open Mission Control incidents and route the blocker to the responsible persona."]
     if raw == "incident_opened":
         return "incident_opened", 1, ["Fix or close the open incident, then rerun the goal runner for this task."]

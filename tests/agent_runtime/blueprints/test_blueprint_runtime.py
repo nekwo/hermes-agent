@@ -165,8 +165,9 @@ def test_blueprint_needs_fixes_routes_back_until_stage_attempt_limit():
     assert plan.stage_attempts == {"implement": 2, "verify": 2}
     assert "blueprint retry limit exceeded" in task.operator_notes[-1]
     action = MissionStateMachine().next_action(task)
-    assert action.type == HarnessActionType.NOOP
-    assert "intervention" in action.reason
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
+    assert "adjudication" in action.reason
 
 
 def test_blueprint_verify_passed_routes_to_done():
@@ -265,7 +266,7 @@ def test_request_test_run_proofs_drive_blueprint_outcome():
     assert apply_decision_outcome(task, decision, proofs=[proof]) == "done"
 
 
-def test_required_blueprint_proof_gate_missing_proof_fails_stage_outcome():
+def test_required_blueprint_proof_gate_missing_proof_surfaces_hud_evidence():
     task = _blueprint_task("one_agent_smoke", bindings={"builder": "persona:dev"})
     stage = task.mission_plan.stages[0]
     decision = AgentDecision(
@@ -276,7 +277,17 @@ def test_required_blueprint_proof_gate_missing_proof_fails_stage_outcome():
     )
 
     assert stage.proof_gate["required"] is True
-    assert derive_stage_outcome(decision, stage, proofs=[]) == StageOutcome.FAILED
+    assert derive_stage_outcome(decision, stage, proofs=[]) == StageOutcome.MISSING_INPUT
+
+    assert apply_decision_outcome(task, decision, proofs=[]) == "intervention"
+    assert task.state == TaskState.BLOCKED
+    evidence = task.harness_self_heal["evidence_stack"]
+    assert evidence[0]["kind"] == "proof_gate"
+    assert evidence[0]["missing"] == ["missing test_run proof"]
+
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
 
 
 def test_blueprint_cli_non_dry_run_creates_persisted_task(tmp_path):

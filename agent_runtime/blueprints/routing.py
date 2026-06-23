@@ -44,7 +44,7 @@ def derive_stage_outcome(
         gate = stage_proof_satisfied(stage, list(proofs or []))
         if gate.allowed:
             return StageOutcome.PASSED
-        return StageOutcome.FAILED
+        return StageOutcome.MISSING_INPUT
     if decision.type == DecisionType.REPORT_QA_VERDICT:
         verdict = str(decision.payload.get("verdict") or "").strip().lower()
         if verdict in {"approved", "passed", "pass"}:
@@ -167,6 +167,10 @@ def apply_decision_outcome(
     outcome = derive_stage_outcome(decision, stage, proofs=proofs)
     if outcome is None:
         return None
+    if outcome == StageOutcome.MISSING_INPUT and _stage_has_required_gate(stage):
+        gate = stage_proof_satisfied(stage, list(proofs or []))
+        if not gate.allowed:
+            _record_proof_gate_evidence(task, stage, gate, reason=reason or decision.summary or decision.type.value)
     return apply_stage_outcome(task, stage.id, outcome, reason=reason or decision.summary or decision.type.value)
 
 
@@ -228,12 +232,78 @@ def _route_intervention(task: Task, plan: MissionPlan, stage: MissionPlanStage, 
     plan.current_stage_id = stage.id
     task.current_stage_id = stage.id
     task.state = TaskState.BLOCKED
+    _record_escalation_evidence(task, stage, reason=reason)
     note = f"blueprint intervention at {stage.id}: {reason}"
     if note not in task.operator_notes:
         task.operator_notes.append(note)
     plan.revision = int(plan.revision or 0) + 1
     task.updated_at = now()
     return "intervention"
+
+
+def _record_proof_gate_evidence(task: Task, stage: MissionPlanStage, gate, *, reason: str) -> None:
+    missing = [str(item) for item in (getattr(gate, "missing", None) or []) if str(item)]
+    warnings = [str(item) for item in (getattr(gate, "warnings", None) or []) if str(item)]
+    if not missing and not warnings:
+        return
+    _append_hud_evidence(
+        task,
+        {
+            "kind": "proof_gate",
+            "severity": "warning",
+            "stage_id": stage.id,
+            "summary": "Required proof is missing or stale; goal owner must adjudicate.",
+            "missing": missing[:10],
+            "warnings": warnings[:10],
+            "recommended_owner": "neko_supervisor",
+            "reason": str(reason or "")[:500],
+        },
+    )
+
+
+def _record_escalation_evidence(task: Task, stage: MissionPlanStage, *, reason: str) -> None:
+    _append_hud_evidence(
+        task,
+        {
+            "kind": "blocked_escalation",
+            "severity": "warning",
+            "stage_id": stage.id,
+            "summary": "Stage is blocked for goal-owner adjudication; this is recoverable.",
+            "missing": [],
+            "warnings": [str(reason or "")[:500]] if reason else [],
+            "recommended_owner": "neko_supervisor",
+            "reason": str(reason or "")[:500],
+        },
+    )
+
+
+def _append_hud_evidence(task: Task, evidence: dict) -> None:
+    root = task.harness_self_heal if isinstance(getattr(task, "harness_self_heal", None), dict) else {}
+    existing = root.get("evidence_stack") if isinstance(root.get("evidence_stack"), list) else []
+    key = (
+        str(evidence.get("kind") or ""),
+        str(evidence.get("stage_id") or ""),
+        tuple(str(item) for item in evidence.get("missing") or []),
+        tuple(str(item) for item in evidence.get("warnings") or []),
+    )
+    deduped = [
+        item
+        for item in existing
+        if not (
+            isinstance(item, dict)
+            and (
+                str(item.get("kind") or ""),
+                str(item.get("stage_id") or ""),
+                tuple(str(value) for value in item.get("missing") or []),
+                tuple(str(value) for value in item.get("warnings") or []),
+            )
+            == key
+        )
+    ]
+    safe = {name: value for name, value in evidence.items() if value not in (None, [], {})}
+    safe["recorded_at"] = now().isoformat()
+    root["evidence_stack"] = [*deduped, safe][-10:]
+    task.harness_self_heal = root
 
 
 def _stage_by_id(plan: MissionPlan, stage_id: str | None) -> MissionPlanStage | None:

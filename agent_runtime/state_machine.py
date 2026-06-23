@@ -160,8 +160,10 @@ class MissionStateMachine:
             return None
         if state in {TaskState.DONE, TaskState.CANCELLED}:
             return HarnessAction(HarnessActionType.NOOP, mission.id, reason="blueprint mission is terminal")
-        if getattr(mission, "open_incident_ids", None) or state == TaskState.BLOCKED:
-            return HarnessAction(HarnessActionType.NOOP, mission.id, reason="blueprint mission waits on intervention")
+        if getattr(mission, "open_incident_ids", None):
+            return _run_slot(mission, "neko_supervisor", "blueprint mission has open incidents; Neko must adjudicate")
+        if state == TaskState.BLOCKED:
+            return _run_slot(mission, "neko_supervisor", "blueprint intervention needs Neko goal-owner adjudication")
         current = current_plan_stage(mission)
         if current is None:
             return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="blueprint has no remaining stages")

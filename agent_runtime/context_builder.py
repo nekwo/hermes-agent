@@ -826,7 +826,7 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str) -> dict[str, 
     repo_bundles = RepoBundleStore().list_for_task(task.id)
     active_bundle_id = str((run.progress or {}).get("repo_bundle_id") or "").strip() if isinstance(run.progress, dict) else ""
     active_bundle = next((bundle for bundle in repo_bundles if bundle.id == active_bundle_id), None)
-    return {
+    hud = {
         "schema_version": 1,
         "mode": "stage53_simplified",
         "stage": "stage57_repo_bundle_simplified",
@@ -848,6 +848,38 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str) -> dict[str, 
         "contract": contract_for_persona(run.persona_id, role=role),
         "response_rule": "Choose one visible option from agent_hud.options. Use agent_hud.recommended_action.payload_skeleton for the primary move. Unknown fields are invalid; open only the named skill_ref when deeper guidance is needed.",
     }
+    evidence_stack = _task_evidence_stack(task)
+    if evidence_stack:
+        hud["evidence_stack"] = evidence_stack
+    return hud
+
+
+def _task_evidence_stack(task: Task) -> list[dict[str, Any]]:
+    root = getattr(task, "harness_self_heal", None)
+    raw_stack = root.get("evidence_stack") if isinstance(root, dict) else None
+    if not isinstance(raw_stack, list):
+        return []
+    safe_stack: list[dict[str, Any]] = []
+    for item in raw_stack[-10:]:
+        if not isinstance(item, dict):
+            continue
+        safe = {
+            "kind": str(item.get("kind") or "evidence")[:80],
+            "severity": str(item.get("severity") or "warning")[:40],
+            "stage_id": str(item.get("stage_id") or "")[:120],
+            "summary": str(item.get("summary") or "")[:500],
+            "recommended_owner": str(item.get("recommended_owner") or "neko_supervisor")[:120],
+        }
+        missing = [str(value)[:240] for value in (item.get("missing") or []) if str(value)]
+        warnings = [str(value)[:240] for value in (item.get("warnings") or []) if str(value)]
+        if missing:
+            safe["missing"] = missing[:10]
+        if warnings:
+            safe["warnings"] = warnings[:10]
+        if item.get("recorded_at"):
+            safe["recorded_at"] = str(item.get("recorded_at"))[:80]
+        safe_stack.append({key: value for key, value in safe.items() if value not in ("", [], {})})
+    return safe_stack
 
 
 def _agent_hud_options(menu: list[dict[str, Any]]) -> list[dict[str, Any]]:
