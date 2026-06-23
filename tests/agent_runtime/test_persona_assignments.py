@@ -80,7 +80,7 @@ class RequestProofRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary="collect assignment proof",
             rationale="The proof should attach to the active assignment.",
-            payload={"stage_id": "stage_1", "commands": ["python -c \"print('assignment-ok')\""]},
+            payload={"stage_id": "implement", "commands": ["python -c \"print('assignment-ok')\""]},
         )
 
 

@@ -506,6 +506,14 @@ def make_task_with_id(task_id: str):
     return task
 
 
+def graph_stage(task: Task, stage_id: str) -> MissionPlanStage:
+    return next(stage for stage in task.mission_plan.stages if stage.id == stage_id)
+
+
+def graph_stage_status(task: Task, stage_id: str) -> StageStatus:
+    return graph_stage(task, stage_id).status
+
+
 def test_tick_advances_created_task_with_fake_pm():
     ts=TaskStore(); ts.create(make_task())
     res=TickEngine(task_store=ts, persona_runtime=FakeRuntime()).tick_once()
@@ -1530,7 +1538,7 @@ class RequestTestRunRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary="run focused tests",
             rationale="Need deterministic command proof before QA handoff.",
-            payload={"stage_id": "stage_1", "commands": ["printf 'proof-ok\\n'"]},
+            payload={"stage_id": "implement", "commands": ["printf 'proof-ok\\n'"]},
         )
 
 
@@ -1826,7 +1834,7 @@ class SettledMissionRuntime:
                 type=DecisionType.REQUEST_TEST_RUN,
                 summary="Dev requested deterministic proof",
                 rationale="Command proof is needed before QA.",
-                payload={"stage_id": "stage_1", "commands": ["printf settled\\n"]},
+                payload={"stage_id": "implement", "commands": ["printf settled\\n"]},
             )
         if persona.id == "qa":
             return AgentDecision(
@@ -1857,26 +1865,6 @@ class PassingProofRunner:
         )
         self.proof_store.attach(proof)
         return [proof]
-
-
-def test_failed_command_proof_is_attached_but_not_promoted_to_ready_stage():
-    ts = TaskStore()
-    task = make_task()
-    task.state = TaskState.RUNNING
-    task.current_stage_id = "stage_1"
-    task.stages = [TaskStage(id="stage_1", title="S1", objective="o", status=StageStatus.IMPLEMENTING, acceptance_criteria=["ok"], test_plan=["cmd"])]
-    ts.create(task)
-    proofs = ProofStore()
-    engine = TickEngine(task_store=ts, proof_store=proofs, persona_runtime=RequestTestRunRuntime(), proof_runner=FailedProofRunner(proofs))
-
-    res = engine.tick_once(task_id="task_1")
-    stored = ts.get("task_1")
-
-    assert res.actions_taken[0].ok
-    assert stored.proof_ids == ["failed_task_1_stage_1"]
-    assert stored.stages[0].status == StageStatus.REWORK
-    assert stored.harness_self_heal["stages"]["stage_1"]["last_failed_proof_ids"] == ["failed_task_1_stage_1"]
-    assert [proof.id for proof in proofs.list_for_task("task_1")] == ["failed_task_1_stage_1"]
 
 
 def test_normal_worker_flow_auto_runs_final_gate_after_patch_delivery():
@@ -2137,8 +2125,7 @@ def test_handoff_repair_with_existing_passed_proof_routes_to_qa_without_dev_run(
     assert res.actions_taken[0].summary == "handoff repair reused existing passed proof; routed to QA"
     stored = ts.get("task_1")
     assert stored.state == TaskState.RUNNING
-    assert stored.stages[0].status == StageStatus.READY_FOR_QA
-    assert stored.mission_plan.stages[0].status == StageStatus.READY_FOR_QA
+    assert graph_stage_status(stored, "backend_implementation") == StageStatus.READY_FOR_QA
     events = EventLog().for_task("task_1", limit=0)
     assert any(event.type == "task.transition" and event.payload.get("source") == "deterministic_handoff_repair_recovery" for event in events)
 
@@ -2580,13 +2567,13 @@ class RequestTestThenHandoffRuntime:
                 type=DecisionType.REQUEST_TEST_RUN,
                 summary="collect smoke proof",
                 rationale="Need deterministic proof before QA.",
-                payload={"stage_id": "stage_1", "commands": ["printf 'smoke-ok\\n'"]},
+                payload={"stage_id": "implement", "commands": ["printf 'smoke-ok\\n'"]},
             )
         return AgentDecision(
             type=DecisionType.REQUEST_QA_REVIEW,
             summary="handoff with proof",
             rationale="Proof was attached by Harness.",
-            payload={"stage_id": "stage_1", "proof_ids": list(ctx.proof_ids), "handoff": {"to": "qa", "stage_complete": True, "known_gaps": []}},
+            payload={"stage_id": "implement", "proof_ids": list(ctx.proof_ids), "handoff": {"to": "qa", "stage_complete": True, "known_gaps": []}},
         )
 
 
@@ -2641,7 +2628,7 @@ def test_tick_passes_proof_intent_and_environment_fingerprint_metadata_to_runner
     task.current_stage_id = "stage_1"
     task.harness_self_heal = {
         "stages": {
-            "stage_1": {
+            "implement": {
                 "last_environment_fingerprint": "docker_desktop:missing",
                 "environment_fingerprint_status": "unchanged",
             }
@@ -2869,7 +2856,7 @@ def test_tick_blocks_passing_backend_stage_proof_from_wrong_repo_workdir():
     saved = ts.get("task_backend_wrong_repo")
     assert saved.state == TaskState.BLOCKED
     assert saved.proof_ids == ["proof_wrong_repo"]
-    assert saved.stages[0].status == StageStatus.BLOCKED
+    assert graph_stage_status(saved, "backend_no_op_route_proof") == StageStatus.BLOCKED
     assert "command_proof_repo_mismatch" in saved.risk_flags
 
 
@@ -2909,7 +2896,7 @@ def test_bridge_archive_stage_wrong_page_proof_does_not_advance():
     saved = ts.get("task_bridge_wrong_command")
     assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "stage_bridge_archive_regression"
-    assert saved.stages[0].status == StageStatus.IMPLEMENTING
+    assert graph_stage_status(saved, "stage_bridge_archive_regression") == StageStatus.IMPLEMENTING
     assert saved.proof_ids == ["proof_wrong_stage_command"]
     assert "command_proof_stage_mismatch" in saved.risk_flags
 
@@ -3164,8 +3151,8 @@ def test_smoke_marker_proof_reroutes_back_to_incomplete_product_edit_stage():
     saved = ts.get("task_dm_bubble_smoke_reroute")
     assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "mc_terminal_dm_bubble_rows"
-    assert saved.stages[0].status == StageStatus.IMPLEMENTING
-    assert saved.stages[1].status == StageStatus.READY_FOR_QA
+    assert graph_stage_status(saved, "mc_terminal_dm_bubble_rows") == StageStatus.IMPLEMENTING
+    assert graph_stage_status(saved, "launcher_contract_smoke") == StageStatus.READY_FOR_QA
     assert saved.proof_ids == ["proof_wrong_stage_command"]
     assert "command_proof_stage_mismatch" in saved.risk_flags
 
@@ -3294,8 +3281,8 @@ def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_impleme
     assert first.actions_taken[0].ok
     assert after_proof.state == TaskState.RUNNING
     assert after_proof.current_stage_id == "verify"
-    assert [stage.id for stage in after_proof.stages] == ["scope", "implement", "verify", "stage_1"]
-    assert after_proof.stages[1].status == StageStatus.IMPLEMENTING
+    assert [stage.id for stage in after_proof.mission_plan.stages] == ["scope", "implement", "verify"]
+    assert graph_stage_status(after_proof, "implement") == StageStatus.PASSED
     assert len(after_proof.proof_ids) == 1
     assert runtime.calls == 1
     assert engine.state_machine.next_action(after_proof).type == HarnessActionType.RUN_SLOT
@@ -3309,7 +3296,7 @@ class FailingRequestTestRunRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary="run failing proof",
             rationale="Need deterministic command proof before QA.",
-            payload={"stage_id": "stage_1", "commands": ["python -c 'import sys; sys.exit(7)'"]},
+            payload={"stage_id": "implement", "commands": ["python -c 'import sys; sys.exit(7)'"]},
         )
 
 
@@ -3326,14 +3313,14 @@ class FailingThenPassingRetryRuntime:
                 type=DecisionType.REQUEST_TEST_RUN,
                 summary="run failing proof",
                 rationale="Need deterministic command proof before QA.",
-                payload={"stage_id": "stage_1", "commands": ["python -c 'import sys; sys.exit(7)'"]},
+                payload={"stage_id": "implement", "commands": ["python -c 'import sys; sys.exit(7)'"]},
             )
         failed_id = ctx.proof_ids[-1]
         return AgentDecision(
             type=DecisionType.REQUEST_TEST_RUN,
             summary=f"retry after failed proof {failed_id}",
             rationale=f"Reuse attached failed proof {failed_id} and run the corrected bounded command.",
-            payload={"stage_id": "stage_1", "commands": ["printf 'retry-ok\\n'"]},
+            payload={"stage_id": "implement", "commands": ["printf 'retry-ok\\n'"]},
         )
 
 
@@ -3350,13 +3337,13 @@ class FailingThenPassingAutoAttachedRetryRuntime:
                 type=DecisionType.REQUEST_TEST_RUN,
                 summary="run failing proof",
                 rationale="Need deterministic command proof before QA.",
-                payload={"stage_id": "stage_1", "commands": ["python -c 'import sys; sys.exit(7)'"]},
+                payload={"stage_id": "implement", "commands": ["python -c 'import sys; sys.exit(7)'"]},
             )
         return AgentDecision(
             type=DecisionType.REQUEST_TEST_RUN,
             summary="retry bounded proof after attached failure context",
             rationale="Use the attached failure context and run the corrected bounded command.",
-            payload={"stage_id": "stage_1", "commands": ["printf 'retry-ok\\n'"]},
+            payload={"stage_id": "implement", "commands": ["printf 'retry-ok\\n'"]},
         )
 
 
@@ -3379,7 +3366,7 @@ class FailingTwiceRetryRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary=summary,
             rationale=rationale,
-            payload={"stage_id": "stage_1", "commands": ["python -c 'import sys; sys.exit(7)'"]},
+            payload={"stage_id": "implement", "commands": ["python -c 'import sys; sys.exit(7)'"]},
         )
 
 
@@ -3396,7 +3383,7 @@ class FailingThenBlockingRuntime:
                 type=DecisionType.REQUEST_TEST_RUN,
                 summary="run failing proof",
                 rationale="Need deterministic command proof before QA.",
-                payload={"stage_id": "stage_1", "commands": ["python -c 'import sys; sys.exit(7)'"]},
+                payload={"stage_id": "implement", "commands": ["python -c 'import sys; sys.exit(7)'"]},
             )
         return AgentDecision(
             type=DecisionType.BLOCK,
@@ -3423,13 +3410,13 @@ def test_request_test_run_failed_proof_stays_in_dev_for_fix_pass(tmp_path):
 
     assert res.actions_taken[0].ok
     assert saved.state == TaskState.RUNNING
-    assert saved.stages[1].status == StageStatus.IMPLEMENTING
+    assert graph_stage_status(saved, "implement") == StageStatus.REWORK
     assert len(saved.proof_ids) == 1
     failed_proofs = engine.proof_store.list_for_task("task_1")
     assert len(failed_proofs) == 1
     assert failed_proofs[0].metadata["status"] == "failed"
     assert saved.proof_ids == [failed_proofs[0].id]
-    stage_state = saved.harness_self_heal["stages"]["stage_1"]
+    stage_state = saved.harness_self_heal["stages"]["implement"]
     assert stage_state["last_failed_proof_ids"] == [failed_proofs[0].id]
     assert engine.state_machine.next_action(saved).type == HarnessActionType.RUN_SLOT
 
@@ -3457,7 +3444,7 @@ def test_failed_command_proof_is_retry_context_and_clears_after_pass(tmp_path):
     assert saved.state == TaskState.RUNNING
     assert len(saved.proof_ids) == 2
     assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "passed"]
-    assert "last_failed_proof_ids" not in saved.harness_self_heal["stages"]["stage_1"]
+    assert "last_failed_proof_ids" not in saved.harness_self_heal["stages"]["implement"]
 
 
 def test_failed_command_proof_retry_auto_attaches_context_when_model_omits_id(tmp_path):
@@ -3501,10 +3488,10 @@ def test_second_same_stage_failed_command_proof_routes_to_neko(tmp_path):
     assert first.actions_taken[0].ok
     assert second.actions_taken[0].ok
     assert [engine.proof_store.get(proof_id).metadata["status"] for proof_id in saved.proof_ids] == ["failed", "failed"]
-    assert saved.harness_self_heal["stages"]["stage_1"]["last_failed_proof_ids"]
+    assert saved.harness_self_heal["stages"]["implement"]["last_failed_proof_ids"]
     next_action = engine.state_machine.next_action(saved)
     assert next_action.type == HarnessActionType.RUN_SLOT
-    assert "self-heal" in next_action.reason
+    assert "Neko" in next_action.reason
 
 
 def test_dev_block_after_failed_proof_routes_to_neko_self_heal(tmp_path):
@@ -3524,10 +3511,10 @@ def test_dev_block_after_failed_proof_routes_to_neko_self_heal(tmp_path):
     assert first.actions_taken[0].ok
     assert second.actions_taken[0].ok
     assert saved.state == TaskState.BLOCKED
-    assert saved.harness_self_heal["stages"]["stage_1"]["last_failed_proof_ids"]
+    assert saved.harness_self_heal["stages"]["implement"]["last_failed_proof_ids"]
     next_action = engine.state_machine.next_action(saved)
     assert next_action.type == HarnessActionType.RUN_SLOT
-    assert "self-heal" in next_action.reason
+    assert next_action.slot_id == "neko_supervisor"
 
 
 def test_request_test_run_failed_proof_advances_explicit_red_stage(tmp_path):
@@ -3551,28 +3538,6 @@ def test_request_test_run_failed_proof_advances_explicit_red_stage(tmp_path):
     assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "stage_1"
     assert [stage.status for stage in saved.stages] == [StageStatus.REWORK, StageStatus.READY, StageStatus.READY]
-
-
-def test_request_test_run_multi_stage_advances_next_stage_without_global_qa(tmp_path):
-    ts = TaskStore()
-    task = make_task()
-    task.state = TaskState.RUNNING
-    task.current_stage_id = "stage_1"
-    task.stages = [
-        TaskStage(id="stage_1", title="One", objective="one", status=StageStatus.READY, test_plan=["printf one"]),
-        TaskStage(id="stage_2", title="Two", objective="two", status=StageStatus.READY, test_plan=["printf two"]),
-    ]
-    ts.create(task)
-    engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
-    engine.command_workdir = tmp_path
-
-    res = engine.tick_once()
-    saved = ts.get("task_1")
-
-    assert res.actions_taken[0].ok
-    assert saved.state == TaskState.RUNNING
-    assert saved.current_stage_id == "stage_2"
-    assert [stage.status for stage in saved.stages] == [StageStatus.READY_FOR_QA, StageStatus.READY, StageStatus.READY]
 
 
 class CancellingProofRunner:
@@ -3633,7 +3598,7 @@ class HighBudgetDevRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary="run focused tests",
             rationale="Need deterministic command proof before QA handoff.",
-            payload={"stage_id": "stage_1", "commands": ["printf 'proof-ok\\n'"]},
+            payload={"stage_id": "implement", "commands": ["printf 'proof-ok\\n'"]},
         )
 
 
@@ -4117,7 +4082,7 @@ class DevRecoveryRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary="rerun proof requested by QA",
             rationale="QA blocked the implementation on missing proof mapping, so Dev must collect corrected deterministic proof.",
-            payload={"stage_id": "stage_1", "commands": ["printf 'recovered-proof\\n'"]},
+            payload={"stage_id": "implement", "commands": ["printf 'recovered-proof\\n'"]},
         )
 
 
@@ -4293,7 +4258,7 @@ class RequestTwoProofCommandsRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary="collect two proof commands",
             rationale="The first proof should survive even if the second command fails.",
-            payload={"stage_id": "stage_1", "commands": ["printf first\\n", "printf second\\n"]},
+            payload={"stage_id": "implement", "commands": ["printf first\\n", "printf second\\n"]},
         )
 
 

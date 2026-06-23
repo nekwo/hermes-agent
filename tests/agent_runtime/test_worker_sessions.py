@@ -86,7 +86,7 @@ class RequestTestRunRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary="collect worker proof",
             rationale="A deterministic proof should advance the stage.",
-            payload={"stage_id": "stage_1", "commands": ["printf worker-ok\\n"]},
+            payload={"stage_id": "implement", "commands": ["printf worker-ok\\n"]},
         )
 
 
@@ -96,7 +96,7 @@ class RequestRecipeRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary="collect recipe proof",
             rationale="Recipe proof avoids command rediscovery.",
-            payload={"stage_id": "stage_1", "recipe_id": "archive_button_cli_contract"},
+            payload={"stage_id": "implement", "recipe_id": "archive_button_cli_contract"},
         )
 
 
