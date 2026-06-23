@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .decision_schema import DecisionPayloadInvalid
+from .mission_plan import task_stage_records
 from .models import Proof, Task
 from .proof_rules import ProofType
 from .stage_intent import stage_requires_product_edit
@@ -55,7 +56,7 @@ def product_promotion_required(task: Task) -> bool:
         repo = str(getattr(stage, "repo", "") or "").strip()
         if repo in _PRODUCT_REPOS and bool(getattr(stage, "requires_product_edit", False)):
             return True
-    for stage in list(getattr(task, "stages", []) or []):
+    for stage in list(task_stage_records(task)):
         if stage_requires_product_edit(task, stage):
             repos = {str(repo).strip() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()}
             return not repos or bool(repos.intersection(_PRODUCT_REPOS))
@@ -132,7 +133,7 @@ def _product_repos(task: Task) -> set[str]:
         if repo:
             repos.add(repo)
         repos.update(_repo_labels_from_text(" ".join([str(getattr(stage, "title", "") or ""), str(getattr(stage, "objective", "") or "")])))
-    for stage in list(getattr(task, "stages", []) or []):
+    for stage in list(task_stage_records(task)):
         repo = str(getattr(stage, "repo_scope_label", "") or getattr(stage, "repo_scope", "") or "").strip()
         if repo:
             repos.add(repo)

@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
+from .mission_plan import task_stage_records
 from .models import AgentPersona, AgentRun, Task
 from .packets import latest_packet
 from .personas import role_from_persona
@@ -63,7 +64,8 @@ def needs_supervisor_slicing(task: Task) -> bool:
     specialist work. Small one-repo fixes still go directly to Dev.
     """
 
-    if getattr(task, "stages", None):
+    plan = getattr(task, "mission_plan", None)
+    if task_stage_records(task) and not (plan and getattr(plan, "blueprint_id", None) == "neko_dev_qa_basic"):
         return False
     repos = [str(repo).strip().lower() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()]
     text = " ".join(

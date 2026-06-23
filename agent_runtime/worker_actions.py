@@ -6,6 +6,7 @@ from typing import Any
 from .decision_schema import DecisionType
 from .mission_plan import current_plan_stage, has_typed_plan, mission_plan_hud_enabled
 from .models import AgentRun, Task, TaskStage
+from .mission_plan import task_stage_records
 from .profile_context import active_profile_name
 from .runtime_config import RuntimeConfig
 from .stage_intent import no_product_edit_recipe_for_stage, no_product_edit_recipe_id, stage_requires_product_edit
@@ -570,7 +571,7 @@ def _typed_visual_missing(task: Task, *, proof_store=None) -> bool:
 
 def _current_stage(task: Task, run: AgentRun) -> TaskStage | None:
     stage_id = str(getattr(run, "stage_id", None) or getattr(task, "current_stage_id", None) or "").strip()
-    for stage in getattr(task, "stages", []) or []:
+    for stage in task_stage_records(task):
         if stage.id == stage_id:
             return stage
     return None

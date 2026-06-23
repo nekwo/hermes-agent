@@ -134,8 +134,10 @@ def normalize_request_test_run_decision(task: Task, decision: AgentDecision) -> 
     recipe = resolve_proof_recipe(recipe_id)
     requested_stage_id = str(payload.get("stage_id") or getattr(task, "current_stage_id", None) or "").strip()
     current_stage_id = str(getattr(task, "current_stage_id", None) or "").strip()
-    requested_stage = next((stage for stage in getattr(task, "stages", []) or [] if stage.id == requested_stage_id), None)
-    current_stage = next((stage for stage in getattr(task, "stages", []) or [] if stage.id == current_stage_id), None)
+    from .mission_plan import task_stage_records
+
+    requested_stage = next((stage for stage in task_stage_records(task) if stage.id == requested_stage_id), None)
+    current_stage = next((stage for stage in task_stage_records(task) if stage.id == current_stage_id), None)
     if no_product_edit_recipe_conflicts_with_stage(task, requested_stage, recipe.id):
         raise DecisionPayloadInvalid(
             f"request_test_run recipe_id {recipe.id!r} is no-product-edit proof and cannot satisfy product-edit stage {requested_stage_id!r}"

@@ -124,8 +124,10 @@ def stage_requires_product_edit(task: Task, stage: TaskStage | None = None) -> b
 
 
 def first_incomplete_product_edit_stage(task: Task, *, excluding_stage_id: str | None = None) -> TaskStage | None:
+    from .mission_plan import task_stage_records
+
     excluded = str(excluding_stage_id or "").strip()
-    for stage in list(getattr(task, "stages", []) or []):
+    for stage in list(task_stage_records(task)):
         if excluded and stage.id == excluded:
             continue
         status = getattr(stage, "status", None)
@@ -149,6 +151,8 @@ def no_product_edit_recipe_conflicts_with_stage(task: Task, stage: TaskStage | N
 
 
 def stage_is_committed_verification_gate(task: Task, stage: TaskStage | None) -> bool:
+    from .mission_plan import task_stage_records
+
     """Return true when an implementation-shaped stage should go straight to proof.
 
     Live Neko can correctly preserve a Hermes code-change as an implementation
@@ -170,11 +174,13 @@ def stage_is_committed_verification_gate(task: Task, stage: TaskStage | None) ->
 
 
 def extract_single_known_stage_reference(task: Task, *, source_stage_id: str, text: str) -> str | None:
+    from .mission_plan import task_stage_records
+
     haystack = str(text or "")
     if not haystack:
         return None
     matches = []
-    for stage in list(getattr(task, "stages", []) or []):
+    for stage in list(task_stage_records(task)):
         sid = str(stage.id or "").strip()
         if not sid or sid == source_stage_id:
             continue
