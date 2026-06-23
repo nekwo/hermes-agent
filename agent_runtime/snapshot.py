@@ -19,7 +19,7 @@ from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash, 
 from .dirty_state import build_dirty_state
 from .events import EventLog
 from .migrations import effective_config_summary, migration_status
-from .mission_plan import mission_plan_summary
+from .mission_plan import mission_plan_summary, task_stage_records
 from .observability import build_observability
 from .persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
@@ -826,7 +826,7 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
 
 def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None):
     gate = task_verdict_proof_satisfied(task, proofs)
-    current = next((s for s in task.stages if s.id == task.current_stage_id), None)
+    current = next((s for s in task_stage_records(task) if s.id == task.current_stage_id), None)
     untriaged = untriaged_issue_discoveries(task)
     child_count = len([item for item in (all_tasks or []) if getattr(item, "parent_task_id", None) == task.id])
     open_incidents = [item for item in (incidents or []) if item.task_id == task.id and item.closed_at is None]
@@ -1144,7 +1144,7 @@ def _stage_streams(task, events) -> list[dict]:
     plan = getattr(task, "mission_plan", None)
     stages = list(getattr(plan, "stages", []) or [])
     if not stages:
-        stages = list(getattr(task, "stages", []) or [])
+        stages = list(task_stage_records(task))
     streams: list[dict] = []
     for stage in stages:
         stage_id = getattr(stage, "id", None)
