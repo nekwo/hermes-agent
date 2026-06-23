@@ -17,17 +17,12 @@ from .states import StageStatus
 ALLOWED_REPOS = frozenset({"EterniaLauncher", "EterniaBackend", "hermes-agent", "none"})
 ALLOWED_KINDS = frozenset({"planning", "proof_only", "implementation", "qa_verdict", "recovery", "context"})
 READY_STATUSES = frozenset({StageStatus.READY_FOR_QA, StageStatus.PASSED})
-INCOMPLETE_STATUSES = frozenset({StageStatus.DRAFT, StageStatus.AUDITED, StageStatus.READY, StageStatus.IMPLEMENTING, StageStatus.NEEDS_FIXES, StageStatus.BLOCKED})
+INCOMPLETE_STATUSES = frozenset({StageStatus.DRAFT, StageStatus.AUDITED, StageStatus.READY, StageStatus.IMPLEMENTING, StageStatus.REWORK, StageStatus.BLOCKED})
 
 
 def mission_plan_enabled(config) -> bool:
     plan = getattr(config, "mission_plan", None)
     return bool(getattr(plan, "enabled", False))
-
-
-def mission_plan_routing_enabled(config) -> bool:
-    plan = getattr(config, "mission_plan", None)
-    return bool(getattr(plan, "enabled", False)) and bool(getattr(plan, "enforce_routing", True))
 
 
 def mission_plan_hud_enabled(config) -> bool:
@@ -256,7 +251,7 @@ def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_sto
     if stage is None:
         return
     if decision.type == DecisionType.PROPOSE_PATCH and actor in {"dev", "backend_dev"}:
-        if stage.kind == "implementation" and stage.status in {StageStatus.READY, StageStatus.DRAFT, StageStatus.BLOCKED, StageStatus.NEEDS_FIXES}:
+        if stage.kind == "implementation" and stage.status in {StageStatus.READY, StageStatus.DRAFT, StageStatus.BLOCKED, StageStatus.REWORK}:
             stage.status = StageStatus.IMPLEMENTING
             stage.updated_at = now()
         elif stage.kind in {"context", "investigation", "audit"} and not stage.requires_product_edit:
@@ -265,7 +260,7 @@ def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_sto
     elif decision.type == DecisionType.REQUEST_TEST_RUN:
         requested = str(decision.payload.get("stage_id") or stage.id).strip()
         target = _stage_by_id(plan, requested) or stage
-        if target.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.BLOCKED, StageStatus.NEEDS_FIXES}:
+        if target.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.BLOCKED, StageStatus.REWORK}:
             target.status = StageStatus.IMPLEMENTING
             target.updated_at = now()
     elif decision.type == DecisionType.REPORT_QA_VERDICT:
@@ -285,7 +280,7 @@ def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_sto
         elif verdict in {"needs_fixes", "blocked"}:
             failed = _first_stage_with_missing_proof(task, proof_store=proof_store)
             if failed is not None:
-                failed.status = StageStatus.NEEDS_FIXES if verdict == "needs_fixes" else StageStatus.BLOCKED
+                failed.status = StageStatus.REWORK if verdict == "needs_fixes" else StageStatus.BLOCKED
                 failed.updated_at = now()
                 plan.current_stage_id = failed.id
     plan.revision = int(plan.revision or 0) + 1
@@ -790,7 +785,7 @@ def _qa_stage(intent: MissionIntent, *, depends_on: list[str], repo: str) -> Mis
 
 def _refresh_stage_status_from_proofs(task: Task, stage: MissionPlanStage, *, proof_store=None) -> None:
     if _stage_has_failed_proof(task, stage, proof_store=proof_store):
-        stage.status = StageStatus.NEEDS_FIXES
+        stage.status = StageStatus.REWORK
         return
     if _stage_required_proofs_pass(task, stage, proof_store=proof_store):
         stage.status = StageStatus.READY_FOR_QA

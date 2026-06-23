@@ -15,13 +15,13 @@ from .schema import StageOutcome
 OUTCOME_TO_STAGE_STATUS = {
     StageOutcome.READY: StageStatus.PASSED,
     StageOutcome.PASSED: StageStatus.PASSED,
-    StageOutcome.FAILED: StageStatus.NEEDS_FIXES,
-    StageOutcome.NEEDS_FIXES: StageStatus.NEEDS_FIXES,
+    StageOutcome.FAILED: StageStatus.REWORK,
+    StageOutcome.REWORK: StageStatus.REWORK,
     StageOutcome.BLOCKED: StageStatus.BLOCKED,
     StageOutcome.MISSING_INPUT: StageStatus.BLOCKED,
 }
 
-RETRY_OUTCOMES = {StageOutcome.FAILED, StageOutcome.NEEDS_FIXES, StageOutcome.BLOCKED, StageOutcome.MISSING_INPUT}
+RETRY_OUTCOMES = {StageOutcome.FAILED, StageOutcome.REWORK, StageOutcome.BLOCKED, StageOutcome.MISSING_INPUT}
 TERMINAL_TARGETS = {"done", "intervention"}
 
 
@@ -50,7 +50,7 @@ def derive_stage_outcome(
         if verdict in {"approved", "passed", "pass"}:
             return StageOutcome.PASSED
         if verdict in {"needs_fixes", "needs-fixes", "fixes"}:
-            return StageOutcome.NEEDS_FIXES
+            return StageOutcome.REWORK
         if verdict in {"failed", "fail", "rejected"}:
             return StageOutcome.FAILED
         if verdict in {"blocked", "block"}:
@@ -140,8 +140,8 @@ def apply_stage_outcome(task: Task, stage_id: str, outcome: StageOutcome, *, rea
 
     plan.current_stage_id = next_stage.id
     task.current_stage_id = next_stage.id
-    if next_stage.status in {StageStatus.PASSED, StageStatus.READY_FOR_QA, StageStatus.BLOCKED, StageStatus.NEEDS_FIXES}:
-        next_stage.status = StageStatus.NEEDS_FIXES if outcome in RETRY_OUTCOMES else StageStatus.READY
+    if next_stage.status in {StageStatus.PASSED, StageStatus.READY_FOR_QA, StageStatus.BLOCKED, StageStatus.REWORK}:
+        next_stage.status = StageStatus.REWORK if outcome in RETRY_OUTCOMES else StageStatus.READY
     elif next_stage.status == StageStatus.DRAFT:
         next_stage.status = StageStatus.READY
     next_stage.updated_at = now()

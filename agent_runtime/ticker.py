@@ -21,7 +21,7 @@ from .locks import HarnessLockUnavailable, tick_lock
 from .events import EventLog
 from .final_gate import build_final_gate_decision
 from .models import Event, Incident, Task
-from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage, has_typed_plan, mission_plan_routing_enabled
+from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage, has_typed_plan
 from .persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
@@ -716,7 +716,7 @@ class TickEngine:
                             proof_store=self.proof_store,
                             run_id=run.id,
                             normal_worker_flow=normal_flow_enabled,
-                            mission_plan_flow=mission_plan_routing_enabled(self.config),
+                            mission_plan_flow=None,
                         )
                         _record_failed_proof_block_after_reuse(task, decision, actor=persona.id, run_id=run.id)
                         _record_timing_span(self.run_store, run.id, "decision_apply", decision_apply_started)
@@ -1599,7 +1599,7 @@ def _recover_handoff_repair_with_existing_proof(task: Task, *, proof_store: Proo
             break
     _sync_typed_plan_stage_status(task, stage_id, StageStatus.READY_FOR_QA)
     task.proof_ids = _dedupe(list(getattr(task, "proof_ids", None) or []), proof_ids)
-    task.state = TaskState.READY_FOR_VERIFICATION
+    task.state = TaskState.READY_FOR_REVIEW
     task.updated_at = now()
     return {"stage_id": stage_id, "proof_ids": proof_ids, "next_state": task.state.value}
 
@@ -2123,13 +2123,13 @@ def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decisio
     ]
     if not _all_stages_dev_complete(task):
         if _needs_sequential_specialist_join(task):
-            task.state = TaskState.READY_FOR_VERIFICATION
+            task.state = TaskState.READY_FOR_REVIEW
         else:
             _advance_to_next_dev_stage(task)
             task.state = TaskState.DEV_IMPLEMENTING
     else:
-        task.state = TaskState.READY_FOR_VERIFICATION
-    waits_for_launcher_join = task.state == TaskState.READY_FOR_VERIFICATION and _needs_cross_stack_launcher_completion(task, proof_store=proof_store)
+        task.state = TaskState.READY_FOR_REVIEW
+    waits_for_launcher_join = task.state == TaskState.READY_FOR_REVIEW and _needs_cross_stack_launcher_completion(task, proof_store=proof_store)
     contract_packet_id = None
     if waits_for_launcher_join:
         contract_packet_id = _ensure_backend_contract_packet_for_handoff(
@@ -2143,7 +2143,7 @@ def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decisio
         handoff_status = "backend_join_ready"
         handoff_summary = "Passing backend command proof attached; routed to Neko for Launcher join release without another Backend Dev tick."
         next_expected = "neko_cross_stack_launcher_release"
-    elif task.state == TaskState.READY_FOR_VERIFICATION:
+    elif task.state == TaskState.READY_FOR_REVIEW:
         handoff_status = "ready_for_qa"
         handoff_summary = "Passing command proof attached; routed to QA without another Dev model tick."
         next_expected = "qa_verification"

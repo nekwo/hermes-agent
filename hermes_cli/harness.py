@@ -84,6 +84,8 @@ def build_parser(parent_subparsers) -> None:
     goal_run.add_argument("--affected-repo", action="append", default=[])
     goal_run.add_argument("--acceptance", action="append", default=[])
     goal_run.add_argument("--non-goal", action="append", default=[])
+    goal_run.add_argument("--blueprint", default="neko_dev_qa_basic", help="Blueprint id for graph-routed goal creation")
+    goal_run.add_argument("--bind", action="append", default=[], help="Bind a blueprint slot, e.g. builder=persona:dev")
     goal_run.add_argument("--json", action="store_true")
     goal_run.set_defaults(func=_cmd_goal_run)
 
@@ -788,6 +790,12 @@ def _cmd_install_stage46_skills(args) -> int:
 def _cmd_goal_run(args) -> int:
     cfg = load_agent_runtime_config()
     os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
+    try:
+        bindings = _parse_blueprint_bindings(list(args.bind or []))
+    except Exception as exc:
+        data = {"ok": False, "error": str(exc)}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
     result = MissionRuntimeController(
         config=cfg,
         engine_factory=lambda **kwargs: TickEngine(
@@ -806,6 +814,8 @@ def _cmd_goal_run(args) -> int:
             affected_repos=list(args.affected_repo or []),
             acceptance_criteria=list(args.acceptance or []),
             non_goals=list(args.non_goal or []),
+            blueprint_id=args.blueprint,
+            bindings=bindings,
         )
     )
     if args.json:
