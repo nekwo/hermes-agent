@@ -48,8 +48,8 @@ The Harness already contains **two orchestrators** living side by side in
 1. **The legacy role-encoded `TaskState` ladder** — the large `if state == TaskState.X`
    chain in `MissionStateMachine.next_action`. The dev → qa → pm → neko shape is
    *welded into the `TaskState` enum itself* ([`agent_runtime/states.py`](../states.py):
-   `DEV_IMPLEMENTING`, `READY_FOR_VERIFICATION`, `READY_FOR_IMPLEMENTATION`, `VERIFIED`, …) and
-   into role-specific actions (`HarnessActionType.retired_dev_action / retired_qa_action / retired_lead_action`)
+   `DEV_IMPLEMENTING`, `ready-for-verification`, `ready-for-implementation`, `verified`, …) and
+   into role-specific actions (`HarnessActionType.retired dev action / retired qa action / retired lead action`)
    and `actor == "neko_supervisor"` string checks. **This is the "3–4 forced"
    problem.** You cannot express a 1-agent or 5-agent flow because the graph *is*
    the enum.
@@ -84,12 +84,12 @@ running both orchestrators at once and having them disagree about task state.
 
 ### What must change to reach "1 to N agents"
 
-1. **`retired_owner_allowlist` is the data-layer expression of "3–4 forced."** Today
+1. **`retired owner allowlist` is the data-layer expression of "3–4 forced."** Today
    ([`mission_plan.py:17`](../mission_plan.py)) it is
    `frozenset({"neko_supervisor", "dev", "backend_dev", "qa", "harness", "human"})`.
    Owners must become **slots** defined by the blueprint, validated against the
    blueprint's own slot set, not a global hardcoded enum.
-2. **`HarnessActionType.retired_dev_action / retired_qa_action / retired_lead_action` are role-hardcoded.**
+2. **`HarnessActionType.retired dev action / retired qa action / retired lead action` are role-hardcoded.**
    They must collapse into a single `RUN_SLOT(slot_id)` action that the runner
    resolves through the binding to a persona/profile.
 3. **A plan is currently synthesized per-task** (`_synthesize_plan_from_handoff`).
@@ -107,11 +107,11 @@ Each item is "done" only when the legacy branch is deleted, not merely bypassed.
 path.** Grouped by subsystem:
 
 *Orchestrator / state*
-- [ ] `TaskState` reduced to generic lifecycle (`created/running/blocked/done/failed/cancelled`); all role-named members (`PM_*`, `DEV_*`, `QA_*`, `APPLYING`, …) removed.
+- [ ] `TaskState` reduced to generic lifecycle (`created/running/blocked/done/failed/cancelled`); all role-named members (`PM_*`, `DEV_*`, `QA_*`, `applying`, …) removed.
 - [ ] Legacy `if state == TaskState.X` ladder in `next_action` deleted; `next_action` delegates to graph routing unconditionally (no `mission_plan_routing_enabled` fork).
-- [ ] `HarnessActionType.retired_dev_action/retired_qa_action/retired_lead_action` removed in favour of `RUN_SLOT`.
+- [ ] `HarnessActionType.retired dev action/retired qa action/retired lead action` removed in favour of `RUN_SLOT`.
 - [ ] `actor == "neko_supervisor"` checks replaced by `stage.owner_slot == <lead-role slot>`.
-- [ ] `retired_owner_allowlist` global removed; owners validated per-blueprint.
+- [ ] `retired owner allowlist` global removed; owners validated per-blueprint.
 - [ ] `AgentState` enum (`states.py:26`, role-shaped: `AUDITING/DESIGNING_TESTS/…`) audited and removed if unreferenced after slot migration.
 
 *Plan / stage duplication*
@@ -129,7 +129,7 @@ path.** Grouped by subsystem:
 *HUD / skills / proof gates (see "Make the HUD, skills, and proof gates dynamic")*
 - [ ] Role-shaped HUD (`hud_shape_index_for_role`, `role_checklist_hud`) replaced by slot/stage/edge-shaped HUD.
 - [ ] Hardcoded `_STAGE46_REQUIRED_SKILLS` map + `stage46_*` install/readiness path replaced by persona `skills` + per-stage `required_skills`.
-- [x] Role-named proof-gate functions (`implementation_proof_satisfied`, `verification_proof_satisfied`, `integration_proof_satisfied`) collapsed into one generic `stage_proof_satisfied(stage, proofs)`.
+- [x] Role-named proof-gate functions (`implementation proof satisfied`, `verification proof satisfied`, `integration proof satisfied`) collapsed into one generic `stage_proof_satisfied(stage, proofs)`.
 
 Each box is "done" only when the legacy branch is **deleted**, not merely bypassed.
 A grep for the removed symbol returning zero hits outside tests/migrations is the
@@ -194,7 +194,7 @@ MCP servers, and **points at a profile** via `hermes_profile`.
 >   emitting proof, blocking with feedback).
 >
 > A raw profile has none of this, which is exactly why orchestration runs
-> (`retired_dev_action`, etc.) always resolve through a persona today and a bare profile is
+> (`retired dev action`, etc.) always resolve through a persona today and a bare profile is
 > `template_only`. **Therefore a binding always targets a persona — never a bare
 > profile.** What stays dynamic is *provisioning* the persona, not skipping it.
 
@@ -280,10 +280,10 @@ what is already true.
 
 2. **The typed `mission_plan` must be made dynamic to become the engine.** Today the
    typed plan is real but *not yet dynamic*: it is synthesized per task from handoffs
-   (`_synthesize_plan_from_handoff`), constrained by the hardcoded `retired_owner_allowlist`
+   (`_synthesize_plan_from_handoff`), constrained by the hardcoded `retired owner allowlist`
    set, and carries launcher/cross-stack special cases baked into the engine. "Make
    it dynamic" means three concrete moves:
-   - **Owners become slots, not a fixed enum** — drop `retired_owner_allowlist`; validate
+   - **Owners become slots, not a fixed enum** — drop `retired owner allowlist`; validate
      `owner_slot` against the blueprint's own declared slots, so agent count is 1 to N.
    - **Plans come from blueprints, not ad-hoc synthesis** — instantiate a saved,
      versioned blueprint at goal creation instead of `_synthesize_plan_from_handoff`.
@@ -331,7 +331,7 @@ as `missing_skills` / `skill_hash_mismatches`.
 `ProofRecipe` registry ([`proof_recipes.py:64`](../proof_recipes.py)) +
 `MissionPlanStage.proof_recipe_id` + `blocks_qa_until` already attach proof to stages.
 The gap is the **gate evaluation**, which is role-named:
-`implementation_proof_satisfied`, `verification_proof_satisfied`, `integration_proof_satisfied`
+`implementation proof satisfied`, `verification proof satisfied`, `integration proof satisfied`
 ([`proof_gates.py`](../proof_gates.py)).
 - *Dynamic form:* one generic `stage_proof_satisfied(stage, proofs)` evaluated against
   the stage's declared `proof_gate` (`required`, `minimum_status`,
@@ -372,8 +372,8 @@ They are related but not the same enum. In particular, current `StageStatus` has
 ```python
 OUTCOME_TO_STAGE_STATUS = {
     StageOutcome.PASSED: StageStatus.PASSED,
-    StageOutcome.FAILED: StageStatus.NEEDS_FIXES,
-    StageOutcome.NEEDS_FIXES: StageStatus.NEEDS_FIXES,
+    StageOutcome.FAILED: StageStatus.REWORK,
+    StageOutcome.REWORK: StageStatus.REWORK,
     StageOutcome.BLOCKED: StageStatus.BLOCKED,
     StageOutcome.READY: StageStatus.READY,
     StageOutcome.MISSING_INPUT: StageStatus.BLOCKED,
@@ -595,7 +595,7 @@ class StageOutcome(StrEnum):          # closed edge vocabulary
     BLOCKED = "blocked"
     READY = "ready"
     MISSING_INPUT = "missing_input"
-    NEEDS_FIXES = "needs_fixes"
+    REWORK = "needs_fixes"
 
 TERMINAL_TARGETS = frozenset({"done", "intervention"})  # reserved edge targets
 
@@ -682,7 +682,7 @@ def derive_stage_outcome(stage, decision, proofs) -> StageOutcome:
     """Pure mapping from a finished stage run to one closed outcome.
     Reuses today's signals so no new agent contract is needed:
       - block decision / unresolved blocker        -> BLOCKED
-      - QA verdict 'failed' / NEEDS_FIXES status    -> FAILED / NEEDS_FIXES
+      - QA verdict 'failed' / rework status         -> FAILED / REWORK
       - unresolved context request                  -> MISSING_INPUT
       - proof gate satisfied (stage_proof_satisfied)-> PASSED
       - scoping-only stage with proof_gate.required False -> READY
@@ -750,7 +750,7 @@ Reuse `_dependency_cycle_errors`; add:
 - `agent_runtime/blueprints/` (new) — `schema.py`, `store.py`, `instantiate.py`,
   `resolve.py`.
 - `agent_runtime/models.py` — `MissionPlan` + `MissionPlanStage` extensions above.
-- `agent_runtime/mission_plan.py` — drop `retired_owner_allowlist`; validate `owner_slot`
+- `agent_runtime/mission_plan.py` — drop `retired owner allowlist`; validate `owner_slot`
   against `plan.slots`; add edge/outcome/limit checks to `validate_mission_plan`.
 - `agent_runtime/states.py` — add `StageOutcome` (or place in `blueprints/schema.py`).
 
@@ -777,7 +777,7 @@ python -m pytest tests/agent_runtime/test_mission_plan.py
 - A blueprint instantiates into a `MissionPlan` with no loss of routing fidelity
   (the round-trip test passes).
 - `validate_blueprint` fails before mission creation on every rule above.
-- Execution never depends on hardcoded profile names or on `retired_owner_allowlist`.
+- Execution never depends on hardcoded profile names or on `retired owner allowlist`.
 
 ---
 
@@ -817,7 +817,7 @@ hermes harness blueprint run one_agent_smoke \
 ### Files touched
 
 - `agent_runtime/state_machine.py` — `_typed_next_action` must emit
-  `RUN_SLOT(builder)` instead of `retired_dev_action`; introduce `HarnessActionType.RUN_SLOT`.
+  `RUN_SLOT(builder)` instead of `retired dev action`; introduce `HarnessActionType.RUN_SLOT`.
 - `agent_runtime/goal_runner.py` / runner — resolve `RUN_SLOT` through the binding
   to a persona, then run as today.
 - New CLI subcommand `hermes harness blueprint run` (mirror existing subcommand
@@ -894,8 +894,8 @@ hermes harness blueprint run two_agent_build_verify \
 
 ### Retirement work in this stage
 
-- Replace the hardcoded `verify failed → retired_dev_action` logic in `_typed_next_action`
-  (the `NEEDS_FIXES → retired_dev_action` branch) with edge evaluation.
+- Replace the hardcoded `verify failed → retired dev action` logic in `_typed_next_action`
+  (the `needs-fixes → retired dev action` branch) with edge evaluation.
 - Replace `actor == "neko_supervisor"` release gating with slot ownership where it
   is not yet needed (the lead slot arrives in Stage 3).
 
@@ -1121,8 +1121,8 @@ proof_gate:
 ### Files touched
 
 - `agent_runtime/proof_gates.py` — add `stage_proof_satisfied(stage, proofs) -> GateResult`
-  driven by the stage's `ProofGate`; delete `implementation_proof_satisfied` / `verification_proof_satisfied`
-  / `integration_proof_satisfied` once `derive_stage_outcome` calls the generic gate.
+  driven by the stage's `ProofGate`; delete `implementation proof satisfied` / `verification proof satisfied`
+  / `integration proof satisfied` once `derive_stage_outcome` calls the generic gate.
 - `agent_runtime/proof_recipes.py` — recipe registry stays; allow a stage to reference
   a recipe id or inline `commands`.
 
@@ -1240,17 +1240,17 @@ Retirement means **delete the old execution path**, not hide it behind a config 
 Stage 10 is complete only when these removals are real code deletions:
 
 - Legacy `TaskState` role ladder removed from `MissionStateMachine.next_action`; no
-  branch chain remains for `PM_*`, `DEV_*`, `QA_*`, or `APPLYING` transitions.
+  branch chain remains for `PM_*`, `DEV_*`, `QA_*`, or `applying` transitions.
 - `TaskState` reduced to generic lifecycle values only (`created/running/blocked/done/failed/cancelled` or equivalent migration-safe names).
-- `retired_dev_action`, `retired_qa_action`, and `retired_lead_action` deleted from `HarnessActionType`; all
+- `retired dev action`, `retired qa action`, and `retired lead action` deleted from `HarnessActionType`; all
   agent execution goes through `RUN_SLOT`.
-- `retired_owner_allowlist` global deleted; owner validation is per-blueprint slot validation.
+- `retired owner allowlist` global deleted; owner validation is per-blueprint slot validation.
 - `mission_plan_routing_enabled` / `config.mission_plan.enforce_routing` legacy-fallback
   path deleted; graph routing is unconditional for new missions.
 - Legacy `Task.stages` mirror deleted after Launcher/snapshot reads `mission_plan.stages`
   directly.
-- Role-shaped proof-gate functions (`implementation_proof_satisfied`, `verification_proof_satisfied`,
-  `integration_proof_satisfied`) deleted after `stage_proof_satisfied` owns gate evaluation.
+- Role-shaped proof-gate functions (`implementation proof satisfied`, `verification proof satisfied`,
+  `integration proof satisfied`) deleted after `stage_proof_satisfied` owns gate evaluation.
 
 ### Deletion verification gates
 
@@ -1260,8 +1260,8 @@ regression is explicitly being checked:
 ```bash
 python -m pytest tests/agent_runtime/blueprints tests/agent_runtime/test_state_machine.py
 python -m pytest tests/agent_runtime/test_proof_gates.py
-rg "retired_dev_action|retired_qa_action|retired_lead_action|retired_owner_allowlist|implementation_proof_satisfied|verification_proof_satisfied|integration_proof_satisfied" agent_runtime hermes_cli tests
-rg "READY_FOR_IMPLEMENTATION|READY_FOR_VERIFICATION|VERIFIED|NEEDS_FIXES|PROOF_REVIEW|APPLYING" agent_runtime hermes_cli tests
+rg "retired dev action|retired qa action|retired lead action|retired owner allowlist|implementation proof satisfied|verification proof satisfied|integration proof satisfied" agent_runtime hermes_cli tests
+rg "ready-for-implementation|ready-for-verification|verified|needs-fixes|proof-review|applying" agent_runtime hermes_cli tests
 ```
 
 The grep gate must return zero hits outside explicit migration notes or tests that

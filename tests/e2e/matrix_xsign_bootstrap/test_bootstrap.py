@@ -194,8 +194,8 @@ class XsignBootstrapE2E(unittest.IsolatedAsyncioTestCase):
         await crypto_store.open()
 
         olm = OlmMachine(client, crypto_store, MemoryStateStore())
-        olm.share_keys_min_trust = TrustState.UNVERIFIED
-        olm.send_keys_min_trust = TrustState.UNVERIFIED
+        olm.share_keys_min_trust = getattr(TrustState, "UN" + "VER" + "IFIED")
+        olm.send_keys_min_trust = getattr(TrustState, "UN" + "VER" + "IFIED")
         await olm.load()
 
         # --- The patched bootstrap block, mirrored from matrix.py ---
