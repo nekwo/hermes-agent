@@ -41,8 +41,17 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     )
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["add_instance"]["type"] == "boolean"
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["kill_active"]["type"] == "boolean"
+    assert by_id["persona.instance.create"]["danger"] == "warning"
+    assert by_id["persona.instance.create"]["args_schema"]["properties"]["coordinator_spawns_used"]["minimum"] == 0
+    assert by_id["persona.instance.create"]["args_schema"]["properties"]["coordinator_may_kill_own"]["type"] == "boolean"
     assert {"add_instance", "placement_id", "kill_active"}.issubset(
         set(by_id["persona.instance.open_chat"]["allowed_args"])
+    )
+    assert {"requested_by", "coordinator_id", "coordinator_max_spawns", "coordinator_may_kill_own"}.issubset(
+        set(by_id["persona.instance.close"]["allowed_args"])
+    )
+    assert {"requested_by", "coordinator_id", "coordinator_max_spawns", "coordinator_may_kill_own"}.issubset(
+        set(by_id["run.cancel"]["allowed_args"])
     )
     for capability_id in (
         "persona.message_task",

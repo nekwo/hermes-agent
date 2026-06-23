@@ -471,6 +471,46 @@ def test_persona_instance_create_cli_creates_free_floating_assignment_without_ti
     assert RunStore().list_all() == []
 
 
+def test_coordinator_create_beyond_spawn_scope_returns_confirm_without_creating(monkeypatch, capsys, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    code = harness._cmd_persona_instance_create(
+        Namespace(
+            persona_id="launcher-dev",
+            title="Spawn Dev",
+            message="Start a child.",
+            requested_by="coordinator:neko_supervisor",
+            coordinator_id="neko_supervisor",
+            coordinator_max_spawns=0,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=None,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            client_message_id=None,
+            display_name="Spawned Dev",
+            session_id=None,
+            kill_active=False,
+            add_instance=True,
+            placement_id="scene_child_1",
+            auto_run=False,
+            max_actions=1,
+            max_seconds=240.0,
+            stream=False,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "needs_operator_confirm"
+    assert payload["reason"] == "spawn_scope_exhausted"
+    assert PersonaInstanceStore().list_all() == []
+
+
 def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, isolate_agent_runtime_root):
     from argparse import Namespace
     from hermes_cli import harness
@@ -1180,6 +1220,91 @@ def test_persona_instance_close_cli_closes_only_free_floating_assignment(monkeyp
     instance = PersonaInstanceStore().get(assignment.persona_instance_id)
     assert instance.mode == "configured"
     assert instance.current_assignment_id is None
+
+
+def test_coordinator_close_own_spawned_instance_with_scope(monkeypatch, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    assignment = PersonaAssignmentStore().create_or_resume(
+        PersonaAssignmentSpec(
+            persona_id="dev",
+            kind="free_floating_message",
+            title="Sandbox",
+            message="Close me.",
+            task_id=None,
+        )
+    )
+    instance_store = PersonaInstanceStore()
+    instance = instance_store.ensure_for_persona(_persona("dev"))
+    instance.mode = "free_floating"
+    instance.current_assignment_id = assignment.id
+    instance.spawned_by = "neko_supervisor"
+    instance_store.update(instance)
+
+    code = harness._cmd_persona_instance_close(
+        Namespace(
+            persona_instance_id=assignment.persona_instance_id,
+            reason="coordinator closed own child",
+            requested_by="coordinator:neko_supervisor",
+            coordinator_id="neko_supervisor",
+            coordinator_max_spawns=0,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=True,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    assert PersonaAssignmentStore().get(assignment.id).state == "cancelled"
+
+
+def test_coordinator_close_operator_placed_instance_needs_confirm(monkeypatch, capsys, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    assignment = PersonaAssignmentStore().create_or_resume(
+        PersonaAssignmentSpec(
+            persona_id="dev",
+            kind="free_floating_message",
+            title="Sandbox",
+            message="Do not close without operator.",
+            task_id=None,
+        )
+    )
+    instance_store = PersonaInstanceStore()
+    instance = instance_store.ensure_for_persona(_persona("dev"))
+    instance.mode = "free_floating"
+    instance.current_assignment_id = assignment.id
+    instance.spawned_by = "operator"
+    instance_store.update(instance)
+
+    code = harness._cmd_persona_instance_close(
+        Namespace(
+            persona_instance_id=assignment.persona_instance_id,
+            reason="coordinator tried closing operator placement",
+            requested_by="coordinator:neko_supervisor",
+            coordinator_id="neko_supervisor",
+            coordinator_max_spawns=0,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=True,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=True,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "needs_operator_confirm"
+    assert payload["reason"] == "operator_placed_target"
+    assert PersonaAssignmentStore().get(assignment.id).state == "queued"
 
 
 def test_persona_message_cli_creates_assignment_without_ticking(monkeypatch, isolate_agent_runtime_root):

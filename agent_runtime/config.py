@@ -11,7 +11,7 @@ from hermes_cli.profiles import profile_exists
 
 from .personas import default_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
-from .runtime_config import ContinuousRoleSessionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
 
 _STAGE46_REQUIRED_SKILLS = {
     "neko_supervisor": ("harness-mission-lead",),
@@ -41,6 +41,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     repo_bundle_routing = _repo_bundle_routing_config(raw.get("repo_bundle_routing") or {})
     simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
     swarm = _swarm_config(raw.get("swarm") or {})
+    coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
     continuous_role_sessions = _apply_enterprise_role_session_compat(
         continuous_role_sessions,
         enterprise_worker_sessions=enterprise_worker_sessions,
@@ -87,6 +88,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         repo_bundle_routing=repo_bundle_routing,
         simplified_agent_contract=simplified_agent_contract,
         swarm=swarm,
+        coordinator_permissions=coordinator_permissions,
         personas=raw.get("personas", {}) or {},
     )
     return cfg
@@ -327,6 +329,14 @@ def _swarm_config(raw: dict[str, Any]) -> SwarmConfig:
         global_api_call_hard_limit=_positive_int(raw.get("global_api_call_hard_limit"), defaults.global_api_call_hard_limit),
         per_lane_token_limit=_positive_int(raw.get("per_lane_token_limit"), defaults.per_lane_token_limit),
         per_lane_api_call_limit=_positive_int(raw.get("per_lane_api_call_limit"), defaults.per_lane_api_call_limit),
+    )
+
+
+def _coordinator_permission_config(raw: dict[str, Any]) -> CoordinatorPermissionConfig:
+    return CoordinatorPermissionConfig(
+        max_spawns=max(0, int(raw.get("max_spawns", 0))),
+        may_kill_own=bool(raw.get("may_kill_own", True)),
+        may_kill_others=bool(raw.get("may_kill_others", False)),
     )
 
 

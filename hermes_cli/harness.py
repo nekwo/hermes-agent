@@ -16,6 +16,11 @@ from hermes_time import now
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
 from agent_runtime.config import configured_personas, load_agent_runtime_config
+from agent_runtime.coordinator_permissions import (
+    CoordinatorPermissionScope,
+    authorize_coordinator_action,
+    scope_for_persona,
+)
 from agent_runtime.decision_contract_examples import verify_stage46_skill_examples
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_role, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
@@ -60,6 +65,15 @@ from agent_runtime.ticker import TickEngine
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_session_summary
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
+
+
+def _add_coordinator_permission_args(parser) -> None:
+    parser.add_argument("--coordinator-id", default="neko_supervisor", help="Coordinator persona id when --requested-by is coordinator or coordinator:<id>")
+    parser.add_argument("--coordinator-max-spawns", type=int, default=None, help="In-scope create/spawn grant for this coordinator action")
+    parser.add_argument("--coordinator-spawns-used", type=int, default=0, help="Create/spawn actions already used in this coordinator scope")
+    parser.add_argument("--coordinator-may-kill-own", action="store_true", default=None, help="Allow killing instances spawned by this coordinator")
+    parser.add_argument("--coordinator-no-kill-own", action="store_true", default=None, help="Require confirmation even for own-spawned instances")
+    parser.add_argument("--coordinator-may-kill-others", action="store_true", default=None, help="Allow killing non-operator instances spawned by another coordinator")
 
 
 def build_parser(parent_subparsers) -> None:
@@ -256,6 +270,8 @@ def build_parser(parent_subparsers) -> None:
     run_cancel = run_subs.add_parser("cancel", help="Cancel a harness run")
     run_cancel.add_argument("run_id")
     run_cancel.add_argument("--reason", required=True)
+    run_cancel.add_argument("--requested-by", default="cli")
+    _add_coordinator_permission_args(run_cancel)
     run_cancel.add_argument("--json", action="store_true")
     run_cancel.set_defaults(func=_cmd_run_cancel)
     run_approve = run_subs.add_parser("approve", help="Approve a waiting run to continue the same session")
@@ -329,6 +345,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.add_argument("--title", required=True)
     persona_instance_create.add_argument("--message", required=True)
     persona_instance_create.add_argument("--requested-by", default="cli")
+    _add_coordinator_permission_args(persona_instance_create)
     persona_instance_create.add_argument("--client-message-id", default=None)
     persona_instance_create.add_argument("--display-name", default=None)
     persona_instance_create.add_argument("--session-id", default=None)
@@ -347,6 +364,8 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_open.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_open.add_argument("--add-instance", action="store_true", help="Open the chat on an additional placement-backed instance")
     persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
+    persona_instance_open.add_argument("--requested-by", default="cli")
+    _add_coordinator_permission_args(persona_instance_open)
     persona_instance_open.add_argument("--json", action="store_true")
     persona_instance_open.set_defaults(func=_cmd_persona_instance_open_chat)
     persona_instance_message = persona_instance_subs.add_parser("message", help="Queue a message to a free-floating persona instance without ticking")
@@ -374,6 +393,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_close.add_argument("persona_instance_id")
     persona_instance_close.add_argument("--reason", required=True)
     persona_instance_close.add_argument("--requested-by", default="cli")
+    _add_coordinator_permission_args(persona_instance_close)
     persona_instance_close.add_argument("--json", action="store_true")
     persona_instance_close.set_defaults(func=_cmd_persona_instance_close)
     persona_instance_archive = persona_instance_subs.add_parser("archive", help="Archive active free-floating assignments for one persona instance")
@@ -948,13 +968,29 @@ def _cmd_persona_instance_create(args) -> int:
     kill_active = bool(getattr(args, "kill_active", False))
     add_instance = bool(getattr(args, "add_instance", False))
     placement_id = safe_assignment_token(getattr(args, "placement_id", None))
+    cfg = load_agent_runtime_config()
+    persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
+    persona = _persona_by_id(cfg, persona_id)
+    coordinator_id = _coordinator_actor_id(args)
+    coordinator_scope = None
+    if coordinator_id and (display_name or add_instance):
+        coordinator_scope = _coordinator_scope_from_args(args, cfg, persona)
+        auth = authorize_coordinator_action(
+            "persona.instance.create",
+            coordinator_scope,
+            actor=coordinator_id,
+            coordinator_id=coordinator_id,
+        )
+        if not auth.ok:
+            data = _coordinator_confirm_payload("persona.instance.create", coordinator_id, auth)
+            print(emit_json(data) if args.json else data["status"])
+            return 2
+        coordinator_scope = auth.scope
     if display_name:
-        cfg = load_agent_runtime_config()
         if not persona_assignment_store_enabled(cfg):
             data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
             print(emit_json(data) if args.json else data["error"])
             return 2
-        persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
         try:
             if add_instance:
                 if not placement_id:
@@ -974,6 +1010,8 @@ def _cmd_persona_instance_create(args) -> int:
                     session_id=getattr(args, "session_id", None),
                     kill_active=kill_active,
                 )
+            if add_instance or coordinator_id:
+                instance = _maybe_stamp_spawned_by(instance, coordinator_id=coordinator_id)
         except ChatBusyError as exc:
             data = _chat_busy_payload(exc)
             print(emit_json(data) if args.json else data["error"])
@@ -995,6 +1033,7 @@ def _cmd_persona_instance_create(args) -> int:
             "killed_previous": bool(kill_active),
             "add_instance": add_instance,
             "placement_id": placement_id or None,
+            "coordinator_permission_scope": asdict(coordinator_scope) if coordinator_scope is not None else None,
             "next_expected": "agent profile created; refresh Harness snapshot for the profile, chat, and scene placement state",
         }
         print(emit_json(data) if args.json else f"created {instance.id} on chat {instance.session_id}")
@@ -1013,6 +1052,8 @@ def _cmd_persona_instance_create(args) -> int:
         kill_active=kill_active,
         add_instance=add_instance,
         placement_id=placement_id,
+        spawned_by=coordinator_id if coordinator_id else ("operator" if add_instance else None),
+        coordinator_permission_scope=coordinator_scope,
     )
 
 
@@ -1023,6 +1064,39 @@ def _cmd_persona_instance_open_chat(args) -> int:
         print(emit_json(data) if args.json else data["error"])
         return 2
     persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
+    persona = _persona_by_id(cfg, persona_id)
+    coordinator_id = _coordinator_actor_id(args)
+    coordinator_scope = None
+    if coordinator_id and bool(getattr(args, "add_instance", False)):
+        coordinator_scope = _coordinator_scope_from_args(args, cfg, persona)
+        auth = authorize_coordinator_action(
+            "persona.instance.open_chat",
+            coordinator_scope,
+            actor=coordinator_id,
+            coordinator_id=coordinator_id,
+        )
+        if not auth.ok:
+            data = _coordinator_confirm_payload("persona.instance.open_chat", coordinator_id, auth)
+            print(emit_json(data) if args.json else data["status"])
+            return 2
+        coordinator_scope = auth.scope
+    elif coordinator_id and bool(getattr(args, "kill_active", False)):
+        coordinator_scope = _coordinator_scope_from_args(args, cfg, persona)
+        try:
+            target = PersonaInstanceStore().get(persona_instance_id_for(persona_id))
+        except Exception:
+            target = None
+        auth = authorize_coordinator_action(
+            "persona.instance.close",
+            coordinator_scope,
+            target,
+            actor=coordinator_id,
+            coordinator_id=coordinator_id,
+        )
+        if not auth.ok:
+            data = _coordinator_confirm_payload("persona.instance.close", coordinator_id, auth)
+            print(emit_json(data) if args.json else data["status"])
+            return 2
     try:
         if bool(getattr(args, "add_instance", False)):
             placement_id = safe_assignment_token(getattr(args, "placement_id", None))
@@ -1035,6 +1109,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 placement_id=placement_id,
                 session_id=args.session_id,
             )
+            instance = _maybe_stamp_spawned_by(instance, coordinator_id=coordinator_id)
         else:
             instance = PersonaInstanceStore().open_chat(
                 persona_id=persona_id,
@@ -1055,6 +1130,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
         "killed_previous": bool(getattr(args, "kill_active", False)),
         "add_instance": bool(getattr(args, "add_instance", False)),
         "placement_id": safe_assignment_token(getattr(args, "placement_id", None)) or None,
+        "coordinator_permission_scope": asdict(coordinator_scope) if coordinator_scope is not None else None,
         "next_expected": "resume or send on this chat session to boot the persona instance history",
     }
     print(emit_json(data) if args.json else f"opened {instance.id} on chat {instance.session_id}")
@@ -1075,6 +1151,57 @@ def _chat_busy_payload(exc: ChatBusyError) -> dict[str, object]:
     }
 
 
+def _coordinator_actor_id(args) -> str | None:
+    raw = str(getattr(args, "requested_by", "") or "").strip()
+    if raw.lower().startswith("coordinator:"):
+        return safe_assignment_token(raw.split(":", 1)[1])
+    if raw.lower() == "coordinator":
+        return safe_assignment_token(getattr(args, "coordinator_id", "neko_supervisor"))
+    return None
+
+
+def _coordinator_scope_from_args(args, cfg, persona: AgentPersona | None) -> CoordinatorPermissionScope:
+    scope = scope_for_persona(
+        persona,
+        config=getattr(cfg, "coordinator_permissions", None),
+        spawns_used=int(getattr(args, "coordinator_spawns_used", 0) or 0),
+    )
+    max_spawns = getattr(args, "coordinator_max_spawns", None)
+    if max_spawns is not None:
+        scope.max_spawns = max(0, int(max_spawns))
+    may_kill_own = getattr(args, "coordinator_may_kill_own", None)
+    no_kill_own = getattr(args, "coordinator_no_kill_own", None)
+    if may_kill_own is not None:
+        scope.may_kill_own = bool(may_kill_own)
+    if no_kill_own is not None:
+        scope.may_kill_own = not bool(no_kill_own)
+    may_kill_others = getattr(args, "coordinator_may_kill_others", None)
+    if may_kill_others is not None:
+        scope.may_kill_others = bool(may_kill_others)
+    return scope
+
+
+def _coordinator_confirm_payload(action: str, coordinator_id: str, auth) -> dict[str, object]:
+    return {
+        "ok": False,
+        "status": "needs_operator_confirm",
+        "needs_operator_confirm": True,
+        "action": action,
+        "coordinator_id": coordinator_id,
+        "reason": auth.reason,
+        "permission_scope": asdict(auth.scope) if auth.scope is not None else None,
+        "next_expected": "operator confirmation or a wider coordinator permission scope is required before this warning/destructive action can run",
+    }
+
+
+def _maybe_stamp_spawned_by(instance, *, coordinator_id: str | None, operator_source: str = "operator"):
+    source = safe_assignment_token(coordinator_id) if coordinator_id else operator_source
+    if not source:
+        return instance
+    instance.spawned_by = source
+    return PersonaInstanceStore().update(instance)
+
+
 def _cmd_persona_instance_message(args) -> int:
     return _queue_free_floating_assignment(
         persona_id=_persona_id_from_instance_id(args.persona_instance_id),
@@ -1092,6 +1219,27 @@ def _cmd_persona_instance_message(args) -> int:
 
 
 def _cmd_persona_instance_close(args) -> int:
+    cfg = load_agent_runtime_config()
+    coordinator_id = _coordinator_actor_id(args)
+    if coordinator_id:
+        try:
+            target = PersonaInstanceStore().get(args.persona_instance_id)
+            persona = _persona_by_id(cfg, target.persona_id)
+        except Exception:
+            target = None
+            persona = None
+        scope = _coordinator_scope_from_args(args, cfg, persona)
+        auth = authorize_coordinator_action(
+            "persona.instance.close",
+            scope,
+            target,
+            actor=coordinator_id,
+            coordinator_id=coordinator_id,
+        )
+        if not auth.ok:
+            data = _coordinator_confirm_payload("persona.instance.close", coordinator_id, auth)
+            print(emit_json(data) if args.json else data["status"])
+            return 2
     return _close_free_floating_assignments(args.persona_instance_id, reason=args.reason, json_output=args.json, terminal_state="cancelled")
 
 
@@ -1173,6 +1321,8 @@ def _queue_free_floating_assignment(
     kill_active: bool = False,
     add_instance: bool = False,
     placement_id: str | None = None,
+    spawned_by: str | None = None,
+    coordinator_permission_scope: CoordinatorPermissionScope | None = None,
 ) -> int:
     cfg = load_agent_runtime_config()
     if not persona_assignment_store_enabled(cfg):
@@ -1194,11 +1344,13 @@ def _queue_free_floating_assignment(
                 else:
                     print(emit_json(data) if json_output else data["error"])
                 return 2
-            persona_instance_id = instance_store.add_instance(
+            instance = instance_store.add_instance(
                 persona_id=normalized_persona,
                 placement_id=placement_id,
                 display_name=safe_assignment_text(title, limit=120) or None,
-            ).id
+            )
+            instance = _maybe_stamp_spawned_by(instance, coordinator_id=spawned_by, operator_source="operator")
+            persona_instance_id = instance.id
         else:
             persona_instance_id = instance_store.create_free_floating(normalized_persona).id
     assignment_store = PersonaAssignmentStore()
@@ -1256,6 +1408,7 @@ def _queue_free_floating_assignment(
         "killed_previous": bool(kill_active),
         "add_instance": bool(add_instance),
         "placement_id": placement_id or None,
+        "coordinator_permission_scope": asdict(coordinator_permission_scope) if coordinator_permission_scope is not None else None,
         "turn_id": None,
         "run_ids": [],
         "next_expected": "agent turn queued; run harness persona instance run-once if auto_run is false",
@@ -2318,9 +2471,35 @@ def _cmd_burn_in_summarize(args) -> int:
 
 
 def _cmd_run_cancel(args) -> int:
-    run = RunStore().cancel(args.run_id, reason=args.reason)
-    updated_workers = []
     worker_store = WorkerSessionStore()
+    run_store = RunStore()
+    run = run_store.get(args.run_id)
+    coordinator_id = _coordinator_actor_id(args)
+    if coordinator_id:
+        target = None
+        for worker in worker_store.find_active(task_id=run.task_id, persona_id=run.persona_id):
+            if worker.active_run_id == run.id:
+                try:
+                    target = PersonaInstanceStore().get(persona_instance_id_for(worker.persona_id))
+                except Exception:
+                    target = None
+                break
+        cfg = load_agent_runtime_config()
+        persona = _persona_by_id(cfg, run.persona_id)
+        scope = _coordinator_scope_from_args(args, cfg, persona)
+        auth = authorize_coordinator_action(
+            "run.cancel",
+            scope,
+            target,
+            actor=coordinator_id,
+            coordinator_id=coordinator_id,
+        )
+        if not auth.ok:
+            data = _coordinator_confirm_payload("run.cancel", coordinator_id, auth)
+            print(emit_json(data) if args.json else data["status"])
+            return 2
+    run = run_store.cancel(args.run_id, reason=args.reason)
+    updated_workers = []
     for worker in worker_store.find_active(task_id=run.task_id, persona_id=run.persona_id):
         if worker.active_run_id == run.id:
             updated = worker_store.update_after_run(worker.id, run, close_reason="run_cancelled", count_decision=False)
