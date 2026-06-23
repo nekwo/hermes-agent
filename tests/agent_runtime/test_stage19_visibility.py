@@ -8,7 +8,7 @@ from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, ProofStore, TaskStore
 
 
-def make_task(state=TaskState.READY_FOR_VERIFICATION):
+def make_task(state=TaskState.READY_FOR_REVIEW):
     ts = now()
     return Task(
         id="task_visibility",

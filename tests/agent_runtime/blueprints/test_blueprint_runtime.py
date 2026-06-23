@@ -221,18 +221,18 @@ def test_blueprint_outcome_edges_route_build_verify_loop():
     assert apply_stage_outcome(task, "verify", StageOutcome.FAILED, reason="failed verification") == "implement"
     assert plan.current_stage_id == "implement"
     implement = next(stage for stage in plan.stages if stage.id == "implement")
-    assert implement.status == StageStatus.NEEDS_FIXES
+    assert implement.status == StageStatus.REWORK
     assert plan.stage_attempts == {"implement": 1, "verify": 1}
 
 
-def test_blueprint_needs_fixes_routes_back_until_stage_attempt_limit():
+def test_blueprint_REWORK_routes_back_until_stage_attempt_limit():
     task = _blueprint_task("two_agent_build_verify")
     plan = task.mission_plan
 
     apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="attempt 1")
-    apply_stage_outcome(task, "verify", StageOutcome.NEEDS_FIXES, reason="needs fixes 1")
+    apply_stage_outcome(task, "verify", StageOutcome.REWORK, reason="needs fixes 1")
     apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="attempt 2")
-    result = apply_stage_outcome(task, "verify", StageOutcome.NEEDS_FIXES, reason="needs fixes 2")
+    result = apply_stage_outcome(task, "verify", StageOutcome.REWORK, reason="needs fixes 2")
 
     assert result == "intervention"
     assert task.state == TaskState.BLOCKED
@@ -249,7 +249,7 @@ def test_blueprint_verify_passed_routes_to_done():
     task = _blueprint_task("two_agent_build_verify")
 
     apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="implemented")
-    result = apply_stage_outcome(task, "verify", StageOutcome.PASSED, reason="verified")
+    result = apply_stage_outcome(task, "verify", StageOutcome.PASSED, reason="APPROVED")
 
     assert result == "done"
     assert task.mission_plan.current_stage_id is None
@@ -262,13 +262,13 @@ def test_blueprint_terminal_run_writes_versioned_record(tmp_path, monkeypatch):
     first.id = "task_blueprint_record_first"
 
     apply_stage_outcome(first, "implement", StageOutcome.PASSED, reason="implemented")
-    assert apply_stage_outcome(first, "verify", StageOutcome.PASSED, reason="verified") == "done"
+    assert apply_stage_outcome(first, "verify", StageOutcome.PASSED, reason="APPROVED") == "done"
 
     second = _blueprint_task("two_agent_build_verify", bindings={"builder": "persona:backend_dev", "verifier": "persona:qa"})
     second.id = "task_blueprint_record_second"
     second.mission_plan.blueprint_version = 2
     apply_stage_outcome(second, "implement", StageOutcome.PASSED, reason="implemented")
-    assert apply_stage_outcome(second, "verify", StageOutcome.PASSED, reason="verified") == "done"
+    assert apply_stage_outcome(second, "verify", StageOutcome.PASSED, reason="APPROVED") == "done"
 
     records = BlueprintRunStore().list_all()
     assert [record.task_id for record in records] == ["task_blueprint_record_first", "task_blueprint_record_second"]

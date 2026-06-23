@@ -67,8 +67,8 @@ def test_status_marks_next_action_blocked_by_open_incident():
     assert s["next_actions"][0]["action"] == "blocked_by_incident"
 
 
-def test_status_next_action_uses_mission_state_machine_for_READY_FOR_VERIFICATION():
-    ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.READY_FOR_VERIFICATION, created_at=n, updated_at=n, requested_by="tony"))
+def test_status_next_action_uses_mission_state_machine_for_READY_FOR_REVIEW():
+    ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.READY_FOR_REVIEW, created_at=n, updated_at=n, requested_by="tony"))
 
     s=build_status(task_store=ts)
 

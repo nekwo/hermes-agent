@@ -38,7 +38,7 @@ def _qa_approval(stage_ids):
     )
 
 
-def test_reconciler_flags_legacy_VERIFIED_missing_stage_records():
+def test_reconciler_flags_legacy_APPROVED_missing_stage_records():
     task = _task(TaskState.DEV_TEST_DESIGN)
     apply_planning_decision(task, _qa_approval(["stage_a"]), actor="qa")
     task.stages = []  # Legacy/runtime residue predating stage reconciliation.
@@ -51,7 +51,7 @@ def test_reconciler_flags_legacy_VERIFIED_missing_stage_records():
 
 
 def test_reconciler_routes_repeated_unsupported_context_requests_to_neko():
-    task = _task(TaskState.READY_FOR_IMPLEMENTATION)
+    task = _task(TaskState.READY_FOR_WORK)
     task.context_requests = [
         {"id": "ctx_1", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
         {"id": "ctx_2", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
@@ -68,7 +68,7 @@ def test_reconciler_routes_repeated_unsupported_context_requests_to_neko():
 
 
 def test_reconciler_does_not_route_clean_dev_ready_task_to_neko():
-    task = _task(TaskState.READY_FOR_IMPLEMENTATION)
+    task = _task(TaskState.READY_FOR_WORK)
 
     result = reconcile_task(task)
     action = MissionStateMachine().next_action(task)

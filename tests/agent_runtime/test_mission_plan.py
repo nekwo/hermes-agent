@@ -453,7 +453,7 @@ def test_implementation_stage_recovers_to_ready_after_later_passed_command_proof
             return {"proof_failed": failed, "proof_passed": passed}[proof_id]
 
     attach_proofs_to_plan_stage(task, "launcher", ["proof_failed"], proof_store=Proofs())
-    assert task.mission_plan.stages[0].status == StageStatus.NEEDS_FIXES
+    assert task.mission_plan.stages[0].status == StageStatus.REWORK
 
     attach_proofs_to_plan_stage(task, "launcher", ["proof_passed"], proof_store=Proofs())
 

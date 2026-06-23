@@ -235,7 +235,7 @@ def test_context_snapshot_and_observability_show_safe_discovery_handles():
 
 def test_child_proof_does_not_satisfy_parent_gate():
     parent_store = TaskStore(); proof_store = ProofStore(); ts = now()
-    parent = make_task(TaskState.READY_FOR_VERIFICATION); child = make_task(TaskState.READY_FOR_VERIFICATION)
+    parent = make_task(TaskState.READY_FOR_REVIEW); child = make_task(TaskState.READY_FOR_REVIEW)
     child.id = "task_child"; child.parent_task_id = parent.id
     parent_store.create(parent); parent_store.create(child)
     proof_store.attach(Proof(id="proof_child_test", task_id=child.id, stage_id=None, type=ProofType.TEST_RUN, title="child test", path_or_value="ok", created_by="qa", created_at=ts, redaction_status="safe"))

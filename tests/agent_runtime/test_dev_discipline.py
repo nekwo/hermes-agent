@@ -20,7 +20,7 @@ def make_task(**overrides):
         id="task_dev_hardening",
         title="Add Backend Dev persona and swarm-ready Mission Control agent model",
         description="Upgrade Launcher Mission Control data types, Launcher UI, Backend Dev profile binding, and future large swarm support across frontend and backend repos.",
-        state=TaskState.READY_FOR_IMPLEMENTATION,
+        state=TaskState.READY_FOR_WORK,
         created_at=ts,
         updated_at=ts,
         requested_by="tony",
