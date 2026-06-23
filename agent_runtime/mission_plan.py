@@ -171,7 +171,7 @@ def current_plan_stage(task: Task) -> MissionPlanStage | None:
     plan = getattr(task, "mission_plan", None)
     if not plan:
         return None
-    current_id = str(plan.current_stage_id or getattr(task, "current_stage_id", "") or "").strip()
+    current_id = str(getattr(task, "current_stage_id", "") or plan.current_stage_id or "").strip()
     if current_id:
         for stage in plan.stages:
             if stage.id == current_id:
@@ -214,14 +214,35 @@ def blocking_stages_ready_for_qa(task: Task, *, proof_store=None) -> tuple[bool,
     for stage in plan.stages:
         if not stage.blocks_qa_until or stage.owner == "qa":
             continue
-        if stage.status not in READY_STATUSES:
+        delivered_bundle = _stage_repo_bundle_delivered(task, stage)
+        if stage.status not in READY_STATUSES and not delivered_bundle:
             missing.append(f"typed stage {stage.id} is {stage.status.value}, not ready_for_qa")
+            continue
+        if delivered_bundle:
             continue
         if _stage_requires_passed_command(stage) and not _has_passed_command_proof(task, stage, proof_store=proof_store):
             missing.append(f"typed stage {stage.id} missing passed command proof")
         if stage.requires_visual_proof and not _has_passed_visual_proof(task, stage, proof_store=proof_store):
             missing.append(f"typed stage {stage.id} missing screenshot or video proof")
     return not missing, missing
+
+
+def _stage_repo_bundle_delivered(task: Task, stage: MissionPlanStage) -> bool:
+    repo = str(getattr(stage, "repo", "") or "").strip()
+    if not repo:
+        return False
+    try:
+        from .repo_bundles import RepoBundleStore
+
+        bundles = RepoBundleStore().list_for_task(task.id)
+    except Exception:
+        return False
+    for bundle in bundles:
+        if str(getattr(bundle, "repo", "") or "") != repo:
+            continue
+        if str(getattr(bundle, "state", "") or "").lower() in {"delivered", "delivered_waiting_for_qa", "verified"}:
+            return True
+    return False
 
 
 def all_blocking_stages_passed(task: Task) -> bool:
@@ -237,6 +258,8 @@ def attach_proofs_to_plan_stage(task: Task, stage_id: str | None, proof_ids: Ite
         return
     sid = str(stage_id or plan.current_stage_id or getattr(task, "current_stage_id", "") or "").strip()
     stage = _stage_by_id(plan, sid) if sid else current_plan_stage(task)
+    if stage is None:
+        stage = current_plan_stage(task)
     if stage is None:
         return
     added = False
@@ -283,10 +306,12 @@ def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_sto
                 if item.blocks_qa_until and item.owner != "qa":
                     item.status = StageStatus.PASSED
                     item.updated_at = now()
-            qa_stage = next((item for item in plan.stages if item.owner == "qa"), None)
+            qa_stage = next((item for item in plan.stages if item.owner == "qa" or item.kind == "qa_verdict"), None)
             if qa_stage is not None:
                 qa_stage.status = StageStatus.PASSED
                 qa_stage.updated_at = now()
+            plan.current_stage_id = None
+            task.current_stage_id = None
         elif verdict in {"needs_fixes", "blocked"}:
             failed = _first_stage_with_missing_proof(task, proof_store=proof_store)
             if failed is not None:

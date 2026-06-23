@@ -42,7 +42,8 @@ def _stage_proofs(stage: MissionPlanStage, proofs: list[Proof]) -> list[Proof]:
     stage_id = str(getattr(stage, "id", "") or "").strip()
     if not stage_id:
         return proofs
-    scoped = [proof for proof in proofs if not proof.stage_id or proof.stage_id == stage_id]
+    attached_ids = {str(proof_id) for proof_id in (getattr(stage, "proof_ids", None) or []) if str(proof_id)}
+    scoped = [proof for proof in proofs if not proof.stage_id or proof.stage_id == stage_id or proof.id in attached_ids]
     return scoped
 
 

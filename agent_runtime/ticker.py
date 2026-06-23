@@ -148,6 +148,9 @@ class TickEngine:
                     )
                 else:
                     action = self.state_machine.next_action(task)
+                if has_typed_plan(task):
+                    self.task_store.update(task, actor="harness", reason="sync mission plan routing state")
+                    task = self.task_store.get(task.id)
                 if task.id in open_incidents_by_task and not (
                     _action_targets(action, "neko_supervisor")
                     and (task.state == TaskState.BLOCKED or budget_approval_incidents or getattr(task, "open_incident_ids", None))
@@ -161,7 +164,7 @@ class TickEngine:
                     result.skipped.append(task.id)
                     continue
                 persona_id = _persona_id_for_harness_action(action, task=task, config=self.config, run_store=self.run_store)
-                if persona_id and self.run_store.find_active(task_id=task.id, persona_id=persona_id, stage_id=task.current_stage_id):
+                if persona_id and self.run_store.find_active(task_id=task.id, persona_id=persona_id):
                     result.skipped.append(task.id)
                     continue
                 if action.type == HarnessActionType.COMPLETE_TASK:
@@ -786,13 +789,40 @@ class TickEngine:
                                 proof_records.append(self.proof_store.get(proof_id))
                             except Exception:
                                 continue
-                        apply_decision_outcome(
-                            task,
-                            decision,
-                            stage_id=str(decision.payload.get("stage_id") or task.current_stage_id or "").strip() or None,
-                            proofs=proof_records,
-                            reason=decision.summary,
-                        )
+                        decision_stage_id = str(decision.payload.get("stage_id") or task.current_stage_id or "").strip()
+                        blueprint_command_mismatch = False
+                        if is_blueprint_plan(getattr(task, "mission_plan", None)):
+                            acceptable_statuses = {"passed"}
+                            if _is_red_stage(task, decision_stage_id):
+                                acceptable_statuses.add("failed")
+                            proof_status_values = {str((proof.metadata or {}).get("status", "")).strip() for proof in proof_records}
+                            if proof_status_values and proof_status_values <= acceptable_statuses:
+                                blueprint_command_mismatch = bool(
+                                    _proof_repo_mismatch_labels(task, proof_records, actor=persona.id, stage_id=decision_stage_id)
+                                    or _proof_command_stage_mismatch_labels(task, proof_records, stage_id=decision_stage_id)
+                                )
+                            if blueprint_command_mismatch:
+                                _apply_deterministic_proof_handoff(
+                                    task,
+                                    proof_ids,
+                                    decision,
+                                    proof_store=self.proof_store,
+                                    actor=persona.id,
+                                    run_id=run.id,
+                                )
+                        if not blueprint_command_mismatch:
+                            apply_decision_outcome(
+                                task,
+                                decision,
+                                stage_id=decision_stage_id or None,
+                                proofs=proof_records,
+                                reason=decision.summary,
+                            )
+                            task.risk_flags = [
+                                flag
+                                for flag in (getattr(task, "risk_flags", None) or [])
+                                if flag not in {"command_proof_stage_mismatch", "command_proof_repo_mismatch"}
+                            ]
                         _record_command_proof_self_heal(
                             task,
                             proof_ids,
@@ -833,6 +863,19 @@ class TickEngine:
                             proof_batch_id = _record_stage52_proof_batch(self.proof_batch_store, task, final_gate_decision, proof_ids, proof_statuses, role_envelope_id=stage52_envelope.envelope_id if stage52_envelope is not None else None, run_id=run.id, persona_id=persona.id)
                             task.proof_ids = _dedupe(list(task.proof_ids or []), proof_ids)
                             attach_proofs_to_plan_stage(task, source_stage_id or None, proof_ids, proof_store=self.proof_store)
+                            proof_records = []
+                            for proof_id in proof_ids:
+                                try:
+                                    proof_records.append(self.proof_store.get(proof_id))
+                                except Exception:
+                                    continue
+                            apply_decision_outcome(
+                                task,
+                                final_gate_decision,
+                                stage_id=source_stage_id or None,
+                                proofs=proof_records,
+                                reason=final_gate_decision.summary,
+                            )
                             _record_command_proof_self_heal(
                                 task,
                                 proof_ids,
@@ -841,14 +884,15 @@ class TickEngine:
                                 actor=persona.id,
                                 run_id=run.id,
                             )
-                            handoff_applied = _apply_deterministic_proof_handoff(
-                                task,
-                                proof_ids,
-                                final_gate_decision,
-                                proof_store=self.proof_store,
-                                actor=persona.id,
-                                run_id=run.id,
-                            )
+                            if not is_blueprint_plan(getattr(task, "mission_plan", None)):
+                                handoff_applied = _apply_deterministic_proof_handoff(
+                                    task,
+                                    proof_ids,
+                                    final_gate_decision,
+                                    proof_store=self.proof_store,
+                                    actor=persona.id,
+                                    run_id=run.id,
+                                )
                             EventLog().append(
                                 Event(
                                     ts=now(),
@@ -908,7 +952,8 @@ class TickEngine:
                         if assignment is not None:
                             for proof_id in proof_ids:
                                 self.persona_assignment_store.attach_proof(assignment.id, proof_id)
-                    checklist = apply_decision_checklist_updates(task, role_id=persona.id, mission_stage_id=task.current_stage_id, payload=decision.payload, run_id=run.id, config=self.config)
+                    checklist_stage_id = str(run.stage_id or before_task.current_stage_id or task.current_stage_id or "").strip() or None
+                    checklist = apply_decision_checklist_updates(task, role_id=persona.id, mission_stage_id=checklist_stage_id, payload=decision.payload, run_id=run.id, config=self.config)
                     checklist_revision = getattr(checklist, "revision", None) if checklist is not None else None
                     if stage52_envelope is not None:
                         stage52_envelope = self.role_envelope_store.record_progress(
@@ -2306,6 +2351,9 @@ def _record_command_proof_self_heal(
         if counters:
             state["counters"] = counters
         stages[key] = state
+        current_key = getattr(task, "current_stage_id", None)
+        if current_key and current_key != key:
+            stages[current_key] = dict(state)
         root["stages"] = stages
         task.harness_self_heal = root
         EventLog().append(
@@ -2544,6 +2592,14 @@ def _latest_model_invalid_repair_error(
         and run.stage_id == stage_id
         and run.state == RunState.FAILED
     ]
+    if not candidates and stage_id:
+        candidates = [
+            run
+            for run in runs
+            if run.persona_id == persona_id
+            and run.stage_id is None
+            and run.state == RunState.FAILED
+        ]
     if not candidates:
         return None
     latest = max(candidates, key=lambda run: run.finished_at or run.last_heartbeat_at or run.started_at)

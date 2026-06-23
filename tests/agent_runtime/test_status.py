@@ -73,7 +73,7 @@ def test_status_next_action_uses_mission_state_machine_for_READY_FOR_VERIFICATIO
     s=build_status(task_store=ts)
 
     assert s["next_actions"][0]["action"] == "run_slot"
-    assert s["next_actions"][0]["reason"] == "needs Neko Mission Lead to coordinate multi-Dev QA handoff"
+    assert s["next_actions"][0]["reason"] == "blueprint stage verify needs slot qa"
 
 
 def test_status_uses_proof_store_for_resolved_incident_only_qa_blocker():
@@ -86,7 +86,7 @@ def test_status_uses_proof_store_for_resolved_incident_only_qa_blocker():
     s=build_status(task_store=ts, proof_store=ps)
 
     assert s["next_actions"][0]["action"] == "run_slot"
-    assert s["next_actions"][0]["reason"] == "retry QA after resolved incident-only blocker"
+    assert s["next_actions"][0]["reason"] == "blueprint needs delivery recovery from QA blocked verdict"
 
 
 def test_status_next_action_owner_reports_backend_specialist_for_backend_stage():

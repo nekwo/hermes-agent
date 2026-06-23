@@ -6,6 +6,7 @@ from hermes_time import now
 
 from .actions import HarnessAction, HarnessActionType
 from .blueprints.routing import apply_decision_outcome, is_blueprint_plan
+from .default_plan import ensure_default_mission_plan
 from .context_requests import has_unresolved_context_request
 from .decision_schema import AgentDecision, DecisionType
 from .dev_discipline import needs_supervisor_slicing
@@ -55,102 +56,13 @@ class MissionStateMachine:
 
     def next_action(self, mission: Task) -> HarnessAction:
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
-        if has_typed_plan(mission) and getattr(getattr(mission, "mission_plan", None), "blueprint_id", None):
-            typed = self._blueprint_next_action(mission, state=state)
-            if typed is not None:
-                return typed
-        if getattr(mission, "open_incident_ids", None):
-            if state == TaskState.BLOCKED and block_recovery_attempted_for_current_signal(mission):
-                return HarnessAction(HarnessActionType.NOOP, mission.id, reason="blocked with open incidents waiting on intervention")
-            return _run_slot(mission, "neko_supervisor", "mission has open incidents; Neko must route recovery or block")
-        if has_typed_plan(mission):
-            typed = self._typed_next_action(mission, state=state)
-            if typed is not None:
-                return typed
-        if state == TaskState.BLOCKED and not getattr(mission, "open_incident_ids", None):
-            if _current_launcher_stage_waits_for_cross_stack_release(mission, proof_store=self.proof_store):
-                return _run_slot(mission, "neko_supervisor", "Launcher stage is waiting for Neko backend-proof join release")
-            if _ensure_pending_dev_handoff_stage(mission):
-                return _run_slot(mission, "dev", "resume deterministic Dev handoff from latest Neko packet")
-            if _has_failed_current_stage_test_proof(mission, proof_store=self.proof_store):
-                if _same_stage_retry_blocked(mission):
-                    return _run_slot(mission, "neko_supervisor", "failed proof retry needs Neko self-heal before another same-stage Dev run")
-                return _run_slot(mission, "dev", "needs dev retry after failed current-stage command proof")
-            if _has_resolved_incident_only_qa_block(mission, proof_store=self.proof_store):
-                return _run_slot(mission, "qa", "retry QA after resolved incident-only blocker")
-            if _has_resolved_qa_output_incident(mission):
-                return _run_slot(mission, "qa", "retry QA after resolved QA output incident")
-            if _has_blocked_qa_verdict(mission, proof_store=self.proof_store):
-                return _run_slot(mission, "dev", "needs dev recovery from QA blocked verdict")
-            if not block_recovery_attempted_for_current_signal(mission):
-                return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead blocked-state recovery")
-            return HarnessAction(HarnessActionType.NOOP, mission.id, reason="blocked waiting on intervention")
-        reconciliation = reconcile_task(mission)
-        if reconciliation.needs_supervisor:
-            return _run_slot(mission, "neko_supervisor", f"needs Neko transition reconciliation: {reconciliation.findings[0].kind}")
-        if state in {TaskState.CREATED, TaskState.PM_TRIAGE}:
-            return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead scoping")
-        if state in {
-            TaskState.READY_FOR_WORK,
-            TaskState.DEV_AUDIT,
-            TaskState.DEV_STAGE_PLANNING,
-            TaskState.DEV_TEST_DESIGN,
-        }:
-            if _current_launcher_stage_waits_for_cross_stack_release(mission, proof_store=self.proof_store):
-                return _run_slot(mission, "neko_supervisor", "Launcher stage is waiting for Neko backend-proof join release")
-            if needs_pm_triage_before_dev(mission):
-                return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead issue discovery triage")
-            if has_unresolved_context_request(mission):
-                return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead to resolve post-scoping context request")
-            if needs_supervisor_slicing(mission):
-                return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead to slice broad specialist mission before Dev")
-            return _run_slot(mission, "dev", "needs dev planning")
-        if state == TaskState.QA_REVIEW_PLAN:
-            return _run_slot(mission, "qa", "needs QA plan review")
-        if state in {TaskState.DEV_IMPLEMENTING, TaskState.REWORK_REQUESTED}:
-            if _current_launcher_stage_waits_for_cross_stack_release(mission, proof_store=self.proof_store):
-                return _run_slot(mission, "neko_supervisor", "Launcher stage is waiting for Neko backend-proof join release")
-            if _ensure_pending_dev_handoff_stage(mission):
-                if _is_cross_stack_backend_first(mission) and _has_backend_contract_proof(mission, proof_store=self.proof_store):
-                    mission.risk_flags = list(getattr(mission, "risk_flags", None) or [])
-                    if LAUNCHER_RELEASED_BY_NEKO_FLAG not in mission.risk_flags:
-                        mission.risk_flags.append(LAUNCHER_RELEASED_BY_NEKO_FLAG)
-                if _current_launcher_stage_waits_for_cross_stack_release(mission, proof_store=self.proof_store):
-                    return _run_slot(mission, "neko_supervisor", "pending Launcher handoff is waiting for backend-proof join release")
-                return _run_slot(mission, "dev", "resume deterministic Dev handoff from latest Neko packet")
-            if _has_failed_current_stage_test_proof(mission, proof_store=self.proof_store) and _same_stage_retry_blocked(mission):
-                return _run_slot(mission, "neko_supervisor", "failed proof retry needs Neko self-heal before another same-stage Dev run")
-            return _run_slot(mission, "dev", "needs dev implementation/fix pass")
-        if state == TaskState.READY_FOR_REVIEW:
-            if _needs_cross_stack_launcher_completion(mission, proof_store=self.proof_store):
-                return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead to release Launcher side after backend proof")
-            if not _all_stages_dev_complete(mission):
-                if QA_COORDINATION_RELEASED_FLAG not in (getattr(mission, "risk_flags", None) or []):
-                    return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead to release next specialist after proof-backed join gate")
-                mission.risk_flags = [flag for flag in (getattr(mission, "risk_flags", None) or []) if flag != QA_COORDINATION_RELEASED_FLAG]
-                _advance_to_next_dev_stage(mission)
-                return _run_slot(mission, "dev", "needs remaining stages before QA")
-            if QA_COORDINATION_RELEASED_FLAG not in (getattr(mission, "risk_flags", None) or []):
-                return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead to coordinate multi-Dev QA handoff")
-            return _run_slot(mission, "qa", "needs QA verification")
-        if state == TaskState.QA_TESTING:
-            if not _all_stages_dev_complete(mission):
-                _advance_to_next_dev_stage(mission)
-                return _run_slot(mission, "dev", "needs remaining stages before QA")
-            return _run_slot(mission, "qa", "needs QA verification")
-        if state in {TaskState.APPROVED, TaskState.EVIDENCE_REVIEW, TaskState.PM_READY_FOR_INTEGRATION} and getattr(mission, "proof_ids", None):
-            if _needs_cross_stack_launcher_completion(mission, proof_store=self.proof_store):
-                return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead to release Launcher side before terminal close")
-            if getattr(mission, "requires_visual_proof", False) and not _has_visual_proof(mission, proof_store=self.proof_store):
-                return _run_slot(mission, "dev", "requires Launcher implementation and visual proof before terminal close")
-            if _all_stages_passed(mission):
-                return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="all stages passed with proof-backed QA approval")
-            _advance_to_next_dev_stage(mission)
-            return _run_slot(mission, "dev", "needs remaining stages before terminal close")
-        if state in {TaskState.APPROVED, TaskState.EVIDENCE_REVIEW, TaskState.PM_READY_FOR_INTEGRATION}:
-            return _run_slot(mission, "neko_supervisor", "needs Neko Mission Lead proof/integration review")
-        if state == TaskState.BLOCKED and getattr(mission, "open_incident_ids", None):
-            return _run_slot(mission, "neko_supervisor", "needs Neko intervention steering")
+        ensure_default_mission_plan(mission)
+        typed = self._blueprint_next_action(mission, state=state)
+        if typed is not None:
+            return typed
+        typed = self._typed_next_action(mission, state=state)
+        if typed is not None:
+            return typed
         return HarnessAction(HarnessActionType.NOOP, mission.id, reason="no eligible mission action")
 
     def _blueprint_next_action(self, mission: Task, *, state: TaskState) -> HarnessAction | None:
@@ -160,12 +72,37 @@ class MissionStateMachine:
         if state in {TaskState.DONE, TaskState.CANCELLED}:
             return HarnessAction(HarnessActionType.NOOP, mission.id, reason="blueprint mission is terminal")
         if getattr(mission, "open_incident_ids", None):
+            if state == TaskState.BLOCKED and block_recovery_attempted_for_current_signal(mission):
+                return HarnessAction(HarnessActionType.NOOP, mission.id, reason="blueprint mission has open incidents waiting on intervention")
             return _run_slot(mission, "neko_supervisor", "blueprint mission has open incidents; Neko must adjudicate")
+        if _has_failed_current_stage_test_proof(mission, proof_store=self.proof_store) and _same_stage_retry_blocked(mission):
+            return _run_slot(mission, "neko_supervisor", "blueprint failed proof retry needs Neko self-heal before another same-stage run")
+        if _has_blocked_qa_verdict(mission, proof_store=self.proof_store):
+            implement = next((stage for stage in plan.stages if stage.id == "implement"), None)
+            if implement is not None:
+                plan.current_stage_id = implement.id
+                mission.current_stage_id = implement.id
+                if implement.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.BLOCKED, StageStatus.REWORK}:
+                    implement.status = StageStatus.IMPLEMENTING
+            return _run_slot(mission, "dev", "blueprint needs delivery recovery from QA blocked verdict")
         if state == TaskState.BLOCKED:
+            if block_recovery_attempted_for_current_signal(mission):
+                return HarnessAction(HarnessActionType.NOOP, mission.id, reason="blueprint mission blocked waiting on intervention")
             return _run_slot(mission, "neko_supervisor", "blueprint intervention needs Neko goal-owner adjudication")
         current = current_plan_stage(mission)
         if current is None:
+            if getattr(mission, "requires_visual_proof", False) and not _has_visual_proof(mission, proof_store=self.proof_store):
+                return _run_slot(mission, "dev", "blueprint mission requires visual proof before terminal close")
             return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="blueprint has no remaining stages")
+        reconciliation = reconcile_task(mission)
+        if reconciliation.needs_supervisor:
+            return _run_slot(mission, "neko_supervisor", f"blueprint needs Neko transition reconciliation: {reconciliation.findings[0].kind}")
+        if needs_pm_triage_before_dev(mission):
+            return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead issue discovery triage")
+        if has_unresolved_context_request(mission):
+            return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to resolve context request")
+        if needs_supervisor_slicing(mission):
+            return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to slice broad specialist mission before delivery")
         if plan.current_stage_id != current.id:
             release_next_stage(mission, current.id)
         slot_id = current.owner_slot or current.owner
@@ -223,13 +160,24 @@ class MissionStateMachine:
     def apply_decision(self, mission: Task, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool | None = None) -> StateMachineResult:
         before = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         blueprint_owned = is_blueprint_plan(getattr(mission, "mission_plan", None))
+        has_open_incident = bool(getattr(mission, "open_incident_ids", None))
+        if not has_open_incident and incident_store is not None:
+            try:
+                has_open_incident = any(getattr(incident, "task_id", None) == mission.id for incident in incident_store.list_open())
+            except Exception:
+                has_open_incident = False
+        incident_resolution_acceptance = (
+            blueprint_owned
+            and actor == "neko_supervisor"
+            and decision.type == DecisionType.PROPOSE_ACCEPTANCE
+            and has_open_incident
+        )
         if mission_plan_flow is None:
-            plan_config = getattr(self.config, "mission_plan", None)
-            mission_plan_flow = bool(getattr(plan_config, "enabled", False)) and bool(getattr(plan_config, "enforce_routing", True))
+            mission_plan_flow = has_typed_plan(mission)
         mission_plan_flow = bool(mission_plan_flow or blueprint_owned)
         apply_planning_decision(mission, decision, actor=actor, task_store=task_store, incident_store=incident_store, proof_store=proof_store, run_id=run_id, normal_worker_flow=normal_worker_flow, mission_plan_flow=mission_plan_flow)
         record_decision_packets(mission, decision, actor=actor, run_id=run_id, stage_id=getattr(mission, "current_stage_id", None))
-        if blueprint_owned and decision.type != DecisionType.REQUEST_TEST_RUN:
+        if blueprint_owned and decision.type != DecisionType.REQUEST_TEST_RUN and not incident_resolution_acceptance:
             proofs = proof_store.list_for_task(mission.id) if proof_store is not None else None
             apply_decision_outcome(mission, decision, proofs=proofs, reason=decision.summary)
         after = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
