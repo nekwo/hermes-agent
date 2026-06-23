@@ -9,6 +9,13 @@ from .persona_assignments import persona_instance_id_for, safe_assignment_text, 
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
+DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
+MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
+_TRACE_EVENT_TYPES = {"run.tool.started", "run.tool.finished", "run.progress"}
+# Per-task trace fetch sizing: headroom over tail*agents to survive dilution by
+# non-trace event rows, and a hard ceiling on the reverse log scan.
+_TRACE_FETCH_HEADROOM = 6
+_TRACE_FETCH_CEILING = 2000
 
 _SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
@@ -20,6 +27,7 @@ def persona_chat_history_summary(
     persona_instances: Iterable[PersonaInstance],
     session_db: Any | None = None,
     limit: int = 50,
+    message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
 ) -> list[dict[str, Any]]:
     """Return redaction-safe persona chat-history rows for Harness snapshots.
 
@@ -80,7 +88,7 @@ def persona_chat_history_summary(
         )
         if instance is None:
             continue
-        row = _history_row(raw, instance, session_id=session_id, session_db=db)
+        row = _history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail)
         rows.append(row)
         seen.add(session_id)
         if len(rows) >= limit:
@@ -91,10 +99,76 @@ def persona_chat_history_summary(
     for session_id, instance in bound_by_session.items():
         if session_id in seen:
             continue
-        rows.append(_history_row({}, instance, session_id=session_id, session_db=db))
+        rows.append(_history_row({}, instance, session_id=session_id, session_db=db, message_tail=message_tail))
         if len(rows) >= limit:
             break
 
+    return rows
+
+
+def persona_chat_trace_summary(
+    *,
+    persona_instances: Iterable[PersonaInstance],
+    event_log: Any | None = None,
+    message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+) -> list[dict[str, Any]]:
+    """Return redaction-safe tool/progress trace rows for task-bound chats.
+
+    This is an additive snapshot projection of already-persisted EventLog rows.
+    The curated persona chat history intentionally keeps dropping tool/system
+    noise; trace rows live in this separate channel and are merged client-side.
+    """
+
+    log = event_log or _default_event_log()
+    if log is None:
+        return []
+    tail = _bounded_message_tail(message_tail)
+
+    # Group task-bound instances by task so each task's event log is scanned once
+    # and the fetch window can be sized for *all* its agents at once. Fetching per
+    # persona with a fixed window let a busy multi-agent task starve a quiet
+    # persona's trace out of the window (its rows pushed past the cap by other
+    # agents' events).
+    members_by_task: dict[str, list[tuple[Any, str]]] = {}
+    for instance in persona_instances:
+        mode = safe_assignment_token(getattr(instance, "mode", None))
+        if mode != "task_bound":
+            continue
+        task_id = safe_assignment_text(getattr(instance, "current_task_id", None), limit=160)
+        persona_id = safe_assignment_token(getattr(instance, "persona_id", None))
+        if not task_id or not persona_id:
+            continue
+        members_by_task.setdefault(task_id, []).append((instance, persona_id))
+
+    rows: list[dict[str, Any]] = []
+    for task_id, members in members_by_task.items():
+        fetch_limit = _trace_fetch_limit(tail, len(members))
+        trace_by_persona: dict[str, list[Any]] = {}
+        for event in log.for_task(task_id, limit=fetch_limit):
+            if getattr(event, "type", None) not in _TRACE_EVENT_TYPES:
+                continue
+            event_persona = getattr(event, "persona_id", None)
+            if event_persona:
+                trace_by_persona.setdefault(event_persona, []).append(event)
+        for instance, persona_id in members:
+            entries = [
+                entry
+                for entry in (_trace_entry(event) for event in trace_by_persona.get(persona_id, []))
+                if entry is not None
+            ][-tail:]
+            if not entries:
+                continue
+            rows.append(
+                {
+                    "persona_instance_id": safe_assignment_text(
+                        getattr(instance, "id", None) or persona_instance_id_for(persona_id),
+                        limit=160,
+                    ),
+                    "persona_id": persona_id,
+                    "task_id": task_id,
+                    "entries": entries,
+                }
+            )
     return rows
 
 
@@ -150,6 +224,7 @@ def _history_row(
     *,
     session_id: str,
     session_db: Any | None = None,
+    message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
 ) -> dict[str, Any]:
     persona_id = safe_assignment_token(getattr(instance, "persona_id", None)) or "unknown"
     raw_title = safe_assignment_text(raw.get("title"), limit=120)
@@ -158,7 +233,7 @@ def _history_row(
     preview, preview_status = _safe_display_text(
         raw.get("preview"), fallback="Preview hidden by redaction boundary", limit=180
     )
-    messages, messages_status = _safe_recent_messages(session_db, session_id=session_id)
+    messages, messages_status = _safe_recent_messages(session_db, session_id=session_id, limit=message_tail)
     redaction_status = (
         "redacted" if "redacted" in {title_status, preview_status, messages_status} else "safe"
     )
@@ -205,7 +280,12 @@ def _fallback_title(raw: dict[str, Any], *, persona_id: str) -> str:
     return f"{label} chat"
 
 
-def _safe_recent_messages(session_db: Any | None, *, session_id: str, limit: int = 8) -> tuple[list[dict[str, Any]], str]:
+def _safe_recent_messages(
+    session_db: Any | None,
+    *,
+    session_id: str,
+    limit: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+) -> tuple[list[dict[str, Any]], str]:
     if session_db is None:
         return [], "safe"
     try:
@@ -245,15 +325,160 @@ def _safe_recent_messages(session_db: Any | None, *, session_id: str, limit: int
                 or f"{session_id}:{index}",
                 "role": role,
                 "safe_text": text,
-                "timestamp": raw.get("created_at")
-                or raw.get("timestamp")
-                or raw.get("time")
-                or raw.get("updated_at"),
+                "timestamp": _iso_timestamp(
+                    raw.get("created_at")
+                    or raw.get("timestamp")
+                    or raw.get("time")
+                    or raw.get("updated_at")
+                ),
                 "redaction_status": status,
             }
         )
-    rows = rows[-limit:]
+    rows = rows[-_bounded_message_tail(limit):]
     return rows, "redacted" if redacted else "safe"
+
+
+def _iso_timestamp(value: Any) -> str | None:
+    """Normalize a message timestamp to the same ISO-8601 ``Z`` form as traces.
+
+    SessionDB stores message timestamps as epoch-seconds floats (``time.time()``),
+    while harness-trace rows carry ISO strings (``Event.ts`` via ``to_jsonable``).
+    The Launcher merges the two channels by parsing each ``ts`` with
+    ``DateTime.tryParse`` and orders them — an epoch float is unparseable there, so
+    without this the curated rows lose their time and the trace block jumps ahead
+    of them. Project both channels in one comparable format.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, (int, float)):
+        from datetime import datetime, timezone
+
+        epoch = float(value)
+        if epoch > 1e12:  # tolerate millisecond clocks
+            epoch /= 1000.0
+        try:
+            moment = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+        return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    return None
+
+
+def _trace_entry(event: Any) -> dict[str, Any] | None:
+    payload = getattr(event, "payload", None)
+    if not isinstance(payload, dict):
+        payload = {}
+    event_type = safe_assignment_text(getattr(event, "type", None), limit=80)
+    trace_event = {
+        "run.tool.started": "tool_started",
+        "run.tool.finished": "tool_finished",
+        "run.progress": "progress",
+    }.get(event_type)
+    if trace_event is None:
+        return None
+
+    tool_name = _safe_trace_text(payload.get("tool_name") or payload.get("tool"), limit=120)
+    summary = _first_safe_trace_text(
+        payload.get("summary"),
+        payload.get("patch_summary"),
+        payload.get("code_summary"),
+        payload.get("command_label"),
+        payload.get("file_summary"),
+        limit=500,
+    )
+    status = _safe_trace_text(payload.get("status") or payload.get("exit_code"), limit=80)
+    files = _safe_trace_file_labels(payload.get("changed_files") or payload.get("files_touched"))
+    return {
+        "kind": "harness_trace",
+        "task_id": safe_assignment_text(getattr(event, "task_id", None), limit=160),
+        "persona_id": safe_assignment_token(getattr(event, "persona_id", None)) or "unknown",
+        "run_id": safe_assignment_text(getattr(event, "run_id", None), limit=160),
+        "stage_id": _safe_trace_text(payload.get("stage_id"), limit=120),
+        "event": trace_event,
+        "tool_name": tool_name,
+        "summary": summary,
+        "files": files,
+        "status": status,
+        "ts": getattr(event, "ts", None),
+    }
+
+
+def _first_safe_trace_text(*values: Any, limit: int) -> str | None:
+    for value in values:
+        safe = _safe_trace_text(value, limit=limit)
+        if safe:
+            return safe
+    return None
+
+
+def _safe_trace_text(value: Any, *, limit: int) -> str | None:
+    text = safe_assignment_text(value, limit=limit)
+    if not text:
+        return None
+    if _SECRET_RE.search(text) or _looks_pathish(text):
+        return None
+    return text
+
+
+def _safe_trace_file_labels(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    labels: list[str] = []
+    for item in value:
+        text = safe_assignment_text(item, limit=120)
+        if not text:
+            continue
+        if _SECRET_RE.search(text) or _looks_pathish(text):
+            continue
+        label = text.replace("\\", "/").rsplit("/", 1)[-1]
+        if not label or _SECRET_RE.search(label) or _looks_pathish(label):
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", label):
+            continue
+        labels.append(label)
+    return labels[:12]
+
+
+def _looks_pathish(value: str) -> bool:
+    if ":/" in value or "\\" in value or value.startswith(("/", "~")):
+        return True
+    return bool(re.search(r"(^|\s)([A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", value))
+
+
+def _bounded_message_tail(value: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL
+    return min(max(parsed, 1), MAX_PERSONA_CHAT_MESSAGE_TAIL)
+
+
+def _trace_fetch_limit(tail: int, member_count: int) -> int:
+    """Size the per-task event fetch so each agent can reach ``tail`` trace rows.
+
+    The task's EventLog interleaves every agent's events plus non-trace rows
+    (worker_session.*, heartbeats, …), so a flat window starves quiet agents.
+    Scale by the agent count with headroom for that dilution, then hard-cap so
+    the reverse file scan stays bounded.
+    """
+
+    agents = max(int(member_count or 0), 1)
+    return min(max(tail * agents * _TRACE_FETCH_HEADROOM, tail), _TRACE_FETCH_CEILING)
+
+
+def _default_event_log() -> Any | None:
+    try:
+        from .events import EventLog
+
+        return EventLog()
+    except Exception:
+        return None
 
 
 # Markers that identify the agent's internal scaffolding (never operator-facing).

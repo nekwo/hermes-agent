@@ -96,6 +96,7 @@ This plan was written after auditing the local Hermes checkout at the repository
 73. [Mission Control Agent Console Enterprise-Grade Upgrade](73-mission-control-agent-console-enterprise-grade-stages.md)
 74. [Open Persona Runtime Blueprint Graph](74-open-persona-runtime-blueprint-graph.md)
 75. [Persona Library and Console Interactibility](75-persona-library-and-console-interactibility.md) — audit-backed execution path for Stage 74: ship the `available_personas` contract gap + console/label/glow asks first, plus a Mission Office UI remaster (dock layout, agent cards, library shelf); defer the graph editor and taskless runtime loops
+76. [Unified Template / Instance / Chat / Goal Model](76-unified-template-instance-chat-goal-model.md) — the locked entity architecture (2026-06-22): Template → durable Level Instance (placement) → swappable Chat → Goal/Task owned by the chat; goals scale as Neko operator chats (N goals = N chats); tasks are an advisory HUD, proof is conductor-read escalation not a per-task crash gate. Supersedes Stage 74's object model and the mid-75 "instance↔chat 1:1" note
 
 ## MVP success criteria
 
