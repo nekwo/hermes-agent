@@ -19,6 +19,7 @@ from .incidents import RUN_BUDGET_EXCEEDED
 from .scope_control import apply_issue_triage, record_issue_discovery
 from .models import Event, Task, TaskStage
 from .mission_plan import (
+    append_task_stage_record,
     attach_proofs_to_plan_stage,
     current_plan_stage,
     ensure_mission_plan,
@@ -26,6 +27,7 @@ from .mission_plan import (
     is_mission_lead_actor,
     mark_plan_stage_from_decision,
     release_next_stage,
+    task_stage_records,
 )
 from .plan_review import PlanReview, PlanReviewVerdict, finding_from_payload
 from .proof_recipes import resolve_proof_recipe
@@ -470,7 +472,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             )
         if task.state in {TaskState.RUNNING, TaskState.RUNNING}:
             task.state = TaskState.RUNNING
-        if task.stages and all(stage.test_plan for stage in task.stages):
+        if task_stage_records(task) and all(stage.test_plan for stage in task_stage_records(task)):
             task.state = TaskState.RUNNING if _dev_plan_can_enter_implementation(task, actor=actor) else TaskState.RUNNING
         task.updated_at = now()
     elif decision.type == DecisionType.REQUEST_TEST_RUN:
@@ -485,7 +487,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
     elif decision.type == DecisionType.CORRECT_STAGE:
         _apply_stage_correction(task, decision.payload, actor=actor, log=log)
         if task.state == TaskState.RUNNING:
-            task.state = TaskState.RUNNING if all(stage.test_plan for stage in task.stages) else TaskState.RUNNING
+            task.state = TaskState.RUNNING if all(stage.test_plan for stage in task_stage_records(task)) else TaskState.RUNNING
         task.updated_at = now()
     elif decision.type in {DecisionType.APPROVE, DecisionType.REPORT_QA_VERDICT}:
         if (
@@ -541,7 +543,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                     log.append(Event(now(), "patch.proposed", task.id, None, actor, {"requires_approval": decision.requires_approval, "normal_worker_flow": True, "no_edit_findings_delivery": True}))
                     return task
             if task.current_stage_id:
-                for stage in task.stages:
+                for stage in task_stage_records(task):
                     if stage.id == task.current_stage_id:
                         stage.status = StageStatus.IMPLEMENTING
                         stage.updated_at = now()
@@ -551,7 +553,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             log.append(Event(now(), "patch.proposed", task.id, None, actor, {"requires_approval": decision.requires_approval, "normal_worker_flow": True}))
             return task
         if task.current_stage_id:
-            for stage in task.stages:
+            for stage in task_stage_records(task):
                 if stage.id == task.current_stage_id:
                     stage.status = StageStatus.READY_FOR_QA
                     stage.updated_at = now()
@@ -574,7 +576,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                 attach_proofs_to_plan_stage(task, stage_id, proof_ids, proof_store=proof_store)
             if stage_id:
                 task.current_stage_id = stage_id
-                for stage in task.stages:
+                for stage in task_stage_records(task):
                     if stage.id == stage_id:
                         stage.status = StageStatus.READY_FOR_QA
                         stage.updated_at = now()
@@ -656,7 +658,7 @@ def _coerce_neko_needs_context_to_handoff_continuation(task: Task, decision: Age
         return True
     if not blocked_recovery and not proof_backed_join:
         return False
-    if not getattr(task, "proof_ids", None) and not getattr(task, "stages", None):
+    if not getattr(task, "proof_ids", None) and not task_stage_records(task):
         return False
     _ensure_launcher_handoff_stage(task, {"objective": task.description, "acceptance_criteria": list(task.acceptance_criteria or [])}, actor=actor, log=log)
     task.affected_repos = ["EterniaLauncher"]
@@ -716,7 +718,7 @@ def _no_edit_context_stage_has_sufficient_context(task: Task, *, actor: str, thr
 
 def _route_backend_contract_packet_repair(task: Task, *, actor: str, log: EventLog, run_id: str | None) -> None:
     sid = "stage_47_backend_contract_packet"
-    stage = next((item for item in task.stages if item.id == sid), None)
+    stage = next((item for item in task_stage_records(task) if item.id == sid), None)
     if stage is None:
         stage = TaskStage(
             id=sid,
@@ -733,7 +735,7 @@ def _route_backend_contract_packet_repair(task: Task, *, actor: str, log: EventL
             created_at=now(),
             updated_at=now(),
         )
-        task.stages.append(stage)
+        append_task_stage_record(task, stage)
         log.append(Event(now(), "task.stage_added", task.id, None, actor, {"stage_id": sid, "title": stage.title, "source": "backend_contract_packet_repair"}))
     else:
         stage.status = StageStatus.IMPLEMENTING
@@ -795,7 +797,7 @@ def _affected_repos_from_handoff(payload: dict[str, Any]) -> list[str]:
 
 
 def _apply_stage_plan(task: Task, payload: dict[str, Any], *, actor: str, log: EventLog) -> dict[str, int]:
-    by_id = {stage.id: stage for stage in task.stages}
+    by_id = {stage.id: stage for stage in task_stage_records(task)}
     applied = 0
     skipped = 0
     for idx, raw in enumerate(payload["stages"], start=1):
@@ -841,7 +843,7 @@ def _apply_stage_plan(task: Task, payload: dict[str, Any], *, actor: str, log: E
                 created_at=now(),
                 updated_at=now(),
             )
-            task.stages.append(stage)
+            append_task_stage_record(task, stage)
             by_id[sid] = stage
             if task.current_stage_id is None:
                 task.current_stage_id = sid
@@ -904,7 +906,7 @@ def _dev_plan_materialized_no_executable_stage(task: Task, *, actor: str, stats:
         return False
     if not _task_is_bounded_proof_or_burnin(task):
         return False
-    return (stats.get("applied") or 0) == 0 and (stats.get("skipped") or 0) > 0 and not getattr(task, "stages", None)
+    return (stats.get("applied") or 0) == 0 and (stats.get("skipped") or 0) > 0 and not task_stage_records(task)
 
 
 def _dev_plan_can_enter_implementation(task: Task, *, actor: str) -> bool:
@@ -968,7 +970,7 @@ def _raw_stage_haystack(raw: dict[str, Any]) -> str:
 def _materialize_test_run_stage(task: Task, payload: dict[str, Any], *, actor: str, log: EventLog) -> None:
     sid = str(payload.get("stage_id") or task.current_stage_id or "stage_1").strip() or "stage_1"
     commands = [str(command).strip() for command in payload.get("commands", []) if str(command).strip()]
-    existing = next((stage for stage in task.stages if stage.id == sid), None)
+    existing = next((stage for stage in task_stage_records(task) if stage.id == sid), None)
     _validate_no_edit_recipe_stage_target(task, requested_stage_id=sid, requested_stage=existing, payload=payload)
     if existing is None:
         stage = TaskStage(
@@ -982,7 +984,7 @@ def _materialize_test_run_stage(task: Task, payload: dict[str, Any], *, actor: s
             created_at=now(),
             updated_at=now(),
         )
-        task.stages.append(stage)
+        append_task_stage_record(task, stage)
         log.append(Event(now(), "task.stage_added", task.id, None, actor, {"stage_id": sid, "title": stage.title, "source": "request_test_run"}))
     else:
         if commands:
@@ -998,7 +1000,7 @@ def _materialize_test_run_stage(task: Task, payload: dict[str, Any], *, actor: s
 
 def _apply_stage_correction(task: Task, payload: dict[str, Any], *, actor: str, log: EventLog) -> None:
     sid = str(payload["stage_id"])
-    stage = next((stage for stage in task.stages if stage.id == sid), None)
+    stage = next((stage for stage in task_stage_records(task) if stage.id == sid), None)
     if stage is None:
         raise DecisionPayloadInvalid(f"unknown stage_id: {sid}")
     _dedupe_extend(stage.corrections, [f"{actor}: {item}" for item in payload.get("corrections", [])])
@@ -1009,7 +1011,7 @@ def _apply_stage_correction(task: Task, payload: dict[str, Any], *, actor: str, 
     log.append(Event(now(), "task.stage_corrected", task.id, None, actor, {"stage_id": sid, "corrections": len(payload.get("corrections", []))}))
     target_stage_id = _correct_stage_target_id(task, payload, source_stage_id=sid)
     if target_stage_id and target_stage_id != sid:
-        target = next((stage for stage in task.stages if stage.id == target_stage_id), None)
+        target = next((stage for stage in task_stage_records(task) if stage.id == target_stage_id), None)
         if target is None:
             raise DecisionPayloadInvalid(f"unknown target_stage_id: {target_stage_id}")
         task.current_stage_id = target.id
@@ -1051,7 +1053,7 @@ def _validate_no_edit_recipe_stage_target(
             f"request_test_run recipe_id {recipe_id!r} is no-product-edit smoke proof and cannot satisfy product-edit stage {requested_stage_id!r}; patch first and request focused implementation proof."
         )
     current_stage_id = str(getattr(task, "current_stage_id", "") or "").strip()
-    current_stage = next((stage for stage in task.stages if stage.id == current_stage_id), None)
+    current_stage = next((stage for stage in task_stage_records(task) if stage.id == current_stage_id), None)
     if (
         current_stage is not None
         and current_stage_id != requested_stage_id
@@ -1138,7 +1140,7 @@ def _apply_implementation_review(task: Task, payload: dict[str, Any], *, actor: 
             task.state = TaskState.RUNNING
             _advance_to_next_dev_stage(task)
             return
-        for stage in task.stages:
+        for stage in task_stage_records(task):
             if stage.status in DEV_COMPLETE_STAGE_STATUSES:
                 stage.status = StageStatus.PASSED
                 stage.updated_at = now()
@@ -1150,7 +1152,7 @@ def _apply_implementation_review(task: Task, payload: dict[str, Any], *, actor: 
         if "qa_blocked_verdict_needs_dev_recovery" not in task.risk_flags:
             task.risk_flags.append("qa_blocked_verdict_needs_dev_recovery")
         if task.current_stage_id:
-            for stage in task.stages:
+            for stage in task_stage_records(task):
                 if stage.id == task.current_stage_id:
                     stage.status = StageStatus.BLOCKED
                     stage.updated_at = now()
@@ -1158,7 +1160,7 @@ def _apply_implementation_review(task: Task, payload: dict[str, Any], *, actor: 
 
 
 def _all_stages_dev_complete(task: Task) -> bool:
-    dev_stages = [stage for stage in list(task.stages or []) if not _is_qa_stage(stage)]
+    dev_stages = [stage for stage in list(task_stage_records(task)) if not _is_qa_stage(stage)]
     if not dev_stages:
         return True
     return all(stage.status in DEV_COMPLETE_STAGE_STATUSES for stage in dev_stages)
@@ -1347,7 +1349,7 @@ def _validate_stage_specific_qa_proof_contract(
 
 
 def _stage_requires_bridge_archive_regression(task: Task, stage_id: str) -> bool:
-    stage = next((item for item in (task.stages or []) if item.id == stage_id), None)
+    stage = next((item for item in (task_stage_records(task) or []) if item.id == stage_id), None)
     if stage is None:
         return False
     identity_text = " ".join(
@@ -1419,7 +1421,7 @@ def _needs_cross_stack_launcher_completion(task: Task, *, proof_store=None) -> b
 def _should_release_backend_first_slice(task: Task) -> bool:
     if getattr(task, "proof_ids", None):
         return False
-    if getattr(task, "stages", None):
+    if task_stage_records(task):
         return False
     text = " ".join(
         [
@@ -1464,14 +1466,14 @@ def _has_launcher_stage(task: Task) -> bool:
 
 
 def _launcher_stage(task: Task) -> TaskStage | None:
-    return next((stage for stage in (getattr(task, "stages", []) or []) if _stage_mentions_launcher(stage)), None)
+    return next((stage for stage in task_stage_records(task) if _stage_mentions_launcher(stage)), None)
 
 
 def _current_stage(task: Task) -> TaskStage | None:
     current_stage_id = str(getattr(task, "current_stage_id", "") or "").strip()
     if not current_stage_id:
         return None
-    return next((stage for stage in (getattr(task, "stages", []) or []) if stage.id == current_stage_id), None)
+    return next((stage for stage in task_stage_records(task) if stage.id == current_stage_id), None)
 
 
 def _is_cross_stack_backend_first(task: Task) -> bool:
@@ -1510,7 +1512,7 @@ def _text_implies_backend_first_cross_stack(task: Task) -> bool:
                         " ".join(str(item) for item in (getattr(stage, "acceptance_criteria", []) or [])),
                     ]
                 )
-                for stage in (getattr(task, "stages", []) or [])
+                for stage in task_stage_records(task)
             ),
         ]
     ).lower()
@@ -1715,7 +1717,7 @@ def _ensure_no_edit_proof_handoff_stage(task: Task, payload: dict[str, Any], *, 
     proof_gate = handoff.get("proof_gate")
     proof_gate = proof_gate if isinstance(proof_gate, dict) else {}
     recipe = resolve_proof_recipe(_no_edit_handoff_recipe_id(payload))
-    existing = next((stage for stage in task.stages if stage.id == recipe.id), None)
+    existing = next((stage for stage in task_stage_records(task) if stage.id == recipe.id), None)
     if existing is None:
         stage = TaskStage(
             id=recipe.id,
@@ -1735,7 +1737,7 @@ def _ensure_no_edit_proof_handoff_stage(task: Task, payload: dict[str, Any], *, 
             created_at=now(),
             updated_at=now(),
         )
-        task.stages.append(stage)
+        append_task_stage_record(task, stage)
         log.append(
             Event(
                 now(),
@@ -1809,9 +1811,9 @@ def _ensure_scoped_dev_handoff_stage(task: Task, payload: dict[str, Any], *, act
     handoff = payload.get("handoff_packet")
     if not isinstance(handoff, dict):
         return False
-    if task.current_stage_id and any(stage.id == task.current_stage_id for stage in task.stages):
+    if task.current_stage_id and any(stage.id == task.current_stage_id for stage in task_stage_records(task)):
         return False
-    if any(stage.status not in DEV_COMPLETE_STAGE_STATUSES for stage in getattr(task, "stages", []) or []):
+    if any(stage.status not in DEV_COMPLETE_STAGE_STATUSES for stage in task_stage_records(task)):
         return False
     target_owner = str(handoff.get("target_owner") or handoff.get("target_dev_persona") or "").strip()
     if target_owner not in {"dev", "backend_dev", "launcher_dev"}:
@@ -1820,7 +1822,7 @@ def _ensure_scoped_dev_handoff_stage(task: Task, payload: dict[str, Any], *, act
     if target_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
         return False
     stage_id = _scoped_handoff_stage_id(target_repo, handoff, payload)
-    existing = next((stage for stage in task.stages if stage.id == stage_id), None)
+    existing = next((stage for stage in task_stage_records(task) if stage.id == stage_id), None)
     if existing is not None:
         task.current_stage_id = existing.id
         if existing.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.BLOCKED}:
@@ -1841,7 +1843,7 @@ def _ensure_scoped_dev_handoff_stage(task: Task, payload: dict[str, Any], *, act
         created_at=now(),
         updated_at=now(),
     )
-    task.stages.append(stage)
+    append_task_stage_record(task, stage)
     task.current_stage_id = stage.id
     task.affected_repos = [target_repo]
     _dedupe_extend(task.risk_flags, ["neko_scoped_dev_handoff_stage"])
@@ -1978,7 +1980,7 @@ def _ensure_launcher_handoff_stage(task: Task, payload: dict[str, Any], *, actor
         created_at=now(),
         updated_at=now(),
     )
-    task.stages.append(stage)
+    append_task_stage_record(task, stage)
     task.current_stage_id = stage.id
     log.append(Event(now(), "task.stage_added", task.id, None, actor, {"stage_id": stage.id, "title": stage.title, "source": "cross_stack_launcher_release"}))
 
@@ -1992,7 +1994,7 @@ def _existing_launcher_handoff_stage(task: Task, payload: dict[str, Any]) -> Tas
         target = _target_visual_recovery_stage(task)
         if target is not None:
             return target
-    return next((stage for stage in task.stages if _stage_mentions_launcher(stage)), None)
+    return next((stage for stage in task_stage_records(task) if _stage_mentions_launcher(stage)), None)
 
 
 def _repair_bounded_visual_proof_stage_from_neko_handoff(task: Task, payload: dict[str, Any], *, actor: str, log: EventLog) -> None:
@@ -2066,7 +2068,7 @@ def _repair_bounded_visual_proof_stage_from_neko_handoff(task: Task, payload: di
 
 def _remove_misplaced_visual_recovery_command(task: Task, *, target_stage: TaskStage, repaired_command: str, actor: str) -> int:
     removed = 0
-    for stage in getattr(task, "stages", []) or []:
+    for stage in task_stage_records(task):
         if stage.id == target_stage.id:
             continue
         original = list(stage.test_plan or [])
@@ -2091,12 +2093,12 @@ def _target_visual_recovery_stage(task: Task) -> TaskStage | None:
     current = _current_stage(task)
     if current is not None and current.status not in DEV_COMPLETE_STAGE_STATUSES and _stage_mentions_mission_control_visual(current):
         return current
-    for stage in getattr(task, "stages", []) or []:
+    for stage in task_stage_records(task):
         if stage.status in DEV_COMPLETE_STAGE_STATUSES:
             continue
         if _stage_is_visual_proof_collection_stage(stage) and _stage_mentions_mission_control_visual(stage):
             return stage
-    for stage in getattr(task, "stages", []) or []:
+    for stage in task_stage_records(task):
         if stage.status in DEV_COMPLETE_STAGE_STATUSES:
             continue
         if _stage_mentions_mission_control_visual(stage):
@@ -2239,13 +2241,13 @@ def _stage_mentions_launcher(stage: TaskStage) -> bool:
 
 
 def _all_stages_passed(task: Task) -> bool:
-    if not task.stages:
+    if not task_stage_records(task):
         return bool(task.proof_ids)
-    return all(stage.status in TERMINAL_STAGE_STATUSES for stage in task.stages)
+    return all(stage.status in TERMINAL_STAGE_STATUSES for stage in task_stage_records(task))
 
 
 def _advance_to_next_dev_stage(task: Task) -> None:
-    for stage in task.stages:
+    for stage in task_stage_records(task):
         if _is_qa_stage(stage):
             continue
         if stage.status not in DEV_COMPLETE_STAGE_STATUSES:
@@ -2279,7 +2281,7 @@ def _synthesize_missing_reviewed_stages(task: Task, *, actor: str, log: EventLog
     review = task.plan_review
     if review is None:
         return
-    existing = {stage.id for stage in task.stages}
+    existing = {stage.id for stage in task_stage_records(task)}
     for stage_id in review.reviewed_stage_ids:
         sid = str(stage_id).strip()
         if not sid or sid in existing:
@@ -2300,7 +2302,7 @@ def _synthesize_missing_reviewed_stages(task: Task, *, actor: str, log: EventLog
             created_at=now(),
             updated_at=now(),
         )
-        task.stages.append(stage)
+        append_task_stage_record(task, stage)
         existing.add(sid)
         if task.current_stage_id is None:
             task.current_stage_id = sid

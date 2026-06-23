@@ -39,6 +39,11 @@ class MissionPlanStage:
     proof_ids: list[str] = field(default_factory=list)
     packet_ids: list[str] = field(default_factory=list)
     blocker_ids: list[str] = field(default_factory=list)
+    affected_paths: list[str] = field(default_factory=list)
+    acceptance_criteria: list[str] = field(default_factory=list)
+    test_plan: list[str] = field(default_factory=list)
+    audit_notes: list[str] = field(default_factory=list)
+    corrections: list[str] = field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
