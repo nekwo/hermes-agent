@@ -9,7 +9,7 @@ from hermes_time import now
 
 from .default_plan import ensure_default_mission_plan
 from .goal_hygiene import prepare_new_goal_runtime
-from .mission_plan import mirror_legacy_stages_from_plan
+from .mission_plan import _sync_task_stage_compat_from_plan
 from .models import MissionIntent, MissionPlan, MissionPlanStage, Task
 from .persona_assignments import (
     PersonaAssignmentSpec,
@@ -440,7 +440,7 @@ def _attach_persona_stage(task: Task, *, persona_id: str) -> None:
             )
         ],
     )
-    mirror_legacy_stages_from_plan(task)
+    _sync_task_stage_compat_from_plan(task)
 
 
 def _decision_type(final_decision: Any) -> str | None:
