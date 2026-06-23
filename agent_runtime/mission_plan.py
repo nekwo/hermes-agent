@@ -61,7 +61,7 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
         _set_current_stage(plan, release_stage_id)
     plan.revision = int(plan.revision or 0) + 1
     task.mission_plan = plan
-    mirror_legacy_stages_from_plan(task)
+    _sync_task_stage_compat_from_plan(task)
     return plan
 
 
@@ -123,7 +123,7 @@ def validate_mission_plan_payload(payload: dict[str, Any]) -> None:
         raise DecisionPayloadInvalid("release_stage_id must be a redaction-safe stage id")
 
 
-def mirror_legacy_stages_from_plan(task: Task) -> None:
+def _sync_task_stage_compat_from_plan(task: Task) -> None:
     plan = getattr(task, "mission_plan", None)
     if not plan:
         return
@@ -273,7 +273,7 @@ def attach_proofs_to_plan_stage(task: Task, stage_id: str | None, proof_ids: Ite
     _refresh_stage_status_from_proofs(task, stage, proof_store=proof_store)
     stage.updated_at = now()
     plan.revision = int(plan.revision or 0) + 1
-    mirror_legacy_stages_from_plan(task)
+    _sync_task_stage_compat_from_plan(task)
 
 
 def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_store=None) -> None:
@@ -318,8 +318,9 @@ def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_sto
                 failed.status = StageStatus.REWORK if verdict == "needs_fixes" else StageStatus.BLOCKED
                 failed.updated_at = now()
                 plan.current_stage_id = failed.id
+                task.current_stage_id = failed.id
     plan.revision = int(plan.revision or 0) + 1
-    mirror_legacy_stages_from_plan(task)
+    _sync_task_stage_compat_from_plan(task)
 
 
 def release_next_stage(task: Task, stage_id: str | None = None) -> MissionPlanStage | None:
@@ -334,7 +335,7 @@ def release_next_stage(task: Task, stage_id: str | None = None) -> MissionPlanSt
         target.status = StageStatus.IMPLEMENTING
     target.updated_at = now()
     plan.revision = int(plan.revision or 0) + 1
-    mirror_legacy_stages_from_plan(task)
+    _sync_task_stage_compat_from_plan(task)
     return target
 
 
