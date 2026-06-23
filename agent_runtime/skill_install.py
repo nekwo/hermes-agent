@@ -15,12 +15,6 @@ STAGE46_SKILLS = frozenset(
         "launcher-analyze-proof",
     }
 )
-_PERSONA_STAGE46_SKILLS = {
-    "neko_supervisor": ("harness-mission-lead",),
-    "dev": ("harness-dev-delivery", "launcher-analyze-proof"),
-    "backend_dev": ("harness-dev-delivery",),
-    "qa": ("harness-qa-verdict",),
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,10 +71,8 @@ def install_stage46_skills_for_personas(personas) -> list[SkillInstallResult]:
 
 
 def stage46_required_skills_for_persona(persona) -> list[str]:
-    configured = [skill for skill in getattr(persona, "skills", []) or [] if skill in STAGE46_SKILLS]
-    required = list(_PERSONA_STAGE46_SKILLS.get(str(getattr(persona, "id", "")), ()))
     selected: list[str] = []
-    for skill in [*required, *configured]:
+    for skill in [skill for skill in getattr(persona, "skills", []) or [] if skill in STAGE46_SKILLS]:
         if skill not in selected:
             selected.append(skill)
     return selected

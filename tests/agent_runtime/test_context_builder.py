@@ -7,9 +7,10 @@ from agent_runtime.models import AgentRun, MissionIntent, MissionPlan, MissionPl
 from agent_runtime.packets import make_packet, record_packet
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.repo_bundles import RepoBundleStore
-from agent_runtime.runtime_config import MissionPlanConfig, NormalWorkerFlowConfig, RuntimeConfig
+from agent_runtime.runtime_config import MissionPlanConfig, NormalWorkerFlowConfig, RoleEnvelopeConfig, RuntimeConfig
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import ProofStore
+from agent_runtime.role_checklists import RoleChecklistStore
 
 
 def make_task():
@@ -186,6 +187,43 @@ def test_agent_hud_current_assignment_is_stage_shaped_from_proof_gate():
     assert assignment["output_type"] == "design document"
     assert assignment["required_proof_types"] == ["artifact"]
     assert assignment["outgoing_edges"] == [{"outcome": "passed", "target": "done"}]
+
+
+def test_typed_plan_hud_exposes_stage_task_list_not_role_task_list(isolate_agent_runtime_root):
+    task = make_task()
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title=task.title, objective=task.description),
+        current_stage_id="build_socket",
+        stages=[
+            MissionPlanStage(
+                id="build_socket",
+                title="Build Socket",
+                objective="Build the socket stage.",
+                owner="dev",
+                owner_slot="builder",
+                repo="hermes-agent",
+                kind="implementation",
+                output_type="code feature",
+                proof_gate={"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"]},
+            )
+        ],
+        slots={"builder": {"role": "builder", "required": True}},
+    )
+    task.current_stage_id = "build_socket"
+    run = make_run()
+    run.stage_id = "build_socket"
+    cfg = RuntimeConfig(role_envelope=RoleEnvelopeConfig(enabled=True))
+    RoleChecklistStore().open_or_create(task=task, role_id="dev", mission_stage_id="build_socket", run_id=run.id)
+
+    hud = build_context(task, run, config=cfg).mission_hud
+    rendered = render_context(build_context(task, run, config=cfg))
+
+    assert "role_task_list" not in hud
+    assert hud["stage_task_list"]["stage_id"] == "build_socket"
+    assert hud["stage_task_list"]["owner_slot"] == "builder"
+    assert hud["stage_task_list"]["output_type"] == "code feature"
+    assert '"stage_task_list"' in rendered
+    assert '"role_task_list"' not in rendered
 
 
 def test_context_agent_hud_surfaces_advisory_evidence_stack():

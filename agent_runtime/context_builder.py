@@ -312,7 +312,7 @@ def _prompt_visible_mission_hud(hud: dict[str, Any]) -> dict[str, Any]:
         "failed_proof_ids",
         "current_stage_command_hints",
         "environment_fingerprint_status",
-        "role_task_list",
+        "stage_task_list",
         "typed_mission_plan",
         "typed_current_stage",
         "typed_qa_gate",
@@ -801,7 +801,17 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
     }
     checklist_hud = role_checklist_hud(task, role, run, config=config)
     if checklist_hud:
-        hud["role_task_list"] = checklist_hud
+        stage_checklist = dict(checklist_hud)
+        if has_typed_plan(task):
+            typed_stage = current_plan_stage(task)
+            if typed_stage is not None:
+                stage_checklist["stage_id"] = typed_stage.id
+                stage_checklist["owner_slot"] = typed_stage.owner_slot or typed_stage.owner
+                stage_checklist["output_type"] = _stage_output_type(typed_stage)
+        else:
+            stage_checklist["stage_id"] = run.stage_id or task.current_stage_id or stage_checklist.get("mission_stage_id")
+            stage_checklist["owner_slot"] = stage_checklist.get("role_id") or role
+        hud["stage_task_list"] = stage_checklist
     if worker_actions:
         visible_actions = [action.manifest() for action in worker_actions if action.visible]
         not_allowed = [action.manifest() for action in worker_actions if not action.visible and action.not_allowed_reason]
