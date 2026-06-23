@@ -1,5 +1,11 @@
 # Stage 74 - Open Persona Runtime Blueprint Graph
 
+> **Superseded (entity model) by [Stage 76](76-unified-template-instance-chat-goal-model.md), locked 2026-06-22.**
+> Stage 74's four-object model (Template → Instance → Runtime Loop → Work Binding)
+> is replaced by Template → durable Level Instance (placement) → swappable Chat →
+> Goal/Task owned by the chat. Keep Stage 74's `available_personas` library
+> contract and `profile:<id>` namespace; read the object model here as historical.
+>
 > Capture of the Mission Control/Harness direction discussed on 2026-06-20.
 > This stage moves Mission Control from a fixed four-agent cockpit toward an
 > open runtime workspace where Hermes profiles, persona templates, agent

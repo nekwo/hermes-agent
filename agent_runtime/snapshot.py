@@ -30,7 +30,7 @@ from .persona_assignments import (
     persona_instance_runtime_enabled,
     persona_instance_summary,
 )
-from .persona_chat_history import persona_chat_history_summary
+from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, persona_chat_history_summary, persona_chat_trace_summary
 from .personas import blocked_tool_names, effective_toolsets
 from .profile_readiness import profile_readiness_for_persona
 from .proof_gates import task_verdict_proof_satisfied
@@ -120,6 +120,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     dirty_state = build_dirty_state(tasks=tasks, runs=runs, incidents=incidents, workers=workers, runtime_instances=runtime_instances)
     persona_assignments = []
     persona_instances = []
+    personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         persona_instances = instance_store.derive_from_workers(agents, workers)
@@ -196,9 +197,18 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             "enabled": True,
             "assignment_store_enabled": persona_assignment_store_enabled(cfg),
         }
-        data["persona_instances"] = [persona_instance_summary(instance) for instance in persona_instances]
+        data["persona_instances"] = [
+            persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
+            for instance in persona_instances
+        ]
         data["persona_chat_history"] = persona_chat_history_summary(
             persona_instances=persona_instances,
+            message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+        )
+        data["persona_chat_trace"] = persona_chat_trace_summary(
+            persona_instances=persona_instances,
+            event_log=event_log,
+            message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
         )
         data["persona_assignments"] = {
             "active": [persona_assignment_summary(item) for item in persona_assignments if item.state in ACTIVE_ASSIGNMENT_STATES],

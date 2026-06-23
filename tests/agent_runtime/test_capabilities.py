@@ -31,6 +31,9 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert all(item["args_schema"]["additionalProperties"] is False for item in descriptors)
     assert all(item["enabled"] is True for item in descriptors)
     assert all("readback" in item for item in descriptors)
+    assert by_id["persona.profile.instantiate"]["args_schema"]["required"] == ["display_name"]
+    assert by_id["persona.instance.create"]["args_schema"]["required"] == []
+    assert by_id["persona.instance.create"]["label"] == "Open Agent Chat"
     for capability_id in (
         "persona.message_task",
         "persona.instance.message",

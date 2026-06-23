@@ -50,12 +50,11 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
         "id": "persona.instance.create",
         "target_kind": "persona",
-        "label": "Create Agent Profile",
+        "label": "Open Agent Chat",
         "group": "lifecycle",
         "execution_semantics": "control_state_change",
-        "required_args": ["display_name"],
-        "allowed_args": ["attachments", "auto_run", "max_actions", "max_seconds", "message", "session_id"],
-        "default_args": {"title": "Create Agent Profile", "message": "Create Mission Control agent profile.", "auto_run": False, "max_actions": 1, "max_seconds": 240},
+        "allowed_args": ["attachments", "auto_run", "display_name", "max_actions", "max_seconds", "message", "session_id"],
+        "default_args": {"title": "New operator chat", "message": "New operator chat opened. Wait for operator input.", "auto_run": False, "max_actions": 1, "max_seconds": 240},
         "danger": "normal",
     },
     {
