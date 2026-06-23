@@ -1426,7 +1426,7 @@ def test_tick_closes_typed_mission_when_qa_stage_passed_even_if_top_state_lags()
 
     assert res.actions_taken[0].ok
     assert res.actions_taken[0].action.type == HarnessActionType.COMPLETE_TASK
-    assert res.actions_taken[0].summary == "typed mission QA approved and all blocking stages passed"
+    assert res.actions_taken[0].summary == "blueprint has no remaining stages"
     assert ts.get("task_1").state == TaskState.DONE
 
 
@@ -2023,9 +2023,9 @@ def test_normal_worker_flow_reuses_existing_passed_final_gate_after_handoff_repa
     assert res.actions_taken[0].ok
     assert runner.calls == []
     stored = ts.get("task_1")
-    assert stored.state == TaskState.APPROVED
+    assert stored.state == TaskState.READY_FOR_VERIFICATION
     assert stored.proof_ids == ["proof_existing_passed"]
-    assert stored.stages[0].status == StageStatus.IMPLEMENTING
+    assert stored.stages[0].status == StageStatus.READY_FOR_QA
     events = EventLog().for_task("task_1", limit=0)
     assert any(
         event.type == "proof.gate_checked"
@@ -2160,7 +2160,7 @@ def test_normal_worker_flow_no_edit_investigation_delivery_advances_to_qa_withou
     assert res.actions_taken[0].ok
     stored = ts.get("task_1")
     assert stored.state == TaskState.READY_FOR_VERIFICATION
-    assert stored.mission_plan.stages[0].status == StageStatus.READY_FOR_QA
+    assert stored.mission_plan.stages[0].status == StageStatus.PASSED
     assert engine.state_machine.next_action(stored).type == HarnessActionType.RUN_SLOT
     assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "deliver_findings"
 

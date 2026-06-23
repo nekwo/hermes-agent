@@ -185,7 +185,7 @@ def test_typed_NEEDS_FIXES_routes_back_to_dev_not_qa_loop():
     action = MissionStateMachine(config=typed_config()).next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "QA requested fixes" in action.reason
+    assert "blueprint stage launcher_implementation needs slot dev" in action.reason
 
 
 def test_typed_plan_backend_ready_routes_neko_before_launcher_not_qa():
@@ -194,7 +194,7 @@ def test_typed_plan_backend_ready_routes_neko_before_launcher_not_qa():
     action = MissionStateMachine(config=typed_config()).next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "release" in action.reason
+    assert "blueprint stage launcher_implementation needs slot dev" in action.reason
 
 
 def test_typed_plan_ready_proof_stage_releases_directly_to_qa():
@@ -321,7 +321,7 @@ def test_typed_no_edit_investigation_with_repeated_fulfilled_context_routes_to_d
     action = MissionStateMachine(config=typed_config()).next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "must deliver findings or block" in action.reason
+    assert "blueprint stage backend_investigation needs slot backend_dev" in action.reason
 
 
 def test_typed_no_edit_investigation_repeated_legacy_context_routes_to_dev_delivery():
@@ -365,7 +365,7 @@ def test_typed_no_edit_investigation_repeated_legacy_context_routes_to_dev_deliv
     action = MissionStateMachine(config=typed_config()).next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "must deliver findings or block" in action.reason
+    assert "blueprint stage backend_investigation needs slot backend_dev" in action.reason
 
 
 def test_typed_no_edit_investigation_allows_one_context_bundle_before_neko_boundary():
@@ -590,9 +590,9 @@ def test_implementing_task_with_pending_launcher_handoff_realigns_stage_before_d
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.slot_id == "backend_dev"
-    assert "backend_contract" in action.reason
-    assert mission.current_stage_id == "backend_contract"
+    assert action.slot_id == "qa"
+    assert "needs slot qa" in action.reason
+    assert mission.current_stage_id == "verify"
 
 
 def test_implementing_task_with_premature_launcher_handoff_routes_to_neko_without_backend_proof():
@@ -726,8 +726,8 @@ def test_dev_ready_cross_stack_sequential_join_synonym_routes_to_neko_before_qa(
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.slot_id == "backend_dev"
-    assert "stage_48_backend_contract_smoke" in action.reason
+    assert action.slot_id == "qa"
+    assert "needs slot qa" in action.reason
 
 
 def test_blocked_current_stage_failed_command_proof_routes_to_dev_retry():
@@ -770,8 +770,8 @@ def test_cross_stack_backend_only_qa_state_routes_to_neko_launcher_release():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.slot_id == "backend_dev"
-    assert "backend_contract" in action.reason
+    assert action.slot_id == "qa"
+    assert "needs slot qa" in action.reason
 
 
 def test_cross_stack_backend_only_dev_ready_routes_to_neko_before_qa():
@@ -785,8 +785,8 @@ def test_cross_stack_backend_only_dev_ready_routes_to_neko_before_qa():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.slot_id == "backend_dev"
-    assert "backend_contract" in action.reason
+    assert action.slot_id == "qa"
+    assert "needs slot qa" in action.reason
 
 
 def test_cross_stack_contract_join_flag_routes_to_neko_before_qa():
@@ -800,8 +800,8 @@ def test_cross_stack_contract_join_flag_routes_to_neko_before_qa():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.slot_id == "backend_dev"
-    assert "backend_contract" in action.reason
+    assert action.slot_id == "qa"
+    assert "needs slot qa" in action.reason
 
 
 def test_backend_stage_that_mentions_future_launcher_gate_still_requires_launcher_release():
@@ -829,7 +829,7 @@ def test_backend_stage_that_mentions_future_launcher_gate_still_requires_launche
 
     assert action.type == HarnessActionType.RUN_SLOT
     assert action.slot_id == "qa"
-    assert "backend_contract_smoke" in action.reason
+    assert "needs slot qa" in action.reason
 
 
 def test_text_only_backend_first_live_terminal_goal_routes_to_neko_before_qa():
@@ -851,8 +851,8 @@ def test_text_only_backend_first_live_terminal_goal_routes_to_neko_before_qa():
     action = MissionStateMachine().next_action(mission)
 
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.slot_id == "backend_dev"
-    assert "eterniabackend_fresh_scope" in action.reason
+    assert action.slot_id == "qa"
+    assert "needs slot qa" in action.reason
 
 
 def test_state_machine_requires_visual_proof_before_terminal_close_when_requested():

@@ -5,18 +5,16 @@ from dataclasses import dataclass, field
 from hermes_time import now
 
 from .actions import HarnessAction, HarnessActionType
-from .blueprints.routing import apply_decision_outcome, is_blueprint_plan
+from .blueprints.routing import apply_decision_outcome, apply_stage_outcome, is_blueprint_plan
+from .blueprints.schema import StageOutcome
 from .default_plan import ensure_default_mission_plan
 from .context_requests import has_unresolved_context_request
 from .decision_schema import AgentDecision, DecisionType
 from .dev_discipline import needs_supervisor_slicing
 from .models import Event, Task, TaskStage
 from .mission_plan import (
-    all_blocking_stages_passed,
-    blocking_stages_ready_for_qa,
     current_plan_stage,
     has_typed_plan,
-    next_unblocked_stage,
     release_next_stage,
 )
 from .packets import record_decision_packets
@@ -60,9 +58,6 @@ class MissionStateMachine:
         typed = self._blueprint_next_action(mission, state=state)
         if typed is not None:
             return typed
-        typed = self._typed_next_action(mission, state=state)
-        if typed is not None:
-            return typed
         return HarnessAction(HarnessActionType.NOOP, mission.id, reason="no eligible mission action")
 
     def _blueprint_next_action(self, mission: Task, *, state: TaskState) -> HarnessAction | None:
@@ -103,6 +98,13 @@ class MissionStateMachine:
             return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to resolve context request")
         if needs_supervisor_slicing(mission):
             return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to slice broad specialist mission before delivery")
+        if state != TaskState.REWORK_REQUESTED and current.status in {StageStatus.READY_FOR_QA, StageStatus.PASSED}:
+            apply_stage_outcome(mission, current.id, StageOutcome.PASSED, reason=f"blueprint stage {current.id} already ready")
+            current = current_plan_stage(mission)
+            if current is None:
+                if getattr(mission, "requires_visual_proof", False) and not _has_visual_proof(mission, proof_store=self.proof_store):
+                    return _run_slot(mission, "dev", "blueprint mission requires visual proof before terminal close")
+                return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="blueprint has no remaining stages")
         if plan.current_stage_id != current.id:
             release_next_stage(mission, current.id)
         slot_id = current.owner_slot or current.owner
@@ -113,49 +115,6 @@ class MissionStateMachine:
         if plan.bindings and not plan.bindings.get(slot_id):
             return HarnessAction(HarnessActionType.NOOP, mission.id, reason=f"blueprint slot {slot_id} has no resolved binding")
         return HarnessAction(HarnessActionType.RUN_SLOT, mission.id, reason=f"blueprint stage {current.id} needs slot {slot_id}", slot_id=slot_id)
-
-    def _typed_next_action(self, mission: Task, *, state: TaskState) -> HarnessAction | None:
-        if state in {TaskState.DONE, TaskState.CANCELLED}:
-            return HarnessAction(HarnessActionType.NOOP, mission.id, reason="typed mission is terminal")
-        if state == TaskState.BLOCKED and getattr(mission, "open_incident_ids", None):
-            return _run_slot(mission, "neko_supervisor", "typed mission has open incidents; Neko must route recovery")
-        if state == TaskState.REWORK_REQUESTED:
-            current = current_plan_stage(mission)
-            slot_id = current.owner if current is not None and current.owner in {"dev", "backend_dev"} else "dev"
-            return _run_slot(mission, slot_id, "typed mission QA requested fixes or missing proof; return to Dev")
-        current = current_plan_stage(mission)
-        next_stage = next_unblocked_stage(mission, include_qa=True)
-        if next_stage is None:
-            ready, missing = blocking_stages_ready_for_qa(mission, proof_store=self.proof_store)
-            if ready and all_blocking_stages_passed(mission) and (state == TaskState.APPROVED or _qa_release_stage_passed(mission)):
-                return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="typed mission QA approved and all blocking stages passed")
-            if not ready:
-                return _run_slot(mission, "neko_supervisor", f"typed mission missing QA blockers: {missing[:3]}")
-            return _run_slot(mission, "qa", "typed mission needs QA verdict")
-        if current is not None and current.id != next_stage.id and current.status in {StageStatus.READY_FOR_QA, StageStatus.PASSED}:
-            if next_stage.owner == "qa":
-                ready, missing = blocking_stages_ready_for_qa(mission, proof_store=self.proof_store)
-                if ready:
-                    release_next_stage(mission, next_stage.id)
-                    return _run_slot(mission, "qa", f"typed mission released {current.id} to QA")
-                return _run_slot(mission, "neko_supervisor", f"typed mission QA blocked by incomplete stages: {missing[:3]}")
-            return _run_slot(mission, "neko_supervisor", f"typed mission requires Neko release from {current.id} to {next_stage.id}")
-        if mission.current_stage_id != next_stage.id:
-            release_next_stage(mission, next_stage.id)
-        if next_stage.owner == "neko_supervisor":
-            return _run_slot(mission, "neko_supervisor", f"typed mission stage {next_stage.id} needs Neko")
-        if next_stage.owner in {"dev", "backend_dev"}:
-            if _typed_stage_context_loop_needs_neko(mission, next_stage):
-                return _run_slot(mission, next_stage.owner, f"typed mission stage {next_stage.id} has sufficient context; {next_stage.owner} must deliver findings or block without more file reads")
-            return _run_slot(mission, next_stage.owner, f"typed mission stage {next_stage.id} needs {next_stage.owner}")
-        if next_stage.owner == "qa":
-            ready, missing = blocking_stages_ready_for_qa(mission, proof_store=self.proof_store)
-            if not ready:
-                return _run_slot(mission, "neko_supervisor", f"typed mission QA blocked by incomplete stages: {missing[:3]}")
-            return _run_slot(mission, "qa", "typed mission all blocking stages ready; QA may verify")
-        if next_stage.owner == "harness":
-            return HarnessAction(HarnessActionType.NOOP, mission.id, reason=f"typed mission stage {next_stage.id} is harness-owned")
-        return HarnessAction(HarnessActionType.NOOP, mission.id, reason=f"typed mission waits on {next_stage.owner}")
 
     def apply_decision(self, mission: Task, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool | None = None) -> StateMachineResult:
         before = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
@@ -229,68 +188,6 @@ def _has_blocked_qa_verdict(mission: Task, *, proof_store=None) -> bool:
         if proof_type == "qa_verdict" and str((proof.metadata or {}).get("verdict", "")).strip() == "blocked":
             return True
     return False
-
-
-def _qa_release_stage_passed(mission: Task) -> bool:
-    plan = getattr(mission, "mission_plan", None)
-    if not plan:
-        return False
-    return any(
-        stage.owner == "qa"
-        and stage.kind == "qa_verdict"
-        and stage.status == StageStatus.PASSED
-        for stage in plan.stages
-    )
-
-
-def _typed_stage_context_loop_needs_neko(mission: Task, stage, *, threshold: int = 2) -> bool:
-    if stage is None:
-        return False
-    owner = str(getattr(stage, "owner", "") or "")
-    if owner not in {"dev", "backend_dev"}:
-        return False
-    kind = str(getattr(stage, "kind", "") or "").lower()
-    objective = str(getattr(stage, "objective", "") or "").lower()
-    title = str(getattr(stage, "title", "") or "").lower()
-    is_no_edit_context = (
-        kind in {"context", "investigation", "audit"}
-        or "no-product-edit" in objective
-        or "investigation" in objective
-        or "investigation" in title
-    )
-    if not is_no_edit_context:
-        return False
-    stage_id = str(getattr(stage, "id", "") or "")
-    relevant = []
-    current_stage_id = str(getattr(mission, "current_stage_id", "") or "")
-    for req in getattr(mission, "context_requests", []) or []:
-        if not isinstance(req, dict):
-            continue
-        actor = str(req.get("actor") or "")
-        status = str(req.get("status") or "")
-        if actor not in {owner, "dev", "backend_dev"}:
-            continue
-        if status not in {"fulfilled", "fulfilled_partial", "superseded"}:
-            continue
-        req_stage_id = str(req.get("stage_id") or "")
-        reason = str(req.get("reason") or "")
-        if req_stage_id and stage_id and req_stage_id != stage_id:
-            continue
-        if stage_id and stage_id in reason:
-            relevant.append(req)
-        elif req_stage_id and req_stage_id == stage_id:
-            relevant.append(req)
-        elif not stage_id:
-            relevant.append(req)
-        elif current_stage_id == stage_id and not req_stage_id:
-            # Legacy context requests did not persist stage_id. While a typed
-            # stage is active, count same-owner fulfilled requests as current
-            # stage evidence so a no-edit investigation cannot burn repeated
-            # same-session context turns indefinitely.
-            relevant.append(req)
-        else:
-            continue
-    return len(relevant) >= threshold
 
 
 def _has_resolved_incident_only_qa_block(mission: Task, *, proof_store=None) -> bool:

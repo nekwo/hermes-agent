@@ -171,7 +171,7 @@ def current_plan_stage(task: Task) -> MissionPlanStage | None:
     plan = getattr(task, "mission_plan", None)
     if not plan:
         return None
-    current_id = str(getattr(task, "current_stage_id", "") or plan.current_stage_id or "").strip()
+    current_id = str(plan.current_stage_id or getattr(task, "current_stage_id", "") or "").strip()
     if current_id:
         for stage in plan.stages:
             if stage.id == current_id:
