@@ -7,6 +7,8 @@ import pytest
 
 from hermes_time import now
 
+from agent_runtime.actions import HarnessAction, HarnessActionType
+from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
@@ -16,6 +18,7 @@ from agent_runtime.persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    persona_instance_summary,
     persona_instance_id_for,
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
@@ -1206,6 +1209,42 @@ def test_persona_message_cli_creates_assignment_without_ticking(monkeypatch, iso
     assert len(assignments) == 1
     assert assignments[0].persona_id == "dev"
     assert RunStore().list_for_task(task.id) == []
+
+
+def test_run_slot_spawns_attributed_persona_instance(isolate_agent_runtime_root):
+    store = AgentStore()
+    store.save(_persona("neko_supervisor"))
+    store.save(_persona("backend_dev"))
+    bp = BlueprintStore().get("neko_dev_qa_basic")
+    plan = instantiate_blueprint(
+        bp,
+        goal="Build a graph-routed thing.",
+        bindings={"lead": "persona:neko_supervisor", "builder": "persona:backend_dev", "verifier": "persona:qa"},
+    )
+    task = _task("task_run_slot_instance")
+    plan.current_stage_id = "implement"
+    task.mission_plan = plan
+    task.current_stage_id = "implement"
+    TaskStore().create(task)
+
+    result = TickEngine(
+        task_store=TaskStore(),
+        proof_store=ProofStore(),
+        persona_runtime=RequestProofRuntime(),
+        proof_runner=PassingProofRunner(ProofStore()),
+        config=_assignment_config(),
+    )._execute_action(
+        HarnessAction(HarnessActionType.RUN_SLOT, task_id=task.id, reason="run builder", slot_id="builder"),
+        task,
+    )
+
+    assert result.ok is True
+    instance = PersonaInstanceStore().get(persona_instance_id_for("backend_dev"))
+    assert instance.goal_id == task.id
+    assert instance.spawned_by == "neko_supervisor"
+    summary = persona_instance_summary(instance)
+    assert summary["goal_id"] == task.id
+    assert summary["spawned_by"] == "neko_supervisor"
 
 
 def test_tick_observe_only_links_assignment_to_run_and_worker(monkeypatch, isolate_agent_runtime_root):

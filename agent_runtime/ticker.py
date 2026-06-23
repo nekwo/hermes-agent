@@ -25,6 +25,7 @@ from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage, has_t
 from .persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
+    PersonaInstanceStore,
     persona_assignment_store_enabled,
     persona_instance_id_for,
 )
@@ -414,6 +415,12 @@ class TickEngine:
                 return HarnessActionResult(action, True, "handoff repair reused existing passed proof; routed to QA", handoff_recovery)
         persona_id = _persona_id_for_harness_action(action, task=task, config=self.config, run_store=self.run_store)
         persona = _get_persona(self.agent_store, persona_id, self.config)
+        if action.type == HarnessActionType.RUN_SLOT:
+            PersonaInstanceStore().ensure_for_goal(
+                persona,
+                goal_id=task.id,
+                spawned_by=_spawned_by_for_harness_action(action, task=task),
+            )
         worker_store = self.worker_session_store if _enterprise_worker_sessions_enabled(self.config) else None
         assignment = None
         if persona_assignment_store_enabled(self.config):
@@ -2927,6 +2934,21 @@ def _persona_id_for_harness_action(action: HarnessAction, *, task: Task | None =
             return _dev_persona_id_for_task(task, config=config, run_store=run_store)
         return slot_id or None
     return None
+
+
+def _spawned_by_for_harness_action(action: HarnessAction, *, task: Task | None = None) -> str | None:
+    if action.type != HarnessActionType.RUN_SLOT:
+        return None
+    slot_id = str(action.slot_id or "").strip()
+    plan = getattr(task, "mission_plan", None) if task is not None else None
+    bindings = getattr(plan, "bindings", None) if plan is not None else None
+    if slot_id in {"lead", "neko_supervisor"}:
+        return "operator"
+    if isinstance(bindings, dict):
+        lead = str(bindings.get("lead") or bindings.get("coordinator") or "").strip()
+        if lead:
+            return lead
+    return "neko_supervisor"
 
 
 def _persona_id_for_action(action_type: HarnessActionType, *, task: Task | None = None, config: RuntimeConfig | None = None, run_store: RunStore | None = None) -> str | None:
