@@ -506,7 +506,7 @@ def _qa_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerAc
 
 def _neko_actions(task: Task, run: AgentRun) -> list[WorkerAction]:
     state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
-    if state == TaskState.READY_FOR_VERIFICATION:
+    if state == TaskState.READY_FOR_REVIEW:
         return [
             WorkerAction(
                 "release_handoff",

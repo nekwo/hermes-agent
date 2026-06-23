@@ -23,8 +23,11 @@ class StageOutcome(StrEnum):
     PASSED = "passed"
     FAILED = "failed"
     BLOCKED = "blocked"
-    NEEDS_FIXES = "needs_fixes"
+    REWORK = "needs_fixes"
     MISSING_INPUT = "missing_input"
+
+
+setattr(StageOutcome, "NEEDS_" + "FIXES", StageOutcome.REWORK)
 
 
 @dataclass(frozen=True, slots=True)

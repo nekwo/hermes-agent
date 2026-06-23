@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from hermes_time import now
 
+from .blueprints import BlueprintStore, instantiate_blueprint
 from .goal_hygiene import prepare_new_goal_runtime
 from .locks import HarnessLockUnavailable, tick_lock
 from .models import Task
@@ -15,6 +16,14 @@ from .states import TaskState
 from .store import IncidentStore, ProofStore, RunStore, TaskStore
 from .ticker import TickEngine, RunUntilSettledResult
 from .worklog import append_persona_worklog
+
+
+DEFAULT_GOAL_BLUEPRINT_ID = "neko_dev_qa_basic"
+DEFAULT_GOAL_BINDINGS = {
+    "lead": "persona:neko_supervisor",
+    "builder": "persona:dev",
+    "verifier": "persona:qa",
+}
 
 
 @dataclass(slots=True)
@@ -29,6 +38,8 @@ class GoalRunOptions:
     affected_repos: list[str] = field(default_factory=list)
     acceptance_criteria: list[str] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
+    blueprint_id: str | None = DEFAULT_GOAL_BLUEPRINT_ID
+    bindings: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -167,6 +178,16 @@ class MissionRuntimeController:
 
     def _create_task(self, options: GoalRunOptions) -> Task:
         ts = now()
+        mission_plan = None
+        blueprint_id = (options.blueprint_id or DEFAULT_GOAL_BLUEPRINT_ID).strip()
+        if blueprint_id:
+            bp = BlueprintStore().get(blueprint_id)
+            bindings = {**DEFAULT_GOAL_BINDINGS, **dict(options.bindings or {})}
+            mission_plan = instantiate_blueprint(bp, goal=options.description, bindings=bindings)
+            if mission_plan.mission_intent is not None:
+                mission_plan.mission_intent.title = options.title
+                mission_plan.mission_intent.acceptance_criteria = list(options.acceptance_criteria)
+                mission_plan.mission_intent.non_goals = list(options.non_goals)
         task = Task(
             id=f"task_{uuid.uuid4().hex[:8]}",
             title=options.title,
@@ -179,6 +200,8 @@ class MissionRuntimeController:
             acceptance_criteria=list(options.acceptance_criteria),
             non_goals=list(options.non_goals),
             affected_repos=list(options.affected_repos),
+            mission_plan=mission_plan,
+            current_stage_id=mission_plan.current_stage_id if mission_plan is not None else None,
         )
         return self.task_store.create(task)
 

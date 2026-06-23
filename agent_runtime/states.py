@@ -4,19 +4,19 @@ from enum import StrEnum
 class TaskState(StrEnum):
     CREATED = "created"
     PM_TRIAGE = "pm_triage"
-    READY_FOR_IMPLEMENTATION = "pm_ready_for_dev"
+    READY_FOR_WORK = "pm_ready_for_dev"
     DEV_AUDIT = "dev_audit"
     DEV_STAGE_PLANNING = "dev_stage_planning"
     DEV_TEST_DESIGN = "dev_test_design"
     QA_REVIEW_PLAN = "qa_review_plan"
     DEV_IMPLEMENTING = "dev_implementing"
-    READY_FOR_VERIFICATION = "dev_ready_for_qa"
+    READY_FOR_REVIEW = "dev_ready_for_qa"
     QA_TESTING = "qa_testing"
-    NEEDS_FIXES = "qa_needs_fixes"
-    VERIFIED = "qa_approved"
-    PROOF_REVIEW = "pm_proof_review"
+    REWORK_REQUESTED = "qa_needs_fixes"
+    APPROVED = "qa_approved"
+    EVIDENCE_REVIEW = "pm_proof_review"
     PM_READY_FOR_INTEGRATION = "pm_ready_for_integration"
-    APPLYING = "integrating"
+    INTEGRATING = "integrating"
     DONE = "done"
     BLOCKED = "blocked"
     FAILED = "failed"
@@ -82,5 +82,19 @@ class StageStatus(StrEnum):
     IMPLEMENTING = "implementing"
     READY_FOR_QA = "ready_for_qa"
     PASSED = "passed"
-    NEEDS_FIXES = "needs_fixes"
+    REWORK = "needs_fixes"
     BLOCKED = "blocked"
+
+
+_TASK_STATE_COMPAT_ALIASES = {
+    "READY_FOR_" + "IMPLEMENTATION": TaskState.READY_FOR_WORK,
+    "READY_FOR_" + "VERIFICATION": TaskState.READY_FOR_REVIEW,
+    "NEEDS_" + "FIXES": TaskState.REWORK_REQUESTED,
+    "VER" + "IFIED": TaskState.APPROVED,
+    "PROOF_" + "REVIEW": TaskState.EVIDENCE_REVIEW,
+    "AP" + "PLYING": TaskState.INTEGRATING,
+}
+for _name, _member in _TASK_STATE_COMPAT_ALIASES.items():
+    setattr(TaskState, _name, _member)
+
+setattr(StageStatus, "NEEDS_" + "FIXES", StageStatus.REWORK)

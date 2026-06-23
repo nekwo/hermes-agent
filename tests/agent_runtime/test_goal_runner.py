@@ -3,10 +3,13 @@ from __future__ import annotations
 from hermes_time import now
 from agent_runtime.locks import HarnessLockUnavailable
 
+from agent_runtime.actions import HarnessActionType
 from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
+from agent_runtime.mission_plan import has_typed_plan
 from agent_runtime.models import Proof
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import RuntimeConfig
+from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.ticker import RunUntilSettledResult
@@ -162,6 +165,34 @@ def test_goal_runner_creates_goal_runs_until_done_and_records_worklog(tmp_path, 
     task = TaskStore().get(result.task_id)
     assert task.acceptance_criteria == ["done"]
     assert task.affected_repos == ["harness"]
+
+
+def test_goal_runner_creates_graph_routed_task_from_birth(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    task_store = TaskStore()
+
+    result = MissionRuntimeController(
+        config=RuntimeConfig(),
+        task_store=task_store,
+        engine_factory=MaxActionsEngine,
+    ).run_goal(
+        GoalRunOptions(
+            title="T",
+            description="D",
+            acceptance_criteria=["done"],
+            bindings={"builder": "persona:backend_dev"},
+            max_actions=1,
+        )
+    )
+
+    task = task_store.get(result.task_id)
+    assert has_typed_plan(task)
+    assert task.mission_plan.blueprint_id == "neko_dev_qa_basic"
+    assert task.mission_plan.bindings["builder"] == "backend_dev"
+    assert task.current_stage_id == "scope"
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "lead"
 
 
 def test_goal_runner_does_not_create_duplicate_task_when_tick_lock_busy(tmp_path, monkeypatch):
