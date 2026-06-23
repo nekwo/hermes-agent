@@ -335,7 +335,6 @@ def _mission_plan_config(raw: dict[str, Any]) -> MissionPlanConfig:
     defaults = MissionPlanConfig()
     return MissionPlanConfig(
         enabled=bool(raw.get("enabled", defaults.enabled)),
-        enforce_routing=bool(raw.get("enforce_routing", defaults.enforce_routing)),
         enforce_hud=bool(raw.get("enforce_hud", defaults.enforce_hud)),
         version=_positive_int(raw.get("version"), defaults.version),
     )

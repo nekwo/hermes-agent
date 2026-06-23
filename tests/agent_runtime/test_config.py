@@ -147,7 +147,6 @@ def test_mission_plan_config_defaults_off_and_can_be_enabled(tmp_path):
     default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
 
     assert default_config.mission_plan.enabled is False
-    assert default_config.mission_plan.enforce_routing is True
     assert default_config.mission_plan.enforce_hud is True
 
     p = tmp_path / "config.yaml"
@@ -155,7 +154,6 @@ def test_mission_plan_config_defaults_off_and_can_be_enabled(tmp_path):
         "agent_runtime:\n"
         "  mission_plan:\n"
         "    enabled: true\n"
-        "    enforce_routing: false\n"
         "    version: 1\n",
         encoding="utf-8",
     )
@@ -163,7 +161,6 @@ def test_mission_plan_config_defaults_off_and_can_be_enabled(tmp_path):
     cfg = load_agent_runtime_config(p)
 
     assert cfg.mission_plan.enabled is True
-    assert cfg.mission_plan.enforce_routing is False
     assert cfg.mission_plan.enforce_hud is True
     assert cfg.mission_plan.version == 1
 

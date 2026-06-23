@@ -52,7 +52,8 @@ def ensure_default_mission_plan(
 ) -> MissionPlan:
     if has_typed_plan(task):
         plan = task.mission_plan
-        if task.current_stage_id and any(stage.id == task.current_stage_id for stage in plan.stages):
+        _upgrade_typed_plan_to_graph(task, plan)
+        if not plan.current_stage_id and task.current_stage_id and any(stage.id == task.current_stage_id for stage in plan.stages):
             plan.current_stage_id = task.current_stage_id
     else:
         plan = _plan_from_legacy_task_stages(task) or build_default_mission_plan(task, blueprint_id=blueprint_id, bindings=bindings)
@@ -130,6 +131,50 @@ def _ensure_default_retry_edges(plan: MissionPlan) -> None:
     for outcome in ("failed", "needs_fixes", "missing_input"):
         if ("implement", outcome) not in existing:
             plan.edges.append({"source": "implement", "outcome": outcome, "target": "implement"})
+
+
+def _upgrade_typed_plan_to_graph(task: Task, plan: MissionPlan) -> None:
+    if getattr(plan, "blueprint_id", None):
+        return
+    plan.blueprint_id = DEFAULT_TASK_BLUEPRINT_ID
+    plan.blueprint_version = plan.blueprint_version or 1
+    for stage in plan.stages:
+        slot = stage.owner_slot or stage.owner or "dev"
+        stage.owner_slot = slot
+        plan.slots.setdefault(slot, {"role": slot, "required": True, "description": f"Migrated typed slot {slot}."})
+        plan.bindings.setdefault(slot, slot)
+        plan.binding_sources.setdefault(slot, f"persona:{slot}")
+    _ensure_migrated_qa_stage(task, plan)
+    if not plan.edges:
+        plan.edges = _linear_edges_for_migrated_stages(plan.stages)
+    plan.limits = plan.limits or {"max_attempts_per_stage": 3, "max_total_stages": 16}
+    plan.on_unhandled = plan.on_unhandled or "intervention"
+
+
+def _ensure_migrated_qa_stage(task: Task, plan: MissionPlan) -> None:
+    if any((stage.owner_slot or stage.owner) == "qa" or stage.kind == "qa_verdict" for stage in plan.stages):
+        return
+    if not plan.stages:
+        return
+    plan.slots.setdefault("qa", {"role": "qa", "required": True, "description": "Migrated verifier slot qa."})
+    plan.bindings.setdefault("qa", "qa")
+    plan.binding_sources.setdefault("qa", "persona:qa")
+    plan.stages.append(
+        MissionPlanStage(
+            id="qa_release",
+            title="QA Release",
+            objective="Verify the migrated mission stages and attached proof.",
+            owner="qa",
+            owner_slot="qa",
+            repo=_repo_for_legacy_stage(task, plan.stages[-1]),
+            kind="qa_verdict",
+            status=StageStatus.READY,
+            depends_on=[stage.id for stage in plan.stages if stage.blocks_qa_until],
+            blocks_qa_until=False,
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
 
 
 def _plan_from_legacy_task_stages(task: Task) -> MissionPlan | None:
@@ -222,10 +267,13 @@ def _owner_for_legacy_stage(stage) -> str:
         ]
     ).lower()
     text = " ".join([id_title, str(getattr(stage, "objective", "") or "").lower(), path_plan])
-    if "qa" in text or "verify" in text:
+    qa_identity = ("qa" in id_title or "verify" in id_title or "verification" in id_title or "verdict" in id_title)
+    if qa_identity:
         return "qa"
     if "backend" in id_title or "eterniabackend" in id_title or "backend" in path_plan or "eterniabackend" in path_plan:
         return "backend_dev"
+    if "qa" in str(getattr(stage, "objective", "") or "").lower() or "verify" in str(getattr(stage, "objective", "") or "").lower():
+        return "qa"
     if "neko" in text or "scope" in text:
         return "neko_supervisor"
     return "dev"

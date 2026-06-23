@@ -52,7 +52,6 @@ class NormalWorkerFlowConfig:
 @dataclass(slots=True)
 class MissionPlanConfig:
     enabled: bool = False
-    enforce_routing: bool = True
     enforce_hud: bool = True
     version: int = 1
 

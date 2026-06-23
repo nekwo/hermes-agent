@@ -184,7 +184,7 @@ def test_dev_request_qa_review_after_all_stages_complete_enters_neko_coordinatio
 
     assert action.type.value == "run_slot"
     assert action.slot_id == "dev"
-    assert "stage_1" in action.reason
+    assert "stage_2" in action.reason
 
 
 def test_neko_qa_coordination_release_allows_qa_verification():
@@ -204,7 +204,7 @@ def test_neko_qa_coordination_release_allows_qa_verification():
     assert t.state == TaskState.READY_FOR_VERIFICATION
     assert "neko_qa_coordination_released" in t.risk_flags
     assert action.type.value == "run_slot"
-    assert action.slot_id == "dev"
+    assert action.slot_id == "qa"
 
 
 def test_neko_visual_recovery_repairs_stale_mission_control_stagec_test_plan(monkeypatch, tmp_path):
