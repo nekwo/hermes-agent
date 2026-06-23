@@ -63,6 +63,31 @@ def test_context_includes_stage53_simplified_agent_hud():
     assert "decision_menu" in ctx.mission_hud
 
 
+def test_context_agent_hud_surfaces_advisory_evidence_stack():
+    task = make_task()
+    task.harness_self_heal = {
+        "evidence_stack": [
+            {
+                "kind": "proof_gate",
+                "severity": "warning",
+                "stage_id": "stage_1",
+                "summary": "Required proof is missing or stale; goal owner must adjudicate.",
+                "missing": ["missing test_run proof"],
+                "warnings": ["stale visual proof"],
+                "recommended_owner": "neko_supervisor",
+                "recorded_at": "2026-06-23T00:00:00",
+            }
+        ]
+    }
+
+    ctx = build_context(task, make_run())
+
+    evidence = ctx.mission_hud["agent_hud"]["evidence_stack"]
+    assert evidence[0]["kind"] == "proof_gate"
+    assert evidence[0]["missing"] == ["missing test_run proof"]
+    assert evidence[0]["recommended_owner"] == "neko_supervisor"
+
+
 def test_rendered_context_hides_legacy_hud_action_surfaces():
     ctx = build_context(make_task(), make_run())
 

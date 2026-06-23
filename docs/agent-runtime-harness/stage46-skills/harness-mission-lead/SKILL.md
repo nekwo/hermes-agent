@@ -22,6 +22,8 @@ Use this skill when acting as Neko Mission Lead for an Agent Runtime Harness tas
 - `checklist_updates` is optional. Use it only for Neko-owned checklist item IDs shown in the HUD. Do not mark Dev or QA checklist items `verified`; route or release stages through the supported handoff/mission-plan fields instead.
 - Use `context` stages for no-product-edit investigations/audits that require repo inspection and a plan. Use `proof_only` only for certification/smoke stages with a deterministic proof recipe or explicit test plan.
 - Treat `agent_hud` as the primary operating surface. Legacy/debug HUD fields are not valid action choices.
+- Read `agent_hud.evidence_stack` before every route/release. Missing proof, stale proof, failed proof, and `BLOCKED` entries are advisory evidence for Neko to adjudicate; they are not terminal dead-ends by themselves.
+- When the HUD shows a blocked escalation without an open incident, choose a visible Neko action that either routes the smallest recovery owner, requests one exact missing input/proof lane, or reports the bounded blocker with evidence. Do not repeat a prior route blindly, and do not treat `TaskState.BLOCKED` as mission completion.
 - Use `agent_hud.repo_bundles` as the authoritative repo split when present. Do not create extra owners, stages, packet fields, or proof lanes outside those bundles unless the mission scope itself is invalid and you are repairing scope.
 - If a bundle is `queued_waiting_dependency`, steer the dependency owner first. If all dependency bundles are delivered but the bundle is still queued, emit one repair/release action naming `dependency_bundle_delivered`.
 - In Stage 53 simplified mode, Neko's only product actions are `assign`, `report_blocker`, and `request_missing_input`.
@@ -93,11 +95,11 @@ Only include fields the Harness cannot derive. Do not include absolute paths, ra
 
 ## QA Release
 
-Use when Dev delivery/proof packets are present and the next safe owner is QA. Join proof IDs, name missing proof lanes if any, and release only the scoped work that satisfies the proof gate. For product-edit goals, do not release to final QA approval while the local, staging k8, and prod rollout promotion proofs are incomplete or out of order.
+Use when Dev delivery/proof packets are present and the next safe owner is QA. Join proof IDs, name missing proof lanes if any, and release only the scoped work whose evidence is ready for QA review. Missing proof is a HUD/evidence warning for Neko to adjudicate or repair, not an automatic terminal block. For product-edit goals, do not release to final QA approval while the local, staging k8, and prod rollout promotion proofs are incomplete or out of order.
 
 ## Incident Resolution
 
-Use when the task is blocked with open incidents and the HUD recommends incident resolution. Resolve only with new evidence or a bounded recovery route; otherwise block with the incident ID and exact remaining blocker.
+Use when the task is blocked with open incidents and the HUD recommends incident resolution. Resolve only with new evidence or a bounded recovery route; otherwise block with the incident ID and exact remaining blocker. A blocked task without an open incident should stay recoverable through the visible HUD action menu.
 
 ## Recovery Template
 

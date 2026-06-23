@@ -71,6 +71,30 @@ class MaxActionsEngine:
         )
 
 
+class RecoverableBlockedMaxActionsEngine:
+    def __init__(self, *, task_store, **_kwargs):
+        self.task_store = task_store
+
+    def run_until_settled(self, *, task_id, max_actions, max_seconds):
+        task = self.task_store.get(task_id)
+        task.state = TaskState.BLOCKED
+        task.updated_at = now()
+        self.task_store.update(task, actor="harness", reason="recoverable escalation")
+        return RunUntilSettledResult(
+            settle_id="settle_test",
+            started_at=now(),
+            finished_at=now(),
+            task_id=task_id,
+            ticks=1,
+            actions_taken=[],
+            stop_reason="max_actions",
+            final_task_state="blocked",
+            open_incidents=0,
+            max_actions=max_actions,
+            max_seconds=max_seconds,
+        )
+
+
 class BlockedWithQaVerdictEngine:
     def __init__(self, *, task_store, proof_store, **_kwargs):
         self.task_store = task_store
@@ -265,6 +289,20 @@ def test_goal_runner_returns_nonzero_on_max_actions_boundary(tmp_path, monkeypat
     assert result.exit_code == 3
     assert result.stop_reason == "max_actions"
     assert result.next_actions == ["Increase the bound only if events show forward progress."]
+
+
+def test_goal_runner_does_not_turn_recoverable_blocked_state_into_terminal_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    result = MissionRuntimeController(config=RuntimeConfig(), engine_factory=RecoverableBlockedMaxActionsEngine).run_goal(
+        GoalRunOptions(title="T", description="D", max_actions=1)
+    )
+
+    assert result.ok is False
+    assert result.exit_code == 3
+    assert result.final_task_state == "blocked"
+    assert result.stop_reason == "max_actions"
+    assert result.final_summary["blocker_kind"] == "state_blocked"
 
 
 def test_goal_runner_blocked_without_incident_surfaces_qa_blocker_summary(tmp_path, monkeypatch):
