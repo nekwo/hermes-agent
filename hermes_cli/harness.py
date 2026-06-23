@@ -343,6 +343,8 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_open.add_argument("--persona", dest="persona_id", required=True)
     persona_instance_open.add_argument("--session-id", required=True)
     persona_instance_open.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
+    persona_instance_open.add_argument("--add-instance", action="store_true", help="Open the chat on an additional placement-backed instance")
+    persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
     persona_instance_open.add_argument("--json", action="store_true")
     persona_instance_open.set_defaults(func=_cmd_persona_instance_open_chat)
     persona_instance_message = persona_instance_subs.add_parser("message", help="Queue a message to a free-floating persona instance without ticking")
@@ -1010,13 +1012,25 @@ def _cmd_persona_instance_open_chat(args) -> int:
         data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
         print(emit_json(data) if args.json else data["error"])
         return 2
-    persona_id = _normalize_cli_persona_id(args.persona_id)
+    persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
     try:
-        instance = PersonaInstanceStore().open_chat(
-            persona_id=persona_id,
-            session_id=args.session_id,
-            kill_active=bool(getattr(args, "kill_active", False)),
-        )
+        if bool(getattr(args, "add_instance", False)):
+            placement_id = safe_assignment_token(getattr(args, "placement_id", None))
+            if not placement_id:
+                data = {"ok": False, "error": "placement_id is required when add_instance is true"}
+                print(emit_json(data) if args.json else data["error"])
+                return 2
+            instance = PersonaInstanceStore().add_instance(
+                persona_id=persona_id,
+                placement_id=placement_id,
+                session_id=args.session_id,
+            )
+        else:
+            instance = PersonaInstanceStore().open_chat(
+                persona_id=persona_id,
+                session_id=args.session_id,
+                kill_active=bool(getattr(args, "kill_active", False)),
+            )
     except ChatBusyError as exc:
         data = _chat_busy_payload(exc)
         print(emit_json(data) if args.json else data["error"])
@@ -1029,6 +1043,8 @@ def _cmd_persona_instance_open_chat(args) -> int:
         "session_id": instance.session_id,
         "chat_busy": False,
         "killed_previous": bool(getattr(args, "kill_active", False)),
+        "add_instance": bool(getattr(args, "add_instance", False)),
+        "placement_id": safe_assignment_token(getattr(args, "placement_id", None)) or None,
         "next_expected": "resume or send on this chat session to boot the persona instance history",
     }
     print(emit_json(data) if args.json else f"opened {instance.id} on chat {instance.session_id}")

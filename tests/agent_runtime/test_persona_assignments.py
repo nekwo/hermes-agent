@@ -494,6 +494,38 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     assert RunStore().list_all() == []
 
 
+def test_persona_instance_open_chat_can_target_additional_placement(monkeypatch, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="profile:reviewer",
+            session_id="chat_old_123",
+            kill_active=False,
+            add_instance=True,
+            placement_id="reviewer_agent_2",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    primary_missing = True
+    try:
+        PersonaInstanceStore().get("personainst_profile_reviewer")
+        primary_missing = False
+    except Exception:
+        pass
+    additional = PersonaInstanceStore().get("personainst_reviewer_agent_2")
+    assert primary_missing is True
+    assert additional.persona_id == "profile:reviewer"
+    assert additional.session_id == "chat_old_123"
+    assert additional.mode == "chat"
+
+
 def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runtime_root):
     instance_store = PersonaInstanceStore()
     workers = WorkerSessionStore()

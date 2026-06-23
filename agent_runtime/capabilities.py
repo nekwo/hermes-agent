@@ -64,6 +64,7 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "group": "lifecycle",
         "execution_semantics": "control_state_change",
         "required_args": ["persona_id", "session_id"],
+        "allowed_args": ["add_instance", "kill_active", "placement_id"],
         "danger": "normal",
     },
     {

@@ -41,6 +41,9 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     )
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["add_instance"]["type"] == "boolean"
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["kill_active"]["type"] == "boolean"
+    assert {"add_instance", "placement_id", "kill_active"}.issubset(
+        set(by_id["persona.instance.open_chat"]["allowed_args"])
+    )
     for capability_id in (
         "persona.message_task",
         "persona.instance.message",
