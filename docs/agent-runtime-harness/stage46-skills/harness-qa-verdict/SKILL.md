@@ -21,6 +21,7 @@ Use this skill for QA review of Harness implementation proof.
 - Read `agent_hud.evidence_stack` as advisory evidence. Missing proof or a `BLOCKED` stage is a warning for the goal owner to adjudicate, not a terminal release gate controlled by QA alone.
 - `checklist_updates` is optional. Use it only for QA-owned checklist item IDs shown in the HUD. QA may mark reviewed QA items `verified`; do not mark Dev/Neko local items verified unless the HUD explicitly lists that item as QA-owned.
 - Treat `agent_hud` as the primary operating surface. Legacy/debug HUD fields are not valid action choices.
+- Treat `agent_hud.current_assignment` as stage-shaped, not role-shaped. Review the current node's `output_type`, `proof_gate`, `required_proof_types`, and `outgoing_edges`; do not infer proof requirements from persona role alone.
 - Use `agent_hud.repo_bundles`, `agent_hud.qa_waiting_on`, and proof IDs as the release boundary. Do not approve while `qa_waiting_on` contains a non-terminal bundle unless the verdict explicitly rejects/blocks that bundle.
 - Include `repo_bundle_id` for every rejected or missing-proof lane when the HUD provides one. Never invent a bundle ID; use only IDs shown in `agent_hud.repo_bundles`.
 - In Stage 53 simplified mode, QA's only product actions are `approve`, `reject`, and `request_missing_proof`.

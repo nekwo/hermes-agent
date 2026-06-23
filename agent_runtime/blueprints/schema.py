@@ -72,6 +72,7 @@ class BlueprintStage:
     blocks_qa_until: bool = True
     proof_recipe_id: str | None = None
     proof_gate: ProofGate = field(default_factory=ProofGate)
+    output_type: str | None = None
     requires_product_edit: bool = False
     requires_visual_proof: bool = False
 
@@ -195,7 +196,11 @@ def _slot_from_dict(raw: dict[str, Any]) -> BlueprintSlot:
 
 
 def _stage_from_dict(raw: dict[str, Any]) -> BlueprintStage:
-    proof_gate = _proof_gate_from_dict(raw.get("proof_gate") if isinstance(raw.get("proof_gate"), dict) else {})
+    output_type = _safe_output_type(raw.get("output_type"))
+    proof_gate_raw = raw.get("proof_gate") if isinstance(raw.get("proof_gate"), dict) else {}
+    proof_gate = _proof_gate_from_dict(proof_gate_raw)
+    if output_type and not proof_gate_raw:
+        proof_gate = _proof_gate_for_output_type(output_type)
     proof_recipe_id = str(raw.get("proof_recipe_id") or proof_gate.proof_recipe_id or "").strip() or None
     if proof_recipe_id and proof_gate.proof_recipe_id != proof_recipe_id:
         proof_gate = ProofGate(
@@ -216,6 +221,7 @@ def _stage_from_dict(raw: dict[str, Any]) -> BlueprintStage:
         blocks_qa_until=bool(raw.get("blocks_qa_until", True)),
         proof_recipe_id=proof_recipe_id,
         proof_gate=proof_gate,
+        output_type=output_type or _infer_output_type(proof_gate=proof_gate, kind=str(raw.get("kind") or "implementation").strip()),
         requires_product_edit=bool(raw.get("requires_product_edit", False)),
         requires_visual_proof=bool(raw.get("requires_visual_proof", False)),
     )
@@ -229,6 +235,34 @@ def _proof_gate_from_dict(raw: dict[str, Any]) -> ProofGate:
         proof_recipe_id=str(raw.get("proof_recipe_id") or raw.get("recipe_id") or "").strip() or None,
         commands=[str(item).strip() for item in raw.get("commands", []) or [] if str(item).strip()],
     )
+
+
+def _safe_output_type(value: Any) -> str | None:
+    text = str(value or "").strip().lower().replace("_", " ").replace("-", " ")
+    return " ".join(text.split()) or None
+
+
+def _proof_gate_for_output_type(output_type: str) -> ProofGate:
+    normalized = _safe_output_type(output_type) or ""
+    if normalized in {"code feature", "code", "implementation", "software change"}:
+        return ProofGate(required=True, minimum_status="passed", required_proof_types=["test_run"])
+    if normalized in {"design document", "design doc", "plan", "document"}:
+        return ProofGate(required=True, minimum_status="passed", required_proof_types=["artifact"])
+    if normalized in {"qa verdict", "verification verdict", "verdict"}:
+        return ProofGate(required=True, minimum_status="approved", required_proof_types=["qa_verdict"])
+    return ProofGate(required=False)
+
+
+def _infer_output_type(*, proof_gate: ProofGate, kind: str) -> str:
+    required = {str(item) for item in proof_gate.required_proof_types}
+    normalized_kind = _safe_output_type(kind) or ""
+    if "qa_verdict" in required or normalized_kind in {"qa verdict", "qa_verdict"}:
+        return "qa verdict"
+    if required & {"test_run", "diff", "diff_stat", "commit"} or normalized_kind in {"implementation", "proof only"}:
+        return "code feature"
+    if required & {"artifact", "text", "url"} or normalized_kind in {"context", "investigation", "scope"}:
+        return "design document"
+    return "design document"
 
 
 def _validate_proof_gate(stage: BlueprintStage) -> list[str]:

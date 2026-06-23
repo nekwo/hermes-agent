@@ -337,6 +337,7 @@ def mission_plan_summary(task: Task) -> dict[str, Any] | None:
                 "repo": stage.repo,
                 "kind": stage.kind,
                 "status": stage.status.value,
+                "output_type": stage.output_type,
                 "proof_recipe_id": stage.proof_recipe_id,
                 "proof_gate": dict(getattr(stage, "proof_gate", {}) or {}),
                 "requires_product_edit": stage.requires_product_edit,
@@ -555,6 +556,7 @@ def _stage_from_raw(task: Task, raw: dict[str, Any], *, intent: MissionIntent, e
     owner_slot = str(raw.get("owner_slot") or (existing.owner_slot if existing else "") or owner).strip()
     repo = _canonical_repo(str(raw.get("repo") or (existing.repo if existing else "EterniaLauncher")))
     proof_gate = raw.get("proof_gate") if isinstance(raw.get("proof_gate"), dict) else dict(existing.proof_gate if existing else {})
+    output_type = str(raw.get("output_type") or (existing.output_type if existing else "") or "").strip() or None
     recipe = str(raw.get("proof_recipe_id") or proof_gate.get("proof_recipe_id") or proof_gate.get("recipe_id") or (existing.proof_recipe_id if existing else "") or "").strip() or None
     if (
         recipe
@@ -590,6 +592,7 @@ def _stage_from_raw(task: Task, raw: dict[str, Any], *, intent: MissionIntent, e
         status=_stage_status(raw.get("status"), existing.status if existing else StageStatus.READY),
         proof_recipe_id=recipe,
         proof_gate=dict(proof_gate),
+        output_type=output_type,
         requires_product_edit=requires_product_edit,
         requires_visual_proof=requires_visual_proof,
         depends_on=_string_list(raw.get("depends_on")) or list(existing.depends_on if existing else []),
@@ -611,6 +614,7 @@ def _make_stage(
     repo: str,
     kind: str,
     proof_recipe_id: str | None = None,
+    output_type: str | None = None,
     requires_product_edit: bool = False,
     requires_visual_proof: bool = False,
     depends_on: list[str] | None = None,
@@ -625,6 +629,7 @@ def _make_stage(
         repo=repo,
         kind=kind,
         proof_recipe_id=proof_recipe_id,
+        output_type=output_type,
         requires_product_edit=requires_product_edit,
         requires_visual_proof=requires_visual_proof,
         depends_on=list(depends_on or []),
@@ -898,7 +903,7 @@ def _validate_raw_plan_keys(raw: dict[str, Any]) -> None:
             raise DecisionPayloadInvalid("mission_plan.stages must be a list")
         allowed_stage_keys = {
             "id", "title", "objective", "owner", "owner_slot", "repo", "kind", "status",
-            "proof_recipe_id", "proof_gate", "requires_product_edit", "requires_visual_proof",
+            "proof_recipe_id", "proof_gate", "output_type", "requires_product_edit", "requires_visual_proof",
             "depends_on", "blocks_qa_until", "proof_ids", "packet_ids", "blocker_ids", "_normalization",
         }
         for idx, stage in enumerate(stages):

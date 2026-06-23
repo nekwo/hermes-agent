@@ -12,6 +12,7 @@ Use this skill after `harness-dev-delivery` when the current Launcher stage need
 - Read `mission_hud.agent_hud.evidence_stack` before choosing a proof command. Missing proof, stale proof, or a blocked-stage entry is advisory evidence for Neko/the goal owner to adjudicate, not a terminal release gate in this skill.
 - If proof is missing, choose the narrowest command that can create the missing evidence, or return a bounded blocker through the visible HUD action. Do not claim completion from prose, and do not treat missing proof as a dead-end.
 - If the HUD already records a blocked escalation, answer with the smallest recovery proof/input step or exact environment blocker; the Harness keeps the task recoverable.
+- Treat `mission_hud.agent_hud.current_assignment` as stage-shaped. Prefer its `proof_gate.required_proof_types`, `proof_gate.commands`, and `output_type` over role defaults when choosing whether Launcher needs analyze, widget proof, visual proof, or a document/artifact proof.
 
 ## First Preflight For Launcher Windows / Stage C Proof
 

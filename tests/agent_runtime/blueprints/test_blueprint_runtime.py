@@ -89,6 +89,81 @@ def test_one_agent_blueprint_instantiates_to_mission_plan_and_run_slot():
     assert summary["stages"][0]["owner_slot"] == "builder"
 
 
+def test_blueprint_output_type_code_feature_materializes_test_run_gate():
+    bp = blueprint_from_dict(
+        {
+            "id": "code_output",
+            "version": 1,
+            "title": "Code Output",
+            "slots": [{"id": "builder", "role": "builder"}],
+            "stages": [
+                {
+                    "id": "build",
+                    "title": "Build",
+                    "objective": "Build the feature.",
+                    "owner_slot": "builder",
+                    "output_type": "code feature",
+                }
+            ],
+            "edges": [{"source": "build", "outcome": "passed", "target": "done"}],
+        }
+    )
+    plan = instantiate_blueprint(bp, goal="ship code", bindings={"builder": "persona:dev"})
+
+    assert plan.stages[0].output_type == "code feature"
+    assert plan.stages[0].proof_gate["required_proof_types"] == ["test_run"]
+    assert plan.stages[0].proof_gate["required"] is True
+
+
+def test_blueprint_output_type_design_document_materializes_artifact_gate():
+    bp = blueprint_from_dict(
+        {
+            "id": "design_output",
+            "version": 1,
+            "title": "Design Output",
+            "slots": [{"id": "builder", "role": "builder"}],
+            "stages": [
+                {
+                    "id": "design",
+                    "title": "Design",
+                    "objective": "Write the design.",
+                    "owner_slot": "builder",
+                    "output_type": "design document",
+                }
+            ],
+            "edges": [{"source": "design", "outcome": "passed", "target": "done"}],
+        }
+    )
+    plan = instantiate_blueprint(bp, goal="ship docs", bindings={"builder": "persona:dev"})
+
+    assert plan.stages[0].output_type == "design document"
+    assert plan.stages[0].proof_gate["required_proof_types"] == ["artifact"]
+    assert "test_run" not in plan.stages[0].proof_gate["required_proof_types"]
+
+
+def test_blueprint_output_type_infers_from_existing_proof_gate():
+    bp = blueprint_from_dict(
+        {
+            "id": "inferred_output",
+            "version": 1,
+            "title": "Inferred Output",
+            "slots": [{"id": "builder", "role": "builder"}],
+            "stages": [
+                {
+                    "id": "build",
+                    "title": "Build",
+                    "objective": "Build the feature.",
+                    "owner_slot": "builder",
+                    "proof_gate": {"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"]},
+                }
+            ],
+            "edges": [{"source": "build", "outcome": "passed", "target": "done"}],
+        }
+    )
+
+    assert bp.stages[0].output_type == "code feature"
+
+
 def test_legacy_plan_without_owner_slot_normalizes_to_owner():
     plan = MissionPlan(
         mission_intent=MissionIntent(title="Legacy", objective="Legacy"),

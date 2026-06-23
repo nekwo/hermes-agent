@@ -31,6 +31,7 @@ class MissionPlanStage:
     status: StageStatus = StageStatus.READY
     proof_recipe_id: str | None = None
     proof_gate: dict[str, Any] = field(default_factory=dict)
+    output_type: str | None = None
     requires_product_edit: bool = False
     requires_visual_proof: bool = False
     depends_on: list[str] = field(default_factory=list)

@@ -30,7 +30,7 @@ def test_config_merges_profile_skills_and_readiness_fields(tmp_path):
     assert qa.display_name == "Visual QA Agent"
     assert qa.autonomy == "autonomous"
     assert qa.hermes_profile == "launcher-qa"
-    assert qa.skills == ["agent-runtime-harness", "launcher-stagec-mcp-screenshot", "harness-qa-verdict"]
+    assert qa.skills == ["agent-runtime-harness", "launcher-stagec-mcp-screenshot"]
     assert qa.soul_overlay_path == "prompts/qa_harness.md"
     assert qa.required_mcp_servers == ["launcher_qa"]
 
@@ -191,7 +191,7 @@ def test_role_envelope_config_defaults_off_and_can_be_enabled(tmp_path):
     assert cfg.role_envelope.max_no_progress_repeats == 2
 
 
-def test_config_preserves_stage46_required_skills_when_overrides_replace_skills(tmp_path):
+def test_config_persona_skill_overrides_are_authoritative(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(
         "agent_runtime:\n"
@@ -210,12 +210,10 @@ def test_config_preserves_stage46_required_skills_when_overrides_replace_skills(
 
     personas = {persona.id: persona for persona in configured_personas(load_agent_runtime_config(p))}
 
-    assert "harness-mission-lead" in personas["neko_supervisor"].skills
-    assert "harness-dev-delivery" in personas["dev"].skills
-    assert "launcher-analyze-proof" in personas["dev"].skills
-    assert "harness-dev-delivery" in personas["backend_dev"].skills
-    assert "launcher-analyze-proof" not in personas["backend_dev"].skills
-    assert "harness-qa-verdict" in personas["qa"].skills
+    assert personas["neko_supervisor"].skills == ["agent-runtime-harness"]
+    assert personas["dev"].skills == ["launcher-stagec-mcp-screenshot"]
+    assert personas["backend_dev"].skills == ["backend-docker"]
+    assert personas["qa"].skills == ["visual-qa"]
 
 
 def test_neko_supervisor_uses_configured_head_agent_profile_when_not_explicit(tmp_path):
@@ -232,7 +230,7 @@ def test_neko_supervisor_uses_configured_head_agent_profile_when_not_explicit(tm
     personas = {persona.id: persona for persona in configured_personas(load_agent_runtime_config(p))}
 
     assert personas["neko_supervisor"].hermes_profile == "captain"
-    assert "harness-mission-lead" in personas["neko_supervisor"].skills
+    assert personas["neko_supervisor"].skills == ["agent-runtime-harness"]
 
 
 def test_neko_supervisor_legacy_alice_profile_falls_back_to_head_agent_when_missing(tmp_path, monkeypatch):

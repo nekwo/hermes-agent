@@ -634,7 +634,7 @@ def test_tick_uses_configured_persona_when_agent_store_empty():
     assert res.actions_taken[0].ok
     assert runtime.personas[0].id == "neko_supervisor"
     assert runtime.personas[0].hermes_profile == "alice"
-    assert runtime.personas[0].skills == ["agent-runtime-harness", "harness-mission-lead"]
+    assert runtime.personas[0].skills == ["agent-runtime-harness"]
 
 
 def test_tick_resolves_blueprint_run_slot_through_binding():

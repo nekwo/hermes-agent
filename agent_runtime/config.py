@@ -13,14 +13,6 @@ from .personas import default_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
 
-_STAGE46_REQUIRED_SKILLS = {
-    "neko_supervisor": ("harness-mission-lead",),
-    "dev": ("harness-dev-delivery", "launcher-analyze-proof"),
-    "backend_dev": ("harness-dev-delivery",),
-    "qa": ("harness-qa-verdict",),
-}
-
-
 @dataclass(slots=True)
 class AgentRuntimeConfig(RuntimeConfig):
     store_root: str | None = None
@@ -142,8 +134,6 @@ def configured_personas(cfg: AgentRuntimeConfig | None = None):
             head_profile,
             fallback_legacy_alice=not explicit_supervisor or bool(str(getattr(cfg, "head_agent_profile", "") or "").strip()),
         )
-    for persona in personas.values():
-        _ensure_stage46_required_skills(persona)
     return list(personas.values())
 
 
@@ -384,15 +374,6 @@ def _positive_int(value: Any, default: int) -> int:
     return number if number > 0 else default
 
 
-def _ensure_stage46_required_skills(persona) -> None:
-    required = _STAGE46_REQUIRED_SKILLS.get(str(persona.id))
-    if not required:
-        return
-    existing = set(persona.skills or [])
-    for skill in required:
-        if skill not in existing:
-            persona.skills.append(skill)
-            existing.add(skill)
 
 
 def _optional_int(value: Any) -> int | None:
