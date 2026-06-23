@@ -7,6 +7,7 @@ from agent_runtime.mission_plan import (
     attach_proofs_to_plan_stage,
     blocking_stages_ready_for_qa,
     ensure_mission_plan,
+    is_mission_lead_actor,
     mission_plan_summary,
     validate_mission_plan,
 )
@@ -29,6 +30,30 @@ def make_task(**overrides):
     }
     values.update(overrides)
     return Task(**values)
+
+
+def test_mission_lead_actor_resolves_blueprint_slot_binding():
+    task = make_task()
+    task.mission_plan = MissionPlan(
+        enabled=True,
+        current_stage_id="scope",
+        slots={"lead": {"role": "lead", "required": True}},
+        bindings={"lead": "persona:captain"},
+        stages=[
+            MissionPlanStage(
+                id="scope",
+                title="Scope",
+                objective="Scope the mission.",
+                owner="lead",
+                owner_slot="lead",
+                repo="hermes-agent",
+                kind="planning",
+            )
+        ],
+    )
+
+    assert is_mission_lead_actor(task, "captain")
+    assert not is_mission_lead_actor(task, "neko_supervisor")
 
 
 def test_neko_backend_only_handoff_preserves_launcher_stage_for_parent_goal():
