@@ -5,6 +5,7 @@ from typing import Any
 
 from hermes_time import now
 
+from .default_plan import ensure_default_mission_plan
 from .decision_schema import AgentDecision, DecisionPayloadInvalid
 from .models import Incident, Task
 from .states import TaskState
@@ -236,7 +237,7 @@ def apply_issue_triage(task: Task, decision: AgentDecision, *, actor: str, task_
             id=f"task_{uuid.uuid4().hex[:8]}",
             title=str(payload["child_title"]).strip(),
             description=str(payload["child_description"]).strip(),
-            state=TaskState.READY_FOR_WORK,
+            state=TaskState.CREATED,
             created_at=ts,
             updated_at=ts,
             requested_by=f"harness:issue_discovery:{discovery['id']}",
@@ -249,6 +250,7 @@ def apply_issue_triage(task: Task, decision: AgentDecision, *, actor: str, task_
             parent_task_id=task.id,
             risk_flags=["forked_from_issue_discovery", "max_child_depth:1", f"priority:{priority}", f"severity:{discovery.get('severity', priority)}"],
         )
+        ensure_default_mission_plan(child)
         task_store.create(child)
         discovery["child_task_id"] = child.id
         discovery["triage_status"] = "forked"

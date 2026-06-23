@@ -9,8 +9,9 @@ from typing import Iterator
 from hermes_time import now
 
 from .actions import HarnessActionType
+from .default_plan import ensure_default_mission_plan
 from .decision_schema import AgentDecision, DecisionType, validate_decision_for_role
-from .models import Proof, Task, TaskStage
+from .models import Proof, Task
 from .personas import AgentRole
 from .proof_rules import ProofType
 from .state_machine import MissionStateMachine
@@ -65,6 +66,7 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
             requested_by="smoke",
             acceptance_criteria=["Smoke proof attached", "QA verdict approved"],
         )
+        ensure_default_mission_plan(task)
         task_store.create(task)
         machine = MissionStateMachine(proof_store=proof_store)
         transitions: list[str] = []
@@ -84,20 +86,8 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
         run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": neko_decision.type.value, "summary": neko_decision.summary})
         transitions.append("neko_supervisor:propose_acceptance")
 
-        task.stages.append(
-            TaskStage(
-                id="stage_smoke",
-                title="No-model smoke stage",
-                objective="Attach deterministic proof and pass QA.",
-                status=StageStatus.READY,
-                acceptance_criteria=["Smoke proof attached", "QA verdict approved"],
-                test_plan=["no-model proof"],
-                created_at=now(),
-                updated_at=now(),
-            )
-        )
-        task.current_stage_id = "stage_smoke"
-        proof_store.attach(Proof(id="proof_smoke_test", task_id=task.id, stage_id="stage_smoke", type=ProofType.TEST_RUN, title="Smoke no-model test", path_or_value="no-model smoke", created_by="smoke", created_at=now(), metadata={"status": "passed", "exit_code": 0}, redaction_status="safe"))
+        task.current_stage_id = task.mission_plan.current_stage_id if task.mission_plan else "implement"
+        proof_store.attach(Proof(id="proof_smoke_test", task_id=task.id, stage_id=task.current_stage_id, type=ProofType.TEST_RUN, title="Smoke no-model test", path_or_value="no-model smoke", created_by="smoke", created_at=now(), metadata={"status": "passed", "exit_code": 0}, redaction_status="safe"))
         dev_decision = AgentDecision(
             type=DecisionType.PROPOSE_PATCH,
             summary="smoke Dev attached proof",
@@ -117,12 +107,12 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
             payload={"review_scope": "implementation", "verdict": "approved", "proof_ids": ["proof_smoke_test"], "findings": []},
         )
         validate_decision_for_role(qa_decision, AgentRole.QA)
+        proof_store.attach(Proof(id="proof_smoke_qa", task_id=task.id, stage_id=task.current_stage_id, type=ProofType.QA_VERDICT, title="Smoke QA verdict", path_or_value="approved", created_by="qa", created_at=now(), metadata={"verdict": "approved"}, redaction_status="safe"))
         run = run_store.open_run("qa", task.id, task.current_stage_id, tick_id="tick_smoke")
         machine.apply_decision(task, qa_decision, actor="qa", proof_store=proof_store, run_id=run.id)
         run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": qa_decision.type.value, "summary": qa_decision.summary})
         transitions.append("qa:report_qa_verdict")
 
-        proof_store.attach(Proof(id="proof_smoke_qa", task_id=task.id, stage_id="stage_smoke", type=ProofType.QA_VERDICT, title="Smoke QA verdict", path_or_value="approved", created_by="qa", created_at=now(), metadata={"verdict": "approved"}, redaction_status="safe"))
         task.proof_ids = ["proof_smoke_test", "proof_smoke_qa"]
         close_action = machine.next_action(task)
         if close_action.type != HarnessActionType.COMPLETE_TASK:

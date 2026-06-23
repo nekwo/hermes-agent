@@ -60,7 +60,7 @@ def derive_stage_outcome(
         return StageOutcome.FAILED
     if decision.type == DecisionType.REQUEST_TEST_RUN:
         return _outcome_from_proofs(proofs or [])
-    if decision.type in {DecisionType.REQUEST_QA_REVIEW, DecisionType.COMPLETE, DecisionType.APPROVE}:
+    if decision.type in {DecisionType.PROPOSE_ACCEPTANCE, DecisionType.REQUEST_QA_REVIEW, DecisionType.COMPLETE, DecisionType.APPROVE}:
         if _scope_stage_ready_without_proof(stage):
             return StageOutcome.READY
         return StageOutcome.PASSED

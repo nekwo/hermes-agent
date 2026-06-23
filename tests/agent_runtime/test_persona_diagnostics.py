@@ -106,7 +106,7 @@ def test_persona_diagnostic_routes_neko_first(tmp_path, monkeypatch):
     assert result.latest_decision_type == "diagnostic_ack"
     assert result.latest_validation_status == "valid"
     assert result.latest_total_tokens == 123
-    assert result.stage_id is None
+    assert result.stage_id == "scope"
     assert result.final_task_state == "done"
 
 

@@ -478,6 +478,7 @@ def _certification_public_summary(ledger: dict[str, Any]) -> dict[str, Any]:
 
 
 def _create_case_task(case_id: str, case: dict[str, Any], *, hygiene: dict[str, Any] | None = None) -> Task:
+    from .default_plan import ensure_default_mission_plan
     from .goal_hygiene import repo_clean_baseline_from_hygiene
 
     ts = now()
@@ -496,6 +497,7 @@ def _create_case_task(case_id: str, case: dict[str, Any], *, hygiene: dict[str, 
         non_goals=list(case.get("non_goals") or []),
         requires_visual_proof=bool(case.get("requires_visual_proof", False)),
     )
+    ensure_default_mission_plan(task)
     # Same baseline capture as `harness task create`: pre-existing operator dirt
     # must not preflight-block a burn-in case (observed live: case 1 blocked on
     # repo_clean for unrelated EterniaBackend edits).

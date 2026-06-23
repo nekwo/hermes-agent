@@ -1898,6 +1898,8 @@ def _normalize_cli_persona_or_template_id(persona_id: str) -> str:
 
 
 def _cmd_task_create(args) -> int:
+    from agent_runtime.default_plan import ensure_default_mission_plan
+
     config = load_agent_runtime_config()
     cleanup_launcher_visual = launcher_visual_cleanup_needed(args.title, args.description)
     hygiene = prepare_new_goal_runtime(
@@ -1910,6 +1912,7 @@ def _cmd_task_create(args) -> int:
     )
     ts = now()
     task = Task(id=f"task_{uuid.uuid4().hex[:8]}", title=args.title, description=args.description, state=TaskState.CREATED, created_at=ts, updated_at=ts, requested_by=args.requested_by)
+    ensure_default_mission_plan(task)
     task.harness_self_heal["repo_clean_baseline"] = _repo_clean_baseline_from_hygiene(hygiene)
     TaskStore().create(task)
     foreground_runtime = activate_foreground_runtime(task.id, started_by=args.requested_by or "cli")

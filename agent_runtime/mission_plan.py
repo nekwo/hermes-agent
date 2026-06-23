@@ -52,6 +52,8 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
         plan = _plan_from_payload(task, payload["mission_plan"], existing=plan)
     elif isinstance(payload.get("mission_plan_patch"), dict):
         plan = _apply_plan_patch(task, plan, payload["mission_plan_patch"])
+    elif _default_plan_should_yield_to_handoff(plan, payload):
+        plan = _synthesize_plan_from_handoff(task, payload, existing=plan)
     elif not plan.stages:
         plan = _synthesize_plan_from_handoff(task, payload, existing=plan)
     release_stage_id = str(payload.get("release_stage_id") or "").strip()
@@ -61,6 +63,14 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
     task.mission_plan = plan
     mirror_legacy_stages_from_plan(task)
     return plan
+
+
+def _default_plan_should_yield_to_handoff(plan: MissionPlan, payload: dict[str, Any]) -> bool:
+    return (
+        plan.blueprint_id == "neko_dev_qa_basic"
+        and isinstance(payload.get("handoff_packet"), dict)
+        and bool(payload["handoff_packet"])
+    )
 
 
 def validate_mission_plan(plan: MissionPlan) -> list[str]:
