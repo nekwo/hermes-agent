@@ -11,7 +11,7 @@ def _task() -> Task:
         id="task_stage_intent",
         title="Stage 50 live cross-stack no-edit routing certification",
         description="No product edits. Certify backend-first then Launcher no-edit proof routing.",
-        state=TaskState.READY_FOR_IMPLEMENTATION,
+        state=TaskState.READY_FOR_WORK,
         created_at=ts,
         updated_at=ts,
         requested_by="test",

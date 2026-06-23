@@ -408,7 +408,7 @@ def test_archive_refuses_active_worker_then_preserves_closed_worker_context_and_
 def test_complete_task_action_closes_active_workers():
     tasks = TaskStore()
     workers = WorkerSessionStore()
-    task = _task("task_complete_worker", state=TaskState.VERIFIED)
+    task = _task("task_complete_worker", state=TaskState.APPROVED)
     task.proof_ids = ["proof_ok"]
     tasks.create(task)
     worker = workers.open(task_id=task.id, persona=_persona(), stage_id="stage_1", session_id="session_safe")

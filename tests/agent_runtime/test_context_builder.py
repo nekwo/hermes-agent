@@ -467,7 +467,7 @@ def test_launcher_contract_join_context_carries_backend_delivery_and_events():
 def test_qa_release_context_carries_latest_upstream_delivery_packet():
     log = EventLog()
     task = make_task()
-    task.state = TaskState.READY_FOR_VERIFICATION
+    task.state = TaskState.READY_FOR_REVIEW
     task.current_stage_id = "backend_investigation"
     task.stages = [
         TaskStage(id="backend_investigation", title="Backend Investigation", objective="Investigate", status=StageStatus.READY_FOR_QA),
@@ -515,7 +515,7 @@ def test_qa_release_context_carries_latest_upstream_delivery_packet():
 def test_qa_release_context_prefers_newest_delivery_over_stale_stage_local_packet():
     log = EventLog()
     task = make_task()
-    task.state = TaskState.READY_FOR_VERIFICATION
+    task.state = TaskState.READY_FOR_REVIEW
     task.current_stage_id = "qa_release"
     task.stages = [
         TaskStage(id="backend_investigation", title="Backend Investigation", objective="Investigate", status=StageStatus.READY_FOR_QA),
@@ -578,10 +578,10 @@ def test_qa_release_context_prefers_newest_delivery_over_stale_stage_local_packe
 def test_dev_recovery_context_carries_latest_cross_stage_qa_review():
     log = EventLog()
     task = make_task()
-    task.state = TaskState.NEEDS_FIXES
+    task.state = TaskState.REWORK_REQUESTED
     task.current_stage_id = "backend_investigation"
     task.stages = [
-        TaskStage(id="backend_investigation", title="Backend Investigation", objective="Investigate", status=StageStatus.NEEDS_FIXES),
+        TaskStage(id="backend_investigation", title="Backend Investigation", objective="Investigate", status=StageStatus.REWORK),
         TaskStage(id="qa_release", title="QA Release", objective="Review", status=StageStatus.READY),
     ]
     run = make_run()
@@ -1331,7 +1331,7 @@ def test_typed_plan_stale_harness_log_implementation_stage_self_heals_to_request
 
 def test_dev_mission_hud_requires_stage_plan_when_no_executable_stage_exists():
     task = make_task()
-    task.state = TaskState.READY_FOR_IMPLEMENTATION
+    task.state = TaskState.READY_FOR_WORK
     task.stages = []
     task.current_stage_id = None
     run = make_run()
@@ -1348,7 +1348,7 @@ def test_dev_mission_hud_requires_stage_plan_when_no_executable_stage_exists():
 
 def test_neko_mission_hud_exposes_visual_recovery_choice_without_patch_options():
     task = make_task()
-    task.state = TaskState.READY_FOR_IMPLEMENTATION
+    task.state = TaskState.READY_FOR_WORK
     task.title = "Mission Control fullscreen visual proof"
     task.harness_self_heal = {"stages": {"stage_1": {"last_failed_proof_ids": ["proof_failed_visual"]}}}
     task.stages[0].requires_visual_proof = True
@@ -1367,7 +1367,7 @@ def test_neko_mission_hud_exposes_visual_recovery_choice_without_patch_options()
 
 def test_qa_mission_hud_exposes_screenshot_and_verdict_choices():
     task = make_task()
-    task.state = TaskState.READY_FOR_VERIFICATION
+    task.state = TaskState.READY_FOR_REVIEW
     task.requires_visual_proof = True
     task.stages[0].requires_visual_proof = True
     run = make_run()

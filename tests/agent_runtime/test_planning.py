@@ -24,7 +24,7 @@ def test_pm_fleshing_updates_task_and_moves_ready_for_dev():
     assert t.description == "obj"
     assert t.acceptance_criteria == ["done"]
     assert t.requires_visual_proof is True
-    assert t.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert t.state == TaskState.READY_FOR_WORK
 
 
 def test_neko_acceptance_derives_repo_scope_from_handoff_when_affected_repos_empty():
@@ -56,7 +56,7 @@ def test_neko_acceptance_derives_repo_scope_from_handoff_when_affected_repos_emp
     )
 
     assert t.affected_repos == ["EterniaLauncher"]
-    assert t.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert t.state == TaskState.READY_FOR_WORK
 
 
 def test_neko_scope_recovery_cancels_read_search_budget_run_and_routes_fresh_dev(isolate_agent_runtime_root):
@@ -169,7 +169,7 @@ def test_typed_neko_acceptance_creates_plan_without_shrinking_parent_goal():
 
 
 def test_typed_qa_approval_rejects_missing_launcher_stage():
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.mission_plan = MissionPlan(
         mission_intent=MissionIntent(title="Fix", objective="Fix"),
         current_stage_id="qa_release",
@@ -253,7 +253,7 @@ def test_neko_no_edit_recipe_handoff_materializes_executable_stage():
         actor="neko_supervisor",
     )
 
-    assert t.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert t.state == TaskState.READY_FOR_WORK
     assert t.current_stage_id == "harness_runtime_status_snapshot"
     assert [stage.id for stage in t.stages] == ["harness_runtime_status_snapshot"]
     assert t.stages[0].status == StageStatus.IMPLEMENTING
@@ -800,7 +800,7 @@ def test_neko_generic_backend_handoff_materializes_executable_stage():
         event_log=log,
     )
 
-    assert t.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert t.state == TaskState.READY_FOR_WORK
     assert t.current_stage_id == "eterniabackend_fresh_scope"
     assert len(t.stages) == 1
     assert t.stages[0].status == StageStatus.IMPLEMENTING
@@ -897,7 +897,7 @@ def test_correct_stage_can_reroute_current_stage_to_known_target_stage():
 
 
 def test_dev_stage_plan_accepts_executable_proof_stage_with_qa_handoff_acceptance():
-    t = task(TaskState.READY_FOR_IMPLEMENTATION)
+    t = task(TaskState.READY_FOR_WORK)
     t.title = "Stage 49 live contract registry certification retry"
     t.description = "No product edits. Verify canonical contract examples."
     t.acceptance_criteria = ["QA reviews the passed proof before completion."]
@@ -944,7 +944,7 @@ def test_correction_updates_existing_stage_only():
 
 
 
-def test_propose_patch_advances_task_to_READY_FOR_VERIFICATION():
+def test_propose_patch_advances_task_to_READY_FOR_REVIEW():
     t = task(TaskState.DEV_IMPLEMENTING)
     decision = AgentDecision(
         type=DecisionType.PROPOSE_PATCH,
@@ -955,7 +955,7 @@ def test_propose_patch_advances_task_to_READY_FOR_VERIFICATION():
 
     apply_planning_decision(t, decision, actor="dev")
 
-    assert t.state == TaskState.READY_FOR_VERIFICATION
+    assert t.state == TaskState.READY_FOR_REVIEW
 
 
 def test_propose_patch_requires_existing_proof_when_store_available():
@@ -1046,7 +1046,7 @@ def test_dev_request_qa_review_advances_implementation_to_qa_verification():
 
     apply_planning_decision(t, decision, actor="dev")
 
-    assert t.state == TaskState.READY_FOR_VERIFICATION
+    assert t.state == TaskState.READY_FOR_REVIEW
 
 
 def test_dev_request_qa_review_merges_existing_proof_ids_when_store_available():
@@ -1062,7 +1062,7 @@ def test_dev_request_qa_review_merges_existing_proof_ids_when_store_available():
 
     apply_planning_decision(t, decision, actor="dev", proof_store=store)
 
-    assert t.state == TaskState.READY_FOR_VERIFICATION
+    assert t.state == TaskState.READY_FOR_REVIEW
     assert t.proof_ids == ["dev_diff"]
 
 
@@ -1184,12 +1184,12 @@ def test_dev_request_qa_review_accepts_complete_recipe_batch_when_store_availabl
 
     apply_planning_decision(t, decision, actor="dev", proof_store=store)
 
-    assert t.state == TaskState.READY_FOR_VERIFICATION
+    assert t.state == TaskState.READY_FOR_REVIEW
     assert t.proof_ids == ["recipe_command_0", "recipe_command_1"]
 
 
 def test_qa_implementation_approval_rejects_failed_command_proof_when_store_available():
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     store = ProofStore()
     store.attach(
         Proof(
@@ -1215,12 +1215,12 @@ def test_qa_implementation_approval_rejects_failed_command_proof_when_store_avai
     with pytest.raises(DecisionPayloadInvalid, match="implementation approval requires passing command proof_ids"):
         apply_planning_decision(t, decision, actor="qa", proof_store=store)
 
-    assert t.state == TaskState.READY_FOR_VERIFICATION
+    assert t.state == TaskState.READY_FOR_REVIEW
     assert t.proof_ids == []
 
 
 def test_qa_implementation_verdict_attaches_verdict_proof_and_advances():
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.proof_ids = ["dev_diff"]
     store = ProofStore()
     store.attach(Proof(id="dev_diff", task_id=t.id, stage_id="stage_1", type=ProofType.DIFF, title="Diff", path_or_value="diff", created_by="dev", created_at=now(), redaction_status="safe"))
@@ -1233,7 +1233,7 @@ def test_qa_implementation_verdict_attaches_verdict_proof_and_advances():
 
     apply_planning_decision(t, decision, actor="qa", proof_store=store)
 
-    assert t.state == TaskState.VERIFIED
+    assert t.state == TaskState.APPROVED
     assert len(t.proof_ids) == 2
     qa_proof = store.get(t.proof_ids[-1])
     assert qa_proof.type == ProofType.QA_VERDICT
@@ -1264,7 +1264,7 @@ def test_approved_qa_review_synthesizes_missing_reviewed_stages_and_enters_dev_i
 
 
 def test_neko_cross_stack_backend_join_releases_launcher_stage_before_qa():
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.risk_flags = ["cross_stack_contract_handoff", "neko_qa_coordination_released"]
     t.affected_repos = ["EterniaBackend"]
     t.proof_ids = ["proof_backend"]
@@ -1291,7 +1291,7 @@ def test_neko_cross_stack_backend_join_releases_launcher_stage_before_qa():
 
 
 def test_neko_launcher_release_narrows_broad_cross_stack_repos_to_launcher():
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.risk_flags = ["cross_stack_contract_handoff", "neko_qa_coordination_released"]
     t.affected_repos = ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
     t.proof_ids = ["proof_backend"]
@@ -1334,7 +1334,7 @@ def test_neko_launcher_release_narrows_broad_cross_stack_repos_to_launcher():
 
 def test_neko_contract_join_packet_only_releases_launcher_before_qa():
     log = EventLog()
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.risk_flags = ["cross_stack_contract_join", "neko_qa_coordination_released"]
     t.affected_repos = ["EterniaBackend"]
     t.proof_ids = ["proof_backend"]
@@ -1379,7 +1379,7 @@ def test_neko_contract_join_packet_only_releases_launcher_before_qa():
 
 def test_neko_launcher_contract_join_cannot_release_qa_after_launcher_stage_complete():
     log = EventLog()
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first"]
     t.affected_repos = ["EterniaLauncher"]
     t.proof_ids = ["proof_backend", "proof_launcher"]
@@ -1440,7 +1440,7 @@ def test_neko_post_scope_needs_context_for_missing_launcher_proof_continues_to_l
 
     apply_planning_decision(t, decision, actor="neko_supervisor")
 
-    assert t.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert t.state == TaskState.READY_FOR_WORK
     assert t.affected_repos == ["EterniaLauncher"]
     assert t.current_stage_id == "launcher_contract_smoke"
     assert "post_scope_wait_coerced_to_handoff" in t.risk_flags
@@ -1465,7 +1465,7 @@ def test_neko_needs_context_handoff_request_continues_to_launcher_dev_without_pr
 
     apply_planning_decision(t, decision, actor="neko_supervisor", event_log=log)
 
-    assert t.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert t.state == TaskState.READY_FOR_WORK
     assert t.affected_repos == ["EterniaLauncher"]
     assert t.current_stage_id == "launcher_contract_smoke"
     assert "post_scope_wait_coerced_to_handoff" in t.risk_flags
@@ -1474,7 +1474,7 @@ def test_neko_needs_context_handoff_request_continues_to_launcher_dev_without_pr
 
 def test_neko_proof_backed_join_needs_context_releases_launcher_without_blocking():
     log = EventLog()
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.description = "Backend proof is complete; Launcher proof is still required."
     t.acceptance_criteria = ["Launcher proof is attached before QA."]
     t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "neko_qa_coordination_released"]
@@ -1524,7 +1524,7 @@ def test_neko_proof_backed_join_needs_context_releases_launcher_without_blocking
 
     apply_planning_decision(t, decision, actor="neko_supervisor", event_log=log)
 
-    assert t.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert t.state == TaskState.READY_FOR_WORK
     assert t.affected_repos == ["EterniaLauncher"]
     assert t.current_stage_id == "launcher_contract_smoke"
     assert any(stage.id == "launcher_contract_smoke" and stage.status == StageStatus.IMPLEMENTING for stage in t.stages)
@@ -1534,7 +1534,7 @@ def test_neko_proof_backed_join_needs_context_releases_launcher_without_blocking
 
 def test_neko_proof_backed_join_missing_contract_packet_routes_backend_repair():
     log = EventLog()
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.description = "Backend proof is complete; Launcher proof is still required."
     t.acceptance_criteria = ["Backend contract packet and Launcher proof are required before QA."]
     t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "neko_qa_coordination_released"]
@@ -1553,7 +1553,7 @@ def test_neko_proof_backed_join_missing_contract_packet_routes_backend_repair():
 
     apply_planning_decision(t, decision, actor="neko_supervisor", event_log=log)
 
-    assert t.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert t.state == TaskState.READY_FOR_WORK
     assert t.affected_repos == ["EterniaBackend"]
     assert t.current_stage_id == "stage_47_backend_contract_packet"
     assert any(stage.id == "stage_47_backend_contract_packet" and stage.status == StageStatus.IMPLEMENTING for stage in t.stages)
@@ -1588,7 +1588,7 @@ def test_neko_initial_cross_stack_scope_normalizes_to_executable_backend_first_s
 
     apply_planning_decision(t, decision, actor="neko_supervisor")
 
-    assert t.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert t.state == TaskState.READY_FOR_WORK
     assert t.affected_repos == ["EterniaBackend"]
     assert "cross_stack_contract_handoff" in t.risk_flags
     assert "backend_contract_first" in t.risk_flags
@@ -1645,7 +1645,7 @@ def test_neko_live_terminal_scope_preserves_launcher_followup_from_text_flags():
 
 
 def test_dev_stage_plan_skips_orchestration_only_neko_and_qa_stages():
-    t = task(TaskState.READY_FOR_IMPLEMENTATION)
+    t = task(TaskState.READY_FOR_WORK)
     t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "sequential_specialist_handoff"]
     decision = dec(
         DecisionType.PROPOSE_STAGE_PLAN,
@@ -1704,7 +1704,7 @@ def test_dev_stage_plan_skips_orchestration_only_neko_and_qa_stages():
 
 
 def test_neko_cannot_release_launcher_before_backend_proof():
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first"]
     t.affected_repos = ["EterniaBackend"]
     t.stages = [
@@ -1728,7 +1728,7 @@ def test_neko_cannot_release_launcher_before_backend_proof():
 
 
 def test_neko_launcher_release_with_cross_stack_join_synonym_creates_launcher_stage():
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.risk_flags = ["cross_stack_sequential_join_required", "worker_session_receipts_required"]
     t.affected_repos = ["EterniaBackend"]
     t.proof_ids = ["proof_backend"]
@@ -1755,7 +1755,7 @@ def test_neko_launcher_release_with_cross_stack_join_synonym_creates_launcher_st
 
 
 def test_backend_dev_launcher_stage_plan_is_not_materialized_in_backend_first_handoff():
-    t = task(TaskState.READY_FOR_VERIFICATION)
+    t = task(TaskState.READY_FOR_REVIEW)
     t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first"]
     t.proof_ids = ["proof_backend"]
     decision = dec(
@@ -1786,7 +1786,7 @@ def test_backend_dev_launcher_stage_plan_is_not_materialized_in_backend_first_ha
 
 
 def test_backend_dev_keeps_backend_stage_when_acceptance_mentions_later_launcher_gate():
-    t = task(TaskState.READY_FOR_IMPLEMENTATION)
+    t = task(TaskState.READY_FOR_WORK)
     t.requested_by = "stage47_burn_in"
     t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "bounded_complex_burn_in"]
     decision = dec(
@@ -1824,7 +1824,7 @@ def test_backend_dev_keeps_backend_stage_when_acceptance_mentions_later_launcher
 
 
 def test_backend_dev_orchestration_only_plan_fails_closed_for_bounded_cross_stack_burn_in():
-    t = task(TaskState.READY_FOR_IMPLEMENTATION)
+    t = task(TaskState.READY_FOR_WORK)
     t.requested_by = "stage47_burn_in"
     t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "bounded_complex_burn_in"]
     decision = dec(

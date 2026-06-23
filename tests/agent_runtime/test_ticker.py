@@ -541,7 +541,7 @@ def test_tick_persists_active_run_provider_model_metadata_before_runtime_call():
 
 def test_tick_uses_persona_specific_live_budget_for_dev_runs():
     task = make_task()
-    task.state = TaskState.READY_FOR_IMPLEMENTATION
+    task.state = TaskState.READY_FOR_WORK
     ts = TaskStore(); ts.create(task)
     runs = RunStore()
     runtime = FakeRuntime()
@@ -798,7 +798,7 @@ def test_invalid_packet_contract_returns_repair_hud_inside_same_run():
     assert run.state == RunState.COMPLETED
     assert run.llm["validation_status"] == "valid"
     assert run.llm["schema_repair_attempts"] == 1
-    assert ts.get("task_1").state == TaskState.READY_FOR_VERIFICATION
+    assert ts.get("task_1").state == TaskState.READY_FOR_REVIEW
     assert proof_store.get("proof_task_1_stage_1").metadata["status"] == "passed"
     assert not engine.incident_store.list_open()
     progress_events = [
@@ -990,7 +990,7 @@ def test_duplicate_visual_request_repairs_to_verdict_instead_of_recapturing():
     assert run.llm["schema_repair_attempts"] == 1
     assert run.final_decision["type"] == "report_qa_verdict"
     saved = ts.get(task.id)
-    assert saved.state == TaskState.VERIFIED
+    assert saved.state == TaskState.APPROVED
     assert saved.stages[0].status == StageStatus.PASSED
     assert [proof.id for proof in proof_store.list_for_task(task.id) if proof.type == ProofType.SCREENSHOT] == ["proof_screenshot"]
 
@@ -1352,10 +1352,10 @@ def test_tick_allows_new_run_after_existing_run_is_terminal():
     assert len(runs.list_for_task("task_1")) == 2
 
 
-def test_tick_deterministically_closes_VERIFIED_mission_with_proof_without_persona_runtime():
+def test_tick_deterministically_closes_APPROVED_mission_with_proof_without_persona_runtime():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.VERIFIED
+    task.state = TaskState.APPROVED
     task.proof_ids = ["proof_test", "proof_qa"]
     ts.create(task)
 
@@ -1476,7 +1476,7 @@ class NekoNeedsContextRuntime:
 
 
 def test_neko_needs_context_blocks_instead_of_daemon_looping():
-    ts=TaskStore(); task=make_task(); task.state=TaskState.READY_FOR_IMPLEMENTATION
+    ts=TaskStore(); task=make_task(); task.state=TaskState.READY_FOR_WORK
     task.context_requests = [
         {"id": "ctx_1", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
         {"id": "ctx_2", "actor": "qa", "status": "unsupported", "failure_reason": "path_not_found"},
@@ -1550,7 +1550,7 @@ class NoEditFindingsRuntime:
                 "tests": ["no product edits; synthesized from fulfilled Harness context bundles"],
                 "delivery": {
                     "work_status": "patch_proposed",
-                    "known_gaps": ["external model pricing must be verified separately"],
+                    "known_gaps": ["external model pricing must be APPROVED separately"],
                 },
             },
         )
@@ -1896,7 +1896,7 @@ def test_normal_worker_flow_auto_runs_final_gate_after_patch_delivery():
     assert runner.calls[0]["commands"] == ["flutter test test/features/mission_control/mission_control_page_test.dart"]
     assert runner.calls[0]["proof_intent"] == "auto_final_gate_after_delivery"
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_VERIFICATION
+    assert stored.state == TaskState.READY_FOR_REVIEW
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.proof_ids == ["proof_auto_task_1_mc_terminal_dm_bubble_rows"]
     proof = proofs.get(stored.proof_ids[0])
@@ -1958,7 +1958,7 @@ def test_normal_worker_flow_auto_runs_repo_default_final_gate_when_stage_test_pl
     assert runner.calls[0]["commands"] == [".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"]
     assert runner.calls[0]["proof_intent"] == "auto_final_gate_after_delivery"
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_VERIFICATION
+    assert stored.state == TaskState.READY_FOR_REVIEW
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.proof_ids == ["proof_auto_task_1_backend_implementation"]
 
@@ -2023,7 +2023,7 @@ def test_normal_worker_flow_reuses_existing_passed_final_gate_after_handoff_repa
     assert res.actions_taken[0].ok
     assert runner.calls == []
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_VERIFICATION
+    assert stored.state == TaskState.READY_FOR_REVIEW
     assert stored.proof_ids == ["proof_existing_passed"]
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     events = EventLog().for_task("task_1", limit=0)
@@ -2113,7 +2113,7 @@ def test_handoff_repair_with_existing_passed_proof_routes_to_qa_without_dev_run(
     assert res.actions_taken[0].ok
     assert res.actions_taken[0].summary == "handoff repair reused existing passed proof; routed to QA"
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_VERIFICATION
+    assert stored.state == TaskState.READY_FOR_REVIEW
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.mission_plan.stages[0].status == StageStatus.READY_FOR_QA
     events = EventLog().for_task("task_1", limit=0)
@@ -2159,7 +2159,7 @@ def test_normal_worker_flow_no_edit_investigation_delivery_advances_to_qa_withou
 
     assert res.actions_taken[0].ok
     stored = ts.get("task_1")
-    assert stored.state == TaskState.READY_FOR_VERIFICATION
+    assert stored.state == TaskState.READY_FOR_REVIEW
     assert stored.mission_plan.stages[0].status == StageStatus.PASSED
     assert engine.state_machine.next_action(stored).type == HarnessActionType.RUN_SLOT
     assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "deliver_findings"
@@ -2233,7 +2233,7 @@ def test_backend_stage_that_mentions_launcher_release_still_routes_to_backend_de
 def test_run_until_settled_blocks_orchestration_only_backend_plan_without_repeating():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.READY_FOR_IMPLEMENTATION
+    task.state = TaskState.READY_FOR_WORK
     task.requested_by = "stage47_burn_in"
     task.affected_repos = ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
     task.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "bounded_complex_burn_in"]
@@ -2258,7 +2258,7 @@ def test_run_until_settled_blocks_orchestration_only_backend_plan_without_repeat
 def test_latest_launcher_handoff_overrides_mixed_backend_affected_repos():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.READY_FOR_IMPLEMENTATION
+    task.state = TaskState.READY_FOR_WORK
     task.current_stage_id = "stage_1"
     task.affected_repos = ["EterniaLauncher", "EterniaBackend", "hermes-agent"]
     ts.create(task)
@@ -2295,7 +2295,7 @@ def test_latest_launcher_handoff_overrides_mixed_backend_affected_repos():
 def test_launcher_stage_identity_overrides_stale_unscoped_backend_handoff():
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.READY_FOR_IMPLEMENTATION
+    task.state = TaskState.READY_FOR_WORK
     task.current_stage_id = "launcher_contract_smoke"
     task.affected_repos = ["EterniaLauncher"]
     task.stages = [
@@ -2581,7 +2581,7 @@ def test_tick_collects_command_proof_for_request_test_run(tmp_path):
 
     assert res.actions_taken[0].ok
     saved = ts.get("task_1")
-    assert saved.state == TaskState.READY_FOR_VERIFICATION
+    assert saved.state == TaskState.READY_FOR_REVIEW
     assert len(saved.proof_ids) == 1
     assert saved.stages[0].status == StageStatus.PASSED
     assert saved.current_stage_id == "verify"
@@ -2951,7 +2951,7 @@ def test_bridge_archive_stage_request_qa_review_rejects_wrong_existing_page_proo
     assert res.actions_taken[0].payload["decision"] == "request_test_run"
     assert runtime.calls == 2
     saved = ts.get("task_bridge_wrong_qa_handoff")
-    assert saved.state == TaskState.READY_FOR_VERIFICATION
+    assert saved.state == TaskState.READY_FOR_REVIEW
     assert saved.current_stage_id == "verify"
     assert saved.stages[0].status == StageStatus.READY_FOR_QA
     assert saved.proof_ids == ["proof_page_bridge", "proof_wrong_stage_command"]
@@ -3259,7 +3259,7 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_path_like_alias
 def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_implementation_qa(tmp_path):
     ts = TaskStore()
     task = make_task()
-    task.state = TaskState.READY_FOR_IMPLEMENTATION
+    task.state = TaskState.READY_FOR_WORK
     task.acceptance_criteria = ["smoke-ok proof exists"]
     ts.create(task)
     runtime = RequestTestThenHandoffRuntime()
@@ -3270,7 +3270,7 @@ def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_impleme
     after_proof = ts.get("task_1")
 
     assert first.actions_taken[0].ok
-    assert after_proof.state == TaskState.READY_FOR_VERIFICATION
+    assert after_proof.state == TaskState.READY_FOR_REVIEW
     assert after_proof.current_stage_id == "verify"
     assert [stage.id for stage in after_proof.stages] == ["scope", "implement", "verify"]
     assert after_proof.stages[1].status == StageStatus.IMPLEMENTING
@@ -3647,7 +3647,7 @@ def test_followup_neko_mission_lead_steering_reuses_previous_neko_session():
 def test_followup_qa_and_neko_steering_reuse_prior_persona_sessions():
     ts = TaskStore()
     qa_task = make_task_with_id("task_qa")
-    qa_task.state = TaskState.READY_FOR_VERIFICATION
+    qa_task.state = TaskState.READY_FOR_REVIEW
     qa_task.current_stage_id = "stage_1"
     qa_task.risk_flags = ["neko_qa_coordination_released"]
     ts.create(qa_task)
@@ -4121,7 +4121,7 @@ def test_blocked_qa_verdict_without_incident_routes_dev_recovery_instead_of_skip
     assert res.actions_taken[0].action.slot_id == "dev"
     assert runtime.personas[0].id == "dev"
     saved = ts.get("task_1")
-    assert saved.state == TaskState.READY_FOR_VERIFICATION
+    assert saved.state == TaskState.READY_FOR_REVIEW
     assert len(saved.proof_ids) == 2
     assert proof_store.get(saved.proof_ids[-1]).metadata["status"] == "passed"
 

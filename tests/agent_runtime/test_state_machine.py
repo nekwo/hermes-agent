@@ -32,7 +32,7 @@ def typed_config():
 
 
 def make_typed_cross_stack_mission():
-    mission = make_mission(TaskState.READY_FOR_VERIFICATION)
+    mission = make_mission(TaskState.READY_FOR_REVIEW)
     mission.title = "Fix Mission Control live terminals"
     mission.description = "Backend stream seed first, then Launcher UI repair, then QA."
     mission.mission_plan = MissionPlan(
@@ -89,16 +89,16 @@ def test_state_machine_selects_neko_lead_dev_qa_actions_with_mission_language():
     machine = MissionStateMachine()
 
     assert machine.next_action(make_mission(TaskState.CREATED)).type == HarnessActionType.RUN_SLOT
-    assert machine.next_action(make_mission(TaskState.READY_FOR_IMPLEMENTATION)).type == HarnessActionType.RUN_SLOT
+    assert machine.next_action(make_mission(TaskState.READY_FOR_WORK)).type == HarnessActionType.RUN_SLOT
     assert machine.next_action(make_mission(TaskState.QA_REVIEW_PLAN)).type == HarnessActionType.RUN_SLOT
     assert machine.next_action(make_mission(TaskState.DEV_IMPLEMENTING)).type == HarnessActionType.RUN_SLOT
-    dev_ready = make_mission(TaskState.READY_FOR_VERIFICATION)
+    dev_ready = make_mission(TaskState.READY_FOR_REVIEW)
     assert machine.next_action(dev_ready).type == HarnessActionType.RUN_SLOT
     dev_ready.risk_flags = ["neko_qa_coordination_released"]
     assert machine.next_action(dev_ready).type == HarnessActionType.RUN_SLOT
     assert machine.next_action(make_mission(TaskState.QA_TESTING)).type == HarnessActionType.RUN_SLOT
-    assert machine.next_action(make_mission(TaskState.VERIFIED)).type == HarnessActionType.COMPLETE_TASK
-    assert machine.next_action(make_mission(TaskState.PROOF_REVIEW)).type == HarnessActionType.COMPLETE_TASK
+    assert machine.next_action(make_mission(TaskState.APPROVED)).type == HarnessActionType.COMPLETE_TASK
+    assert machine.next_action(make_mission(TaskState.EVIDENCE_REVIEW)).type == HarnessActionType.COMPLETE_TASK
 
 
 def test_open_incident_routes_neko_even_when_task_not_blocked():
@@ -112,7 +112,7 @@ def test_open_incident_routes_neko_even_when_task_not_blocked():
 
 
 def test_legacy_qa_stage_does_not_count_as_remaining_dev_work():
-    mission = make_mission(TaskState.READY_FOR_VERIFICATION)
+    mission = make_mission(TaskState.READY_FOR_REVIEW)
     mission.risk_flags = ["neko_qa_coordination_released"]
     mission.current_stage_id = "backend_implementation"
     mission.proof_ids = ["proof_backend"]
@@ -149,8 +149,8 @@ def test_blocked_open_incident_is_settled_not_repeated_neko_loop():
     assert "open incidents" in action.reason
 
 
-def test_typed_NEEDS_FIXES_routes_back_to_dev_not_qa_loop():
-    mission = make_mission(TaskState.NEEDS_FIXES)
+def test_typed_REWORK_routes_back_to_dev_not_qa_loop():
+    mission = make_mission(TaskState.REWORK_REQUESTED)
     mission.current_stage_id = "launcher_implementation"
     mission.mission_plan = MissionPlan(
         mission_intent=MissionIntent(title="Mission Control", objective="Patch UI"),
@@ -249,7 +249,7 @@ def test_typed_plan_ready_proof_stage_releases_directly_to_qa():
 
 def test_typed_plan_never_completes_from_single_backend_substage():
     mission = make_typed_cross_stack_mission()
-    mission.state = TaskState.VERIFIED
+    mission.state = TaskState.APPROVED
 
     action = MissionStateMachine(config=typed_config()).next_action(mission)
 
@@ -710,7 +710,7 @@ def test_implementing_launcher_stage_after_neko_release_routes_to_dev():
 
 
 def test_dev_ready_cross_stack_sequential_join_synonym_routes_to_neko_before_qa():
-    mission = make_mission(TaskState.READY_FOR_VERIFICATION)
+    mission = make_mission(TaskState.READY_FOR_REVIEW)
     mission.risk_flags = ["cross_stack_sequential_join_required", "worker_session_receipts_required"]
     mission.proof_ids = ["proof_backend"]
     mission.current_stage_id = "stage_48_backend_contract_smoke"
@@ -749,8 +749,8 @@ def test_blocked_current_stage_failed_command_proof_routes_to_dev_retry():
     assert "blueprint intervention" in action.reason
 
 
-def test_state_machine_closes_VERIFIED_mission_with_existing_proof_without_pm_model_loop():
-    mission = make_mission(TaskState.VERIFIED)
+def test_state_machine_closes_APPROVED_mission_with_existing_proof_without_pm_model_loop():
+    mission = make_mission(TaskState.APPROVED)
     mission.proof_ids = ["proof_test", "proof_qa"]
 
     action = MissionStateMachine().next_action(mission)
@@ -760,7 +760,7 @@ def test_state_machine_closes_VERIFIED_mission_with_existing_proof_without_pm_mo
 
 
 def test_cross_stack_backend_only_qa_state_routes_to_neko_launcher_release():
-    mission = make_mission(TaskState.VERIFIED)
+    mission = make_mission(TaskState.APPROVED)
     mission.risk_flags = ["cross_stack_contract_handoff"]
     mission.proof_ids = ["proof_backend", "proof_qa"]
     mission.stages = [
@@ -775,7 +775,7 @@ def test_cross_stack_backend_only_qa_state_routes_to_neko_launcher_release():
 
 
 def test_cross_stack_backend_only_dev_ready_routes_to_neko_before_qa():
-    mission = make_mission(TaskState.READY_FOR_VERIFICATION)
+    mission = make_mission(TaskState.READY_FOR_REVIEW)
     mission.risk_flags = ["cross_stack_contract_handoff", "neko_qa_coordination_released"]
     mission.proof_ids = ["proof_backend"]
     mission.stages = [
@@ -790,7 +790,7 @@ def test_cross_stack_backend_only_dev_ready_routes_to_neko_before_qa():
 
 
 def test_cross_stack_contract_join_flag_routes_to_neko_before_qa():
-    mission = make_mission(TaskState.READY_FOR_VERIFICATION)
+    mission = make_mission(TaskState.READY_FOR_REVIEW)
     mission.risk_flags = ["cross_stack_contract_join", "neko_qa_coordination_released"]
     mission.proof_ids = ["proof_backend"]
     mission.stages = [
@@ -805,7 +805,7 @@ def test_cross_stack_contract_join_flag_routes_to_neko_before_qa():
 
 
 def test_backend_stage_that_mentions_future_launcher_gate_still_requires_launcher_release():
-    mission = make_mission(TaskState.READY_FOR_VERIFICATION)
+    mission = make_mission(TaskState.READY_FOR_REVIEW)
     mission.risk_flags = ["cross_stack_contract_handoff", "sequential_specialist_handoff"]
     mission.proof_ids = ["proof_backend"]
     mission.stages = [
@@ -833,7 +833,7 @@ def test_backend_stage_that_mentions_future_launcher_gate_still_requires_launche
 
 
 def test_text_only_backend_first_live_terminal_goal_routes_to_neko_before_qa():
-    mission = make_mission(TaskState.READY_FOR_VERIFICATION)
+    mission = make_mission(TaskState.READY_FOR_REVIEW)
     mission.title = "Fix Mission Control all-role live terminals"
     mission.description = "Seed and prove Backend Dev live terminal/event stream artifacts without backend product edits, using only the existing no-product-edit backend_contract_smoke proof recipe."
     mission.acceptance_criteria = [
@@ -856,7 +856,7 @@ def test_text_only_backend_first_live_terminal_goal_routes_to_neko_before_qa():
 
 
 def test_state_machine_requires_visual_proof_before_terminal_close_when_requested():
-    mission = make_mission(TaskState.VERIFIED)
+    mission = make_mission(TaskState.APPROVED)
     mission.requires_visual_proof = True
     mission.proof_ids = ["proof_backend", "proof_qa"]
 
@@ -878,15 +878,15 @@ def test_state_machine_applies_neko_mission_lead_decision_through_transition_aut
     result = MissionStateMachine().apply_decision(mission, decision, actor="neko_supervisor")
 
     assert result.from_state == TaskState.CREATED
-    assert result.to_state == TaskState.READY_FOR_IMPLEMENTATION
-    assert mission.state == TaskState.READY_FOR_IMPLEMENTATION
+    assert result.to_state == TaskState.READY_FOR_WORK
+    assert mission.state == TaskState.READY_FOR_WORK
     assert mission.acceptance_criteria == ["ok"]
     assert result.events
     assert result.events[0].payload["actor"] == "neko_supervisor"
 
 
 def test_neko_scoped_launcher_fix_with_harness_support_scope_routes_to_dev():
-    mission = make_mission(TaskState.READY_FOR_IMPLEMENTATION)
+    mission = make_mission(TaskState.READY_FOR_WORK)
     mission.title = "Fix Mission Control live terminals for all agents"
     mission.description = (
         "Launcher Dev will diagnose and implement the narrow EterniaLauncher "

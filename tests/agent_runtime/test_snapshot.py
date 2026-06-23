@@ -137,7 +137,7 @@ def test_snapshot_exposes_terminal_and_active_run_execution_truth(isolate_agent_
     runs = RunStore()
     n = now()
     ts.create(Task(id="done", title="Done", description="d", state=TaskState.DONE, created_at=n, updated_at=n, requested_by="tony"))
-    ts.create(Task(id="active", title="Active", description="d", state=TaskState.READY_FOR_IMPLEMENTATION, created_at=n, updated_at=n, requested_by="tony"))
+    ts.create(Task(id="active", title="Active", description="d", state=TaskState.READY_FOR_WORK, created_at=n, updated_at=n, requested_by="tony"))
     runs.open_run("dev", "active", stage_id=None)
 
     snap = build_snapshot(task_store=ts, run_store=runs)

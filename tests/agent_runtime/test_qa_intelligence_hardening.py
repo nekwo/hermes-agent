@@ -46,7 +46,7 @@ def _task():
         id="task_qa",
         title="QA proof-first smoke",
         description="Verify QA stops at proof-backed verdict.",
-        state=TaskState.READY_FOR_VERIFICATION,
+        state=TaskState.READY_FOR_REVIEW,
         created_at=now(),
         updated_at=now(),
         requested_by="test",

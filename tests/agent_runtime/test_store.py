@@ -36,10 +36,10 @@ def test_task_store_create_update_round_trip_and_records_events():
 
     apply_transition(task, TaskState.PM_TRIAGE, actor="pm", reason="triage")
     store.update(task, actor="pm", reason="triage")
-    apply_transition(task, TaskState.READY_FOR_IMPLEMENTATION, actor="pm", reason="ready")
+    apply_transition(task, TaskState.READY_FOR_WORK, actor="pm", reason="ready")
     store.update(task, actor="pm", reason="ready")
 
-    assert store.get("task_abc").state == TaskState.READY_FOR_IMPLEMENTATION
+    assert store.get("task_abc").state == TaskState.READY_FOR_WORK
     events = EventLog().tail(10)
     assert [evt.type for evt in events] == ["task.created", "task.transition", "task.transition"]
     assert events[-1].payload == {"from": "pm_triage", "to": "pm_ready_for_dev", "actor": "pm", "reason": "ready"}
@@ -125,7 +125,7 @@ def test_task_store_list_all_tolerates_concurrent_archive_move(monkeypatch):
 
 def test_task_store_cancel_marks_task_cancelled_with_reason_event():
     store = TaskStore()
-    store.create(make_task("task_cancel", TaskState.READY_FOR_IMPLEMENTATION))
+    store.create(make_task("task_cancel", TaskState.READY_FOR_WORK))
 
     cancelled = store.cancel("task_cancel", reason="operator stopped runaway smoke", actor="alice")
 

@@ -84,17 +84,3 @@ class StageStatus(StrEnum):
     PASSED = "passed"
     REWORK = "needs_fixes"
     BLOCKED = "blocked"
-
-
-_TASK_STATE_COMPAT_ALIASES = {
-    "READY_FOR_" + "IMPLEMENTATION": TaskState.READY_FOR_WORK,
-    "READY_FOR_" + "VERIFICATION": TaskState.READY_FOR_REVIEW,
-    "NEEDS_" + "FIXES": TaskState.REWORK_REQUESTED,
-    "VER" + "IFIED": TaskState.APPROVED,
-    "PROOF_" + "REVIEW": TaskState.EVIDENCE_REVIEW,
-    "AP" + "PLYING": TaskState.INTEGRATING,
-}
-for _name, _member in _TASK_STATE_COMPAT_ALIASES.items():
-    setattr(TaskState, _name, _member)
-
-setattr(StageStatus, "NEEDS_" + "FIXES", StageStatus.REWORK)

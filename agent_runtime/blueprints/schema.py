@@ -27,9 +27,6 @@ class StageOutcome(StrEnum):
     MISSING_INPUT = "missing_input"
 
 
-setattr(StageOutcome, "NEEDS_" + "FIXES", StageOutcome.REWORK)
-
-
 @dataclass(frozen=True, slots=True)
 class BlueprintSlot:
     id: str
