@@ -13,7 +13,7 @@ from .blueprints.runs import BlueprintRunStore, blueprint_run_summary
 from .blueprints.store import BlueprintStore, blueprint_summary
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .capabilities import capability_descriptors
-from .config import configured_personas, load_agent_runtime_config
+from .config import ensure_persisted_personas, load_agent_runtime_config
 from .daemon import read_daemon_status
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash, event_catalog
 from .dirty_state import build_dirty_state
@@ -89,7 +89,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     cfg = load_agent_runtime_config()
-    agents = agent_store.list_all() or configured_personas(cfg)
+    agents = agent_store.list_all() or ensure_persisted_personas(cfg)
     incidents = incident_store.list_all()
     role_envelope_store = RoleEnvelopeStore(event_log=event_log)
     role_checklist_store = RoleChecklistStore(event_log=event_log)

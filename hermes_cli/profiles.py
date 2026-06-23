@@ -1157,7 +1157,7 @@ def backfill_profile_envs(quiet: bool = False) -> List[str]:
 
 def _profile_bound_in_live_runtime(profile_name: str) -> list[str]:
     try:
-        from agent_runtime.config import configured_personas
+        from agent_runtime.config import ensure_persisted_personas
         from agent_runtime.states import TaskState
         from agent_runtime.store import AgentStore, TaskStore
     except Exception:
@@ -1168,7 +1168,7 @@ def _profile_bound_in_live_runtime(profile_name: str) -> list[str]:
     except Exception:
         personas = []
     try:
-        personas.extend(configured_personas())
+        personas.extend(ensure_persisted_personas())
     except Exception:
         pass
     for persona in personas:

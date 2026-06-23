@@ -15,7 +15,7 @@ from pathlib import Path
 from hermes_time import now
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
-from agent_runtime.config import configured_personas, load_agent_runtime_config
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
     authorize_coordinator_action,
@@ -783,10 +783,7 @@ def _matrix_binding_cases(base: dict[str, str], variations: dict[str, list[str]]
 
 
 def _cmd_init(args) -> int:
-    store = AgentStore()
-    personas = configured_personas(load_agent_runtime_config())
-    for persona in personas:
-        store.save(persona)
+    personas = ensure_persisted_personas(load_agent_runtime_config())
     data = {"personas": [p.id for p in personas]}
     print(emit_json(data) if args.json else f"Initialized harness personas: {', '.join(data['personas'])}")
     return 0
@@ -796,7 +793,7 @@ def _cmd_install_stage46_skills(args) -> int:
     if getattr(args, "active_profile_only", False):
         results = install_stage46_skills()
     else:
-        results = install_stage46_skills_for_personas(configured_personas(load_agent_runtime_config()))
+        results = install_stage46_skills_for_personas(ensure_persisted_personas(load_agent_runtime_config()))
     data = {"installed": [asdict(result) for result in results], "ok": all(result.ok for result in results)}
     if args.json:
         print(emit_json(data))
@@ -849,7 +846,7 @@ def _cmd_persona_list(args) -> int:
     cfg = load_agent_runtime_config()
     store = PersonaInstanceStore()
     workers = WorkerSessionStore().list_all()
-    personas = configured_personas(cfg)
+    personas = ensure_persisted_personas(cfg)
     enabled = persona_instance_runtime_enabled(cfg)
     instances = store.derive_from_workers(personas, workers) if enabled else []
     data = {
@@ -874,7 +871,7 @@ def _cmd_persona_show(args) -> int:
         print(emit_json(data) if args.json else data["error"])
         return 2
     store = PersonaInstanceStore()
-    store.derive_from_workers(configured_personas(cfg), WorkerSessionStore().list_all())
+    store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
     value = str(args.persona_id_or_instance_id or "").strip()
     instance_id = value if value.startswith("personainst_") else persona_instance_id_for(_normalize_cli_persona_id(value))
     try:
@@ -938,7 +935,7 @@ def _cmd_persona_message(args) -> int:
         data = {"ok": False, "error": f"task not found: {args.task_id}"}
         print(emit_json(data) if args.json else data["error"])
         return 2
-    PersonaInstanceStore().derive_from_workers(configured_personas(cfg), WorkerSessionStore().list_all())
+    PersonaInstanceStore().derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
     assignment = PersonaAssignmentStore().create_or_resume(
         PersonaAssignmentSpec(
             persona_id=persona_id,
@@ -1334,7 +1331,7 @@ def _queue_free_floating_assignment(
         return 2
     normalized_persona = _normalize_cli_persona_or_template_id(persona_id)
     instance_store = PersonaInstanceStore()
-    instance_store.derive_from_workers(configured_personas(cfg), WorkerSessionStore().list_all())
+    instance_store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
     if persona_instance_id is None:
         if add_instance:
             if not placement_id:
@@ -1563,7 +1560,7 @@ def _append_persona_assistant_text(*, session_db, session_id: str, text: str) ->
 
 def _persona_by_id(cfg, persona_id: str):
     raw = str(persona_id or "").strip()
-    personas = list(configured_personas(cfg))
+    personas = list(ensure_persisted_personas(cfg))
     if raw.lower().startswith("profile:"):
         profile_id = safe_assignment_token(raw.split(":", 1)[1])
         if not profile_id:
@@ -2626,7 +2623,7 @@ def _cmd_status(args) -> int:
 
 
 def _cmd_health(args) -> int:
-    personas = AgentStore().list_all() or configured_personas(load_agent_runtime_config())
+    personas = ensure_persisted_personas(load_agent_runtime_config())
     data = provider_health_for_personas(personas)
     if args.json:
         print(emit_json(data))
@@ -2856,7 +2853,7 @@ def _cmd_daemon(args) -> int:
 
 
 def _cmd_agents(args) -> int:
-    personas = AgentStore().list_all() or configured_personas(load_agent_runtime_config())
+    personas = ensure_persisted_personas(load_agent_runtime_config())
     print(emit_json(personas) if args.json else "\n".join(f"{p.id} ({p.role})" for p in personas))
     return 0
 

@@ -4,7 +4,7 @@ import json
 import pytest
 
 from hermes_time import now
-from agent_runtime.config import AgentRuntimeConfig, configured_personas, load_agent_runtime_config
+from agent_runtime.config import AgentRuntimeConfig, persona_records_from_config, load_agent_runtime_config
 from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.models import AgentPersona, AgentRun, Incident, Proof, Task, TaskStage
 from agent_runtime.plan_review import PlanReviewVerdict
@@ -112,7 +112,7 @@ def test_tick_engine_uses_stored_persona_configuration():
 
 def test_global_default_persona_config_applies_without_per_persona_overrides():
     cfg = AgentRuntimeConfig(default_provider="openai", default_model="gpt-test", personas={})
-    personas = {p.id: p for p in configured_personas(cfg)}
+    personas = {p.id: p for p in persona_records_from_config(cfg)}
     assert "pm" not in personas
     assert personas["neko_supervisor"].provider == "openai"
     assert personas["neko_supervisor"].model == "gpt-test"

@@ -65,9 +65,9 @@ class BindingResolver:
         except Exception:
             pass
         if self._configured is None:
-            from agent_runtime.config import configured_personas
+            from agent_runtime.config import ensure_persisted_personas
 
-            self._configured = list(configured_personas())
+            self._configured = list(ensure_persisted_personas())
         for persona in self._configured:
             personas.setdefault(persona.id, persona)
         return personas
@@ -122,9 +122,9 @@ def promote_profile_to_persona(
                 known[persona.id] = persona
         except Exception:
             pass
-        from agent_runtime.config import configured_personas
+        from agent_runtime.config import ensure_persisted_personas
 
-        for persona in configured_personas():
+        for persona in ensure_persisted_personas():
             known.setdefault(persona.id, persona)
     template_id = _ROLE_TEMPLATE.get(slot_role, "dev")
     template = known.get(template_id) or known.get("dev") or next(iter(known.values()), None)
