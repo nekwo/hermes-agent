@@ -135,6 +135,25 @@ class PersonaInstanceStore:
             self._write(existing)
         return self.get(instance_id)
 
+    def ensure_for_goal(self, persona: AgentPersona, *, goal_id: str, spawned_by: str | None) -> PersonaInstance:
+        instance = self.ensure_for_persona(persona)
+        changed = False
+        updates = {
+            "mode": "task_bound",
+            "current_task_id": safe_optional_token(goal_id),
+            "goal_id": safe_optional_token(goal_id),
+            "spawned_by": safe_optional_token(spawned_by),
+        }
+        for attr, value in updates.items():
+            if getattr(instance, attr) != value:
+                setattr(instance, attr, value)
+                changed = True
+        if changed:
+            instance.updated_at = now()
+            self._write(instance)
+            self._event("persona_instance.attributed", instance, {"goal_id": instance.goal_id, "spawned_by": instance.spawned_by})
+        return self.get(instance.id)
+
     def get(self, persona_instance_id: str) -> PersonaInstance:
         raw = json.loads(paths.persona_instance_path(persona_instance_id).read_text(encoding="utf-8"))
         return from_jsonable(PersonaInstance, raw)
@@ -289,6 +308,7 @@ class PersonaInstanceStore:
         instance.mode = "task_bound"
         instance.current_assignment_id = worker.current_assignment_id
         instance.current_task_id = worker.task_id
+        instance.goal_id = instance.goal_id or worker.task_id
         instance.active_worker_session_id = worker.id
         instance.active_run_id = worker.active_run_id
         instance.session_id = worker.session_id
@@ -344,6 +364,8 @@ class PersonaInstanceStore:
                 instance.mode = "configured"
                 instance.current_assignment_id = None
                 instance.current_task_id = None
+                instance.goal_id = None
+                instance.spawned_by = None
                 instance.active_worker_session_id = None
                 instance.active_run_id = None
                 instance.session_id = None
@@ -667,6 +689,8 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "state": state,
         "lifecycle_mode": instance.mode,
         "mode": instance.mode,
+        "goal_id": instance.goal_id,
+        "spawned_by": instance.spawned_by,
         "current_work_assignment_id": instance.current_assignment_id,
         "current_assignment_id": instance.current_assignment_id,
         "attached_task_id": instance.current_task_id,
