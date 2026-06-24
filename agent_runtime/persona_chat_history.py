@@ -26,7 +26,6 @@ def persona_chat_history_summary(
     *,
     persona_instances: Iterable[PersonaInstance],
     session_db: Any | None = None,
-    event_log: Any | None = None,
     limit: int = 50,
     message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
 ) -> list[dict[str, Any]]:
@@ -40,12 +39,8 @@ def persona_chat_history_summary(
     """
 
     bound_by_session: dict[str, PersonaInstance] = {}
-    instances_by_id: dict[str, PersonaInstance] = {}
     instances_by_persona: dict[str, PersonaInstance] = {}
     for instance in persona_instances:
-        instance_id = safe_assignment_text(getattr(instance, "id", None), limit=160)
-        if instance_id:
-            instances_by_id[instance_id] = instance
         persona_id = _canonical_persona_id(getattr(instance, "persona_id", None))
         if persona_id:
             instances_by_persona[persona_id] = instance
@@ -74,8 +69,7 @@ def persona_chat_history_summary(
     )
 
     try:
-        event_sessions = _list_chat_opened_event_sessions(event_log, limit=max(limit * 4, 1))
-        sessions = list(source_sessions) + list(broad_sessions) + list(event_sessions)
+        sessions = list(source_sessions) + list(broad_sessions)
     except Exception:
         sessions = list(broad_sessions)
 
@@ -89,8 +83,7 @@ def persona_chat_history_summary(
             continue
         is_source_chat = safe_assignment_token(raw.get("source")) == PERSONA_CHAT_SESSION_SOURCE
         inferred_persona = _infer_persona_id(raw, session_id=session_id)
-        raw_instance_id = safe_assignment_text(raw.get("persona_instance_id"), limit=160)
-        instance = bound_by_session.get(session_id) or instances_by_id.get(raw_instance_id) or (
+        instance = bound_by_session.get(session_id) or (
             instances_by_persona.get(inferred_persona) if is_source_chat and inferred_persona else None
         )
         if instance is None:
@@ -101,12 +94,18 @@ def persona_chat_history_summary(
         if len(rows) >= limit:
             break
 
-    # If SessionDB doesn't know about a bound session yet, still expose a safe
-    # placeholder so Launcher can show that the persona instance is chat-bound.
+    # Create/open paths now persist persona chat sessions before exposing them.
+    # If the active instance still points at a session that SessionDB no longer
+    # knows about, treat SessionDB as authoritative: the operator may have
+    # deleted that chat, and resurrecting it as an empty placeholder is worse
+    # than temporarily hiding a failed write.
     for session_id, instance in bound_by_session.items():
         if session_id in seen:
             continue
-        rows.append(_history_row({}, instance, session_id=session_id, session_db=db, message_tail=message_tail))
+        raw = _get_session_row(db, session_id)
+        if raw is None:
+            continue
+        rows.append(_history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail))
         if len(rows) >= limit:
             break
 
@@ -216,55 +215,12 @@ def _list_sessions(
         return []
 
 
-def _list_chat_opened_event_sessions(event_log: Any | None, *, limit: int) -> list[dict[str, Any]]:
-    log = event_log or _default_event_log()
-    if log is None:
-        return []
+def _get_session_row(db: Any, session_id: str) -> dict[str, Any] | None:
     try:
-        events = list(log.iter_all())
+        raw = db.get_session(session_id)
     except Exception:
-        return []
-
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for evt in reversed(events):
-        if safe_assignment_text(getattr(evt, "type", None), limit=120) != "persona_instance.chat_opened":
-            continue
-        payload = getattr(evt, "payload", None)
-        if not isinstance(payload, dict):
-            payload = {}
-        session_id = safe_assignment_text(payload.get("session_id"), limit=200)
-        if not session_id or session_id in seen:
-            continue
-        persona_id = _canonical_persona_id(getattr(evt, "persona_id", None)) or _infer_persona_id(
-            {}, session_id=session_id
-        )
-        instance_id = safe_assignment_text(payload.get("persona_instance_id"), limit=160)
-        rows.append(
-            {
-                "id": session_id,
-                "source": PERSONA_CHAT_SESSION_SOURCE,
-                "system_prompt": f"Mission Control persona chat for {persona_id or 'persona'}",
-                "persona_instance_id": instance_id,
-                "title": None,
-                "preview": None,
-                "message_count": 0,
-                "started_at": _event_timestamp(getattr(evt, "ts", None)),
-                "last_active": _event_timestamp(getattr(evt, "ts", None)),
-                "archived": 0,
-            }
-        )
-        seen.add(session_id)
-        if len(rows) >= limit:
-            break
-    return rows
-
-
-def _event_timestamp(value: Any) -> Any:
-    try:
-        return value.isoformat().replace("+00:00", "Z")
-    except Exception:
-        return value
+        return None
+    return raw if isinstance(raw, dict) else None
 
 
 def _default_session_db() -> Any | None:
@@ -272,15 +228,6 @@ def _default_session_db() -> Any | None:
         from hermes_state import SessionDB
 
         return SessionDB()
-    except Exception:
-        return None
-
-
-def _default_event_log() -> Any | None:
-    try:
-        from .events import EventLog
-
-        return EventLog()
     except Exception:
         return None
 
