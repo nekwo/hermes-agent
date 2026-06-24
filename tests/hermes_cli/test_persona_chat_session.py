@@ -11,6 +11,7 @@ from hermes_cli.harness import (
     _append_persona_operator_turn,
     _persona_chat_message_with_history,
     _redact_persona_chat_text,
+    _update_persona_chat_token_counts,
 )
 
 
@@ -18,6 +19,7 @@ class FakeSessionDB:
     def __init__(self):
         self.messages: dict[str, list[dict]] = {}
         self.sessions: dict[str, dict] = {}
+        self.token_updates: list[dict] = []
 
     def create_session(self, session_id, source, **kwargs):
         self.sessions[session_id] = {"source": source, **kwargs}
@@ -30,6 +32,24 @@ class FakeSessionDB:
     def get_messages(self, session_id, include_inactive=False):
         return list(self.messages.get(session_id, []))
 
+    def update_token_counts(
+        self,
+        session_id,
+        input_tokens=0,
+        output_tokens=0,
+        api_call_count=0,
+        model=None,
+    ):
+        self.token_updates.append(
+            {
+                "session_id": session_id,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "api_call_count": api_call_count,
+                "model": model,
+            }
+        )
+
 
 def test_operator_turn_is_persisted():
     db = FakeSessionDB()
@@ -41,6 +61,27 @@ def test_assistant_turn_is_persisted():
     db = FakeSessionDB()
     _append_persona_assistant_text(session_db=db, session_id="s1", text="hey, doing great")
     assert db.get_messages("s1") == [{"role": "assistant", "content": "hey, doing great"}]
+
+
+def test_persona_chat_token_counts_are_persisted():
+    class Result:
+        input_tokens = 120
+        output_tokens = 30
+        api_calls = 2
+        model = "gpt-test"
+
+    db = FakeSessionDB()
+    _update_persona_chat_token_counts(session_db=db, session_id="s1", result=Result())
+
+    assert db.token_updates == [
+        {
+            "session_id": "s1",
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "api_call_count": 2,
+            "model": "gpt-test",
+        }
+    ]
 
 
 def test_continuity_prepends_prior_turns():

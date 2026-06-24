@@ -535,6 +535,170 @@ def test_coordinator_create_beyond_spawn_scope_returns_confirm_without_creating(
     assert PersonaInstanceStore().list_all() == []
 
 
+def test_persona_instance_steer_cli_attaches_parent_and_goal(monkeypatch, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    store = PersonaInstanceStore()
+    store.ensure_for_persona(_persona("neko_supervisor"))
+    store.ensure_for_persona(_persona("dev"))
+
+    code = harness._cmd_persona_instance_steer(
+        Namespace(
+            persona_instance_id="personainst_dev",
+            parent_instance_id="personainst_neko_supervisor",
+            goal_id="task_77",
+            detach=False,
+            requested_by="operator",
+            coordinator_id="neko_supervisor",
+            coordinator_max_spawns=None,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=None,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    instance = PersonaInstanceStore().get("personainst_dev")
+    assert instance.spawned_by == "personainst_neko_supervisor"
+    assert instance.goal_id == "task_77"
+    assert instance.current_task_id == "task_77"
+    assert instance.mode == "task_bound"
+
+
+def test_persona_instance_steer_cli_detaches_to_standalone(monkeypatch, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    store = PersonaInstanceStore()
+    store.ensure_for_persona(_persona("neko_supervisor"))
+    store.ensure_for_persona(_persona("dev"))
+    store.steer("personainst_dev", parent_instance_id="personainst_neko_supervisor", goal_id="task_77")
+
+    code = harness._cmd_persona_instance_steer(
+        Namespace(
+            persona_instance_id="personainst_dev",
+            parent_instance_id=None,
+            goal_id=None,
+            detach=True,
+            requested_by="operator",
+            coordinator_id="neko_supervisor",
+            coordinator_max_spawns=None,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=None,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    instance = PersonaInstanceStore().get("personainst_dev")
+    assert instance.spawned_by is None
+    assert instance.goal_id is None
+    assert instance.current_task_id is None
+    assert instance.mode == "configured"
+
+
+def test_persona_instance_steer_cli_rejects_self_steer(monkeypatch, capsys, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    PersonaInstanceStore().ensure_for_persona(_persona("dev"))
+
+    code = harness._cmd_persona_instance_steer(
+        Namespace(
+            persona_instance_id="personainst_dev",
+            parent_instance_id="personainst_dev",
+            goal_id="task_77",
+            detach=False,
+            requested_by="operator",
+            coordinator_id="neko_supervisor",
+            coordinator_max_spawns=None,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=None,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "cannot steer itself" in payload["error"]
+
+
+def test_persona_instance_steer_cli_rejects_missing_parent(monkeypatch, capsys, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    PersonaInstanceStore().ensure_for_persona(_persona("dev"))
+
+    code = harness._cmd_persona_instance_steer(
+        Namespace(
+            persona_instance_id="personainst_dev",
+            parent_instance_id="personainst_missing",
+            goal_id="task_77",
+            detach=False,
+            requested_by="operator",
+            coordinator_id="neko_supervisor",
+            coordinator_max_spawns=None,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=None,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert "parent persona instance not found" in payload["error"]
+
+
+def test_persona_instance_steer_store_reroutes_without_minting_instances(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    store.ensure_for_persona(_persona("neko_supervisor"))
+    store.ensure_for_persona(_persona("pm"))
+    store.ensure_for_persona(_persona("dev"))
+    before = {item.id for item in store.list_all()}
+
+    store.steer("personainst_dev", parent_instance_id="personainst_neko_supervisor", goal_id="task_77")
+    rewired = store.steer("personainst_dev", parent_instance_id="personainst_pm", goal_id="task_77")
+
+    assert rewired.spawned_by == "personainst_pm"
+    # Re-routing must mutate the existing instance, never spawn a new one.
+    assert {item.id for item in store.list_all()} == before
+
+
+def test_persona_instance_steer_store_rejects_cycles(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    store.ensure_for_persona(_persona("neko_supervisor"))
+    store.ensure_for_persona(_persona("dev"))
+    store.ensure_for_persona(_persona("qa"))
+    store.steer("personainst_dev", parent_instance_id="personainst_neko_supervisor", goal_id="task_77")
+    store.steer("personainst_qa", parent_instance_id="personainst_dev", goal_id="task_77")
+
+    with pytest.raises(ValueError, match="cycle"):
+        store.steer("personainst_dev", parent_instance_id="personainst_qa", goal_id="task_77")
+
+    assert store.get("personainst_dev").spawned_by == "personainst_neko_supervisor"
+
+
 def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, isolate_agent_runtime_root):
     from argparse import Namespace
     from hermes_cli import harness
@@ -681,6 +845,8 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
                     "title": "API_KEY=super-secret",
                     "preview": "Please inspect the proof packet.",
                     "message_count": 7,
+                    "input_tokens": 1234,
+                    "output_tokens": 56,
                     "started_at": 10,
                     "last_active": 20,
                     "archived": 0,
@@ -702,9 +868,45 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
             "updated_at": 20,
             "state": "open",
             "redaction_status": "redacted",
+            "input_tokens": 1234,
+            "output_tokens": 56,
+            "total_tokens": 1290,
             "messages": [],
         }
     ]
+
+
+def test_persona_instance_update_profile_persists_runtime_overrides_only(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    instance = store.create_operator_chat(
+        persona_id="profile:alice",
+        display_name="Alice Agent",
+        session_id="chat_alice",
+    )
+
+    updated = store.update_profile(
+        instance.id,
+        display_name="Alice Mission Lead",
+        current_chat_goal="Keep the operator channel warm.",
+        goal_id="task_123",
+        skills=["agent-runtime-harness", "technical-writing", "technical-writing"],
+    )
+
+    assert updated.id == instance.id
+    assert updated.persona_id == "profile:alice"
+    assert updated.profile_id == "alice"
+    assert updated.display_name == "Alice Mission Lead"
+    assert updated.current_chat_goal == "Keep the operator channel warm."
+    assert updated.goal_id == "task_123"
+    assert updated.current_task_id == "task_123"
+    assert updated.skill_overrides == ["agent-runtime-harness", "technical-writing"]
+
+    summary = persona_instance_summary(updated)
+    assert summary["display_name"] == "Alice Mission Lead"
+    assert summary["backing_profile"] == "alice"
+    assert summary["current_chat_goal"] == "Keep the operator channel warm."
+    assert summary["skills"] == ["agent-runtime-harness", "technical-writing"]
+    assert summary["skill_overrides"] == ["agent-runtime-harness", "technical-writing"]
 
 
 def test_persona_chat_history_summary_ignores_task_bound_worker_sessions(isolate_agent_runtime_root):
@@ -851,6 +1053,9 @@ def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_age
             "updated_at": 200,
             "state": "open",
             "redaction_status": "safe",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
             "messages": [
                 {
                     "id": "msg_1",

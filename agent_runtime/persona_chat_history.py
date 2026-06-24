@@ -251,7 +251,21 @@ def _history_row(
         "updated_at": raw.get("last_active") or raw.get("ended_at") or raw.get("started_at"),
         "state": "archived" if bool(raw.get("archived")) else "open",
         "redaction_status": redaction_status,
+        **_token_usage_fields(raw),
         "messages": messages,
+    }
+
+
+def _token_usage_fields(raw: dict[str, Any]) -> dict[str, int]:
+    input_tokens = _safe_int(raw.get("input_tokens"))
+    output_tokens = _safe_int(raw.get("output_tokens"))
+    total_tokens = _safe_int(raw.get("total_tokens"))
+    if total_tokens == 0 and (input_tokens or output_tokens):
+        total_tokens = input_tokens + output_tokens
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
     }
 
 
