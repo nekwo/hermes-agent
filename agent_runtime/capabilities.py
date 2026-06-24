@@ -32,7 +32,7 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "group": "queue",
         "execution_semantics": "bounded_execution",
         "required_args": ["message"],
-        "allowed_args": ["attachments", "auto_run", "max_actions", "max_seconds"],
+        "allowed_args": ["attachments", "auto_run", "max_actions", "max_seconds", "session_id"],
         "default_args": {"title": "Free-floating operator message", "auto_run": True, "max_actions": 1, "max_seconds": 240},
         "danger": "normal",
     },

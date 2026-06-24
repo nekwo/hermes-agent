@@ -44,6 +44,7 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert by_id["persona.instance.create"]["danger"] == "warning"
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["coordinator_spawns_used"]["minimum"] == 0
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["coordinator_may_kill_own"]["type"] == "boolean"
+    assert "session_id" in by_id["persona.instance.message"]["allowed_args"]
     assert {"add_instance", "placement_id", "kill_active"}.issubset(
         set(by_id["persona.instance.open_chat"]["allowed_args"])
     )

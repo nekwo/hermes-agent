@@ -374,6 +374,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_message.add_argument("--title", default="Free-floating operator message")
     persona_instance_message.add_argument("--requested-by", default="cli")
     persona_instance_message.add_argument("--client-message-id", default=None)
+    persona_instance_message.add_argument("--session-id", default=None)
     persona_instance_message.add_argument("--auto-run", action="store_true", help="Immediately run one bounded chat turn after queuing the message")
     persona_instance_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     persona_instance_message.add_argument("--max-actions", type=int, default=1)
@@ -1045,6 +1046,7 @@ def _cmd_persona_instance_create(args) -> int:
         max_actions=getattr(args, "max_actions", 1),
         max_seconds=getattr(args, "max_seconds", 240.0),
         client_message_id=getattr(args, "client_message_id", None),
+        session_id=getattr(args, "session_id", None),
         stream=getattr(args, "stream", False),
         kill_active=kill_active,
         add_instance=add_instance,
@@ -1211,6 +1213,7 @@ def _cmd_persona_instance_message(args) -> int:
         max_actions=getattr(args, "max_actions", 1),
         max_seconds=getattr(args, "max_seconds", 240.0),
         client_message_id=getattr(args, "client_message_id", None),
+        session_id=getattr(args, "session_id", None),
         stream=getattr(args, "stream", False),
     )
 
@@ -1314,6 +1317,7 @@ def _queue_free_floating_assignment(
     max_actions: int = 1,
     max_seconds: float = 240.0,
     client_message_id: str | None = None,
+    session_id: str | None = None,
     stream: bool = False,
     kill_active: bool = False,
     add_instance: bool = False,
@@ -1374,6 +1378,7 @@ def _queue_free_floating_assignment(
             persona_id=normalized_persona,
             persona_instance_id=assignment.persona_instance_id,
             assignment_id=assignment.id,
+            session_id=session_id,
             kill_active=kill_active,
         )
     except ChatBusyError as exc:
@@ -1473,12 +1478,14 @@ def _bind_free_floating_chat_session(
     persona_id: str,
     persona_instance_id: str,
     assignment_id: str | None = None,
+    session_id: str | None = None,
     kill_active: bool = False,
 ) -> str:
     requested_persona = _normalize_cli_persona_or_template_id(persona_id)
     normalized_persona = requested_persona
     normalized_instance = safe_assignment_token(persona_instance_id) or persona_instance_id_for(requested_persona)
-    session_id = ""
+    requested_session_id = safe_assignment_text(session_id, limit=200)
+    session_id = requested_session_id or ""
     previous_mode = None
     try:
         instance = instance_store.get(normalized_instance)
@@ -1486,7 +1493,7 @@ def _bind_free_floating_chat_session(
         previous_mode = safe_assignment_token(getattr(instance, "mode", None))
         existing_session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
         existing_assignment_id = safe_assignment_token(getattr(instance, "current_assignment_id", None))
-        if existing_session_id and (not existing_assignment_id or existing_assignment_id == safe_assignment_token(assignment_id)):
+        if not session_id and existing_session_id and (not existing_assignment_id or existing_assignment_id == safe_assignment_token(assignment_id)):
             session_id = existing_session_id
     except Exception:
         instance = None
