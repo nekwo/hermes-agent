@@ -45,6 +45,7 @@ from agent_runtime.persona_assignments import (
     persona_instance_id_for,
     safe_assignment_token,
     safe_assignment_text,
+    safe_optional_token,
 )
 from agent_runtime.persona_diagnostics import PersonaDiagnosticController, PersonaDiagnosticOptions
 from agent_runtime.profile_context import active_profile_name
@@ -403,6 +404,26 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_archive.add_argument("--requested-by", default="cli")
     persona_instance_archive.add_argument("--json", action="store_true")
     persona_instance_archive.set_defaults(func=_cmd_persona_instance_archive)
+    persona_instance_steer = persona_instance_subs.add_parser("steer", help="Re-route a persona instance's living-graph wiring (Stage 77 steering edge)")
+    persona_instance_steer.add_argument("persona_instance_id")
+    persona_instance_steer.add_argument("--parent", dest="parent_instance_id", default=None, help="Owner/coordinator instance id that steers this sub-agent")
+    persona_instance_steer.add_argument("--goal", dest="goal_id", default=None, help="Goal/task id this sub-agent inherits from its parent container")
+    persona_instance_steer.add_argument("--detach", action="store_true", help="Detach from any parent and goal (becomes a standalone owner)")
+    persona_instance_steer.add_argument("--requested-by", default="operator")
+    _add_coordinator_permission_args(persona_instance_steer)
+    persona_instance_steer.add_argument("--json", action="store_true")
+    persona_instance_steer.set_defaults(func=_cmd_persona_instance_steer)
+    persona_instance_update = persona_instance_subs.add_parser("update-profile", help="Update runtime persona-instance profile overrides without editing the backing Hermes profile")
+    persona_instance_update.add_argument("persona_instance_id")
+    persona_instance_update.add_argument("--display-name", default=None)
+    persona_instance_update.add_argument("--current-chat-goal", default=None)
+    persona_instance_update.add_argument("--goal", dest="goal_id", default=None)
+    persona_instance_update.add_argument("--skill", dest="skills", action="append", default=None)
+    persona_instance_update.add_argument("--clear-skills", action="store_true")
+    persona_instance_update.add_argument("--requested-by", default="operator")
+    _add_coordinator_permission_args(persona_instance_update)
+    persona_instance_update.add_argument("--json", action="store_true")
+    persona_instance_update.set_defaults(func=_cmd_persona_instance_update_profile)
 
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")
@@ -1247,6 +1268,118 @@ def _cmd_persona_instance_archive(args) -> int:
     return _close_free_floating_assignments(args.persona_instance_id, reason=args.reason, json_output=args.json, terminal_state="completed")
 
 
+def _cmd_persona_instance_steer(args) -> int:
+    cfg = load_agent_runtime_config()
+    if not persona_assignment_store_enabled(cfg):
+        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    persona_instance_id = safe_assignment_token(args.persona_instance_id)
+    if not persona_instance_id:
+        data = {"ok": False, "error": "persona_instance_id is required"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    detach = bool(getattr(args, "detach", False))
+    parent_instance_id = None if detach else safe_optional_token(getattr(args, "parent_instance_id", None))
+    goal_id = None if detach else safe_optional_token(getattr(args, "goal_id", None))
+    if not detach and not parent_instance_id:
+        data = {"ok": False, "error": "--parent is required unless --detach is set"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    if not detach and parent_instance_id == persona_instance_id:
+        data = {"ok": False, "error": "a persona instance cannot steer itself"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    store = PersonaInstanceStore()
+    try:
+        target = store.get(persona_instance_id)
+    except Exception:
+        data = {"ok": False, "error": f"persona instance not found: {persona_instance_id}"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    # 76D.3: re-routing a steering edge is a STEER verb (ungated); operator
+    # actors bypass entirely. Coordinators still pass through the authorizer so
+    # the contract stays uniform with create/kill paths.
+    coordinator_id = _coordinator_actor_id(args)
+    if coordinator_id:
+        persona = _persona_by_id(cfg, target.persona_id)
+        scope = _coordinator_scope_from_args(args, cfg, persona)
+        auth = authorize_coordinator_action("re_route", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
+        if not auth.ok:
+            data = _coordinator_confirm_payload("re_route", coordinator_id, auth)
+            print(emit_json(data) if args.json else data["status"])
+            return 2
+    try:
+        updated = store.steer(persona_instance_id, parent_instance_id=parent_instance_id, goal_id=goal_id, detach=detach)
+    except ValueError as exc:
+        data = {"ok": False, "error": str(exc)}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    try:
+        persona = _persona_by_id(cfg, updated.persona_id)
+    except Exception:
+        persona = None
+    data = {"ok": True, "detached": detach, "instance": persona_instance_summary(updated, persona)}
+    print(emit_json(data) if args.json else f"steered {persona_instance_id}: parent={updated.spawned_by} goal={updated.goal_id}")
+    return 0
+
+
+def _cmd_persona_instance_update_profile(args) -> int:
+    cfg = load_agent_runtime_config()
+    if not persona_assignment_store_enabled(cfg):
+        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    persona_instance_id = safe_assignment_token(args.persona_instance_id)
+    if not persona_instance_id:
+        data = {"ok": False, "error": "persona_instance_id is required"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    store = PersonaInstanceStore()
+    try:
+        target = store.get(persona_instance_id)
+    except Exception:
+        data = {"ok": False, "error": f"persona instance not found: {persona_instance_id}"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    coordinator_id = _coordinator_actor_id(args)
+    if coordinator_id:
+        persona = _persona_by_id(cfg, target.persona_id)
+        scope = _coordinator_scope_from_args(args, cfg, persona)
+        auth = authorize_coordinator_action("persona.instance.update_profile", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
+        if not auth.ok:
+            data = _coordinator_confirm_payload("persona.instance.update_profile", coordinator_id, auth)
+            print(emit_json(data) if args.json else data["status"])
+            return 2
+    try:
+        updated = store.update_profile(
+            persona_instance_id,
+            display_name=getattr(args, "display_name", None),
+            current_chat_goal=getattr(args, "current_chat_goal", None),
+            goal_id=getattr(args, "goal_id", None),
+            skills=list(getattr(args, "skills", None) or []),
+            clear_skills=bool(getattr(args, "clear_skills", False)),
+        )
+    except ValueError as exc:
+        data = {"ok": False, "error": str(exc)}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    try:
+        persona = _persona_by_id(cfg, updated.persona_id)
+    except Exception:
+        persona = None
+    data = {
+        "ok": True,
+        "persona_instance_id": updated.id,
+        "persona_id": updated.persona_id,
+        "backing_profile": updated.profile_id,
+        "updated_instance": persona_instance_summary(updated, persona),
+        "next_expected": "refresh Harness snapshot; runtime instance overrides should be visible without modifying the backing Hermes profile",
+    }
+    print(emit_json(data) if args.json else f"updated runtime profile {updated.id}")
+    return 0
+
+
 def _cmd_persona_instance_run_once(args) -> int:
     cfg = load_agent_runtime_config()
     if not persona_assignment_store_enabled(cfg):
@@ -1565,6 +1698,34 @@ def _append_persona_assistant_text(*, session_db, session_id: str, text: str) ->
         return
 
 
+def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:
+    if session_db is None or not session_id or result is None:
+        return
+    input_tokens = _positive_int_or_zero(getattr(result, "input_tokens", None))
+    output_tokens = _positive_int_or_zero(getattr(result, "output_tokens", None))
+    api_calls = _positive_int_or_zero(getattr(result, "api_calls", None))
+    if input_tokens == 0 and output_tokens == 0 and api_calls == 0:
+        return
+    try:
+        session_db.update_token_counts(
+            session_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            api_call_count=api_calls,
+            model=getattr(result, "model", None),
+        )
+    except Exception:
+        return
+
+
+def _positive_int_or_zero(value) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return 0
+    return max(parsed, 0)
+
+
 def _persona_by_id(cfg, persona_id: str):
     raw = str(persona_id or "").strip()
     personas = list(ensure_persisted_personas(cfg))
@@ -1743,6 +1904,11 @@ def _run_free_floating_assignment_once(
 
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=8000)
     _append_persona_assistant_text(session_db=session_db, session_id=session_id, text=reply_text)
+    _update_persona_chat_token_counts(
+        session_db=session_db,
+        session_id=session_id,
+        result=chat_result,
+    )
 
     PersonaAssignmentStore().complete(assignment_id, state="completed")
     try:
@@ -1772,6 +1938,9 @@ def _run_free_floating_assignment_once(
         "turn_id": None,
         "run_ids": [],
         "task_id": None,
+        "input_tokens": getattr(chat_result, "input_tokens", None),
+        "output_tokens": getattr(chat_result, "output_tokens", None),
+        "total_tokens": getattr(chat_result, "total_tokens", None),
         "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
     }
 

@@ -165,6 +165,134 @@ class PersonaInstanceStore:
             self._event("persona_instance.attributed", instance, {"goal_id": instance.goal_id, "spawned_by": instance.spawned_by})
         return self.get(instance.id)
 
+    def steer(
+        self,
+        persona_instance_id: str,
+        *,
+        parent_instance_id: str | None,
+        goal_id: str | None = None,
+        detach: bool = False,
+    ) -> PersonaInstance:
+        """Re-route an existing instance's living-graph wiring (Stage 77).
+
+        Persists the steering edge the operator draws in the agent graph: it
+        sets the child's ``spawned_by`` parent and the ``goal_id`` it inherits
+        from that container, so the wiring round-trips back into the graph and
+        drives the runtime's membership resolution. ``detach`` clears both,
+        returning the instance to a standalone owner. This is a re-route (a
+        STEER verb, ungated per 76D.3), never a create/kill.
+        """
+        instance = self.get(persona_instance_id)
+        if detach:
+            updates: dict[str, Any] = {"spawned_by": None, "goal_id": None, "current_task_id": None}
+            if instance.mode == "task_bound":
+                updates["mode"] = "configured"
+        else:
+            normalized_parent = safe_optional_token(parent_instance_id)
+            if not normalized_parent:
+                raise ValueError("parent_instance_id is required unless detach is set")
+            if normalized_parent == persona_instance_id:
+                raise ValueError("a persona instance cannot steer itself")
+            try:
+                self.get(normalized_parent)
+            except Exception as exc:
+                raise ValueError(f"parent persona instance not found: {normalized_parent}") from exc
+            self._validate_no_steering_cycle(persona_instance_id, normalized_parent)
+            resolved_goal = safe_optional_token(goal_id) if goal_id is not None else instance.goal_id
+            updates = {
+                "spawned_by": normalized_parent,
+                "goal_id": resolved_goal,
+            }
+            if resolved_goal:
+                updates["mode"] = "task_bound"
+                updates["current_task_id"] = resolved_goal
+        changed = False
+        for attr, value in updates.items():
+            if getattr(instance, attr) != value:
+                setattr(instance, attr, value)
+                changed = True
+        if changed:
+            instance.updated_at = now()
+            self._write(instance)
+            self._event(
+                "persona_instance.steered",
+                instance,
+                {"goal_id": instance.goal_id, "spawned_by": instance.spawned_by, "detached": bool(detach)},
+            )
+        return self.get(instance.id)
+
+    def update_profile(
+        self,
+        persona_instance_id: str,
+        *,
+        display_name: str | None = None,
+        current_chat_goal: str | None = None,
+        goal_id: str | None = None,
+        skills: list[str] | None = None,
+        clear_skills: bool = False,
+    ) -> PersonaInstance:
+        """Persist operator-editable runtime profile overrides.
+
+        These fields belong to the durable persona instance, not the backing
+        Hermes profile template. Editing ``Alice Agent`` therefore updates the
+        live ``personainst_*`` record while leaving the lower ``alice`` profile
+        untouched for future default instances.
+        """
+        instance = self.get(persona_instance_id)
+        changed = False
+        if display_name is not None:
+            value = safe_assignment_text(display_name, limit=120)
+            if not value:
+                raise ValueError("display_name must not be empty")
+            if instance.display_name != value:
+                instance.display_name = value
+                changed = True
+        if current_chat_goal is not None:
+            value = safe_assignment_text(current_chat_goal, limit=500) or None
+            if instance.current_chat_goal != value:
+                instance.current_chat_goal = value
+                changed = True
+        if goal_id is not None:
+            value = safe_optional_token(goal_id)
+            if instance.goal_id != value:
+                instance.goal_id = value
+                changed = True
+            if value and instance.current_task_id != value:
+                instance.current_task_id = value
+                changed = True
+        if skills is not None or clear_skills:
+            value = [] if clear_skills else _safe_skill_overrides(skills or [])
+            if instance.skill_overrides != value:
+                instance.skill_overrides = value
+                changed = True
+        if changed:
+            instance.updated_at = now()
+            self._write(instance)
+            self._event(
+                "persona_instance.profile_updated",
+                instance,
+                {
+                    "display_name": instance.display_name,
+                    "current_chat_goal": instance.current_chat_goal,
+                    "goal_id": instance.goal_id,
+                    "skill_overrides": list(instance.skill_overrides or []),
+                },
+            )
+        return self.get(instance.id)
+
+    def _validate_no_steering_cycle(self, persona_instance_id: str, parent_instance_id: str) -> None:
+        seen = {persona_instance_id}
+        cursor = parent_instance_id
+        while cursor:
+            if cursor in seen:
+                raise ValueError("steering edge would create a cycle")
+            seen.add(cursor)
+            try:
+                parent = self.get(cursor)
+            except Exception:
+                return
+            cursor = safe_optional_token(parent.spawned_by)
+
     def get(self, persona_instance_id: str) -> PersonaInstance:
         raw = json.loads(paths.persona_instance_path(persona_instance_id).read_text(encoding="utf-8"))
         return from_jsonable(PersonaInstance, raw)
@@ -682,6 +810,7 @@ def persona_assignment_store_enabled(config) -> bool:
 def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | None = None) -> dict[str, Any]:
     state = instance.state.value if hasattr(instance.state, "value") else str(instance.state)
     profile_id = instance.profile_id or getattr(persona, "hermes_profile", None)
+    skills = list(instance.skill_overrides) if instance.skill_overrides is not None else list(getattr(persona, "skills", []) or [])
     return {
         "agent_profile_id": instance.id,
         "agent_profile_display_name": instance.display_name,
@@ -694,7 +823,8 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "profile_id": profile_id,
         "backing_profile": profile_id,
         "repo_scope_label": getattr(persona, "repo_scope_label", None),
-        "skills": list(getattr(persona, "skills", []) or []),
+        "skills": skills,
+        "skill_overrides": list(instance.skill_overrides) if instance.skill_overrides is not None else None,
         "toolsets": list(getattr(persona, "toolsets", []) or []),
         "runtime_root": instance.runtime_root,
         "state": state,
@@ -702,6 +832,7 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "mode": instance.mode,
         "goal_id": instance.goal_id,
         "spawned_by": instance.spawned_by,
+        "current_chat_goal": instance.current_chat_goal,
         "current_work_assignment_id": instance.current_assignment_id,
         "current_assignment_id": instance.current_assignment_id,
         "attached_task_id": instance.current_task_id,
@@ -824,6 +955,18 @@ def safe_assignment_state(value: str) -> str:
     if state in ACTIVE_ASSIGNMENT_STATES or state in TERMINAL_ASSIGNMENT_STATES:
         return state
     return "queued"
+
+
+def _safe_skill_overrides(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        skill = safe_assignment_token(value)
+        if not skill or skill in seen:
+            continue
+        seen.add(skill)
+        result.append(skill)
+    return result[:40]
 
 
 def safe_assignment_text(value: Any, *, limit: int) -> str:
