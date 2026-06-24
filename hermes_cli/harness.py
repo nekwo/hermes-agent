@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hermes_time import now
+from hermes_constants import get_hermes_home
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
@@ -30,7 +31,7 @@ from agent_runtime.events import EventLog
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
 from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
 from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
-from agent_runtime.models import AgentPersona, Task
+from agent_runtime.models import AgentPersona, Event, Task
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     ChatBusyError,
@@ -338,6 +339,16 @@ def build_parser(parent_subparsers) -> None:
     persona_diagnose.add_argument("--non-goal", action="append", default=[])
     persona_diagnose.add_argument("--json", action="store_true")
     persona_diagnose.set_defaults(func=_cmd_persona_diagnose)
+
+    persona_chat = persona_subs.add_parser("chat", help="Manage durable persona chat sessions")
+    persona_chat_subs = persona_chat.add_subparsers(dest="persona_chat_command")
+    persona_chat_delete = persona_chat_subs.add_parser("delete", help="Delete a persona chat session and clear active persona bindings")
+    persona_chat_delete.add_argument("--session-id", required=True)
+    persona_chat_delete.add_argument("--persona", dest="persona_id", default=None)
+    persona_chat_delete.add_argument("--persona-instance-id", default=None)
+    persona_chat_delete.add_argument("--requested-by", default="cli")
+    persona_chat_delete.add_argument("--json", action="store_true")
+    persona_chat_delete.set_defaults(func=_cmd_persona_chat_delete)
 
     persona_instance = persona_subs.add_parser("instance", help="Create, message, run, close, and archive free-floating persona instances")
     persona_instance_subs = persona_instance.add_subparsers(dest="persona_instance_command")
@@ -1160,6 +1171,130 @@ def _cmd_persona_instance_open_chat(args) -> int:
         "next_expected": "resume or send on this chat session to boot the persona instance history",
     }
     print(emit_json(data) if args.json else f"opened {instance.id} on chat {instance.session_id}")
+    return 0
+
+
+def _cmd_persona_chat_delete(args) -> int:
+    cfg = load_agent_runtime_config()
+    if not persona_assignment_store_enabled(cfg):
+        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
+    if not session_id:
+        data = {"ok": False, "error": "session_id is required"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    requested_persona = None
+    raw_persona = safe_assignment_text(getattr(args, "persona_id", None), limit=160)
+    if raw_persona:
+        try:
+            requested_persona = _normalize_cli_persona_or_template_id(raw_persona)
+        except Exception:
+            requested_persona = safe_assignment_token(raw_persona)
+    requested_instance = safe_assignment_token(getattr(args, "persona_instance_id", None))
+
+    deleted_session = False
+    session_db = _default_persona_session_db()
+    if session_db is not None:
+        try:
+            deleted_session = bool(session_db.delete_session(session_id, sessions_dir=get_hermes_home() / "sessions"))
+        except TypeError:
+            deleted_session = bool(session_db.delete_session(session_id))
+        except Exception as exc:
+            data = {
+                "ok": False,
+                "session_id": session_id,
+                "error": f"failed to delete persona chat session: {exc}",
+            }
+            print(emit_json(data) if args.json else data["error"])
+            return 2
+
+    instance_store = PersonaInstanceStore()
+    assignment_store = PersonaAssignmentStore()
+    cleared_bindings: list[str] = []
+    closed_assignment_ids: list[str] = []
+    for instance in instance_store.list_all():
+        if safe_assignment_text(getattr(instance, "session_id", None), limit=200) != session_id:
+            continue
+        if requested_instance and instance.id != requested_instance:
+            continue
+        if requested_persona and instance.persona_id != requested_persona:
+            continue
+
+        assignment_id = safe_assignment_token(getattr(instance, "current_assignment_id", None))
+        if assignment_id:
+            try:
+                assignment = assignment_store.get(assignment_id)
+                if (
+                    assignment.task_id is None
+                    and assignment.evidence_kind == "free_floating"
+                    and assignment.state not in {"completed", "blocked", "cancelled"}
+                ):
+                    closed = assignment_store.complete(
+                        assignment.id,
+                        state="cancelled",
+                        error=f"deleted persona chat session {session_id}",
+                    )
+                    closed_assignment_ids.append(closed.id)
+            except Exception:
+                pass
+
+        instance.session_id = None
+        instance.current_assignment_id = None
+        instance.active_worker_session_id = None
+        instance.active_run_id = None
+        if instance.mode in {"chat", "free_floating"}:
+            instance.mode = "configured"
+        instance_store.update(instance)
+        cleared_bindings.append(instance.id)
+
+    if not deleted_session and not cleared_bindings:
+        data = {
+            "ok": False,
+            "status": "not_found",
+            "session_id": session_id,
+            "deleted_session": False,
+            "cleared_bindings": [],
+            "error": f"persona chat session not found: {session_id}",
+            "next_expected": "refresh Harness snapshot; if the row is still visible, inspect SessionDB source and persona_instance.session_id",
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    try:
+        EventLog().append(
+            Event(
+                id=f"evt_{uuid.uuid4().hex[:12]}",
+                type="persona_chat.deleted",
+                persona_id=requested_persona or "persona",
+                task_id=None,
+                run_id=None,
+                ts=now(),
+                payload={
+                    "session_id": session_id,
+                    "deleted_session": deleted_session,
+                    "cleared_bindings": cleared_bindings,
+                    "closed_assignment_ids": closed_assignment_ids,
+                    "requested_by": safe_assignment_text(getattr(args, "requested_by", None), limit=120) or "cli",
+                },
+            )
+        )
+    except Exception:
+        pass
+
+    data = {
+        "ok": True,
+        "session_id": session_id,
+        "deleted_session": deleted_session,
+        "cleared_bindings": cleared_bindings,
+        "cleared_binding_count": len(cleared_bindings),
+        "closed_assignment_ids": closed_assignment_ids,
+        "next_expected": "refresh Harness snapshot; deleted persona chat should be absent and active bindings should be cleared",
+    }
+    print(emit_json(data) if args.json else f"deleted persona chat {session_id}")
     return 0
 
 

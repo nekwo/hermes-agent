@@ -829,16 +829,14 @@ class _FakeSessionDB:
     def list_sessions_rich(self, **kwargs):
         return list(self.sessions)
 
+    def get_session(self, session_id):
+        for session in self.sessions:
+            if session.get("id") == session_id:
+                return dict(session)
+        return None
+
     def get_messages(self, session_id):
         return list(self.messages.get(session_id, []))
-
-
-class _FakeEventLog:
-    def __init__(self, events):
-        self.events = events
-
-    def iter_all(self):
-        return iter(self.events)
 
 
 def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(isolate_agent_runtime_root):
@@ -891,7 +889,21 @@ def test_persona_chat_history_summary_empty_bound_chat_is_safe_placeholder(isola
 
     rows = persona_chat_history_summary(
         persona_instances=[instance],
-        session_db=_FakeSessionDB([]),
+        session_db=_FakeSessionDB(
+            [
+                {
+                    "id": "chat_empty_123",
+                    "source": "agent_runtime_persona_chat",
+                    "system_prompt": "Mission Control persona chat for dev",
+                    "title": None,
+                    "preview": None,
+                    "message_count": 0,
+                    "started_at": 100,
+                    "last_active": 100,
+                    "archived": 0,
+                }
+            ]
+        ),
     )
 
     assert rows[0]["session_id"] == "chat_empty_123"
@@ -900,50 +912,16 @@ def test_persona_chat_history_summary_empty_bound_chat_is_safe_placeholder(isola
     assert rows[0]["redaction_status"] == "safe"
 
 
-def test_persona_chat_history_recovers_empty_chats_from_opened_events(isolate_agent_runtime_root):
+def test_persona_chat_history_hides_bound_session_deleted_from_session_db(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
-    first = store.create_operator_chat(
-        persona_id="profile:reviewer",
-        display_name="Reviewer One",
-    )
-    second = store.create_operator_chat(
-        persona_id="profile:reviewer",
-        display_name="Reviewer Two",
-    )
+    instance = store.open_chat(persona_id="dev", session_id="deleted_chat_123")
 
     rows = persona_chat_history_summary(
-        persona_instances=store.list_all(),
+        persona_instances=[instance],
         session_db=_FakeSessionDB([]),
-        event_log=_FakeEventLog(
-            [
-                SimpleNamespace(
-                    type="persona_instance.chat_opened",
-                    ts="2026-06-24T10:00:00Z",
-                    persona_id="profile:reviewer",
-                    payload={
-                        "session_id": first.session_id,
-                        "persona_instance_id": first.id,
-                    },
-                ),
-                SimpleNamespace(
-                    type="persona_instance.chat_opened",
-                    ts="2026-06-24T10:01:00Z",
-                    persona_id="profile:reviewer",
-                    payload={
-                        "session_id": second.session_id,
-                        "persona_instance_id": second.id,
-                    },
-                ),
-            ]
-        ),
     )
 
-    by_session = {row["session_id"]: row for row in rows}
-    assert set(by_session) == {first.session_id, second.session_id}
-    assert by_session[first.session_id]["persona_id"] == "profile:reviewer"
-    assert by_session[first.session_id]["persona_instance_id"] == first.id
-    assert by_session[first.session_id]["last_message_preview"] == "No messages yet."
-    assert by_session[first.session_id]["redaction_status"] == "safe"
+    assert rows == []
 
 
 def test_persona_instance_update_profile_persists_runtime_overrides_only(isolate_agent_runtime_root):
@@ -1193,11 +1171,35 @@ class _TranscriptDB:
     def get_messages(self, session_id, include_inactive=False):
         return list(self.messages.get(session_id, []))
 
+    def get_session(self, session_id):
+        session = self.sessions.get(session_id)
+        if session is None:
+            return None
+        return {
+            "id": session_id,
+            "source": session.get("source"),
+            "system_prompt": session.get("system_prompt"),
+            "title": self.titles.get(session_id),
+            "preview": None,
+            "message_count": len(self.messages.get(session_id, [])),
+            "started_at": None,
+            "last_active": None,
+            "archived": 0,
+        }
+
     def get_session_title(self, session_id):
         return self.titles.get(session_id)
 
     def set_session_title(self, session_id, title):
         self.titles[session_id] = title
+
+    def delete_session(self, session_id, **kwargs):
+        if session_id not in self.sessions:
+            return False
+        del self.sessions[session_id]
+        self.messages.pop(session_id, None)
+        self.titles.pop(session_id, None)
+        return True
 
 
 def test_persona_instance_create_persists_empty_operator_chat_history(
@@ -1257,6 +1259,102 @@ def test_persona_instance_create_persists_empty_operator_chat_history(
     assert by_session[first_session_id]["redaction_status"] == "safe"
     assert by_session[second_session_id]["last_message_preview"] == "No messages yet."
     assert by_session[second_session_id]["redaction_status"] == "safe"
+
+
+def test_persona_chat_delete_removes_session_and_clears_binding(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    store = PersonaInstanceStore()
+    instance = store.create_operator_chat(
+        persona_id="profile:reviewer",
+        display_name="Reviewer",
+    )
+    db.create_session(instance.session_id, "agent_runtime_persona_chat")
+    db.append_message(instance.session_id, "user", "delete this")
+
+    code = harness._cmd_persona_chat_delete(
+        SimpleNamespace(
+            session_id=instance.session_id,
+            persona_id=instance.persona_id,
+            persona_instance_id=instance.id,
+            requested_by="test",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["deleted_session"] is True
+    assert payload["cleared_bindings"] == [instance.id]
+    assert instance.session_id not in db.sessions
+    updated = PersonaInstanceStore().get(instance.id)
+    assert updated.session_id is None
+    assert updated.mode == "configured"
+    assert persona_chat_history_summary(persona_instances=[updated], session_db=db) == []
+
+
+def test_persona_chat_delete_clears_stale_binding_when_session_already_missing(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    store = PersonaInstanceStore()
+    instance = store.open_chat(persona_id="dev", session_id="deleted_chat_123")
+
+    code = harness._cmd_persona_chat_delete(
+        SimpleNamespace(
+            session_id="deleted_chat_123",
+            persona_id="dev",
+            persona_instance_id=instance.id,
+            requested_by="test",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["deleted_session"] is False
+    assert payload["cleared_bindings"] == [instance.id]
+    assert PersonaInstanceStore().get(instance.id).session_id is None
+
+
+def test_persona_chat_delete_reports_missing_without_silent_success(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: _TranscriptDB())
+
+    code = harness._cmd_persona_chat_delete(
+        SimpleNamespace(
+            session_id="missing_chat_123",
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            requested_by="test",
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["status"] == "not_found"
+    assert payload["error"] == "persona chat session not found: missing_chat_123"
 
 
 def test_free_floating_chat_session_binding_reuses_resume_and_opens_fresh_chat(monkeypatch, isolate_agent_runtime_root):
