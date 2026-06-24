@@ -1021,5 +1021,3 @@ class IncidentStore:
 
     def list_all(self) -> list[Incident]:
         return _list_models(Incident, paths.incidents_dir())
-
-

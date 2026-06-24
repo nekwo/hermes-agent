@@ -17,6 +17,17 @@ from .states import RunState, WorkerSessionState
 
 TERMINAL_ASSIGNMENT_STATES = frozenset({"completed", "blocked", "cancelled"})
 ACTIVE_ASSIGNMENT_STATES = frozenset({"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"})
+ACTIVE_PERSONA_WORKER_STATES = frozenset(
+    {
+        WorkerSessionState.ASSIGNED,
+        WorkerSessionState.RUNNING,
+        WorkerSessionState.WAITING_ON_TOOL,
+        WorkerSessionState.WAITING_ON_PROOF,
+        WorkerSessionState.SELF_HEALING,
+        WorkerSessionState.WAITING_ON_HUMAN,
+        WorkerSessionState.POSSESSED,
+    }
+)
 LIVE_RUN_STATES = frozenset(
     {
         RunState.QUEUED,
@@ -309,7 +320,7 @@ class PersonaInstanceStore:
         instance.current_assignment_id = worker.current_assignment_id
         instance.current_task_id = worker.task_id
         instance.goal_id = instance.goal_id or worker.task_id
-        instance.active_worker_session_id = worker.id
+        instance.active_worker_session_id = worker.id if worker.state in ACTIVE_PERSONA_WORKER_STATES else None
         instance.active_run_id = worker.active_run_id
         instance.session_id = worker.session_id
         instance.context_receipt_id = worker.context_receipt_id
