@@ -26,6 +26,7 @@ def persona_chat_history_summary(
     *,
     persona_instances: Iterable[PersonaInstance],
     session_db: Any | None = None,
+    event_log: Any | None = None,
     limit: int = 50,
     message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
 ) -> list[dict[str, Any]]:
@@ -39,9 +40,13 @@ def persona_chat_history_summary(
     """
 
     bound_by_session: dict[str, PersonaInstance] = {}
+    instances_by_id: dict[str, PersonaInstance] = {}
     instances_by_persona: dict[str, PersonaInstance] = {}
     for instance in persona_instances:
-        persona_id = safe_assignment_token(getattr(instance, "persona_id", None))
+        instance_id = safe_assignment_text(getattr(instance, "id", None), limit=160)
+        if instance_id:
+            instances_by_id[instance_id] = instance
+        persona_id = _canonical_persona_id(getattr(instance, "persona_id", None))
         if persona_id:
             instances_by_persona[persona_id] = instance
         mode = safe_assignment_token(getattr(instance, "mode", None))
@@ -69,7 +74,8 @@ def persona_chat_history_summary(
     )
 
     try:
-        sessions = list(source_sessions) + list(broad_sessions)
+        event_sessions = _list_chat_opened_event_sessions(event_log, limit=max(limit * 4, 1))
+        sessions = list(source_sessions) + list(broad_sessions) + list(event_sessions)
     except Exception:
         sessions = list(broad_sessions)
 
@@ -83,7 +89,8 @@ def persona_chat_history_summary(
             continue
         is_source_chat = safe_assignment_token(raw.get("source")) == PERSONA_CHAT_SESSION_SOURCE
         inferred_persona = _infer_persona_id(raw, session_id=session_id)
-        instance = bound_by_session.get(session_id) or (
+        raw_instance_id = safe_assignment_text(raw.get("persona_instance_id"), limit=160)
+        instance = bound_by_session.get(session_id) or instances_by_id.get(raw_instance_id) or (
             instances_by_persona.get(inferred_persona) if is_source_chat and inferred_persona else None
         )
         if instance is None:
@@ -209,11 +216,71 @@ def _list_sessions(
         return []
 
 
+def _list_chat_opened_event_sessions(event_log: Any | None, *, limit: int) -> list[dict[str, Any]]:
+    log = event_log or _default_event_log()
+    if log is None:
+        return []
+    try:
+        events = list(log.iter_all())
+    except Exception:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for evt in reversed(events):
+        if safe_assignment_text(getattr(evt, "type", None), limit=120) != "persona_instance.chat_opened":
+            continue
+        payload = getattr(evt, "payload", None)
+        if not isinstance(payload, dict):
+            payload = {}
+        session_id = safe_assignment_text(payload.get("session_id"), limit=200)
+        if not session_id or session_id in seen:
+            continue
+        persona_id = _canonical_persona_id(getattr(evt, "persona_id", None)) or _infer_persona_id(
+            {}, session_id=session_id
+        )
+        instance_id = safe_assignment_text(payload.get("persona_instance_id"), limit=160)
+        rows.append(
+            {
+                "id": session_id,
+                "source": PERSONA_CHAT_SESSION_SOURCE,
+                "system_prompt": f"Mission Control persona chat for {persona_id or 'persona'}",
+                "persona_instance_id": instance_id,
+                "title": None,
+                "preview": None,
+                "message_count": 0,
+                "started_at": _event_timestamp(getattr(evt, "ts", None)),
+                "last_active": _event_timestamp(getattr(evt, "ts", None)),
+                "archived": 0,
+            }
+        )
+        seen.add(session_id)
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _event_timestamp(value: Any) -> Any:
+    try:
+        return value.isoformat().replace("+00:00", "Z")
+    except Exception:
+        return value
+
+
 def _default_session_db() -> Any | None:
     try:
         from hermes_state import SessionDB
 
         return SessionDB()
+    except Exception:
+        return None
+
+
+def _default_event_log() -> Any | None:
+    try:
+        from .events import EventLog
+
+        return EventLog()
     except Exception:
         return None
 
@@ -226,12 +293,15 @@ def _history_row(
     session_db: Any | None = None,
     message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
 ) -> dict[str, Any]:
-    persona_id = safe_assignment_token(getattr(instance, "persona_id", None)) or "unknown"
+    persona_id = _canonical_persona_id(getattr(instance, "persona_id", None)) or "unknown"
     raw_title = safe_assignment_text(raw.get("title"), limit=120)
     title_fallback = "Untitled persona chat" if raw_title else _fallback_title(raw, persona_id=persona_id)
     title, title_status = _safe_display_text(raw.get("title"), fallback=title_fallback, limit=120)
     preview, preview_status = _safe_display_text(
-        raw.get("preview"), fallback="Preview hidden by redaction boundary", limit=180
+        raw.get("preview"),
+        fallback="No messages yet.",
+        redacted_fallback="Preview hidden by redaction boundary",
+        limit=180,
     )
     messages, messages_status = _safe_recent_messages(session_db, session_id=session_id, limit=message_tail)
     redaction_status = (
@@ -273,7 +343,7 @@ def _infer_persona_id(raw: dict[str, Any], *, session_id: str) -> str | None:
     system_prompt = safe_assignment_text(raw.get("system_prompt"), limit=240)
     marker = "Mission Control persona chat for "
     if marker in system_prompt:
-        return safe_assignment_token(system_prompt.split(marker, 1)[1])
+        return _canonical_persona_id(system_prompt.split(marker, 1)[1])
     prefix = "persona_chat_personainst_"
     if session_id.startswith(prefix):
         return _persona_token_from_chat_session_tail(session_id[len(prefix) :])
@@ -293,7 +363,20 @@ def _persona_token_from_chat_session_tail(value: str) -> str | None:
     parts = token.rsplit("_", 1)
     if len(parts) == 2 and len(parts[1]) == 12 and all(ch in "0123456789abcdef" for ch in parts[1].lower()):
         token = parts[0]
-    return safe_assignment_token(token)
+    return _canonical_persona_id(token)
+
+
+def _canonical_persona_id(value: Any) -> str | None:
+    raw = safe_assignment_text(value, limit=160)
+    if not raw:
+        return None
+    if raw.lower().startswith("profile:"):
+        profile = safe_assignment_token(raw.split(":", 1)[1])
+        return f"profile:{profile}" if profile else None
+    token = safe_assignment_token(raw)
+    if token.startswith("profile_") and len(token) > len("profile_"):
+        return f"profile:{token[len('profile_'):]}"
+    return token or None
 
 
 def _fallback_title(raw: dict[str, Any], *, persona_id: str) -> str:
@@ -496,15 +579,6 @@ def _trace_fetch_limit(tail: int, member_count: int) -> int:
     return min(max(tail * agents * _TRACE_FETCH_HEADROOM, tail), _TRACE_FETCH_CEILING)
 
 
-def _default_event_log() -> Any | None:
-    try:
-        from .events import EventLog
-
-        return EventLog()
-    except Exception:
-        return None
-
-
 # Markers that identify the agent's internal scaffolding (never operator-facing).
 _INTERNAL_SCAFFOLDING_MARKERS = (
     "# Agent Runtime Tick Context",
@@ -574,12 +648,18 @@ def _safe_message_role(value: Any) -> str | None:
     return None
 
 
-def _safe_display_text(value: Any, *, fallback: str, limit: int) -> tuple[str, str]:
+def _safe_display_text(
+    value: Any,
+    *,
+    fallback: str,
+    limit: int,
+    redacted_fallback: str | None = None,
+) -> tuple[str, str]:
     text = safe_assignment_text(value, limit=limit)
     if not text:
-        return fallback, "redacted" if "redaction" in fallback.lower() else "safe"
+        return fallback, "safe"
     if _SECRET_RE.search(text):
-        return fallback, "redacted"
+        return redacted_fallback or fallback, "redacted"
     return text, "safe"
 
 
