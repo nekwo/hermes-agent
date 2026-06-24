@@ -1035,6 +1035,12 @@ def _cmd_persona_instance_create(args) -> int:
             data = _chat_busy_payload(exc)
             print(emit_json(data) if args.json else data["error"])
             return 2
+        _ensure_persona_chat_session(
+            session_db=_default_persona_session_db(),
+            session_id=instance.session_id,
+            persona_id=instance.persona_id,
+            title=f"{instance.display_name} chat",
+        )
         data = {
             "ok": True,
             "agent_profile_id": instance.id,
@@ -1600,6 +1606,44 @@ def _default_persona_session_db():
         return None
 
 
+def _ensure_persona_chat_session(
+    *,
+    session_db,
+    session_id: str | None,
+    persona_id: str | None,
+    title: str | None = None,
+) -> None:
+    if session_db is None or not session_id:
+        return
+    try:
+        normalized_persona = _normalize_cli_persona_or_template_id(persona_id or "persona")
+    except Exception:
+        normalized_persona = safe_assignment_token(persona_id) or "persona"
+    try:
+        session_db.create_session(
+            session_id=session_id,
+            source=PERSONA_CHAT_SESSION_SOURCE,
+            model=None,
+            system_prompt=f"Mission Control persona chat for {normalized_persona}",
+        )
+    except Exception:
+        pass
+
+    safe_title = safe_assignment_text(title, limit=120)
+    if not safe_title:
+        return
+    try:
+        existing_title = session_db.get_session_title(session_id)
+    except Exception:
+        existing_title = None
+    if existing_title:
+        return
+    try:
+        session_db.set_session_title(session_id, safe_title)
+    except Exception:
+        pass
+
+
 def _persona_chat_session_id(persona_instance_id: str) -> str:
     return persona_chat_session_id_for(persona_instance_id)
 
@@ -1645,15 +1689,11 @@ def _bind_free_floating_chat_session(
     instance.current_assignment_id = assignment_id
     instance_store.update(instance)
     if session_db is not None:
-        try:
-            session_db.create_session(
-                session_id=session_id,
-                source=PERSONA_CHAT_SESSION_SOURCE,
-                model=None,
-                system_prompt=f"Mission Control persona chat for {normalized_persona}",
-            )
-        except Exception:
-            pass
+        _ensure_persona_chat_session(
+            session_db=session_db,
+            session_id=session_id,
+            persona_id=normalized_persona,
+        )
     return session_id
 
 

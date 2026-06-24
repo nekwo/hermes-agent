@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -832,6 +833,14 @@ class _FakeSessionDB:
         return list(self.messages.get(session_id, []))
 
 
+class _FakeEventLog:
+    def __init__(self, events):
+        self.events = events
+
+    def iter_all(self):
+        return iter(self.events)
+
+
 def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     instance = store.open_chat(persona_id="dev", session_id="chat_old_123")
@@ -874,6 +883,67 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
             "messages": [],
         }
     ]
+
+
+def test_persona_chat_history_summary_empty_bound_chat_is_safe_placeholder(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    instance = store.open_chat(persona_id="dev", session_id="chat_empty_123")
+
+    rows = persona_chat_history_summary(
+        persona_instances=[instance],
+        session_db=_FakeSessionDB([]),
+    )
+
+    assert rows[0]["session_id"] == "chat_empty_123"
+    assert rows[0]["last_message_preview"] == "No messages yet."
+    assert rows[0]["message_count"] == 0
+    assert rows[0]["redaction_status"] == "safe"
+
+
+def test_persona_chat_history_recovers_empty_chats_from_opened_events(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    first = store.create_operator_chat(
+        persona_id="profile:reviewer",
+        display_name="Reviewer One",
+    )
+    second = store.create_operator_chat(
+        persona_id="profile:reviewer",
+        display_name="Reviewer Two",
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=store.list_all(),
+        session_db=_FakeSessionDB([]),
+        event_log=_FakeEventLog(
+            [
+                SimpleNamespace(
+                    type="persona_instance.chat_opened",
+                    ts="2026-06-24T10:00:00Z",
+                    persona_id="profile:reviewer",
+                    payload={
+                        "session_id": first.session_id,
+                        "persona_instance_id": first.id,
+                    },
+                ),
+                SimpleNamespace(
+                    type="persona_instance.chat_opened",
+                    ts="2026-06-24T10:01:00Z",
+                    persona_id="profile:reviewer",
+                    payload={
+                        "session_id": second.session_id,
+                        "persona_instance_id": second.id,
+                    },
+                ),
+            ]
+        ),
+    )
+
+    by_session = {row["session_id"]: row for row in rows}
+    assert set(by_session) == {first.session_id, second.session_id}
+    assert by_session[first.session_id]["persona_id"] == "profile:reviewer"
+    assert by_session[first.session_id]["persona_instance_id"] == first.id
+    assert by_session[first.session_id]["last_message_preview"] == "No messages yet."
+    assert by_session[first.session_id]["redaction_status"] == "safe"
 
 
 def test_persona_instance_update_profile_persists_runtime_overrides_only(isolate_agent_runtime_root):
@@ -1089,6 +1159,31 @@ class _TranscriptDB:
         self.messages.setdefault(session_id, [])
         return session_id
 
+    def list_sessions_rich(self, **kwargs):
+        source = kwargs.get("source")
+        exclude_sources = set(kwargs.get("exclude_sources") or [])
+        rows = []
+        for session_id, session in self.sessions.items():
+            row_source = session.get("source")
+            if source and row_source != source:
+                continue
+            if row_source in exclude_sources:
+                continue
+            rows.append(
+                {
+                    "id": session_id,
+                    "source": row_source,
+                    "system_prompt": session.get("system_prompt"),
+                    "title": self.titles.get(session_id),
+                    "preview": None,
+                    "message_count": len(self.messages.get(session_id, [])),
+                    "started_at": None,
+                    "last_active": None,
+                    "archived": 0,
+                }
+            )
+        return rows
+
     def append_message(self, session_id, role, content=None, **kwargs):
         self.messages.setdefault(session_id, []).append(
             {"role": role, "content": content, **kwargs}
@@ -1103,6 +1198,65 @@ class _TranscriptDB:
 
     def set_session_title(self, session_id, title):
         self.titles[session_id] = title
+
+
+def test_persona_instance_create_persists_empty_operator_chat_history(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    def _args(display_name: str):
+        return SimpleNamespace(
+            persona_id="profile:reviewer",
+            display_name=display_name,
+            title=f"{display_name} chat",
+            message="New operator chat opened. Wait for operator input.",
+            requested_by="test",
+            json=True,
+            auto_run=False,
+            max_actions=1,
+            max_seconds=240,
+            client_message_id=None,
+            session_id=None,
+            stream=False,
+            kill_active=False,
+            add_instance=False,
+            placement_id=None,
+        )
+
+    assert harness._cmd_persona_instance_create(_args("Reviewer One")) == 0
+    first_session_id = PersonaInstanceStore().get(
+        persona_instance_id_for("profile:reviewer")
+    ).session_id
+    assert harness._cmd_persona_instance_create(_args("Reviewer Two")) == 0
+    second_session_id = PersonaInstanceStore().get(
+        persona_instance_id_for("profile:reviewer")
+    ).session_id
+    capsys.readouterr()
+
+    assert first_session_id != second_session_id
+    assert sorted(db.sessions) == sorted([first_session_id, second_session_id])
+
+    rows = persona_chat_history_summary(
+        persona_instances=PersonaInstanceStore().list_all(),
+        session_db=db,
+    )
+    by_session = {row["session_id"]: row for row in rows}
+
+    assert set(by_session) == {first_session_id, second_session_id}
+    assert by_session[first_session_id]["persona_id"] == "profile:reviewer"
+    assert by_session[first_session_id]["persona_instance_id"] == persona_instance_id_for(
+        "profile:reviewer"
+    )
+    assert by_session[first_session_id]["last_message_preview"] == "No messages yet."
+    assert by_session[first_session_id]["redaction_status"] == "safe"
+    assert by_session[second_session_id]["last_message_preview"] == "No messages yet."
+    assert by_session[second_session_id]["redaction_status"] == "safe"
 
 
 def test_free_floating_chat_session_binding_reuses_resume_and_opens_fresh_chat(monkeypatch, isolate_agent_runtime_root):
