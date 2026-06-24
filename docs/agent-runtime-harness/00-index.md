@@ -97,6 +97,7 @@ This plan was written after auditing the local Hermes checkout at the repository
 74. [Open Persona Runtime Blueprint Graph](74-open-persona-runtime-blueprint-graph.md)
 75. [Persona Library and Console Interactibility](75-persona-library-and-console-interactibility.md) — audit-backed execution path for Stage 74: ship the `available_personas` contract gap + console/label/glow asks first, plus a Mission Office UI remaster (dock layout, agent cards, library shelf); defer the graph editor and taskless runtime loops
 76. [Unified Template / Instance / Chat / Goal Model](76-unified-template-instance-chat-goal-model.md) — the locked entity architecture (2026-06-22): Template → durable Level Instance (placement) → swappable Chat → Goal/Task owned by the chat; goals scale as Neko operator chats (N goals = N chats); tasks are an advisory HUD, proof is conductor-read escalation not a per-task crash gate. Supersedes Stage 74's object model and the mid-75 "instance↔chat 1:1" note
+77. [Consolidated Agent Graph: one node = one agent](77-consolidated-agent-graph-node-model.md) — collapse the persona pipeline (WHO) and the blueprint stage graph (WHAT) into ONE graph; a node IS an agent (details panel = persona + goal template + output→sub-agent it steers); retire the standalone persona pipeline. ONE node type for now — every new node type must clear the Node Charter. Double-click-to-expand-into-subgraph deferred
 
 ## MVP success criteria
 
