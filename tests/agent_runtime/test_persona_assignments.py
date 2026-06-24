@@ -166,6 +166,30 @@ def test_persona_instance_derivation_clears_stale_worker_projection(isolate_agen
     assert instance.session_id is None
 
 
+def test_persona_instance_derivation_does_not_mark_idle_worker_active(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    workers = WorkerSessionStore()
+    runs = RunStore()
+    worker = workers.open(
+        task_id="task_1",
+        persona=_persona("dev"),
+        stage_id="stage_1",
+        assignment_id="assign_1",
+    )
+    run = runs.open_run("dev", "task_1", "stage_1", session_id="session_safe")
+    worker = workers.assign_run(worker.id, run)
+    run = runs.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "done", "summary": "done"})
+    workers.update_after_run(worker.id, run, close_reason="tick_completed")
+
+    instances = store.derive_from_workers([_persona("dev")], workers.list_all())
+
+    instance = instances[0]
+    assert instance.state == WorkerSessionState.IDLE
+    assert instance.current_task_id == "task_1"
+    assert instance.active_worker_session_id is None
+    assert instance.active_run_id is None
+
+
 def test_create_free_floating_instance_reuses_canonical_idle_placement(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     first = store.create_free_floating("profile:reviewer")
