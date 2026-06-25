@@ -32,6 +32,7 @@ from .persona_assignments import (
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, persona_chat_history_summary, persona_chat_trace_summary
 from .personas import blocked_tool_names, effective_toolsets
+from .prompt_observability import snapshot_prompt_observability
 from .profile_readiness import profile_readiness_for_persona
 from .proof_gates import task_verdict_proof_satisfied
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_summary, simplified_phase_for_task
@@ -126,6 +127,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         persona_instances = instance_store.derive_from_workers(agents, workers)
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
+    session_db = _default_persona_session_db()
     data = {
         "schema_version": 1,
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
@@ -151,6 +153,11 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         "runtime_config": effective_config_summary(cfg),
         "migration": migration_status(),
         "capabilities": capability_descriptors(),
+        "prompt_observability": snapshot_prompt_observability(
+            personas=agents,
+            persona_instances=persona_instances,
+            session_db=session_db,
+        ),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=cfg.execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
         "tasks": [
@@ -203,6 +210,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         ]
         data["persona_chat_history"] = persona_chat_history_summary(
             persona_instances=persona_instances,
+            session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
         )
         data["persona_chat_trace"] = persona_chat_trace_summary(
@@ -223,6 +231,15 @@ def write_snapshot(snapshot: dict | None = None) -> dict:
     snapshot = snapshot or build_snapshot()
     atomic_json_write(paths.snapshot_path(), to_jsonable(snapshot), indent=2, sort_keys=True)
     return snapshot
+
+
+def _default_persona_session_db():
+    try:
+        from hermes_state import SessionDB
+
+        return SessionDB()
+    except Exception:
+        return None
 
 
 def _archived_task_summaries(limit: int = 25) -> list[dict]:

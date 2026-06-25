@@ -120,6 +120,41 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
     ]
 
 
+def test_runner_attaches_redaction_safe_model_input(monkeypatch):
+    monkeypatch.setattr(
+        "agent_runtime.profile_runner.resolve_runtime_provider",
+        lambda requested, target_model: {
+            "provider": requested,
+            "model": target_model,
+            "api_mode": "codex_responses",
+        },
+    )
+
+    class PromptAgent(FakeAgent):
+        def _build_system_prompt(self, system_message=None):
+            return f"core prompt\napi_key: should-not-leak\n{system_message or ''}"
+
+    result = ProfileAgentRunner(agent_factory=PromptAgent).run(
+        AgentRunRequest(
+            profile=None,
+            provider="openai-codex",
+            model="gpt-5.5",
+            user_message="hello",
+            system_message="surface",
+        )
+    )
+
+    model_input = result.raw["model_input_observability"]
+    assert model_input["skip_context_files"] is True
+    assert model_input["skip_memory"] is True
+    assert model_input["message_count"] == 2
+    assert model_input["messages"][0]["role"] == "system"
+    assert "api_key=<redacted>" in model_input["messages"][0]["content"]
+    assert "should-not-leak" not in model_input["messages"][0]["content"]
+    assert model_input["messages"][1]["role"] == "user"
+    assert model_input["messages"][1]["content"] == "hello"
+
+
 def test_runner_forwards_stream_callback_to_agent():
     captured = {}
 

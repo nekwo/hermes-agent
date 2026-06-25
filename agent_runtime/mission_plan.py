@@ -216,7 +216,7 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
 
 def _default_plan_should_yield_to_handoff(plan: MissionPlan, payload: dict[str, Any]) -> bool:
     return (
-        plan.blueprint_id == "neko_dev_qa_basic"
+        plan.blueprint_id in {"neko_dev_qa_basic", "neko_two_dev_default"}
         and isinstance(payload.get("handoff_packet"), dict)
         and bool(payload["handoff_packet"])
     )

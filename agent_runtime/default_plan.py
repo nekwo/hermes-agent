@@ -10,16 +10,16 @@ from .models import MissionIntent, MissionPlan, MissionPlanStage, Task
 from .states import StageStatus
 
 
-DEFAULT_TASK_BLUEPRINT_ID = "neko_dev_qa_basic"
+DEFAULT_TASK_BLUEPRINT_ID = "neko_two_dev_default"
 DEFAULT_TASK_BLUEPRINT_BINDINGS = {
     "lead": "persona:neko_supervisor",
+    "backend_builder": "persona:backend_dev",
     "builder": "persona:dev",
-    "verifier": "persona:qa",
 }
 _DEFAULT_SLOT_ALIASES = {
     "lead": "neko_supervisor",
+    "backend_builder": "backend_dev",
     "builder": "dev",
-    "verifier": "qa",
 }
 
 
@@ -71,14 +71,14 @@ def _alias_default_slots_to_personas(plan: MissionPlan) -> None:
         stage.owner_slot = owner
     plan.slots = {
         "neko_supervisor": {"role": "neko", "required": True, "description": "Mission lead that clarifies scope and routes recovery."},
+        "backend_dev": {"role": "backend_dev", "required": True, "description": "Backend implementation specialist."},
         "dev": {"role": "builder", "required": True, "description": "Agent that implements the scoped work."},
-        "qa": {"role": "verifier", "required": True, "description": "Agent that verifies implementation and proof."},
     }
-    plan.bindings = {"neko_supervisor": "neko_supervisor", "dev": "dev", "qa": "qa"}
+    plan.bindings = {"neko_supervisor": "neko_supervisor", "backend_dev": "backend_dev", "dev": "dev"}
     plan.binding_sources = {
         "neko_supervisor": "persona:neko_supervisor",
+        "backend_dev": "persona:backend_dev",
         "dev": "persona:dev",
-        "qa": "persona:qa",
     }
 
 

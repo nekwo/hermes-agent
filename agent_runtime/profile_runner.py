@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from contextlib import contextmanager
+import hashlib
 import os
 from pathlib import Path
 from threading import Event, RLock, Timer
@@ -203,6 +204,7 @@ class ProfileAgentRunner:
                 if request.stream_callback is not None:
                     conversation_kwargs["stream_callback"] = request.stream_callback
                 raw_result = agent.run_conversation(**conversation_kwargs)
+                _attach_model_input_observability(raw_result, agent=agent, request=request)
                 timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started)
                 if budget_guard.tripped_reason:
                     raise RunBudgetExceeded(budget_guard.tripped_reason, session_id=getattr(agent, "session_id", None))
@@ -242,6 +244,7 @@ class ProfileAgentRunner:
                 if request.stream_callback is not None:
                     conversation_kwargs["stream_callback"] = request.stream_callback
                 raw_result = agent.run_conversation(**conversation_kwargs)
+                _attach_model_input_observability(raw_result, agent=agent, request=request)
                 timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started)
             except BaseException:
                 timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started, status="failed")
@@ -866,6 +869,72 @@ def _looks_sensitive_or_pathish(value: str) -> bool:
     if re.search(r"(^|\s)([A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", value):
         return True
     return False
+
+
+def _attach_model_input_observability(raw_result: Any, *, agent, request: AgentRunRequest) -> None:
+    if not isinstance(raw_result, dict):
+        return
+    raw_result.setdefault("model_input_observability", _model_input_observability(agent=agent, request=request))
+
+
+def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, Any]:
+    system_prompt = getattr(agent, "_cached_system_prompt", None)
+    if not system_prompt and hasattr(agent, "_build_system_prompt"):
+        try:
+            system_prompt = agent._build_system_prompt(request.system_message)
+        except Exception:
+            system_prompt = request.system_message or ""
+    messages: list[dict[str, Any]] = []
+    if system_prompt:
+        messages.append(_message_preview("system", str(system_prompt), source="hermes_system_prompt"))
+    messages.append(_message_preview("user", request.user_message, source="mission_chat_user_message"))
+    return {
+        "schema_version": 1,
+        "kind": "redaction_safe_final_model_input",
+        "platform": request.platform,
+        "profile": request.profile,
+        "session_id": request.session_id,
+        "task_id": request.task_id,
+        "skip_context_files": bool(request.skip_context_files),
+        "skip_memory": bool(request.skip_memory),
+        "system_message_supplied": request.system_message is not None,
+        "message_count": len(messages),
+        "messages": messages,
+    }
+
+
+def _message_preview(role: str, content: str, *, source: str) -> dict[str, Any]:
+    raw = str(content or "")
+    safe = _redact_prompt_text(raw)
+    encoded = safe.encode("utf-8", errors="replace")
+    limit = 60000
+    preview = safe
+    truncated = False
+    if len(encoded) > limit:
+        preview = encoded[:limit].decode("utf-8", errors="ignore")
+        truncated = True
+    return {
+        "role": role,
+        "source": source,
+        "content": preview,
+        "truncated": truncated,
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest().upper(),
+    }
+
+
+_PROMPT_SECRET_PATTERNS = [
+    re.compile(r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|bearer|password|secret)\s*[:=]\s*([^\s,;]+)"),
+    re.compile(r"(?i)\b(sk-[A-Za-z0-9_-]{12,})\b"),
+    re.compile(r"(?i)\b(xox[baprs]-[A-Za-z0-9-]{12,})\b"),
+]
+
+
+def _redact_prompt_text(value: str) -> str:
+    text = value
+    for pattern in _PROMPT_SECRET_PATTERNS:
+        text = pattern.sub(lambda match: f"{match.group(1)}=<redacted>" if match.lastindex and match.lastindex >= 2 else "<redacted>", text)
+    return text
 
 
 def _normalize_result(result: Any, *, agent) -> AgentRunResult:

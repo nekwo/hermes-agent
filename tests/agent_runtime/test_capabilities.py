@@ -16,11 +16,12 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert envelope["schema_version"] == 1
     assert envelope["write_boundary"] == "hermes harness --json"
     assert len(ids) == len(set(ids))
-    assert "persona.instance.message" in ids
+    assert "mission.chat.message" in ids
     assert "persona.profile.instantiate" in ids
     assert "persona.instance.create" in ids
     assert "persona.instance.open_chat" in ids
-    assert "persona.instance.run_once" in ids
+    assert "persona.instance.message" not in ids
+    assert "persona.instance.run_once" not in ids
     assert "persona.profile.create" in ids
     assert "persona.profile.promote" in ids
     assert "task.run_until_settled" in ids
@@ -44,7 +45,8 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert by_id["persona.instance.create"]["danger"] == "warning"
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["coordinator_spawns_used"]["minimum"] == 0
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["coordinator_may_kill_own"]["type"] == "boolean"
-    assert "session_id" in by_id["persona.instance.message"]["allowed_args"]
+    assert "session_id" in by_id["mission.chat.message"]["allowed_args"]
+    assert by_id["mission.chat.message"]["default_args"]["surface_prompt"] == ""
     assert {"add_instance", "placement_id", "kill_active"}.issubset(
         set(by_id["persona.instance.open_chat"]["allowed_args"])
     )
@@ -56,8 +58,7 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     )
     for capability_id in (
         "persona.message_task",
-        "persona.instance.message",
-        "persona.instance.run_once",
+        "mission.chat.message",
         "persona.diagnose",
     ):
         assert "attachments" in by_id[capability_id].get("allowed_args", [])
@@ -89,7 +90,8 @@ def test_snapshot_emits_callable_capability_descriptors(isolate_agent_runtime_ro
 
     assert snap["capabilities"]["schema_version"] == 1
     assert capability_ids().issubset(ids)
-    assert "persona.instance.message" in ids
+    assert "mission.chat.message" in ids
+    assert "persona.instance.message" not in ids
     assert "daemon.start" in ids
 
 

@@ -93,6 +93,10 @@ def context_dir() -> Path:
     return store_root() / "context"
 
 
+def prompt_observability_dir() -> Path:
+    return store_root() / "prompt_observability"
+
+
 def proof_sandbox_root() -> Path:
     return store_root() / "proof_sandbox"
 

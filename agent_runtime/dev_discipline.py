@@ -65,7 +65,9 @@ def needs_supervisor_slicing(task: Task) -> bool:
     """
 
     plan = getattr(task, "mission_plan", None)
-    if task_stage_records(task) and not (plan and getattr(plan, "blueprint_id", None) == "neko_dev_qa_basic"):
+    if task_stage_records(task) and not (
+        plan and getattr(plan, "blueprint_id", None) in {"neko_dev_qa_basic", "neko_two_dev_default"}
+    ):
         return False
     repos = [str(repo).strip().lower() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()]
     text = " ".join(

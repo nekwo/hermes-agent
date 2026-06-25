@@ -35,7 +35,7 @@ def _persona(autonomy: str = "autonomous") -> AgentPersona:
 
 
 def test_steer_verbs_run_without_permission_scope():
-    auth = authorize_coordinator_action("persona.instance.message", None, actor="neko_supervisor", coordinator_id="neko_supervisor")
+    auth = authorize_coordinator_action("mission.chat.message", None, actor="neko_supervisor", coordinator_id="neko_supervisor")
 
     assert auth.ok is True
     assert auth.needs_operator_confirm is False

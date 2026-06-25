@@ -54,6 +54,7 @@ from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, 
 from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
+from agent_runtime.prompt_observability import mission_chat_prompt_observability, persist_prompt_observability_context
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_stage46_skills, install_stage46_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
@@ -100,7 +101,7 @@ def build_parser(parent_subparsers) -> None:
     goal_run.add_argument("--affected-repo", action="append", default=[])
     goal_run.add_argument("--acceptance", action="append", default=[])
     goal_run.add_argument("--non-goal", action="append", default=[])
-    goal_run.add_argument("--blueprint", default="neko_dev_qa_basic", help="Blueprint id for graph-routed goal creation")
+    goal_run.add_argument("--blueprint", default="neko_two_dev_default", help="Blueprint id for graph-routed goal creation")
     goal_run.add_argument("--bind", action="append", default=[], help="Bind a blueprint slot, e.g. builder=persona:dev")
     goal_run.add_argument("--json", action="store_true")
     goal_run.set_defaults(func=_cmd_goal_run)
@@ -435,6 +436,25 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_update)
     persona_instance_update.add_argument("--json", action="store_true")
     persona_instance_update.set_defaults(func=_cmd_persona_instance_update_profile)
+
+    mission_chat = subs.add_parser("mission-chat", help="Canonical Mission Control chat path")
+    mission_chat_subs = mission_chat.add_subparsers(dest="mission_chat_command")
+    mission_chat_message = mission_chat_subs.add_parser("message", help="Send one Mission Control chat turn through the normal Hermes profile context")
+    mission_chat_message.add_argument("--persona", dest="persona_id", required=True)
+    mission_chat_message.add_argument("--persona-instance-id", default=None)
+    mission_chat_message.add_argument("--session-id", default=None)
+    mission_chat_message.add_argument("--task", dest="task_id", default=None)
+    mission_chat_message.add_argument("--goal", dest="goal_id", default=None)
+    mission_chat_message.add_argument("--title", default="Operator message")
+    mission_chat_message.add_argument("--message", required=True)
+    mission_chat_message.add_argument("--surface-prompt", default="")
+    mission_chat_message.add_argument("--intent-hint", default="chat")
+    mission_chat_message.add_argument("--requested-by", default="cli")
+    mission_chat_message.add_argument("--client-message-id", default=None)
+    mission_chat_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
+    mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
+    mission_chat_message.add_argument("--json", action="store_true")
+    mission_chat_message.set_defaults(func=_cmd_mission_chat_message)
 
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")
@@ -1378,6 +1398,191 @@ def _cmd_persona_instance_message(args) -> int:
         session_id=getattr(args, "session_id", None),
         stream=getattr(args, "stream", False),
     )
+
+
+def _cmd_mission_chat_message(args) -> int:
+    cfg = load_agent_runtime_config()
+    normalized_persona = _normalize_cli_persona_or_template_id(args.persona_id)
+    persona = _persona_by_id(cfg, normalized_persona)
+    if persona is None:
+        data = {"ok": False, "error": f"unknown persona {safe_assignment_token(args.persona_id)}"}
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    session_db = _default_persona_session_db()
+    instance_store = PersonaInstanceStore()
+    instance_store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
+    persona_instance_id = safe_assignment_token(getattr(args, "persona_instance_id", None))
+    session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
+    if not session_id:
+        session_id = _persona_chat_session_id(persona_instance_id or persona_instance_id_for(normalized_persona))
+    display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or _display_name_for_profile(normalized_persona)
+    try:
+        instance = instance_store.open_chat(
+            persona_id=normalized_persona,
+            persona_instance_id=persona_instance_id or None,
+            session_id=session_id,
+            display_name=display_name,
+            profile_id=safe_assignment_token(getattr(persona, "hermes_profile", None)),
+            kill_active=False,
+        )
+    except ChatBusyError as exc:
+        data = _chat_busy_payload(exc)
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
+    except ValueError as exc:
+        data = {"ok": False, "error": safe_assignment_text(str(exc), limit=240)}
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    task_id = safe_assignment_token(getattr(args, "task_id", None))
+    goal_id = safe_assignment_token(getattr(args, "goal_id", None))
+    if task_id or goal_id:
+        instance.current_task_id = task_id or instance.current_task_id
+        instance.goal_id = goal_id or task_id or instance.goal_id
+        instance.mode = "task_bound"
+        instance = instance_store.update(instance)
+
+    _ensure_persona_chat_session(
+        session_db=session_db,
+        session_id=session_id,
+        persona_id=normalized_persona,
+        title=f"{instance.display_name} chat",
+    )
+    message = safe_assignment_text(getattr(args, "message", None), limit=12000)
+    if not message:
+        data = {"ok": False, "error": "message is required"}
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    _append_persona_operator_turn(
+        session_db=session_db,
+        session_id=session_id,
+        message=message,
+    )
+    chat_message = _persona_chat_message_with_history(
+        session_db=session_db,
+        session_id=session_id,
+        message=message,
+    )
+    prompt_context = mission_chat_prompt_observability(
+        persona=persona,
+        persona_instance_id=instance.id,
+        session_id=session_id,
+        task_id=task_id,
+        goal_id=goal_id,
+        turn_id=safe_assignment_token(getattr(args, "client_message_id", None)),
+        surface_prompt=getattr(args, "surface_prompt", "") or "",
+        limiting_wrapper_active=False,
+        session_db=session_db,
+        current_message=message,
+    )
+    try:
+        chat_result = GPTPersonaRuntime(
+            default_provider=cfg.default_provider,
+            default_model=cfg.default_model,
+            session_db=session_db,
+        ).mission_chat_reply(
+            persona,
+            chat_message,
+            session_id=None,
+            surface_prompt=getattr(args, "surface_prompt", "") or "",
+            max_wall_seconds=getattr(args, "max_seconds", 240.0),
+            stream_callback=_emit_chat_delta if getattr(args, "stream", False) else None,
+        )
+        prompt_context = {
+            **prompt_context,
+            "final_model_input": (getattr(chat_result, "raw", {}) or {}).get("model_input_observability"),
+        }
+        try:
+            persist_prompt_observability_context(prompt_context)
+        except Exception as persist_exc:
+            prompt_context = {
+                **prompt_context,
+                "observability_persist_error": safe_assignment_text(type(persist_exc).__name__, limit=80),
+            }
+    except Exception as exc:
+        data = {
+            "ok": False,
+            "persona_instance_id": instance.id,
+            "persona_id": normalized_persona,
+            "session_id": session_id,
+            "blocker": safe_assignment_text(str(exc), limit=240),
+            "prompt_context_id": prompt_context["context_id"],
+            "prompt_observability": prompt_context,
+            "next_expected": "fix the runtime blocker and retry the mission chat turn",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["blocker"])
+        return 2
+
+    reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=8000)
+    _append_persona_assistant_text(session_db=session_db, session_id=session_id, text=reply_text)
+    _update_persona_chat_token_counts(
+        session_db=session_db,
+        session_id=session_id,
+        result=chat_result,
+    )
+    _maybe_auto_title_persona_chat(
+        session_db=session_db,
+        session_id=session_id,
+        user_message=message,
+        assistant_response=reply_text,
+    )
+    try:
+        instance.active_run_id = None
+        instance.current_assignment_id = None
+        instance.state = WorkerSessionState.IDLE
+        instance.session_id = session_id
+        instance_store.update(instance)
+    except Exception:
+        pass
+
+    data = {
+        "ok": True,
+        "capability_id": "mission.chat.message",
+        "agent_profile_id": instance.id,
+        "persona_instance_id": instance.id,
+        "persona_id": normalized_persona,
+        "session_id": session_id,
+        "chat_session_id": session_id,
+        "task_id": task_id,
+        "goal_id": goal_id,
+        "client_message_id": safe_assignment_text(getattr(args, "client_message_id", None), limit=200),
+        "execution_state": "completed",
+        "kind": "mission_chat_message",
+        "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None)) or "chat",
+        "surface_prompt": safe_assignment_text(getattr(args, "surface_prompt", ""), limit=4000) or "",
+        "limiting_wrapper_active": False,
+        "reply": reply_text,
+        "turn_id": safe_assignment_token(getattr(args, "client_message_id", None)),
+        "run_ids": [],
+        "input_tokens": getattr(chat_result, "input_tokens", None),
+        "output_tokens": getattr(chat_result, "output_tokens", None),
+        "total_tokens": getattr(chat_result, "total_tokens", None),
+        "prompt_context_id": prompt_context["context_id"],
+        "prompt_observability": prompt_context,
+        "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
+    }
+    if getattr(args, "stream", False):
+        _emit_chat_final(data)
+    else:
+        print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
+    return 0
 
 
 def _cmd_persona_instance_close(args) -> int:

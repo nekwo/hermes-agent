@@ -208,6 +208,53 @@ class GPTPersonaRuntime:
             )
         )
 
+    def mission_chat_reply(
+        self,
+        persona: AgentPersona,
+        message: str,
+        *,
+        session_id: str | None = None,
+        surface_prompt: str | None = "",
+        max_wall_seconds: float | None = 120.0,
+        max_api_calls: int | None = 8,
+        max_total_tokens: int | None = None,
+        stream_callback: Callable[[str | None], None] | None = None,
+    ) -> AgentRunResult:
+        """Run the canonical Mission Control chat path.
+
+        Unlike the older free-floating helper, this uses the normal Hermes
+        profile context stack: SOUL.md, profile memory, skills/context files,
+        and the profile's standard chat behavior. Mission Control contributes
+        only an optional surface prompt, blank by default.
+        """
+
+        binding = resolve_persona_profile(persona)
+        if binding.readiness == "missing_profile":
+            raise ValueError(binding.summary)
+        assert_provider_health_for_persona(persona)
+        return self._runner.run(
+            AgentRunRequest(
+                profile=binding.hermes_profile,
+                provider=persona.provider or self._default_provider,
+                model=persona.model or self._default_model or "",
+                api_mode=persona.api_mode,
+                enabled_toolsets=effective_toolsets(persona),
+                blocked_tool_names=blocked_tool_names(persona),
+                quiet_mode=True,
+                skip_context_files=False,
+                skip_memory=False,
+                platform=PERSONA_CHAT_SCRATCH_SOURCE,
+                session_id=session_id,
+                max_wall_seconds=max_wall_seconds,
+                max_api_calls=max_api_calls,
+                max_total_tokens=max_total_tokens,
+                user_message=message,
+                system_message=surface_prompt or None,
+                stream_callback=stream_callback,
+                runtime_root=paths.store_root(),
+            )
+        )
+
 
 # Source label for the agent's own scratch turns during an operator chat reply.
 # The caller persists the redacted canonical transcript under

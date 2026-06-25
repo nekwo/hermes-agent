@@ -139,7 +139,7 @@ def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(
     ps = ProofStore()
     stamp = now()
     done = Task(id="task_done", title="Done mission", description="d", state=TaskState.DONE, created_at=stamp, updated_at=stamp, requested_by="tony")
-    active = Task(id="task_active", title="Active mission", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=stamp, updated_at=stamp, requested_by="tony")
+    active = Task(id="task_active", title="Active mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony")
     ts.create(done)
     ts.create(active)
     run = AgentRun(id="run_done", persona_id="dev", task_id="task_done", stage_id="stage_impl", state=RunState.COMPLETED, started_at=stamp, last_heartbeat_at=stamp, finished_at=stamp)
@@ -168,7 +168,7 @@ def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(
 def test_harness_task_archive_refuses_active_task_id(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     stamp = now()
-    TaskStore().create(Task(id="task_active", title="Active mission", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=stamp, updated_at=stamp, requested_by="tony"))
+    TaskStore().create(Task(id="task_active", title="Active mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony"))
 
     args = parser().parse_args(["harness", "task", "archive", "task_active", "--json"])
 
@@ -185,7 +185,7 @@ def test_harness_task_archive_refuses_active_task_id(tmp_path, monkeypatch, caps
 def test_harness_task_cancel_cancels_active_runs_for_archive_cleanup(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     stamp = now()
-    TaskStore().create(Task(id="task_cancel", title="Cancel mission", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=stamp, updated_at=stamp, requested_by="tony"))
+    TaskStore().create(Task(id="task_cancel", title="Cancel mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony"))
     run = RunStore().open_run("dev", "task_cancel", stage_id="stage_1", session_id="session_budget")
 
     args = parser().parse_args(["harness", "task", "cancel", "task_cancel", "--reason", "operator cleanup", "--json"])
@@ -236,7 +236,7 @@ def test_harness_task_history_returns_event_envelope(tmp_path, monkeypatch, caps
 def test_harness_run_show_returns_run_proofs_and_events(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     stamp = now()
-    TaskStore().create(Task(id="task_run_show", title="Run show mission", description="d", state=TaskState.DEV_IMPLEMENTING, created_at=stamp, updated_at=stamp, requested_by="tony"))
+    TaskStore().create(Task(id="task_run_show", title="Run show mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony"))
     run = RunStore().open_run("dev", "task_run_show", stage_id="stage_impl", session_id="session_run_show")
     ProofStore().attach(
         Proof(

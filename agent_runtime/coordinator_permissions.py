@@ -7,7 +7,7 @@ from .runtime_config import CoordinatorPermissionConfig
 
 STEER_ACTIONS = frozenset(
     {
-        "persona.instance.message",
+        "mission.chat.message",
         "worker.nudge",
         "worker.resume",
         "use_output",
