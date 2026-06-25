@@ -1612,6 +1612,79 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
     assert lines[-1]["client_message_id"] == "client_1"
 
 
+def test_mission_chat_message_replays_duplicate_client_message_id(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    calls = {"count": 0}
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(
+        "agent.title_generator.generate_title",
+        lambda user_message, assistant_response, **kwargs: "Mission Chat",
+    )
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            calls["count"] += 1
+            return SimpleNamespace(
+                final_response="Recovered canonical reply.",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                api_calls=1,
+                model="gpt-test",
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    def _args():
+        return SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="hi",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_dup_1",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+
+    assert harness._cmd_mission_chat_message(_args()) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first.get("idempotent_replay") is not True
+
+    assert harness._cmd_mission_chat_message(_args()) == 0
+    replay = json.loads(capsys.readouterr().out)
+
+    assert calls["count"] == 1
+    assert [item["role"] for item in db.messages["persona_chat_personainst_dev"]] == [
+        "user",
+        "assistant",
+    ]
+    assert {
+        item["platform_message_id"]
+        for item in db.messages["persona_chat_personainst_dev"]
+    } == {"client_dup_1"}
+    assert replay["idempotent_replay"] is True
+    assert replay["client_message_id"] == "client_dup_1"
+    assert replay["reply"] == "Recovered canonical reply."
+
+
 def test_persona_chat_auto_title_waits_for_session_title_write(monkeypatch, isolate_agent_runtime_root):
     from hermes_cli import harness
 

@@ -1467,10 +1467,60 @@ def _cmd_mission_chat_message(args) -> int:
             print(emit_json(data) if args.json else data["error"])
         return 2
 
+    client_message_id = safe_assignment_text(
+        getattr(args, "client_message_id", None), limit=200
+    )
+    replay = _persona_chat_existing_turn(
+        session_db=session_db,
+        session_id=session_id,
+        client_message_id=client_message_id,
+    )
+    if replay.get("assistant"):
+        reply_text = _redact_persona_chat_text(
+            replay["assistant"].get("content"), limit=8000
+        )
+        data = {
+            "ok": True,
+            "capability_id": "mission.chat.message",
+            "agent_profile_id": instance.id,
+            "persona_instance_id": instance.id,
+            "persona_id": normalized_persona,
+            "session_id": session_id,
+            "chat_session_id": session_id,
+            "task_id": task_id,
+            "goal_id": goal_id,
+            "client_message_id": client_message_id,
+            "execution_state": "completed",
+            "kind": "mission_chat_message",
+            "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None))
+            or "chat",
+            "surface_prompt": safe_assignment_text(
+                getattr(args, "surface_prompt", ""), limit=4000
+            )
+            or "",
+            "limiting_wrapper_active": False,
+            "reply": reply_text,
+            "turn_id": safe_assignment_token(client_message_id),
+            "run_ids": [],
+            "idempotent_replay": True,
+            "next_expected": "duplicate client message id replayed from the canonical Mission Control chat transcript",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(
+                emit_json(data)
+                if args.json
+                else f"mission chat reply for {normalized_persona}"
+            )
+        return 0
+
     _append_persona_operator_turn(
         session_db=session_db,
         session_id=session_id,
         message=message,
+        client_message_id=client_message_id,
+        skip_if_present=bool(replay.get("operator")),
     )
     chat_message = _persona_chat_message_with_history(
         session_db=session_db,
@@ -1483,7 +1533,7 @@ def _cmd_mission_chat_message(args) -> int:
         session_id=session_id,
         task_id=task_id,
         goal_id=goal_id,
-        turn_id=safe_assignment_token(getattr(args, "client_message_id", None)),
+        turn_id=safe_assignment_token(client_message_id),
         surface_prompt=getattr(args, "surface_prompt", "") or "",
         limiting_wrapper_active=False,
         session_db=session_db,
@@ -1531,7 +1581,12 @@ def _cmd_mission_chat_message(args) -> int:
         return 2
 
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=8000)
-    _append_persona_assistant_text(session_db=session_db, session_id=session_id, text=reply_text)
+    _append_persona_assistant_text(
+        session_db=session_db,
+        session_id=session_id,
+        text=reply_text,
+        client_message_id=client_message_id,
+    )
     _update_persona_chat_token_counts(
         session_db=session_db,
         session_id=session_id,
@@ -1562,14 +1617,14 @@ def _cmd_mission_chat_message(args) -> int:
         "chat_session_id": session_id,
         "task_id": task_id,
         "goal_id": goal_id,
-        "client_message_id": safe_assignment_text(getattr(args, "client_message_id", None), limit=200),
+        "client_message_id": client_message_id,
         "execution_state": "completed",
         "kind": "mission_chat_message",
         "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None)) or "chat",
         "surface_prompt": safe_assignment_text(getattr(args, "surface_prompt", ""), limit=4000) or "",
         "limiting_wrapper_active": False,
         "reply": reply_text,
-        "turn_id": safe_assignment_token(getattr(args, "client_message_id", None)),
+        "turn_id": safe_assignment_token(client_message_id),
         "run_ids": [],
         "input_tokens": getattr(chat_result, "input_tokens", None),
         "output_tokens": getattr(chat_result, "output_tokens", None),
@@ -2054,26 +2109,89 @@ def _redact_persona_chat_text(value, *, limit: int) -> str:
     return _PERSONA_CHAT_SECRET_RE.sub(r"\1: [redacted]", safe)
 
 
-def _append_persona_operator_turn(*, session_db, session_id: str, message: str) -> None:
+def _persona_chat_existing_turn(
+    *,
+    session_db,
+    session_id: str | None,
+    client_message_id: str | None,
+) -> dict[str, object]:
+    if session_db is None or not session_id or not client_message_id:
+        return {}
+    try:
+        messages = session_db.get_messages(session_id)
+    except Exception:
+        return {}
+
+    result: dict[str, object] = {}
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        message_id = safe_assignment_text(
+            item.get("platform_message_id"), limit=200
+        )
+        if message_id != client_message_id:
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role == "user" and "operator" not in result:
+            result["operator"] = item
+        elif role == "assistant":
+            result["assistant"] = item
+    return result
+
+
+def _append_persona_operator_turn(
+    *,
+    session_db,
+    session_id: str,
+    message: str,
+    client_message_id: str | None = None,
+    skip_if_present: bool = False,
+) -> None:
     if session_db is None or not session_id:
+        return
+    if skip_if_present:
         return
     safe_message = _redact_persona_chat_text(message, limit=12000)
     if not safe_message:
         return
     try:
-        session_db.append_message(session_id=session_id, role="user", content=safe_message)
+        session_db.append_message(
+            session_id=session_id,
+            role="user",
+            content=safe_message,
+            platform_message_id=safe_assignment_text(client_message_id, limit=200)
+            or None,
+        )
     except Exception:
         return
 
 
-def _append_persona_assistant_text(*, session_db, session_id: str, text: str) -> None:
+def _append_persona_assistant_text(
+    *,
+    session_db,
+    session_id: str,
+    text: str,
+    client_message_id: str | None = None,
+) -> None:
     if session_db is None or not session_id:
         return
     safe = _redact_persona_chat_text(text, limit=8000)
     if not safe:
         return
+    safe_client_message_id = safe_assignment_text(client_message_id, limit=200)
+    if _persona_chat_existing_turn(
+        session_db=session_db,
+        session_id=session_id,
+        client_message_id=safe_client_message_id,
+    ).get("assistant"):
+        return
     try:
-        session_db.append_message(session_id=session_id, role="assistant", content=safe)
+        session_db.append_message(
+            session_id=session_id,
+            role="assistant",
+            content=safe,
+            platform_message_id=safe_client_message_id or None,
+        )
     except Exception:
         return
 
