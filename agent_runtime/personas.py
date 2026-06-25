@@ -38,6 +38,7 @@ ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
             "session_search",
             "todo",
             "skills",
+            "mission_goal",
         }
     ),
 }
@@ -106,7 +107,7 @@ def default_personas() -> list[AgentPersona]:
             model=None,
             provider=None,
             api_mode="codex_responses",
-            toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills"],
+            toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills", "mission_goal"],
             system_prompt_path="personas/neko_supervisor/system.md",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
             skills=["harness-mission-lead"],

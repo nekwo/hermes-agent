@@ -2879,70 +2879,21 @@ def _normalize_cli_persona_or_template_id(persona_id: str) -> str:
 
 
 def _cmd_task_create(args) -> int:
-    from agent_runtime.default_plan import ensure_default_mission_plan
+    from agent_runtime.mission_goal import create_mission_goal
 
-    config = load_agent_runtime_config()
-    cleanup_launcher_visual = launcher_visual_cleanup_needed(args.title, args.description)
-    hygiene = prepare_new_goal_runtime(
-        cleanup_stage47_temp=False,
-        cleanup_launcher_visual_processes=cleanup_launcher_visual,
-        heartbeat_ttl_seconds=config.heartbeat_ttl_seconds,
-        foreground_mode=True,
-        park_open_tasks=True,
-        preempt_background_runs=True,
+    data = create_mission_goal(
+        title=args.title,
+        description=args.description,
+        requested_by=args.requested_by,
+        start_daemon_mode=getattr(args, "start_daemon", None),
     )
-    ts = now()
-    task = Task(id=f"task_{uuid.uuid4().hex[:8]}", title=args.title, description=args.description, state=TaskState.CREATED, created_at=ts, updated_at=ts, requested_by=args.requested_by)
-    ensure_default_mission_plan(task)
-    task.harness_self_heal["repo_clean_baseline"] = _repo_clean_baseline_from_hygiene(hygiene)
-    TaskStore().create(task)
-    foreground_runtime = activate_foreground_runtime(task.id, started_by=args.requested_by or "cli")
-    daemon_start = _start_daemon_for_new_goal(args, config, task_id=task.id, foreground_runtime_instance_id=foreground_runtime.get("instance_id"))
-    data = task_summary(task)
-    data["new_goal_hygiene"] = hygiene
-    data["foreground_runtime"] = foreground_runtime
-    data["daemon_start"] = daemon_start
     if args.json:
         print(emit_json(data))
     else:
-        daemon_summary = daemon_start.get("summary", "daemon start not attempted")
-        print(f"{human_task_line(task)} dirty={hygiene['dirty_state_after_cleanup']['summary']} daemon={daemon_summary}")
+        daemon_summary = (data.get("daemon_start") or {}).get("summary", "daemon start not attempted")
+        dirty_summary = (((data.get("new_goal_hygiene") or {}).get("dirty_state_after_cleanup") or {}).get("summary"))
+        print(f"{data.get('task_id')} [{data.get('state')}] {data.get('title')} dirty={dirty_summary} daemon={daemon_summary}")
     return 0
-
-
-def _start_daemon_for_new_goal(args, config, *, task_id: str, foreground_runtime_instance_id: str | None = None) -> dict:
-    start_daemon_requested = getattr(args, "start_daemon", None)
-    if start_daemon_requested is None:
-        start_daemon_requested = bool(getattr(config, "task_create_auto_start_daemon", False))
-    if not start_daemon_requested:
-        return {"attempted": False, "started": False, "summary": "disabled; use harness goal run for in-process execution or --start-daemon for daemon mode"}
-    try:
-        result = start_daemon(
-            task_id=task_id,
-            foreground_runtime_instance_id=foreground_runtime_instance_id,
-            interval_seconds=getattr(config, "daemon_interval_seconds", None),
-            idle_interval_seconds=getattr(config, "daemon_idle_interval_seconds", None),
-        )
-    except Exception as exc:
-        return {
-            "attempted": True,
-            "started": False,
-            "ok": False,
-            "error_class": type(exc).__name__,
-            "summary": "daemon start failed; task was created and requires manual daemon start or ticks",
-        }
-    if result.get("error") == "daemon_target_conflict":
-        summary = "daemon already driving another foreground task"
-        return {"attempted": True, "ok": False, "summary": summary, **result}
-    else:
-        summary = "started" if result.get("started") else f"already {result.get('state', 'running')}"
-    return {"attempted": True, "ok": True, "summary": summary, **result}
-
-
-def _repo_clean_baseline_from_hygiene(hygiene: dict) -> dict:
-    from agent_runtime.goal_hygiene import repo_clean_baseline_from_hygiene
-
-    return repo_clean_baseline_from_hygiene(hygiene)
 
 
 def _cmd_task_list(args) -> int:

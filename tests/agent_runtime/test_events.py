@@ -5,6 +5,7 @@ import pytest
 
 from hermes_time import now
 
+from agent_runtime import paths
 from agent_runtime.errors import EventPayloadTooLarge
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event, Task
@@ -57,6 +58,128 @@ def test_event_log_for_task_filters_before_decoding_and_preserves_order(isolate_
 
     limited_events = log.for_task("task_target", limit=2)
     assert [event.run_id for event in limited_events] == ["run_4", "run_5"]
+
+
+def test_event_log_for_session_filters_session_lane_and_ignores_task_events(isolate_agent_runtime_root):
+    log = EventLog()
+    # A task-run event: keyed on task_id, no session lineage.
+    log.append(
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_run",
+            run_id="run_1",
+            persona_id="dev",
+            payload={"tool_name": "pytest", "status": "passed"},
+        )
+    )
+    # Two chat-turn events on the target session, interleaved with another session.
+    log.append(
+        Event(
+            ts=now(),
+            type="run.tool.started",
+            task_id=None,
+            run_id=None,
+            persona_id="neko_supervisor",
+            payload={"tool_name": "terminal"},
+            session_id="chat_target",
+        )
+    )
+    log.append(
+        Event(
+            ts=now(),
+            type="run.tool.started",
+            task_id=None,
+            run_id=None,
+            persona_id="neko_supervisor",
+            payload={"tool_name": "terminal"},
+            session_id="chat_other",
+        )
+    )
+    log.append(
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id=None,
+            run_id=None,
+            persona_id="neko_supervisor",
+            payload={"tool_name": "terminal", "status": "passed"},
+            session_id="chat_target",
+        )
+    )
+
+    rows = log.for_session("chat_target")
+    assert [event.type for event in rows] == ["run.tool.started", "run.tool.finished"]
+    assert all(event.session_id == "chat_target" for event in rows)
+    # The task-run event never leaks into the session lane.
+    assert all(event.task_id is None for event in rows)
+    assert log.for_session("chat_target", limit=1)[0].type == "run.tool.finished"
+
+
+def test_event_log_for_session_decodes_legacy_rows_without_session_field(isolate_agent_runtime_root):
+    # A legacy JSONL row written before Event grew a session_id field must still
+    # decode (session_id defaults to None) and must not match a session query.
+    path = isolate_agent_runtime_root / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "ts": now().isoformat().replace("+00:00", "Z"),
+                "type": "run.progress",
+                "task_id": "legacy_task",
+                "run_id": "run_legacy",
+                "persona_id": "dev",
+                "payload": {"summary": "legacy"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    log = EventLog()
+    assert log.for_session("anything") == []
+    assert log.tail(1)[0].session_id is None
+
+
+def test_cached_event_log_matches_base_and_reads_once(isolate_agent_runtime_root, monkeypatch):
+    from agent_runtime.events import CachedEventLog
+
+    base = EventLog()
+    for index in range(4):
+        base.append(Event(ts=now(), type="run.tool.started", task_id="task_a", run_id=f"r{index}", persona_id="dev", payload={"tool_name": "x"}))
+    base.append(
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id=None,
+            run_id=None,
+            persona_id="neko_supervisor",
+            payload={"tool_name": "terminal", "status": "passed"},
+            session_id="chat_z",
+        )
+    )
+
+    cached = CachedEventLog()
+    # Equivalence with the base log across every read method.
+    assert [e.run_id for e in cached.for_task("task_a")] == [e.run_id for e in base.for_task("task_a")]
+    assert cached.for_task("task_a", limit=2)[-1].run_id == base.for_task("task_a", limit=2)[-1].run_id
+    assert [e.type for e in cached.for_session("chat_z")] == [e.type for e in base.for_session("chat_z")]
+    assert [e.type for e in cached.tail(2)] == [e.type for e in base.tail(2)]
+    assert len(list(cached.iter_all())) == len(list(base.iter_all()))
+
+    # The file is read exactly once regardless of how many reads happen.
+    reads = {"n": 0}
+    real_read_text = type(paths.events_path()).read_text
+
+    def counting_read_text(self, *a, **k):
+        reads["n"] += 1
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(type(paths.events_path()), "read_text", counting_read_text)
+    fresh = CachedEventLog()
+    fresh.for_task("task_a")
+    fresh.for_session("chat_z")
+    fresh.tail(1)
+    assert reads["n"] == 1
 
 
 def test_event_log_rejects_payloads_over_4kb_and_does_not_write(isolate_agent_runtime_root):

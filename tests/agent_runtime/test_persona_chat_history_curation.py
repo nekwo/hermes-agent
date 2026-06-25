@@ -260,6 +260,196 @@ def test_busy_task_does_not_starve_a_quiet_personas_trace():
     assert len(by_persona["dev"]["entries"]) == 2
 
 
+def test_persona_chat_trace_projects_session_keyed_chat_tool_calls():
+    events = EventLog()
+    ts = now()
+    # A conversational (non-task) chat turn's tool calls, keyed on the session.
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.started",
+            task_id=None,
+            run_id=None,
+            persona_id="neko_supervisor",
+            payload={"tool_name": "terminal", "command_label": "echo PARITY_OK_2026"},
+            session_id="chat_neko",
+        )
+    )
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.finished",
+            task_id=None,
+            run_id=None,
+            persona_id="neko_supervisor",
+            payload={"tool_name": "terminal", "status": "passed"},
+            session_id="chat_neko",
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[_chat_persona_instance("personainst_neko", "neko_supervisor", "chat_neko")],
+        event_log=events,
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["persona_instance_id"] == "personainst_neko"
+    assert row["task_id"] is None
+    assert row["session_id"] == "chat_neko"
+    assert [entry["event"] for entry in row["entries"]] == ["tool_started", "tool_finished"]
+    assert row["entries"][0]["summary"] == "echo PARITY_OK_2026"
+
+
+def test_persona_chat_trace_merges_task_and_session_lanes_for_one_instance():
+    events = EventLog()
+    early = now()
+    # Lane 1: a task-run tool event (task-keyed, no session lineage).
+    events.append(
+        Event(
+            ts=early,
+            type="run.tool.started",
+            task_id="task_live",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={"tool_name": "pytest", "summary": "running suite"},
+        )
+    )
+    # Lane 2: a later conversational tool call on the same instance's session.
+    events.append(
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id=None,
+            run_id=None,
+            persona_id="dev",
+            payload={"tool_name": "terminal", "status": "passed", "command_label": "git status"},
+            session_id="chat_dev",
+        )
+    )
+
+    instance = PersonaInstance(
+        id="personainst_dev",
+        persona_id="dev",
+        role="dev",
+        display_name="dev",
+        profile_id=None,
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="task_bound",
+        current_task_id="task_live",
+        session_id="chat_dev",
+    )
+
+    rows = persona_chat_trace_summary(persona_instances=[instance], event_log=events)
+
+    assert len(rows) == 1
+    row = rows[0]
+    # Both lanes merge into one chronologically-ordered trace, no double counting.
+    assert [entry["event"] for entry in row["entries"]] == ["tool_started", "tool_finished"]
+    assert [entry["tool_name"] for entry in row["entries"]] == ["pytest", "terminal"]
+    assert row["task_id"] == "task_live"
+    assert row["session_id"] == "chat_dev"
+
+
+def test_persona_chat_trace_projects_profile_persona_with_colon_id():
+    # Regression: profile instances carry ids like "profile:alice". The events
+    # store that raw id; the projection must canonicalize (not token-mangle to
+    # "profile_alice") or every profile-instance tool call is silently dropped.
+    events = EventLog()
+    ts = now()
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.started",
+            task_id=None,
+            run_id=None,
+            persona_id="profile:alice",
+            payload={"tool_name": "terminal", "command_label": "echo hi"},
+            session_id="persona_chat_alice",
+        )
+    )
+
+    instance = PersonaInstance(
+        id=None,
+        persona_id="profile:alice",
+        role="alice_supervisor",
+        display_name="Alice Agent",
+        profile_id="alice",
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="chat",
+        session_id="persona_chat_alice",
+    )
+
+    rows = persona_chat_trace_summary(persona_instances=[instance], event_log=events)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["persona_id"] == "profile:alice"
+    # Matches the history projection's id derivation so the Launcher links them.
+    assert row["persona_instance_id"] == "personainst_profile_alice"
+    assert [entry["event"] for entry in row["entries"]] == ["tool_started"]
+
+
+def test_persona_chat_trace_accountant_records_drops():
+    from agent_runtime.parity import ProjectionAccountant
+
+    events = EventLog()
+    ts = now()
+    # Three renderable chat tool events for the instance's persona...
+    for _ in range(3):
+        events.append(
+            Event(
+                ts=ts,
+                type="run.tool.started",
+                task_id=None,
+                run_id=None,
+                persona_id="neko_supervisor",
+                payload={"tool_name": "terminal"},
+                session_id="chat_x",
+            )
+        )
+    # ...and one event for a DIFFERENT persona on the same session (mismatch).
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.started",
+            task_id=None,
+            run_id=None,
+            persona_id="other_persona",
+            payload={"tool_name": "terminal"},
+            session_id="chat_x",
+        )
+    )
+
+    accountant = ProjectionAccountant("persona_chat_trace")
+    persona_chat_trace_summary(
+        persona_instances=[_chat_persona_instance("personainst_neko", "neko_supervisor", "chat_x")],
+        event_log=events,
+        message_tail=2,
+        accountant=accountant,
+    )
+
+    summary = accountant.summary()
+    assert summary["included"] == 2  # tail=2
+    assert summary["reasons"].get("tail_truncated") == 1  # 3 renderable − 2 kept
+    assert summary["reasons"].get("persona_mismatch") == 1  # the other-persona event
+    assert summary["truncated"] is True
+
+
+def test_persona_chat_trace_tolerates_event_log_without_for_session():
+    class _TaskOnlyLog:
+        def for_task(self, task_id, *, limit=50):
+            return []
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[_chat_persona_instance("personainst_neko", "neko_supervisor", "chat_neko")],
+        event_log=_TaskOnlyLog(),
+    )
+    assert rows == []
+
+
 def _persona_instance(instance_id: str, persona_id: str, task_id: str) -> PersonaInstance:
     return PersonaInstance(
         id=instance_id,
@@ -271,4 +461,18 @@ def _persona_instance(instance_id: str, persona_id: str, task_id: str) -> Person
         state=WorkerSessionState.IDLE,
         mode="task_bound",
         current_task_id=task_id,
+    )
+
+
+def _chat_persona_instance(instance_id: str, persona_id: str, session_id: str) -> PersonaInstance:
+    return PersonaInstance(
+        id=instance_id,
+        persona_id=persona_id,
+        role="alice_supervisor",
+        display_name=persona_id,
+        profile_id=None,
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="chat",
+        session_id=session_id,
     )

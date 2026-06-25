@@ -21,10 +21,13 @@ class AgentRuntimeConfig(RuntimeConfig):
 
 
 def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeConfig:
+    from .parse_cache import cached_yaml_file
+
     config_path = config_path or get_config_path()
-    raw = {}
-    if config_path.exists():
-        raw = (yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}).get("agent_runtime", {}) or {}
+    # mtime-cached parse: this is called many times per snapshot build (and across
+    # the runtime) and was re-parsing the full config.yaml each time.
+    loaded = cached_yaml_file(config_path, default=None)
+    raw = (loaded.get("agent_runtime", {}) or {}) if isinstance(loaded, dict) else {}
     enterprise_worker_sessions = _enterprise_worker_sessions_config(raw.get("enterprise_worker_sessions") or {})
     continuous_role_sessions = _continuous_role_sessions_config(raw.get("continuous_role_sessions") or {})
     normal_worker_flow = _normal_worker_flow_config(raw.get("normal_worker_flow") or {})

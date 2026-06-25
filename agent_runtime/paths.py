@@ -3,18 +3,21 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import yaml
-
 from hermes_constants import get_config_path, get_default_hermes_root
+
+from .parse_cache import cached_yaml_file
 
 
 def store_root() -> Path:
     override = os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()
     if override:
         return Path(override)
+    # store_root() is on the hot path of *every* path helper and was re-parsing
+    # the (large) Hermes config.yaml on each call — 500+ YAML parses per snapshot
+    # build (~50s). The mtime-keyed cache collapses that to a single parse.
     config_path = get_config_path()
-    if config_path.exists():
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    raw = cached_yaml_file(config_path, default=None)
+    if isinstance(raw, dict):
         configured = str((raw.get("agent_runtime") or {}).get("store_root") or "").strip()
         if configured:
             return Path(configured).expanduser()

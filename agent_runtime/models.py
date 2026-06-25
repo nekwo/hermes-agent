@@ -362,6 +362,12 @@ class Event:
     run_id: str | None
     persona_id: str | None
     payload: dict[str, Any] = field(default_factory=dict)
+    # Session lineage for events that belong to a conversational (non-task)
+    # persona chat turn. Task-run events leave this ``None`` and remain keyed on
+    # ``task_id``; chat-turn tool/progress events set this so the snapshot trace
+    # projection can surface them per chat session. Optional + trailing keeps the
+    # JSONL envelope backward compatible: older event rows decode with ``None``.
+    session_id: str | None = None
 
 
 @dataclass(slots=True)

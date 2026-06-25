@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime
 
 from hermes_cli.profiles import available_profile_templates
@@ -17,7 +18,7 @@ from .config import ensure_persisted_personas, load_agent_runtime_config
 from .daemon import read_daemon_status
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash, event_catalog
 from .dirty_state import build_dirty_state
-from .events import EventLog
+from .events import CachedEventLog, EventLog
 from .migrations import effective_config_summary, migration_status
 from .mission_plan import mission_plan_summary, task_stage_records
 from .observability import build_observability
@@ -30,7 +31,8 @@ from .persona_assignments import (
     persona_instance_runtime_enabled,
     persona_instance_summary,
 )
-from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, persona_chat_history_summary, persona_chat_trace_summary
+from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
+from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
 from .personas import blocked_tool_names, effective_toolsets
 from .prompt_observability import snapshot_prompt_observability
 from .profile_readiness import profile_readiness_for_persona
@@ -85,12 +87,15 @@ def _runtime_paths_diagnostic(available_personas: list) -> dict:
 
 
 def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
+    _build_started = time.perf_counter()
     task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
     agent_store = agent_store or AgentStore()
     proof_store = proof_store or ProofStore()
     incident_store = incident_store or IncidentStore()
-    event_log = event_log or EventLog()
+    # A snapshot calls for_task/for_session/tail dozens of times on the same log;
+    # CachedEventLog reads events.jsonl once and serves all of them from memory.
+    event_log = event_log or CachedEventLog()
     worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
     tasks = task_store.list_all()
     runs = run_store.list_all()
@@ -214,23 +219,109 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
             for instance in persona_instances
         ]
+        history_accountant = ProjectionAccountant("persona_chat_history")
+        trace_accountant = ProjectionAccountant("persona_chat_trace")
         data["persona_chat_history"] = persona_chat_history_summary(
             persona_instances=persona_instances,
             session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+            accountant=history_accountant,
         )
         data["persona_chat_trace"] = persona_chat_trace_summary(
             persona_instances=persona_instances,
             event_log=event_log,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+            accountant=trace_accountant,
         )
         data["persona_assignments"] = {
             "active": [persona_assignment_summary(item) for item in persona_assignments if item.state in ACTIVE_ASSIGNMENT_STATES],
             "recent": [persona_assignment_summary(item) for item in persona_assignments[-50:]],
         }
+        completeness = {
+            "persona_chat_history": history_accountant.summary(),
+            "persona_chat_trace": trace_accountant.summary(),
+        }
+        drop_samples = history_accountant.drop_samples() + trace_accountant.drop_samples()
     else:
         data["persona_instance_runtime"] = {"enabled": False}
+        completeness = {}
+        drop_samples = []
+    data["parity"] = _parity_envelope(
+        data,
+        build_started=_build_started,
+        last_event=recent_events[-1] if recent_events else None,
+        completeness=completeness,
+        drop_samples=drop_samples,
+    )
     return data
+
+
+def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples):
+    """The S0 observability envelope: provenance + completeness + parity warnings.
+
+    Additive and self-describing — turns the snapshot's silent drops into reported
+    data and dates the snapshot against the event log so a reader knows how far
+    behind it is. See the snapshot-architecture brain note.
+    """
+
+    last_ts = getattr(last_event, "ts", None) if last_event is not None else None
+    return {
+        "envelope_version": PARITY_ENVELOPE_VERSION,
+        "generated_at": data.get("generated_at"),
+        "build_ms": int(max(0.0, (time.perf_counter() - build_started)) * 1000),
+        "watermark": events_watermark(last_event_ts=last_ts),
+        "completeness": completeness,
+        "drops": drop_samples,
+        "warnings": _parity_warnings(data),
+    }
+
+
+def _parity_warnings(data) -> list[dict]:
+    """Snapshot-level self-checks that flag likely UI/harness divergence."""
+
+    warnings: list[dict] = []
+    runtime = data.get("persona_instance_runtime") or {}
+    if not runtime.get("enabled"):
+        warnings.append(
+            {
+                "code": "persona_instance_runtime_disabled",
+                "detail": "persona instance runtime is off; persona_instances / chat_history / chat_trace are absent from this snapshot",
+            }
+        )
+        return warnings
+
+    instances = data.get("persona_instances") or []
+    instance_personas = {
+        _canonical_persona_id(inst.get("persona_id")) for inst in instances if isinstance(inst, dict)
+    }
+    instance_ids = {
+        str(inst.get("persona_instance_id") or inst.get("agent_profile_id") or "")
+        for inst in instances
+        if isinstance(inst, dict)
+    }
+    for row in data.get("persona_chat_trace") or []:
+        if not isinstance(row, dict):
+            continue
+        row_persona = _canonical_persona_id(row.get("persona_id"))
+        row_instance = str(row.get("persona_instance_id") or "")
+        if row_persona not in instance_personas and row_instance not in instance_ids:
+            warnings.append(
+                {
+                    "code": "trace_persona_not_in_instances",
+                    "entity_id": row_instance or row_persona,
+                    "detail": "trace row has no matching persona_instance; the launcher may orphan it",
+                }
+            )
+
+    summary = data.get("summary") or {}
+    if (summary.get("open_tasks") or 0) > 0 and not (data.get("tasks")):
+        warnings.append(
+            {
+                "code": "open_tasks_without_task_rows",
+                "detail": "summary reports open tasks but no task rows were mapped",
+            }
+        )
+    return warnings
 
 
 def write_snapshot(snapshot: dict | None = None) -> dict:

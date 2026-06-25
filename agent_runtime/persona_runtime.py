@@ -22,11 +22,11 @@ from .decision_schema import (
 from .decision_contracts import validate_planning_decision
 from .models import AgentPersona, AgentRun
 from .mission_plan import current_plan_stage
-from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
+from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .profile_runner import AgentRunRequest, AgentRunResult, ProfileAgentRunner, RunBudgetExceeded
-from .progress import RunProgressSink
+from .progress import ChatProgressSink, RunProgressSink
 from .repo_context import RepoExecutionContext, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
 from .store import RunStore, _safe_session_id
@@ -209,6 +209,7 @@ class GPTPersonaRuntime:
                 user_message=message,
                 system_message=_persona_chat_system_prompt(persona),
                 stream_callback=stream_callback,
+                progress_callback=_chat_trace_callback(session_id=session_id, persona=persona),
                 runtime_root=paths.store_root(),
             )
         )
@@ -276,8 +277,13 @@ class GPTPersonaRuntime:
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,
                 user_message=message,
-                system_message=surface_prompt or None,
+                system_message=_mission_chat_surface_message(surface_prompt),
                 stream_callback=stream_callback,
+                # Key chat trace on the real chat session: Mission Control passes
+                # session_id=None (the transcript is already baked into the
+                # message) but the permission/session lineage lives on
+                # perm_session_id, which is also the persona instance's session.
+                progress_callback=_chat_trace_callback(session_id=perm_session_id, persona=persona),
                 runtime_root=paths.store_root(),
             )
         )
@@ -300,15 +306,18 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         f"{_persona_chat_voice(role, display)} "
         "Voice: warm, plain text, teammate-tight. Lead with the answer; skip preamble, filler, and restating the question. "
         "A sentence or two is usually enough — only go longer when the operator clearly wants depth. "
-        "Hard rules: never emit JSON, decision objects, task scopes, acceptance criteria, handoff packets, or tool/tick chatter. "
-        "Do NOT scope, create, dispatch, or route tasks from here — chat is the conversational layer, not the work pipeline. "
+        "You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
+        "change state — actually use your tools and report the real result. The operator's current permission grant is the "
+        "only gate on what you can do; there is no separate 'hand it off first' step. "
+        "Never fabricate: do not claim to have run a command, read a file, opened a path, or produced output unless you "
+        "actually invoked the tool and are reporting its real result. If a capability isn't available, or your permission "
+        "grant blocks it, say so plainly instead of inventing output. "
+        "Keep replies as clean teammate prose: never paste decision JSON, task scopes, acceptance criteria, handoff packets, "
+        "or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane. "
         "If the operator just greets you or makes small talk, talk back like a teammate. "
         "Recall: lean on the inline chat history for continuity. Reach for session_search only when the operator points at "
         "something specific from a past session you can't already see, and consult your durable memory only when it actually "
-        "bears on the reply — don't fish. "
-        "Escalation: when the operator genuinely asks you to DO work (build, fix, investigate, run, change code), don't start "
-        "executing from chat — confirm the ask in a sentence and tell them to hand it off as real work (the Assign Work action / "
-        "task pipeline) so it runs with proof and budgets. You can help shape the scope conversationally first."
+        "bears on the reply — don't fish."
     )
 
 
@@ -316,19 +325,63 @@ def _persona_chat_voice(role: str, display: str) -> str:
     if role == "alice_supervisor":
         return (
             f"As {display} you run point for the operator across the mission: you coordinate the dev/QA personas, track what's "
-            "in flight, and give crisp, decisive read-outs. Chief-of-staff energy, not cheerleader."
+            "in flight, and give crisp, decisive read-outs — and you act directly when the operator asks. Chief-of-staff "
+            "energy, not cheerleader."
         )
     if role == "qa":
         return (
-            "You are the quality gate: skeptical, precise, evidence-first. In chat you talk through risks, what you'd verify, "
-            "and what proof you'd want — without actually running a gate."
+            "You are the quality gate: skeptical, precise, evidence-first. You talk through risks and what you'd verify — and "
+            "when the operator asks, you actually run the checks and report what the evidence shows."
         )
     if role == "dev":
         return (
-            "You are a senior engineer: concrete, pragmatic, fluent in the repo. In chat you reason about approach, tradeoffs, "
-            "and what you'd change — without editing files until it's handed off as real work."
+            "You are a senior engineer: concrete, pragmatic, fluent in the repo. You reason about approach and tradeoffs — and "
+            "when the operator asks, you make the change or run the command directly, within your granted permissions."
         )
     return f"You speak as {display}: a capable, straight-talking teammate."
+
+
+def _mission_chat_operative_rules() -> str:
+    """Operative rules layered on top of the persona profile's own SOUL/identity
+    for the canonical Mission Control operator chat.
+
+    The profile owns voice and identity; these rules only govern *how the chat
+    surface behaves*: real tool use is allowed (permission-gated), fabricated
+    tool output is forbidden, and the reply stays clean prose while tool calls
+    flow to the trace lane. Appended into the system prompt's context section
+    (see ``agent/system_prompt.py``), so it overrides any 'propose-only / don't
+    execute' posture for this surface without rewriting the profile."""
+
+    return (
+        "Mission Control operator-chat rules (these govern this live operator channel):\n"
+        "- You are talking directly to your operator — a trusted teammate, not an end user.\n"
+        "- You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
+        "change state — actually use your tools and report the real result. The operator's current permission grant is the "
+        "only gate on what you can do; there is no separate 'hand it off first' step.\n"
+        "- Never fabricate. Do not claim to have run a command, read a file, opened a path, or produced output unless you "
+        "actually invoked the tool and are reporting its real result. If a capability isn't available, or your permission "
+        "grant blocks it, say so plainly instead of inventing output.\n"
+        "- When the operator asks you to start, trigger, kick off, or run a goal/mission/task, create a REAL one with the "
+        "mission_goal_create tool (it returns a tracked task_id and starts the Mission Daemon so it self-drives). Do NOT "
+        "run the no-model smoke test (or any temp/throwaway graph validation) as a stand-in for a real goal — the smoke "
+        "never appears in Mission Control. Only fall back to the smoke if the operator explicitly asks to validate the "
+        "graph without creating real work.\n"
+        "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
+        "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane."
+    )
+
+
+def _mission_chat_surface_message(surface_prompt: str | None) -> str:
+    """Compose the operator-chat system message: the non-negotiable operative
+    rules first, then the operator's optional per-session surface prompt. The
+    rules always apply so the anti-fabrication invariant holds even when the
+    operator supplies their own surface prompt."""
+
+    operator_surface = (surface_prompt or "").strip()
+    rules = _mission_chat_operative_rules()
+    if operator_surface:
+        return f"{rules}\n\n{operator_surface}"
+    return rules
 
 
 def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:
@@ -405,11 +458,46 @@ def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | Non
     return sorted(names)
 
 
+def _chat_trace_callback(
+    *, session_id: str | None, persona: AgentPersona
+) -> Callable[[dict], None] | None:
+    """Build a runner ``progress_callback`` that records a chat turn's tool
+    calls as redaction-safe trace events keyed on the chat session.
+
+    Returns ``None`` when there is no session to key on (e.g. a sandbox run with
+    no durable chat), which leaves the chat turn's telemetry exactly as it was
+    before — no run row is created, nothing is persisted.
+    """
+
+    if not session_id:
+        return None
+    sink = ChatProgressSink(session_id=session_id, persona_id=getattr(persona, "id", None))
+    return sink.callback()
+
+
 def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
     options = permission_options_for_chat(persona, session_id=session_id)
     if permission_mode_is_unbounded(options.permission_mode):
         return all_registered_toolsets()
-    return effective_toolsets(persona)
+    return _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+
+
+# Operator-chat-only first-class capabilities that a persona's role is allowed to
+# use but which a persisted/config toolset list (created before the capability
+# existed) may not yet enumerate. Without this, a deployment whose supervisor
+# toolsets were persisted before ``mission_goal`` shipped could never trigger a
+# real Mission Control goal from chat — the very thing the tool exists for.
+_CHAT_CAPABILITY_TOOLSETS = ("mission_goal",)
+
+
+def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> list[str]:
+    role = role_from_persona(persona)
+    allowed = ALLOWED_TOOLSETS_BY_ROLE.get(role, frozenset())
+    augmented = list(toolsets)
+    for toolset in _CHAT_CAPABILITY_TOOLSETS:
+        if toolset in allowed and toolset not in augmented:
+            augmented.append(toolset)
+    return augmented
 
 
 def _is_no_edit_context_stage(ctx: AgentContext) -> bool:

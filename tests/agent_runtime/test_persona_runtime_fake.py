@@ -161,6 +161,125 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
     assert fake.kwargs["blocked_tool_names"] == []
 
 
+def test_chat_reply_routes_tool_calls_into_session_keyed_trace(tmp_path, monkeypatch):
+    # End-to-end through the REAL ProfileAgentRunner: a chat turn that invokes a
+    # tool must land redaction-safe run.tool.* events keyed on the chat session,
+    # so the snapshot trace projection can surface them in the operator channel.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    FakeAIAgent.instances.clear()
+    session_id = "session_chat_tool_trace"
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+
+    class ToolCallingAgent(FakeAIAgent):
+        def run_conversation(self, *, user_message, system_message, task_id):
+            # Drive the runner's tool callbacks exactly as the real provider does.
+            self.kwargs["tool_start_callback"]("tool.started", "terminal", "echo PARITY_OK_2026")
+            self.kwargs["tool_complete_callback"](
+                "tool.completed", "terminal", "echo PARITY_OK_2026", {"exit_code": 0}
+            )
+            return super().run_conversation(
+                user_message=user_message, system_message=system_message, task_id=task_id
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_factory=ToolCallingAgent
+    )
+
+    runtime.chat_reply(neko, "run echo PARITY_OK_2026 and paste the output", session_id=session_id)
+
+    events = EventLog().for_session(session_id)
+    assert [event.type for event in events] == ["run.tool.started", "run.tool.finished"]
+    assert all(event.session_id == session_id for event in events)
+    assert all(event.task_id is None for event in events)
+    assert all(event.persona_id == "neko_supervisor" for event in events)
+    assert events[0].payload.get("tool_name") == "terminal"
+    assert events[1].payload.get("status") == "passed"
+
+
+def test_persona_chat_prompt_allows_real_tools_and_forbids_fabrication():
+    from agent_runtime.persona_runtime import _persona_chat_system_prompt
+
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    prompt = _persona_chat_system_prompt(neko)
+
+    # Full tool access: actually use tools, permission-gated, no escalation nudge.
+    assert "actually use your tools" in prompt
+    assert "permission grant is the only gate" in prompt
+    assert "hand it off as real work" not in prompt
+    assert "task pipeline" not in prompt
+    # Hard anti-fabrication invariant.
+    assert "Never fabricate" in prompt
+    assert "inventing output" in prompt
+
+
+def test_mission_chat_surface_message_always_carries_operative_rules():
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules, _mission_chat_surface_message
+
+    # Blank operator surface still injects the operative rules (so the
+    # anti-fabrication invariant holds on the default operator channel).
+    assert _mission_chat_surface_message("") == _mission_chat_operative_rules()
+    assert _mission_chat_surface_message(None) == _mission_chat_operative_rules()
+    assert "Never fabricate" in _mission_chat_surface_message("")
+
+    # An operator-supplied surface prompt is layered after the rules, not instead.
+    composed = _mission_chat_surface_message("Focus on the auth refresh path.")
+    assert "Never fabricate" in composed
+    assert composed.endswith("Focus on the auth refresh path.")
+
+
+def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="session_mission_chat",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+    runtime.mission_chat_reply(neko, "run echo PARITY_OK_2026", permission_session_id="session_mission_chat")
+
+    system_message = captured["request"].system_message
+    assert "Never fabricate" in system_message
+    assert "actually use your tools" in system_message
+    # And the chat-trace callback is wired on the canonical operator path too.
+    assert captured["request"].progress_callback is not None
+
+
+def test_chat_reply_without_session_records_no_trace(tmp_path, monkeypatch):
+    # A sandbox chat turn with no durable session must not synthesize trace.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    FakeAIAgent.instances.clear()
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+
+    class ToolCallingAgent(FakeAIAgent):
+        def run_conversation(self, *, user_message, system_message, task_id):
+            # The runner still wraps a no-op budget callback; driving it must not
+            # synthesize any trace because there is no session to key on.
+            self.kwargs["tool_start_callback"]("tool.started", "terminal", "echo hi")
+            return super().run_conversation(
+                user_message=user_message, system_message=system_message, task_id=task_id
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_factory=ToolCallingAgent
+    )
+
+    runtime.chat_reply(neko, "hi", session_id=None)
+
+    assert EventLog().tail(10) == []
+
+
 def test_llm_timing_records_repeated_profile_attempts_without_losing_totals():
     _, run = make_task_and_run()
     first = AgentRunResult(

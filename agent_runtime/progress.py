@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 import re
 
 from hermes_time import now
@@ -72,6 +72,80 @@ class RunProgressSink:
             )
         except Exception:
             return None
+
+
+_CHAT_TRACE_EVENT_TYPES = {"run.tool.started", "run.tool.finished", "run.progress"}
+# run.progress payloads that carry one of these keys are real signal (a tool
+# step, a command, dev work, or a reasoning summary). Bare "Run progress update"
+# rows are dropped so the operator-channel Trace lane stays meaningful, not noisy.
+_CHAT_PROGRESS_SIGNAL_KEYS = (
+    "tool_name", "tool", "command_label", "reasoning_summary",
+    "changed_files", "patch_summary", "code_summary", "file_summary",
+)
+
+
+class ChatProgressSink:
+    """Record redaction-safe tool/progress trace events for a conversational
+    (non-task) persona chat turn.
+
+    Unlike :class:`RunProgressSink` there is no backing :class:`AgentRun`: an
+    operator chat turn runs free of the task/decision pipeline, so there is no
+    run row to update and no ``task_id`` to key on. Events are appended to the
+    :class:`EventLog` keyed on ``session_id`` + ``persona_id`` instead, which is
+    exactly what :func:`persona_chat_trace_summary` scans to surface chat-turn
+    tool calls in the Mission Control operator channel's Trace lane.
+
+    Payloads are sanitized through the same :func:`_safe_progress_payload`
+    redaction boundary the task lane uses, and every emit is best-effort: a
+    telemetry failure must never break the operator's chat reply.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        persona_id: str | None,
+        run_id: str | None = None,
+        event_log: EventLog | None = None,
+    ):
+        self.session_id = session_id
+        self.persona_id = persona_id
+        self.run_id = run_id
+        self.event_log = event_log or EventLog()
+
+    def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
+        try:
+            if not self.session_id or event_type not in _CHAT_TRACE_EVENT_TYPES:
+                return None
+            payload = payload or {}
+            if event_type == "run.progress" and not _chat_progress_has_signal(payload):
+                return None
+            safe_payload = _safe_progress_payload(event_type, payload)
+            self.event_log.append(
+                Event(
+                    ts=now(),
+                    type=event_type,
+                    task_id=None,
+                    run_id=self.run_id,
+                    persona_id=self.persona_id,
+                    payload=safe_payload,
+                    session_id=self.session_id,
+                )
+            )
+        except Exception:
+            return None
+
+    def callback(self) -> "Callable[[dict[str, Any]], None]":
+        """Adapter matching the runner's ``progress_callback`` contract."""
+
+        def _emit(payload: dict[str, Any]) -> None:
+            self.emit(str(payload.get("type", "run.progress")), payload)
+
+        return _emit
+
+
+def _chat_progress_has_signal(payload: dict[str, Any]) -> bool:
+    return any(payload.get(key) for key in _CHAT_PROGRESS_SIGNAL_KEYS)
 
 
 def _maybe_record_self_test(run, event_type: str, payload: dict[str, Any], *, event_log: EventLog) -> None:

@@ -127,8 +127,8 @@ def harness_skill_installed_ok(skill: str, *, hermes_home: Path | None = None) -
 
 
 def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    # mtime-cached: skill-hash checks run per skill × per persona × per resolver
+    # pass during a snapshot build, all hashing the same unchanged files.
+    from .parse_cache import cached_file_sha256
+
+    return cached_file_sha256(path)

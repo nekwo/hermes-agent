@@ -3,6 +3,7 @@ from argparse import Namespace
 
 def test_task_create_start_daemon_passes_target_task(monkeypatch, capsys, isolate_agent_runtime_root):
     from hermes_cli import harness as harness_cli
+    from agent_runtime import mission_goal
 
     calls = []
 
@@ -16,7 +17,9 @@ def test_task_create_start_daemon_passes_target_task(monkeypatch, capsys, isolat
             "queue_mode": "foreground",
         }
 
-    monkeypatch.setattr(harness_cli, "start_daemon", fake_start_daemon)
+    # task create delegates to agent_runtime.mission_goal.create_mission_goal,
+    # which calls start_daemon from the mission_goal module's namespace.
+    monkeypatch.setattr(mission_goal, "start_daemon", fake_start_daemon)
 
     code = harness_cli._cmd_task_create(
         Namespace(

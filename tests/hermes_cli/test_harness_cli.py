@@ -27,7 +27,7 @@ def test_harness_parser_exposes_task_create():
 def test_harness_task_create_reports_new_goal_hygiene(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     monkeypatch.setattr(
-        "hermes_cli.harness.start_daemon",
+        "agent_runtime.mission_goal.start_daemon",
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("daemon should not start by default")),
     )
 
@@ -47,7 +47,7 @@ def test_harness_task_create_can_start_daemon_with_explicit_flag(tmp_path, monke
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     daemon_starts = []
     monkeypatch.setattr(
-        "hermes_cli.harness.start_daemon",
+        "agent_runtime.mission_goal.start_daemon",
         lambda **kwargs: daemon_starts.append(kwargs) or {"started": True, "pid": 1234, "state": "starting"},
     )
 
@@ -65,7 +65,7 @@ def test_harness_task_create_can_start_daemon_with_explicit_flag(tmp_path, monke
 
 def test_harness_task_create_can_skip_daemon_start(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr("hermes_cli.harness.start_daemon", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("daemon should not start")))
+    monkeypatch.setattr("agent_runtime.mission_goal.start_daemon", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("daemon should not start")))
 
     args = parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--no-start-daemon", "--json"])
 

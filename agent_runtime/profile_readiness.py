@@ -8,6 +8,7 @@ from hermes_cli.auth import AuthError
 from hermes_cli.runtime_environment import missing_runtime_packages_for
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
+from .parse_cache import cached_by_mtime, cached_yaml_file
 from .profile_context import persona_profile_context, resolve_persona_profile
 from .skill_install import harness_skill_hash_mismatches, harness_skill_installed_ok
 
@@ -49,7 +50,7 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
                 skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills), hermes_home=binding.profile_home)
                 missing_skills = [name for name in missing_skills if not harness_skill_installed_ok(name, hermes_home=binding.profile_home)]
                 cfg_path = binding.profile_home / "config.yaml"
-                raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
+                raw = cached_yaml_file(cfg_path, default={}) or {}
                 configured_mcp = _configured_mcp_server_names(raw or {})
                 missing_mcp = [name for name in effective_required_mcp if name not in configured_mcp]
                 runtime_issue = _runtime_dependency_issue(persona)
@@ -179,6 +180,10 @@ def _skill_exists_in_tree(skill_name: str, skill_root: Path) -> bool:
 
 
 def _skill_frontmatter_name(skill_md: Path) -> str | None:
+    return cached_by_mtime(skill_md, _read_skill_frontmatter_name)
+
+
+def _read_skill_frontmatter_name(skill_md: Path) -> str | None:
     try:
         text = skill_md.read_text(encoding="utf-8", errors="ignore")
     except OSError:
