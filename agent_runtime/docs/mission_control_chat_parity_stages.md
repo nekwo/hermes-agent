@@ -68,7 +68,7 @@ chat**. The Neko operator chat owns the **goal**; a worker chat carries a
 **task**. The goal staffs blueprint slots with worker chats. The Harness ticks the
 goal owned by that chat and runs the bound worker chats. Navigation is
 **chat-first**. Full model + cardinalities + the soft-task/HUD principle:
-[Stage 76 — Unified Template / Instance / Chat / Goal Model](../../docs/agent-runtime-harness/76-unified-template-instance-chat-goal-model.md).
+[01 — Mission Control Architecture](../../docs/agent-runtime-harness/01-architecture.md).
 
 The chat→goal cardinality knob is **closed**: a goal *is* a chat that owns it, so
 `0..N` goals = `N` Neko operator chats (peers). This work stays naturally agnostic
@@ -405,4 +405,4 @@ Whether a chat names **one** goal or a room holds **many** is no longer open. A 
 *is* a chat that owns it, so **N concurrent goals = N Neko operator chats** (peers) —
 the cockpit's many-goals view is just many conductor chats, no singleton orchestrator.
 The Goal Room still groups by `goalId`, so this remains an additive change, not a
-rework. See [Stage 76](../../docs/agent-runtime-harness/76-unified-template-instance-chat-goal-model.md).
+rework. See [01 — Mission Control Architecture](../../docs/agent-runtime-harness/01-architecture.md).
