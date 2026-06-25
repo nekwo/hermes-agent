@@ -219,6 +219,7 @@ class GPTPersonaRuntime:
         message: str,
         *,
         session_id: str | None = None,
+        permission_session_id: str | None = None,
         provider_override: str | None = None,
         model_override: str | None = None,
         surface_prompt: str | None = "",
@@ -233,8 +234,17 @@ class GPTPersonaRuntime:
         profile context stack: SOUL.md, profile memory, skills/context files,
         and the profile's standard chat behavior. Mission Control contributes
         only an optional surface prompt, blank by default.
+
+        ``permission_session_id`` resolves the chat-scoped tool permission
+        (e.g. an operator-granted ``unbounded`` mode) independently of the run
+        ``session_id``. The Mission Control caller passes ``session_id=None`` so
+        the runtime does not re-load the transcript it already baked into the
+        message, but the permission record is keyed on the real chat session —
+        without this, the unbounded grant is silently ignored and the chat falls
+        back to the role-default toolset.
         """
 
+        perm_session_id = permission_session_id or session_id
         binding = resolve_persona_profile(persona)
         if binding.readiness == "missing_profile":
             raise ValueError(binding.summary)
@@ -255,8 +265,8 @@ class GPTPersonaRuntime:
                 provider=runtime_provider,
                 model=runtime_model,
                 api_mode=persona.api_mode,
-                enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=session_id),
-                blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
+                enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=perm_session_id),
+                blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=perm_session_id),
                 quiet_mode=True,
                 skip_context_files=False,
                 skip_memory=False,

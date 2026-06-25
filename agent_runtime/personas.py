@@ -26,7 +26,20 @@ ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
     AgentRole.PM: frozenset({"file", "session_search", "todo", "skills"}),
     AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills"}),
     AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills"}),
-    AgentRole.ALICE_SUPERVISOR: frozenset({"file", "search", "session_search", "todo", "skills"}),
+    AgentRole.ALICE_SUPERVISOR: frozenset(
+        {
+            "file",
+            "search",
+            "terminal",
+            "code_execution",
+            "browser",
+            "vision",
+            "web",
+            "session_search",
+            "todo",
+            "skills",
+        }
+    ),
 }
 
 DEFAULT_SUPERVISOR_PERSONA_ID = "neko_supervisor"
@@ -55,7 +68,7 @@ PER_ROLE_TOOL_DENIES: dict[AgentRole, frozenset[str]] = {
     AgentRole.PM: frozenset({"write_file", "patch", "terminal"}),
     AgentRole.DEV: frozenset({"send_message"}),
     AgentRole.QA: frozenset({"write_file", "patch"}),
-    AgentRole.ALICE_SUPERVISOR: frozenset({"write_file", "patch", "terminal"}),
+    AgentRole.ALICE_SUPERVISOR: frozenset({"send_message"}),
 }
 
 
@@ -93,7 +106,7 @@ def default_personas() -> list[AgentPersona]:
             model=None,
             provider=None,
             api_mode="codex_responses",
-            toolsets=["file", "search", "session_search", "todo", "skills"],
+            toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills"],
             system_prompt_path="personas/neko_supervisor/system.md",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
             skills=["harness-mission-lead"],

@@ -1690,6 +1690,7 @@ def _cmd_mission_chat_message(args) -> int:
             persona,
             chat_message,
             session_id=None,
+            permission_session_id=session_id,
             provider_override=model_selection.get("effective_provider"),
             model_override=model_selection.get("effective_model"),
             surface_prompt=getattr(args, "surface_prompt", "") or "",

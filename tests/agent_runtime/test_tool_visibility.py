@@ -14,19 +14,22 @@ def _persona(persona_id: str):
     return {persona.id: persona for persona in default_personas()}[persona_id]
 
 
-def test_neko_supervisor_visibility_is_bounded_by_default():
+def test_neko_supervisor_visibility_has_dev_parity_by_default():
+    # The mission-lead role was brought to dev-grade tool parity (operator
+    # decision 2026-06-25): terminal + file mutation are available by default,
+    # while the global persona blocks (delegate_task/kanban/send_message) stay.
     visibility = resolve_tool_visibility(_persona("neko_supervisor"))
 
     final_tools = set(visibility["final_model_tools"])
 
     assert "read_file" in final_tools
     assert "search_files" in final_tools
-    assert "write_file" not in final_tools
-    assert "patch" not in final_tools
-    assert "terminal" not in final_tools
-    assert "terminal" in visibility["blocked_tool_names"]
-    assert visibility["mutation_boundary"]["can_mutate_files"] is False
-    assert visibility["mutation_boundary"]["can_run_terminal"] is False
+    assert "write_file" in final_tools
+    assert "patch" in final_tools
+    assert "terminal" in final_tools
+    assert "delegate_task" in visibility["blocked_tool_names"]
+    assert visibility["mutation_boundary"]["can_mutate_files"] is True
+    assert visibility["mutation_boundary"]["can_run_terminal"] is True
 
 
 def test_dev_visibility_can_mutate_but_keeps_default_persona_blocks():
@@ -175,3 +178,33 @@ def test_turn_tool_context_loads_last_actual_tool_schema(tmp_path, monkeypatch):
     assert context["last_actual"]["turn_id"] == "turn_actual"
     assert context["last_actual"]["final_model_tools"] == ["read_file", "write_file"]
     assert context["history"][0]["tool_count"] == 2
+
+
+def test_turn_tool_context_does_not_persist_requested_blocked_tool_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    persona = _persona("dev")
+
+    persist_tool_turn_actual(
+        persona_id=persona.id,
+        session_id="session_blocked_names",
+        turn_id="turn_blocked_names",
+        model_input={
+            "enabled_toolsets": ["file"],
+            "blocked_tool_names": ["kanban_complete", "terminal"],
+            "tool_schema": {
+                "schema_version": 1,
+                "kind": "actual_model_tools",
+                "final_model_tools": ["read_file"],
+                "tool_count": 1,
+                "blocked_tool_names": ["kanban_complete", "terminal"],
+            },
+        },
+    )
+
+    context = turn_tool_context_for_persona(
+        persona,
+        ToolVisibilityOptions(session_id="session_blocked_names"),
+    )
+
+    assert "blocked_tool_names" not in context["last_actual"]
+    assert "blocked_tool_names" not in context["last_actual"]["tool_schema"]
