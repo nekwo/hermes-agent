@@ -39,10 +39,23 @@ data-migration compatibility noted — do **not** re-delete the legacy serialize
   placement id (Stage 76A). Guard: no new `personainst_operator_<uuid>` files appear
   under `.hermes/agent-runtime/persona_instances/`.
 
+- ✅ **The routing fork in `next_action`.** `MissionStateMachine.next_action`
+  (`state_machine.py:56`) is already **unconditionally graph-routed**: it calls
+  `ensure_default_mission_plan(mission)` then `_blueprint_next_action`. There is no
+  `if state == TaskState.X` ladder and no `mission_plan_routing_enabled` branch left in
+  `next_action`. The "two orchestrators in `next_action`" the old docs described is gone.
+- ✅ **`mission_plan_routing_enabled` / `enforce_routing` config switch** — gone from
+  code (only the prose engine doc still names them). No routing on/off switch survives.
+- ✅ **`retired_owner_allowlist` global** — no such symbol exists in code (`rg` clean).
+- ✅ **Goal-runner tasks are typed from birth.** `_create_task` (`goal_runner.py:179`)
+  already defaults to `DEFAULT_GOAL_BLUEPRINT_ID` (`= "neko_two_dev_default"`), so
+  goal-runner missions instantiate a blueprint plan at creation.
+
 Gate (must stay green):
 ```bash
 rg "unique_operator_persona_instance_id|free_floating_persona_instance_id_for" agent_runtime hermes_cli
 rg "DEV_IMPLEMENTING|QA_APPROVED|class AgentState|_proof_satisfied\b" agent_runtime/states.py agent_runtime/proof_gates.py
+rg "mission_plan_routing_enabled|enforce_routing|retired_owner_allowlist" agent_runtime hermes_cli   # code-only: zero hits
 ```
 
 ---
@@ -51,27 +64,45 @@ rg "DEV_IMPLEMENTING|QA_APPROVED|class AgentState|_proof_satisfied\b" agent_runt
 
 Grouped by subsystem. Each item: the symbols, the files, the gate, and the owning stage.
 
-### R1 — The dual-orchestrator fork  ⛓ (the keystone; everything else rides on it)
+### R1 — The residual `has_typed_plan` projection fork  ⛓ (keystone; mostly already done)
 
-The legacy ladder and the `has_typed_plan` fork are **still live** — 43 hits across 11
-files. This is the keystone: until new goals are graph-routed from birth, the legacy
-ladder cannot be deleted.
+**Re-scoped after a 2026-06-25 audit.** The dangerous part of R1 (the routing fork, the
+config switches, the owner allowlist) is **already done** — see "Already retired" above.
+What remains is the **projection-layer** `has_typed_plan` fork: ~30 call sites that
+branch between the **graph projection** and a **legacy projection** for tasks that don't
+yet have a typed plan, e.g. `legacy_projection=not has_typed_plan(task)`
+(`role_checklists.py:232,324,369,422`, `ticker.py:570`), and the `current_plan_stage(...)
+if has_typed_plan(task) else _current_stage(task)` fallbacks (`ticker.py:1377,1716`,
+`context_builder.py:682`, `proof_gates.py:130`, `worker_actions.py:60`).
 
-- [ ] **Collapse entry points.** `MissionRuntimeController._create_task`
-  (`goal_runner.py`) instantiates the default blueprint onto `task.mission_plan` so
-  `has_typed_plan` is true from birth; `goal run` thread `--blueprint`/`--bind`. (02 §1)
-- [ ] **Delete the `has_typed_plan` / `mission_plan_routing_enabled` / `enforce_routing`
-  fork.** `next_action` delegates to graph routing unconditionally.
-  - Files (grep-verified): `state_machine.py`, `ticker.py` (6), `planning.py` (7),
-    `context_builder.py` (4), `role_checklists.py` (6), `proof_gates.py` (2),
-    `worker_actions.py` (2), `store.py` (2), `default_plan.py` (2), `mission_plan.py`.
-- [ ] **`retired_owner_allowlist` global removed** (`planning.py`); owners validated
-  per-blueprint against `plan.slots`.
+These branches are **only reachable while a task is un-typed** — the window between
+creation and its first tick (`next_action` types every task via
+`ensure_default_mission_plan`). Goal-runner tasks are already typed at birth; the un-typed
+window survives only for the **other task-creation entry points** that pass
+`mission_plan=None`:
+
+- `agent_runtime/burn_in.py:505`, `persona_diagnostics.py:251`, `smoke.py:70`,
+  `scope_control.py:254` (child tasks); `hermes_cli/web_server.py:8810`,
+  `harness.py:729,775,2896`.
+
+**Safe removal condition (do this first, then delete the fork):**
+- [ ] **Make every task-creation site build a default plan** (call
+  `build_default_mission_plan` / set a `DEFAULT_TASK_BLUEPRINT_ID` plan), so
+  `has_typed_plan` is provably true everywhere the projection code runs.
+- [ ] **Then collapse the projection branches** to the typed path unconditionally and
+  delete the `legacy_projection=True` code + `_current_stage` legacy fallback. Each
+  `has_typed_plan(task)` guard above becomes unconditional.
+- [ ] **Then delete `has_typed_plan`** and the legacy `Task.stages` reads it protected
+  (folds into R2).
+
+> ⚠️ Do **not** delete the projection branches before the first box is proven — an
+> un-typed task hitting a removed fallback would crash the HUD/checklist render. This is
+> the careful part the old "delete the ladder" framing hid.
 
 Gate:
 ```bash
-rg "has_typed_plan|mission_plan_routing_enabled|enforce_routing|retired_owner_allowlist" agent_runtime hermes_cli tests
-python -m pytest tests/agent_runtime/test_state_machine.py tests/agent_runtime/blueprints -q
+rg "has_typed_plan" agent_runtime hermes_cli   # target: only the definition + R2 removal
+python -m pytest tests/agent_runtime/test_state_machine.py tests/agent_runtime/test_context_builder.py tests/agent_runtime/blueprints -q
 ```
 
 ### R2 — Plan/stage duplication  ⛓ (depends on R1)
