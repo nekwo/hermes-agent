@@ -29,7 +29,7 @@ def test_config_merges_profile_skills_and_readiness_fields(tmp_path):
 
     assert qa.display_name == "Visual QA Agent"
     assert qa.autonomy == "autonomous"
-    assert qa.hermes_profile == "launcher-qa"
+    assert qa.hermes_profile == "unbounded"
     assert qa.skills == ["agent-runtime-harness", "launcher-stagec-mcp-screenshot"]
     assert qa.soul_overlay_path == "prompts/qa_harness.md"
     assert qa.required_mcp_servers == ["launcher_qa"]
@@ -98,7 +98,7 @@ def test_config_merges_specialist_dev_repo_scope_fields(tmp_path):
 
     assert backend_dev.role == "dev"
     assert backend_dev.display_name == "Backend Dev Agent"
-    assert backend_dev.hermes_profile == "backend-dev"
+    assert backend_dev.hermes_profile == "unbounded"
     assert backend_dev.repo_scope == "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend"
     assert backend_dev.repo_scope_label == "EterniaBackend"
 
@@ -226,7 +226,7 @@ def test_neko_supervisor_uses_configured_head_agent_profile_when_not_explicit(tm
 
     personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
-    assert personas["neko_supervisor"].hermes_profile == "captain"
+    assert personas["neko_supervisor"].hermes_profile == "unbounded"
     assert personas["neko_supervisor"].skills == ["agent-runtime-harness"]
 
 
@@ -245,7 +245,7 @@ def test_neko_supervisor_legacy_alice_profile_falls_back_to_head_agent_when_miss
 
     personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
-    assert personas["neko_supervisor"].hermes_profile == "alice-mac"
+    assert personas["neko_supervisor"].hermes_profile == "unbounded"
 
 
 def test_neko_supervisor_preserves_existing_explicit_alice_profile(tmp_path, monkeypatch):
@@ -262,7 +262,7 @@ def test_neko_supervisor_preserves_existing_explicit_alice_profile(tmp_path, mon
 
     personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
-    assert personas["neko_supervisor"].hermes_profile == "alice"
+    assert personas["neko_supervisor"].hermes_profile == "unbounded"
 
 
 def test_config_accepts_json_encoded_skill_list_from_cli_config_set(tmp_path):

@@ -29,6 +29,7 @@ def mission_chat_prompt_observability(
     session_db: Any | None = None,
     current_message: str | None = None,
     final_model_input: dict[str, Any] | None = None,
+    model_selection: dict[str, Any] | None = None,
     prompt_mode: str = "normal_hermes_profile_chat",
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
@@ -102,6 +103,7 @@ def mission_chat_prompt_observability(
         "chat_history_context": history,
         "retrieval_context": [],
         "final_model_input": _safe_final_model_input(final_model_input),
+        "model_selection": _safe_model_selection(model_selection),
         "prompt_flags": {
             "skip_context_files": False,
             "skip_memory": False,
@@ -117,6 +119,31 @@ def mission_chat_prompt_observability(
             ],
         },
     }
+
+
+def _safe_model_selection(value: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "default_provider",
+        "default_model",
+        "chat_provider",
+        "chat_model",
+        "effective_provider",
+        "effective_model",
+        "model_is_default",
+        "scope",
+    }
+    result: dict[str, Any] = {}
+    for key in allowed:
+        item = value.get(key)
+        if isinstance(item, bool):
+            result[key] = item
+        elif isinstance(item, str) and item.strip():
+            result[key] = safe_assignment_text(item, limit=220)
+        elif item is None and key in {"chat_provider", "chat_model"}:
+            result[key] = None
+    return result
 
 
 def snapshot_prompt_observability(
@@ -358,7 +385,7 @@ def _chat_history_context(*, session_db: Any | None, session_id: str | None) -> 
         rows.append(
             {
                 "role": "operator" if role == "user" else role,
-                "safe_text": _safe_preview(content),
+                "text": _safe_preview(content),
                 "timestamp": safe_assignment_text(item.get("created_at") or item.get("timestamp"), limit=80),
                 "source": "persona_chat_history",
             }

@@ -9,7 +9,7 @@ import yaml
 from hermes_constants import get_config_path
 from hermes_cli.profiles import profile_exists
 
-from .personas import default_personas, validate_toolsets, AgentRole
+from .personas import DEFAULT_PERSONA_IDS, UNBOUNDED_PROFILE, default_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
 
@@ -134,6 +134,10 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
             head_profile,
             fallback_legacy_alice=not explicit_supervisor or bool(str(getattr(cfg, "head_agent_profile", "") or "").strip()),
         )
+    for persona_id in DEFAULT_PERSONA_IDS:
+        persona = personas.get(persona_id)
+        if persona is not None:
+            persona.hermes_profile = UNBOUNDED_PROFILE
     return list(personas.values())
 
 
@@ -156,6 +160,16 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
         if persona_id not in stored:
             stored[persona_id] = store.save(persona)
             changed = True
+        elif persona_id in DEFAULT_PERSONA_IDS:
+            current = stored[persona_id]
+            if (
+                getattr(current, "hermes_profile", None) != persona.hermes_profile
+                or list(getattr(current, "toolsets", []) or []) != list(getattr(persona, "toolsets", []) or [])
+            ):
+                current.hermes_profile = persona.hermes_profile
+                current.toolsets = list(getattr(persona, "toolsets", []) or [])
+                stored[persona_id] = store.save(current)
+                changed = True
     if changed:
         stored = {persona.id: persona for persona in store.list_all()}
     return list(stored.values())

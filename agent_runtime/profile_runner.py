@@ -13,7 +13,7 @@ import re
 from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
-from .profile_context import PersonaProfileBinding, persona_profile_context
+from .profile_context import PersonaProfileBinding, is_virtual_builtin_profile, persona_profile_context
 
 
 class ProfileRunnerError(RuntimeError):
@@ -446,6 +446,15 @@ def _binding_for_profile(profile: str | None) -> PersonaProfileBinding:
         )
     name = normalize_profile_name(profile)
     if not profile_exists(name):
+        if is_virtual_builtin_profile(name):
+            return PersonaProfileBinding(
+                persona_id="profile_runner",
+                hermes_profile=name,
+                profile_home=None,
+                readiness="ready",
+                summary=f"built-in profile '{name}' inherits active Hermes profile home",
+                metadata={"virtual_profile": True},
+            )
         return PersonaProfileBinding(
             persona_id="profile_runner",
             hermes_profile=name,
@@ -895,12 +904,36 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
         "profile": request.profile,
         "session_id": request.session_id,
         "task_id": request.task_id,
+        "enabled_toolsets": list(request.enabled_toolsets or []),
+        "disabled_toolsets": list(request.disabled_toolsets or []),
+        "blocked_tool_names": sorted(str(name) for name in (request.blocked_tool_names or [])),
+        "tool_schema": {
+            "schema_version": 1,
+            "kind": "actual_model_tools",
+            "final_model_tools": _agent_tool_names(agent),
+            "tool_count": len(_agent_tool_names(agent)),
+            "blocked_tool_names": sorted(str(name) for name in (request.blocked_tool_names or [])),
+        },
         "skip_context_files": bool(request.skip_context_files),
         "skip_memory": bool(request.skip_memory),
         "system_message_supplied": request.system_message is not None,
         "message_count": len(messages),
         "messages": messages,
     }
+
+
+def _agent_tool_names(agent) -> list[str]:
+    names: list[str] = []
+    for tool in list(getattr(agent, "tools", []) or []):
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = str(function.get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return sorted(names)
 
 
 def _message_preview(role: str, content: str, *, source: str) -> dict[str, Any]:

@@ -30,6 +30,7 @@ from .progress import RunProgressSink
 from .repo_context import RepoExecutionContext, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
 from .store import RunStore, _safe_session_id
+from .tool_permissions import extra_blocked_tools_for_permission_mode, permission_options_for_chat
 
 
 class PersonaRuntime(Protocol):
@@ -192,7 +193,7 @@ class GPTPersonaRuntime:
                 model=persona.model or self._default_model or "",
                 api_mode=persona.api_mode,
                 enabled_toolsets=effective_toolsets(persona),
-                blocked_tool_names=blocked_tool_names(persona),
+                blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
                 quiet_mode=True,
                 skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
                 skip_memory=False,
@@ -214,6 +215,8 @@ class GPTPersonaRuntime:
         message: str,
         *,
         session_id: str | None = None,
+        provider_override: str | None = None,
+        model_override: str | None = None,
         surface_prompt: str | None = "",
         max_wall_seconds: float | None = 120.0,
         max_api_calls: int | None = 8,
@@ -231,15 +234,25 @@ class GPTPersonaRuntime:
         binding = resolve_persona_profile(persona)
         if binding.readiness == "missing_profile":
             raise ValueError(binding.summary)
-        assert_provider_health_for_persona(persona)
+        runtime_provider = provider_override or persona.provider or self._default_provider
+        runtime_model = model_override or persona.model or self._default_model or ""
+        health_persona = AgentPersona(
+            **{
+                field: getattr(persona, field)
+                for field in getattr(persona, "__dataclass_fields__", {})
+            }
+        )
+        health_persona.provider = runtime_provider
+        health_persona.model = runtime_model
+        assert_provider_health_for_persona(health_persona)
         return self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
-                provider=persona.provider or self._default_provider,
-                model=persona.model or self._default_model or "",
+                provider=runtime_provider,
+                model=runtime_model,
                 api_mode=persona.api_mode,
                 enabled_toolsets=effective_toolsets(persona),
-                blocked_tool_names=blocked_tool_names(persona),
+                blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
                 quiet_mode=True,
                 skip_context_files=False,
                 skip_memory=False,
@@ -366,6 +379,13 @@ def _blocked_tool_names_for_run(persona: AgentPersona, ctx: AgentContext) -> lis
     names = set(blocked_tool_names(persona))
     if _is_no_edit_context_stage(ctx) and role_from_persona(persona).value == "dev":
         names.update({"read_file", "search_files", "session_search", "browser_snapshot"})
+    return sorted(names)
+
+
+def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
+    options = permission_options_for_chat(persona, session_id=session_id)
+    names = set(blocked_tool_names(persona))
+    names.update(extra_blocked_tools_for_permission_mode(options.permission_mode))
     return sorted(names)
 
 

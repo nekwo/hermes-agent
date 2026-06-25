@@ -65,6 +65,9 @@ from agent_runtime.states import TaskState, RunState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.ticker import TickEngine
+from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
+from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
+from agent_runtime.tool_turn_history import persist_tool_turn_actual
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_session_summary
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
@@ -313,6 +316,25 @@ def build_parser(parent_subparsers) -> None:
     persona_show.add_argument("persona_id_or_instance_id")
     persona_show.add_argument("--json", action="store_true")
     persona_show.set_defaults(func=_cmd_persona_show)
+    persona_tool_diff = persona_subs.add_parser("tool-diff", help="Show resolved model tools and blocked tools for one persona")
+    persona_tool_diff.add_argument("persona_id", help="Persona id or alias: neko, dev, launcher-dev, backend-dev, qa")
+    persona_tool_diff.add_argument("--session-id", default=None)
+    persona_tool_diff.add_argument("--task", dest="task_id", default=None)
+    persona_tool_diff.add_argument("--goal", dest="goal_id", default=None)
+    persona_tool_diff.add_argument("--permission-mode", default="profile_default")
+    persona_tool_diff.add_argument("--repo-scope", default=None)
+    persona_tool_diff.add_argument("--workdir", default=None)
+    persona_tool_diff.add_argument("--json", action="store_true")
+    persona_tool_diff.set_defaults(func=_cmd_persona_tool_diff)
+    persona_permission = persona_subs.add_parser("permission", help="Preview or set chat-scoped persona tool permissions")
+    persona_permission_subs = persona_permission.add_subparsers(dest="persona_permission_command")
+    persona_permission_set = persona_permission_subs.add_parser("set", help="Set chat-scoped permission mode")
+    persona_permission_set.add_argument("persona_id", help="Persona id or alias: neko, dev, launcher-dev, backend-dev, qa")
+    persona_permission_set.add_argument("--session-id", required=True)
+    persona_permission_set.add_argument("--mode", choices=["profile_default", "read_only"], required=True)
+    persona_permission_set.add_argument("--reason", required=True)
+    persona_permission_set.add_argument("--json", action="store_true")
+    persona_permission_set.set_defaults(func=_cmd_persona_permission_set)
     persona_assignments = persona_subs.add_parser("assignments", help="List persona assignments")
     persona_assignments.add_argument("--persona", dest="persona_id", default=None)
     persona_assignments.add_argument("--task", dest="task_id", default=None)
@@ -447,6 +469,9 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--goal", dest="goal_id", default=None)
     mission_chat_message.add_argument("--title", default="Operator message")
     mission_chat_message.add_argument("--message", required=True)
+    mission_chat_message.add_argument("--provider", default=None, help="Provider override for this persona chat session only")
+    mission_chat_message.add_argument("--model", default=None, help="Model override for this persona chat session only")
+    mission_chat_message.add_argument("--use-agent-default", action="store_true", help="Clear the chat-scoped provider/model override before sending")
     mission_chat_message.add_argument("--surface-prompt", default="")
     mission_chat_message.add_argument("--intent-hint", default="chat")
     mission_chat_message.add_argument("--requested-by", default="cli")
@@ -900,12 +925,16 @@ def _cmd_persona_list(args) -> int:
     store = PersonaInstanceStore()
     workers = WorkerSessionStore().list_all()
     personas = ensure_persisted_personas(cfg)
+    personas_by_id = {str(getattr(persona, "id", "") or ""): persona for persona in personas}
     enabled = persona_instance_runtime_enabled(cfg)
     instances = store.derive_from_workers(personas, workers) if enabled else []
     data = {
         "feature_enabled": enabled,
         "assignment_store_enabled": persona_assignment_store_enabled(cfg),
-        "persona_instances": [persona_instance_summary(instance) for instance in instances],
+        "persona_instances": [
+            persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
+            for instance in instances
+        ],
     }
     if args.json:
         print(emit_json(data))
@@ -924,7 +953,9 @@ def _cmd_persona_show(args) -> int:
         print(emit_json(data) if args.json else data["error"])
         return 2
     store = PersonaInstanceStore()
-    store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
+    personas = ensure_persisted_personas(cfg)
+    personas_by_id = {str(getattr(persona, "id", "") or ""): persona for persona in personas}
+    store.derive_from_workers(personas, WorkerSessionStore().list_all())
     value = str(args.persona_id_or_instance_id or "").strip()
     instance_id = value if value.startswith("personainst_") else persona_instance_id_for(_normalize_cli_persona_id(value))
     try:
@@ -937,7 +968,7 @@ def _cmd_persona_show(args) -> int:
     data = {
         "ok": True,
         "feature_enabled": True,
-        "persona_instance": persona_instance_summary(instance),
+        "persona_instance": persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or ""))),
         "assignments": [persona_assignment_summary(item) for item in assignments[-25:]],
     }
     if args.json:
@@ -945,6 +976,70 @@ def _cmd_persona_show(args) -> int:
     else:
         summary = data["persona_instance"]
         print(f"{summary['persona_instance_id']}: {summary['display_name']} state={summary['state']}")
+    return 0
+
+
+def _cmd_persona_tool_diff(args) -> int:
+    cfg = load_agent_runtime_config()
+    persona = _persona_by_id(cfg, str(args.persona_id or ""))
+    if persona is None:
+        data = {"ok": False, "error": f"persona not found: {args.persona_id}"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    visibility = resolve_tool_visibility(
+        persona,
+        ToolVisibilityOptions(
+            permission_mode=str(args.permission_mode or "profile_default"),
+            permission_source="cli_preview",
+            repo_scope=args.repo_scope,
+            workdir=args.workdir,
+            session_id=args.session_id,
+            task_id=args.task_id,
+            goal_id=args.goal_id,
+        ),
+    )
+    data = {"ok": True, "tool_visibility": visibility}
+    if args.json:
+        print(emit_json(data))
+    else:
+        print(f"{visibility['persona_id']}: {visibility['final_tool_count']} tools")
+        if visibility["blocked_tools"]:
+            print("blocked:")
+            for item in visibility["blocked_tools"]:
+                print(f"  {item['name']} ({item['reason']})")
+    return 0
+
+
+def _cmd_persona_permission_set(args) -> int:
+    cfg = load_agent_runtime_config()
+    persona = _persona_by_id(cfg, str(args.persona_id or ""))
+    if persona is None:
+        data = {"ok": False, "error": f"persona not found: {args.persona_id}"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    record = ChatToolPermissionStore().set(
+        persona_id=persona.id,
+        session_id=str(args.session_id or ""),
+        mode=str(args.mode or "profile_default"),
+        reason=str(args.reason or ""),
+        source="operator",
+    )
+    data = {
+        "ok": True,
+        "permission": {
+            "persona_id": record.persona_id,
+            "session_id": record.session_id,
+            "mode": record.mode,
+            "reason": record.reason,
+            "source": record.source,
+            "updated_at": record.updated_at,
+        },
+        "permission_state": permission_state_for_chat(persona, session_id=record.session_id),
+    }
+    if args.json:
+        print(emit_json(data))
+    else:
+        print(f"{record.persona_id}: {record.session_id} mode={record.mode}")
     return 0
 
 
@@ -1458,6 +1553,50 @@ def _cmd_mission_chat_message(args) -> int:
         persona_id=normalized_persona,
         title=f"{instance.display_name} chat",
     )
+    try:
+        requested_override = _requested_chat_model_override(args)
+        chat_override = _resolve_chat_model_override(
+            session_db=session_db,
+            session_id=session_id,
+            requested_override=requested_override,
+        )
+        model_selection = _chat_effective_model_payload(
+            persona=persona,
+            config=cfg,
+            override=chat_override,
+        )
+    except ValueError as exc:
+        data = {
+            "ok": False,
+            "error_kind": "invalid_chat_model_override",
+            "error": safe_assignment_text(str(exc), limit=320),
+            "persona_instance_id": instance.id,
+            "persona_id": normalized_persona,
+            "session_id": session_id,
+            "chat_session_id": session_id,
+            "next_expected": "choose a valid provider/model id or clear the chat-scoped override; Hermes profile defaults were not changed",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
+    except Exception as exc:
+        data = {
+            "ok": False,
+            "error_kind": "chat_model_override_persist_failed",
+            "error": safe_assignment_text(str(exc), limit=320) or type(exc).__name__,
+            "persona_instance_id": instance.id,
+            "persona_id": normalized_persona,
+            "session_id": session_id,
+            "chat_session_id": session_id,
+            "next_expected": "inspect Harness session metadata storage; chat-scoped model override was not applied and Hermes profile defaults were not changed",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
     message = safe_assignment_text(getattr(args, "message", None), limit=12000)
     if not message:
         data = {"ok": False, "error": "message is required"}
@@ -1502,6 +1641,7 @@ def _cmd_mission_chat_message(args) -> int:
             "reply": reply_text,
             "turn_id": safe_assignment_token(client_message_id),
             "run_ids": [],
+            "model_selection": model_selection,
             "idempotent_replay": True,
             "next_expected": "duplicate client message id replayed from the canonical Mission Control chat transcript",
         }
@@ -1538,6 +1678,7 @@ def _cmd_mission_chat_message(args) -> int:
         limiting_wrapper_active=False,
         session_db=session_db,
         current_message=message,
+        model_selection=model_selection,
     )
     try:
         chat_result = GPTPersonaRuntime(
@@ -1548,6 +1689,8 @@ def _cmd_mission_chat_message(args) -> int:
             persona,
             chat_message,
             session_id=None,
+            provider_override=model_selection.get("effective_provider"),
+            model_override=model_selection.get("effective_model"),
             surface_prompt=getattr(args, "surface_prompt", "") or "",
             max_wall_seconds=getattr(args, "max_seconds", 240.0),
             stream_callback=_emit_chat_delta if getattr(args, "stream", False) else None,
@@ -1556,6 +1699,14 @@ def _cmd_mission_chat_message(args) -> int:
             **prompt_context,
             "final_model_input": (getattr(chat_result, "raw", {}) or {}).get("model_input_observability"),
         }
+        persist_tool_turn_actual(
+            persona_id=normalized_persona,
+            session_id=session_id,
+            task_id=task_id,
+            goal_id=goal_id,
+            turn_id=safe_assignment_token(client_message_id),
+            model_input=prompt_context.get("final_model_input"),
+        )
         try:
             persist_prompt_observability_context(prompt_context)
         except Exception as persist_exc:
@@ -1572,6 +1723,7 @@ def _cmd_mission_chat_message(args) -> int:
             "blocker": safe_assignment_text(str(exc), limit=240),
             "prompt_context_id": prompt_context["context_id"],
             "prompt_observability": prompt_context,
+            "model_selection": model_selection,
             "next_expected": "fix the runtime blocker and retry the mission chat turn",
         }
         if getattr(args, "stream", False):
@@ -1631,6 +1783,7 @@ def _cmd_mission_chat_message(args) -> int:
         "total_tokens": getattr(chat_result, "total_tokens", None),
         "prompt_context_id": prompt_context["context_id"],
         "prompt_observability": prompt_context,
+        "model_selection": model_selection,
         "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
     }
     if getattr(args, "stream", False):
@@ -2001,6 +2154,152 @@ def _default_persona_session_db():
         return None
 
 
+_CHAT_MODEL_OVERRIDE_CONFIG_KEY = "mission_control_chat_model_override"
+_CHAT_PROVIDER_MODEL_RE = re.compile(r"^[A-Za-z0-9_.:/@+-]{1,200}$")
+
+
+def _safe_chat_model_override_value(value, *, field: str) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not _CHAT_PROVIDER_MODEL_RE.fullmatch(text):
+        raise ValueError(
+            f"{field} contains unsupported characters; only letters, numbers, '.', '_', '-', '+', '/', ':', and '@' are allowed"
+        )
+    return text
+
+
+def _requested_chat_model_override(args) -> dict[str, object] | None:
+    use_default = bool(getattr(args, "use_agent_default", False))
+    provider = _safe_chat_model_override_value(getattr(args, "provider", None), field="provider")
+    model = _safe_chat_model_override_value(getattr(args, "model", None), field="model")
+    if use_default and (provider or model):
+        raise ValueError("use_agent_default cannot be combined with provider or model")
+    if use_default:
+        return {
+            "schema_version": 1,
+            "clear": True,
+            "source": "operator",
+            "scope": "mission_control_chat_session",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    if not provider and not model:
+        return None
+    return {
+        "schema_version": 1,
+        "provider": provider,
+        "model": model,
+        "source": "operator",
+        "scope": "mission_control_chat_session",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _session_model_config(session_db, session_id: str | None) -> dict[str, object]:
+    if session_db is None or not session_id:
+        return {}
+    try:
+        raw = session_db.get_session(session_id)
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    model_config = raw.get("model_config")
+    if isinstance(model_config, dict):
+        return dict(model_config)
+    if isinstance(model_config, str) and model_config.strip():
+        try:
+            decoded = json.loads(model_config)
+        except Exception:
+            return {}
+        if isinstance(decoded, dict):
+            return decoded
+    return {}
+
+
+def _persist_chat_model_override(
+    *,
+    session_db,
+    session_id: str | None,
+    override: dict[str, object] | None,
+) -> dict[str, object]:
+    current = _session_model_config(session_db, session_id)
+    if override is not None:
+        if override.get("clear") is True:
+            current.pop(_CHAT_MODEL_OVERRIDE_CONFIG_KEY, None)
+        else:
+            current[_CHAT_MODEL_OVERRIDE_CONFIG_KEY] = override
+    if session_db is None or not session_id:
+        return current
+    try:
+        session_db.update_session_meta(
+            session_id,
+            json.dumps(current, sort_keys=True, separators=(",", ":")),
+            model=(override or {}).get("model") if override else None,
+        )
+    except AttributeError:
+        if hasattr(session_db, "sessions"):
+            session = session_db.sessions.setdefault(session_id, {})
+            session["model_config"] = json.dumps(current, sort_keys=True, separators=(",", ":"))
+            if override and override.get("model"):
+                session["model"] = override.get("model")
+    return current
+
+
+def _chat_model_override_from_config(model_config: dict[str, object]) -> dict[str, object] | None:
+    raw = model_config.get(_CHAT_MODEL_OVERRIDE_CONFIG_KEY)
+    if not isinstance(raw, dict):
+        return None
+    provider = _safe_chat_model_override_value(raw.get("provider"), field="provider")
+    model = _safe_chat_model_override_value(raw.get("model"), field="model")
+    if not provider and not model:
+        return None
+    return {
+        "schema_version": 1,
+        "provider": provider,
+        "model": model,
+        "source": safe_assignment_text(raw.get("source"), limit=80) or "session",
+        "scope": "mission_control_chat_session",
+        "updated_at": safe_assignment_text(raw.get("updated_at"), limit=80) or None,
+    }
+
+
+def _resolve_chat_model_override(
+    *,
+    session_db,
+    session_id: str | None,
+    requested_override: dict[str, object] | None,
+) -> dict[str, object] | None:
+    model_config = _persist_chat_model_override(
+        session_db=session_db,
+        session_id=session_id,
+        override=requested_override,
+    )
+    return _chat_model_override_from_config(model_config)
+
+
+def _chat_effective_model_payload(
+    *,
+    persona,
+    config,
+    override: dict[str, object] | None,
+) -> dict[str, object]:
+    default_provider = getattr(persona, "provider", None) or getattr(config, "default_provider", None)
+    default_model = getattr(persona, "model", None) or getattr(config, "default_model", None)
+    provider = (override or {}).get("provider") or default_provider
+    model = (override or {}).get("model") or default_model
+    return {
+        "default_provider": default_provider,
+        "default_model": default_model,
+        "chat_provider": (override or {}).get("provider"),
+        "chat_model": (override or {}).get("model"),
+        "effective_provider": provider,
+        "effective_model": model,
+        "model_is_default": not bool(override and ((override.get("provider") or "") or (override.get("model") or ""))),
+        "scope": "mission_control_chat_session",
+    }
+
+
 def _ensure_persona_chat_session(
     *,
     session_db,
@@ -2103,10 +2402,19 @@ _PERSONA_CHAT_SECRET_RE = re.compile(
 
 
 def _redact_persona_chat_text(value, *, limit: int) -> str:
-    safe = safe_assignment_text(value, limit=limit)
+    safe = _safe_persona_chat_body_text(value, limit=limit)
     if not safe:
         return ""
     return _PERSONA_CHAT_SECRET_RE.sub(r"\1: [redacted]", safe)
+
+
+def _safe_persona_chat_body_text(value, *, limit: int) -> str:
+    text = str(value or "").replace("\x00", " ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [" ".join(line.split()) for line in text.split("\n")]
+    normalized = "\n".join(lines).strip()
+    normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
+    return normalized[:limit].rstrip()
 
 
 def _persona_chat_existing_turn(

@@ -17,6 +17,10 @@ class FakeAgent:
         self.provider = kwargs.get("provider")
         self.model = kwargs.get("model")
         self.base_url = "https://example.invalid/v1"
+        self.tools = [
+            {"type": "function", "function": {"name": tool_name}}
+            for tool_name in (kwargs.get("enabled_toolsets") or [])
+        ]
 
     def run_conversation(self, user_message, system_message=None, task_id=None):
         if FakeAgent.response is not None:
@@ -107,6 +111,11 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
     assert result.profile_timing["result_normalize_ms"] >= 0
     assert result.profile_timing["budget_checks_ms"] >= 0
     assert result.raw["profile_timing"] == result.profile_timing
+    model_input = result.raw["model_input_observability"]
+    assert model_input["enabled_toolsets"] == ["terminal"]
+    assert model_input["blocked_tool_names"] == ["send_message"]
+    assert model_input["tool_schema"]["final_model_tools"] == ["terminal"]
+    assert model_input["tool_schema"]["tool_count"] == 1
     assert [
         event["timing_key"]
         for event in progress_events

@@ -19,6 +19,10 @@ class AutonomyLevel(StrEnum):
     AUTONOMOUS = "autonomous"
 
 
+UNBOUNDED_PROFILE = "unbounded"
+DEFAULT_PERSONA_IDS = frozenset({"neko_supervisor", "dev", "backend_dev", "qa"})
+
+
 ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
     AgentRole.PM: frozenset({"file", "session_search", "todo", "skills"}),
     AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills"}),
@@ -67,12 +71,26 @@ def validate_toolsets(role: AgentRole | str, configured: list[str]) -> list[str]
 
 
 def blocked_tool_names(persona: AgentPersona) -> frozenset[str]:
+    if is_unbounded_persona(persona):
+        return frozenset()
     role = role_from_persona(persona)
     return PERSONA_BLOCKED_TOOLS | PER_ROLE_TOOL_DENIES[role]
 
 
 def effective_toolsets(persona: AgentPersona) -> list[str]:
+    if is_unbounded_persona(persona):
+        return _all_registered_toolsets()
     return validate_toolsets(role_from_persona(persona), persona.toolsets)
+
+
+def is_unbounded_persona(persona: AgentPersona) -> bool:
+    return str(getattr(persona, "hermes_profile", "") or "").strip().lower() == UNBOUNDED_PROFILE
+
+
+def _all_registered_toolsets() -> list[str]:
+    from model_tools import get_available_toolsets
+
+    return sorted(str(name) for name in get_available_toolsets().keys())
 
 
 def default_personas() -> list[AgentPersona]:
@@ -87,6 +105,7 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "session_search", "todo", "skills"],
             system_prompt_path="personas/neko_supervisor/system.md",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
+            hermes_profile=UNBOUNDED_PROFILE,
             skills=["harness-mission-lead"],
         ),
         AgentPersona(
@@ -99,6 +118,7 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
             system_prompt_path="personas/dev/system.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
+            hermes_profile=UNBOUNDED_PROFILE,
             skills=[
                 "agent-runtime-harness",
                 "staged-deep-audit-delivery",
@@ -125,7 +145,7 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
             system_prompt_path="personas/dev/system.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
-            hermes_profile="backend-dev",
+            hermes_profile=UNBOUNDED_PROFILE,
             skills=[
                 "agent-runtime-harness",
                 "staged-deep-audit-delivery",
@@ -151,6 +171,7 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "terminal", "browser", "vision", "session_search", "skills"],
             system_prompt_path="personas/qa/system.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
+            hermes_profile=UNBOUNDED_PROFILE,
             skills=["harness-qa-verdict"],
         ),
     ]

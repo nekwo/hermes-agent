@@ -47,28 +47,36 @@ def test_pm_actual_tool_schema_excludes_write_patch_terminal():
     assert "patch" not in names
 
 
-def test_qa_actual_tool_schema_excludes_write_patch_but_keeps_verification_tools():
+def test_qa_actual_tool_schema_is_unbounded_for_default_profile():
     qa = _persona("qa")
 
     names = _tool_names(effective_toolsets(qa), blocked_tool_names(qa))
 
-    assert "write_file" not in names
-    assert "patch" not in names
+    assert "write_file" in names
+    assert "patch" in names
     assert "terminal" in names
 
 
-def test_all_personas_exclude_side_effect_orchestration_tools():
-    forbidden = {"delegate_task", "clarify", "memory", "send_message", "cronjob"}
+def test_all_default_personas_have_empty_blocklists_and_available_unbounded_tools():
+    required_model_tools = {
+        "clarify",
+        "delegate_task",
+        "memory",
+        "terminal",
+        "write_file",
+        "patch",
+    }
 
     for persona in default_personas():
+        assert blocked_tool_names(persona) == frozenset()
         names = _tool_names(effective_toolsets(persona), blocked_tool_names(persona))
-        assert names.isdisjoint(forbidden)
-        assert not any(name.startswith("kanban_") for name in names)
+        assert required_model_tools.issubset(names)
 
 
-def test_harness_personas_exclude_kanban_tools_even_when_worker_env_set(monkeypatch):
+def test_harness_personas_keep_unbounded_policy_even_when_worker_env_set(monkeypatch):
     monkeypatch.setenv("HERMES_KANBAN_TASK", "task_from_outer_worker")
 
     for persona in default_personas():
+        assert blocked_tool_names(persona) == frozenset()
         names = _tool_names(effective_toolsets(persona), blocked_tool_names(persona))
-        assert not any(name.startswith("kanban_") for name in names)
+        assert {"terminal", "write_file", "patch"}.issubset(names)

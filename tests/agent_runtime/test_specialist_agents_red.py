@@ -41,7 +41,7 @@ def test_default_specialist_persona_collection_includes_backend_dev_and_frontend
     backend = personas["backend_dev"]
     assert backend.display_name in {"Backend Dev Agent", "Backend Dev"}
     assert backend.role == AgentRole.DEV.value
-    assert backend.hermes_profile == "backend-dev"
+    assert backend.hermes_profile == "unbounded"
     assert "terminal" in effective_toolsets(backend)
     assert "write_file" not in blocked_tool_names(backend)
 
@@ -65,7 +65,7 @@ def test_persona_records_from_config_support_collection_specialists_without_drop
 
     personas = _by_id(persona_records_from_config(cfg))
 
-    assert personas["backend_dev"].hermes_profile == "backend-dev"
+    assert personas["backend_dev"].hermes_profile == "unbounded"
     assert personas["ml_dev"].display_name == "ML Dev"
     assert personas["ml_dev"].role == AgentRole.DEV.value
     assert personas["ml_dev"].hermes_profile == "ml-dev"
@@ -88,7 +88,7 @@ def test_specialist_agents_snapshot_is_collection_based_redaction_safe_and_repo_
     assert "backend_dev" in agents
     assert agents["dev"]["display_name"] in {"Launcher Dev Agent", "Frontend Dev Agent", "Frontend Dev", "Compatibility Frontend Dev"}
     assert agents["backend_dev"]["display_name"] in {"Backend Dev Agent", "Backend Dev"}
-    assert agents["backend_dev"]["hermes_profile"] == "backend-dev"
+    assert agents["backend_dev"]["hermes_profile"] == "unbounded"
 
     repo_scopes = snapshot["repo_scopes"]
     assert repo_scopes["harness"]["label"] == "hermes-agent"
@@ -162,4 +162,4 @@ def test_dev_like_specialists_can_request_implementation_proof_but_cannot_self_a
 
     backend = _by_id(default_personas())["backend_dev"]
     assert backend.role == AgentRole.DEV.value
-    assert "send_message" in blocked_tool_names(backend)
+    assert "send_message" not in blocked_tool_names(backend)

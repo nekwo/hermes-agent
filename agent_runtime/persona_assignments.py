@@ -14,6 +14,13 @@ from .events import EventLog
 from .models import AgentPersona, Event, PersonaAssignment, PersonaInstance, WorkerSession
 from .serde import from_jsonable, to_jsonable
 from .states import RunState, WorkerSessionState
+from .tool_visibility import (
+    agent_hud_state_for_persona,
+    permission_state_for_persona,
+    resolve_tool_visibility,
+    turn_tool_context_for_persona,
+)
+from .tool_permissions import permission_options_for_chat
 
 TERMINAL_ASSIGNMENT_STATES = frozenset({"completed", "blocked", "cancelled"})
 ACTIVE_ASSIGNMENT_STATES = frozenset({"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"})
@@ -811,7 +818,16 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
     state = instance.state.value if hasattr(instance.state, "value") else str(instance.state)
     profile_id = instance.profile_id or getattr(persona, "hermes_profile", None)
     skills = list(instance.skill_overrides) if instance.skill_overrides is not None else list(getattr(persona, "skills", []) or [])
-    return {
+    tool_options = None
+    if persona is not None:
+        tool_options = permission_options_for_chat(
+            persona,
+            session_id=instance.session_id,
+            task_id=instance.current_task_id,
+            goal_id=instance.goal_id,
+            runtime_root=instance.runtime_root,
+        )
+    summary = {
         "agent_profile_id": instance.id,
         "agent_profile_display_name": instance.display_name,
         "source_persona_id": instance.persona_id,
@@ -851,6 +867,15 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "last_heartbeat_at": instance.last_heartbeat_at,
         "updated_at": instance.updated_at,
     }
+    if persona is not None:
+        summary["tool_resolution"] = resolve_tool_visibility(persona, tool_options)
+        summary["turn_tool_context"] = turn_tool_context_for_persona(persona, tool_options)
+        summary["permission_state"] = permission_state_for_persona(persona, tool_options)
+        summary["agent_hud_state"] = agent_hud_state_for_persona(persona, tool_options)
+        summary["blocked_tools"] = summary["tool_resolution"]["blocked_tools"]
+        summary["blocked_tools_count"] = len(summary["blocked_tools"])
+        summary["effective_toolsets"] = summary["tool_resolution"]["effective_toolsets"]
+    return summary
 
 
 def persona_assignment_summary(assignment: PersonaAssignment) -> dict[str, Any]:

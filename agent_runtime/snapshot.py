@@ -47,6 +47,12 @@ from .serde import from_jsonable, to_jsonable
 from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
+from .tool_visibility import (
+    agent_hud_state_for_persona,
+    permission_state_for_persona,
+    resolve_tool_visibility,
+    turn_tool_context_for_persona,
+)
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
 
@@ -1304,6 +1310,7 @@ def _event_display_title(event_type: str, payload: dict, kind: str) -> str:
 
 def _agent_summary(agent):
     readiness = profile_readiness_for_persona(agent)
+    tool_resolution = resolve_tool_visibility(agent)
     return {
         "persona_id": agent.id,
         "display_name": agent.display_name,
@@ -1318,9 +1325,16 @@ def _agent_summary(agent):
         "missing_mcp_servers": readiness.get("missing_mcp_servers", []),
         "skill_hash_mismatches": readiness.get("skill_hash_mismatches", []),
         "toolsets": effective_toolsets(agent),
-        "blocked_tools_count": len(blocked_tool_names(agent)),
+        "blocked_tools_count": len(tool_resolution["blocked_tools"]),
+        "blocked_tools": tool_resolution["blocked_tools"],
+        "tool_resolution": tool_resolution,
+        "turn_tool_context": turn_tool_context_for_persona(agent),
+        "permission_state": permission_state_for_persona(agent),
+        "agent_hud_state": agent_hud_state_for_persona(agent),
         "model_configured": bool(agent.model),
         "provider_configured": bool(agent.provider),
+        "default_model": _safe_model_label(getattr(agent, "model", None)),
+        "default_provider": _safe_model_label(getattr(agent, "provider", None)),
         "autonomy": agent.autonomy,
         "core_context_files": "enabled" if getattr(agent, "include_core_context_files", False) else "isolated",
         "repo_scope_label": _safe_text(getattr(agent, "repo_scope_label", None)) or _safe_repo_scope_label(getattr(agent, "repo_scope", None)),
@@ -1372,6 +1386,17 @@ def _safe_repo_scope_label(value):
     text = str(value).replace("\\", "/").rstrip("/")
     name = text.rsplit("/", 1)[-1]
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip("-._")[:64] or None
+
+
+def _safe_model_label(value):
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.:/@+-]{1,220}", text):
+        return None
+    return text
 
 
 def _repo_scopes_summary() -> dict:

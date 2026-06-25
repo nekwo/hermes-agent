@@ -46,12 +46,12 @@ def test_decision_dict_collapses_to_summary_and_rationale():
     assert status == "safe"
     assert len(rows) == 1
     assert rows[0]["role"] == "agent"
-    assert "Route the greeting as a scope clarification." in rows[0]["safe_text"]
-    assert "The mission description is only 'hi'." in rows[0]["safe_text"]
+    assert "Route the greeting as a scope clarification." in rows[0]["text"]
+    assert "The mission description is only 'hi'." in rows[0]["text"]
     # Internal structure must not leak.
-    assert "risk_flags" not in rows[0]["safe_text"]
-    assert "handoff_packet" not in rows[0]["safe_text"]
-    assert "payload" not in rows[0]["safe_text"]
+    assert "risk_flags" not in rows[0]["text"]
+    assert "handoff_packet" not in rows[0]["text"]
+    assert "payload" not in rows[0]["text"]
 
 
 def test_internal_scaffolding_operator_rows_are_dropped():
@@ -71,7 +71,31 @@ def test_clean_operator_message_is_kept():
     rows, _ = _safe_recent_messages(db, session_id="s1")
     assert len(rows) == 1
     assert rows[0]["role"] == "operator"
-    assert rows[0]["safe_text"] == "hi neko"
+    assert rows[0]["text"] == "hi neko"
+
+
+def test_long_markdown_agent_message_is_not_preview_truncated():
+    body = "\n\n".join(
+        [
+            "## Gap 1 — Chat-to-goal action execution is not proven",
+            "**Severity: High**",
+            "The current Mission Control chat path can send a message.",
+            "## Gap 2 — Runtime graph and mission blueprint need a join contract",
+            "1. Mission blueprint defines stages, owners, repos, proof expectations.",
+            "## Gap 3 — Raw terminal should not become the product layer",
+            "Use typed Harness actions instead of arbitrary shell visibility.",
+            "## Gap 4 — Child-agent spawning needs explicit permission checks",
+            "Bottom line: build the typed Neko supervisor action bridge.",
+        ]
+    )
+    db = FakeSessionDB([{"role": "assistant", "content": body}])
+
+    rows, status = _safe_recent_messages(db, session_id="s1")
+
+    assert status == "safe"
+    assert rows[0]["text"] == body
+    assert "## Gap 4" in rows[0]["text"]
+    assert rows[0]["text"].count("\n\n") >= 8
 
 
 def test_tool_system_and_empty_rows_are_dropped():
@@ -123,8 +147,8 @@ def test_safe_recent_messages_returns_deeper_bounded_tail():
 
     assert status == "safe"
     assert len(rows) == 12
-    assert rows[0]["safe_text"] == "Agent update 0"
-    assert rows[-1]["safe_text"] == "Agent update 11"
+    assert rows[0]["text"] == "Agent update 0"
+    assert rows[-1]["text"] == "Agent update 11"
 
 
 def test_persona_chat_trace_projects_tool_events_by_persona_without_raw_secrets():

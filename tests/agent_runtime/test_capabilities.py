@@ -24,6 +24,9 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert "persona.instance.run_once" not in ids
     assert "persona.profile.create" in ids
     assert "persona.profile.promote" in ids
+    assert "persona.permission_preview" in ids
+    assert "persona.permission_override" in ids
+    assert "persona.elevate_tools_once" in ids
     assert "task.run_until_settled" in ids
     assert "daemon.start" in ids
     assert "shell.anything" not in ids
@@ -46,7 +49,12 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["coordinator_spawns_used"]["minimum"] == 0
     assert by_id["persona.instance.create"]["args_schema"]["properties"]["coordinator_may_kill_own"]["type"] == "boolean"
     assert "session_id" in by_id["mission.chat.message"]["allowed_args"]
+    assert {"provider", "model"}.issubset(set(by_id["mission.chat.message"]["allowed_args"]))
     assert by_id["mission.chat.message"]["default_args"]["surface_prompt"] == ""
+    assert by_id["persona.permission_preview"]["execution_semantics"] == "read_only"
+    assert by_id["persona.permission_override"]["danger"] == "warning"
+    assert by_id["persona.permission_override"]["args_schema"]["properties"]["turns"]["type"] == "integer"
+    assert by_id["persona.elevate_tools_once"]["args_schema"]["properties"]["tools"]["type"] == "array"
     assert {"add_instance", "placement_id", "kill_active"}.issubset(
         set(by_id["persona.instance.open_chat"]["allowed_args"])
     )

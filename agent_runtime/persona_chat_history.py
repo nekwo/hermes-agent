@@ -11,6 +11,8 @@ PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
 DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
 MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
+PERSONA_CHAT_MESSAGE_TEXT_LIMIT = 20000
+_CHAT_MODEL_OVERRIDE_CONFIG_KEY = "mission_control_chat_model_override"
 _TRACE_EVENT_TYPES = {"run.tool.started", "run.tool.finished", "run.progress"}
 # Per-task trace fetch sizing: headroom over tail*agents to survive dilution by
 # non-trace event rows, and a hard ceiling on the reverse log scan.
@@ -269,8 +271,43 @@ def _history_row(
         "state": "archived" if bool(raw.get("archived")) else "open",
         "redaction_status": redaction_status,
         **_token_usage_fields(raw),
+        **_chat_model_fields(raw),
         "messages": messages,
     }
+
+
+def _chat_model_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    model_config = _model_config(raw.get("model_config"))
+    override = model_config.get(_CHAT_MODEL_OVERRIDE_CONFIG_KEY)
+    if not isinstance(override, dict):
+        override = {}
+    provider = safe_assignment_text(override.get("provider"), limit=220) or None
+    model = safe_assignment_text(override.get("model"), limit=220) or None
+    fallback_provider = safe_assignment_text(raw.get("provider"), limit=220) or None
+    fallback_model = safe_assignment_text(raw.get("model"), limit=220) or None
+    if not (provider or model or fallback_provider or fallback_model):
+        return {}
+    return {
+        "chat_provider": provider,
+        "chat_model": model,
+        "chat_model_scope": "mission_control_chat_session" if provider or model else None,
+        "chat_model_is_default": not bool(provider or model),
+        "effective_provider": provider or fallback_provider,
+        "effective_model": model or fallback_model,
+    }
+
+
+def _model_config(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            decoded = json.loads(value)
+        except Exception:
+            return {}
+        if isinstance(decoded, dict):
+            return decoded
+    return {}
 
 
 def _token_usage_fields(raw: dict[str, Any]) -> dict[str, int]:
@@ -360,14 +397,14 @@ def _safe_recent_messages(
         if role not in {"operator", "agent"}:
             continue
         curated = _curate_chat_message_text(
-            role, raw.get("content") or raw.get("safe_text") or raw.get("text")
+            role, raw.get("content") or raw.get("text")
         )
         if not curated:
             continue
-        text, status = _safe_display_text(
+        text, status = _safe_display_body_text(
             curated,
             fallback="Message hidden by redaction boundary",
-            limit=1200,
+            limit=PERSONA_CHAT_MESSAGE_TEXT_LIMIT,
         )
         if not text:
             continue
@@ -378,7 +415,7 @@ def _safe_recent_messages(
                 "id": safe_assignment_text(raw.get("id"), limit=120)
                 or f"{session_id}:{index}",
                 "role": role,
-                "safe_text": text,
+                "text": text,
                 "timestamp": _iso_timestamp(
                     raw.get("created_at")
                     or raw.get("timestamp")
@@ -548,13 +585,13 @@ def _curate_chat_message_text(role: str, content: Any) -> str | None:
         summary = _decision_summary_text(content)
         if summary:
             return summary
-        text = safe_assignment_text(content, limit=4000)
+        text = _safe_chat_body_text(content, limit=PERSONA_CHAT_MESSAGE_TEXT_LIMIT)
         if not text or text.startswith("{"):
             # Empty assistant turn or an unparseable raw dict — not presentable.
             return None
         return text
     if role == "operator":
-        text = safe_assignment_text(content, limit=4000)
+        text = _safe_chat_body_text(content, limit=PERSONA_CHAT_MESSAGE_TEXT_LIMIT)
         if not text:
             return None
         if any(marker in text for marker in _INTERNAL_SCAFFOLDING_MARKERS):
@@ -608,6 +645,30 @@ def _safe_display_text(
     if _SECRET_RE.search(text):
         return redacted_fallback or fallback, "redacted"
     return text, "safe"
+
+
+def _safe_display_body_text(
+    value: Any,
+    *,
+    fallback: str,
+    limit: int,
+    redacted_fallback: str | None = None,
+) -> tuple[str, str]:
+    text = _safe_chat_body_text(value, limit=limit)
+    if not text:
+        return fallback, "safe"
+    if _SECRET_RE.search(text):
+        return redacted_fallback or fallback, "redacted"
+    return text, "safe"
+
+
+def _safe_chat_body_text(value: Any, *, limit: int) -> str:
+    text = str(value or "").replace("\x00", " ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [" ".join(line.split()) for line in text.split("\n")]
+    normalized = "\n".join(lines).strip()
+    normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
+    return normalized[:limit].rstrip()
 
 
 def _safe_int(value: Any) -> int:

@@ -37,10 +37,13 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
             "goal_id",
             "intent_hint",
             "max_seconds",
+            "model",
             "persona_instance_id",
+            "provider",
             "session_id",
             "surface_prompt",
             "task_id",
+            "use_agent_default",
         ],
         "default_args": {"title": "Operator message", "surface_prompt": "", "max_seconds": 240},
         "danger": "normal",
@@ -162,6 +165,36 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "allowed_args": ["attachments"],
         "default_args": {"title": "Persona diagnostic", "max_actions": 1, "max_seconds": 240},
         "danger": "normal",
+    },
+    {
+        "id": "persona.permission_preview",
+        "target_kind": "persona",
+        "label": "Preview Permissions",
+        "group": "visibility",
+        "execution_semantics": "read_only",
+        "required_args": ["persona_id"],
+        "allowed_args": ["permission_mode", "repo_scope", "session_id"],
+        "danger": "normal",
+    },
+    {
+        "id": "persona.permission_override",
+        "target_kind": "persona",
+        "label": "Set Chat Permissions",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["persona_id", "permission_mode", "reason"],
+        "allowed_args": ["expires_at", "repo_scope", "session_id", "turns"],
+        "danger": "warning",
+    },
+    {
+        "id": "persona.elevate_tools_once",
+        "target_kind": "persona",
+        "label": "Elevate Tools Once",
+        "group": "steer",
+        "execution_semantics": "bounded_elevation",
+        "required_args": ["persona_id", "reason"],
+        "allowed_args": ["max_seconds", "repo_scope", "session_id", "tools", "turns"],
+        "danger": "warning",
     },
     {
         "id": "worker.nudge",
@@ -359,11 +392,13 @@ def _arg_schema_for(item: dict[str, Any]) -> dict[str, Any]:
                     },
                 },
             }
-        elif name in {"max_actions", "max_seconds", "lease_seconds"}:
+        elif name == "tools":
+            properties[name] = {"type": "array", "items": {"type": "string", "minLength": 1}}
+        elif name in {"max_actions", "max_seconds", "lease_seconds", "turns"}:
             properties[name] = {"type": "integer", "minimum": 1}
         elif name in {"coordinator_max_spawns", "coordinator_spawns_used"}:
             properties[name] = {"type": "integer", "minimum": 0}
-        elif name in {"rescope", "foreground", "auto_run", "kill_active", "add_instance", "coordinator_may_kill_own", "coordinator_no_kill_own", "coordinator_may_kill_others"}:
+        elif name in {"rescope", "foreground", "auto_run", "kill_active", "add_instance", "coordinator_may_kill_own", "coordinator_no_kill_own", "coordinator_may_kill_others", "use_agent_default"}:
             properties[name] = {"type": "boolean"}
         else:
             properties[name] = {"type": "string", "minLength": 1}

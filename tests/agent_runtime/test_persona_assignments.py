@@ -269,7 +269,7 @@ def test_operator_chat_history_binds_by_unique_session(isolate_agent_runtime_roo
     )
 
     messages_by_session = {
-        row["session_id"]: [message["safe_text"] for message in row["messages"]]
+        row["session_id"]: [message["text"] for message in row["messages"]]
         for row in rows
         if row["messages"]
     }
@@ -1042,46 +1042,45 @@ def test_persona_chat_history_summary_projects_builtin_chat_source_when_worker_o
     assert rows[0]["persona_id"] == "qa"
     assert rows[0]["persona_instance_id"] == "personainst_qa"
     assert rows[0]["title"] == "hi, what's your take on shipping fast?"
-    assert rows[0]["messages"][0]["safe_text"] == "hi, what's your take on shipping fast?"
+    assert rows[0]["messages"][0]["text"] == "hi, what's your take on shipping fast?"
 
 
 def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_agent_runtime_root):
     import agent_runtime.persona_chat_history as history
+    import agent_runtime.snapshot as snapshot_module
 
     cfg = _assignment_config()
     monkeypatch.setattr("agent_runtime.snapshot.load_agent_runtime_config", lambda: cfg)
-    monkeypatch.setattr(
-        history,
-        "_default_session_db",
-        lambda: _FakeSessionDB(
-            [
+    db = _FakeSessionDB(
+        [
+            {
+                "id": "chat_old_123",
+                "title": "Launcher Dev operator channel",
+                "preview": "Continue the old chat safely.",
+                "message_count": 3,
+                "started_at": 100,
+                "last_active": 200,
+            }
+        ],
+        messages={
+            "chat_old_123": [
                 {
-                    "id": "chat_old_123",
-                    "title": "Launcher Dev operator channel",
-                    "preview": "Continue the old chat safely.",
-                    "message_count": 3,
-                    "started_at": 100,
-                    "last_active": 200,
-                }
-            ],
-            messages={
-                "chat_old_123": [
-                    {
-                        "id": "msg_1",
-                        "role": "user",
-                        "content": "Can you keep working from the old chat?",
-                        "created_at": "2026-06-19T10:00:00Z",
-                    },
-                    {
-                        "id": "msg_2",
-                        "role": "assistant",
-                        "content": "Yes. I will continue from this persona session.",
-                        "created_at": "2026-06-19T10:01:00Z",
-                    },
-                ]
-            },
-        ),
+                    "id": "msg_1",
+                    "role": "user",
+                    "content": "Can you keep working from the old chat?",
+                    "created_at": "2026-06-19T10:00:00Z",
+                },
+                {
+                    "id": "msg_2",
+                    "role": "assistant",
+                    "content": "Yes. I will continue from this persona session.",
+                    "created_at": "2026-06-19T10:01:00Z",
+                },
+            ]
+        },
     )
+    monkeypatch.setattr(history, "_default_session_db", lambda: db)
+    monkeypatch.setattr(snapshot_module, "_default_persona_session_db", lambda: db)
     PersonaInstanceStore().open_chat(persona_id="dev", session_id="chat_old_123")
 
     snapshot = build_snapshot()
@@ -1108,14 +1107,14 @@ def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_age
                 {
                     "id": "msg_1",
                     "role": "operator",
-                    "safe_text": "Can you keep working from the old chat?",
+                    "text": "Can you keep working from the old chat?",
                     "timestamp": "2026-06-19T10:00:00Z",
                     "redaction_status": "safe",
                 },
                 {
                     "id": "msg_2",
                     "role": "agent",
-                    "safe_text": "Yes. I will continue from this persona session.",
+                    "text": "Yes. I will continue from this persona session.",
                     "timestamp": "2026-06-19T10:01:00Z",
                     "redaction_status": "safe",
                 },
@@ -1152,6 +1151,8 @@ class _TranscriptDB:
                     "id": session_id,
                     "source": row_source,
                     "system_prompt": session.get("system_prompt"),
+                    "model": session.get("model"),
+                    "model_config": session.get("model_config"),
                     "title": self.titles.get(session_id),
                     "preview": None,
                     "message_count": len(self.messages.get(session_id, [])),
@@ -1179,6 +1180,8 @@ class _TranscriptDB:
             "id": session_id,
             "source": session.get("source"),
             "system_prompt": session.get("system_prompt"),
+            "model": session.get("model"),
+            "model_config": session.get("model_config"),
             "title": self.titles.get(session_id),
             "preview": None,
             "message_count": len(self.messages.get(session_id, [])),
@@ -1192,6 +1195,12 @@ class _TranscriptDB:
 
     def set_session_title(self, session_id, title):
         self.titles[session_id] = title
+
+    def update_session_meta(self, session_id, model_config_json, model=None):
+        session = self.sessions.setdefault(session_id, {})
+        session["model_config"] = model_config_json
+        if model is not None:
+            session["model"] = model
 
     def delete_session(self, session_id, **kwargs):
         if session_id not in self.sessions:
@@ -1409,7 +1418,7 @@ def test_persona_chat_transcript_records_operator_and_assistant_turn(isolate_age
     harness._append_persona_assistant_text(
         session_db=db,
         session_id=session_id,
-        text="Hey — what are we working on?",
+        text="Hey — what are we working on?\n\n- Scope\n- Proof",
     )
 
     assert [item["role"] for item in db.messages[session_id]] == [
@@ -1417,7 +1426,175 @@ def test_persona_chat_transcript_records_operator_and_assistant_turn(isolate_age
         "assistant",
     ]
     assert db.messages[session_id][0]["content"] == "hi"
-    assert db.messages[session_id][1]["content"] == "Hey — what are we working on?"
+    assert (
+        db.messages[session_id][1]["content"]
+        == "Hey — what are we working on?\n\n- Scope\n- Proof"
+    )
+
+
+def test_mission_chat_model_override_is_chat_scoped_and_does_not_mutate_persona(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    cfg.personas["dev"] = {
+        "model": "gpt-default",
+        "provider": "openai-codex",
+        "api_mode": "codex_responses",
+        "hermes_profile": "profile-dev",
+    }
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    captured: dict = {}
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            captured["runtime_kwargs"] = kwargs
+
+        def mission_chat_reply(self, persona_arg, message, **kwargs):
+            captured["persona_model"] = persona_arg.model
+            captured["persona_provider"] = persona_arg.provider
+            captured["reply_kwargs"] = kwargs
+            return SimpleNamespace(
+                final_response="override accepted",
+                input_tokens=3,
+                output_tokens=4,
+                total_tokens=7,
+                raw={
+                    "model_input_observability": {
+                        "kind": "redaction_safe_final_model_input",
+                        "message_count": 1,
+                        "messages": [],
+                    }
+                },
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            title="Operator message",
+            message="use the override",
+            provider="openrouter",
+            model="anthropic/claude-sonnet-4",
+            use_agent_default=False,
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_override_1",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["model_selection"]["default_provider"] == "openai-codex"
+    assert payload["model_selection"]["default_model"] == "gpt-default"
+    assert payload["model_selection"]["effective_provider"] == "openrouter"
+    assert payload["model_selection"]["effective_model"] == "anthropic/claude-sonnet-4"
+    assert payload["model_selection"]["model_is_default"] is False
+    assert captured["reply_kwargs"]["provider_override"] == "openrouter"
+    assert captured["reply_kwargs"]["model_override"] == "anthropic/claude-sonnet-4"
+    assert captured["persona_provider"] == "openai-codex"
+    assert captured["persona_model"] == "gpt-default"
+    stored_persona = AgentStore().get("dev")
+    assert stored_persona.provider == "openai-codex"
+    assert stored_persona.model == "gpt-default"
+
+    stored_config = json.loads(db.sessions["persona_chat_personainst_dev"]["model_config"])
+    override = stored_config["mission_control_chat_model_override"]
+    assert override["provider"] == "openrouter"
+    assert override["model"] == "anthropic/claude-sonnet-4"
+    assert override["scope"] == "mission_control_chat_session"
+
+    instance = PersonaInstanceStore().get("personainst_dev")
+    rows = persona_chat_history_summary(persona_instances=[instance], session_db=db)
+    assert rows[0]["chat_provider"] == "openrouter"
+    assert rows[0]["chat_model"] == "anthropic/claude-sonnet-4"
+    assert rows[0]["effective_provider"] == "openrouter"
+    assert rows[0]["effective_model"] == "anthropic/claude-sonnet-4"
+    assert rows[0]["chat_model_is_default"] is False
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            title="Operator message",
+            message="back to default",
+            provider=None,
+            model=None,
+            use_agent_default=True,
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_default_1",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["model_selection"]["effective_provider"] == "openai-codex"
+    assert payload["model_selection"]["effective_model"] == "gpt-default"
+    assert payload["model_selection"]["model_is_default"] is True
+    stored_config = json.loads(db.sessions["persona_chat_personainst_dev"]["model_config"])
+    assert "mission_control_chat_model_override" not in stored_config
+
+
+def test_mission_chat_model_override_rejects_bad_values_before_turn_is_written(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            title="Operator message",
+            message="bad model please",
+            provider="openrouter",
+            model="bad model with spaces",
+            use_agent_default=False,
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_bad_model",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "invalid_chat_model_override"
+    assert "Hermes profile defaults were not changed" in payload["next_expected"]
+    assert db.messages["persona_chat_personainst_dev"] == []
 
 
 def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, isolate_agent_runtime_root):
