@@ -5,7 +5,6 @@ from typing import Mapping
 from hermes_time import now
 
 from .blueprints import BlueprintStore, instantiate_blueprint
-from .mission_plan import has_typed_plan
 from .models import MissionIntent, MissionPlan, MissionPlanStage, Task
 from .states import StageStatus
 
@@ -50,7 +49,7 @@ def ensure_default_mission_plan(
     blueprint_id: str = DEFAULT_TASK_BLUEPRINT_ID,
     bindings: Mapping[str, str] | None = None,
 ) -> MissionPlan:
-    if has_typed_plan(task):
+    if _has_plan(task):
         plan = task.mission_plan
         _upgrade_typed_plan_to_graph(task, plan)
         if not plan.current_stage_id and task.current_stage_id and any(stage.id == task.current_stage_id for stage in plan.stages):
@@ -60,6 +59,11 @@ def ensure_default_mission_plan(
         task.mission_plan = plan
     task.current_stage_id = plan.current_stage_id
     return plan
+
+
+def _has_plan(task: Task) -> bool:
+    plan = getattr(task, "mission_plan", None)
+    return bool(plan and plan.enabled and plan.stages)
 
 
 def _alias_default_slots_to_personas(plan: MissionPlan) -> None:

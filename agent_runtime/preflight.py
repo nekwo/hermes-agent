@@ -167,7 +167,8 @@ def open_preflight_blocker(
         },
     )
     incident_store.open(incident)
-    task.state = TaskState.BLOCKED
+    if task.state not in {TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED}:
+        task.state = TaskState.RUNNING
     task.open_incident_ids = _dedupe(list(task.open_incident_ids or []), [incident.id])
     task.proof_ids = _dedupe(list(task.proof_ids or []), [proof.id])
     _persist_environment_fingerprint(task, stage_id, result.environment_fingerprint, status, failed_proof_id=proof.id)

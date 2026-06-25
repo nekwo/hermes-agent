@@ -292,7 +292,7 @@ def test_preflight_blocker_attaches_proof_and_incident(monkeypatch):
     saved = ts.get(t.id)
 
     assert incident is not None
-    assert saved.state == TaskState.BLOCKED
+    assert saved.state == TaskState.RUNNING
     assert saved.proof_ids
     proof = ps.get(saved.proof_ids[-1])
     assert proof.metadata["kind"] == "preflight"

@@ -14,22 +14,22 @@ def _persona(persona_id: str):
     return {persona.id: persona for persona in default_personas()}[persona_id]
 
 
-def test_neko_supervisor_visibility_is_unbounded_and_write_capable():
+def test_neko_supervisor_visibility_is_bounded_by_default():
     visibility = resolve_tool_visibility(_persona("neko_supervisor"))
 
     final_tools = set(visibility["final_model_tools"])
 
     assert "read_file" in final_tools
     assert "search_files" in final_tools
-    assert "write_file" in final_tools
-    assert "patch" in final_tools
-    assert "terminal" in final_tools
-    assert visibility["blocked_tools"] == []
-    assert visibility["mutation_boundary"]["can_mutate_files"] is True
-    assert visibility["mutation_boundary"]["can_run_terminal"] is True
+    assert "write_file" not in final_tools
+    assert "patch" not in final_tools
+    assert "terminal" not in final_tools
+    assert "terminal" in visibility["blocked_tool_names"]
+    assert visibility["mutation_boundary"]["can_mutate_files"] is False
+    assert visibility["mutation_boundary"]["can_run_terminal"] is False
 
 
-def test_dev_visibility_is_unbounded_with_mutating_tools_available():
+def test_dev_visibility_can_mutate_but_keeps_default_persona_blocks():
     visibility = resolve_tool_visibility(_persona("dev"))
 
     final_tools = set(visibility["final_model_tools"])
@@ -37,13 +37,14 @@ def test_dev_visibility_is_unbounded_with_mutating_tools_available():
     assert "write_file" in final_tools
     assert "patch" in final_tools
     assert "terminal" in final_tools
-    assert visibility["blocked_tool_names"] == []
+    assert "send_message" in visibility["blocked_tool_names"]
+    assert "delegate_task" in visibility["blocked_tool_names"]
     assert visibility["mutation_boundary"]["can_mutate_files"] is True
     assert visibility["mutation_boundary"]["can_run_terminal"] is True
 
 
 def test_qa_visibility_is_unbounded_and_can_mutate():
-    visibility = resolve_tool_visibility(_persona("qa"))
+    visibility = resolve_tool_visibility(_persona("qa"), ToolVisibilityOptions(permission_mode="unbounded"))
 
     final_tools = set(visibility["final_model_tools"])
 
@@ -53,6 +54,21 @@ def test_qa_visibility_is_unbounded_and_can_mutate():
     assert visibility["blocked_tool_names"] == []
     assert visibility["mutation_boundary"]["can_mutate_files"] is True
     assert visibility["mutation_boundary"]["can_run_terminal"] is True
+
+
+def test_unbounded_permission_mode_expands_neko_visibility():
+    visibility = resolve_tool_visibility(
+        _persona("neko_supervisor"),
+        ToolVisibilityOptions(permission_mode="unbounded", permission_source="test"),
+    )
+
+    final_tools = set(visibility["final_model_tools"])
+
+    assert "write_file" in final_tools
+    assert "patch" in final_tools
+    assert "terminal" in final_tools
+    assert visibility["blocked_tool_names"] == []
+    assert visibility["permission_mode"] == "unbounded"
 
 
 def test_turn_context_permission_state_and_hud_share_the_same_resolution():
@@ -102,6 +118,31 @@ def test_chat_permission_store_can_narrow_dev_chat_to_read_only(tmp_path):
     assert "write_file" not in visibility["final_model_tools"]
     assert "patch" not in visibility["final_model_tools"]
     assert "terminal" not in visibility["final_model_tools"]
+
+
+def test_chat_permission_store_can_expand_chat_to_unbounded(tmp_path):
+    persona = _persona("qa")
+    store = ChatToolPermissionStore(path=tmp_path / "tool_permissions.json")
+
+    store.set(
+        persona_id=persona.id,
+        session_id="session_unbounded",
+        mode="unbounded",
+        reason="operator enabled full tools for this chat",
+    )
+
+    options = permission_options_for_chat(
+        persona,
+        session_id="session_unbounded",
+        store=store,
+    )
+    visibility = resolve_tool_visibility(persona, options)
+
+    assert visibility["permission_mode"] == "unbounded"
+    assert visibility["blocked_tool_names"] == []
+    assert "write_file" in visibility["final_model_tools"]
+    assert "patch" in visibility["final_model_tools"]
+    assert "terminal" in visibility["final_model_tools"]
 
 
 def test_turn_tool_context_loads_last_actual_tool_schema(tmp_path, monkeypatch):

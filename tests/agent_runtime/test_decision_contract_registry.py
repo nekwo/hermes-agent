@@ -13,11 +13,11 @@ from agent_runtime.decision_contract_registry import (
     contract_hash,
     contract_manifest,
     event_catalog,
-    hud_shape_index_for_role,
+    hud_shape_index_for_stage,
     payload_contract,
     verify_registry,
 )
-from agent_runtime.decision_contract_examples import verify_stage46_skill_examples
+from agent_runtime.decision_contract_examples import verify_harness_skill_examples
 from agent_runtime.decision_payload_contracts import payload_contract as facade_payload_contract
 from agent_runtime.decision_schema import ALLOWED_DECISIONS_BY_ROLE, DECISION_SCHEMA, DecisionType
 from agent_runtime.events import ALLOWED_EVENT_TYPES
@@ -86,12 +86,12 @@ def test_role_permissions_are_registry_generated():
 def test_hud_shapes_do_not_expose_decisions_for_the_wrong_role():
     for role in AgentRole:
         allowed = {item.value for item in allowed_decisions_for_role(role)}
-        for shape_id, shape in hud_shape_index_for_role(role).items():
+        for shape_id, shape in hud_shape_index_for_stage(role).items():
             assert shape["decision_type"] in allowed, f"{role.value} leaked {shape_id}"
 
-    assert "common.request_human" not in hud_shape_index_for_role("dev")
-    assert "common.needs_context" not in hud_shape_index_for_role("qa")
-    assert "common.report_issue_discovery" not in hud_shape_index_for_role("neko_supervisor")
+    assert "common.request_human" not in hud_shape_index_for_stage("dev")
+    assert "common.needs_context" not in hud_shape_index_for_stage("qa")
+    assert "common.report_issue_discovery" not in hud_shape_index_for_stage("neko_supervisor")
 
 
 def test_payload_contract_facade_matches_registry():
@@ -108,7 +108,7 @@ def test_role_aliases_support_runtime_persona_ids():
 def test_registry_hud_shapes_drive_context_builder_menu():
     ctx = build_context(_task(), _run())
     hud = ctx.mission_hud
-    registry_shapes = hud_shape_index_for_role("dev")
+    registry_shapes = hud_shape_index_for_stage("dev")
 
     assert hud["decision_contract_hash"] == contract_hash()
     assert hud["decision_menu"][0]["shape_id"] == "dev.request_test_run"
@@ -201,8 +201,8 @@ def test_contract_cli_dump_and_verify_examples():
     assert verify_payload["skill_examples"]["checked_count"] >= 6
 
 
-def test_stage46_skill_examples_validate_against_live_contracts():
-    result = verify_stage46_skill_examples()
+def test_harness_skill_examples_validate_against_live_contracts():
+    result = verify_harness_skill_examples()
 
     assert result["ok"] is True
     assert result["failure_count"] == 0

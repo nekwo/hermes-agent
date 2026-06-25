@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .decision_schema import DecisionType
-from .mission_plan import current_plan_stage, has_typed_plan, mission_plan_hud_enabled
+from .mission_plan import current_plan_stage, mission_plan_hud_enabled
 from .models import AgentRun, Task, TaskStage
 from .mission_plan import task_stage_records
 from .profile_context import active_profile_name
@@ -57,7 +57,7 @@ def worker_actions_for_role(
     if not normal_worker_flow_enabled(config):
         return []
     resolved = _worker_role(role, run)
-    if mission_plan_hud_enabled(config) and has_typed_plan(task):
+    if mission_plan_hud_enabled(config):
         return _typed_actions(resolved, task, run, proof_store=proof_store)
     if resolved == "dev":
         return _dev_actions(task, run, proof_store=proof_store)

@@ -47,7 +47,7 @@ def test_harness_system_prompt_lists_recommended_skills_without_preloading_bodie
     assert "Loaded by Agent Runtime Harness persona skill manifest" not in prompt
 
 
-def test_stage46_personas_expose_mission_dev_and_qa_skills():
+def test_harness_personas_expose_mission_dev_and_qa_skills():
     personas = {persona.id: persona for persona in default_personas()}
 
     assert "harness-mission-lead" in personas["neko_supervisor"].skills
@@ -58,18 +58,18 @@ def test_stage46_personas_expose_mission_dev_and_qa_skills():
     assert "harness-qa-verdict" in personas["qa"].skills
 
 
-def test_stage46_install_uses_persona_declared_skills_not_role_map():
-    from agent_runtime.skill_install import stage46_required_skills_for_persona
+def test_harness_install_uses_persona_declared_skills_not_role_map():
+    from agent_runtime.skill_install import harness_required_skills_for_persona
 
-    dev_without_stage46 = _persona(id="dev", skills=["aaa-feature-delivery"])
-    dev_with_stage46 = _persona(id="dev", skills=["aaa-feature-delivery", "harness-dev-delivery"])
+    dev_without_harness = _persona(id="dev", skills=["aaa-feature-delivery"])
+    dev_with_harness = _persona(id="dev", skills=["aaa-feature-delivery", "harness-dev-delivery"])
 
-    assert stage46_required_skills_for_persona(dev_without_stage46) == []
-    assert stage46_required_skills_for_persona(dev_with_stage46) == ["harness-dev-delivery"]
+    assert harness_required_skills_for_persona(dev_without_harness) == []
+    assert harness_required_skills_for_persona(dev_with_harness) == ["harness-dev-delivery"]
 
 
 def test_stage59_hud_skill_sections_exist_in_role_skills():
-    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "stage46-skills"
+    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
     expected = {
         "harness-mission-lead": {"Scoped Handoff", "Bounded Recovery", "QA Release", "Incident Resolution"},
         "harness-dev-delivery": {"Deliver Patch", "Request Proof Recipe", "Request Context", "Stage Plan", "Report Blocker"},
@@ -85,12 +85,12 @@ def test_stage59_hud_skill_sections_exist_in_role_skills():
         assert "next_required_move" not in text
 
 
-def test_stage46_skill_install_allows_readiness_from_temp_home(tmp_path, monkeypatch):
+def test_harness_skill_install_allows_readiness_from_temp_home(tmp_path, monkeypatch):
     from agent_runtime.profile_readiness import profile_readiness_for_persona
-    from agent_runtime.skill_install import install_stage46_skills
+    from agent_runtime.skill_install import install_harness_skills
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    results = install_stage46_skills(hermes_home=tmp_path)
+    results = install_harness_skills(hermes_home=tmp_path)
     assert all(result.ok for result in results)
 
     qa = _persona(id="qa", role=AgentRole.QA.value, system_prompt_path="personas/qa/system.md", skills=["harness-qa-verdict"])
@@ -100,7 +100,7 @@ def test_stage46_skill_install_allows_readiness_from_temp_home(tmp_path, monkeyp
     assert readiness["skill_hash_mismatches"] == []
 
 
-def test_stage46_skill_cli_defaults_to_persona_profiles(monkeypatch, capsys):
+def test_harness_skill_cli_defaults_to_persona_profiles(monkeypatch, capsys):
     from agent_runtime.skill_install import SkillInstallResult
     from hermes_cli import harness
 
@@ -118,12 +118,12 @@ def test_stage46_skill_cli_defaults_to_persona_profiles(monkeypatch, capsys):
 
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: object())
     monkeypatch.setattr(harness, "ensure_persisted_personas", lambda _cfg: ["qa"])
-    monkeypatch.setattr(harness, "install_stage46_skills_for_personas", lambda _personas: calls.append("personas") or [result])
-    monkeypatch.setattr(harness, "install_stage46_skills", lambda: calls.append("active") or [result])
+    monkeypatch.setattr(harness, "install_harness_skills_for_personas", lambda _personas: calls.append("personas") or [result])
+    monkeypatch.setattr(harness, "install_harness_skills", lambda: calls.append("active") or [result])
 
-    assert harness._cmd_install_stage46_skills(SimpleNamespace(active_profile_only=False, all_persona_profiles=False, json=True)) == 0
+    assert harness._cmd_install_harness_skills(SimpleNamespace(active_profile_only=False, all_persona_profiles=False, json=True)) == 0
     assert calls == ["personas"]
     assert '"ok": true' in capsys.readouterr().out
 
-    assert harness._cmd_install_stage46_skills(SimpleNamespace(active_profile_only=True, all_persona_profiles=False, json=True)) == 0
+    assert harness._cmd_install_harness_skills(SimpleNamespace(active_profile_only=True, all_persona_profiles=False, json=True)) == 0
     assert calls == ["personas", "active"]

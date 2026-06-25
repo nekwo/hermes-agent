@@ -14,20 +14,16 @@ from .dev_discipline import needs_supervisor_slicing
 from .models import Event, Task, TaskStage
 from .mission_plan import (
     current_plan_stage,
-    has_typed_plan,
     is_mission_lead_actor,
     release_next_stage,
 )
 from .packets import record_decision_packets
 from .packets import latest_packet
-from .planning import LAUNCHER_RELEASED_BY_NEKO_FLAG, _all_stages_dev_complete, _all_stages_passed, _advance_to_next_dev_stage, _has_backend_contract_proof, _is_cross_stack_backend_first, _needs_cross_stack_launcher_completion, _stage_mentions_launcher, apply_planning_decision
+from .planning import _all_stages_dev_complete, _all_stages_passed, _advance_to_next_dev_stage, _has_backend_contract_proof, _is_cross_stack_backend_first, _needs_cross_stack_launcher_completion, _stage_mentions_launcher, apply_planning_decision
 from .reconciler import reconcile_task
 from .recovery_flags import block_recovery_attempted_for_current_signal
 from .scope_control import needs_pm_triage_before_dev
 from .states import StageStatus, TaskState
-
-
-QA_COORDINATION_RELEASED_FLAG = "neko_qa_coordination_released"
 
 
 def _run_slot(mission: Task, slot_id: str, reason: str) -> HarnessAction:
@@ -106,6 +102,8 @@ class MissionStateMachine:
                 if getattr(mission, "requires_visual_proof", False) and not _has_visual_proof(mission, proof_store=self.proof_store):
                     return _run_slot(mission, "dev", "blueprint mission requires visual proof before terminal close")
                 return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="blueprint has no remaining stages")
+        if current.status == StageStatus.BLOCKED:
+            return _run_slot(mission, "neko_supervisor", f"blueprint stage {current.id} needs goal-owner adjudication")
         if plan.current_stage_id != current.id:
             release_next_stage(mission, current.id)
         slot_id = current.owner_slot or current.owner
@@ -118,6 +116,7 @@ class MissionStateMachine:
         return HarnessAction(HarnessActionType.RUN_SLOT, mission.id, reason=f"blueprint stage {current.id} needs slot {slot_id}", slot_id=slot_id)
 
     def apply_decision(self, mission: Task, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool | None = None) -> StateMachineResult:
+        ensure_default_mission_plan(mission)
         before = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         blueprint_owned = is_blueprint_plan(getattr(mission, "mission_plan", None))
         has_open_incident = bool(getattr(mission, "open_incident_ids", None))
@@ -133,7 +132,7 @@ class MissionStateMachine:
             and has_open_incident
         )
         if mission_plan_flow is None:
-            mission_plan_flow = has_typed_plan(mission)
+            mission_plan_flow = True
         mission_plan_flow = bool(mission_plan_flow or blueprint_owned)
         apply_planning_decision(mission, decision, actor=actor, task_store=task_store, incident_store=incident_store, proof_store=proof_store, run_id=run_id, normal_worker_flow=normal_worker_flow, mission_plan_flow=mission_plan_flow)
         record_decision_packets(mission, decision, actor=actor, run_id=run_id, stage_id=getattr(mission, "current_stage_id", None))
@@ -211,8 +210,6 @@ def _has_resolved_incident_only_qa_block(mission: Task, *, proof_store=None) -> 
 
 
 def _has_resolved_qa_output_incident(mission: Task) -> bool:
-    if QA_COORDINATION_RELEASED_FLAG not in (getattr(mission, "risk_flags", None) or []):
-        return False
     if getattr(mission, "open_incident_ids", None):
         return False
     if not getattr(mission, "stages", None):
@@ -265,8 +262,6 @@ def _current_launcher_stage_waits_for_cross_stack_release(mission: Task, *, proo
         return False
     if not _has_backend_contract_proof(mission, proof_store=proof_store):
         return True
-    if LAUNCHER_RELEASED_BY_NEKO_FLAG in (getattr(mission, "risk_flags", None) or []):
-        return False
     return not _latest_handoff_targets_launcher(mission)
 
 

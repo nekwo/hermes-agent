@@ -11,7 +11,7 @@ from utils import atomic_json_write
 
 from . import paths
 from .decision_schema import DecisionPayloadInvalid
-from .mission_plan import current_plan_stage, has_typed_plan
+from .mission_plan import current_plan_stage
 from .models import AgentRun, Event, Task
 from .serde import from_jsonable, to_jsonable
 
@@ -196,13 +196,12 @@ def checklist_for_task_stage(task: Task, *, role_id: str, mission_stage_id: str 
     normalized_role = normalize_role_id(role_id)
     stage_kind = "implementation"
     stage_owner = normalized_role
-    if has_typed_plan(task):
-        stage = _typed_stage_for_checklist(task, mission_stage_id)
-        if stage is not None:
-            stage_kind = str(stage.kind or stage_kind)
-            stage_owner = normalize_role_id(stage.owner or normalized_role)
-            mission_stage_id = stage.id or mission_stage_id
-            legacy_projection = False
+    stage = _typed_stage_for_checklist(task, mission_stage_id)
+    if stage is not None:
+        stage_kind = str(stage.kind or stage_kind)
+        stage_owner = normalize_role_id(stage.owner or normalized_role)
+        mission_stage_id = stage.id or mission_stage_id
+    legacy_projection = False
     template_role = stage_owner if stage_owner in {"neko_supervisor", "dev", "backend_dev", "qa"} else normalized_role
     can_promote = template_role == "neko_supervisor"
     return RoleChecklist(
@@ -220,16 +219,16 @@ def checklist_for_task_stage(task: Task, *, role_id: str, mission_stage_id: str 
     )
 
 
-def role_checklist_hud(task: Task, role: str, run: AgentRun, *, config=None) -> dict[str, Any] | None:
+def stage_checklist_hud(task: Task, owner: str, run: AgentRun, *, config=None) -> dict[str, Any] | None:
     cfg = getattr(config, "role_envelope", None)
     if not bool(getattr(cfg, "enabled", False) and getattr(cfg, "checklist_hud_enabled", True)):
         return None
-    role_id = normalize_role_id(run.persona_id if run.persona_id else role)
+    role_id = normalize_role_id(run.persona_id if run.persona_id else owner)
     stage_id = run.stage_id or task.current_stage_id
     store = RoleChecklistStore()
     checklist = store.latest_for_role_stage(task.id, role_id=role_id, mission_stage_id=stage_id, active_only=True)
     if checklist is None:
-        checklist = checklist_for_task_stage(task, role_id=role_id, mission_stage_id=stage_id, legacy_projection=not has_typed_plan(task))
+        checklist = checklist_for_task_stage(task, role_id=role_id, mission_stage_id=stage_id)
     return checklist_summary(checklist, max_items=int(getattr(cfg, "max_checklist_items_rendered", 8) or 8))
 
 
@@ -321,7 +320,7 @@ def validate_decision_checklist_payload(task: Task, *, role_id: str, mission_sta
         return
     checklist = RoleChecklistStore().latest_for_role_stage(task.id, role_id=normalize_role_id(role_id), mission_stage_id=mission_stage_id, active_only=True)
     if checklist is None:
-        checklist = checklist_for_task_stage(task, role_id=role_id, mission_stage_id=mission_stage_id, legacy_projection=not has_typed_plan(task))
+        checklist = checklist_for_task_stage(task, role_id=role_id, mission_stage_id=mission_stage_id)
     valid_ids = {item.item_id for item in checklist.items}
     if active_item and active_item not in valid_ids:
         raise DecisionPayloadInvalid(_repair_message("active_checklist_item_id", valid_item_ids=sorted(valid_ids)))
@@ -366,7 +365,7 @@ def sanitize_decision_checklist_payload(
         return payload, []
     checklist = RoleChecklistStore().latest_for_role_stage(task.id, role_id=normalize_role_id(role_id), mission_stage_id=mission_stage_id, active_only=True)
     if checklist is None:
-        checklist = checklist_for_task_stage(task, role_id=role_id, mission_stage_id=mission_stage_id, legacy_projection=not has_typed_plan(task))
+        checklist = checklist_for_task_stage(task, role_id=role_id, mission_stage_id=mission_stage_id)
     by_id = {item.item_id: item for item in checklist.items}
     role = normalize_role_id(role_id)
     kept: list[dict[str, Any]] = []
@@ -419,7 +418,7 @@ def apply_decision_checklist_updates(task: Task, *, role_id: str, mission_stage_
         return None
     updates = payload.get("checklist_updates") if isinstance(payload, dict) else None
     store = RoleChecklistStore()
-    checklist = store.open_or_create(task=task, role_id=role_id, mission_stage_id=mission_stage_id, run_id=run_id, legacy_projection=not has_typed_plan(task))
+    checklist = store.open_or_create(task=task, role_id=role_id, mission_stage_id=mission_stage_id, run_id=run_id)
     if isinstance(updates, list) and updates:
         checklist = store.apply_updates(checklist, updates=updates, run_id=run_id, persona_id=role_id)
     return checklist

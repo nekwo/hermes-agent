@@ -283,7 +283,7 @@ def test_command_proof_runner_refuses_smoke_full_suite_before_spawn(tmp_path):
     with pytest.raises(DecisionPayloadInvalid, match="proof execution boundary"):
         runner.run_commands(
             make_smoke_task(),
-            stage_id="backend_dev_stage46_smoke",
+            stage_id="backend_dev_harness_smoke",
             run_id="run_1",
             actor="backend_dev",
             commands=[command],

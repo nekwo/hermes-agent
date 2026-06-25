@@ -12,14 +12,23 @@ from .models import AgentPersona
 from .tool_visibility import ToolVisibilityOptions, permission_state_for_persona
 
 READ_ONLY_BLOCKS = frozenset({"apply_patch", "edit_file", "file.edit", "file.write", "patch", "terminal", "write_file"})
-SUPPORTED_PERMISSION_MODES = frozenset({"profile_default", "read_only"})
+PERMISSION_MODE_PROFILE_DEFAULT = "profile_default"
+PERMISSION_MODE_READ_ONLY = "read_only"
+PERMISSION_MODE_UNBOUNDED = "unbounded"
+SUPPORTED_PERMISSION_MODES = frozenset(
+    {
+        PERMISSION_MODE_PROFILE_DEFAULT,
+        PERMISSION_MODE_READ_ONLY,
+        PERMISSION_MODE_UNBOUNDED,
+    }
+)
 
 
 @dataclass(slots=True)
 class ChatToolPermission:
     persona_id: str
     session_id: str
-    mode: str = "profile_default"
+    mode: str = PERMISSION_MODE_PROFILE_DEFAULT
     reason: str = ""
     source: str = "operator"
     updated_at: str = ""
@@ -36,9 +45,9 @@ class ChatToolPermissionStore:
         item = raw.get(_key(persona_id, session_id))
         if not isinstance(item, dict):
             return None
-        mode = str(item.get("mode") or "profile_default")
+        mode = str(item.get("mode") or PERMISSION_MODE_PROFILE_DEFAULT)
         if mode not in SUPPORTED_PERMISSION_MODES:
-            mode = "profile_default"
+            mode = PERMISSION_MODE_PROFILE_DEFAULT
         return ChatToolPermission(
             persona_id=str(item.get("persona_id") or persona_id),
             session_id=str(item.get("session_id") or session_id),
@@ -49,7 +58,7 @@ class ChatToolPermissionStore:
         )
 
     def set(self, *, persona_id: str, session_id: str, mode: str, reason: str, source: str = "operator") -> ChatToolPermission:
-        resolved_mode = mode if mode in SUPPORTED_PERMISSION_MODES else "profile_default"
+        resolved_mode = mode if mode in SUPPORTED_PERMISSION_MODES else PERMISSION_MODE_PROFILE_DEFAULT
         record = ChatToolPermission(
             persona_id=persona_id,
             session_id=session_id,
@@ -89,7 +98,7 @@ def permission_options_for_chat(
     store: ChatToolPermissionStore | None = None,
 ) -> ToolVisibilityOptions:
     record = (store or ChatToolPermissionStore()).get(persona_id=persona.id, session_id=session_id)
-    mode = record.mode if record is not None else "profile_default"
+    mode = record.mode if record is not None else PERMISSION_MODE_PROFILE_DEFAULT
     return ToolVisibilityOptions(
         permission_mode=mode,
         permission_source=record.source if record is not None else "persona_role_policy",
@@ -106,9 +115,13 @@ def permission_state_for_chat(persona: AgentPersona, *, session_id: str | None) 
 
 
 def extra_blocked_tools_for_permission_mode(mode: str) -> list[str]:
-    if mode == "read_only":
+    if mode == PERMISSION_MODE_READ_ONLY:
         return sorted(READ_ONLY_BLOCKS)
     return []
+
+
+def permission_mode_is_unbounded(mode: str | None) -> bool:
+    return str(mode or "").strip().lower() == PERMISSION_MODE_UNBOUNDED
 
 
 def _key(persona_id: str, session_id: str) -> str:

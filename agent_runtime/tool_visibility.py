@@ -12,6 +12,7 @@ from .personas import (
     ALLOWED_TOOLSETS_BY_ROLE,
     PER_ROLE_TOOL_DENIES,
     PERSONA_BLOCKED_TOOLS,
+    all_registered_toolsets,
     blocked_tool_names,
     effective_toolsets,
     role_from_persona,
@@ -53,10 +54,11 @@ class ToolVisibilityOptions:
 def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOptions | None = None) -> dict[str, Any]:
     opts = options or ToolVisibilityOptions()
     role = role_from_persona(persona)
-    resolved_toolsets = list(opts.enabled_toolsets) if opts.enabled_toolsets is not None else effective_toolsets(persona)
-    role_allowed_toolsets = list(resolved_toolsets) if _is_unbounded(persona, opts) else sorted(ALLOWED_TOOLSETS_BY_ROLE[role])
+    unbounded = _is_unbounded(opts)
+    resolved_toolsets = _resolved_toolsets(persona, opts, unbounded=unbounded)
+    role_allowed_toolsets = list(resolved_toolsets) if unbounded else sorted(ALLOWED_TOOLSETS_BY_ROLE[role])
     persona_toolsets = list(getattr(persona, "toolsets", []) or [])
-    persona_blocked = blocked_tool_names(persona)
+    persona_blocked = frozenset() if unbounded else blocked_tool_names(persona)
     requested_blocked = frozenset(_clean_names(opts.blocked_tool_names or []))
     final_blocked = persona_blocked | requested_blocked
     candidate_tools = _tool_names_for_toolsets(resolved_toolsets, blocked_tool_names=[])
@@ -67,7 +69,7 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
         persona_denies=PERSONA_BLOCKED_TOOLS,
         requested_denies=requested_blocked,
     )
-    readiness = profile_readiness_for_persona(persona)
+    readiness = _profile_readiness_for_visibility(persona)
     return {
         "schema_version": TOOL_VISIBILITY_SCHEMA_VERSION,
         "persona_id": persona.id,
@@ -164,6 +166,46 @@ def _tool_names_for_toolsets(toolsets: list[str], *, blocked_tool_names: list[st
     return list(_cached_tool_names_for_toolsets(tuple(toolsets), tuple(blocked_tool_names)))
 
 
+def _profile_readiness_for_visibility(persona: AgentPersona) -> dict[str, Any]:
+    return dict(
+        _cached_profile_readiness_for_visibility(
+            str(getattr(persona, "id", "") or ""),
+            str(getattr(persona, "hermes_profile", "") or ""),
+            tuple(getattr(persona, "skills", []) or []),
+            tuple(getattr(persona, "required_mcp_servers", []) or []),
+            str(getattr(persona, "provider", "") or ""),
+            str(getattr(persona, "model", "") or ""),
+            str(getattr(persona, "api_mode", "") or ""),
+        )
+    )
+
+
+@lru_cache(maxsize=128)
+def _cached_profile_readiness_for_visibility(
+    persona_id: str,
+    hermes_profile: str,
+    skills: tuple[str, ...],
+    required_mcp_servers: tuple[str, ...],
+    provider: str,
+    model: str,
+    api_mode: str,
+) -> tuple[tuple[str, Any], ...]:
+    persona = AgentPersona(
+        id=persona_id,
+        display_name=persona_id,
+        role=persona_id,
+        provider=provider or None,
+        model=model or None,
+        api_mode=api_mode,
+        toolsets=[],
+        system_prompt_path="",
+        hermes_profile=hermes_profile or None,
+        skills=list(skills),
+        required_mcp_servers=list(required_mcp_servers),
+    )
+    return tuple(profile_readiness_for_persona(persona).items())
+
+
 @lru_cache(maxsize=128)
 def _cached_tool_names_for_toolsets(toolsets: tuple[str, ...], blocked_tool_names: tuple[str, ...]) -> tuple[str, ...]:
     tools = get_tool_definitions(
@@ -226,8 +268,13 @@ def _clean_names(values) -> list[str]:
     return out
 
 
-def _is_unbounded(persona: AgentPersona, options: ToolVisibilityOptions) -> bool:
-    return (
-        str(getattr(persona, "hermes_profile", "") or "").strip().lower() == "unbounded"
-        or str(getattr(options, "permission_mode", "") or "").strip().lower() == "unbounded"
-    )
+def _resolved_toolsets(persona: AgentPersona, options: ToolVisibilityOptions, *, unbounded: bool) -> list[str]:
+    if options.enabled_toolsets is not None:
+        return list(options.enabled_toolsets)
+    if unbounded:
+        return all_registered_toolsets()
+    return effective_toolsets(persona)
+
+
+def _is_unbounded(options: ToolVisibilityOptions) -> bool:
+    return str(getattr(options, "permission_mode", "") or "").strip().lower() == "unbounded"

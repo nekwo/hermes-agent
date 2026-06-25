@@ -241,7 +241,8 @@ def _route_intervention(task: Task, plan: MissionPlan, stage: MissionPlanStage, 
     stage.updated_at = now()
     plan.current_stage_id = stage.id
     task.current_stage_id = stage.id
-    task.state = TaskState.BLOCKED
+    if task.state not in {TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED}:
+        task.state = TaskState.RUNNING
     _record_escalation_evidence(task, stage, reason=reason)
     note = f"blueprint intervention at {stage.id}: {reason}"
     if note not in task.operator_notes:

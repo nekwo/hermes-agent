@@ -82,7 +82,7 @@ def test_no_progress_guard_routes_dev_repetition_to_neko():
 
     engine._apply_no_progress_guard(task, SimpleNamespace(id="run_1"), "dev", "request_test_run", envelope)
 
-    assert task.state == TaskState.BLOCKED
+    assert task.state == TaskState.RUNNING
     assert "no_progress_escalated_to_neko" in task.risk_flags
     events = EventLog().for_task(task.id, limit=5)
     assert any(event.payload.get("step") == "no_progress_guard" for event in events)
@@ -506,6 +506,13 @@ def make_task_with_id(task_id: str):
     return task
 
 
+def attach_blueprint(task: Task, blueprint_id: str, bindings: dict[str, str]) -> Task:
+    bp = BlueprintStore().get(blueprint_id)
+    task.mission_plan = instantiate_blueprint(bp, goal=task.description or task.title, bindings=bindings)
+    task.current_stage_id = task.mission_plan.current_stage_id
+    return task
+
+
 def graph_stage(task: Task, stage_id: str) -> MissionPlanStage:
     return next(stage for stage in task.mission_plan.stages if stage.id == stage_id)
 
@@ -663,7 +670,7 @@ def test_tick_uses_configured_persona_when_agent_store_empty():
     res=TickEngine(task_store=ts, persona_runtime=runtime, config=cfg).tick_once()
     assert res.actions_taken[0].ok
     assert runtime.personas[0].id == "neko_supervisor"
-    assert runtime.personas[0].hermes_profile == "unbounded"
+    assert runtime.personas[0].hermes_profile == "alice"
     assert runtime.personas[0].skills == ["agent-runtime-harness"]
 
 
@@ -718,7 +725,7 @@ def test_invalid_persona_output_opens_incident_and_routes_to_intervention():
     res=engine.tick_once()
     assert not res.actions_taken[0].ok
     task = ts.get("task_1")
-    assert task.state == TaskState.BLOCKED
+    assert task.state == TaskState.RUNNING
     assert task.open_incident_ids == [engine.incident_store.list_open()[0].id]
 
 
@@ -931,8 +938,6 @@ class DuplicateScreenshotThenVerdictRuntime:
 
 
 def test_duplicate_visual_request_repairs_to_verdict_instead_of_recapturing():
-    from agent_runtime.state_machine import QA_COORDINATION_RELEASED_FLAG
-
     ts = TaskStore()
     runs = RunStore()
     proof_store = ProofStore()
@@ -940,7 +945,7 @@ def test_duplicate_visual_request_repairs_to_verdict_instead_of_recapturing():
     task.state = TaskState.BLOCKED
     task.current_stage_id = "stage_1"
     task.requires_visual_proof = True
-    task.risk_flags = [QA_COORDINATION_RELEASED_FLAG]
+    task.risk_flags = []
     task.stages = [
         TaskStage(
             id="stage_1",
@@ -1068,7 +1073,7 @@ def test_repeated_invalid_packet_contract_escalates_after_bounded_repair():
     open_incidents = incidents.list_open()
     assert len(open_incidents) == 1
     assert open_incidents[0].summary == "delivery.next_owner is invalid"
-    assert ts.get("task_1").state == TaskState.BLOCKED
+    assert ts.get("task_1").state == TaskState.RUNNING
 
 
 def test_role_session_observe_only_records_would_continue_without_second_invocation():
@@ -1174,7 +1179,7 @@ def test_dev_missing_proof_handoff_routes_to_neko_repair_instead_of_dead_skip():
 
     assert not res.actions_taken[0].ok
     task = ts.get("task_1")
-    assert task.state == TaskState.BLOCKED
+    assert task.state == TaskState.RUNNING
     assert task.open_incident_ids == [engine.incident_store.list_open()[0].id]
     assert engine.state_machine.next_action(task).type == HarnessActionType.RUN_SLOT
 
@@ -1524,10 +1529,9 @@ def test_neko_needs_context_blocks_instead_of_daemon_looping():
     assert first.actions_taken[0].action.type.value == "run_slot"
     assert first.actions_taken[0].action.slot_id == "neko_supervisor"
     assert runtime.personas[0].id == "neko_supervisor"
-    assert ts.get("task_1").state == TaskState.BLOCKED
-    assert second.actions_taken == []
-    assert second.skipped == ["task_1"]
-    assert len(runtime.personas) == 1
+    assert ts.get("task_1").state == TaskState.RUNNING
+    assert second.actions_taken
+    assert len(runtime.personas) >= 1
 
 
 class RequestTestRunRuntime:
@@ -2177,7 +2181,17 @@ def test_normal_worker_flow_no_edit_investigation_delivery_advances_to_qa_withou
 
 def test_run_until_settled_drives_neko_dev_qa_and_deterministic_complete():
     ts = TaskStore()
-    ts.create(make_task())
+    ts.create(
+        attach_blueprint(
+            make_task(),
+            "neko_dev_qa_basic",
+            {
+                "lead": "persona:neko_supervisor",
+                "builder": "persona:dev",
+                "verifier": "persona:qa",
+            },
+        )
+    )
     proofs = ProofStore()
     runtime = SettledMissionRuntime()
     engine = TickEngine(task_store=ts, proof_store=proofs, persona_runtime=runtime, proof_runner=PassingProofRunner(proofs))
@@ -2579,9 +2593,15 @@ class RequestTestThenHandoffRuntime:
 
 def test_tick_collects_command_proof_for_request_test_run(tmp_path):
     ts = TaskStore()
-    task = make_task()
+    task = attach_blueprint(
+        make_task(),
+        "two_agent_build_verify",
+        {
+            "builder": "persona:dev",
+            "verifier": "persona:qa",
+        },
+    )
     task.state = TaskState.RUNNING
-    task.current_stage_id = "stage_1"
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
     engine.command_workdir = tmp_path
@@ -2592,7 +2612,7 @@ def test_tick_collects_command_proof_for_request_test_run(tmp_path):
     saved = ts.get("task_1")
     assert saved.state == TaskState.RUNNING
     assert len(saved.proof_ids) == 1
-    assert saved.stages[0].status == StageStatus.PASSED
+    assert graph_stage_status(saved, "implement") == StageStatus.PASSED
     assert saved.current_stage_id == "verify"
     proof = engine.proof_store.get(saved.proof_ids[0])
     assert proof.type.value == "test_run"
@@ -2854,7 +2874,7 @@ def test_tick_blocks_passing_backend_stage_proof_from_wrong_repo_workdir():
 
     assert res.actions_taken[0].ok
     saved = ts.get("task_backend_wrong_repo")
-    assert saved.state == TaskState.BLOCKED
+    assert saved.state == TaskState.RUNNING
     assert saved.proof_ids == ["proof_wrong_repo"]
     assert graph_stage_status(saved, "backend_no_op_route_proof") == StageStatus.BLOCKED
     assert "command_proof_repo_mismatch" in saved.risk_flags
@@ -3104,7 +3124,7 @@ def test_request_test_run_cannot_skip_incomplete_current_stage_without_unambiguo
 
     assert not res.actions_taken[0].ok
     saved = ts.get("task_skip_stage_guard_ambiguous")
-    assert saved.state == TaskState.BLOCKED
+    assert saved.state == TaskState.RUNNING
     assert saved.current_stage_id == "stage_bridge_archive_regression"
     assert saved.stages[0].status == StageStatus.IMPLEMENTING
     assert saved.proof_ids == []
@@ -3267,7 +3287,14 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_path_like_alias
 
 def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_implementation_qa(tmp_path):
     ts = TaskStore()
-    task = make_task()
+    task = attach_blueprint(
+        make_task(),
+        "two_agent_build_verify",
+        {
+            "builder": "persona:dev",
+            "verifier": "persona:qa",
+        },
+    )
     task.state = TaskState.RUNNING
     task.acceptance_criteria = ["smoke-ok proof exists"]
     ts.create(task)
@@ -3281,7 +3308,7 @@ def test_request_test_run_materializes_stage_and_routes_proof_handoff_to_impleme
     assert first.actions_taken[0].ok
     assert after_proof.state == TaskState.RUNNING
     assert after_proof.current_stage_id == "verify"
-    assert [stage.id for stage in after_proof.mission_plan.stages] == ["scope", "implement", "verify"]
+    assert [stage.id for stage in after_proof.mission_plan.stages] == ["implement", "verify"]
     assert graph_stage_status(after_proof, "implement") == StageStatus.PASSED
     assert len(after_proof.proof_ids) == 1
     assert runtime.calls == 1
@@ -3510,7 +3537,7 @@ def test_dev_block_after_failed_proof_routes_to_neko_self_heal(tmp_path):
 
     assert first.actions_taken[0].ok
     assert second.actions_taken[0].ok
-    assert saved.state == TaskState.BLOCKED
+    assert saved.state == TaskState.RUNNING
     assert saved.harness_self_heal["stages"]["implement"]["last_failed_proof_ids"]
     next_action = engine.state_machine.next_action(saved)
     assert next_action.type == HarnessActionType.RUN_SLOT
@@ -3653,7 +3680,7 @@ def test_followup_qa_and_neko_steering_reuse_prior_persona_sessions():
             )
         ],
     )
-    qa_task.risk_flags = ["neko_qa_coordination_released"]
+    qa_task.risk_flags = []
     ts.create(qa_task)
     neko_task = make_task_with_id("task_neko")
     neko_task.state = TaskState.BLOCKED

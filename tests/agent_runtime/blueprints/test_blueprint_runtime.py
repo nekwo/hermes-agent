@@ -235,7 +235,7 @@ def test_blueprint_REWORK_routes_back_until_stage_attempt_limit():
     result = apply_stage_outcome(task, "verify", StageOutcome.REWORK, reason="needs fixes 2")
 
     assert result == "intervention"
-    assert task.state == TaskState.BLOCKED
+    assert task.state == TaskState.RUNNING
     assert plan.current_stage_id == "verify"
     assert plan.stage_attempts == {"implement": 2, "verify": 2}
     assert "blueprint retry limit exceeded" in task.operator_notes[-1]
@@ -355,7 +355,7 @@ def test_required_blueprint_proof_gate_missing_proof_surfaces_hud_evidence():
     assert derive_stage_outcome(decision, stage, proofs=[]) == StageOutcome.MISSING_INPUT
 
     assert apply_decision_outcome(task, decision, proofs=[]) == "intervention"
-    assert task.state == TaskState.BLOCKED
+    assert task.state == TaskState.RUNNING
     evidence = task.harness_self_heal["evidence_stack"]
     assert evidence[0]["kind"] == "proof_gate"
     assert evidence[0]["missing"] == ["missing test_run proof"]

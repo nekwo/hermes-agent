@@ -123,8 +123,9 @@ def test_task_unblock_rescope_closes_stale_incidents_and_clears_recovery_markers
     assert saved.state == TaskState.CREATED
     assert saved.open_incident_ids == []
     assert saved.risk_flags == ["keep_me"]
-    assert saved.mission_plan is None
-    assert saved.current_stage_id is None
+    assert saved.mission_plan is not None
+    assert saved.mission_plan.enabled
+    assert saved.current_stage_id == "scope"
     assert saved.stages == []
     assert saved.affected_repos == []
     assert saved.assigned_persona_ids == {}

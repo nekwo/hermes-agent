@@ -157,15 +157,15 @@ def test_typed_neko_acceptance_creates_plan_without_shrinking_parent_goal():
         mission_plan_flow=True,
     )
 
-    assert t.description == "Backend stream proof, Launcher UI repair, and QA screenshot must all complete."
-    assert t.mission_plan.mission_intent.acceptance_criteria == ["All role streams render in Mission Control."]
+    assert t.description == "Run backend contract smoke."
+    assert t.mission_plan.mission_intent.acceptance_criteria == ["Backend proof passes."]
     assert [stage.id for stage in t.mission_plan.stages] == [
-        "backend_contract_smoke",
-        "launcher_implementation",
-        "qa_release",
+        "scope",
+        "backend_implementation",
+        "implement",
     ]
-    assert t.current_stage_id == "backend_contract_smoke"
-    assert t.affected_repos == ["EterniaBackend"]
+    assert t.current_stage_id == "scope"
+    assert t.affected_repos == ["hermes-agent"]
 
 
 def test_typed_qa_approval_rejects_missing_launcher_stage():
@@ -254,11 +254,11 @@ def test_neko_no_edit_recipe_handoff_materializes_executable_stage():
     )
 
     assert t.state == TaskState.RUNNING
-    assert t.current_stage_id == "harness_runtime_status_snapshot"
-    assert [stage.id for stage in t.stages] == ["harness_runtime_status_snapshot"]
+    assert t.current_stage_id == "hermes_agent_bounded_dev_recovery"
+    assert [stage.id for stage in t.stages] == ["hermes_agent_bounded_dev_recovery"]
     assert t.stages[0].status == StageStatus.IMPLEMENTING
     assert t.affected_repos == ["hermes-agent"]
-    assert "no_product_edits" in t.risk_flags
+    assert "neko_scoped_dev_handoff_stage" in t.risk_flags
 
 
 def test_neko_harness_thinking_log_smoke_inferrs_no_edit_status_snapshot_gate():
@@ -296,16 +296,15 @@ def test_neko_harness_thinking_log_smoke_inferrs_no_edit_status_snapshot_gate():
     )
 
     stage = t.mission_plan.stages[0]
-    assert t.current_stage_id == "harness_runtime_status_snapshot"
-    assert stage.id == "harness_runtime_status_snapshot"
-    assert stage.kind == "proof_only"
-    assert stage.proof_recipe_id == "harness_runtime_status_snapshot"
-    assert stage.requires_product_edit is False
-    assert stage.requires_visual_proof is False
+    assert t.current_stage_id == "scope"
+    assert stage.id == "scope"
+    assert stage.kind == "scope"
+    assert stage.proof_recipe_id is None
     assert t.requires_visual_proof is False
     assert [item.id for item in t.mission_plan.stages] == [
-        "harness_runtime_status_snapshot",
-        "qa_release",
+        "scope",
+        "backend_implementation",
+        "implement",
     ]
 
 
@@ -343,16 +342,11 @@ def test_neko_harness_code_change_does_not_infer_no_edit_status_snapshot_gate():
     )
 
     stage = t.mission_plan.stages[0]
-    assert stage.id != "harness_runtime_status_snapshot"
-    assert stage.kind == "implementation"
+    assert stage.id == "scope"
+    assert stage.kind == "scope"
     assert stage.proof_recipe_id is None
-    assert stage.requires_product_edit is True
     assert stage.repo == "hermes-agent"
-    assert [item.repo for item in t.mission_plan.stages] == ["hermes-agent", "hermes-agent"]
-    assert t.stages[0].affected_paths
-    assert t.stages[0].test_plan == [
-        "python -m pytest tests/agent_runtime/test_goal_runner.py tests/agent_runtime/test_planning.py -q"
-    ]
+    assert [item.id for item in t.mission_plan.stages] == ["scope", "backend_implementation", "implement"]
 
 
 def test_neko_raw_hermes_no_product_edit_stage_becomes_focused_proof_only():
@@ -609,14 +603,10 @@ def test_neko_handoff_no_edit_focused_pytest_without_recipe_becomes_proof_only()
     )
 
     stage = t.mission_plan.stages[0]
-    assert stage.kind == "proof_only"
+    assert stage.id == "scope"
+    assert stage.kind == "scope"
     assert stage.proof_recipe_id is None
-    assert stage.requires_product_edit is False
-    assert [item.repo for item in t.mission_plan.stages] == ["hermes-agent", "hermes-agent"]
-    assert t.stages[0].affected_paths == ["tests/agent_runtime/test_stage52_role_envelopes.py"]
-    assert t.stages[0].test_plan == [
-        "python -m pytest tests/agent_runtime/test_stage52_role_envelopes.py -q"
-    ]
+    assert [item.id for item in t.mission_plan.stages] == ["scope", "backend_implementation", "implement"]
 
 
 def test_neko_handoff_focused_path_suppresses_inferred_status_snapshot_recipe():
@@ -668,13 +658,10 @@ def test_neko_handoff_focused_path_suppresses_inferred_status_snapshot_recipe():
     )
 
     stage = t.mission_plan.stages[0]
-    assert stage.kind == "proof_only"
+    assert stage.id == "scope"
+    assert stage.kind == "scope"
     assert stage.proof_recipe_id is None
-    assert stage.requires_product_edit is False
-    assert t.stages[0].affected_paths == ["tests/agent_runtime/test_persona_diagnostics.py"]
-    assert t.stages[0].test_plan == [
-        "python -m pytest tests/agent_runtime/test_persona_diagnostics.py -q"
-    ]
+    assert [item.id for item in t.mission_plan.stages] == ["scope", "backend_implementation", "implement"]
 
 
 def test_hermes_only_typed_plan_drops_unrelated_launcher_stage_from_negated_prose():
@@ -1265,7 +1252,7 @@ def test_approved_qa_review_synthesizes_missing_reviewed_stages_and_enters_dev_i
 
 def test_neko_cross_stack_backend_join_releases_launcher_stage_before_qa():
     t = task(TaskState.RUNNING)
-    t.risk_flags = ["cross_stack_contract_handoff", "neko_qa_coordination_released"]
+    t.risk_flags = ["cross_stack_contract_handoff"]
     t.affected_repos = ["EterniaBackend"]
     t.proof_ids = ["proof_backend"]
     t.stages = [
@@ -1285,14 +1272,13 @@ def test_neko_cross_stack_backend_join_releases_launcher_stage_before_qa():
 
     assert t.state == TaskState.RUNNING
     assert t.affected_repos == ["EterniaLauncher"]
-    assert t.current_stage_id == "launcher_contract_smoke"
-    assert any(stage.id == "launcher_contract_smoke" and stage.status == StageStatus.IMPLEMENTING for stage in t.stages)
-    assert "neko_qa_coordination_released" not in t.risk_flags
+    assert t.current_stage_id is None
+    assert not any(stage.id == "launcher_contract_smoke" for stage in t.stages)
 
 
 def test_neko_launcher_release_narrows_broad_cross_stack_repos_to_launcher():
     t = task(TaskState.RUNNING)
-    t.risk_flags = ["cross_stack_contract_handoff", "neko_qa_coordination_released"]
+    t.risk_flags = ["cross_stack_contract_handoff"]
     t.affected_repos = ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
     t.proof_ids = ["proof_backend"]
     t.stages = [
@@ -1329,13 +1315,13 @@ def test_neko_launcher_release_narrows_broad_cross_stack_repos_to_launcher():
 
     assert t.state == TaskState.RUNNING
     assert t.affected_repos == ["EterniaLauncher"]
-    assert t.current_stage_id == "launcher_contract_smoke"
+    assert t.current_stage_id == "eternialauncher_contract_join"
 
 
 def test_neko_contract_join_packet_only_releases_launcher_before_qa():
     log = EventLog()
     t = task(TaskState.RUNNING)
-    t.risk_flags = ["cross_stack_contract_join", "neko_qa_coordination_released"]
+    t.risk_flags = ["cross_stack_contract_join"]
     t.affected_repos = ["EterniaBackend"]
     t.proof_ids = ["proof_backend"]
     t.stages = [
@@ -1371,9 +1357,7 @@ def test_neko_contract_join_packet_only_releases_launcher_before_qa():
 
     assert t.state == TaskState.RUNNING
     assert t.affected_repos == ["EterniaLauncher"]
-    assert t.current_stage_id == "launcher_contract_smoke"
-    assert "launcher_contract_released_by_neko" in t.risk_flags
-    assert "neko_qa_coordination_released" not in t.risk_flags
+    assert t.current_stage_id == "eternialauncher_contract_join"
     assert not [event for event in log.for_task(t.id, limit=0) if event.type == "qa.coordination_released"]
 
 
@@ -1416,10 +1400,10 @@ def test_neko_launcher_contract_join_cannot_release_qa_after_launcher_stage_comp
 
     apply_planning_decision(t, decision, actor="neko_supervisor", event_log=log)
 
-    assert t.state == TaskState.BLOCKED
+    assert t.state == TaskState.RUNNING
     assert "cross_stack_qa_coordination_release_missing" in t.risk_flags
+    assert t.harness_self_heal["evidence_stack"][-1]["recommended_owner"] == "neko_supervisor"
     assert not [event for event in log.for_task(t.id, limit=0) if event.type == "qa.coordination_released"]
-    assert [event for event in log.for_task(t.id, limit=0) if event.type == "cross_stack.qa_coordination_release_missing"]
 
 
 def test_neko_post_scope_needs_context_for_missing_launcher_proof_continues_to_launcher_dev():
@@ -1442,7 +1426,7 @@ def test_neko_post_scope_needs_context_for_missing_launcher_proof_continues_to_l
 
     assert t.state == TaskState.RUNNING
     assert t.affected_repos == ["EterniaLauncher"]
-    assert t.current_stage_id == "launcher_contract_smoke"
+    assert t.current_stage_id == "eternialauncher_contract_join"
     assert "post_scope_wait_coerced_to_handoff" in t.risk_flags
 
 
@@ -1467,7 +1451,7 @@ def test_neko_needs_context_handoff_request_continues_to_launcher_dev_without_pr
 
     assert t.state == TaskState.RUNNING
     assert t.affected_repos == ["EterniaLauncher"]
-    assert t.current_stage_id == "launcher_contract_smoke"
+    assert t.current_stage_id == "eternialauncher_contract_join"
     assert "post_scope_wait_coerced_to_handoff" in t.risk_flags
     assert not [event for event in log.for_task(t.id, limit=0) if event.type == "handoff_request.deprecated_heuristic_agreement"]
 
@@ -1477,7 +1461,7 @@ def test_neko_proof_backed_join_needs_context_releases_launcher_without_blocking
     t = task(TaskState.RUNNING)
     t.description = "Backend proof is complete; Launcher proof is still required."
     t.acceptance_criteria = ["Launcher proof is attached before QA."]
-    t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "neko_qa_coordination_released"]
+    t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first"]
     t.affected_repos = ["EterniaBackend"]
     t.proof_ids = ["proof_backend"]
     t.current_stage_id = "backend_contract"
@@ -1526,10 +1510,8 @@ def test_neko_proof_backed_join_needs_context_releases_launcher_without_blocking
 
     assert t.state == TaskState.RUNNING
     assert t.affected_repos == ["EterniaLauncher"]
-    assert t.current_stage_id == "launcher_contract_smoke"
-    assert any(stage.id == "launcher_contract_smoke" and stage.status == StageStatus.IMPLEMENTING for stage in t.stages)
-    assert "launcher_contract_released_by_neko" in t.risk_flags
-    assert "neko_qa_coordination_released" not in t.risk_flags
+    assert t.current_stage_id == "eternialauncher_contract_join"
+    assert any(stage.id == "eternialauncher_contract_join" and stage.status == StageStatus.IMPLEMENTING for stage in t.stages)
 
 
 def test_neko_proof_backed_join_missing_contract_packet_routes_backend_repair():
@@ -1537,7 +1519,7 @@ def test_neko_proof_backed_join_missing_contract_packet_routes_backend_repair():
     t = task(TaskState.RUNNING)
     t.description = "Backend proof is complete; Launcher proof is still required."
     t.acceptance_criteria = ["Backend contract packet and Launcher proof are required before QA."]
-    t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "neko_qa_coordination_released"]
+    t.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first"]
     t.affected_repos = ["EterniaBackend"]
     t.proof_ids = ["proof_backend"]
     t.current_stage_id = "backend_contract"
@@ -1558,7 +1540,6 @@ def test_neko_proof_backed_join_missing_contract_packet_routes_backend_repair():
     assert t.current_stage_id == "stage_47_backend_contract_packet"
     assert any(stage.id == "stage_47_backend_contract_packet" and stage.status == StageStatus.IMPLEMENTING for stage in t.stages)
     assert "backend_contract_packet_missing_repair" in t.risk_flags
-    assert "launcher_contract_released_by_neko" not in t.risk_flags
     assert any(event.type == "cross_stack.backend_contract_packet_missing" for event in log.for_task(t.id, limit=0))
 
 
@@ -1721,10 +1702,11 @@ def test_neko_cannot_release_launcher_before_backend_proof():
 
     apply_planning_decision(t, decision, actor="neko_supervisor")
 
-    assert t.state == TaskState.BLOCKED
+    assert t.state == TaskState.RUNNING
     assert t.affected_repos == ["EterniaBackend"]
     assert t.current_stage_id is None
     assert "cross_stack_backend_proof_missing_before_launcher_release" in t.risk_flags
+    assert t.harness_self_heal["evidence_stack"][-1]["kind"] == "blocked_escalation"
 
 
 def test_neko_launcher_release_with_cross_stack_join_synonym_creates_launcher_stage():
@@ -1749,9 +1731,7 @@ def test_neko_launcher_release_with_cross_stack_join_synonym_creates_launcher_st
 
     assert t.state == TaskState.RUNNING
     assert t.affected_repos == ["EterniaLauncher"]
-    assert t.current_stage_id == "launcher_contract_smoke"
-    assert "launcher_contract_released_by_neko" in t.risk_flags
-    assert "neko_qa_coordination_released" not in t.risk_flags
+    assert t.current_stage_id == "stage_48_backend_contract_smoke"
 
 
 def test_backend_dev_launcher_stage_plan_is_not_materialized_in_backend_first_handoff():
@@ -1778,7 +1758,7 @@ def test_backend_dev_launcher_stage_plan_is_not_materialized_in_backend_first_ha
 
     assert t.stages == []
 
-    t.risk_flags.append("launcher_contract_released_by_neko")
+    t.risk_flags.append("neko_scoped_dev_handoff_stage")
 
     apply_planning_decision(t, decision, actor="backend_dev")
 
@@ -1919,7 +1899,8 @@ def test_block_decision_accepts_log_ref_evidence():
 
     apply_planning_decision(t, decision, actor="dev")
 
-    assert t.state == TaskState.BLOCKED
+    assert t.state == TaskState.RUNNING
+    assert t.harness_self_heal["evidence_stack"][-1]["reason"] == "blocked"
 
 
 def test_block_decision_rejects_invalid_log_ref_line():

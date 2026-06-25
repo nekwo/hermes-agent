@@ -32,6 +32,16 @@ def make_task(**overrides):
     return Task(**values)
 
 
+def assert_default_blueprint_plan(plan, task):
+    assert plan.blueprint_id == "neko_two_dev_default"
+    assert [stage.id for stage in plan.stages] == ["scope", "backend_implementation", "implement"]
+    assert plan.current_stage_id == "scope"
+    assert task.current_stage_id == "scope"
+    assert plan.bindings["neko_supervisor"] == "neko_supervisor"
+    assert plan.bindings["backend_dev"] == "backend_dev"
+    assert plan.bindings["dev"] == "dev"
+
+
 def test_mission_lead_actor_resolves_blueprint_slot_binding():
     task = make_task()
     task.mission_plan = MissionPlan(
@@ -56,7 +66,7 @@ def test_mission_lead_actor_resolves_blueprint_slot_binding():
     assert not is_mission_lead_actor(task, "neko_supervisor")
 
 
-def test_neko_backend_only_handoff_preserves_launcher_stage_for_parent_goal():
+def test_handoff_payload_does_not_synthesize_per_task_plan():
     task = make_task()
 
     plan = ensure_mission_plan(
@@ -74,26 +84,11 @@ def test_neko_backend_only_handoff_preserves_launcher_stage_for_parent_goal():
         actor="neko_supervisor",
     )
 
-    assert [stage.id for stage in plan.stages] == [
-        "backend_contract_smoke",
-        "launcher_implementation",
-        "qa_release",
-    ]
-    assert plan.mission_intent.objective == task.description
-    assert plan.stages[0].kind == "proof_only"
-    assert plan.stages[1].owner == "dev"
-    assert plan.stages[1].depends_on == ["backend_contract_smoke"]
-    assert plan.stages[2].depends_on == ["backend_contract_smoke", "launcher_implementation"]
-    assert task.current_stage_id == "backend_contract_smoke"
-    launcher_stage = next(stage for stage in task.stages if stage.id == "launcher_implementation")
-    assert launcher_stage.affected_paths == ["lib/features/mission_control/", "test/features/mission_control/"]
-    assert launcher_stage.test_plan == [
-        "flutter analyze lib/features/mission_control test/features/mission_control",
-        "flutter test test/features/mission_control",
-    ]
+    assert_default_blueprint_plan(plan, task)
+    assert not any(stage.id == "backend_contract_smoke" for stage in plan.stages)
 
 
-def test_backend_no_product_edit_investigation_routes_directly_to_qa():
+def test_backend_no_product_edit_investigation_uses_default_blueprint_without_implicit_route():
     task = make_task(
         title="Investigate NSFW filter leakage hardening plan",
         description=(
@@ -120,17 +115,11 @@ def test_backend_no_product_edit_investigation_routes_directly_to_qa():
         actor="neko_supervisor",
     )
 
-    assert [stage.id for stage in plan.stages] == ["backend_investigation", "qa_release"]
-    assert plan.stages[0].owner == "backend_dev"
-    assert plan.stages[0].repo == "EterniaBackend"
-    assert plan.stages[0].kind == "context"
-    assert plan.stages[0].requires_product_edit is False
-    assert plan.stages[1].owner == "qa"
-    assert plan.stages[1].repo == "EterniaBackend"
-    assert plan.stages[1].depends_on == ["backend_investigation"]
+    assert_default_blueprint_plan(plan, task)
+    assert not any(stage.id == "backend_investigation" for stage in plan.stages)
 
 
-def test_backend_product_hardening_admin_ui_nongoal_does_not_synthesize_launcher_stage():
+def test_backend_product_hardening_nongoal_keeps_blueprint_authority():
     task = make_task(
         title="NSFW hardening slice: fail-closed media safety verdicts",
         description=(
@@ -160,17 +149,11 @@ def test_backend_product_hardening_admin_ui_nongoal_does_not_synthesize_launcher
         actor="neko_supervisor",
     )
 
-    assert [stage.repo for stage in plan.stages] == ["EterniaBackend", "EterniaBackend"]
-    assert [stage.owner for stage in plan.stages] == ["backend_dev", "qa"]
-    assert plan.stages[0].id == "backend_implementation"
-    assert plan.stages[0].kind == "implementation"
-    assert plan.stages[0].proof_recipe_id is None
-    assert plan.stages[0].requires_product_edit is True
-    assert not any(stage.id == "launcher_implementation" for stage in plan.stages)
-    assert plan.stages[1].depends_on == [plan.stages[0].id]
+    assert_default_blueprint_plan(plan, task)
+    assert plan.stages[1].repo == "EterniaBackend"
 
 
-def test_backend_only_no_launcher_frontend_goal_strips_synthesized_launcher_stage():
+def test_backend_only_no_launcher_frontend_goal_does_not_rewrite_blueprint_from_handoff():
     task = make_task(
         title="NSFW hardening slice retry: fail-closed media safety verdicts",
         description=(
@@ -196,13 +179,11 @@ def test_backend_only_no_launcher_frontend_goal_strips_synthesized_launcher_stag
         actor="neko_supervisor",
     )
 
-    assert [stage.repo for stage in plan.stages] == ["EterniaBackend", "EterniaBackend"]
-    assert [stage.owner for stage in plan.stages] == ["backend_dev", "qa"]
+    assert_default_blueprint_plan(plan, task)
     assert task.requires_visual_proof is False
-    assert not any(stage.repo == "EterniaLauncher" for stage in plan.stages)
 
 
-def test_neko_persona_diagnostic_self_observation_does_not_synthesize_qa_stage():
+def test_neko_persona_diagnostic_self_observation_uses_default_blueprint_without_implicit_single_stage():
     task = make_task(
         id="task_neko_diag",
         title="Stage 57/58 Neko-only contract burn",
@@ -237,11 +218,8 @@ def test_neko_persona_diagnostic_self_observation_does_not_synthesize_qa_stage()
         actor="neko_supervisor",
     )
 
-    assert [stage.id for stage in plan.stages] == ["neko_diagnostic"]
-    assert plan.current_stage_id == "neko_diagnostic"
-    assert plan.stages[0].owner == "neko_supervisor"
-    assert plan.stages[0].kind == "planning"
-    assert plan.stages[0].blocks_qa_until is False
+    assert_default_blueprint_plan(plan, task)
+    assert not any(stage.id == "neko_diagnostic" for stage in plan.stages)
 
 
 def test_mission_control_launcher_plan_projects_focused_worker_hud_defaults():
@@ -257,10 +235,20 @@ def test_mission_control_launcher_plan_projects_focused_worker_hud_defaults():
     plan = ensure_mission_plan(
         task,
         {
-            "objective": "Implement the narrow Mission Control terminal thinking visibility UI fix.",
-            "acceptance_criteria": ["Mission Control displays redaction-safe thinking summary rows."],
-            "affected_repos": ["EterniaLauncher"],
-            "handoff_packet": {"target_owner": "dev", "target_repo": "EterniaLauncher"},
+            "mission_plan": {
+                "current_stage_id": "launcher_implementation",
+                "stages": [
+                    {
+                        "id": "launcher_implementation",
+                        "title": "Launcher Implementation",
+                        "objective": "Implement the narrow Mission Control terminal thinking visibility UI fix.",
+                        "owner": "dev",
+                        "repo": "EterniaLauncher",
+                        "kind": "implementation",
+                        "requires_product_edit": True,
+                    }
+                ],
+            }
         },
         actor="neko_supervisor",
     )
@@ -289,11 +277,21 @@ def test_launcher_post_media_plan_projects_focused_worker_hud_defaults():
     plan = ensure_mission_plan(
         task,
         {
-            "objective": "Implement the scoped EterniaLauncher feed/post media presentation change.",
-            "acceptance_criteria": ["Post thumbnails and portrait videos render 3x larger without overlap."],
-            "affected_repos": ["EterniaLauncher"],
-            "handoff_packet": {"target_owner": "dev", "target_repo": "EterniaLauncher"},
-            "requires_visual_proof": True,
+            "mission_plan": {
+                "current_stage_id": "launcher_implementation",
+                "stages": [
+                    {
+                        "id": "launcher_implementation",
+                        "title": "Launcher Implementation",
+                        "objective": "Implement the scoped EterniaLauncher feed/post media presentation change.",
+                        "owner": "dev",
+                        "repo": "EterniaLauncher",
+                        "kind": "implementation",
+                        "requires_product_edit": True,
+                        "requires_visual_proof": True,
+                    }
+                ],
+            }
         },
         actor="neko_supervisor",
     )
@@ -324,10 +322,20 @@ def test_launcher_post_media_no_product_edit_certification_is_proof_only():
     plan = ensure_mission_plan(
         task,
         {
-            "objective": "Certify the committed Launcher post media 3x inline sizing change without editing product code by collecting focused command proof.",
-            "acceptance_criteria": ["Focused post media tests and analyze pass."],
-            "affected_repos": ["EterniaLauncher"],
-            "handoff_packet": {"target_owner": "dev", "target_repo": "EterniaLauncher"},
+            "mission_plan": {
+                "current_stage_id": "launcher_implementation",
+                "stages": [
+                    {
+                        "id": "launcher_implementation",
+                        "title": "Launcher Certification",
+                        "objective": "Certify the committed Launcher post media 3x inline sizing change without editing product code by collecting focused command proof.",
+                        "owner": "dev",
+                        "repo": "EterniaLauncher",
+                        "kind": "proof_only",
+                        "requires_product_edit": False,
+                    }
+                ],
+            }
         },
         actor="neko_supervisor",
     )
@@ -495,5 +503,6 @@ def test_mission_plan_summary_is_redaction_safe_shape():
     summary = mission_plan_summary(task)
 
     assert summary["enabled"] is True
-    assert summary["current_stage_id"] == "launcher_implementation"
-    assert summary["stages"][0]["owner"] == "dev"
+    assert summary["current_stage_id"] == "scope"
+    assert summary["stages"][0]["owner"] == "neko_supervisor"
+    assert summary["blueprint_id"] == "neko_two_dev_default"

@@ -5,7 +5,6 @@ from agent_runtime.locks import HarnessLockUnavailable
 
 from agent_runtime.actions import HarnessActionType
 from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
-from agent_runtime.mission_plan import has_typed_plan
 from agent_runtime.models import Proof
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import RuntimeConfig
@@ -132,7 +131,7 @@ class BlockedWithQaVerdictEngine:
             task_id=task_id,
             ticks=1,
             actions_taken=[object()],
-            stop_reason="task_blocked",
+            stop_reason="task_escalated",
             final_task_state="blocked",
             open_incidents=0,
             max_actions=max_actions,
@@ -186,9 +185,12 @@ def test_goal_runner_creates_graph_routed_task_from_birth(tmp_path, monkeypatch)
     )
 
     task = task_store.get(result.task_id)
-    assert has_typed_plan(task)
-    assert task.mission_plan.blueprint_id == "neko_dev_qa_basic"
+    assert task.mission_plan is not None
+    assert task.mission_plan.enabled
+    assert task.mission_plan.stages
+    assert task.mission_plan.blueprint_id == "neko_two_dev_default"
     assert task.mission_plan.bindings["builder"] == "backend_dev"
+    assert task.mission_plan.bindings["lead"] == "neko_supervisor"
     assert task.current_stage_id == "scope"
     action = MissionStateMachine().next_action(task)
     assert action.type == HarnessActionType.RUN_SLOT
@@ -333,7 +335,7 @@ def test_goal_runner_does_not_turn_recoverable_blocked_state_into_terminal_bound
     assert result.exit_code == 3
     assert result.final_task_state == "blocked"
     assert result.stop_reason == "max_actions"
-    assert result.final_summary["blocker_kind"] == "state_blocked"
+    assert result.final_summary["blocker_kind"] == "state_escalated"
 
 
 def test_goal_runner_blocked_without_incident_surfaces_qa_blocker_summary(tmp_path, monkeypatch):
@@ -344,7 +346,7 @@ def test_goal_runner_blocked_without_incident_surfaces_qa_blocker_summary(tmp_pa
     )
 
     assert result.ok is False
-    assert result.stop_reason == "task_blocked"
+    assert result.stop_reason == "task_escalated"
     assert result.open_incident_ids == []
     assert result.final_summary["blocker_kind"] == "qa_verdict_blocker"
     assert result.proof_summary["latest_qa_verdict"]["proof_id"] == "proof_qa_blocked"

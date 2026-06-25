@@ -22,7 +22,7 @@ from .decision_schema import (
 from .decision_contracts import validate_planning_decision
 from .models import AgentPersona, AgentRun
 from .mission_plan import current_plan_stage
-from .personas import blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
+from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .profile_runner import AgentRunRequest, AgentRunResult, ProfileAgentRunner, RunBudgetExceeded
@@ -30,7 +30,11 @@ from .progress import RunProgressSink
 from .repo_context import RepoExecutionContext, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
 from .store import RunStore, _safe_session_id
-from .tool_permissions import extra_blocked_tools_for_permission_mode, permission_options_for_chat
+from .tool_permissions import (
+    extra_blocked_tools_for_permission_mode,
+    permission_mode_is_unbounded,
+    permission_options_for_chat,
+)
 
 
 class PersonaRuntime(Protocol):
@@ -192,7 +196,7 @@ class GPTPersonaRuntime:
                 provider=persona.provider or self._default_provider,
                 model=persona.model or self._default_model or "",
                 api_mode=persona.api_mode,
-                enabled_toolsets=effective_toolsets(persona),
+                enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=session_id),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
                 quiet_mode=True,
                 skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
@@ -251,7 +255,7 @@ class GPTPersonaRuntime:
                 provider=runtime_provider,
                 model=runtime_model,
                 api_mode=persona.api_mode,
-                enabled_toolsets=effective_toolsets(persona),
+                enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=session_id),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
                 quiet_mode=True,
                 skip_context_files=False,
@@ -384,9 +388,18 @@ def _blocked_tool_names_for_run(persona: AgentPersona, ctx: AgentContext) -> lis
 
 def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
     options = permission_options_for_chat(persona, session_id=session_id)
+    if permission_mode_is_unbounded(options.permission_mode):
+        return []
     names = set(blocked_tool_names(persona))
     names.update(extra_blocked_tools_for_permission_mode(options.permission_mode))
     return sorted(names)
+
+
+def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
+    options = permission_options_for_chat(persona, session_id=session_id)
+    if permission_mode_is_unbounded(options.permission_mode):
+        return all_registered_toolsets()
+    return effective_toolsets(persona)
 
 
 def _is_no_edit_context_stage(ctx: AgentContext) -> bool:

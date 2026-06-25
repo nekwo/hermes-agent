@@ -282,7 +282,7 @@ def test_incident_store_close_removes_task_open_incident_reference():
     assert incident_store.get("inc_stale").closed_at is not None
     saved = task_store.get(task.id)
     assert saved.open_incident_ids == []
-    assert saved.state == TaskState.CREATED
+    assert saved.state == TaskState.RUNNING
     assert saved.harness_self_heal["stages"]["_mission"]["incident_close_counter"] == 1
     assert saved.harness_self_heal["stages"]["_mission"]["last_closed_incident_id"] == "inc_stale"
 

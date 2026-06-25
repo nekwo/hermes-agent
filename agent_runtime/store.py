@@ -15,7 +15,6 @@ from . import paths
 from .errors import AlreadyExists, NotFound
 from .events import EventLog
 from .locks import archive_lock, task_lock, run_lock
-from .mission_plan import has_typed_plan
 from .models import AgentPersona, AgentRun, Event, GoalRuntimeInstance, Incident, Proof, Task
 from .persona_assignments import PersonaAssignmentStore
 from .proof_rules import ProofType
@@ -993,8 +992,8 @@ class IncidentStore:
                     changed = True
                 if was_open and task.state == TaskState.BLOCKED:
                     mark_incident_closed_for_recovery(task, incident_id=incident.id)
-                    if not task.open_incident_ids and not has_typed_plan(task):
-                        task.state = TaskState.CREATED
+                    if not task.open_incident_ids:
+                        task.state = TaskState.RUNNING
                     changed = True
                 if changed:
                     task.updated_at = now()

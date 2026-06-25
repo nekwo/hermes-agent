@@ -157,7 +157,7 @@ def test_progress_hash_ignores_fresh_proof_ids_and_checklist_revision(isolate_ag
     assert first != different
 
 
-def test_synthesized_no_edit_cross_stack_plan_includes_launcher_leg(isolate_agent_runtime_root):
+def test_handoff_payload_does_not_synthesize_no_edit_cross_stack_launcher_leg(isolate_agent_runtime_root):
     from agent_runtime.burn_in import STAGE47_CASES, _create_case_task
     from agent_runtime.mission_plan import ensure_mission_plan
 
@@ -174,10 +174,9 @@ def test_synthesized_no_edit_cross_stack_plan_includes_launcher_leg(isolate_agen
 
     plan = ensure_mission_plan(task, payload)
 
-    launcher_stages = [stage for stage in plan.stages if stage.repo == "EterniaLauncher" and stage.owner == "dev"]
-    assert launcher_stages, [f"{s.id}:{s.repo}:{s.owner}" for s in plan.stages]
-    assert launcher_stages[0].requires_product_edit is False
-    assert launcher_stages[0].kind == "proof_only"
+    assert plan.blueprint_id == "neko_two_dev_default"
+    assert [stage.id for stage in plan.stages] == ["scope", "backend_implementation", "implement"]
+    assert not [stage for stage in plan.stages if stage.id == "launcher_implementation"]
 
 
 def test_automated_unblock_is_not_manual_intervention(isolate_agent_runtime_root):

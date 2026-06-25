@@ -9,12 +9,12 @@ from .config import load_agent_runtime_config
 from .decision_contract_registry import (
     context_expansion_shape_ids as registry_context_expansion_shape_ids,
     contract_hash,
-    hud_shape_index_for_role,
+    hud_shape_index_for_stage,
     role_shape_ids as registry_role_shape_ids,
 )
 from .decision_payload_contracts import payload_contract
 from .events import EventLog
-from .mission_plan import blocking_stages_ready_for_qa, current_plan_stage, has_typed_plan, mission_plan_summary
+from .mission_plan import blocking_stages_ready_for_qa, current_plan_stage, mission_plan_summary
 from .models import AgentRun, Event, Proof, Task, TaskStage
 from .mission_plan import task_stage_records
 from .objective_templates import render_objective
@@ -22,7 +22,7 @@ from .packets import HANDOFF_MODES, HANDOFF_OWNERS, HANDOFF_REPOS, QA_NEXT_OWNER
 from .profile_context import active_profile_name
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_summary, simplified_phase_for_task
 from .repo_context import repo_execution_context_for_task, safe_affected_repo_labels
-from .role_checklists import role_checklist_hud
+from .role_checklists import stage_checklist_hud
 from .role_contracts import contract_for_persona
 from .serde import to_jsonable
 from .stage_intent import stage_is_committed_verification_gate, stage_requires_product_edit
@@ -679,7 +679,7 @@ def _safe_proof_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _context_objective_stage(task: Task, run: AgentRun):
-    typed = current_plan_stage(task) if has_typed_plan(task) else None
+    typed = current_plan_stage(task)
     if typed is not None:
         return typed
     stage_id = run.stage_id or task.current_stage_id
@@ -707,7 +707,7 @@ def _stage_role(task: Task, run: AgentRun, stage) -> str:
     slot_info = slots.get(owner_slot) if isinstance(slots, dict) else None
     if isinstance(slot_info, dict) and slot_info.get("role"):
         return str(slot_info["role"])
-    return owner_slot or _hud_role(run)
+    return owner_slot or _hud_owner(run)
 
 
 def _stage_output_type(stage) -> str:
@@ -755,7 +755,7 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
     handoff = (packets.get("handoff_packet") or {}).get("body") if isinstance(packets.get("handoff_packet"), dict) else None
     handoff = handoff if isinstance(handoff, dict) else {}
     stage_state = _stage_self_heal_state(task, run.stage_id or task.current_stage_id)
-    role = _hud_role(run)
+    role = _hud_owner(run)
     config = config or load_agent_runtime_config()
     worker_actions = worker_actions_for_role(role, task, run, config=config, proof_store=proof_store)
     primary_action = primary_worker_action(worker_actions)
@@ -800,15 +800,14 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
         "current_stage_command_hints": _current_stage_command_hints(task, run, role=role),
         "forbidden_decisions": _forbidden_decisions(run),
     }
-    checklist_hud = role_checklist_hud(task, role, run, config=config)
+    checklist_hud = stage_checklist_hud(task, role, run, config=config)
     if checklist_hud:
         stage_checklist = dict(checklist_hud)
-        if has_typed_plan(task):
-            typed_stage = current_plan_stage(task)
-            if typed_stage is not None:
-                stage_checklist["stage_id"] = typed_stage.id
-                stage_checklist["owner_slot"] = typed_stage.owner_slot or typed_stage.owner
-                stage_checklist["output_type"] = _stage_output_type(typed_stage)
+        typed_stage = current_plan_stage(task)
+        if typed_stage is not None:
+            stage_checklist["stage_id"] = typed_stage.id
+            stage_checklist["owner_slot"] = typed_stage.owner_slot or typed_stage.owner
+            stage_checklist["output_type"] = _stage_output_type(typed_stage)
         else:
             stage_checklist["stage_id"] = run.stage_id or task.current_stage_id or stage_checklist.get("mission_stage_id")
             stage_checklist["owner_slot"] = stage_checklist.get("role_id") or role
@@ -821,29 +820,28 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
         hud["worker_action_menu"] = visible_actions
         hud["allowed_alternatives"] = [action["action_id"] for action in visible_actions if not action.get("primary")]
         hud["not_allowed_yet"] = not_allowed
-    if has_typed_plan(task):
-        typed_stage = current_plan_stage(task)
-        ready, blockers = blocking_stages_ready_for_qa(task, proof_store=proof_store)
-        hud["typed_mission_plan"] = mission_plan_summary(task)
-        hud["typed_current_stage"] = {
-            "id": typed_stage.id,
-            "owner": typed_stage.owner,
-            "repo": typed_stage.repo,
-            "kind": typed_stage.kind,
-            "status": typed_stage.status.value,
-            "output_type": _stage_output_type(typed_stage),
-            "proof_recipe_id": typed_stage.proof_recipe_id,
-            "proof_gate": _stage_proof_gate(typed_stage),
-            "required_proof_types": list((_stage_proof_gate(typed_stage)).get("required_proof_types", []) or []),
-            "requires_product_edit": typed_stage.requires_product_edit,
-            "requires_visual_proof": typed_stage.requires_visual_proof,
-            "depends_on": list(typed_stage.depends_on),
-            "outgoing_edges": _stage_outgoing_edges(task, typed_stage),
-        } if typed_stage is not None else None
-        hud["typed_qa_gate"] = {
-            "ready": ready,
-            "blockers": blockers[:10],
-        }
+    typed_stage = current_plan_stage(task)
+    ready, blockers = blocking_stages_ready_for_qa(task, proof_store=proof_store)
+    hud["typed_mission_plan"] = mission_plan_summary(task)
+    hud["typed_current_stage"] = {
+        "id": typed_stage.id,
+        "owner": typed_stage.owner,
+        "repo": typed_stage.repo,
+        "kind": typed_stage.kind,
+        "status": typed_stage.status.value,
+        "output_type": _stage_output_type(typed_stage),
+        "proof_recipe_id": typed_stage.proof_recipe_id,
+        "proof_gate": _stage_proof_gate(typed_stage),
+        "required_proof_types": list((_stage_proof_gate(typed_stage)).get("required_proof_types", []) or []),
+        "requires_product_edit": typed_stage.requires_product_edit,
+        "requires_visual_proof": typed_stage.requires_visual_proof,
+        "depends_on": list(typed_stage.depends_on),
+        "outgoing_edges": _stage_outgoing_edges(task, typed_stage),
+    } if typed_stage is not None else None
+    hud["typed_qa_gate"] = {
+        "ready": ready,
+        "blockers": blockers[:10],
+    }
     counters = stage_state.get("counters") if isinstance(stage_state.get("counters"), dict) else {}
     self_heal = stage_state.get("self_heal") if isinstance(stage_state.get("self_heal"), dict) else {}
     if counters:
@@ -878,7 +876,7 @@ def _latest_context_request_feedback(task: Task, run: AgentRun) -> dict[str, Any
         return None
     persona = str(getattr(run, "persona_id", "") or "")
     stage_id = str(getattr(run, "stage_id", "") or getattr(task, "current_stage_id", "") or "")
-    relevant = [req for req in requests if str(req.get("actor") or "") in {"", persona, _hud_role(run)}]
+    relevant = [req for req in requests if str(req.get("actor") or "") in {"", persona, _hud_owner(run)}]
     req = (relevant or requests)[-1]
     status = str(req.get("status") or "unknown")
     failure = str(req.get("failure_reason") or "").strip()
@@ -1103,7 +1101,7 @@ def _worker_action_shape_ids(actions) -> list[str]:
     return result
 
 
-def _hud_role(run: AgentRun) -> str:
+def _hud_owner(run: AgentRun) -> str:
     persona_id = str(getattr(run, "persona_id", "") or "")
     if persona_id == "neko_supervisor":
         return "alice_supervisor"
@@ -1115,7 +1113,7 @@ def _hud_role(run: AgentRun) -> str:
 
 
 def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], stage_state: dict[str, Any]) -> dict[str, Any]:
-    role = _hud_role(run)
+    role = _hud_owner(run)
     stage_id = str(run.stage_id or task.current_stage_id or "").strip()
     state = str(task.state.value if hasattr(task.state, "value") else task.state)
     failed_proof_ids = [str(item).strip() for item in (stage_state.get("last_failed_proof_ids") or []) if str(item).strip()] if isinstance(stage_state.get("last_failed_proof_ids"), list) else []
@@ -1237,7 +1235,7 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
 
 def _registry_decision_shape_index(role: str, task: Task, run: AgentRun, *, handoff: dict[str, Any]) -> dict[str, Any]:
     stage_id = run.stage_id or task.current_stage_id or "<current stage>"
-    shape_index = hud_shape_index_for_role(role)
+    shape_index = hud_shape_index_for_stage(role)
     target_repo = str(handoff.get("target_repo") or "EterniaLauncher").strip() or "EterniaLauncher"
     for shape in shape_index.values():
         template = shape.get("payload_template")
@@ -1523,7 +1521,7 @@ def _safe_packet_body(body: dict[str, Any]) -> dict[str, Any]:
         "final_repo",
         "proof_gate",
         "join_gate",
-        "stage46_rules",
+        "harness_rules",
         "self_heal",
         "joined_proof_ids",
         "joined_contract_packet_ids",

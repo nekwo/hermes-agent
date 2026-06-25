@@ -39,7 +39,7 @@ def mission_chat_prompt_observability(
     filenames are known prompt/memory files.
     """
 
-    persona_id = safe_assignment_token(getattr(persona, "id", None)) or "unknown"
+    persona_id = _safe_persona_id(getattr(persona, "id", None))
     profile = safe_assignment_token(getattr(persona, "hermes_profile", None)) or persona_id
     context_id = "ctx_" + hashlib.sha256(
         "|".join(
@@ -144,6 +144,14 @@ def _safe_model_selection(value: dict[str, Any] | None) -> dict[str, Any]:
         elif item is None and key in {"chat_provider", "chat_model"}:
             result[key] = None
     return result
+
+
+def _safe_persona_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    if raw.lower().startswith("profile:"):
+        profile = safe_assignment_token(raw.split(":", 1)[1])
+        return f"profile:{profile}" if profile else "profile:unknown"
+    return safe_assignment_token(raw) or "unknown"
 
 
 def snapshot_prompt_observability(

@@ -13,7 +13,7 @@ import re
 from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
-from .profile_context import PersonaProfileBinding, is_virtual_builtin_profile, persona_profile_context
+from .profile_context import PersonaProfileBinding, persona_profile_context
 
 
 class ProfileRunnerError(RuntimeError):
@@ -446,15 +446,6 @@ def _binding_for_profile(profile: str | None) -> PersonaProfileBinding:
         )
     name = normalize_profile_name(profile)
     if not profile_exists(name):
-        if is_virtual_builtin_profile(name):
-            return PersonaProfileBinding(
-                persona_id="profile_runner",
-                hermes_profile=name,
-                profile_home=None,
-                readiness="ready",
-                summary=f"built-in profile '{name}' inherits active Hermes profile home",
-                metadata={"virtual_profile": True},
-            )
         return PersonaProfileBinding(
             persona_id="profile_runner",
             hermes_profile=name,

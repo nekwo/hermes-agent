@@ -9,7 +9,7 @@ from hermes_cli.runtime_environment import missing_runtime_packages_for
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
 from .profile_context import persona_profile_context, resolve_persona_profile
-from .skill_install import stage46_skill_hash_mismatches, stage46_skill_installed_ok
+from .skill_install import harness_skill_hash_mismatches, harness_skill_installed_ok
 
 READINESS_READY = "ready"
 READINESS_MISSING_PROFILE = "missing_profile"
@@ -46,8 +46,8 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
         try:
             with persona_profile_context(binding):
                 missing_skills = _missing_skill_names(list(persona.skills), skill_root=binding.profile_home / "skills")
-                skill_hash_mismatches = stage46_skill_hash_mismatches(list(persona.skills), hermes_home=binding.profile_home)
-                missing_skills = [name for name in missing_skills if not stage46_skill_installed_ok(name, hermes_home=binding.profile_home)]
+                skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills), hermes_home=binding.profile_home)
+                missing_skills = [name for name in missing_skills if not harness_skill_installed_ok(name, hermes_home=binding.profile_home)]
                 cfg_path = binding.profile_home / "config.yaml"
                 raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
                 configured_mcp = _configured_mcp_server_names(raw or {})
@@ -62,8 +62,8 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
             issues.append((READINESS_CONFIG_ERROR, f"Profile config read failed: {type(exc).__name__}"))
     else:
         missing_skills = _missing_skill_names(list(persona.skills))
-        skill_hash_mismatches = stage46_skill_hash_mismatches(list(persona.skills))
-        missing_skills = [name for name in missing_skills if not stage46_skill_installed_ok(name)]
+        skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills))
+        missing_skills = [name for name in missing_skills if not harness_skill_installed_ok(name)]
         if effective_required_mcp:
             missing_mcp = list(effective_required_mcp)
         runtime_issue = _runtime_dependency_issue(persona)

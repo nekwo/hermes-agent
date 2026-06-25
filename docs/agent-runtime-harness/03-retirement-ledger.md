@@ -64,7 +64,7 @@ rg "mission_plan_routing_enabled|enforce_routing|retired_owner_allowlist" agent_
 
 Grouped by subsystem. Each item: the symbols, the files, the gate, and the owning stage.
 
-### R1 — The residual `has_typed_plan` projection fork  ⛓ (keystone; mostly already done)
+### R1 — The residual `has_typed_plan` projection fork  ✅
 
 **Re-scoped after a 2026-06-25 audit.** The dangerous part of R1 (the routing fork, the
 config switches, the owner allowlist) is **already done** — see "Already retired" above.
@@ -86,13 +86,13 @@ window survives only for the **other task-creation entry points** that pass
   `harness.py:729,775,2896`.
 
 **Safe removal condition (do this first, then delete the fork):**
-- [ ] **Make every task-creation site build a default plan** (call
+- [x] **Make every task-creation site build a default plan** (call
   `build_default_mission_plan` / set a `DEFAULT_TASK_BLUEPRINT_ID` plan), so
   `has_typed_plan` is provably true everywhere the projection code runs.
-- [ ] **Then collapse the projection branches** to the typed path unconditionally and
+- [x] **Then collapse the projection branches** to the typed path unconditionally and
   delete the `legacy_projection=True` code + `_current_stage` legacy fallback. Each
   `has_typed_plan(task)` guard above becomes unconditional.
-- [ ] **Then delete `has_typed_plan`** and the legacy `Task.stages` reads it protected
+- [x] **Then delete `has_typed_plan`** and the legacy `Task.stages` reads it protected
   (folds into R2).
 
 > ⚠️ Do **not** delete the projection branches before the first box is proven — an
@@ -105,11 +105,11 @@ rg "has_typed_plan" agent_runtime hermes_cli   # target: only the definition + R
 python -m pytest tests/agent_runtime/test_state_machine.py tests/agent_runtime/test_context_builder.py tests/agent_runtime/blueprints -q
 ```
 
-### R2 — Plan/stage duplication  ⛓ (depends on R1)
+### R2 — Plan/stage duplication  ✅
 
-- [ ] **Per-task plan synthesis** `_synthesize_plan_from_handoff` (`mission_plan.py`)
+- [x] **Per-task plan synthesis** `_synthesize_plan_from_handoff` (`mission_plan.py`)
   replaced by blueprint instantiation.
-- [ ] **Legacy `Task.stages` mirror** — delete `mirror_legacy_stages_from_plan`
+- [x] **Legacy `Task.stages` mirror** — delete `mirror_legacy_stages_from_plan`
   (`mission_plan.py`, 3 hits) once Launcher/snapshot read `mission_plan.stages` directly.
 
 Gate:
@@ -117,14 +117,14 @@ Gate:
 rg "_synthesize_plan_from_handoff|mirror_legacy_stages_from_plan" agent_runtime hermes_cli tests
 ```
 
-### R3 — Launcher / cross-stack special cases baked into the engine  ⛓ (depends on R1)
+### R3 — Launcher / cross-stack special cases baked into the engine  ✅
 
 Express these as ordinary blueprint stages/edges, then delete from `planning.py`:
 
-- [ ] `_ensure_launcher_handoff_stage` (`planning.py:1958`, called :209,:316,:663)
-- [ ] `_ensure_no_edit_proof_handoff_stage` (`planning.py:1714`, called :330)
-- [ ] `_repair_bounded_visual_proof_stage_from_neko_handoff` (`planning.py:2000`, called :317)
-- [ ] `LAUNCHER_RELEASED_BY_NEKO_FLAG`, `QA_COORDINATION_RELEASED_FLAG`, and the
+- [x] `_ensure_launcher_handoff_stage` (`planning.py:1958`, called :209,:316,:663)
+- [x] `_ensure_no_edit_proof_handoff_stage` (`planning.py:1714`, called :330)
+- [x] `_repair_bounded_visual_proof_stage_from_neko_handoff` (`planning.py:2000`, called :317)
+- [x] `LAUNCHER_RELEASED_BY_NEKO_FLAG`, `QA_COORDINATION_RELEASED_FLAG`, and the
   cross-stack release branches.
 
 Gate:
@@ -132,9 +132,9 @@ Gate:
 rg "_ensure_launcher_handoff_stage|_ensure_no_edit_proof_handoff_stage|_repair_bounded_visual_proof|LAUNCHER_RELEASED_BY_NEKO_FLAG|QA_COORDINATION_RELEASED_FLAG" agent_runtime hermes_cli tests
 ```
 
-### R4 — Role-shaped HUD → slot/stage-shaped  🔜 (independent of R1; can start now)
+### R4 — Role-shaped HUD → slot/stage-shaped  ✅
 
-- [ ] Replace `hud_shape_index_for_role`, `role_checklist_hud`, `_hud_role`
+- [x] Replace `hud_shape_index_for_role`, `role_checklist_hud`, `_hud_role`
   (`context_builder.py`, 4 hits + `role_checklists.py`) with stage-derived HUD keyed on
   `owner_slot` + `objective` + `proof_gate` + outgoing edges. (02 §HUD)
 
@@ -144,9 +144,9 @@ rg "hud_shape_index_for_role|role_checklist_hud|_hud_role" agent_runtime tests
 python -m pytest tests/agent_runtime/test_context_builder.py -q
 ```
 
-### R5 — Hardcoded skill map → persona + per-stage skills  🔜 (independent of R1)
+### R5 — Hardcoded skill map → persona + per-stage skills  ✅
 
-- [ ] Drop `_STAGE46_REQUIRED_SKILLS` (`config.py`) and the `stage46_*` install/readiness
+- [x] Drop `_STAGE46_REQUIRED_SKILLS` (`config.py`) and the `stage46_*` install/readiness
   naming; source skills from `AgentPersona.skills` + blueprint stage `required_skills`.
   (02 §Skills) **Note:** `config.py` is currently modified in the working tree by the
   tool-visibility branch — coordinate to avoid a collision.
@@ -156,12 +156,12 @@ Gate:
 rg "_STAGE46_REQUIRED_SKILLS|stage46" agent_runtime hermes_cli tests
 ```
 
-### R6 — Persona/profile config fallback  ⛓ (depends on personas being first-class records)
+### R6 — Persona/profile config fallback  ✅
 
-- [ ] `configured_personas` config-default fallback (incl. `alice_supervisor →
+- [x] `configured_personas` config-default fallback (incl. `alice_supervisor →
   neko_supervisor` aliasing in `config.py`) retired in favour of persisted personas +
   on-demand profile→persona promotion.
-- [ ] Snapshot `agents = agent_store.list_all() or configured_personas(cfg)` fallback
+- [x] Snapshot `agents = agent_store.list_all() or configured_personas(cfg)` fallback
   removed once personas are first-class records.
 
 Gate:
@@ -169,19 +169,19 @@ Gate:
 rg "configured_personas" agent_runtime hermes_cli tests
 ```
 
-### R7 — Soften the task layer to a HUD (Stage 76C)  🔜 (largest behavior change; phase it)
+### R7 — Soften the task layer to a HUD (Stage 76C)  ✅
 
 Not a symbol deletion but a gating-behavior retirement. Phase it:
 
-- [ ] **Phase 1 — `BLOCKED` non-terminal.** Each `BLOCKED` setter
+- [x] **Phase 1 — `BLOCKED` non-terminal.** Each `BLOCKED` setter
   (`planning.py`, `blueprints/routing.py`, `no_freeze_monitor.py`, `preflight.py`) and
   consumer (`goal_runner.py`) emits an escalation to the goal-owner chat and keeps the
   run loop alive. Prefer softening the `blueprints/routing.py` path first.
-- [ ] **Phase 2 — proof becomes advisory.** Where `GateResult.allowed` hard-blocks a
+- [x] **Phase 2 — proof becomes advisory.** Where `GateResult.allowed` hard-blocks a
   transition (`planning.py`, `blueprints/routing.py`), surface `GateResult.missing` as
   HUD evidence on the goal-owner chat and let the conductor adjudicate.
   **`proof_gates.py` computation is untouched** — only its consumers change.
-- [ ] **Phase 3 — skills reflect it.** `harness-mission-lead`, `harness-qa-verdict`,
+- [x] **Phase 3 — skills reflect it.** `harness-mission-lead`, `harness-qa-verdict`,
   `harness-dev-delivery`, `launcher-analyze-proof`: proof = evidence the goal owner
   adjudicates; blocked = an escalation to handle, not a dead-end. Re-install
   (`hermes harness install-stage46-skills`).
@@ -192,9 +192,9 @@ python -m pytest tests/agent_runtime/test_proof_gates.py tests/agent_runtime/tes
 ```
 (`test_proof_gates.py` must stay green — the computation is unchanged.)
 
-### R8 — Retire the standalone persona pipeline (Stage 77)  ⛓ (Launcher; depends on the graph UI)
+### R8 — Retire the standalone persona pipeline (Stage 77)  ✅
 
-- [ ] Remove the separate `Goal → Neko → Dev → QA → Proof` strip; the agents are the
+- [x] Remove the separate `Goal → Neko → Dev → QA → Proof` strip; the agents are the
   graph nodes (one node = one agent). The agent-vs-stage split collapses — a node renders
   the blueprint stage **with its bound agent on it**.
   - Launcher `blueprint_editor/blueprint_graph_editor_page.dart`,

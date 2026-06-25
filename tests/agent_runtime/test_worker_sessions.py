@@ -96,7 +96,7 @@ class RequestRecipeRuntime:
             type=DecisionType.REQUEST_TEST_RUN,
             summary="collect recipe proof",
             rationale="Recipe proof avoids command rediscovery.",
-            payload={"stage_id": "implement", "recipe_id": "archive_button_cli_contract"},
+            payload={"stage_id": "archive_button_cli_contract", "recipe_id": "archive_button_cli_contract"},
         )
 
 
@@ -165,6 +165,26 @@ def test_request_test_run_recipe_normalizes_commands_and_metadata():
     tasks = TaskStore()
     proofs = ProofStore()
     task = _task("task_recipe")
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title=task.title, objective=task.description),
+        current_stage_id="archive_button_cli_contract",
+        blueprint_id="neko_two_dev_default",
+        stages=[
+            MissionPlanStage(
+                id="archive_button_cli_contract",
+                title="Archive Button CLI Contract",
+                objective="Collect archive button CLI proof.",
+                owner="dev",
+                owner_slot="dev",
+                repo="hermes-agent",
+                kind="proof_only",
+                proof_recipe_id="archive_button_cli_contract",
+                requires_product_edit=False,
+                status=StageStatus.IMPLEMENTING,
+            )
+        ],
+    )
+    task.current_stage_id = "archive_button_cli_contract"
     tasks.create(task)
     runner = PassingProofRunner(proofs)
 

@@ -22,9 +22,10 @@ from agent_runtime.coordinator_permissions import (
     authorize_coordinator_action,
     scope_for_persona,
 )
-from agent_runtime.decision_contract_examples import verify_stage46_skill_examples
-from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_role, verify_registry
+from agent_runtime.decision_contract_examples import verify_harness_skill_examples
+from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
+from agent_runtime.default_plan import ensure_default_mission_plan
 from agent_runtime.daemon import MissionDaemon, read_daemon_status, start_daemon, stop_daemon
 from agent_runtime.errors import NotFound
 from agent_runtime.events import EventLog
@@ -56,7 +57,7 @@ from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.prompt_observability import mission_chat_prompt_observability, persist_prompt_observability_context
 from agent_runtime.provider_health import provider_health_for_personas
-from agent_runtime.skill_install import install_stage46_skills, install_stage46_skills_for_personas
+from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
 from agent_runtime.smoke import run_smoke
 from agent_runtime.scope_control import find_discovery_task
@@ -331,7 +332,7 @@ def build_parser(parent_subparsers) -> None:
     persona_permission_set = persona_permission_subs.add_parser("set", help="Set chat-scoped permission mode")
     persona_permission_set.add_argument("persona_id", help="Persona id or alias: neko, dev, launcher-dev, backend-dev, qa")
     persona_permission_set.add_argument("--session-id", required=True)
-    persona_permission_set.add_argument("--mode", choices=["profile_default", "read_only"], required=True)
+    persona_permission_set.add_argument("--mode", choices=["profile_default", "read_only", "unbounded"], required=True)
     persona_permission_set.add_argument("--reason", required=True)
     persona_permission_set.add_argument("--json", action="store_true")
     persona_permission_set.set_defaults(func=_cmd_persona_permission_set)
@@ -558,11 +559,11 @@ def build_parser(parent_subparsers) -> None:
     agents.add_argument("--json", action="store_true")
     agents.set_defaults(func=_cmd_agents)
 
-    skills = subs.add_parser("install-stage46-skills", help="Install versioned Stage 46 Harness skills into configured persona profiles")
-    skills.add_argument("--active-profile-only", action="store_true", help="Install all Stage 46 skills only into the active Hermes profile")
+    skills = subs.add_parser("install-harness-skills", help="Install versioned Harness skills into configured persona profiles")
+    skills.add_argument("--active-profile-only", action="store_true", help="Install all Harness skills only into the active Hermes profile")
     skills.add_argument("--all-persona-profiles", action="store_true", help="Compatibility flag; persona profiles are now the default")
     skills.add_argument("--json", action="store_true")
-    skills.set_defaults(func=_cmd_install_stage46_skills)
+    skills.set_defaults(func=_cmd_install_harness_skills)
 
     smoke = subs.add_parser("smoke", help="Run a safe Mission Control smoke goal")
     smoke.add_argument("--json", action="store_true")
@@ -867,11 +868,11 @@ def _cmd_init(args) -> int:
     return 0
 
 
-def _cmd_install_stage46_skills(args) -> int:
+def _cmd_install_harness_skills(args) -> int:
     if getattr(args, "active_profile_only", False):
-        results = install_stage46_skills()
+        results = install_harness_skills()
     else:
-        results = install_stage46_skills_for_personas(ensure_persisted_personas(load_agent_runtime_config()))
+        results = install_harness_skills_for_personas(ensure_persisted_personas(load_agent_runtime_config()))
     data = {"installed": [asdict(result) for result in results], "ok": all(result.ok for result in results)}
     if args.json:
         print(emit_json(data))
@@ -3117,11 +3118,11 @@ def _cmd_task_unblock(args) -> int:
     task.risk_flags = [flag for flag in list(task.risk_flags or []) if flag != "neko_block_recovery_attempted"]
     cleared_recovery_keys = _clear_task_recovery_markers(task)
     if args.rescope:
-        task.mission_plan = None
         task.current_stage_id = None
         task.stages = []
         task.affected_repos = []
         task.assigned_persona_ids = {}
+        ensure_default_mission_plan(task)
     task.updated_at = now()
     store.update(task, actor="cli", reason=f"operator unblock: {_safe_operator_text(args.reason)}")
     foreground = activate_foreground_runtime(task.id, started_by="cli") if args.foreground else None
@@ -3731,7 +3732,7 @@ def _cmd_contracts_dump(args) -> int:
             "allowed_decisions": manifest["roles"].get(canonical_role, []),
             "decision_menu_shape_ids": manifest["role_shape_ids"].get(canonical_role, []),
             "context_expansion_shape_ids": manifest["context_expansion_shape_ids"].get(canonical_role, []),
-            "hud_shapes": hud_shape_index_for_role(canonical_role),
+            "hud_shapes": hud_shape_index_for_stage(canonical_role),
         }
     if decision:
         data = {
@@ -3749,7 +3750,7 @@ def _cmd_contracts_dump(args) -> int:
 
 def _cmd_contracts_verify_examples(args) -> int:
     data = verify_registry()
-    skill_examples = verify_stage46_skill_examples()
+    skill_examples = verify_harness_skill_examples()
     data["skill_examples"] = skill_examples
     data["ok"] = bool(data.get("ok")) and bool(skill_examples.get("ok"))
     print(emit_json(data) if args.json else f"contracts ok={data['ok']} hash={data['contract_hash'][:16]}")

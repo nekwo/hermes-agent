@@ -12,7 +12,7 @@ from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .personas import AgentRole
 
 
-STAGE46_SKILL_ROLES: dict[str, AgentRole] = {
+HARNESS_SKILL_ROLES: dict[str, AgentRole] = {
     "harness-dev-delivery": AgentRole.DEV,
     "launcher-analyze-proof": AgentRole.DEV,
     "harness-qa-verdict": AgentRole.QA,
@@ -20,19 +20,19 @@ STAGE46_SKILL_ROLES: dict[str, AgentRole] = {
 }
 
 
-def stage46_skill_root() -> Path:
-    return Path(__file__).resolve().parent.parent / "docs" / "agent-runtime-harness" / "stage46-skills"
+def harness_skill_root() -> Path:
+    return Path(__file__).resolve().parent.parent / "docs" / "agent-runtime-harness" / "harness-skills"
 
 
-def verify_stage46_skill_examples(root: Path | None = None) -> dict[str, Any]:
-    root = root or stage46_skill_root()
+def verify_harness_skill_examples(root: Path | None = None) -> dict[str, Any]:
+    root = root or harness_skill_root()
     failures: list[dict[str, Any]] = []
     checked: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     for skill_dir in sorted(root.iterdir()) if root.exists() else []:
         if not skill_dir.is_dir():
             continue
-        role = STAGE46_SKILL_ROLES.get(skill_dir.name)
+        role = HARNESS_SKILL_ROLES.get(skill_dir.name)
         skill_file = skill_dir / "SKILL.md"
         if role is None or not skill_file.exists():
             continue
@@ -101,7 +101,7 @@ def _wrap_handoff_packet(packet: dict[str, Any]) -> AgentDecision:
     return AgentDecision(
         type=DecisionType.PROPOSE_ACCEPTANCE,
         summary="Validate handoff packet example.",
-        rationale="Stage 46 skill handoff examples must pass the live planning validator.",
+        rationale="Harness skill handoff examples must pass the live planning validator.",
         payload={
             "objective": "Validate the handoff packet example.",
             "acceptance_criteria": ["The example passes contract validation."],

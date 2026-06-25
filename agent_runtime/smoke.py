@@ -114,6 +114,11 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
         transitions.append("qa:report_qa_verdict")
 
         task.proof_ids = ["proof_smoke_test", "proof_smoke_qa"]
+        if task.mission_plan is not None:
+            for stage in task.mission_plan.stages:
+                stage.status = StageStatus.PASSED
+            task.mission_plan.current_stage_id = None
+            task.current_stage_id = None
         close_action = machine.next_action(task)
         if close_action.type != HarnessActionType.COMPLETE_TASK:
             raise RuntimeError(f"expected deterministic completion, got {close_action.type.value}")

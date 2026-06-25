@@ -213,7 +213,7 @@ def allowed_decisions_by_role() -> dict[AgentRole, frozenset[DecisionType]]:
 
 
 def canonical_role_value(role: AgentRole | str) -> str:
-    return _resolve_hud_role(role).value
+    return _resolve_hud_owner(role).value
 
 
 def validate_payload_keys(decision) -> None:
@@ -253,8 +253,8 @@ def hud_shape(shape_id: str) -> dict[str, Any]:
     return result
 
 
-def hud_shape_index_for_role(role: str | AgentRole) -> dict[str, dict[str, Any]]:
-    resolved = _resolve_hud_role(role)
+def hud_shape_index_for_stage(owner: str | AgentRole) -> dict[str, dict[str, Any]]:
+    resolved = _resolve_hud_owner(owner)
     result: dict[str, dict[str, Any]] = {}
     for shape_id in role_shape_ids(resolved):
         shape = _HUD_SHAPES.get(shape_id)
@@ -268,7 +268,7 @@ def hud_shape_index_for_role(role: str | AgentRole) -> dict[str, dict[str, Any]]
 
 
 def role_shape_ids(role: str | AgentRole) -> list[str]:
-    resolved = _resolve_hud_role(role)
+    resolved = _resolve_hud_owner(role)
     return [
         shape_id
         for shape_id in _ROLE_SHAPE_IDS.get(resolved, _ROLE_SHAPE_IDS[AgentRole.DEV])
@@ -277,7 +277,7 @@ def role_shape_ids(role: str | AgentRole) -> list[str]:
 
 
 def context_expansion_shape_ids(role: str | AgentRole) -> list[str]:
-    resolved = _resolve_hud_role(role)
+    resolved = _resolve_hud_owner(role)
     shape_ids = ["common.request_file_reads"]
     if resolved in {AgentRole.ALICE_SUPERVISOR, AgentRole.DEV}:
         shape_ids.append("common.needs_context")
@@ -502,7 +502,7 @@ def _validate_stage_payload_keys(payload: dict[str, Any], *, contract: DecisionC
             )
 
 
-def _resolve_hud_role(role: str | AgentRole) -> AgentRole:
+def _resolve_hud_owner(role: str | AgentRole) -> AgentRole:
     if isinstance(role, AgentRole):
         return role
     value = str(role or "").strip()
@@ -542,7 +542,7 @@ _OBJECT_CONTRACTS: dict[str, ObjectContract] = {
             "final_owner",
             "final_repo",
             "join_gate",
-            "stage46_rules",
+            "harness_rules",
             "self_heal",
             "joined_proof_ids",
             "joined_contract_packet_ids",

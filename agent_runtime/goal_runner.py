@@ -261,7 +261,7 @@ def _normalize_stop(task_state: TaskState, settled: RunUntilSettledResult) -> tu
     if task_state == TaskState.FAILED:
         return "task_failed", 1, ["Inspect run errors and attached incidents."]
     if raw == "task_blocked":
-        return "task_blocked", 1, ["Open Mission Control incidents and route the blocker to the responsible persona."]
+        return "task_escalated", 1, ["Let Neko adjudicate the advisory blocker, then continue the run loop."]
     if raw == "incident_opened":
         return "incident_opened", 1, ["Fix or close the open incident, then rerun the goal runner for this task."]
     if raw == "waiting_on_approval":
@@ -350,10 +350,10 @@ def _blocker_summary(task: Task, *, normalized_stop: str, open_incidents: list, 
                 "qa_verdict_proof_id": latest_qa.get("proof_id"),
                 "findings": blocker_findings[:10],
             }
-    if normalized_stop in {"task_blocked", "action_failed"} or task.state == TaskState.BLOCKED:
+    if normalized_stop in {"task_escalated", "action_failed"} or task.state == TaskState.BLOCKED:
         return {
-            "kind": "state_blocked",
-            "summary": "Task stopped without open incidents; inspect proof_summary, recent events, and task state.",
+            "kind": "state_escalated",
+            "summary": "Task hit an advisory blocker; inspect proof_summary, HUD evidence, recent events, and task state.",
             "task_state": task.state.value,
         }
     return {}
@@ -362,6 +362,6 @@ def _blocker_summary(task: Task, *, normalized_stop: str, open_incidents: list, 
 def _next_actions_for_summary(next_actions: list[str], *, blocker_summary: dict[str, Any]) -> list[str]:
     if blocker_summary.get("kind") == "qa_verdict_blocker":
         return ["Inspect blocker_summary.latest QA findings, attach missing proof or route a bounded fix to the responsible persona."]
-    if blocker_summary.get("kind") == "state_blocked":
-        return ["Inspect blocker_summary and proof_summary; no open incident was recorded for this blocked boundary."]
+    if blocker_summary.get("kind") == "state_escalated":
+        return ["Inspect blocker_summary, proof_summary, and HUD evidence; route Neko adjudication instead of treating BLOCKED as terminal."]
     return next_actions

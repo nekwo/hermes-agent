@@ -37,7 +37,7 @@ HANDOFF_PACKET_KEYS = frozenset(
         "final_repo",
         "proof_gate",
         "join_gate",
-        "stage46_rules",
+        "harness_rules",
         "self_heal",
         "joined_proof_ids",
         "joined_contract_packet_ids",
@@ -542,8 +542,8 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
             raise DecisionPayloadInvalid("handoff_packet.join_gate.release_condition is required")
     _optional_string_list(packet, "joined_proof_ids")
     _optional_string_list(packet, "joined_contract_packet_ids")
-    if packet.get("stage46_rules") is not None:
-        _validate_stage46_rules(packet.get("stage46_rules"))
+    if packet.get("harness_rules") is not None:
+        _validate_harness_rules(packet.get("harness_rules"))
     if isinstance(packet.get("self_heal"), dict):
         self_heal = packet["self_heal"]
         if "classification" in self_heal and str(self_heal.get("classification")) not in SELF_HEAL_CLASSES:
@@ -1036,19 +1036,19 @@ def _optional_string_list(packet: dict[str, Any], key: str) -> None:
         raise DecisionPayloadInvalid(f"{key} must be a list of non-empty strings")
 
 
-def _validate_stage46_rules(value: Any) -> None:
+def _validate_harness_rules(value: Any) -> None:
     if isinstance(value, list):
         if not value or not all(isinstance(item, str) and item.strip() for item in value):
-            raise DecisionPayloadInvalid("handoff_packet.stage46_rules must be a non-empty string list or object")
+            raise DecisionPayloadInvalid("handoff_packet.harness_rules must be a non-empty string list or object")
         return
     if not isinstance(value, dict):
-        raise DecisionPayloadInvalid("handoff_packet.stage46_rules must be a non-empty string list or object")
+        raise DecisionPayloadInvalid("handoff_packet.harness_rules must be a non-empty string list or object")
     if not value:
-        raise DecisionPayloadInvalid("handoff_packet.stage46_rules must not be empty")
+        raise DecisionPayloadInvalid("handoff_packet.harness_rules must not be empty")
     allowed = {"skill_loading", "retry_policy", "wait_semantic", "edit_policy", "observability", "self_heal"}
     extra = sorted(set(value.keys()) - allowed)
     if extra:
-        raise DecisionPayloadInvalid(f"handoff_packet.stage46_rules has unsupported keys: {extra}")
+        raise DecisionPayloadInvalid(f"handoff_packet.harness_rules has unsupported keys: {extra}")
 
 
 def _normalize_proof_status(value: Any) -> str:

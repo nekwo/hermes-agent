@@ -116,7 +116,7 @@ def test_state_machine_selects_neko_lead_dev_qa_actions_with_mission_language():
     assert machine.next_action(make_mission(TaskState.RUNNING)).type == HarnessActionType.RUN_SLOT
     dev_ready = make_mission(TaskState.RUNNING)
     assert machine.next_action(dev_ready).type == HarnessActionType.RUN_SLOT
-    dev_ready.risk_flags = ["neko_qa_coordination_released"]
+    dev_ready.risk_flags = []
     assert machine.next_action(dev_ready).type == HarnessActionType.RUN_SLOT
     assert machine.next_action(make_mission(TaskState.RUNNING)).type == HarnessActionType.RUN_SLOT
     assert machine.next_action(mark_graph_complete(make_mission(TaskState.RUNNING))).type == HarnessActionType.COMPLETE_TASK
@@ -134,7 +134,7 @@ def test_open_incident_routes_neko_even_when_task_not_blocked():
 
 def test_legacy_qa_stage_does_not_count_as_remaining_dev_work():
     mission = make_mission(TaskState.RUNNING)
-    mission.risk_flags = ["neko_qa_coordination_released"]
+    mission.risk_flags = []
     mission.current_stage_id = "backend_implementation"
     mission.proof_ids = ["proof_backend"]
     mission.stages = [
@@ -497,7 +497,7 @@ def test_state_machine_retries_qa_after_resolved_incident_only_blocker():
 def test_state_machine_retries_qa_after_resolved_qa_output_incident_without_neko_loop():
     mission = make_mission(TaskState.BLOCKED)
     mission.open_incident_ids = []
-    mission.risk_flags = ["neko_qa_coordination_released"]
+    mission.risk_flags = []
     mission.proof_ids = ["proof_backend", "proof_launcher"]
     mission.current_stage_id = "launcher_contract_smoke"
     mission.stages = [
@@ -715,7 +715,7 @@ def test_implementing_launcher_stage_without_neko_release_routes_to_neko():
 
 def test_implementing_launcher_stage_after_neko_release_routes_to_dev():
     mission = make_mission(TaskState.RUNNING)
-    mission.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "launcher_contract_released_by_neko"]
+    mission.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first"]
     mission.proof_ids = ["proof_backend"]
     mission.current_stage_id = "launcher_contract_smoke"
     mission.stages = [
@@ -797,7 +797,7 @@ def test_cross_stack_backend_only_qa_state_routes_to_neko_launcher_release():
 
 def test_cross_stack_backend_only_dev_ready_routes_to_neko_before_qa():
     mission = make_mission(TaskState.RUNNING)
-    mission.risk_flags = ["cross_stack_contract_handoff", "neko_qa_coordination_released"]
+    mission.risk_flags = ["cross_stack_contract_handoff"]
     mission.proof_ids = ["proof_backend"]
     mission.stages = [
         TaskStage(id="backend_contract", title="Backend Contract", objective="prove backend", status=StageStatus.READY_FOR_QA),
@@ -812,7 +812,7 @@ def test_cross_stack_backend_only_dev_ready_routes_to_neko_before_qa():
 
 def test_cross_stack_contract_join_flag_routes_to_neko_before_qa():
     mission = make_mission(TaskState.RUNNING)
-    mission.risk_flags = ["cross_stack_contract_join", "neko_qa_coordination_released"]
+    mission.risk_flags = ["cross_stack_contract_join"]
     mission.proof_ids = ["proof_backend"]
     mission.stages = [
         TaskStage(id="backend_contract", title="Backend Contract", objective="prove backend", status=StageStatus.READY_FOR_QA),

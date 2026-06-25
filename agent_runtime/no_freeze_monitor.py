@@ -160,7 +160,7 @@ def _link_incident_to_task(task_store: TaskStore, incident_id: str, task_id: Any
     if incident_id not in task.open_incident_ids:
         task.open_incident_ids.append(incident_id)
     if task.state not in {TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED}:
-        task.state = TaskState.BLOCKED
+        task.state = TaskState.RUNNING
     task.updated_at = now()
     task_store.update(task, actor="harness_monitor", reason="runtime freeze monitor finding")
 

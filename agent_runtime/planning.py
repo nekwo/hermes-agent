@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
 from typing import Any
 
-from hermes_constants import get_default_hermes_root
 from hermes_time import now
 
-from . import paths
-from .profile_context import active_profile_name
 from .decision_contracts import validate_planning_decision
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
@@ -23,7 +19,6 @@ from .mission_plan import (
     attach_proofs_to_plan_stage,
     current_plan_stage,
     ensure_mission_plan,
-    has_typed_plan,
     is_mission_lead_actor,
     mark_plan_stage_from_decision,
     release_next_stage,
@@ -46,9 +41,6 @@ from .states import StageStatus, TaskState
 from .store import RunStore
 
 
-QA_COORDINATION_RELEASED_FLAG = "neko_qa_coordination_released"
-LAUNCHER_RELEASED_BY_NEKO_FLAG = "launcher_contract_released_by_neko"
-
 DEV_COMPLETE_STAGE_STATUSES = frozenset({StageStatus.READY_FOR_QA, StageStatus.PASSED})
 TERMINAL_STAGE_STATUSES = frozenset({StageStatus.PASSED})
 CROSS_STACK_BACKEND_FIRST_FLAGS = frozenset(
@@ -61,6 +53,34 @@ CROSS_STACK_BACKEND_FIRST_FLAGS = frozenset(
         "frontend_backend_contract_handoff",
     }
 )
+
+
+def _soft_block_task(task: Task, *, reason: str, stage_id: str | None = None, recommended_owner: str = "neko_supervisor") -> None:
+    if task.state not in {TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED}:
+        task.state = TaskState.RUNNING
+    root = task.harness_self_heal if isinstance(getattr(task, "harness_self_heal", None), dict) else {}
+    stack = root.get("evidence_stack") if isinstance(root.get("evidence_stack"), list) else []
+    evidence = {
+        "kind": "blocked_escalation",
+        "severity": "warning",
+        "stage_id": stage_id or getattr(task, "current_stage_id", None),
+        "summary": "Blocked condition escalated to the goal owner; task remains runnable for adjudication.",
+        "warnings": [str(reason or "")[:500]] if reason else [],
+        "recommended_owner": recommended_owner,
+        "reason": str(reason or "")[:500],
+        "recorded_at": now().isoformat(),
+    }
+    key = (evidence["kind"], evidence.get("stage_id"), tuple(evidence.get("warnings") or []))
+    stack = [
+        item
+        for item in stack
+        if not (
+            isinstance(item, dict)
+            and (item.get("kind"), item.get("stage_id"), tuple(item.get("warnings") or [])) == key
+        )
+    ]
+    root["evidence_stack"] = [*stack, {k: v for k, v in evidence.items() if v not in (None, [], {})}][-10:]
+    task.harness_self_heal = root
 
 
 def _dedupe_extend(existing: list[str], incoming: Iterable[str]) -> list[str]:
@@ -169,6 +189,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
     if _coerce_neko_budget_acceptance_to_continuation(task, decision, actor=actor, incident_store=incident_store, log=log, run_id=run_id):
         return task
     if mission_plan_flow and is_mission_lead_actor(task, actor) and decision.type == DecisionType.PROPOSE_ACCEPTANCE:
+        _apply_acceptance(task, decision.payload)
         ensure_mission_plan(task, decision.payload, actor=actor)
         target = release_next_stage(task, str(decision.payload.get("release_stage_id") or "").strip() or None)
         if target is not None:
@@ -178,7 +199,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             elif target.owner in {"dev", "backend_dev"}:
                 task.state = TaskState.RUNNING if task.state in {TaskState.CREATED, TaskState.RUNNING} else TaskState.RUNNING
             elif target.owner == "human":
-                task.state = TaskState.BLOCKED
+                _soft_block_task(task, reason="typed plan routed to human owner", stage_id=target.id, recommended_owner="human")
             else:
                 task.state = TaskState.RUNNING
         task.updated_at = now()
@@ -206,9 +227,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                     return task
                 if _payload_targets_launcher(decision.payload):
                     task.affected_repos = ["EterniaLauncher"]
-                    _ensure_launcher_handoff_stage(task, decision.payload, actor=actor, log=log)
-                    task.risk_flags = [flag for flag in task.risk_flags if flag != QA_COORDINATION_RELEASED_FLAG]
-                    _dedupe_extend(task.risk_flags, [LAUNCHER_RELEASED_BY_NEKO_FLAG])
+                    _ensure_scoped_dev_handoff_stage(task, decision.payload, actor=actor, log=log)
                     task.state = TaskState.RUNNING
                     task.updated_at = now()
                     log.append(
@@ -227,7 +246,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                         )
                     )
                     return task
-                task.state = TaskState.BLOCKED
+                _soft_block_task(task, reason="cross-stack launcher release missing", stage_id=task.current_stage_id)
                 if "cross_stack_launcher_release_missing" not in task.risk_flags:
                     task.risk_flags.append("cross_stack_launcher_release_missing")
                 task.updated_at = now()
@@ -247,7 +266,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                 )
                 return task
             if _payload_is_launcher_handoff(decision.payload):
-                task.state = TaskState.BLOCKED
+                _soft_block_task(task, reason="cross-stack QA coordination release missing", stage_id=task.current_stage_id)
                 _dedupe_extend(task.risk_flags, ["cross_stack_qa_coordination_release_missing"])
                 task.updated_at = now()
                 log.append(
@@ -265,8 +284,6 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                     )
                 )
                 return task
-            if QA_COORDINATION_RELEASED_FLAG not in task.risk_flags:
-                task.risk_flags.append(QA_COORDINATION_RELEASED_FLAG)
             next_repos = [str(repo).strip() for repo in decision.payload.get("affected_repos", []) if str(repo).strip()]
             if next_repos:
                 task.affected_repos = next_repos
@@ -313,8 +330,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             _block_launcher_release_until_backend_proof(task, log=log, actor=actor, run_id=run_id)
             return task
         if is_mission_lead_actor(task, actor) and _payload_is_launcher_handoff(decision.payload):
-            _ensure_launcher_handoff_stage(task, decision.payload, actor=actor, log=log)
-            _repair_bounded_visual_proof_stage_from_neko_handoff(task, decision.payload, actor=actor, log=log)
+            _ensure_scoped_dev_handoff_stage(task, decision.payload, actor=actor, log=log)
             task.affected_repos = ["EterniaLauncher"]
             if _payload_is_visual_recovery_handoff(decision.payload):
                 task.risk_flags = [
@@ -322,12 +338,10 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                     for flag in task.risk_flags
                     if flag not in {"cross_stack_backend_proof_missing_before_launcher_release", "sequential_specialist_handoff"}
                 ]
-            launcher_flags = [LAUNCHER_RELEASED_BY_NEKO_FLAG]
             if not _payload_is_visual_recovery_handoff(decision.payload):
-                launcher_flags.append("sequential_specialist_handoff")
-            _dedupe_extend(task.risk_flags, launcher_flags)
+                _dedupe_extend(task.risk_flags, ["sequential_specialist_handoff"])
         if is_mission_lead_actor(task, actor) and _payload_is_no_edit_proof_handoff(decision.payload):
-            _ensure_no_edit_proof_handoff_stage(task, decision.payload, actor=actor, log=log)
+            _ensure_scoped_dev_handoff_stage(task, decision.payload, actor=actor, log=log)
         if is_mission_lead_actor(task, actor) and _should_release_backend_first_slice(task):
             task.affected_repos = ["EterniaBackend"]
             _dedupe_extend(task.risk_flags, ["cross_stack_contract_handoff", "backend_contract_first"])
@@ -477,7 +491,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
         task.updated_at = now()
     elif decision.type == DecisionType.REQUEST_TEST_RUN:
         _materialize_test_run_stage(task, decision.payload, actor=actor, log=log)
-        if mission_plan_flow and has_typed_plan(task):
+        if mission_plan_flow:
             mark_plan_stage_from_decision(task, decision, actor=actor, proof_store=proof_store)
         if task.state in {TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING, TaskState.RUNNING}:
             task.state = TaskState.RUNNING
@@ -509,7 +523,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             return task
         if decision.payload.get("review_scope", "plan") == "implementation":
             _apply_implementation_review(task, decision.payload, actor=actor, proof_store=proof_store)
-            if mission_plan_flow and has_typed_plan(task):
+            if mission_plan_flow:
                 mark_plan_stage_from_decision(task, decision, actor=actor, proof_store=proof_store)
         else:
             _apply_plan_review(task, decision.payload, actor=actor, log=log)
@@ -534,7 +548,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             _validate_commit_deploy_gate(task, decision, proof_store=proof_store, stage_id=task.current_stage_id)
             _merge_existing_proof_ids(task, proof_ids, proof_store=proof_store)
         if normal_worker_flow and not decision.payload.get("proof_ids"):
-            if mission_plan_flow and has_typed_plan(task):
+            if mission_plan_flow:
                 mark_plan_stage_from_decision(task, decision, actor=actor, proof_store=proof_store)
                 stage = current_plan_stage(task)
                 if stage is not None and stage.kind in {"context", "investigation", "audit"} and not stage_requires_product_edit(task, stage):
@@ -558,7 +572,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                     stage.status = StageStatus.READY_FOR_QA
                     stage.updated_at = now()
                     break
-        if mission_plan_flow and has_typed_plan(task):
+        if mission_plan_flow:
             mark_plan_stage_from_decision(task, decision, actor=actor, proof_store=proof_store)
         if not _all_stages_dev_complete(task):
             _advance_to_next_dev_stage(task)
@@ -572,7 +586,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             _validate_qa_handoff_proof_readiness(task, proof_ids, proof_store=proof_store, stage_id=stage_id)
             _validate_commit_deploy_gate(task, decision, proof_store=proof_store, stage_id=stage_id)
             _merge_existing_proof_ids(task, proof_ids, proof_store=proof_store)
-            if mission_plan_flow and has_typed_plan(task):
+            if mission_plan_flow:
                 attach_proofs_to_plan_stage(task, stage_id, proof_ids, proof_store=proof_store)
             if stage_id:
                 task.current_stage_id = stage_id
@@ -599,12 +613,12 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
         # valid structured request for missing external context. Blocking keeps
         # the intervention visible through observability/context-request signals
         # without inventing proof or bypassing gates.
-        task.state = TaskState.BLOCKED
+        _soft_block_task(task, reason="missing external context requested", stage_id=task.current_stage_id)
         if is_mission_lead_actor(task, actor):
             mark_block_recovery_attempt(task)
         task.updated_at = now()
     elif decision.type == DecisionType.BLOCK:
-        task.state = TaskState.BLOCKED
+        _soft_block_task(task, reason=str(decision.summary or "agent reported blocker"), stage_id=task.current_stage_id)
         if is_mission_lead_actor(task, actor):
             mark_block_recovery_attempt(task)
         task.updated_at = now()
@@ -660,10 +674,24 @@ def _coerce_neko_needs_context_to_handoff_continuation(task: Task, decision: Age
         return False
     if not getattr(task, "proof_ids", None) and not task_stage_records(task):
         return False
-    _ensure_launcher_handoff_stage(task, {"objective": task.description, "acceptance_criteria": list(task.acceptance_criteria or [])}, actor=actor, log=log)
+    _ensure_scoped_dev_handoff_stage(
+        task,
+        {
+            "objective": task.description,
+            "acceptance_criteria": list(task.acceptance_criteria or []),
+            "handoff_packet": {
+                "packet_kind": "contract_join",
+                "target_owner": "dev",
+                "target_repo": "EterniaLauncher",
+                "proof_gate": {"required": True, "required_proof_types": ["test_run"], "minimum_status": "passed"},
+            },
+        },
+        actor=actor,
+        log=log,
+    )
     task.affected_repos = ["EterniaLauncher"]
-    _dedupe_extend(task.risk_flags, ["sequential_specialist_handoff", "post_scope_wait_coerced_to_handoff", LAUNCHER_RELEASED_BY_NEKO_FLAG])
-    task.risk_flags = [flag for flag in task.risk_flags if flag not in {QA_COORDINATION_RELEASED_FLAG, "cross_stack_launcher_release_missing"}]
+    _dedupe_extend(task.risk_flags, ["sequential_specialist_handoff", "post_scope_wait_coerced_to_handoff"])
+    task.risk_flags = [flag for flag in task.risk_flags if flag != "cross_stack_launcher_release_missing"]
     task.state = TaskState.RUNNING
     task.updated_at = now()
     source = "proof_backed_neko_needs_context_launcher_handoff" if proof_backed_join else "post_scope_needs_context_handoff_continuation"
@@ -687,7 +715,7 @@ def _coerce_neko_needs_context_to_handoff_continuation(task: Task, decision: Age
 
 
 def _no_edit_context_stage_has_sufficient_context(task: Task, *, actor: str, threshold: int = 2) -> bool:
-    if actor not in {"dev", "backend_dev"} or not has_typed_plan(task):
+    if actor not in {"dev", "backend_dev"}:
         return False
     stage = current_plan_stage(task)
     if stage is None:
@@ -747,7 +775,7 @@ def _route_backend_contract_packet_repair(task: Task, *, actor: str, log: EventL
     task.affected_repos = ["EterniaBackend"]
     task.state = TaskState.RUNNING
     _dedupe_extend(task.risk_flags, ["backend_contract_packet_missing_repair"])
-    task.risk_flags = [flag for flag in task.risk_flags if flag not in {QA_COORDINATION_RELEASED_FLAG, LAUNCHER_RELEASED_BY_NEKO_FLAG}]
+    task.risk_flags = [flag for flag in task.risk_flags if flag != "cross_stack_launcher_release_missing"]
     task.updated_at = now()
     log.append(
         Event(
@@ -1148,7 +1176,7 @@ def _apply_implementation_review(task: Task, payload: dict[str, Any], *, actor: 
     elif verdict == "needs_fixes":
         task.state = TaskState.RUNNING
     else:
-        task.state = TaskState.BLOCKED
+        _soft_block_task(task, reason="QA verdict blocked; Dev recovery required", stage_id=task.current_stage_id)
         if "qa_blocked_verdict_needs_dev_recovery" not in task.risk_flags:
             task.risk_flags.append("qa_blocked_verdict_needs_dev_recovery")
         if task.current_stage_id:
@@ -1627,7 +1655,7 @@ def _text_mentions_backend(text: str) -> bool:
 
 
 def _block_launcher_release_until_backend_proof(task: Task, *, log: EventLog, actor: str, run_id: str | None) -> None:
-    task.state = TaskState.BLOCKED
+    _soft_block_task(task, reason="backend proof required before Launcher release", stage_id=task.current_stage_id)
     _dedupe_extend(task.risk_flags, ["cross_stack_backend_proof_missing_before_launcher_release"])
     task.updated_at = now()
     log.append(
@@ -1711,72 +1739,6 @@ def _payload_is_no_edit_proof_handoff(payload: dict[str, Any]) -> bool:
     return target_owner in {"dev", "backend_dev", "launcher_dev"}
 
 
-def _ensure_no_edit_proof_handoff_stage(task: Task, payload: dict[str, Any], *, actor: str, log: EventLog) -> None:
-    handoff = payload.get("handoff_packet")
-    handoff = handoff if isinstance(handoff, dict) else {}
-    proof_gate = handoff.get("proof_gate")
-    proof_gate = proof_gate if isinstance(proof_gate, dict) else {}
-    recipe = resolve_proof_recipe(_no_edit_handoff_recipe_id(payload))
-    existing = next((stage for stage in task_stage_records(task) if stage.id == recipe.id), None)
-    if existing is None:
-        stage = TaskStage(
-            id=recipe.id,
-            title=recipe.id.replace("_", " ").strip().title() or "No-Edit Proof",
-            objective=str(payload.get("objective") or recipe.description or f"Collect {recipe.id} proof.").strip(),
-            status=StageStatus.IMPLEMENTING,
-            affected_paths=[],
-            acceptance_criteria=list(
-                payload.get("acceptance_criteria")
-                or [
-                    f"Request the {recipe.id} Harness proof recipe.",
-                    "Attach passed proof before QA handoff.",
-                ]
-            ),
-            test_plan=[],
-            requires_visual_proof=bool(proof_gate.get("visual_required", False)),
-            created_at=now(),
-            updated_at=now(),
-        )
-        append_task_stage_record(task, stage)
-        log.append(
-            Event(
-                now(),
-                "task.stage_added",
-                task.id,
-                None,
-                actor,
-                {
-                    "stage_id": stage.id,
-                    "title": stage.title,
-                    "source": "neko_no_edit_proof_handoff",
-                    "recipe_id": recipe.id,
-                },
-            )
-        )
-    else:
-        if existing.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.BLOCKED}:
-            existing.status = StageStatus.IMPLEMENTING
-        existing.updated_at = now()
-        log.append(
-            Event(
-                now(),
-                "task.stage_updated",
-                task.id,
-                None,
-                actor,
-                {
-                    "stage_id": existing.id,
-                    "source": "neko_no_edit_proof_handoff",
-                    "recipe_id": recipe.id,
-                },
-            )
-        )
-    task.current_stage_id = recipe.id
-    if recipe.repo_scope:
-        task.affected_repos = [recipe.repo_scope]
-    _dedupe_extend(task.risk_flags, ["no_product_edits", "proof_ids_required_before_qa"])
-
-
 def _no_edit_handoff_recipe_id(payload: dict[str, Any]) -> str:
     handoff = payload.get("handoff_packet")
     handoff = handoff if isinstance(handoff, dict) else {}
@@ -1811,7 +1773,8 @@ def _ensure_scoped_dev_handoff_stage(task: Task, payload: dict[str, Any], *, act
     handoff = payload.get("handoff_packet")
     if not isinstance(handoff, dict):
         return False
-    if task.current_stage_id and any(stage.id == task.current_stage_id for stage in task_stage_records(task)):
+    current = next((stage for stage in task_stage_records(task) if stage.id == task.current_stage_id), None) if task.current_stage_id else None
+    if current is not None and current.status not in DEV_COMPLETE_STAGE_STATUSES:
         return False
     if any(stage.status not in DEV_COMPLETE_STAGE_STATUSES for stage in task_stage_records(task)):
         return False
@@ -1953,244 +1916,6 @@ def _summary_is_missing_launcher_proof(decision: AgentDecision) -> bool:
         ]
     ).lower()
     return "launcher" in text and "proof" in text and any(marker in text for marker in ("missing", "cannot proceed", "required"))
-
-
-def _ensure_launcher_handoff_stage(task: Task, payload: dict[str, Any], *, actor: str, log: EventLog) -> None:
-    existing = _existing_launcher_handoff_stage(task, payload)
-    if existing is not None:
-        task.current_stage_id = existing.id
-        if existing.status in {StageStatus.DRAFT, StageStatus.READY}:
-            existing.status = StageStatus.IMPLEMENTING
-            existing.updated_at = now()
-        return
-    stage = TaskStage(
-        id="launcher_contract_smoke",
-        title="Launcher Contract Smoke",
-        objective=str(payload.get("objective") or "Verify Launcher consumes the backend contract packet without guessing.").strip(),
-        status=StageStatus.IMPLEMENTING,
-        affected_paths=[],
-        acceptance_criteria=list(
-            payload.get("acceptance_criteria")
-            or [
-                "Launcher Dev verifies the backend contract packet or documented Mission Control bridge expectations.",
-                "Launcher proof is attached before QA approval can close the cross-stack mission.",
-            ]
-        ),
-        test_plan=[],
-        created_at=now(),
-        updated_at=now(),
-    )
-    append_task_stage_record(task, stage)
-    task.current_stage_id = stage.id
-    log.append(Event(now(), "task.stage_added", task.id, None, actor, {"stage_id": stage.id, "title": stage.title, "source": "cross_stack_launcher_release"}))
-
-
-def _existing_launcher_handoff_stage(task: Task, payload: dict[str, Any]) -> TaskStage | None:
-    handoff = payload.get("handoff_packet")
-    handoff = handoff if isinstance(handoff, dict) else {}
-    kind = str(handoff.get("packet_kind") or "").strip().lower()
-    phase = str(handoff.get("mission_phase") or "").strip().lower()
-    if kind == "bounded_visual_proof_recovery" or phase == "visual_proof_recovery":
-        target = _target_visual_recovery_stage(task)
-        if target is not None:
-            return target
-    return next((stage for stage in task_stage_records(task) if _stage_mentions_launcher(stage)), None)
-
-
-def _repair_bounded_visual_proof_stage_from_neko_handoff(task: Task, payload: dict[str, Any], *, actor: str, log: EventLog) -> None:
-    if not is_mission_lead_actor(task, actor):
-        return
-    handoff = payload.get("handoff_packet")
-    if not isinstance(handoff, dict):
-        return
-    kind = str(handoff.get("packet_kind") or "").strip().lower()
-    phase = str(handoff.get("mission_phase") or "").strip().lower()
-    target_repo = str(handoff.get("target_repo") or "").strip()
-    if kind != "bounded_visual_proof_recovery" and phase != "visual_proof_recovery":
-        return
-    if target_repo != "EterniaLauncher":
-        return
-    stage = _target_visual_recovery_stage(task)
-    if stage is None or not _stage_mentions_mission_control_visual(stage):
-        return
-    repaired_command = _mission_control_visual_recovery_command(task)
-    misplaced_count = _remove_misplaced_visual_recovery_command(task, target_stage=stage, repaired_command=repaired_command, actor=actor)
-    original_plan = list(stage.test_plan or [])
-    kept_plan = [item for item in original_plan if not _is_mission_control_stagec_command(item)]
-    if repaired_command in kept_plan:
-        next_plan = kept_plan
-    else:
-        next_plan = kept_plan + [repaired_command]
-    if next_plan == original_plan and stage.requires_visual_proof is True:
-        return
-    replaced_count = len(original_plan) - len(kept_plan)
-    stage.test_plan = next_plan
-    stage.requires_visual_proof = True
-    if stage.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.BLOCKED}:
-        stage.status = StageStatus.IMPLEMENTING
-    _dedupe_extend(
-        stage.corrections,
-        [
-            (
-                f"{actor}: Replaced stale Mission Control Stage C visual proof command(s) "
-                "with a pinned fullscreen screenshot_window recovery command."
-            )
-        ],
-    )
-    _dedupe_extend(
-        stage.audit_notes,
-        [
-            (
-                f"{actor}: bounded_visual_proof_recovery removed {replaced_count} stale/unpinned/invalid "
-                f"Mission Control Stage C command(s) and {misplaced_count} misplaced generated command(s); "
-                "failed proof records remain preserved."
-            )
-        ],
-    )
-    stage.updated_at = now()
-    log.append(
-        Event(
-            now(),
-            "task.stage_corrected",
-            task.id,
-            None,
-            actor,
-            {
-                "stage_id": stage.id,
-                "source": "bounded_visual_proof_recovery",
-                "corrections": 1,
-                "replaced_commands": replaced_count,
-                "summary": "Mission Control visual proof command repaired from Neko recovery handoff.",
-            },
-        )
-    )
-
-
-def _remove_misplaced_visual_recovery_command(task: Task, *, target_stage: TaskStage, repaired_command: str, actor: str) -> int:
-    removed = 0
-    for stage in task_stage_records(task):
-        if stage.id == target_stage.id:
-            continue
-        original = list(stage.test_plan or [])
-        if repaired_command not in original:
-            continue
-        stage.test_plan = [item for item in original if item != repaired_command]
-        removed += len(original) - len(stage.test_plan)
-        _dedupe_extend(
-            stage.audit_notes,
-            [
-                (
-                    f"{actor}: removed misplaced bounded visual recovery command from non-target stage; "
-                    f"target stage is {target_stage.id}."
-                )
-            ],
-        )
-        stage.updated_at = now()
-    return removed
-
-
-def _target_visual_recovery_stage(task: Task) -> TaskStage | None:
-    current = _current_stage(task)
-    if current is not None and current.status not in DEV_COMPLETE_STAGE_STATUSES and _stage_mentions_mission_control_visual(current):
-        return current
-    for stage in task_stage_records(task):
-        if stage.status in DEV_COMPLETE_STAGE_STATUSES:
-            continue
-        if _stage_is_visual_proof_collection_stage(stage) and _stage_mentions_mission_control_visual(stage):
-            return stage
-    for stage in task_stage_records(task):
-        if stage.status in DEV_COMPLETE_STAGE_STATUSES:
-            continue
-        if _stage_mentions_mission_control_visual(stage):
-            return stage
-    return current if current is not None and _stage_mentions_mission_control_visual(current) else None
-
-
-def _stage_is_visual_proof_collection_stage(stage: TaskStage) -> bool:
-    text = " ".join(
-        [
-            str(stage.id or ""),
-            str(stage.title or ""),
-            str(stage.objective or ""),
-        ]
-    ).lower()
-    return any(marker in text for marker in ("visual", "screenshot", "stage c", "stagec", "mcp"))
-
-
-def _stage_mentions_mission_control_visual(stage: TaskStage) -> bool:
-    text = " ".join(
-        [
-            str(stage.id or ""),
-            str(stage.title or ""),
-            str(stage.objective or ""),
-            " ".join(str(item) for item in (stage.acceptance_criteria or [])),
-            " ".join(str(item) for item in (stage.test_plan or [])),
-            "visual" if getattr(stage, "requires_visual_proof", False) else "",
-        ]
-    ).lower()
-    return ("mission control" in text or "missioncontrol" in text) and any(
-        marker in text for marker in ("stage c", "stagec", "screenshot", "visual", "mcp", "fullscreen")
-    )
-
-
-def _is_mission_control_stagec_command(value: str) -> bool:
-    text = str(value or "").lower()
-    if "missioncontrol" not in text and "mission control" not in text:
-        return False
-    return "mcp_launcher_qa_open_app_tab" in text or "mcp_launcher_qa_screenshot_window" in text
-
-
-def _mission_control_visual_recovery_command(task: Task) -> str:
-    profile = active_profile_name()
-    runtime_root = _path_arg(paths.store_root())
-    hermes_home = _path_arg(get_default_hermes_root() / "profiles" / profile)
-    label = _safe_stagec_label(f"mission_control_visual_{task.id}")
-    open_args = {
-        "tab": "missionControl",
-        "browser_login": True,
-        "credential_profile": "stagec-smoke",
-        "screenshot": False,
-        "reap_stale": True,
-        "force_relaunch": True,
-        "hermes_profile": profile,
-        "harness_runtime_root": runtime_root,
-        "hermes_home": hermes_home,
-    }
-    capture_args = {
-        "tab": "missionControl",
-        "browser_login": True,
-        "credential_profile": "stagec-smoke",
-        "screenshot": True,
-        "scenario_label": label,
-        "reap_stale": True,
-        "force_relaunch": False,
-        "nav_settle_timeout_seconds": 15,
-        "screenshot_stabilize_ms": 3000,
-        "screenshot_max_retries": 12,
-        "screenshot_retry_delay_ms": 1000,
-        "hermes_profile": profile,
-        "harness_runtime_root": runtime_root,
-        "hermes_home": hermes_home,
-    }
-    open_json = json.dumps(open_args, separators=(",", ":"))
-    capture_json = json.dumps(capture_args, separators=(",", ":"))
-    return (
-        "powershell.exe -NoProfile -ExecutionPolicy Bypass -File docs/stages/qa-reboot/scripts/Invoke-LauncherQaMcpTool.ps1 "
-        f"-Tool mcp_launcher_qa_open_app_tab -ArgsJson '{open_json}' -CallTimeoutSeconds 240 "
-        "&& powershell.exe -NoProfile -ExecutionPolicy Bypass -File docs/stages/qa-reboot/scripts/Show-StageCLauncherWindow.ps1 "
-        '-WindowTitlePrefix "Eternia Launcher" -WaitMilliseconds 1500 '
-        "&& powershell.exe -NoProfile -ExecutionPolicy Bypass -File docs/stages/qa-reboot/scripts/Invoke-LauncherQaMcpTool.ps1 "
-        f"-Tool mcp_launcher_qa_open_app_tab -ArgsJson '{capture_json}' -CallTimeoutSeconds 240"
-    )
-
-
-def _path_arg(path) -> str:
-    return str(path).replace("\\", "/")
-
-
-def _safe_stagec_label(value: str) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in str(value or "").strip())
-    return safe.strip("._")[:64] or "mission_control_visual"
 
 
 def _context_request_summary(req: dict[str, Any]) -> str:

@@ -337,4 +337,4 @@ def test_burn_in_records_freeze_findings_as_proof_and_incident():
     assert engine.proof_store.get(manifest["monitor_proof_ids"][0]).redaction_status == "safe"
     incident = engine.incident_store.get(manifest["monitor_incident_ids"][0])
     assert incident.kind == "runtime_freeze"
-    assert engine.task_store.get(manifest["task_id"]).state == TaskState.BLOCKED
+    assert engine.task_store.get(manifest["task_id"]).state == TaskState.RUNNING

@@ -56,7 +56,7 @@ def test_handoff_packet_validates_underivable_core():
     )
 
 
-def test_handoff_packet_accepts_compact_stage46_rules_metadata():
+def test_handoff_packet_accepts_compact_harness_rules_metadata():
     validate_planning_decision(
         decision(
             DecisionType.PROPOSE_ACCEPTANCE,
@@ -64,7 +64,7 @@ def test_handoff_packet_accepts_compact_stage46_rules_metadata():
                 "objective": "ship",
                 "acceptance_criteria": ["proved"],
                 "handoff_packet": handoff_packet(
-                    stage46_rules={
+                    harness_rules={
                         "skill_loading": "single relevant skill",
                         "retry_policy": "one proof-backed retry after environment change",
                         "wait_semantic": "beginning-only",
@@ -81,7 +81,7 @@ def test_handoff_packet_accepts_compact_stage46_rules_metadata():
                 {
                     "objective": "ship",
                     "acceptance_criteria": ["proved"],
-                    "handoff_packet": handoff_packet(stage46_rules={"random": "nope"}),
+                    "handoff_packet": handoff_packet(harness_rules={"random": "nope"}),
                 },
             )
         )
@@ -611,7 +611,7 @@ def test_delivery_normalizes_metadata_and_masks_bare_secret_vocabulary():
     assert packet["known_gaps"] == ["auth [redacted-term] refresh contract still needs proof"]
 
 
-def test_qa_review_allows_stage46_real_token_phrase_without_allowing_secrets():
+def test_qa_review_allows_harness_real_token_phrase_without_allowing_secrets():
     packet = qa_review(remaining_gaps=["cross-stack real-token behavior beyond command proof remains unproven"])
     validate_planning_decision(
         decision(
@@ -677,7 +677,7 @@ def test_qa_review_allows_stage46_real_token_phrase_without_allowing_secrets():
 def test_harness_qa_skill_documents_exact_packet_keys():
     from pathlib import Path
 
-    text = Path("docs/agent-runtime-harness/stage46-skills/harness-qa-verdict/SKILL.md").read_text(encoding="utf-8")
+    text = Path("docs/agent-runtime-harness/harness-skills/harness-qa-verdict/SKILL.md").read_text(encoding="utf-8")
 
     assert "Allowed `qa_review` keys only" in text
     assert "Do not add `notes`" in text

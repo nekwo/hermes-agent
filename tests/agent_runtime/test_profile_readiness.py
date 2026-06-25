@@ -153,7 +153,7 @@ def test_profile_readiness_injects_launcher_qa_only_for_visual_scope(monkeypatch
     from agent_runtime import profile_readiness
 
     monkeypatch.setattr(profile_readiness, "_missing_skill_names", lambda _skills: [])
-    monkeypatch.setattr(profile_readiness, "stage46_skill_hash_mismatches", lambda _skills, hermes_home=None: [])
+    monkeypatch.setattr(profile_readiness, "harness_skill_hash_mismatches", lambda _skills, hermes_home=None: [])
     monkeypatch.setattr(profile_readiness, "_runtime_dependency_issue", lambda _persona: None)
     monkeypatch.setattr(profile_readiness, "_provider_issue", lambda _persona: None)
 

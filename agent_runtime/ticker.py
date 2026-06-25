@@ -21,7 +21,7 @@ from .locks import HarnessLockUnavailable, tick_lock
 from .events import EventLog
 from .final_gate import build_final_gate_decision
 from .models import Event, Incident, Task
-from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage, has_typed_plan
+from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage
 from .persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
@@ -148,9 +148,8 @@ class TickEngine:
                     )
                 else:
                     action = self.state_machine.next_action(task)
-                if has_typed_plan(task):
-                    self.task_store.update(task, actor="harness", reason="sync mission plan routing state")
-                    task = self.task_store.get(task.id)
+                self.task_store.update(task, actor="harness", reason="sync mission plan routing state")
+                task = self.task_store.get(task.id)
                 if task.id in open_incidents_by_task and not (
                     _action_targets(action, "neko_supervisor")
                     and (task.state == TaskState.BLOCKED or budget_approval_incidents or getattr(task, "open_incident_ids", None))
@@ -334,9 +333,9 @@ class TickEngine:
             )
             self.incident_store.open(incident)
             task.open_incident_ids = _dedupe(list(task.open_incident_ids or []), [incident.id])
-            task.state = TaskState.BLOCKED
+            task.state = TaskState.RUNNING
         else:
-            task.state = TaskState.BLOCKED
+            task.state = TaskState.RUNNING
             task.risk_flags = _dedupe(list(task.risk_flags or []), ["no_progress_escalated_to_neko"])
 
     def _has_continuable_budget_incident(self, task_id: str) -> bool:
@@ -567,7 +566,7 @@ class TickEngine:
                     mission_stage_id=task.current_stage_id,
                     worker_session_id=worker.id if worker is not None else None,
                     run_id=run.id,
-                    legacy_projection=not has_typed_plan(task),
+                    legacy_projection=False,
                 )
             last_run_id = run.id
             envelope = None
@@ -1169,7 +1168,7 @@ class TickEngine:
                 inc = Incident(id=f"inc_{uuid.uuid4().hex[:8]}", task_id=task.id, run_id=run.id, kind=classification.kind, summary=classification.summary, detail_path=None, opened_at=now())
                 self.incident_store.open(inc)
                 if classification.kind == MODEL_INVALID_OUTPUT:
-                    current_task.state = TaskState.BLOCKED
+                    current_task.state = TaskState.RUNNING
                     current_task.open_incident_ids = _dedupe(list(current_task.open_incident_ids or []), [inc.id])
                     current_task.updated_at = now()
                     self.task_store.update(current_task, actor="harness", reason="model invalid output routed to Neko intervention steering")
@@ -1250,7 +1249,7 @@ class TickEngine:
                 },
             )
             self.incident_store.open(inc)
-            task.state = TaskState.BLOCKED
+            task.state = TaskState.RUNNING
             task.open_incident_ids = _dedupe(list(task.open_incident_ids or []), [inc.id])
         return [result.proof.id]
 
@@ -1374,7 +1373,7 @@ def _record_timing_value(timing_map: dict[str, int], key: object, value: object)
 
 
 def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id: str, repo_bundle_id: str | None = None) -> PersonaAssignmentSpec:
-    stage = current_plan_stage(task) if has_typed_plan(task) else _current_stage(task)
+    stage = current_plan_stage(task) or _current_stage(task)
     title = getattr(stage, "title", None) or str(action.type.value).replace("_", " ").title()
     objective = getattr(stage, "objective", None) or action.reason
     repo = getattr(stage, "repo", None) or _repo_for_task(task)
@@ -1708,12 +1707,10 @@ def _validate_request_test_run_targets_current_stage(task: Task, decision) -> No
         return
     requested_stage_id = str(decision.payload.get("stage_id") or "").strip()
     current_stage_id = str(getattr(task, "current_stage_id", "") or "").strip()
-    typed_current_stage_id = ""
-    if has_typed_plan(task):
-        typed_current_stage_id = str(getattr(getattr(task, "mission_plan", None), "current_stage_id", "") or "").strip()
+    typed_current_stage_id = str(getattr(getattr(task, "mission_plan", None), "current_stage_id", "") or "").strip()
     recipe_id = str(decision.payload.get("recipe_id") or "").strip()
     requested_stage = next((stage for stage in _runtime_stage_records(task) if stage.id == requested_stage_id), None)
-    typed_stage = current_plan_stage(task) if has_typed_plan(task) else None
+    typed_stage = current_plan_stage(task)
     if (
         typed_stage is not None
         and str(getattr(typed_stage, "id", "") or "") == (requested_stage_id or typed_current_stage_id or current_stage_id)
@@ -2089,7 +2086,7 @@ def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decisio
             _set_stage_status(task, stage_id, StageStatus.BLOCKED)
         if "command_proof_repo_mismatch" not in task.risk_flags:
             task.risk_flags.append("command_proof_repo_mismatch")
-        task.state = TaskState.BLOCKED
+        task.state = TaskState.RUNNING
         task.updated_at = now()
         EventLog().append(
             Event(
@@ -2161,7 +2158,6 @@ def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decisio
         for flag in (getattr(task, "risk_flags", None) or [])
         if flag
         not in {
-            "neko_qa_coordination_released",
             "command_proof_stage_mismatch",
             "command_proof_repo_mismatch",
         }
@@ -3266,6 +3262,8 @@ def _command_proof_repo_scope(task: Task, *, actor: str | None, stage_id: str | 
     for repo in affected_repos:
         if _repo_text_matches_intent(repo, intent):
             return repo
+    if affected_repos:
+        return None
     return {
         "backend": "EterniaBackend",
         "launcher": "EterniaLauncher",

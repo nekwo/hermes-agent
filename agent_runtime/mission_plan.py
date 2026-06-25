@@ -30,11 +30,6 @@ def mission_plan_hud_enabled(config) -> bool:
     return bool(getattr(plan, "enabled", False)) and bool(getattr(plan, "enforce_hud", True))
 
 
-def has_typed_plan(task: Task) -> bool:
-    plan = getattr(task, "mission_plan", None)
-    return bool(plan and plan.enabled and plan.stages)
-
-
 def task_stage_records(task: Task) -> list[MissionPlanStage | TaskStage]:
     plan = getattr(task, "mission_plan", None)
     if plan and plan.enabled:
@@ -201,10 +196,10 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
         plan = _plan_from_payload(task, payload["mission_plan"], existing=plan)
     elif isinstance(payload.get("mission_plan_patch"), dict):
         plan = _apply_plan_patch(task, plan, payload["mission_plan_patch"])
-    elif _default_plan_should_yield_to_handoff(plan, payload):
-        plan = _synthesize_plan_from_handoff(task, payload, existing=plan)
     elif not plan.stages:
-        plan = _synthesize_plan_from_handoff(task, payload, existing=plan)
+        from .default_plan import build_default_mission_plan
+
+        plan = build_default_mission_plan(task)
     release_stage_id = str(payload.get("release_stage_id") or "").strip()
     if release_stage_id:
         _set_current_stage(plan, release_stage_id)
@@ -212,15 +207,6 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
     task.mission_plan = plan
     _sync_task_stage_compat_from_plan(task)
     return plan
-
-
-def _default_plan_should_yield_to_handoff(plan: MissionPlan, payload: dict[str, Any]) -> bool:
-    return (
-        plan.blueprint_id in {"neko_dev_qa_basic", "neko_two_dev_default"}
-        and isinstance(payload.get("handoff_packet"), dict)
-        and bool(payload["handoff_packet"])
-    )
-
 
 def validate_mission_plan(plan: MissionPlan) -> list[str]:
     errors: list[str] = []
@@ -614,126 +600,6 @@ def _apply_plan_patch(task: Task, plan: MissionPlan, raw: dict[str, Any]) -> Mis
     if errors:
         raise DecisionPayloadInvalid(f"invalid mission_plan_patch: {errors}")
     return patched
-
-
-def _synthesize_plan_from_handoff(task: Task, payload: dict[str, Any], *, existing: MissionPlan) -> MissionPlan:
-    intent = existing.mission_intent or _mission_intent_from_task(task)
-    handoff = payload.get("handoff_packet") if isinstance(payload.get("handoff_packet"), dict) else {}
-    target_owner = _canonical_owner(str(handoff.get("target_owner") or handoff.get("target_dev_persona") or "dev"))
-    target_repo = _canonical_repo(str(handoff.get("target_repo") or _first_repo(payload.get("affected_repos")) or "EterniaLauncher"))
-    objective = str(payload.get("objective") or intent.objective or task.title).strip()
-    proof_recipe_id = _recipe_from_payload(payload, handoff, target_repo=target_repo)
-    no_edit_recipe = no_product_edit_recipe_id(proof_recipe_id)
-    no_edit_handoff = _handoff_is_no_product_edit_proof(task, payload, handoff, intent=intent, objective=objective)
-    no_edit_certification = _task_is_no_product_edit_certification(task, intent, payload=payload, handoff=handoff, objective=objective)
-    no_edit_investigation = _task_is_no_product_edit_investigation(task, intent, payload=payload, handoff=handoff, objective=objective)
-    if no_edit_investigation:
-        no_edit_certification = False
-    if (no_edit_recipe or no_edit_handoff) and _handoff_agent_runtime_test_files(task, payload, handoff, intent=intent, objective=objective):
-        proof_recipe_id = None
-        no_edit_recipe = None
-        no_edit_handoff = True
-    investigation_text = " ".join([str(task.title or ""), str(task.description or ""), objective])
-    if no_edit_investigation and (not proof_recipe_id or _text_mentions_investigation(investigation_text)):
-        proof_recipe_id = None
-        no_edit_recipe = None
-    stages: list[MissionPlanStage] = []
-    persona_diagnostic_self_observation = _is_persona_diagnostic_self_observation(task, handoff)
-    if persona_diagnostic_self_observation:
-        stages.append(
-            _make_stage(
-                "neko_diagnostic",
-                title="Neko Diagnostic",
-                objective=objective,
-                owner="neko_supervisor",
-                repo=target_repo,
-                kind="planning",
-                requires_product_edit=False,
-                requires_visual_proof=False,
-                depends_on=[],
-                blocks_qa_until=False,
-            )
-        )
-    if target_owner in {"dev", "backend_dev"}:
-        no_edit_stage = no_edit_recipe or no_edit_handoff or no_edit_certification or no_edit_investigation
-        stage_kind = "implementation"
-        if no_edit_recipe or no_edit_handoff or no_edit_certification:
-            stage_kind = "proof_only"
-        elif no_edit_investigation:
-            stage_kind = "context"
-        stages.append(
-            _make_stage(
-                _stage_id_for(target_repo, proof_recipe_id, objective),
-                title=_stage_title_for(target_repo, proof_recipe_id),
-                objective=objective,
-                owner=target_owner,
-                repo=target_repo,
-                kind=stage_kind,
-                proof_recipe_id=proof_recipe_id,
-                requires_product_edit=not no_edit_stage,
-                requires_visual_proof=bool(payload.get("requires_visual_proof") or _text_mentions_visual(objective)),
-                depends_on=[],
-            )
-        )
-    # Goal-level no-edit signals only: no_edit_recipe is stage-local (a backend
-    # proof-only smoke leg does not make the parent goal no-edit, and its
-    # Launcher leg may still require product edits).
-    no_edit_synthesized = bool(no_edit_handoff or no_edit_certification or no_edit_investigation)
-    no_edit_harness_stage = target_repo == "hermes-agent" and (no_edit_recipe or no_edit_handoff)
-    # A no-edit goal can still be cross-stack (e.g. the Stage 47 no-op
-    # orchestration burn-in proves backend->Neko join->Launcher routing without
-    # product edits). Only treat it as single-repo when the parent does not
-    # require a Launcher leg; otherwise QA correctly rejects forever because the
-    # plan can never satisfy the Launcher acceptance criteria (observed live:
-    # task_burn_a77bf268/task_burn_d75d233b Dev<->QA ping-pong).
-    no_edit_single_repo_stage = (
-        target_repo in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}
-        and no_edit_synthesized
-        and not _parent_requires_launcher(task, intent)
-    )
-    if (
-        not persona_diagnostic_self_observation
-        and
-        not no_edit_harness_stage
-        and not no_edit_single_repo_stage
-        and _parent_requires_launcher(task, intent)
-        and not any(stage.repo == "EterniaLauncher" and stage.owner == "dev" for stage in stages)
-    ):
-        stages.extend(
-            _default_launcher_and_qa_stages(
-                task,
-                intent,
-                depends_on=[stage.id for stage in stages if stage.owner != "qa"],
-                requires_product_edit=not no_edit_synthesized,
-            )
-        )
-    elif not persona_diagnostic_self_observation and not any(stage.owner == "qa" for stage in stages):
-        stages.append(_qa_stage(intent, depends_on=[stage.id for stage in stages if stage.owner != "qa"], repo=target_repo))
-    stages = _normalize_stages_for_task_scope(task, intent, stages)
-    if not stages:
-        stages.append(
-            _make_stage(
-                "mission_scope",
-                title="Mission Scope",
-                objective=objective,
-                owner="neko_supervisor",
-                repo="none",
-                kind="planning",
-                blocks_qa_until=False,
-            )
-        )
-    plan = MissionPlan(
-        version=1,
-        enabled=True,
-        mission_intent=intent,
-        stages=stages,
-        current_stage_id=stages[0].id,
-        revision=int(existing.revision or 0),
-    )
-    errors = validate_mission_plan(plan)
-    if errors:
-        raise DecisionPayloadInvalid(f"invalid synthesized mission_plan: {errors}")
-    return plan
 
 
 def _is_persona_diagnostic_self_observation(task: Task, handoff: dict[str, Any]) -> bool:

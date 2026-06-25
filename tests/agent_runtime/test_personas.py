@@ -59,12 +59,11 @@ def test_default_personas_are_valid_and_pin_autonomy():
     backend_dev = next(p for p in personas if p.id == "backend_dev")
     assert backend_dev.display_name == "Backend Dev Agent"
     assert backend_dev.role == AgentRole.DEV.value
-    assert backend_dev.hermes_profile == "unbounded"
+    assert backend_dev.hermes_profile == "backend-dev"
     assert backend_dev.autonomy == AutonomyLevel.AUTONOMOUS.value
     assert backend_dev.repo_scope == "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend"
     assert backend_dev.repo_scope_label == "EterniaBackend"
     assert effective_toolsets(backend_dev) == effective_toolsets(dev)
-    assert all(p.hermes_profile == "unbounded" for p in personas)
 
 
 def test_bundled_prompts_exist_for_each_role():

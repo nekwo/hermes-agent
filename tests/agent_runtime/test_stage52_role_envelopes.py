@@ -13,8 +13,8 @@ from agent_runtime.proof_rules import ProofType
 from agent_runtime.role_checklists import (
     RoleChecklistStore,
     apply_decision_checklist_updates,
-    role_checklist_hud,
     sanitize_decision_checklist_payload,
+    stage_checklist_hud,
     validate_decision_checklist_payload,
 )
 from agent_runtime.role_envelopes import RoleEnvelopeStore
@@ -119,9 +119,9 @@ def test_checklist_hud_is_gated_and_lists_valid_choices():
     tasks.create(task)
     run = runs.open_run("dev", task.id, stage_id="stage_1")
 
-    assert role_checklist_hud(task, "dev", run, config=_config(False)) is None
+    assert stage_checklist_hud(task, "dev", run, config=_config(False)) is None
 
-    hud = role_checklist_hud(task, "dev", run, config=_config(True))
+    hud = stage_checklist_hud(task, "dev", run, config=_config(True))
 
     assert hud["role_id"] == "dev"
     assert hud["valid_item_ids"]

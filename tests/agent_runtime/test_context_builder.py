@@ -302,7 +302,7 @@ def test_neko_diagnostic_hud_recommends_valid_ack_packet():
     assert hud["decision_menu"][0]["recommended_payload"] == payload
 
 
-def test_simplified_agent_hud_role_contracts_are_closed_choice():
+def test_simplified_agent_hud_actor_contracts_are_closed_choice():
     from agent_runtime.context_builder import build_context
     from agent_runtime.models import AgentRun, Task
     from agent_runtime.states import RunState, TaskState

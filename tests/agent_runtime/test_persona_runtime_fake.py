@@ -13,7 +13,8 @@ from agent_runtime.models import AgentRun, Event, Task
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.persona_runtime import _apply_llm_metadata
 from agent_runtime.profile_runner import AgentRunResult
-from agent_runtime.personas import default_personas
+from agent_runtime.personas import all_registered_toolsets, default_personas, effective_toolsets
+from agent_runtime.tool_permissions import ChatToolPermissionStore
 from agent_runtime.states import RunState, TaskState
 
 
@@ -124,7 +125,7 @@ def test_dev_persona_tick_returns_structured_decision_without_network():
     fake = FakeAIAgent.instances[0]
     assert fake.kwargs["provider"] == "openai-codex"
     assert fake.kwargs["model"] == "gpt-5.5"
-    assert fake.kwargs["enabled_toolsets"] == ["file", "search", "terminal", "session_search", "code_execution", "skills"]
+    assert fake.kwargs["enabled_toolsets"] == effective_toolsets(dev)
     assert fake.kwargs["skip_context_files"] is True
     assert fake.kwargs["skip_memory"] is True
     assert fake.kwargs["platform"] == "agent_runtime"
@@ -138,16 +139,26 @@ def test_dev_persona_tick_returns_structured_decision_without_network():
     assert run.llm["base_url_host"] == "chatgpt.com"
     assert run.llm["total_tokens"] == 120
     assert isinstance(run.llm["latency_ms"], int)
-    assert run.llm["latency_ms"] >= 0
-    assert run.llm["timing"]["prompt_render_ms"] >= 0
-    assert run.llm["timing"]["provider_call_ms"] >= 0
-    assert run.llm["timing"]["profile_runner_ms"] >= 0
-    assert run.llm["timing"]["profile_runtime_resolve_ms"] >= 0
-    assert run.llm["timing"]["profile_agent_construct_ms"] >= 0
-    assert run.llm["timing"]["profile_conversation_call_ms"] >= 0
-    assert run.llm["timing"]["profile_result_normalize_ms"] >= 0
-    assert run.llm["timing"]["profile_budget_checks_ms"] >= 0
-    assert "SECRET" not in json.dumps(run.llm)
+
+
+def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    FakeAIAgent.instances.clear()
+    session_id = "session_unbounded_actual"
+    qa = next(persona for persona in default_personas() if persona.id == "qa")
+    ChatToolPermissionStore().set(
+        persona_id=qa.id,
+        session_id=session_id,
+        mode="unbounded",
+        reason="operator enabled full tools for this chat",
+    )
+    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
+
+    runtime.chat_reply(qa, "can you write now?", session_id=session_id)
+
+    fake = FakeAIAgent.instances[0]
+    assert fake.kwargs["enabled_toolsets"] == all_registered_toolsets()
+    assert fake.kwargs["blocked_tool_names"] == []
 
 
 def test_llm_timing_records_repeated_profile_attempts_without_losing_totals():

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .incidents import CRITICAL_INCIDENT_KINDS
-from .mission_plan import blocking_stages_ready_for_qa, has_typed_plan, task_stage_records
+from .mission_plan import blocking_stages_ready_for_qa, task_stage_records
 from .models import Incident, MissionPlanStage, Proof, Task
 from .proof_rules import ProofType
 
@@ -127,9 +127,8 @@ def task_delivery_proof_satisfied(task: Task, proofs: list[Proof]) -> GateResult
 
 def task_verdict_proof_satisfied(task: Task, proofs: list[Proof]) -> GateResult:
     missing=[]
-    if has_typed_plan(task):
-        typed_ready, typed_missing = blocking_stages_ready_for_qa(task, proof_store=_ListProofStore(proofs))
-        missing.extend(typed_missing)
+    typed_ready, typed_missing = blocking_stages_ready_for_qa(task, proof_store=_ListProofStore(proofs))
+    missing.extend(typed_missing)
     verdict_gate = stage_proof_satisfied(
         _synthetic_gate_stage("verdict", required_proof_types=[ProofType.QA_VERDICT.value]),
         proofs,

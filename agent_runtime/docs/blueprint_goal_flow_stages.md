@@ -55,7 +55,7 @@ The Harness already contains **two orchestrators** living side by side in
    the enum.
 
 2. **The typed `mission_plan` path** — `MissionStateMachine._typed_next_action`,
-   gated by `mission_plan_routing_enabled(config)` and `has_typed_plan(task)`. This
+   formerly gated by legacy routing/projection checks. This
    already walks a real stage DAG: `MissionPlan` / `MissionPlanStage`
    ([`agent_runtime/models.py`](../models.py)) with `owner`, `depends_on`, generic
    `StageStatus`, and dependency-aware routing in
@@ -79,7 +79,7 @@ running both orchestrators at once and having them disagree about task state.
 | Edges (implicit) | `MissionPlanStage.depends_on` DAG | `models.py:34` |
 | Routing engine | `next_unblocked_stage`, `release_next_stage`, `current_plan_stage` | `mission_plan.py` |
 | Schema validation + cycle detection | `validate_mission_plan`, `_dependency_cycle_errors` | `mission_plan.py:72` |
-| Routing on/off switch | `config.mission_plan.enabled` / `.enforce_routing` | `mission_plan.py:29` |
+| Routing on/off switch | retired; graph routing is unconditional | `state_machine.py` |
 | Plan persistence | `Task.mission_plan` | `models.py:80` |
 
 ### What must change to reach "1 to N agents"
@@ -92,9 +92,9 @@ running both orchestrators at once and having them disagree about task state.
 2. **`HarnessActionType.retired dev action / retired qa action / retired lead action` are role-hardcoded.**
    They must collapse into a single `RUN_SLOT(slot_id)` action that the runner
    resolves through the binding to a persona/profile.
-3. **A plan is currently synthesized per-task** (`_synthesize_plan_from_handoff`).
-   A blueprint is a **saved, versioned, reusable** plan template, instantiated at
-   goal creation and bound to concrete profiles at run time.
+3. **Plans are blueprint-instantiated at goal creation.** A blueprint is a
+   **saved, versioned, reusable** plan template bound to concrete profiles at run
+   time, not ad-hoc per-task routing derived from a handoff packet.
 4. **Routing is currently implicit** (DAG `depends_on` + hardcoded "QA fail → Dev"
    in `_typed_next_action`). It must become **explicit edges** with a closed
    outcome vocabulary.
@@ -108,27 +108,27 @@ path.** Grouped by subsystem:
 
 *Orchestrator / state*
 - [ ] `TaskState` reduced to generic lifecycle (`created/running/blocked/done/failed/cancelled`); all role-named members (`PM_*`, `DEV_*`, `QA_*`, `applying`, …) removed.
-- [ ] Legacy `if state == TaskState.X` ladder in `next_action` deleted; `next_action` delegates to graph routing unconditionally (no `mission_plan_routing_enabled` fork).
+- [x] Legacy `if state == TaskState.X` ladder in `next_action` deleted; `next_action` delegates to graph routing unconditionally.
 - [ ] `HarnessActionType.retired dev action/retired qa action/retired lead action` removed in favour of `RUN_SLOT`.
 - [ ] `actor == "neko_supervisor"` checks replaced by `stage.owner_slot == <lead-role slot>`.
 - [ ] `retired owner allowlist` global removed; owners validated per-blueprint.
 - [ ] `AgentState` enum (`states.py:26`, role-shaped: `AUDITING/DESIGNING_TESTS/…`) audited and removed if unreferenced after slot migration.
 
 *Plan / stage duplication*
-- [ ] Legacy `Task.stages: list[TaskStage]` + `StageStatus` dual-write retired; `mission_plan.stages` becomes the single source. Delete `mirror_legacy_stages_from_plan` once nothing reads the legacy list.
-- [ ] `mission_plan_routing_enabled` / `enforce_routing` config switch removed (graph routing is unconditional, so no legacy fallback to gate).
-- [ ] Per-task plan synthesis (`_synthesize_plan_from_handoff`) replaced by blueprint instantiation.
+- [ ] Legacy `Task.stages: list[TaskStage]` + `StageStatus` dual-write retired; `mission_plan.stages` becomes the single source.
+- [x] Legacy routing config switch removed (graph routing is unconditional, so no legacy fallback to gate).
+- [x] Per-task handoff-derived plan synthesis replaced by blueprint instantiation.
 
 *Launcher / cross-stack special cases (planning.py + state_machine.py)*
-- [ ] `_ensure_launcher_handoff_stage`, `_ensure_no_edit_proof_handoff_stage`, `_repair_bounded_visual_proof_stage_from_neko_handoff`, `LAUNCHER_RELEASED_BY_NEKO_FLAG`, `QA_COORDINATION_RELEASED_FLAG` and the cross-stack release branches expressed as ordinary blueprint stages/edges and removed from the engine.
+- [x] Launcher/no-edit/visual-recovery handoff helpers, release flags, and cross-stack release branches expressed as ordinary stage/packet flow and removed from the engine.
 
 *Persona / profile (see "Identity Reconciliation" below)*
-- [ ] `configured_personas` config-default fallback (incl. `alice_supervisor → neko_supervisor` aliasing in `config.py`) retired in favour of persisted personas + on-demand profile→persona promotion.
-- [ ] Snapshot `agents = agent_store.list_all() or configured_personas(cfg)` fallback removed once personas are first-class records.
+- [x] Config-default persona fallback retired in favour of persisted personas + on-demand profile→persona promotion.
+- [x] Snapshot agent fallback removed; snapshots read first-class persona records.
 
 *HUD / skills / proof gates (see "Make the HUD, skills, and proof gates dynamic")*
-- [ ] Role-shaped HUD (`hud_shape_index_for_role`, `role_checklist_hud`) replaced by slot/stage/edge-shaped HUD.
-- [ ] Hardcoded `_STAGE46_REQUIRED_SKILLS` map + `stage46_*` install/readiness path replaced by persona `skills` + per-stage `required_skills`.
+- [x] Role-shaped HUD helper names replaced by slot/stage/edge-shaped HUD helpers.
+- [ ] Hardcoded `_harness_REQUIRED_SKILLS` map + `harness_*` install/readiness path replaced by persona `skills` + per-stage `required_skills`.
 - [x] Role-named proof-gate functions (`implementation proof satisfied`, `verification proof satisfied`, `integration proof satisfied`) collapsed into one generic `stage_proof_satisfied(stage, proofs)`.
 
 Each box is "done" only when the legacy branch is **deleted**, not merely bypassed.
@@ -141,21 +141,19 @@ The single largest risk is two orchestrators disagreeing about one mission. The 
 that prevents it:
 
 > **A mission is owned by exactly one orchestrator, decided once at creation and never
-> mixed.** If a mission has a blueprint-derived plan (`has_typed_plan` true), *only*
+> mixed.** Missions are created with blueprint-derived plans, so *only*
 > graph routing runs for it; `next_action` returns the graph result before reaching
 > the legacy ladder. If it has no plan, the legacy ladder runs unchanged. There is no
 > per-turn negotiation and no dual-write of state.
 
 Concretely, during migration:
-- `MissionStateMachine.next_action` begins with: `if has_typed_plan(mission): return
-  graph_next_action(mission)`. Everything below it is legacy and untouched until its
+- `MissionStateMachine.next_action` enters graph routing directly. Everything below it is legacy and untouched until its
   retirement-ledger box is checked.
 - New goals created via `hermes harness blueprint run` always get a plan, so they are
   graph-routed from birth. Existing/legacy goals finish on the legacy ladder and are
   not migrated mid-flight.
 - No code writes both `mission.state` role transitions *and* graph stage status for
-  the same mission. The legacy `Task.stages` mirror is frozen for blueprint goals
-  (don't call `mirror_legacy_stages_from_plan` on them).
+  the same mission. The legacy `Task.stages` mirror is frozen for blueprint goals.
 
 This lets each stage below land incrementally: blueprint goals exercise the new path,
 legacy goals keep working, and the legacy code is deleted only when the ledger says
@@ -205,9 +203,8 @@ MCP servers, and **points at a profile** via `hermes_profile`.
 `available_personas` already distinguishes **bindable personas** from
 **template-only profiles** — we make that distinction authoritative.
 
-> Note: the snapshot's separate `agents` list (`agent_store.list_all() or
-> configured_personas(cfg)`) is the overlay list and *does* still fall back to config
-> defaults — that fallback is on the retirement ledger.
+> Note: the snapshot's separate `agents` list is now sourced from first-class
+> persona records; config defaults are no longer a runtime fallback.
 
 ### Blueprint-local concepts
 
@@ -270,7 +267,7 @@ what is already true.
 
 1. **The persona is the runtime-harness work already built — and it is the
    participation layer, not optional polish.** Everything done in the Agent Runtime
-   Harness to date — `AgentPersona`, the persona library, `configured_personas`,
+   Harness to date — `AgentPersona`, the persona library, persisted persona records,
    persona chat/voice/recall, readiness — is what lets an agent actually work the
    graph: it injects the HUD, exposes the selectable skills, and facilitates
    proof-gate feedback. A slot is therefore always bound to a persona; the blueprint
@@ -279,14 +276,13 @@ what is already true.
    Persona work continues to pay off unchanged — it becomes the binding target.
 
 2. **The typed `mission_plan` must be made dynamic to become the engine.** Today the
-   typed plan is real but *not yet dynamic*: it is synthesized per task from handoffs
-   (`_synthesize_plan_from_handoff`), constrained by the hardcoded `retired owner allowlist`
-   set, and carries launcher/cross-stack special cases baked into the engine. "Make
-   it dynamic" means three concrete moves:
+   typed plan is dynamic: it is instantiated from a saved blueprint, scoped by
+   blueprint-local slots, and keeps launcher/cross-stack cases in ordinary graph data.
+   "Make it dynamic" means three concrete moves:
    - **Owners become slots, not a fixed enum** — drop `retired owner allowlist`; validate
      `owner_slot` against the blueprint's own declared slots, so agent count is 1 to N.
    - **Plans come from blueprints, not ad-hoc synthesis** — instantiate a saved,
-     versioned blueprint at goal creation instead of `_synthesize_plan_from_handoff`.
+     versioned blueprint at goal creation.
    - **Special cases become data** — launcher/cross-stack handoffs expressed as
      ordinary stages and edges, removed from the engine.
 
@@ -304,8 +300,8 @@ blueprint. None is thrown away; each is re-keyed off the graph instead of fixed 
 Built by `_mission_hud` ([`context_builder.py:92`](../context_builder.py)) and
 injected into the agent prompt as a `## Mission HUD` JSON block
 (`context_builder.py:173`). Config switch `mission_plan_hud_enabled` =
-`enabled && enforce_hud`. Today it is **role-shaped**: `hud_shape_index_for_role`,
-`role_checklist_hud` key off the actor's role.
+`enabled && enforce_hud`. The retired implementation keyed helper APIs off the
+actor's role.
 - *Dynamic form:* derive the HUD from the **current stage** — its `owner_slot`,
   objective, proof gate, and **outgoing edges**. The HUD's `recommended_action` is the
   edge the stage is expected to satisfy; the `context_expansion_menu` and
@@ -314,8 +310,8 @@ injected into the agent prompt as a `## Mission HUD` JSON block
 
 **Skills (per-agent capability install).**
 Skills live on the persona overlay (`AgentPersona.skills`) but are force-augmented by
-a hardcoded `_STAGE46_REQUIRED_SKILLS` map keyed by persona id
-([`config.py:16`](../config.py)) via the `stage46_*` install/readiness path
+a hardcoded `_harness_REQUIRED_SKILLS` map keyed by persona id
+([`config.py:16`](../config.py)) via the `harness_*` install/readiness path
 ([`skill_install.py`](../skill_install.py)); readiness surfaces in `_agent_summary`
 as `missing_skills` / `skill_hash_mismatches`.
 - *Dynamic form:* two clean sources, no hardcoded persona map.
@@ -325,7 +321,7 @@ as `missing_skills` / `skill_hash_mismatches`.
      needs. At binding/validation time, check the bound persona satisfies them (and at
      promotion time, fold a profile's installed skills into the new persona); surface
      missing skills as a readiness block before the run, not a mid-run surprise. Drop
-     `_STAGE46_REQUIRED_SKILLS` and the `stage46` naming entirely.
+     `_harness_REQUIRED_SKILLS` and the `harness` naming entirely.
 
 **Proof gates (evidence required to pass a stage).**
 `ProofRecipe` registry ([`proof_recipes.py:64`](../proof_recipes.py)) +
@@ -574,7 +570,7 @@ storage, instantiation, and resolution all defined as code. No prose-only concep
 2. **`MissionPlan` is the runtime form of a `Blueprint`.** A `Blueprint` is the saved
    template; instantiating it produces a `MissionPlan` carrying the resolved
    `slots`, `bindings`, `edges`, and `limits`. There is no second runtime object.
-3. **A goal is graph-routed iff it has a blueprint-derived plan.** `has_typed_plan`
+3. **A goal is graph-routed from its blueprint-derived plan.** The former typed-plan guard
    already gates this. During migration the legacy ladder is *never consulted* for a
    blueprint goal (see "Migration & Coexistence"). No dual-write.
 4. **Outcomes are derived, not declared by the agent.** A stage run ends with an
@@ -1245,7 +1241,7 @@ Stage 10 is complete only when these removals are real code deletions:
 - `retired dev action`, `retired qa action`, and `retired lead action` deleted from `HarnessActionType`; all
   agent execution goes through `RUN_SLOT`.
 - `retired owner allowlist` global deleted; owner validation is per-blueprint slot validation.
-- `mission_plan_routing_enabled` / `config.mission_plan.enforce_routing` legacy-fallback
+- legacy routing switch fallback
   path deleted; graph routing is unconditional for new missions.
 - Legacy `Task.stages` mirror deleted after Launcher/snapshot reads `mission_plan.stages`
   directly.
@@ -1290,7 +1286,7 @@ reached:
   per-stage attempt counts, total-stage bounds, terminal `done`, and intervention
   routing.
 - `MissionStateMachine.apply_decision` treats blueprint-owned plans as graph-owned
-  even when the legacy `mission_plan.enforce_routing` gate is off.
+  even when legacy routing gates are absent.
 - `TickEngine` applies proof-derived blueprint outcomes after command proof is
   collected and attached, and skips the legacy deterministic proof handoff for
   blueprint-owned tasks so graph terminal routing is not overwritten.

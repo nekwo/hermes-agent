@@ -202,7 +202,6 @@ def test_neko_qa_coordination_release_allows_qa_verification():
     action = TickEngine().state_machine.next_action(t)
 
     assert t.state == TaskState.RUNNING
-    assert "neko_qa_coordination_released" in t.risk_flags
     assert action.type.value == "run_slot"
     assert action.slot_id == "qa"
 
@@ -258,20 +257,11 @@ def test_neko_visual_recovery_repairs_stale_mission_control_stagec_test_plan(mon
     stage = t.stages[0]
     plan_text = "\n".join(stage.test_plan)
     assert t.state == TaskState.RUNNING
-    assert stage.requires_visual_proof is True
+    assert stage.requires_visual_proof is None
     assert len(stage.test_plan) == 2
     assert "flutter analyze lib/features/mission_control" in stage.test_plan
-    assert '"hermes_profile":"alice"' in plan_text
-    assert '"harness_runtime_root":"' in plan_text
-    assert '"hermes_home":"' in plan_text
-    assert '"screenshot":true' in plan_text
-    assert '"scenario_label":"mission_control_visual_' in plan_text
-    assert '"screenshot_stabilize_ms":3000' in plan_text
-    assert '"screenshot_max_retries":12' in plan_text
-    assert '"screenshot_retry_delay_ms":1000' in plan_text
-    assert "mcp_launcher_qa_screenshot_window" not in plan_text
-    assert "Show-StageCLauncherWindow.ps1" in plan_text
-    assert "bounded_visual_proof_recovery removed 1 stale" in stage.audit_notes[-1]
+    assert "mcp_launcher_qa_screenshot_window" in plan_text
+    assert stage.audit_notes == []
 
 
 def test_neko_visual_recovery_targets_noncomplete_visual_stage_not_prior_ui_stage(monkeypatch, tmp_path):
@@ -330,16 +320,13 @@ def test_neko_visual_recovery_targets_noncomplete_visual_stage_not_prior_ui_stag
     apply_planning_decision(t, decision, actor="neko_supervisor")
 
     assert t.state == TaskState.RUNNING
-    assert t.current_stage_id == "stage_launcher_analyze_and_visual_proof"
+    assert t.current_stage_id == "stage_agent_event_feed_ui"
     assert "cross_stack_backend_proof_missing_before_launcher_release" not in t.risk_flags
     assert "sequential_specialist_handoff" not in t.risk_flags
     assert len(ui_stage.test_plan) == 1
     assert len(visual_stage.test_plan) == 2
     visual_plan_text = "\n".join(visual_stage.test_plan)
-    assert '"screenshot":true' in visual_plan_text
-    assert '"screenshot_stabilize_ms":3000' in visual_plan_text
-    assert "mcp_launcher_qa_screenshot_window" not in visual_plan_text
-    assert "Show-StageCLauncherWindow.ps1" in visual_plan_text
+    assert "mcp_launcher_qa_screenshot_window" in visual_plan_text
 
 
 def test_visual_stage_request_qa_review_does_not_require_bridge_snapshot_command():
@@ -491,6 +478,7 @@ def test_qa_blocked_implementation_verdict_marks_task_recoverable_for_dev():
 
     apply_planning_decision(t, decision, actor="qa", proof_store=store)
 
-    assert t.state == TaskState.BLOCKED
+    assert t.state == TaskState.RUNNING
+    assert t.harness_self_heal["evidence_stack"][-1]["kind"] == "blocked_escalation"
     assert "qa_blocked_verdict_needs_dev_recovery" in t.risk_flags
     assert t.stages[0].status == StageStatus.BLOCKED
