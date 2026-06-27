@@ -1,6 +1,7 @@
 from hermes_time import now
 
 from agent_runtime.context_builder import AgentContext, build_context, render_context
+from agent_runtime.default_plan import ensure_default_mission_plan
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentRun, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
@@ -62,6 +63,21 @@ def test_context_includes_stage53_simplified_agent_hud():
     assert agent_hud["recommended_action"]["payload_skeleton"] is not None
     assert agent_hud["recommended_action"]["skill_ref"] == "harness-dev-delivery"
     assert "decision_menu" in ctx.mission_hud
+
+
+def test_neko_closed_choice_hud_does_not_release_qa_for_default_graph():
+    task = make_task()
+    task.state = "dev_ready_for_qa"
+    task.stages = []
+    ensure_default_mission_plan(task)
+    run = make_run()
+    run.persona_id = "neko_supervisor"
+    cfg = RuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=False))
+
+    hud = build_context(task, run, config=cfg).mission_hud
+
+    assert hud["agent_hud"]["recommended_action"]["shape_id"] == "neko.scoped_handoff"
+    assert hud["next_required_move"]["shape_id"] == "neko.scoped_handoff"
 
 
 def test_rendered_context_uses_stage_output_template_instead_of_raw_description():

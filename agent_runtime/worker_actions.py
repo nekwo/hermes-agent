@@ -508,14 +508,27 @@ def _qa_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerAc
 def _neko_actions(task: Task, run: AgentRun) -> list[WorkerAction]:
     state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
     if state == TaskState.RUNNING:
+        if _task_has_qa_stage(task):
+            return [
+                WorkerAction(
+                    "release_handoff",
+                    DecisionType.PROPOSE_ACCEPTANCE,
+                    "neko.qa_coordination_release",
+                    "Release QA",
+                    primary=True,
+                    reason="The active graph includes a QA/verifier stage; release QA only with joined proof IDs.",
+                ),
+                WorkerAction("route_repair", DecisionType.TRIAGE_ISSUE_DISCOVERY, "neko.triage_issue_discovery", "Route Repair"),
+                _block_action(),
+            ]
         return [
             WorkerAction(
                 "release_handoff",
                 DecisionType.PROPOSE_ACCEPTANCE,
-                "neko.qa_coordination_release",
-                "Release Handoff",
+                "neko.scoped_handoff",
+                "Release Stage",
                 primary=True,
-                reason="Dev proof is attached; release QA with joined proof IDs.",
+                reason="Release or repair the next graph stage; do not add QA unless the active graph contains a QA/verifier node.",
             ),
             WorkerAction("route_repair", DecisionType.TRIAGE_ISSUE_DISCOVERY, "neko.triage_issue_discovery", "Route Repair"),
             _block_action(),
@@ -548,6 +561,17 @@ def _neko_actions(task: Task, run: AgentRun) -> list[WorkerAction]:
 
 def _block_action(*, primary: bool = False, reason: str = "Use when the next safe action is impossible with current evidence.") -> WorkerAction:
     return WorkerAction("report_blocker", DecisionType.BLOCK, "common.block", "Report Blocker", primary=primary, reason=reason)
+
+
+def _task_has_qa_stage(task: Task) -> bool:
+    for stage in task_stage_records(task):
+        owner = str(getattr(stage, "owner", "") or getattr(stage, "owner_slot", "") or "").strip()
+        owner_slot = str(getattr(stage, "owner_slot", "") or "").strip()
+        kind = str(getattr(stage, "kind", "") or "").strip()
+        legacy_label = f"{getattr(stage, 'id', '')} {getattr(stage, 'title', '')}".lower()
+        if owner == "qa" or owner_slot == "qa" or kind == "qa_verdict" or "qa" in legacy_label:
+            return True
+    return False
 
 
 def _typed_visual_missing(task: Task, *, proof_store=None) -> bool:

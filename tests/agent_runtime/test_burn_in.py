@@ -294,10 +294,10 @@ def test_cross_stack_burn_in_case_has_explicit_repo_role_and_join_scope():
     created = json.loads((root / "task_create.json").read_text(encoding="utf-8"))["task"]
 
     assert created["affected_repos"] == ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
-    assert created["suggested_roles"] == ["neko_supervisor", "backend_dev", "neko_supervisor", "dev", "qa"]
+    assert created["suggested_roles"] == ["neko_supervisor", "backend_dev", "dev"]
     assert "backend_contract_first" in created["risk_flags"]
     assert "launcher_contract_second" in created["risk_flags"]
-    assert any("both backend and Launcher proof IDs" in item for item in created["non_goals"])
+    assert any("Do not add QA" in item for item in created["non_goals"])
 
 
 def test_burn_in_summary_fails_closed_when_evidence_is_missing():

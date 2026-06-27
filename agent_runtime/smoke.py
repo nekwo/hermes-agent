@@ -15,7 +15,7 @@ from .models import Proof, Task
 from .personas import AgentRole
 from .proof_rules import ProofType
 from .state_machine import MissionStateMachine
-from .states import RunState, StageStatus, TaskState
+from .states import RunState, TaskState
 from .store import ProofStore, RunStore, TaskStore
 
 
@@ -59,12 +59,12 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
         task = Task(
             id="task_smoke",
             title="Harness smoke goal",
-            description="Verify Neko Mission Lead -> Dev -> QA -> proof -> done in a temp root.",
+            description="Verify Neko Mission Lead -> Backend Dev -> Launcher Dev -> proof -> done in a temp root.",
             state=TaskState.CREATED,
             created_at=ts,
             updated_at=ts,
             requested_by="smoke",
-            acceptance_criteria=["Smoke proof attached", "QA verdict approved"],
+            acceptance_criteria=["Backend smoke proof attached", "Launcher smoke proof attached"],
         )
         ensure_default_mission_plan(task)
         task_store.create(task)
@@ -86,13 +86,29 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
         run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": neko_decision.type.value, "summary": neko_decision.summary})
         transitions.append("neko_supervisor:propose_acceptance")
 
-        task.current_stage_id = task.mission_plan.current_stage_id if task.mission_plan else "implement"
-        proof_store.attach(Proof(id="proof_smoke_test", task_id=task.id, stage_id=task.current_stage_id, type=ProofType.TEST_RUN, title="Smoke no-model test", path_or_value="no-model smoke", created_by="smoke", created_at=now(), metadata={"status": "passed", "exit_code": 0}, redaction_status="safe"))
+        if task.current_stage_id != "backend_implementation":
+            raise RuntimeError(f"expected backend implementation stage after Neko, got {task.current_stage_id!r}")
+        proof_store.attach(Proof(id="proof_smoke_backend", task_id=task.id, stage_id=task.current_stage_id, type=ProofType.TEST_RUN, title="Smoke backend no-model test", path_or_value="no-model backend smoke", created_by="smoke", created_at=now(), metadata={"status": "passed", "exit_code": 0}, redaction_status="safe"))
+        backend_decision = AgentDecision(
+            type=DecisionType.PROPOSE_PATCH,
+            summary="smoke Backend Dev attached proof",
+            rationale="deterministic no-model smoke has a safe backend proof artifact",
+            payload={"proof_ids": ["proof_smoke_backend"]},
+        )
+        validate_decision_for_role(backend_decision, AgentRole.DEV)
+        run = run_store.open_run("backend_dev", task.id, task.current_stage_id, tick_id="tick_smoke")
+        machine.apply_decision(task, backend_decision, actor="backend_dev", proof_store=proof_store, run_id=run.id)
+        run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": backend_decision.type.value, "summary": backend_decision.summary})
+        transitions.append("backend_dev:propose_patch")
+
+        if task.current_stage_id != "implement":
+            raise RuntimeError(f"expected launcher implementation stage after Backend Dev, got {task.current_stage_id!r}")
+        proof_store.attach(Proof(id="proof_smoke_launcher", task_id=task.id, stage_id=task.current_stage_id, type=ProofType.TEST_RUN, title="Smoke launcher no-model test", path_or_value="no-model launcher smoke", created_by="smoke", created_at=now(), metadata={"status": "passed", "exit_code": 0}, redaction_status="safe"))
         dev_decision = AgentDecision(
             type=DecisionType.PROPOSE_PATCH,
-            summary="smoke Dev attached proof",
-            rationale="deterministic no-model smoke has a safe proof artifact",
-            payload={"proof_ids": ["proof_smoke_test"]},
+            summary="smoke Launcher Dev attached proof",
+            rationale="deterministic no-model smoke has a safe launcher proof artifact",
+            payload={"proof_ids": ["proof_smoke_launcher"]},
         )
         validate_decision_for_role(dev_decision, AgentRole.DEV)
         run = run_store.open_run("dev", task.id, task.current_stage_id, tick_id="tick_smoke")
@@ -100,25 +116,7 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
         run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": dev_decision.type.value, "summary": dev_decision.summary})
         transitions.append("dev:propose_patch")
 
-        qa_decision = AgentDecision(
-            type=DecisionType.REPORT_QA_VERDICT,
-            summary="smoke QA approved proof",
-            rationale="QA reviewed the deterministic no-model proof",
-            payload={"review_scope": "implementation", "verdict": "approved", "proof_ids": ["proof_smoke_test"], "findings": []},
-        )
-        validate_decision_for_role(qa_decision, AgentRole.QA)
-        proof_store.attach(Proof(id="proof_smoke_qa", task_id=task.id, stage_id=task.current_stage_id, type=ProofType.QA_VERDICT, title="Smoke QA verdict", path_or_value="approved", created_by="qa", created_at=now(), metadata={"verdict": "approved"}, redaction_status="safe"))
-        run = run_store.open_run("qa", task.id, task.current_stage_id, tick_id="tick_smoke")
-        machine.apply_decision(task, qa_decision, actor="qa", proof_store=proof_store, run_id=run.id)
-        run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": qa_decision.type.value, "summary": qa_decision.summary})
-        transitions.append("qa:report_qa_verdict")
-
-        task.proof_ids = ["proof_smoke_test", "proof_smoke_qa"]
-        if task.mission_plan is not None:
-            for stage in task.mission_plan.stages:
-                stage.status = StageStatus.PASSED
-            task.mission_plan.current_stage_id = None
-            task.current_stage_id = None
+        task.proof_ids = ["proof_smoke_backend", "proof_smoke_launcher"]
         close_action = machine.next_action(task)
         if close_action.type != HarnessActionType.COMPLETE_TASK:
             raise RuntimeError(f"expected deterministic completion, got {close_action.type.value}")

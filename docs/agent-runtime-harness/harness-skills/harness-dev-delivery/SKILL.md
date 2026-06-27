@@ -1,6 +1,6 @@
 ---
 name: harness-dev-delivery
-description: Shared Backend Dev and Launcher Dev delivery contract for Harness tasks, proof reuse, bounded skill loading, proof requests, QA handoff, and blockers.
+description: Shared Backend Dev and Launcher Dev delivery contract for Harness tasks, proof reuse, bounded skill loading, proof requests, graph handoff, and blockers.
 ---
 
 # Harness Dev Delivery
@@ -22,7 +22,7 @@ Use this skill for non-trivial Backend Dev or Launcher Dev Harness ticks.
 - `checklist_updates` is optional. Use it only for item IDs shown in the current role checklist HUD. Use `self_approved` only for your own role's item, never `verified` unless the item owner is your role, and omit checklist updates when uncertain.
 - For `kind: context` no-product-edit investigation/audit stages with no proof recipe/test plan, do not use `request_test_run`. Request bounded file/log context first, then deliver findings or block. `request_test_run` is only for HUD `request_gate`, proof-only/certification stages, QA missing-proof lanes, or final-gate recovery.
 - When delivering a no-product-edit investigation/audit, put the actual report substance under `payload.delivery.summary`, `payload.delivery.findings`, `payload.delivery.recommendations`, and `payload.delivery.questions` so QA can review a preserved delivery packet. Do not rely only on top-level `summary` or `rationale`.
-- For QA handoff or handoff-repair delivery, preserve acceptance-critical review data in first-class delivery fields: `inspected_paths`, `changed_paths`, `dirty_baseline`, `coverage_claims`, `known_non_coverage`, `proof_reuse_basis`, `failed_proof_classification`, and `handoff_repair`. Use these instead of inventing one-off metadata keys.
+- For graph handoff or handoff-repair delivery, preserve acceptance-critical review data in first-class delivery fields: `inspected_paths`, `changed_paths`, `dirty_baseline`, `coverage_claims`, `known_non_coverage`, `proof_reuse_basis`, `failed_proof_classification`, and `handoff_repair`. Use these instead of inventing one-off metadata keys. Use QA handoff wording only when the active blueprint includes a QA/verifier node.
 - For NSFW/media-safety investigations, use the supported fields `payload.delivery.model_options` and `payload.delivery.wd_tagger_assessment`; do not invent `model_options` or `wd_tagger_assessment` outside `payload.delivery`.
 - Treat `agent_hud` as the primary operating surface. Legacy/debug HUD fields are not valid action choices.
 - Treat `agent_hud.current_assignment` as stage-shaped, not role-shaped. Use its `stage_id`, `output_type`, `proof_gate`, `required_proof_types`, and `outgoing_edges` to decide whether to patch, deliver a document/artifact, or request the exact proof lane.
@@ -30,7 +30,7 @@ Use this skill for non-trivial Backend Dev or Launcher Dev Harness ticks.
 - If your bundle is `queued_waiting_dependency`, do not start implementation. Read `dependency_bundle_ids`, consume available contract/proof packets, then either hand off/wait or request the exact missing input from the owning persona.
 - In Stage 53 simplified mode, Dev's only product actions are `deliver`, `report_blocker`, and `request_missing_input`.
 - In Stage 53 simplified mode, patch, run the narrowest relevant self-test while context is hot, then deliver. Do not ask Harness for a proof recipe when you can run the focused proof directly in the same session.
-- Use `request_missing_input` for blocking cross-role gaps: `backend_contract` to Backend Dev, `frontend_usage` to Launcher Dev, `visual_verification` to QA, `scope_decision` to Neko, and `environment_blocker` to Harness preflight/self-heal.
+- Use `request_missing_input` for blocking cross-role gaps: `backend_contract` to Backend Dev, `frontend_usage` to Launcher Dev, `visual_verification` to QA only when the active blueprint includes a QA/verifier node, `scope_decision` to Neko, and `environment_blocker` to Harness preflight/self-heal.
 - Stay inside the resolved repo and stage.
 - Use skill search first; load one relevant skill by default and two at most unless the AgentDecision explains why more were needed.
 - If failed proof IDs are attached, inspect those proof packets before broad read/search.
@@ -58,9 +58,9 @@ Use this skill for non-trivial Backend Dev or Launcher Dev Harness ticks.
 
 ## Commit and Deploy Gate (required for product-edit stages)
 
-The Harness rejects a product-edit QA handoff that lacks commit evidence. In normal
+The Harness rejects a product-edit graph handoff that lacks commit evidence. In normal
 worker flow, Harness runs the deterministic final deploy-check after a valid Dev
-delivery and attaches the authoritative proof. Before `propose_patch`/`request_qa_review`
+delivery and attaches the authoritative proof. Before `propose_patch` or, only when the active graph includes QA, `request_qa_review`
 on a stage with `requires_product_edit`:
 
 1. Commit exactly your changed paths on the current branch:
@@ -178,7 +178,7 @@ Attach `payload.delivery` only to Dev delivery decisions that support delivery p
 - `planned` for `propose_stage_plan`
 - `patch_proposed` for `propose_patch`
 - `proof_requested` for `request_test_run`
-- `ready_for_qa` for `request_qa_review`
+- `ready_for_qa` for `request_qa_review` only when the active graph includes QA
 - `blocked` for `block`
 - `issue_discovered` for `report_issue_discovery`
 - `correct_stage` has no `delivery` object and no `work_status`; use `test_plan` and `corrections` to repair the current stage.

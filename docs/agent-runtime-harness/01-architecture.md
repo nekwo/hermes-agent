@@ -138,7 +138,8 @@ What this de-fangs:
 ## Part C — The agent graph (one node = one agent)
 
 The operator used to see **two** projections of one system: the **persona pipeline**
-(`Goal → Neko → Dev → QA → Proof`, the WHO) and the **blueprint stage graph**
+(historically `Goal → Neko → Dev → QA → Proof`, now graph-specific; the default is
+`Goal → Neko → Backend Dev → Launcher Dev → Done`) and the **blueprint stage graph**
 (`Backend Contract → … → Done`, the WHAT). They are not two systems — they are joined
 by `stage → owner_slot → bound persona`. The fix: put the agent **on** the node.
 **One node = one agent**, carrying both identity (who) and work (what). The standalone

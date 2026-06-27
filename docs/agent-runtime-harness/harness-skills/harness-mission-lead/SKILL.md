@@ -32,7 +32,7 @@ Use this skill when acting as Neko Mission Lead for an Agent Runtime Harness tas
 - If a bundle is `queued_waiting_dependency`, steer the dependency owner first. If all dependency bundles are delivered but the bundle is still queued, emit one repair/release action naming `dependency_bundle_delivered`.
 - In Stage 53 simplified mode, Neko's only product actions are `assign`, `report_blocker`, and `request_missing_input`.
 - In Stage 53 simplified mode, assign the smallest complete next owner with objective, acceptance, repo candidate, and proof expectation; do not mutate stage status or invent packet/checklist fields.
-- Use `request_missing_input` for cross-role gaps before asking Tony. Route `frontend_usage` to Launcher Dev, `backend_contract` to Backend Dev, `visual_verification` to QA, and `scope_decision` to Neko.
+- Use `request_missing_input` for cross-role gaps before asking Tony. Route `frontend_usage` to Launcher Dev, `backend_contract` to Backend Dev, `visual_verification` to QA only when the active graph includes a QA/verifier node, and `scope_decision` to Neko.
 - Use beginning-only wait semantics: ask for preference/context only before implementation starts or when a human-only gate is genuinely required.
 - For large files, steer specialists to context windows such as `relative/path.py#L120-L220` instead of repeated whole-file reads.
 - After scoping, choose the best justified path from repo evidence, project brains, local architecture, and prior proof. Report alternatives after completion.
@@ -99,7 +99,7 @@ Only include fields the Harness cannot derive. Do not include absolute paths, ra
 
 ## QA Release
 
-Use when Dev delivery/proof packets are present and the next safe owner is QA. Join proof IDs, name missing proof lanes if any, and release only the scoped work whose evidence is ready for QA review. Missing proof is a HUD/evidence warning for Neko to adjudicate or repair, not an automatic terminal block. For product-edit goals, do not release to final QA approval while the local, staging k8, and prod rollout promotion proofs are incomplete or out of order.
+Use only when Dev delivery/proof packets are present and the active graph's next owner is QA. Join proof IDs, name missing proof lanes if any, and release only the scoped work whose evidence is ready for QA review. If the selected blueprint has no QA/verifier node, do not create a QA release; release the next graph stage or let the Harness close. Missing proof is a HUD/evidence warning for Neko to adjudicate or repair, not an automatic terminal block. For product-edit goals, do not release to final QA approval while the local, staging k8, and prod rollout promotion proofs are incomplete or out of order.
 
 ## Incident Resolution
 
@@ -134,8 +134,8 @@ When the latest context already contains a passing backend proof and the next re
   - `handoff_mode`: `sequential_specialists`
   - `target_owner`: `dev`
   - `target_repo`: `EterniaLauncher`
-  - `final_owner`: `qa`
-  - `final_repo`: `EterniaLauncher`
+  - `final_owner`: include `qa` only when the active graph includes a QA/verifier node; otherwise omit it
+  - `final_repo`: include only when `final_owner` is present
   - `joined_proof_ids`: the passed backend proof IDs being released to Launcher Dev
   - `joined_contract_packet_ids`: the backend delivery/contract packet IDs Launcher Dev must consume
   - `proof_gate.minimum_status`: `passed`
@@ -146,7 +146,7 @@ Keep the packet as a route and proof contract. Do not embed command output, abso
 
 ## QA Coordination Release Template
 
-When backend and Launcher proof IDs are both attached and the next owner is QA:
+When backend and Launcher proof IDs are both attached and the active graph's next owner is QA:
 
 - Emit `propose_acceptance` with a `handoff_packet`.
 - Use `packet_kind`: `qa_coordination_release`.

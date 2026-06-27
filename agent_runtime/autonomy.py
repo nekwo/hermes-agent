@@ -610,7 +610,7 @@ def _handoff_shape(persona: AgentPersona, ctx: AgentContext) -> str:
         return "handoff_packet with target owner/repo, proof gate, join gate, and next expected owner."
     if role == "qa":
         return "qa_review/report_qa_verdict with verdict, proof IDs, findings, remaining risk, and autonomy packet IDs reviewed."
-    return "delivery/request_qa_review with stage ID, proof IDs, changed-file summary, known gaps, and next owner."
+    return "delivery/propose_patch with stage ID, proof IDs, changed-file summary, known gaps, and next graph owner; use request_qa_review only when the active graph includes QA."
 
 
 def _environment_fingerprint_status(ctx: AgentContext) -> str:

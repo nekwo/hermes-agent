@@ -506,12 +506,12 @@ def _repair_hint_for_message(message: str) -> dict[str, Any]:
         return {
             "invalid_field": "delivery.work_status",
             "allowed_values": ["proof_requested", "ready_for_qa"],
-            "shape_hint": "Use proof_requested with request_test_run and ready_for_qa with request_qa_review.",
+            "shape_hint": "Use proof_requested with request_test_run. Use ready_for_qa/request_qa_review only when the active graph includes a QA/verifier node.",
         }
     if "proof_ids" in text:
         return {
             "invalid_field": "payload.proof_ids",
-            "shape_hint": "Attach only existing passed proof IDs when handing implementation to QA; if proof is missing, request_test_run instead of request_qa_review or propose_patch.",
+            "shape_hint": "Attach only existing passed proof IDs when handing implementation to QA, and do that only when the active graph includes QA; if proof is missing, request_test_run instead of request_qa_review or propose_patch.",
         }
     if "recipe_id" in text:
         return {
@@ -1153,11 +1153,18 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
                 "stage_id": stage_id,
                 "recommended_payload_keys": payload_contract("propose_acceptance")["allowed_payload_keys"],
             }
-        if state == "dev_ready_for_qa":
+        if state == "dev_ready_for_qa" and _task_has_qa_stage(task):
             return {
                 "decision_type": "propose_acceptance",
                 "shape_id": "neko.qa_coordination_release",
                 "reason": "Dev is ready; join proof IDs and release QA only if required proof is attached.",
+                "stage_id": stage_id,
+            }
+        if state == "dev_ready_for_qa":
+            return {
+                "decision_type": "propose_acceptance",
+                "shape_id": "neko.scoped_handoff",
+                "reason": "Dev is ready, but the active graph has no QA/verifier node; release the next graph stage or let the Harness close.",
                 "stage_id": stage_id,
             }
         if state in {"created", "pm_triage", "pm_ready_for_dev", "blocked"}:
@@ -1443,6 +1450,17 @@ def _diagnostic_persona(task: Task) -> str | None:
         if text.startswith(prefix):
             return text[len(prefix) :].strip() or None
     return None
+
+
+def _task_has_qa_stage(task: Task) -> bool:
+    for stage in task_stage_records(task):
+        owner = str(getattr(stage, "owner", "") or getattr(stage, "owner_slot", "") or "").strip()
+        owner_slot = str(getattr(stage, "owner_slot", "") or "").strip()
+        kind = str(getattr(stage, "kind", "") or "").strip()
+        legacy_label = f"{getattr(stage, 'id', '')} {getattr(stage, 'title', '')}".lower()
+        if owner == "qa" or owner_slot == "qa" or kind == "qa_verdict" or "qa" in legacy_label:
+            return True
+    return False
 
 
 def _neko_diagnostic_ack_payload(task: Task) -> dict[str, Any]:

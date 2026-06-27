@@ -14,8 +14,12 @@ def test_no_model_smoke_runs_in_temp_root_and_finishes_done(monkeypatch):
     assert result["first_action"] == "run_slot"
     assert result["final_action"] == "complete_task"
     assert result["final_state"] == "done"
-    assert result["transitions"] == ["neko_supervisor:propose_acceptance", "dev:propose_patch", "qa:report_qa_verdict"]
-    assert result["proof_ids"] == ["proof_smoke_test", "proof_smoke_qa"]
+    assert result["transitions"] == [
+        "neko_supervisor:propose_acceptance",
+        "backend_dev:propose_patch",
+        "dev:propose_patch",
+    ]
+    assert result["proof_ids"] == ["proof_smoke_backend", "proof_smoke_launcher"]
 
 
 def test_no_model_smoke_restores_runtime_root_when_smoke_fails(monkeypatch):

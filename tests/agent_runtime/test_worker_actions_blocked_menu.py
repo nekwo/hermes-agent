@@ -1,8 +1,10 @@
 from hermes_time import now
 
+from agent_runtime.default_plan import ensure_default_mission_plan
 from agent_runtime.models import AgentRun, Task
 from agent_runtime.runtime_config import NormalWorkerFlowConfig, RuntimeConfig
-from agent_runtime.states import RunState, TaskState
+from agent_runtime.models import TaskStage
+from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.worker_actions import worker_actions_for_role
 
 
@@ -17,6 +19,19 @@ def make_blocked_task(open_incident_ids=None):
         updated_at=ts,
         requested_by="tony",
         open_incident_ids=list(open_incident_ids or []),
+    )
+
+
+def make_running_task():
+    ts = now()
+    return Task(
+        id="task_running",
+        title="Running mission",
+        description="d",
+        state=TaskState.RUNNING,
+        created_at=ts,
+        updated_at=ts,
+        requested_by="tony",
     )
 
 
@@ -53,3 +68,31 @@ def test_blocked_without_open_incident_offers_rescope_not_resolve_incident():
     assert "neko.resolve_incident" not in shape_ids
     primary = next(action for action in actions if action.primary)
     assert primary.shape_id == "neko.scoped_handoff"
+
+
+def test_running_default_graph_neko_menu_does_not_offer_qa_release():
+    task = make_running_task()
+    ensure_default_mission_plan(task)
+
+    actions = worker_actions_for_role("neko_supervisor", task, make_neko_run(), config=normal_flow_config())
+
+    primary = next(action for action in actions if action.primary)
+    assert primary.shape_id == "neko.scoped_handoff"
+    assert primary.label == "Release Stage"
+
+
+def test_running_graph_with_qa_stage_neko_menu_can_offer_qa_release():
+    task = make_running_task()
+    task.stages.append(
+        TaskStage(
+            id="qa_release",
+            title="QA Release",
+            objective="Verify proof.",
+            status=StageStatus.READY,
+        )
+    )
+
+    actions = worker_actions_for_role("neko_supervisor", task, make_neko_run(), config=normal_flow_config())
+
+    primary = next(action for action in actions if action.primary)
+    assert primary.shape_id == "neko.qa_coordination_release"

@@ -761,13 +761,13 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
             "# Stage Ownership and Handoff\n"
             "Act like an accountable teammate, not a stateless robot. Know your role, current task state, current stage, available proof_ids, and the next owner. "
             "A stage is complete only when your payload says what you finished, what proof_ids support it, known gaps, and who receives the handoff. "
-            "PM/Neko hands scoped work to Dev. Dev notifies Neko for QA coordination by requesting QA review only with real proof_ids and handoff.to=qa; the Harness routes dev_ready_for_qa through Neko before QA in the multi-Dev specialist model. "
-            "QA approves implementation only after reviewing proof_ids and attaching/verifying an implementation verdict; otherwise request tests/fixes or block with exact gaps. "
+            "PM/Neko hands scoped work to the graph-selected Dev specialist. Dev completes the current stage with real proof_ids and hands off to the next graph owner; request QA review only when the active blueprint includes a QA/verifier stage. "
+            "When QA is present, QA approves implementation only after reviewing proof_ids and attaching/verifying an implementation verdict; otherwise request tests/fixes or block with exact gaps. "
             "If you discover a repeated workflow failure, report it as a Harness/skill intervention rather than looping.",
             f"# AgentDecision JSON Schema\n```json\n{compact_schema}\n```",
             f"# AgentDecision Payload Contracts\n{payload_contracts}\n"
             "Use `recipe_id` when the Autonomy packet lists a matching `available_proof_recipes` entry; then omit commands and let the Harness supply the exact recipe commands, sandbox, dirty-check, marker checks, and proof metadata. "
-            "After Harness attaches command proof IDs, hand off to QA with those existing proof_ids. "
+            "After Harness attaches command proof IDs, hand off to the next graph owner with those existing proof_ids; use QA only when the active blueprint includes a QA/verifier node. "
             "Before blocking, inspect/grep your own run or event logs, keep the reason brief, and point at the redaction-safe log line number that proves the blocker. "
             "If a previous decision parse failed, fix the exact missing/invalid key named in the repair context.",
         ]
@@ -830,7 +830,7 @@ def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
         return (
             "# Normal Worker Flow Neko\n"
             "Prefer same-worker repair over spawning new work. Wait/request-human only at kickoff or for true human/safety blockers. "
-            "Route by attached evidence, failed proof IDs, and worker HUD state; release QA only after final gate proof is attached."
+            "Route by attached evidence, failed proof IDs, and worker HUD state; release QA only when the active graph includes QA and final gate proof is attached."
         )
     return ""
 
