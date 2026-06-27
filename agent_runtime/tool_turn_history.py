@@ -41,10 +41,9 @@ def persist_tool_turn_actual(
         "turn_id": _safe_token(turn_id),
         "enabled_toolsets": list(model_input.get("enabled_toolsets") or []),
         "disabled_toolsets": list(model_input.get("disabled_toolsets") or []),
-        "blocked_tool_names": list(model_input.get("blocked_tool_names") or []),
         "final_model_tools": list(tool_schema.get("final_model_tools") or []),
         "tool_count": int(tool_schema.get("tool_count") or 0),
-        "tool_schema": tool_schema,
+        "tool_schema": _safe_tool_schema(tool_schema),
     }
     history = [entry, *list(payload.get("history") or [])]
     payload = {
@@ -108,6 +107,12 @@ def _read_history(path) -> dict[str, Any]:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _safe_tool_schema(value: dict[str, Any]) -> dict[str, Any]:
+    schema = dict(value)
+    schema.pop("blocked_tool_names", None)
+    return schema
 
 
 def _safe_token(value: object) -> str | None:

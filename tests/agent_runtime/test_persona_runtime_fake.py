@@ -185,9 +185,18 @@ def test_chat_reply_routes_tool_calls_into_session_keyed_trace(tmp_path, monkeyp
         default_provider="openai-codex", default_model="gpt-5.5", agent_factory=ToolCallingAgent
     )
 
-    runtime.chat_reply(neko, "run echo PARITY_OK_2026 and paste the output", session_id=session_id)
+    pre_trace = []
+    runtime.chat_reply(
+        neko,
+        "run echo PARITY_OK_2026 and paste the output",
+        session_id=session_id,
+        pre_trace_callback=pre_trace.append,
+    )
 
     events = EventLog().for_session(session_id)
+    assert len(pre_trace) == 1
+    assert pre_trace[0]["type"] == "run.tool.started"
+    assert pre_trace[0]["tool_name"] == "terminal"
     assert [event.type for event in events] == ["run.tool.started", "run.tool.finished"]
     assert all(event.session_id == session_id for event in events)
     assert all(event.task_id is None for event in events)

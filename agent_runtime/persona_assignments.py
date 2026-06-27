@@ -410,14 +410,23 @@ class PersonaInstanceStore:
             existing = None
         if existing is not None and existing.persona_id != normalized_persona:
             raise ValueError(f"placement already belongs to {existing.persona_id}: {normalized_placement}")
+        normalized_session = safe_assignment_text(session_id, limit=200) if session_id is not None else None
+        if normalized_session and self._session_owned_by_other_instance(normalized_session, instance_id):
+            normalized_session = None
         return self.open_chat(
             persona_id=normalized_persona,
             persona_instance_id=instance_id,
-            session_id=session_id or persona_chat_session_id_for(instance_id),
+            session_id=normalized_session or persona_chat_session_id_for(instance_id),
             display_name=display_name,
             profile_id=_profile_id_for_persona_or_template(normalized_persona),
             kill_active=False,
         )
+
+    def _session_owned_by_other_instance(self, session_id: str, instance_id: str) -> bool:
+        for instance in self.list_all():
+            if instance.id != instance_id and instance.session_id == session_id:
+                return True
+        return False
 
     def _guard_or_replace_chat(self, instance: PersonaInstance, *, kill_active: bool) -> None:
         active_run_id, active_worker_session_id = _live_chat_bindings(instance)
@@ -816,12 +825,17 @@ def persona_assignment_store_enabled(config) -> bool:
 
 def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | None = None) -> dict[str, Any]:
     state = instance.state.value if hasattr(instance.state, "value") else str(instance.state)
-    profile_id = instance.profile_id or getattr(persona, "hermes_profile", None)
-    skills = list(instance.skill_overrides) if instance.skill_overrides is not None else list(getattr(persona, "skills", []) or [])
+    visibility_persona = persona or _profile_visibility_persona(instance)
+    profile_id = instance.profile_id or getattr(visibility_persona, "hermes_profile", None)
+    skills = (
+        list(instance.skill_overrides)
+        if instance.skill_overrides is not None
+        else list(getattr(visibility_persona, "skills", []) or [])
+    )
     tool_options = None
-    if persona is not None:
+    if visibility_persona is not None:
         tool_options = permission_options_for_chat(
-            persona,
+            visibility_persona,
             session_id=instance.session_id,
             task_id=instance.current_task_id,
             goal_id=instance.goal_id,
@@ -841,7 +855,7 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "repo_scope_label": getattr(persona, "repo_scope_label", None),
         "skills": skills,
         "skill_overrides": list(instance.skill_overrides) if instance.skill_overrides is not None else None,
-        "toolsets": list(getattr(persona, "toolsets", []) or []),
+        "toolsets": list(getattr(visibility_persona, "toolsets", []) or []),
         "runtime_root": instance.runtime_root,
         "state": state,
         "lifecycle_mode": instance.mode,
@@ -867,15 +881,39 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "last_heartbeat_at": instance.last_heartbeat_at,
         "updated_at": instance.updated_at,
     }
-    if persona is not None:
-        summary["tool_resolution"] = resolve_tool_visibility(persona, tool_options)
-        summary["turn_tool_context"] = turn_tool_context_for_persona(persona, tool_options)
-        summary["permission_state"] = permission_state_for_persona(persona, tool_options)
-        summary["agent_hud_state"] = agent_hud_state_for_persona(persona, tool_options)
+    if visibility_persona is not None:
+        summary["tool_resolution"] = resolve_tool_visibility(visibility_persona, tool_options)
+        summary["turn_tool_context"] = turn_tool_context_for_persona(visibility_persona, tool_options)
+        summary["permission_state"] = permission_state_for_persona(visibility_persona, tool_options)
+        summary["agent_hud_state"] = agent_hud_state_for_persona(visibility_persona, tool_options)
         summary["blocked_tools"] = summary["tool_resolution"]["blocked_tools"]
         summary["blocked_tools_count"] = len(summary["blocked_tools"])
         summary["effective_toolsets"] = summary["tool_resolution"]["effective_toolsets"]
     return summary
+
+
+def _profile_visibility_persona(instance: PersonaInstance) -> AgentPersona | None:
+    profile_id = (instance.profile_id or "").strip()
+    persona_id = (instance.persona_id or "").strip()
+    if not profile_id and not persona_id.lower().startswith("profile:"):
+        return None
+    if not profile_id and persona_id.lower().startswith("profile:"):
+        profile_id = persona_id.split(":", 1)[1].strip()
+    resolved_persona_id = persona_id or (f"profile:{profile_id}" if profile_id else "profile:unknown")
+    display_name = instance.display_name or _display_name_for_template(profile_id or resolved_persona_id)
+    return AgentPersona(
+        id=resolved_persona_id,
+        display_name=display_name,
+        role="alice_supervisor",
+        model=None,
+        provider=None,
+        api_mode="codex_responses",
+        toolsets=["file", "search", "session_search", "todo", "skills"],
+        system_prompt_path="",
+        autonomy="propose_only",
+        hermes_profile=profile_id or None,
+        skills=list(instance.skill_overrides or []),
+    )
 
 
 def persona_assignment_summary(assignment: PersonaAssignment) -> dict[str, Any]:

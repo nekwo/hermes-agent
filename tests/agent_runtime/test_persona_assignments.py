@@ -13,7 +13,7 @@ from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
-from agent_runtime.models import AgentPersona, Proof, Task
+from agent_runtime.models import AgentPersona, PersonaInstance, Proof, Task
 from agent_runtime.persona_assignments import (
     ChatBusyError,
     PersonaAssignmentSpec,
@@ -21,6 +21,7 @@ from agent_runtime.persona_assignments import (
     PersonaInstanceStore,
     persona_instance_summary,
     persona_instance_id_for,
+    persona_instance_id_for_placement,
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
 from agent_runtime.proof_rules import ProofType
@@ -276,6 +277,25 @@ def test_operator_chat_history_binds_by_unique_session(isolate_agent_runtime_roo
     assert messages_by_session[first.session_id] == ["first only"]
     assert messages_by_session[second.session_id] == ["second only"]
     assert {row["persona_instance_id"] for row in rows if row["messages"]} == {first.id}
+
+
+def test_additional_placement_does_not_reuse_another_instance_session(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    profile = store.create_operator_chat(
+        persona_id="profile:alice",
+        display_name="Alice Agent",
+    )
+
+    placed = store.add_instance(
+        persona_id="profile:alice",
+        placement_id="operator_2c1f1de674e74942",
+        display_name="Alice Agent",
+        session_id=profile.session_id,
+    )
+
+    assert placed.id == persona_instance_id_for_placement("operator_2c1f1de674e74942")
+    assert placed.session_id != profile.session_id
+    assert placed.session_id.startswith(f"persona_chat_{placed.id}_")
 
 
 def test_assignment_store_create_or_resume_uses_signal_hash(isolate_agent_runtime_root):
@@ -1862,6 +1882,80 @@ def test_mission_chat_message_replays_duplicate_client_message_id(
     assert replay["reply"] == "Recovered canonical reply."
 
 
+def test_mission_chat_message_persists_pre_trace_ack_before_final_reply(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            kwargs["pre_trace_callback"](
+                {
+                    "type": "run.tool.started",
+                    "phase": "tool",
+                    "step": "tool_started",
+                    "status": "started",
+                    "tool_name": "skill_view",
+                }
+            )
+            return SimpleNamespace(
+                final_response="The guidance is loaded; this is the right place.",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                api_calls=1,
+                model="gpt-test",
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="is that a good place to do it",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_pre_trace_1",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    messages = db.messages["persona_chat_personainst_dev"]
+    assert [item["role"] for item in messages] == [
+        "user",
+        "assistant",
+        "assistant",
+    ]
+    assert messages[1]["content"] == (
+        "I'll load the relevant guidance first, then report back with the useful part."
+    )
+    assert messages[2]["content"] == "The guidance is loaded; this is the right place."
+    assert messages[1].get("platform_message_id") is None
+    assert messages[2].get("platform_message_id") == "client_pre_trace_1"
+
+
 def test_persona_chat_auto_title_waits_for_session_title_write(monkeypatch, isolate_agent_runtime_root):
     from hermes_cli import harness
 
@@ -2101,6 +2195,29 @@ def test_run_slot_spawns_attributed_persona_instance(isolate_agent_runtime_root)
     summary = persona_instance_summary(instance)
     assert summary["goal_id"] == task.id
     assert summary["spawned_by"] == "neko_supervisor"
+
+
+def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent_runtime_root):
+    instance = PersonaInstance(
+        id="personainst_profile_alice",
+        persona_id="profile:alice",
+        role="profile",
+        display_name="Alice Agent",
+        profile_id="alice",
+        runtime_root=str(REPO_ROOT),
+        state=WorkerSessionState.IDLE,
+        mode="chat",
+        session_id="persona_chat_personainst_profile_alice_e898c1dc3794",
+    )
+
+    summary = persona_instance_summary(instance)
+
+    assert summary["tool_resolution"]["persona_id"] == "profile:alice"
+    assert summary["turn_tool_context"]["persona_id"] == "profile:alice"
+    assert "read_file" in summary["tool_resolution"]["final_model_tools"]
+    assert "send_message" in summary["tool_resolution"]["blocked_tool_names"]
+    assert summary["permission_state"]["mode"] == "profile_default"
+    assert summary["agent_hud_state"]["tool_count"] == len(summary["tool_resolution"]["final_model_tools"])
 
 
 def test_tick_observe_only_links_assignment_to_run_and_worker(monkeypatch, isolate_agent_runtime_root):

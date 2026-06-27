@@ -168,6 +168,7 @@ class GPTPersonaRuntime:
         max_api_calls: int | None = 8,
         max_total_tokens: int | None = None,
         stream_callback: Callable[[str | None], None] | None = None,
+        pre_trace_callback: Callable[[dict], None] | None = None,
     ) -> AgentRunResult:
         """Run one plain conversational turn for an operator persona chat.
 
@@ -209,7 +210,11 @@ class GPTPersonaRuntime:
                 user_message=message,
                 system_message=_persona_chat_system_prompt(persona),
                 stream_callback=stream_callback,
-                progress_callback=_chat_trace_callback(session_id=session_id, persona=persona),
+                progress_callback=_chat_trace_callback(
+                    session_id=session_id,
+                    persona=persona,
+                    before_first_trace=pre_trace_callback,
+                ),
                 runtime_root=paths.store_root(),
             )
         )
@@ -228,6 +233,7 @@ class GPTPersonaRuntime:
         max_api_calls: int | None = 8,
         max_total_tokens: int | None = None,
         stream_callback: Callable[[str | None], None] | None = None,
+        pre_trace_callback: Callable[[dict], None] | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -283,7 +289,11 @@ class GPTPersonaRuntime:
                 # session_id=None (the transcript is already baked into the
                 # message) but the permission/session lineage lives on
                 # perm_session_id, which is also the persona instance's session.
-                progress_callback=_chat_trace_callback(session_id=perm_session_id, persona=persona),
+                progress_callback=_chat_trace_callback(
+                    session_id=perm_session_id,
+                    persona=persona,
+                    before_first_trace=pre_trace_callback,
+                ),
                 runtime_root=paths.store_root(),
             )
         )
@@ -306,6 +316,7 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         f"{_persona_chat_voice(role, display)} "
         "Voice: warm, plain text, teammate-tight. Lead with the answer; skip preamble, filler, and restating the question. "
         "A sentence or two is usually enough — only go longer when the operator clearly wants depth. "
+        "If you need tools, acknowledge the action first in one short sentence, then use the tools, then report the result. "
         "You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
         "change state — actually use your tools and report the real result. The operator's current permission grant is the "
         "only gate on what you can do; there is no separate 'hand it off first' step. "
@@ -355,6 +366,7 @@ def _mission_chat_operative_rules() -> str:
     return (
         "Mission Control operator-chat rules (these govern this live operator channel):\n"
         "- You are talking directly to your operator — a trusted teammate, not an end user.\n"
+        "- If you need tools, acknowledge the action first in one short sentence, then use the tools, then report the result.\n"
         "- You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
         "change state — actually use your tools and report the real result. The operator's current permission grant is the "
         "only gate on what you can do; there is no separate 'hand it off first' step.\n"
@@ -459,7 +471,10 @@ def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | Non
 
 
 def _chat_trace_callback(
-    *, session_id: str | None, persona: AgentPersona
+    *,
+    session_id: str | None,
+    persona: AgentPersona,
+    before_first_trace: Callable[[dict], None] | None = None,
 ) -> Callable[[dict], None] | None:
     """Build a runner ``progress_callback`` that records a chat turn's tool
     calls as redaction-safe trace events keyed on the chat session.
@@ -471,7 +486,11 @@ def _chat_trace_callback(
 
     if not session_id:
         return None
-    sink = ChatProgressSink(session_id=session_id, persona_id=getattr(persona, "id", None))
+    sink = ChatProgressSink(
+        session_id=session_id,
+        persona_id=getattr(persona, "id", None),
+        before_first_trace=before_first_trace,
+    )
     return sink.callback()
 
 

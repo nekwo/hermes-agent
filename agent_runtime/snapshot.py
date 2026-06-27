@@ -22,6 +22,7 @@ from .events import CachedEventLog, EventLog
 from .migrations import effective_config_summary, migration_status
 from .mission_plan import mission_plan_summary, task_stage_records
 from .observability import build_observability
+from .operator_channels import operator_channel_summary
 from .persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
     PersonaAssignmentStore,
@@ -233,6 +234,11 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=trace_accountant,
         )
+        data["operator_channels"] = operator_channel_summary(
+            persona_instances=persona_instances,
+            persona_chat_history=data["persona_chat_history"],
+            persona_chat_trace=data["persona_chat_trace"],
+        )
         data["persona_assignments"] = {
             "active": [persona_assignment_summary(item) for item in persona_assignments if item.state in ACTIVE_ASSIGNMENT_STATES],
             "recent": [persona_assignment_summary(item) for item in persona_assignments[-50:]],
@@ -312,6 +318,37 @@ def _parity_warnings(data) -> list[dict]:
                     "detail": "trace row has no matching persona_instance; the launcher may orphan it",
                 }
             )
+
+    channels = data.get("operator_channels")
+    if channels is None:
+        warnings.append(
+            {
+                "code": "operator_channels_missing",
+                "detail": "persona runtime is enabled but the Agent Console channel projection is absent",
+            }
+        )
+    elif not isinstance(channels, list):
+        warnings.append(
+            {
+                "code": "operator_channels_invalid",
+                "detail": "operator_channels must be a list; Launcher Agent Console cannot render this snapshot",
+            }
+        )
+    else:
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
+            for warning in channel.get("warnings") or []:
+                if not isinstance(warning, dict):
+                    continue
+                code = str(warning.get("code") or "operator_channel_warning")
+                warnings.append(
+                    {
+                        "code": f"operator_channel.{code}",
+                        "entity_id": channel.get("channel_id"),
+                        "detail": warning.get("detail") or "operator channel projection warning",
+                    }
+                )
 
     summary = data.get("summary") or {}
     if (summary.get("open_tasks") or 0) > 0 and not (data.get("tasks")):

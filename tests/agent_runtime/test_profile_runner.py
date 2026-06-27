@@ -113,9 +113,10 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
     assert result.raw["profile_timing"] == result.profile_timing
     model_input = result.raw["model_input_observability"]
     assert model_input["enabled_toolsets"] == ["terminal"]
-    assert model_input["blocked_tool_names"] == ["send_message"]
     assert model_input["tool_schema"]["final_model_tools"] == ["terminal"]
     assert model_input["tool_schema"]["tool_count"] == 1
+    assert "blocked_tool_names" not in model_input
+    assert "blocked_tool_names" not in model_input["tool_schema"]
     assert [
         event["timing_key"]
         for event in progress_events

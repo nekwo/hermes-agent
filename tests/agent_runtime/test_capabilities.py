@@ -74,7 +74,7 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
         assert attachment_schema["type"] == "array"
         assert attachment_schema["items"]["required"] == ["kind", "mime", "uri"]
         assert attachment_schema["items"]["properties"]["kind"]["enum"] == ["image", "video", "file"]
-    assert by_id["persona.instance.open_chat"]["args_schema"]["required"] == ["persona_id", "session_id"]
+    assert by_id["persona.instance.open_chat"]["args_schema"]["required"] == ["persona_id"]
     assert "attachments" not in by_id["worker.nudge"].get("allowed_args", [])
 
 

@@ -93,7 +93,7 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "label": "Open Chat",
         "group": "lifecycle",
         "execution_semantics": "control_state_change",
-        "required_args": ["persona_id", "session_id"],
+        "required_args": ["persona_id"],
         "allowed_args": [
             "add_instance",
             "coordinator_id",
@@ -105,6 +105,7 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
             "kill_active",
             "placement_id",
             "requested_by",
+            "session_id",
         ],
         "danger": "warning",
     },

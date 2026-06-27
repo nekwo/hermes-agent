@@ -396,7 +396,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.set_defaults(func=_cmd_persona_instance_create)
     persona_instance_open = persona_instance_subs.add_parser("open-chat", help="Bind a persona instance to a durable chat session without ticking")
     persona_instance_open.add_argument("--persona", dest="persona_id", required=True)
-    persona_instance_open.add_argument("--session-id", required=True)
+    persona_instance_open.add_argument("--session-id", default=None)
     persona_instance_open.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_open.add_argument("--add-instance", action="store_true", help="Open the chat on an additional placement-backed instance")
     persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
@@ -1264,6 +1264,10 @@ def _cmd_persona_instance_open_chat(args) -> int:
             )
             instance = _maybe_stamp_spawned_by(instance, coordinator_id=coordinator_id)
         else:
+            if not safe_assignment_text(getattr(args, "session_id", None), limit=200):
+                data = {"ok": False, "error": "session_id is required unless add_instance is true"}
+                print(emit_json(data) if args.json else data["error"])
+                return 2
             instance = PersonaInstanceStore().open_chat(
                 persona_id=persona_id,
                 session_id=args.session_id,
@@ -1696,6 +1700,11 @@ def _cmd_mission_chat_message(args) -> int:
             surface_prompt=getattr(args, "surface_prompt", "") or "",
             max_wall_seconds=getattr(args, "max_seconds", 240.0),
             stream_callback=_emit_chat_delta if getattr(args, "stream", False) else None,
+            pre_trace_callback=lambda payload: _append_persona_pre_trace_ack(
+                session_db=session_db,
+                session_id=session_id,
+                trace_payload=payload,
+            ),
         )
         prompt_context = {
             **prompt_context,
@@ -2504,6 +2513,41 @@ def _append_persona_assistant_text(
         )
     except Exception:
         return
+
+
+def _append_persona_pre_trace_ack(
+    *,
+    session_db,
+    session_id: str,
+    trace_payload: dict,
+) -> None:
+    text = _persona_pre_trace_ack_text(trace_payload)
+    _append_persona_assistant_text(
+        session_db=session_db,
+        session_id=session_id,
+        text=text,
+        client_message_id=None,
+    )
+
+
+def _persona_pre_trace_ack_text(trace_payload: dict) -> str:
+    tool_name = safe_assignment_token(
+        trace_payload.get("tool_name") or trace_payload.get("tool")
+    )
+    command_label = safe_assignment_text(
+        trace_payload.get("command_label"), limit=160
+    )
+    if tool_name in {"skill_view", "skills_list", "skill_search"}:
+        return "I'll load the relevant guidance first, then report back with the useful part."
+    if tool_name in {"terminal", "shell_command", "execute_code"}:
+        if command_label:
+            return f"I'll run `{command_label}` now, then report back with the result."
+        return "I'll run the check now, then report back with the result."
+    if tool_name in {"read_file", "search_files", "find_files", "session_search"}:
+        return "I'll inspect the relevant context now, then report back with what I find."
+    if tool_name in {"mission_goal_create", "mission_goal"}:
+        return "I'll create the real Mission Control goal now, then report back with the task details."
+    return "I'll check that now and report back with what I find."
 
 
 def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:
