@@ -51,10 +51,16 @@ class GPTPersonaRuntime:
         session_db=None,
         agent_factory=None,
         agent_runner: ProfileAgentRunner | None = None,
+        persist_agent_session: bool = True,
     ):
         self._default_provider = default_provider
         self._default_model = default_model
-        self._runner = agent_runner or ProfileAgentRunner(agent_factory=agent_factory, credential_pool=credential_pool, session_db=session_db)
+        runner_session_db = session_db if persist_agent_session else None
+        self._runner = agent_runner or ProfileAgentRunner(
+            agent_factory=agent_factory,
+            credential_pool=credential_pool,
+            session_db=runner_session_db,
+        )
 
     def run_tick(self, persona: AgentPersona, ctx: AgentContext, *, run: AgentRun) -> AgentDecision:
         first_error: DecisionPayloadInvalid | None = None
@@ -178,13 +184,10 @@ class GPTPersonaRuntime:
         chat-first path — the harness task/decision machinery only engages when
         the operator explicitly asks for work.
 
-        Recall: when the runtime is constructed with a ``session_db`` the agent
-        can ``session_search`` the operator's prior (redaction-safe) persona
-        chats and prefetch its durable memory. The agent's own scratch turns
-        are persisted under :data:`PERSONA_CHAT_SCRATCH_SOURCE`, which is hidden
-        from recall, so this never double-writes the curated operator transcript
-        (the caller owns the redacted canonical writes) and never leaks an
-        unredacted copy back into recall.
+        The Harness caller owns the redacted canonical transcript. Live
+        operator-chat paths should construct this runtime with
+        ``persist_agent_session=False`` so the internal model run cannot create
+        a private scratch session that later needs copy-back reconciliation.
         """
 
         binding = resolve_persona_profile(persona)

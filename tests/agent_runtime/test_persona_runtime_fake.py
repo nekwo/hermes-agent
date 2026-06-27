@@ -161,6 +161,25 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
     assert fake.kwargs["blocked_tool_names"] == []
 
 
+def test_chat_reply_can_disable_internal_session_persistence(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    FakeAIAgent.instances.clear()
+    session_db = object()
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex",
+        default_model="gpt-5.5",
+        agent_factory=FakeAIAgent,
+        session_db=session_db,
+        persist_agent_session=False,
+    )
+
+    runtime.chat_reply(neko, "hi", session_id=None)
+
+    fake = FakeAIAgent.instances[0]
+    assert fake.kwargs["session_db"] is None
+
+
 def test_chat_reply_routes_tool_calls_into_session_keyed_trace(tmp_path, monkeypatch):
     # End-to-end through the REAL ProfileAgentRunner: a chat turn that invokes a
     # tool must land redaction-safe run.tool.* events keyed on the chat session,

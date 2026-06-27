@@ -1690,6 +1690,7 @@ def _cmd_mission_chat_message(args) -> int:
             default_provider=cfg.default_provider,
             default_model=cfg.default_model,
             session_db=session_db,
+            persist_agent_session=False,
         ).mission_chat_reply(
             persona,
             chat_message,
@@ -2727,16 +2728,14 @@ def _run_free_floating_assignment_once(
         message=message,
     )
     try:
-        # Wire the shared SessionDB so the agent gets real recall (session_search
-        # over prior redaction-safe persona chats + durable memory prefetch). The
-        # agent runs on its own ephemeral scratch session (session_id=None) under
-        # the hidden PERSONA_CHAT_SCRATCH_SOURCE, so this never double-writes the
-        # curated operator transcript we persist below and never leaks an
-        # unredacted copy back into recall.
+        # Keep the model run out of SessionDB. The canonical operator transcript
+        # is written below; persisting the internal run as a second hidden
+        # session creates orphaned final answers when copy-back is interrupted.
         chat_result = GPTPersonaRuntime(
             default_provider=cfg.default_provider,
             default_model=cfg.default_model,
             session_db=session_db,
+            persist_agent_session=False,
         ).chat_reply(
             persona,
             chat_message,

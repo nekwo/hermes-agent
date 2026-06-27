@@ -1658,8 +1658,10 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
     )
 
     assert code == 0
-    # Recall is wired: the runtime received the shared SessionDB.
+    # The visible transcript is the only persisted operator-chat ledger; the
+    # model run must not create a hidden scratch SessionDB row.
     assert captured["runtime_kwargs"].get("session_db") is db
+    assert captured["runtime_kwargs"].get("persist_agent_session") is False
     # Chat-first path: no decision contract, the agent saw the raw operator text.
     assert "hey, how are you" in captured["chat_message"]
 
@@ -1724,6 +1726,7 @@ def test_profile_backed_operator_chat_auto_run_resolves_profile_persona(monkeypa
 
     assert code == 0
     assert captured["runtime_kwargs"].get("session_db") is db
+    assert captured["runtime_kwargs"].get("persist_agent_session") is False
     assert captured["persona"].id == "profile:alice"
     assert captured["persona"].hermes_profile == "alice"
     assert captured["persona"].include_profile_memory is True
