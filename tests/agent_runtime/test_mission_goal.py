@@ -1,8 +1,41 @@
 import json
 
-from agent_runtime.mission_goal import create_mission_goal
+import agent_runtime.mission_goal as mission_goal_mod
+from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
 from agent_runtime.store import TaskStore
 from tools.mission_goal_tool import mission_goal_create
+
+
+def _canonical_request(**overrides):
+    request = {
+        "schema_version": 1,
+        "idempotency_key": "perm-key",
+        "source_surface": "mission_control",
+        "operator": {"operator_id": "tony", "session_id": "s"},
+        "goal": {"title": "T", "description": "D"},
+        "blueprint": {"requested_blueprint_id": "neko_dev_qa_basic", "selection_mode": "explicit"},
+    }
+    request.update(overrides)
+    return request
+
+
+def test_create_from_request_denies_unattributed_mission_control_goal(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    result = create_mission_goal_from_request(_canonical_request(operator={}))
+    assert result["error"]["code"] == "permission_denied"
+    assert result["error"]["retryable"] is False
+
+
+def test_create_surfaces_runtime_unavailable_when_runtime_prep_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("runtime down")
+
+    monkeypatch.setattr(mission_goal_mod, "prepare_new_goal_runtime", _boom)
+    result = create_mission_goal(title="T", description="D", start_daemon_mode=False)
+    assert result["error"]["code"] == "runtime_unavailable"
+    assert result["error"]["retryable"] is True
 
 
 def test_create_mission_goal_creates_real_task_without_daemon(tmp_path, monkeypatch):
@@ -24,6 +57,74 @@ def test_create_mission_goal_creates_real_task_without_daemon(tmp_path, monkeypa
     # New-goal hygiene ran (same payload shape the CLI emits).
     assert "new_goal_hygiene" in data
     assert "foreground_runtime" in data
+
+
+def test_create_mission_goal_accepts_canonical_stage38_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    data = create_mission_goal(
+        title="Stage 38 contract",
+        description="Create a graph-routed Neko mission.",
+        requested_by="tony",
+        start_daemon_mode=False,
+        idempotency_key="stage38-key",
+        source_surface="mission_control",
+        operator={"operator_id": "tony", "session_id": "launcher-session"},
+        acceptance_criteria=["Neko, Dev, and QA are visible."],
+        proof_expectations=["snapshot projection"],
+        requested_blueprint_id="neko_dev_qa_basic",
+        blueprint_selection_mode="explicit",
+        repo_scope=["hermes-agent"],
+    )
+
+    assert data["schema_version"] == 1
+    assert data["state"] == "created"
+    assert data["mission_id"] == data["task_id"]
+    assert data["blueprint_id"] == "neko_dev_qa_basic"
+    task = TaskStore().get(data["task_id"])
+    assert task.mission_plan.blueprint_id == "neko_dev_qa_basic"
+    assert [stage.owner for stage in task.mission_plan.stages] == [
+        "neko_supervisor",
+        "dev",
+        "qa",
+    ]
+
+    duplicate = create_mission_goal(
+        title="Stage 38 contract",
+        description="Create a graph-routed Neko mission.",
+        requested_by="tony",
+        start_daemon_mode=False,
+        idempotency_key="stage38-key",
+        source_surface="mission_control",
+        operator={"operator_id": "tony", "session_id": "launcher-session"},
+        acceptance_criteria=["Neko, Dev, and QA are visible."],
+        proof_expectations=["snapshot projection"],
+        requested_blueprint_id="neko_dev_qa_basic",
+        blueprint_selection_mode="explicit",
+        repo_scope=["hermes-agent"],
+    )
+
+    assert duplicate["state"] == "already_created"
+    assert duplicate["task_id"] == data["task_id"]
+
+
+def test_create_mission_goal_rejects_idempotency_conflict(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    create_mission_goal(
+        title="Stage 38 contract",
+        description="Create a graph-routed Neko mission.",
+        start_daemon_mode=False,
+        idempotency_key="stage38-key",
+    )
+    conflict = create_mission_goal(
+        title="Different contract",
+        description="Same key, different content.",
+        start_daemon_mode=False,
+        idempotency_key="stage38-key",
+    )
+
+    assert conflict["error"]["code"] == "duplicate_conflict"
 
 
 def test_mission_goal_create_tool_returns_real_task_id(tmp_path, monkeypatch):

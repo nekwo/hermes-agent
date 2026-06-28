@@ -661,6 +661,9 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
         payload["command_label"] = command_label
         if tool_name:
             payload["summary"] = f"Started tool {tool_name}: {command_label}"
+    command_full = _safe_operator_command(invocation)
+    if command_full:
+        payload["command_full"] = command_full
     return payload
 
 
@@ -690,6 +693,12 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
     command_label = _safe_command_label(invocation)
     if command_label:
         payload["command_label"] = command_label
+    command_full = _safe_operator_command(invocation)
+    if command_full:
+        payload["command_full"] = command_full
+    output = _safe_operator_output(tool_name, result)
+    if output:
+        payload["output"] = output
     return payload
 
 
@@ -766,6 +775,100 @@ def _safe_command_label(invocation: Any) -> str | None:
     if re.search(r"(^|\s)([A-Za-z]:/|//|/home/|/users/|/x/|/c/|~)", text.lower()):
         return None
     return f"{text[:237]}..." if len(text) > 240 else text
+
+
+# Operator-console field extractors. These feed the trusted Mission Control
+# operator chat (the v2 stream + persisted turn elements) and are deliberately
+# LESS strict than `_safe_command_label` (which is path-stripped for Telegram and
+# other surfaces): the operator wants to see the real command and its output,
+# including paths. Secrets are still scrubbed line-by-line and everything is
+# bounded. Do NOT route these into untrusted surfaces.
+_OPERATOR_SECRET_MARKERS = (
+    "password",
+    "passwd",
+    "api_key",
+    "apikey",
+    "api-key",
+    "authorization",
+    "bearer ",
+    "credential",
+    "secret",
+    "private_key",
+    "private-key",
+    "access_key",
+    "session_token",
+    " token=",
+    "x-api-key",
+    "sk-",
+)
+_OPERATOR_COMMAND_MAX = 1000
+_OPERATOR_OUTPUT_MAX_LINES = 200
+_OPERATOR_OUTPUT_MAX_CHARS = 8000
+_OPERATOR_TERMINAL_TOOLS = {
+    "terminal",
+    "shell",
+    "bash",
+    "sh",
+    "command",
+    "run_command",
+    "run",
+    "code_execution",
+    "code_execution_tool",
+    "execute",
+    "exec",
+}
+
+
+def _line_has_secret(line: str) -> bool:
+    lowered = line.lower()
+    return any(marker in lowered for marker in _OPERATOR_SECRET_MARKERS)
+
+
+def _safe_operator_command(invocation: Any) -> str | None:
+    if not isinstance(invocation, dict):
+        return None
+    command = invocation.get("command") or invocation.get("cmd")
+    if not isinstance(command, str):
+        return None
+    text = command.strip()
+    if not text:
+        return None
+    # Scrub a command that itself embeds a secret (e.g. `curl -H "authorization: …"`).
+    if _line_has_secret(text):
+        return "[command withheld — contained a secret]"
+    if len(text) > _OPERATOR_COMMAND_MAX:
+        text = f"{text[: _OPERATOR_COMMAND_MAX - 1]}…"
+    return text
+
+
+def _safe_operator_output(tool_name: str | None, result: Any) -> str | None:
+    if not isinstance(result, dict):
+        return None
+    if (tool_name or "").lower() not in _OPERATOR_TERMINAL_TOOLS:
+        return None
+    raw = result.get("output")
+    if not isinstance(raw, str):
+        raw = result.get("stdout")
+    if not isinstance(raw, str):
+        return None
+    text = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    lines = [
+        "[redacted line — contained a secret]" if _line_has_secret(line) else line
+        for line in text.split("\n")
+    ]
+    truncated = False
+    if len(lines) > _OPERATOR_OUTPUT_MAX_LINES:
+        lines = lines[-_OPERATOR_OUTPUT_MAX_LINES :]
+        truncated = True
+    text = "\n".join(lines)
+    if len(text) > _OPERATOR_OUTPUT_MAX_CHARS:
+        text = text[-_OPERATOR_OUTPUT_MAX_CHARS :]
+        truncated = True
+    if truncated:
+        text = f"…(earlier output truncated)…\n{text}"
+    return text
 
 
 def _safe_tool_result_detail(tool_name: str | None, result: Any) -> str | None:

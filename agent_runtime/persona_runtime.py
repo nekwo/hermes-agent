@@ -175,6 +175,7 @@ class GPTPersonaRuntime:
         max_total_tokens: int | None = None,
         stream_callback: Callable[[str | None], None] | None = None,
         pre_trace_callback: Callable[[dict], None] | None = None,
+        trace_callback: Callable[[dict], None] | None = None,
     ) -> AgentRunResult:
         """Run one plain conversational turn for an operator persona chat.
 
@@ -217,6 +218,7 @@ class GPTPersonaRuntime:
                     session_id=session_id,
                     persona=persona,
                     before_first_trace=pre_trace_callback,
+                    on_trace=trace_callback,
                 ),
                 runtime_root=paths.store_root(),
             )
@@ -237,6 +239,7 @@ class GPTPersonaRuntime:
         max_total_tokens: int | None = None,
         stream_callback: Callable[[str | None], None] | None = None,
         pre_trace_callback: Callable[[dict], None] | None = None,
+        trace_callback: Callable[[dict], None] | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -296,6 +299,7 @@ class GPTPersonaRuntime:
                     session_id=perm_session_id,
                     persona=persona,
                     before_first_trace=pre_trace_callback,
+                    on_trace=trace_callback,
                 ),
                 runtime_root=paths.store_root(),
             )
@@ -478,6 +482,7 @@ def _chat_trace_callback(
     session_id: str | None,
     persona: AgentPersona,
     before_first_trace: Callable[[dict], None] | None = None,
+    on_trace: Callable[[dict], None] | None = None,
 ) -> Callable[[dict], None] | None:
     """Build a runner ``progress_callback`` that records a chat turn's tool
     calls as redaction-safe trace events keyed on the chat session.
@@ -487,12 +492,13 @@ def _chat_trace_callback(
     before — no run row is created, nothing is persisted.
     """
 
-    if not session_id:
+    if not session_id and on_trace is None:
         return None
     sink = ChatProgressSink(
-        session_id=session_id,
+        session_id=session_id or "",
         persona_id=getattr(persona, "id", None),
         before_first_trace=before_first_trace,
+        on_trace=on_trace,
     )
     return sink.callback()
 

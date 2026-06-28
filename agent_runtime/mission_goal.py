@@ -14,11 +14,17 @@ from chat behaves identically to one created from the terminal or Assign Work.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import uuid
 from typing import Any
 
 from hermes_time import now
 
+from .blueprints.instantiate import instantiate_blueprint
+from .blueprints.resolve import BindingResolver
+from .blueprints.store import BlueprintStore
 from .cli_format import task_summary
 from .config import load_agent_runtime_config
 from .daemon import start_daemon
@@ -43,6 +49,16 @@ def create_mission_goal(
     requested_by: str = DEFAULT_GOAL_REQUESTED_BY,
     start_daemon_mode: bool | None = None,
     config: Any | None = None,
+    schema_version: int = 1,
+    idempotency_key: str | None = None,
+    source_surface: str = "mission_control",
+    operator: dict[str, Any] | None = None,
+    acceptance_criteria: list[str] | None = None,
+    proof_expectations: list[str] | None = None,
+    requested_blueprint_id: str | None = None,
+    blueprint_selection_mode: str = "default",
+    blueprint_bindings: dict[str, str] | None = None,
+    repo_scope: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a real Mission Control goal and (optionally) start the daemon.
 
@@ -55,15 +71,63 @@ def create_mission_goal(
     """
 
     config = config or load_agent_runtime_config()
-    cleanup_launcher_visual = launcher_visual_cleanup_needed(title, description)
-    hygiene = prepare_new_goal_runtime(
-        cleanup_stage47_temp=False,
-        cleanup_launcher_visual_processes=cleanup_launcher_visual,
-        heartbeat_ttl_seconds=config.heartbeat_ttl_seconds,
-        foreground_mode=True,
-        park_open_tasks=True,
-        preempt_background_runs=True,
+    validation_error = _validate_create_request(
+        schema_version=schema_version,
+        title=title,
+        description=description,
+        source_surface=source_surface,
+        requested_blueprint_id=requested_blueprint_id,
+        blueprint_selection_mode=blueprint_selection_mode,
+        repo_scope=repo_scope,
     )
+    if validation_error is not None:
+        return validation_error
+    idempotency_key = _safe_idempotency_key(idempotency_key)
+    request_fingerprint = _create_request_fingerprint(
+        title=title,
+        description=description,
+        source_surface=source_surface,
+        acceptance_criteria=acceptance_criteria or [],
+        proof_expectations=proof_expectations or [],
+        requested_blueprint_id=requested_blueprint_id,
+        blueprint_selection_mode=blueprint_selection_mode,
+        blueprint_bindings=blueprint_bindings or {},
+        repo_scope=repo_scope or [],
+    )
+    if idempotency_key:
+        duplicate = _find_create_request_by_idempotency_key(idempotency_key)
+        if duplicate is not None:
+            create_meta = (duplicate.harness_self_heal or {}).get("mission_goal_create")
+            if isinstance(create_meta, dict) and create_meta.get("fingerprint") != request_fingerprint:
+                return _create_error(
+                    "duplicate_conflict",
+                    "Same idempotency key was submitted with different mission content.",
+                    retryable=False,
+                    safe_details={"idempotency_key": idempotency_key},
+                )
+            return _create_response(
+                duplicate,
+                state="already_created",
+                duplicate_of=idempotency_key,
+                extra=task_summary(duplicate),
+            )
+    cleanup_launcher_visual = launcher_visual_cleanup_needed(title, description)
+    try:
+        hygiene = prepare_new_goal_runtime(
+            cleanup_stage47_temp=False,
+            cleanup_launcher_visual_processes=cleanup_launcher_visual,
+            heartbeat_ttl_seconds=config.heartbeat_ttl_seconds,
+            foreground_mode=True,
+            park_open_tasks=True,
+            preempt_background_runs=True,
+        )
+    except Exception as exc:
+        return _create_error(
+            "runtime_unavailable",
+            "Harness runtime could not accept the mission right now.",
+            retryable=True,
+            safe_details={"error_class": type(exc).__name__},
+        )
     ts = now()
     task = Task(
         id=f"task_{uuid.uuid4().hex[:8]}",
@@ -73,24 +137,263 @@ def create_mission_goal(
         created_at=ts,
         updated_at=ts,
         requested_by=requested_by,
+        acceptance_criteria=list(acceptance_criteria or []),
+        affected_repos=list(repo_scope or []),
     )
-    ensure_default_mission_plan(task)
+    plan_error = _attach_requested_blueprint_plan(
+        task,
+        requested_blueprint_id=requested_blueprint_id,
+        selection_mode=blueprint_selection_mode,
+        bindings=blueprint_bindings or {},
+    )
+    if plan_error is not None:
+        return plan_error
+    if proof_expectations:
+        task.operator_notes.append(
+            "Proof expectations: " + "; ".join(_safe_note(item) for item in proof_expectations if _safe_note(item))
+        )
+    task.harness_self_heal["mission_goal_create"] = {
+        "schema_version": schema_version,
+        "idempotency_key": idempotency_key,
+        "source_surface": source_surface,
+        "operator_id": _safe_note((operator or {}).get("operator_id")) if operator else None,
+        "session_id": _safe_note((operator or {}).get("session_id")) if operator else None,
+        "fingerprint": request_fingerprint,
+        "requested_blueprint_id": requested_blueprint_id,
+        "created_at": ts,
+    }
     task.harness_self_heal["repo_clean_baseline"] = repo_clean_baseline_from_hygiene(hygiene)
     TaskStore().create(task)
-    foreground_runtime = activate_foreground_runtime(
-        task.id, started_by=requested_by or DEFAULT_GOAL_REQUESTED_BY
-    )
-    daemon_start = start_daemon_for_new_goal(
-        config,
-        task_id=task.id,
-        start_daemon_mode=start_daemon_mode,
-        foreground_runtime_instance_id=foreground_runtime.get("instance_id"),
-    )
+    try:
+        foreground_runtime = activate_foreground_runtime(
+            task.id, started_by=requested_by or DEFAULT_GOAL_REQUESTED_BY
+        )
+        daemon_start = start_daemon_for_new_goal(
+            config,
+            task_id=task.id,
+            start_daemon_mode=start_daemon_mode,
+            foreground_runtime_instance_id=foreground_runtime.get("instance_id"),
+        )
+    except Exception as exc:
+        return _create_error(
+            "runtime_unavailable",
+            "Harness runtime could not start the mission runtime.",
+            retryable=True,
+            safe_details={"error_class": type(exc).__name__, "mission_id": task.id},
+        )
     data = task_summary(task)
     data["new_goal_hygiene"] = hygiene
     data["foreground_runtime"] = foreground_runtime
     data["daemon_start"] = daemon_start
+    data.update(_create_response(task, state="created", duplicate_of=None))
     return data
+
+
+def create_mission_goal_from_request(request: dict[str, Any], *, config: Any | None = None) -> dict[str, Any]:
+    """Create a goal from the Stage 38 canonical request envelope."""
+
+    goal = request.get("goal") if isinstance(request.get("goal"), dict) else {}
+    blueprint = request.get("blueprint") if isinstance(request.get("blueprint"), dict) else {}
+    operator = request.get("operator") if isinstance(request.get("operator"), dict) else {}
+    source_surface = str(request.get("source_surface") or "")
+    permission_error = _authorize_create_request(source_surface=source_surface, operator=operator)
+    if permission_error is not None:
+        return permission_error
+    return create_mission_goal(
+        title=str(goal.get("title") or ""),
+        description=str(goal.get("description") or ""),
+        requested_by=str(operator.get("operator_id") or "launcher"),
+        config=config,
+        schema_version=int(request.get("schema_version") or 1),
+        idempotency_key=str(request.get("idempotency_key") or ""),
+        source_surface=str(request.get("source_surface") or ""),
+        operator=operator,
+        acceptance_criteria=_string_list(goal.get("acceptance_criteria")),
+        proof_expectations=_string_list(goal.get("proof_expectations")),
+        requested_blueprint_id=str(blueprint.get("requested_blueprint_id") or ""),
+        blueprint_selection_mode=str(blueprint.get("selection_mode") or "default"),
+        blueprint_bindings=_string_dict(blueprint.get("bindings")),
+        repo_scope=_string_list(request.get("repo_scope")),
+    )
+
+
+def _attach_requested_blueprint_plan(
+    task: Task,
+    *,
+    requested_blueprint_id: str | None,
+    selection_mode: str,
+    bindings: dict[str, str],
+) -> dict[str, Any] | None:
+    blueprint_id = str(requested_blueprint_id or "").strip()
+    if not blueprint_id or selection_mode != "explicit":
+        ensure_default_mission_plan(task)
+        return None
+    try:
+        bp = BlueprintStore().get(blueprint_id)
+    except FileNotFoundError:
+        return _create_error(
+            "blueprint_not_found",
+            "Requested Neko Supervisor blueprint is unavailable.",
+            retryable=False,
+            safe_details={"requested_blueprint_id": blueprint_id},
+        )
+    try:
+        requested_bindings = {**_default_bindings_for_blueprint(bp), **bindings}
+        plan = instantiate_blueprint(
+            bp,
+            goal=task.description or task.title,
+            bindings=requested_bindings,
+            resolver=BindingResolver(allow_promote=False),
+        )
+    except Exception as exc:
+        return _create_error(
+            "blueprint_invalid",
+            "Requested blueprint could not instantiate.",
+            retryable=False,
+            safe_details={"requested_blueprint_id": blueprint_id, "error_class": type(exc).__name__},
+        )
+    if plan.mission_intent is not None:
+        plan.mission_intent.title = task.title
+        plan.mission_intent.acceptance_criteria = list(task.acceptance_criteria or [])
+        plan.mission_intent.source_task_id = task.id
+    task.mission_plan = plan
+    task.current_stage_id = plan.current_stage_id
+    return None
+
+
+def _default_bindings_for_blueprint(bp: Any) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for slot in getattr(bp, "slots", []) or []:
+        slot_id = str(getattr(slot, "id", "") or "").strip()
+        role = str(getattr(slot, "role", "") or "").strip()
+        persona = {
+            "lead": "neko_supervisor",
+            "neko": "neko_supervisor",
+            "pm": "neko_supervisor",
+            "builder": "dev",
+            "dev": "dev",
+            "backend_dev": "backend_dev",
+            "verifier": "qa",
+            "reviewer": "qa",
+            "qa": "qa",
+        }.get(role, "dev")
+        if slot_id:
+            result[slot_id] = f"persona:{persona}"
+    return result
+
+
+def _validate_create_request(
+    *,
+    schema_version: int,
+    title: str,
+    description: str,
+    source_surface: str,
+    requested_blueprint_id: str | None,
+    blueprint_selection_mode: str,
+    repo_scope: list[str] | None,
+) -> dict[str, Any] | None:
+    if int(schema_version or 0) != 1:
+        return _create_error("invalid_request", "Unsupported goal-create schema version.", retryable=False)
+    if not str(title or "").strip() or not str(description or "").strip():
+        return _create_error("invalid_request", "Mission title and description are required.", retryable=False)
+    if source_surface and source_surface != "mission_control":
+        return _create_error("invalid_request", "Unsupported goal-create source surface.", retryable=False)
+    if blueprint_selection_mode == "explicit" and not str(requested_blueprint_id or "").strip():
+        return _create_error("invalid_request", "Explicit blueprint selection requires requested_blueprint_id.", retryable=False)
+    allowed_repos = {"EterniaLauncher", "EterniaBackend", "hermes-agent"}
+    invalid = [repo for repo in (repo_scope or []) if repo not in allowed_repos]
+    if invalid:
+        return _create_error("repo_scope_invalid", "Requested repo scope is unknown or unsafe.", retryable=False, safe_details={"repo_scope": invalid})
+    return None
+
+
+def _authorize_create_request(*, source_surface: str, operator: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Mission Control goals must be attributed to an operator identity.
+
+    Read visibility never implies write permission; an unattributed
+    ``mission_control`` create is rejected with ``permission_denied`` rather
+    than silently creating an orphaned, unauthorizable mission.
+    """
+
+    if source_surface != "mission_control":
+        return None
+    operator_id = str((operator or {}).get("operator_id") or "").strip()
+    if not operator_id:
+        return _create_error(
+            "permission_denied",
+            "Operator identity is required to create a Mission Control goal.",
+            retryable=False,
+        )
+    return None
+
+
+def _find_create_request_by_idempotency_key(idempotency_key: str) -> Task | None:
+    for task in TaskStore().list_all():
+        meta = (task.harness_self_heal or {}).get("mission_goal_create")
+        if isinstance(meta, dict) and meta.get("idempotency_key") == idempotency_key:
+            return task
+    return None
+
+
+def _create_response(task: Task, *, state: str, duplicate_of: str | None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    plan = getattr(task, "mission_plan", None)
+    data = dict(extra or {})
+    data.update(
+        {
+            "schema_version": 1,
+            "mission_id": task.id,
+            "task_id": task.id,
+            "blueprint_id": getattr(plan, "blueprint_id", None),
+            "blueprint_version": getattr(plan, "blueprint_version", None),
+            "state": state,
+            "first_snapshot_ref": f"snapshot:{task.id}:1",
+            "duplicate_of": duplicate_of,
+        }
+    )
+    return data
+
+
+def _create_error(code: str, message: str, *, retryable: bool, safe_details: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "error": {
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+            "safe_details": safe_details or {},
+        },
+    }
+
+
+def _create_request_fingerprint(**payload: Any) -> str:
+    normalized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _safe_idempotency_key(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text if re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", text) else None
+
+
+def _safe_note(value: Any) -> str:
+    text = " ".join(str(value or "").split())
+    if re.search(r"[:/\\]", text) or any(marker in text.lower() for marker in ("secret", "token", "password", "credential")):
+        return ""
+    return text[:240]
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _string_dict(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item) for key, item in value.items() if str(key).strip() and str(item).strip()}
 
 
 def start_daemon_for_new_goal(

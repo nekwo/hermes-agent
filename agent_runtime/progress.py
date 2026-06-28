@@ -108,26 +108,34 @@ class ChatProgressSink:
         run_id: str | None = None,
         event_log: EventLog | None = None,
         before_first_trace: Callable[[dict[str, Any]], None] | None = None,
+        on_trace: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.session_id = session_id
         self.persona_id = persona_id
         self.run_id = run_id
         self.event_log = event_log or EventLog()
         self.before_first_trace = before_first_trace
+        self.on_trace = on_trace
         self._did_emit_first_trace = False
 
     def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
         try:
-            if not self.session_id or event_type not in _CHAT_TRACE_EVENT_TYPES:
+            if event_type not in _CHAT_TRACE_EVENT_TYPES:
                 return None
             payload = payload or {}
             if event_type == "run.progress" and not _chat_progress_has_signal(payload):
                 return None
             safe_payload = _safe_progress_payload(event_type, payload)
+            if not self.session_id:
+                if self.on_trace is not None:
+                    self.on_trace(safe_payload)
+                return None
             if not self._did_emit_first_trace:
                 self._did_emit_first_trace = True
                 if self.before_first_trace is not None:
                     self.before_first_trace(safe_payload)
+            if self.on_trace is not None:
+                self.on_trace(safe_payload)
             self.event_log.append(
                 Event(
                     ts=now(),

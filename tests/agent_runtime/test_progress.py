@@ -120,3 +120,33 @@ def test_chat_progress_sink_without_session_records_nothing(isolate_agent_runtim
     sink = ChatProgressSink(session_id="", persona_id="dev", event_log=log)
     sink.emit("run.tool.started", {"type": "run.tool.started", "tool_name": "terminal"})
     assert log.tail(5) == []
+
+
+def test_chat_progress_sink_without_session_can_emit_safe_observer(isolate_agent_runtime_root):
+    log = EventLog()
+    observed = []
+    sink = ChatProgressSink(
+        session_id="",
+        persona_id="dev",
+        event_log=log,
+        on_trace=observed.append,
+    )
+
+    sink.emit(
+        "run.tool.started",
+        {
+            "type": "run.tool.started",
+            "tool_name": "terminal",
+            "command_label": "echo ok",
+            "unsafe": "SECRET",
+        },
+    )
+
+    assert log.tail(5) == []
+    assert observed == [
+        {
+            "type": "run.tool.started",
+            "tool_name": "terminal",
+            "command_label": "echo ok",
+        }
+    ]

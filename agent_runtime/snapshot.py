@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import hashlib
 from datetime import datetime
 
 from hermes_cli.profiles import available_profile_templates
@@ -273,13 +274,48 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
     last_ts = getattr(last_event, "ts", None) if last_event is not None else None
     return {
         "envelope_version": PARITY_ENVELOPE_VERSION,
+        "contract_version": 38,
         "generated_at": data.get("generated_at"),
         "build_ms": int(max(0.0, (time.perf_counter() - build_started)) * 1000),
         "watermark": events_watermark(last_event_ts=last_ts),
+        "runtime_root": _runtime_root_identity(),
+        "profile": _runtime_profile_identity(),
+        "capabilities": [
+            "goal_create",
+            "mission_level_state",
+            "mission_flow_timeline",
+            "proof_gate_state",
+            "operator_capabilities",
+        ],
+        "freshness": {
+            "state": "fresh",
+            "stale_after_seconds": 30,
+            "generated_at": data.get("generated_at"),
+        },
         "completeness": completeness,
         "drops": drop_samples,
         "warnings": _parity_warnings(data),
     }
+
+
+def _runtime_root_identity() -> dict:
+    text = str(paths.store_root()).replace("\\", "/")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    return {
+        "fingerprint": digest,
+        "label": _safe_repo_scope_label(text),
+    }
+
+
+def _runtime_profile_identity() -> dict:
+    try:
+        from .profile_context import active_profile_name
+
+        name = active_profile_name()
+    except Exception:
+        name = None
+    safe = _safe_model_label(str(name)) if name else None
+    return {"name": safe or "default"}
 
 
 def _parity_warnings(data) -> list[dict]:
@@ -996,6 +1032,7 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "task_id": task.id,
         "title": task.title,
         "state": str(task.state),
+        "mission_state": _mission_lifecycle_state(task, active_runs, open_incidents, gate),
         "parent_task_id": task.parent_task_id,
         "child_task_count": child_count,
         "current_stage_id": task.current_stage_id,
@@ -1041,6 +1078,338 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "role_checklists": [checklist_summary(item) for item in (role_checklists or [])],
         "proof_batches": [proof_batch_summary(item) for item in (proof_batches or [])],
         "stage_streams": _stage_streams(task, events or []),
+        "mission_level_state": _mission_level_state(
+            task,
+            active_runs=active_runs,
+            active_workers=active_workers,
+            events=events or [],
+            role_streams=_role_streams(
+                task,
+                events or [],
+                runs or [],
+                workers or [],
+                persona_assignments=assignments,
+                role_envelopes=role_envelopes or [],
+                role_checklists=role_checklists or [],
+                proof_batches=proof_batches or [],
+            ),
+        ),
+        "mission_flow_timeline": _mission_flow_timeline(task, events or []),
+        "proof_gate_state": _proof_gate_state(task, proofs),
+        "operator_capabilities": _operator_capabilities(task, next_action, gate),
+    }
+
+
+def _mission_lifecycle_state(task, active_runs, open_incidents, gate) -> str:
+    if task.state == TaskState.CANCELLED:
+        return "cancelled"
+    if task.state == TaskState.FAILED:
+        return "failed"
+    if task.state == TaskState.DONE:
+        return "ready_for_tony" if not gate.missing else "blocked"
+    if open_incidents:
+        return "waiting_for_operator" if any(getattr(item, "kind", "") in {"qa_intervention_required", "operator_intervention", "run_budget_exceeded"} for item in open_incidents) else "blocked"
+    if active_runs:
+        return "running"
+    if task.state == TaskState.BLOCKED:
+        return "blocked"
+    return "queued"
+
+
+def _mission_level_state(task, *, active_runs, active_workers, events, role_streams) -> dict:
+    plan = getattr(task, "mission_plan", None)
+    stages = list(getattr(plan, "stages", []) or [])
+    stage_by_owner: dict[str, list] = {}
+    for stage in stages:
+        owner = str(getattr(stage, "owner", "") or "").strip()
+        if owner:
+            stage_by_owner.setdefault(owner, []).append(stage)
+    actor_ids = list(stage_by_owner)
+    for run in active_runs:
+        if getattr(run, "persona_id", None) and run.persona_id not in actor_ids:
+            actor_ids.append(run.persona_id)
+    active_stage_id = getattr(plan, "current_stage_id", None) or getattr(task, "current_stage_id", None)
+    stream_by_id = {stream.get("persona_id"): stream for stream in role_streams if isinstance(stream, dict)}
+    actors = []
+    for persona_id in actor_ids:
+        owned_stages = stage_by_owner.get(persona_id, [])
+        active_owned = next((stage for stage in owned_stages if stage.id == active_stage_id), None)
+        latest = _latest_actor_event(persona_id, events)
+        runs = [run for run in active_runs if getattr(run, "persona_id", None) == persona_id]
+        workers = [worker for worker in active_workers if getattr(worker, "persona_id", None) == persona_id]
+        actors.append(
+            {
+                "actor_id": persona_id,
+                "persona_id": persona_id,
+                "display_name": _display_name_for_persona(persona_id),
+                "role": _actor_role_for_persona(persona_id),
+                "presence": _actor_presence(active_owned, owned_stages, runs, workers),
+                "stage_id": active_owned.id if active_owned is not None else (owned_stages[0].id if owned_stages else None),
+                "state_label": _actor_state_label(active_owned, owned_stages, runs, workers),
+                "active_run_ids": [run.id for run in runs],
+                "active_worker_session_ids": [worker.id for worker in workers],
+                "latest_safe_event": latest,
+                "budget": _actor_budget_summary(runs, stream_by_id.get(persona_id)),
+                "hidden_by_blueprint": False,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "mission_id": task.id,
+        "task_id": task.id,
+        "blueprint_id": getattr(plan, "blueprint_id", None),
+        "blueprint_version": getattr(plan, "blueprint_version", None),
+        "active_stage_id": active_stage_id,
+        "actors": actors,
+        "updated_at": getattr(task, "updated_at", None),
+    }
+
+
+def _mission_flow_timeline(task, events) -> dict:
+    plan = getattr(task, "mission_plan", None)
+    stages = list(getattr(plan, "stages", []) or [])
+    items = []
+    for stage in stages:
+        status = getattr(getattr(stage, "status", None), "value", getattr(stage, "status", None))
+        items.append(
+            {
+                "id": f"stage:{stage.id}",
+                "kind": "stage",
+                "stage_id": stage.id,
+                "title": stage.title,
+                "owner": getattr(stage, "owner", None),
+                "owner_slot": getattr(stage, "owner_slot", None),
+                "status": status,
+                "proof_ids": list(getattr(stage, "proof_ids", []) or []),
+                "depends_on": list(getattr(stage, "depends_on", []) or []),
+            }
+        )
+    for event in [event for event in events if event.task_id == task.id][-20:]:
+        display = _event_display_projection(event)
+        items.append(
+            {
+                "id": f"event:{event.type}:{event.run_id or 'task'}:{event.ts}",
+                "kind": display.get("display_kind") or "event",
+                "ts": event.ts,
+                "type": event.type,
+                "persona_id": event.persona_id,
+                "run_id": event.run_id,
+                "summary": display.get("display_summary"),
+                "redaction_status": display.get("redaction_status") or "safe",
+                "artifact_refs": display.get("artifact_refs") or [],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "mission_id": task.id,
+        "active_stage_id": getattr(plan, "current_stage_id", None) if plan else getattr(task, "current_stage_id", None),
+        "items": items,
+    }
+
+
+def _proof_gate_state(task, proofs) -> dict:
+    proof_by_id = {proof.id: proof for proof in proofs}
+    plan = getattr(task, "mission_plan", None)
+    stages = list(getattr(plan, "stages", []) or [])
+    requirements = []
+    missing = []
+    captured = []
+    required_statuses: list[str] = []
+    for stage in stages:
+        gate = getattr(stage, "proof_gate", {}) if isinstance(getattr(stage, "proof_gate", None), dict) else {}
+        required_types = [str(item) for item in gate.get("required_proof_types") or []]
+        required = bool(gate.get("required") or required_types or gate.get("proof_recipe_id") or gate.get("commands"))
+        stage_proofs = [proof_by_id[item] for item in getattr(stage, "proof_ids", []) or [] if item in proof_by_id]
+        safe_refs = [_proof_evidence_ref(proof) for proof in stage_proofs if _proof_evidence_ref(proof)]
+        captured.extend(safe_refs)
+        status = "not_applicable"
+        if required:
+            status = _proof_requirement_status(stage, stage_proofs)
+            required_statuses.append(status)
+        if status == "missing":
+            missing.append(stage.id)
+        requirements.append(
+            {
+                "stage_id": stage.id,
+                "title": stage.title,
+                "required": required,
+                "required_proof_types": required_types,
+                "minimum_status": gate.get("minimum_status") or "passed",
+                "status": status,
+                "evidence_refs": safe_refs,
+                "redaction_status": "safe",
+            }
+        )
+    gate_state = _roll_up_gate_state(required_statuses, waived=bool(getattr(task, "waiver", None)))
+    why_not_ready = [
+        f"{req['stage_id']} {req['status']}"
+        for req in requirements
+        if req["required"] and req["status"] not in {"passed", "not_applicable"}
+    ]
+    return {
+        "schema_version": 1,
+        "mission_id": task.id,
+        "gate_state": gate_state,
+        "requirements": requirements,
+        "captured_evidence": captured,
+        "missing_stage_ids": missing,
+        "why_not_ready": why_not_ready,
+        "waiver": getattr(task, "waiver", None),
+        "updated_at": getattr(task, "updated_at", None),
+    }
+
+
+# Roles whose proof verdict can satisfy a required gate. Worker self-reports
+# (dev/backend_dev) are evidence candidates only — never a passing verdict —
+# until a verifier/reviewer/Neko proof review records the result.
+_PROOF_VERIFIER_ROLES = frozenset({"qa", "verifier", "reviewer", "neko_supervisor"})
+
+
+def _roll_up_gate_state(required_statuses: list[str], *, waived: bool) -> str:
+    """Roll per-requirement statuses into a spec gate_state value.
+
+    Allowed: not_required | incomplete | running | blocked | failed | passed | waived.
+    """
+
+    if not required_statuses:
+        return "not_required"
+    if any(status == "failed" for status in required_statuses):
+        return "failed"
+    if any(status == "blocked_external" for status in required_statuses):
+        return "blocked"
+    if waived and all(status in {"passed", "waived_by_operator", "not_applicable"} for status in required_statuses):
+        return "waived"
+    if any(status == "missing" for status in required_statuses):
+        return "incomplete"
+    if any(status == "running" for status in required_statuses):
+        return "running"
+    if all(status in {"passed", "not_applicable"} for status in required_statuses):
+        return "passed"
+    return "incomplete"
+
+
+def _operator_capabilities(task, next_action, gate) -> dict:
+    terminal = task.state in {TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED}
+    return {
+        "schema_version": 1,
+        "mission_id": task.id,
+        "actions": {
+            "goal_create": {"enabled": True, "disabled_reason": None},
+            "cancel_mission": {"enabled": not terminal, "disabled_reason": "mission is terminal" if terminal else None},
+            "retry_stage": {"enabled": bool((next_action or {}).get("action") in {"run_slot", "blocked_by_incident"}), "disabled_reason": None},
+            "waive_proof": {"enabled": bool(gate.missing), "disabled_reason": None if gate.missing else "proof gate has no missing requirements"},
+            "answer_intervention": {"enabled": (next_action or {}).get("action") == "blocked_by_incident", "disabled_reason": None},
+            "raw_log": {"enabled": False, "disabled_reason": "raw logs require explicit redaction-aware debug path"},
+        },
+    }
+
+
+def _actor_presence(active_stage, owned_stages, runs, workers) -> str:
+    if runs or workers:
+        return "active"
+    if active_stage is not None:
+        return "waiting"
+    if owned_stages and all(getattr(stage, "status", None) == StageStatus.PASSED for stage in owned_stages):
+        return "complete"
+    if owned_stages:
+        return "queued"
+    return "unknown"
+
+
+def _actor_state_label(active_stage, owned_stages, runs, workers) -> str:
+    if runs:
+        return "Running"
+    if workers:
+        return "Assigned"
+    stage = active_stage or (owned_stages[0] if owned_stages else None)
+    if stage is None:
+        return "Unknown"
+    status = getattr(getattr(stage, "status", None), "value", getattr(stage, "status", None))
+    return str(status or "waiting").replace("_", " ").title()
+
+
+def _actor_role_for_persona(persona_id: str) -> str:
+    return {
+        "neko_supervisor": "neko_supervisor",
+        "backend_dev": "backend_dev",
+        "dev": "dev",
+        "qa": "qa",
+    }.get(persona_id, "specialist")
+
+
+def _latest_actor_event(persona_id: str, events) -> dict | None:
+    for event in reversed(events):
+        if event.persona_id != persona_id:
+            continue
+        display = _event_display_projection(event)
+        return {
+            "ts": event.ts,
+            "type": event.type,
+            "run_id": event.run_id,
+            "summary": display.get("display_summary"),
+            "redaction_status": display.get("redaction_status") or "safe",
+            "artifact_refs": display.get("artifact_refs") or [],
+        }
+    return None
+
+
+def _actor_budget_summary(runs, role_stream) -> dict:
+    token_total = 0
+    for run in runs:
+        llm = getattr(run, "llm", None) if isinstance(getattr(run, "llm", None), dict) else {}
+        value = llm.get("total_tokens")
+        if isinstance(value, int):
+            token_total += value
+    return {
+        "active_run_count": len(runs),
+        "token_budget_used": token_total or None,
+        "proof_batch_count": len((role_stream or {}).get("proof_batches") or []) if isinstance(role_stream, dict) else 0,
+    }
+
+
+def _proof_requirement_status(stage, proofs) -> str:
+    """Resolve a required proof requirement to a spec proof status.
+
+    Returns one of: passed | failed | blocked_external | running | missing.
+    A worker self-report is treated as in-progress evidence (``running``),
+    never ``passed`` — only a verifier/reviewer/Neko verdict (or the gate
+    machinery flipping the stage to PASSED) can pass the requirement.
+    """
+
+    if getattr(stage, "status", None) == StageStatus.PASSED:
+        return "passed"
+    if getattr(stage, "status", None) == StageStatus.BLOCKED:
+        return "blocked_external"
+    saw_evidence = False
+    for proof in proofs:
+        if getattr(proof, "redaction_status", None) not in {"safe", "redacted", None}:
+            continue
+        saw_evidence = True
+        metadata = proof.metadata if isinstance(proof.metadata, dict) else {}
+        status = str(metadata.get("status") or metadata.get("verdict") or "").lower()
+        author = str(getattr(proof, "created_by", "") or "").lower()
+        author_role = author.split(":", 1)[0]
+        is_verifier = author_role in _PROOF_VERIFIER_ROLES or author in _PROOF_VERIFIER_ROLES
+        if status in {"failed", "rejected", "needs_fixes"}:
+            return "failed"
+        if status == "blocked_external":
+            return "blocked_external"
+        if status in {"passed", "approved"} and is_verifier:
+            return "passed"
+    return "running" if saw_evidence else "missing"
+
+
+def _proof_evidence_ref(proof) -> dict | None:
+    if not getattr(proof, "id", None):
+        return None
+    redaction_status = getattr(proof, "redaction_status", None) or "unknown"
+    if redaction_status not in {"safe", "redacted", "unknown", "pending"}:
+        return None
+    return {
+        "evidence_id": proof.id,
+        "kind": str(getattr(proof, "type", "proof")),
+        "uri": f"artifact://proof/{proof.task_id}/{proof.id}",
+        "redaction_status": redaction_status,
     }
 
 

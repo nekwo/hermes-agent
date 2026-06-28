@@ -13,6 +13,10 @@ from hermes_time import now
 
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event, PersonaInstance
+from agent_runtime.mission_chat_turns import (
+    mission_chat_turn_elements,
+    persist_mission_chat_turn,
+)
 from agent_runtime.persona_chat_history import (
     _iso_timestamp,
     _safe_recent_messages,
@@ -149,6 +153,180 @@ def test_safe_recent_messages_returns_deeper_bounded_tail():
     assert len(rows) == 12
     assert rows[0]["text"] == "Agent update 0"
     assert rows[-1]["text"] == "Agent update 11"
+
+
+def test_safe_recent_messages_projects_persisted_turn_elements(isolate_agent_runtime_root):
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_1",
+        turn_id="turn_1",
+        elements=[
+            {
+                "kind": "segment",
+                "id": "seg_2",
+                "turn_id": "turn_1",
+                "seq": 3,
+                "seg_type": "answer",
+                "text": "Done.",
+            },
+            {
+                "kind": "tool",
+                "id": "tool_1",
+                "turn_id": "turn_1",
+                "seq": 2,
+                "name": "shell_command",
+                "args": "rg plan",
+                "status": "ok",
+                "duration_ms": 42,
+                "files": ["safe.dart", "C:/Users/beast/private_token.txt"],
+            },
+            {
+                "kind": "segment",
+                "id": "seg_1",
+                "turn_id": "turn_1",
+                "seq": 1,
+                "seg_type": "plan",
+                "text": "I will inspect.",
+            },
+            {
+                "kind": "segment",
+                "id": "bad",
+                "turn_id": "turn_1",
+                "seq": "not-an-int",
+                "text": "drop me",
+            },
+        ],
+    )
+    db = FakeSessionDB(
+        [
+            {
+                "id": "agent_1",
+                "role": "assistant",
+                "content": "Done.",
+                "platform_message_id": "client_1",
+            }
+        ]
+    )
+
+    rows, status = _safe_recent_messages(db, session_id="s1")
+
+    assert status == "safe"
+    assert rows[0]["client_message_id"] == "client_1"
+    assert [item["id"] for item in rows[0]["turn_elements"]] == ["seg_1", "tool_1", "seg_2"]
+    assert rows[0]["turn_elements"][1]["files"] == ["safe.dart"]
+    assert mission_chat_turn_elements(session_id="s1", client_message_id="missing") == []
+
+
+def test_mission_chat_turn_persists_durable_partial_prefix(isolate_agent_runtime_root):
+    # Mid-turn (before turn.end) the emitter persists on every update, so a
+    # dropped stream / reload still has the segments-so-far prefix. Here the
+    # answer segment never arrived and seg_1 is still "streaming" — the partial
+    # must read back intact and ordered (I-DURABLE).
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_1",
+        turn_id="turn_1",
+        elements=[
+            {
+                "kind": "segment",
+                "id": "seg_1",
+                "turn_id": "turn_1",
+                "seq": 1,
+                "seg_type": "plan",
+                "text": "I'll inspect",
+                "state": "streaming",
+            },
+            {
+                "kind": "tool",
+                "id": "tool_1",
+                "turn_id": "turn_1",
+                "seq": 2,
+                "name": "read_file",
+                "state": "started",
+            },
+        ],
+    )
+
+    partial = mission_chat_turn_elements(session_id="s1", client_message_id="client_1")
+
+    assert [item["id"] for item in partial] == ["seg_1", "tool_1"]
+    assert partial[0]["state"] == "streaming"
+    assert partial[0]["text"] == "I'll inspect"
+    assert partial[1]["state"] == "started"
+
+    # A later update (the same client_message_id) supersedes the partial without
+    # duplicating it — idempotent replay, no dup bubbles on re-attach.
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_1",
+        turn_id="turn_1",
+        elements=[
+            {
+                "kind": "segment",
+                "id": "seg_1",
+                "turn_id": "turn_1",
+                "seq": 1,
+                "seg_type": "plan",
+                "text": "I'll inspect the doc",
+                "state": "settled",
+            },
+            {
+                "kind": "tool",
+                "id": "tool_1",
+                "turn_id": "turn_1",
+                "seq": 2,
+                "name": "read_file",
+                "state": "finished",
+                "status": "ok",
+            },
+            {
+                "kind": "segment",
+                "id": "seg_2",
+                "turn_id": "turn_1",
+                "seq": 3,
+                "seg_type": "answer",
+                "text": "Done.",
+                "state": "settled",
+            },
+        ],
+    )
+
+    settled = mission_chat_turn_elements(session_id="s1", client_message_id="client_1")
+    assert [item["id"] for item in settled] == ["seg_1", "tool_1", "seg_2"]
+    assert settled[0]["state"] == "settled"
+    assert settled[0]["text"] == "I'll inspect the doc"
+
+
+def test_mission_chat_turn_persists_command_output_and_exit_code(isolate_agent_runtime_root):
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_1",
+        turn_id="turn_1",
+        elements=[
+            {
+                "kind": "tool",
+                "id": "tool_1",
+                "turn_id": "turn_1",
+                "seq": 1,
+                "name": "terminal",
+                "state": "finished",
+                "status": "failed",
+                "command": "flutter test -j1",
+                "exit_code": 1,
+                "output": "00:01 +0 -1: boom\nException: failed",
+                "detail": "see failing test",
+                "duration_ms": 900,
+            },
+        ],
+    )
+
+    elements = mission_chat_turn_elements(session_id="s1", client_message_id="client_1")
+
+    tool = elements[0]
+    assert tool["command"] == "flutter test -j1"
+    assert tool["exit_code"] == 1
+    assert tool["detail"] == "see failing test"
+    assert "Exception: failed" in tool["output"]
 
 
 def test_persona_chat_trace_projects_tool_events_by_persona_without_raw_secrets():

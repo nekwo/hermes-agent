@@ -14,6 +14,7 @@ from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, PersonaInstance, Proof, Task
+from agent_runtime.mission_chat_turns import mission_chat_turn_elements
 from agent_runtime.persona_assignments import (
     ChatBusyError,
     PersonaAssignmentSpec,
@@ -1797,12 +1798,23 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
         if line.strip()
     ]
     assert [line["type"] for line in lines] == [
+        "turn.start",
         "chat.delta",
+        "segment.start",
+        "segment.delta",
         "chat.delta",
+        "segment.delta",
+        "segment.end",
+        "turn.end",
         "chat.final",
     ]
-    assert [line.get("text") for line in lines[:2]] == ["He", "llo"]
+    assert [line.get("text") for line in lines if line["type"] == "chat.delta"] == ["He", "llo"]
+    assert [line.get("text") for line in lines if line["type"] == "segment.delta"] == ["He", "llo"]
+    assert lines[0]["protocol_version"] == 2
+    assert lines[2]["seq"] == 1
     assert lines[-1]["ok"] is True
+    assert lines[-1]["protocol_version"] == 2
+    assert lines[-1]["turn_elements"][0]["text"] == "Hello"
     assert lines[-1]["execution_state"] == "completed"
     assert lines[-1]["reply"] == "Hello"
     assert lines[-1]["run_ids"] == []
@@ -1810,6 +1822,12 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
     assert lines[-1]["assignment_id"]
     assert lines[-1]["persona_instance_id"] == "personainst_dev"
     assert lines[-1]["client_message_id"] == "client_1"
+    persisted = mission_chat_turn_elements(
+        session_id=lines[-1]["session_id"],
+        client_message_id="client_1",
+    )
+    assert [item["id"] for item in persisted] == [lines[-1]["turn_elements"][0]["id"]]
+    assert persisted[0]["text"] == "Hello"
 
 
 def test_mission_chat_message_replays_duplicate_client_message_id(

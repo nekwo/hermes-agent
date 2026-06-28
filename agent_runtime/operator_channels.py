@@ -164,7 +164,12 @@ class _OperatorChannelBuilder:
                     "entity_id": session_id,
                 }
             )
-        if trace is None:
+        task_id = _first_text(
+            getattr(canonical, "current_task_id", None) if canonical is not None else None,
+            history.get("task_id") if history else None,
+            trace.get("task_id") if trace else None,
+        )
+        if trace is None and (history is None or task_id):
             warnings.append(
                 {
                     "code": "trace_empty",
@@ -180,11 +185,7 @@ class _OperatorChannelBuilder:
             "persona_id": persona_id,
             "persona_instance_id": canonical_id,
             "session_id": session_id,
-            "task_id": _first_text(
-                getattr(canonical, "current_task_id", None) if canonical is not None else None,
-                history.get("task_id") if history else None,
-                trace.get("task_id") if trace else None,
-            ),
+            "task_id": task_id,
             "goal_id": _first_text(
                 getattr(canonical, "goal_id", None) if canonical is not None else None,
                 history.get("goal_id") if history else None,

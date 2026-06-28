@@ -319,6 +319,7 @@ def test_progress_adapter_enriches_tool_progress_started_event():
             "status": "started",
             "summary": "Started tool terminal: pytest",
             "command_label": "pytest",
+            "command_full": "pytest",
         }
     ]
 
@@ -338,6 +339,7 @@ def test_progress_adapter_enriches_tool_lifecycle_started_event():
             "status": "started",
             "summary": "Started tool terminal: pytest",
             "command_label": "pytest",
+            "command_full": "pytest",
         }
     ]
 
@@ -378,8 +380,41 @@ def test_progress_adapter_enriches_tool_lifecycle_finished_event():
             "exit_code": 0,
             "summary": "Finished tool terminal: passed",
             "command_label": "pytest",
+            "command_full": "pytest",
         }
     ]
+
+
+def test_progress_adapter_surfaces_operator_command_and_scrubbed_output():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.finished")
+
+    cb(
+        "call_1",
+        "terminal",
+        {"command": "rg --files /home/x/foo"},
+        {"exit_code": 1, "output": "line1\napi_key=SECRET\n/home/x/foo/bar.dart"},
+    )
+
+    payload = events[0]
+    # Operator command keeps the path (unlike the path-stripped command_label).
+    assert payload["command_full"] == "rg --files /home/x/foo"
+    assert "command_label" not in payload  # path-stripped variant drops it
+    # Output is surfaced for terminal-class tools, with the secret LINE redacted
+    # and the path line kept.
+    assert "api_key=SECRET" not in payload["output"]
+    assert "[redacted line" in payload["output"]
+    assert "/home/x/foo/bar.dart" in payload["output"]
+    assert payload["exit_code"] == 1
+
+
+def test_progress_adapter_does_not_surface_output_for_non_terminal_tools():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.finished")
+
+    cb("call_1", "read_file", {"path": "mission.md"}, {"output": "file body here"})
+
+    assert "output" not in events[0]
 
 
 def test_progress_adapter_marks_string_error_lifecycle_result_failed():
@@ -397,6 +432,7 @@ def test_progress_adapter_marks_string_error_lifecycle_result_failed():
             "status": "failed",
             "summary": "Finished tool terminal: failed",
             "command_label": "pytest",
+            "command_full": "pytest",
         }
     ]
 
@@ -816,5 +852,6 @@ def test_tool_lifecycle_finished_marks_timeout_exit_code_as_failed():
             "exit_code": 124,
             "summary": "Finished tool terminal: failed",
             "command_label": "pytest",
+            "command_full": "pytest",
         }
     ]

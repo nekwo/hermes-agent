@@ -53,6 +53,7 @@ from agent_runtime.persona_diagnostics import PersonaDiagnosticController, Perso
 from agent_runtime.profile_context import active_profile_name
 from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
+from agent_runtime.mission_chat_turns import persist_mission_chat_turn
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.prompt_observability import mission_chat_prompt_observability, persist_prompt_observability_context
@@ -144,8 +145,9 @@ def build_parser(parent_subparsers) -> None:
     task = subs.add_parser("task", help="Manage harness tasks")
     task_subs = task.add_subparsers(dest="task_command")
     create = task_subs.add_parser("create", help="Create a harness task")
-    create.add_argument("--title", required=True)
-    create.add_argument("--description", required=True)
+    create.add_argument("--title")
+    create.add_argument("--description")
+    create.add_argument("--request-json", help="Path to a Stage 38 canonical goal-create request JSON file")
     create.add_argument("--requested-by", default="cli")
     create.add_argument("--start-daemon", dest="start_daemon", action="store_true", default=None, help="Start the Mission Daemon after creating the task")
     create.add_argument("--no-start-daemon", dest="start_daemon", action="store_false", help="Create the task without starting the Mission Daemon")
@@ -1685,6 +1687,30 @@ def _cmd_mission_chat_message(args) -> int:
         current_message=message,
         model_selection=model_selection,
     )
+    stream_emitter = (
+        _ChatProtocolV2Emitter(
+            turn_id=safe_assignment_token(client_message_id),
+            client_message_id=client_message_id,
+            on_update=lambda emitter: persist_mission_chat_turn(
+                session_id=session_id,
+                client_message_id=client_message_id,
+                turn_id=emitter.turn_id,
+                elements=emitter.elements,
+            ),
+        )
+        if getattr(args, "stream", False)
+        else None
+    )
+
+    def _stream_delta(delta: str | None) -> None:
+        _emit_chat_delta(delta)
+        if stream_emitter is not None:
+            stream_emitter.delta(delta)
+
+    def _stream_progress(payload: dict[str, object] | None) -> None:
+        if stream_emitter is not None:
+            stream_emitter.progress(payload)
+
     try:
         chat_result = GPTPersonaRuntime(
             default_provider=cfg.default_provider,
@@ -1700,12 +1726,13 @@ def _cmd_mission_chat_message(args) -> int:
             model_override=model_selection.get("effective_model"),
             surface_prompt=getattr(args, "surface_prompt", "") or "",
             max_wall_seconds=getattr(args, "max_seconds", 240.0),
-            stream_callback=_emit_chat_delta if getattr(args, "stream", False) else None,
+            stream_callback=_stream_delta if getattr(args, "stream", False) else None,
             pre_trace_callback=lambda payload: _append_persona_pre_trace_ack(
                 session_db=session_db,
                 session_id=session_id,
                 trace_payload=payload,
             ),
+            trace_callback=_stream_progress if stream_emitter is not None else None,
         )
         prompt_context = {
             **prompt_context,
@@ -1727,6 +1754,8 @@ def _cmd_mission_chat_message(args) -> int:
                 "observability_persist_error": safe_assignment_text(type(persist_exc).__name__, limit=80),
             }
     except Exception as exc:
+        if stream_emitter is not None:
+            stream_emitter.finish(state="failed")
         data = {
             "ok": False,
             "persona_instance_id": instance.id,
@@ -1751,6 +1780,13 @@ def _cmd_mission_chat_message(args) -> int:
         text=reply_text,
         client_message_id=client_message_id,
     )
+    if stream_emitter is not None:
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+        )
     _update_persona_chat_token_counts(
         session_db=session_db,
         session_id=session_id,
@@ -1773,6 +1809,7 @@ def _cmd_mission_chat_message(args) -> int:
 
     data = {
         "ok": True,
+        "protocol_version": 2 if stream_emitter is not None else None,
         "capability_id": "mission.chat.message",
         "agent_profile_id": instance.id,
         "persona_instance_id": instance.id,
@@ -1799,6 +1836,14 @@ def _cmd_mission_chat_message(args) -> int:
         "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
     }
     if getattr(args, "stream", False):
+        if stream_emitter is not None:
+            data["turn_elements"] = stream_emitter.elements
+            stream_emitter.finish(
+                state="completed",
+                input_tokens=data.get("input_tokens"),
+                output_tokens=data.get("output_tokens"),
+                total_tokens=data.get("total_tokens"),
+            )
         _emit_chat_final(data)
     else:
         print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
@@ -2126,6 +2171,7 @@ def _queue_free_floating_assignment(
             requested_by=requested_by,
             max_actions=max_actions,
             max_seconds=max_seconds,
+            client_message_id=assignment.client_message_id,
             stream=stream,
         )
         data.update(run_payload)
@@ -2155,6 +2201,267 @@ def _emit_chat_final(payload: dict[str, object]) -> None:
     data["type"] = "chat.final"
     sys.stdout.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+
+
+def _emit_chat_frame(payload: dict[str, object]) -> None:
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+class _ChatProtocolV2Emitter:
+    """Additive Mission Control chat stream protocol.
+
+    Legacy ``chat.delta``/``chat.final`` frames are still emitted by callers.
+    These v2 frames give the Launcher stable ids and per-turn sequence order.
+    """
+
+    def __init__(self, *, turn_id: str | None, client_message_id: str | None, on_update=None):
+        safe_turn = safe_assignment_token(turn_id) or f"turn_{uuid.uuid4().hex[:12]}"
+        self.turn_id = safe_turn
+        self.client_message_id = safe_assignment_text(client_message_id, limit=200) or None
+        self._on_update = on_update
+        self._seq = 0
+        self._started_at = time.monotonic()
+        self._current_segment: dict[str, object] | None = None
+        self._segment_count = 0
+        self._tool_count = 0
+        self._active_tools: dict[str, list[dict[str, object]]] = {}
+        self.elements: list[dict[str, object]] = []
+        _emit_chat_frame(
+            {
+                "type": "turn.start",
+                "protocol_version": 2,
+                "turn_id": self.turn_id,
+                "client_message_id": self.client_message_id,
+            }
+        )
+
+    def delta(self, delta: str | None) -> None:
+        if not delta:
+            return
+        segment = self._ensure_segment()
+        text = str(delta)
+        segment["text"] = str(segment.get("text") or "") + text
+        _emit_chat_frame(
+            {
+                "type": "segment.delta",
+                "protocol_version": 2,
+                "turn_id": self.turn_id,
+                "seq": segment["seq"],
+                "id": segment["id"],
+                "text": text,
+            }
+        )
+        self._notify_update()
+
+    def progress(self, payload: dict[str, object] | None) -> None:
+        if not isinstance(payload, dict):
+            return
+        event_type = str(payload.get("type") or "run.progress")
+        if event_type not in {"run.tool.started", "run.tool.finished"}:
+            return
+        self.end_segment(state="settled")
+        if event_type == "run.tool.started":
+            self._tool_started(payload)
+        else:
+            self._tool_finished(payload)
+        self._notify_update()
+
+    def end_segment(self, *, state: str = "settled") -> None:
+        segment = self._current_segment
+        if segment is None:
+            return
+        segment["state"] = state
+        segment["duration_ms"] = _elapsed_ms(segment.get("started_at"))
+        _emit_chat_frame(
+            {
+                "type": "segment.end",
+                "protocol_version": 2,
+                "turn_id": self.turn_id,
+                "seq": segment["seq"],
+                "id": segment["id"],
+                "state": state,
+                "duration_ms": segment["duration_ms"],
+            }
+        )
+        self._current_segment = None
+        self._notify_update()
+
+    def finish(
+        self,
+        *,
+        state: str,
+        input_tokens: object = None,
+        output_tokens: object = None,
+        total_tokens: object = None,
+    ) -> None:
+        self.end_segment(state="settled" if state == "completed" else state)
+        _emit_chat_frame(
+            {
+                "type": "turn.end",
+                "protocol_version": 2,
+                "turn_id": self.turn_id,
+                "state": state,
+                "duration_ms": _elapsed_ms(self._started_at),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,
+            }
+        )
+        self._notify_update()
+
+    def _ensure_segment(self) -> dict[str, object]:
+        if self._current_segment is not None:
+            return self._current_segment
+        self._seq += 1
+        self._segment_count += 1
+        segment = {
+            "turn_id": self.turn_id,
+            "seq": self._seq,
+            "id": f"{self.turn_id}_seg_{self._segment_count}",
+            "kind": "segment",
+            "seg_type": "answer" if self._tool_count else "plan",
+            "state": "streaming",
+            "text": "",
+            "started_at": time.monotonic(),
+        }
+        segment["ttft_ms"] = _elapsed_ms(self._started_at)
+        self._current_segment = segment
+        self.elements.append(segment)
+        _emit_chat_frame(
+            {
+                "type": "segment.start",
+                "protocol_version": 2,
+                "turn_id": self.turn_id,
+                "seq": segment["seq"],
+                "id": segment["id"],
+                "seg_type": segment["seg_type"],
+                "ttft_ms": segment["ttft_ms"],
+            }
+        )
+        self._notify_update()
+        return segment
+
+    def _tool_started(self, payload: dict[str, object]) -> None:
+        self._seq += 1
+        self._tool_count += 1
+        name = _tool_name_from_progress(payload)
+        command = _safe_stream_text(payload.get("command_full")) or _safe_stream_text(
+            payload.get("command_label")
+        )
+        tool = {
+            "turn_id": self.turn_id,
+            "seq": self._seq,
+            "id": f"{self.turn_id}_tool_{self._tool_count}",
+            "kind": "tool",
+            "name": name,
+            "state": "started",
+            "args": _safe_stream_text(payload.get("summary")),
+            "command": command,
+            "status": _safe_stream_text(payload.get("status")),
+            "summary": _safe_stream_text(payload.get("summary")),
+        }
+        self.elements.append(tool)
+        self._active_tools.setdefault(name, []).append(tool)
+        _emit_chat_frame(
+            {
+                "type": "tool.started",
+                "protocol_version": 2,
+                "turn_id": self.turn_id,
+                "seq": tool["seq"],
+                "id": tool["id"],
+                "name": name,
+                "args": _safe_stream_text(payload.get("summary")),
+                "command": command,
+            }
+        )
+
+    def _tool_finished(self, payload: dict[str, object]) -> None:
+        name = _tool_name_from_progress(payload)
+        stack = self._active_tools.get(name) or []
+        tool = stack.pop() if stack else None
+        if tool is None:
+            self._seq += 1
+            self._tool_count += 1
+            tool = {
+                "turn_id": self.turn_id,
+                "seq": self._seq,
+                "id": f"{self.turn_id}_tool_{self._tool_count}",
+                "kind": "tool",
+                "name": name,
+            }
+            self.elements.append(tool)
+        tool["state"] = "finished"
+        tool["status"] = _safe_stream_text(payload.get("status")) or "ok"
+        tool["duration_ms"] = payload.get("duration_ms")
+        files = payload.get("changed_files") or payload.get("files_touched") or []
+        if isinstance(files, list):
+            tool["files"] = [safe_assignment_text(item, limit=240) for item in files if safe_assignment_text(item, limit=240)]
+        # Carry-through started command if the finished payload omits it.
+        command = (
+            _safe_stream_text(payload.get("command_full"))
+            or _safe_stream_text(payload.get("command_label"))
+            or tool.get("command")
+        )
+        if command:
+            tool["command"] = command
+        detail = _safe_stream_text(payload.get("detail"))
+        if detail:
+            tool["detail"] = detail
+        output = _safe_stream_text(payload.get("output"), limit=8000)
+        if output:
+            tool["output"] = output
+        exit_code = _safe_exit_code_value(payload.get("exit_code"))
+        if exit_code is not None:
+            tool["exit_code"] = exit_code
+        _emit_chat_frame(
+            {
+                "type": "tool.finished",
+                "protocol_version": 2,
+                "turn_id": self.turn_id,
+                "seq": tool["seq"],
+                "id": tool["id"],
+                "name": name,
+                "status": tool["status"],
+                "duration_ms": tool.get("duration_ms"),
+                "files": tool.get("files") or [],
+                "command": tool.get("command"),
+                "detail": tool.get("detail"),
+                "output": tool.get("output"),
+                "exit_code": tool.get("exit_code"),
+            }
+        )
+
+    def _notify_update(self) -> None:
+        if self._on_update is None:
+            return
+        try:
+            self._on_update(self)
+        except Exception:
+            pass
+
+
+def _safe_stream_text(value: object, *, limit: int = 800) -> str | None:
+    return safe_assignment_text(value, limit=limit) or None
+
+
+def _safe_exit_code_value(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _elapsed_ms(started_at: object) -> int | None:
+    try:
+        started = float(started_at)
+    except Exception:
+        return None
+    return max(0, int((time.monotonic() - started) * 1000))
+
+
+def _tool_name_from_progress(payload: dict[str, object]) -> str:
+    return safe_assignment_token(payload.get("tool_name") or payload.get("tool")) or "tool"
 
 
 def _default_persona_session_db():
@@ -2690,6 +2997,7 @@ def _run_free_floating_assignment_once(
     requested_by: str,
     max_actions: int,
     max_seconds: float,
+    client_message_id: str | None = None,
     stream: bool = False,
 ) -> tuple[int, dict[str, object]]:
     """Run one bounded sandbox turn for an already-queued persona chat message."""
@@ -2707,6 +3015,7 @@ def _run_free_floating_assignment_once(
         session_db=session_db,
         session_id=session_id,
         message=message,
+        client_message_id=client_message_id,
     )
     persona = _persona_by_id(cfg, persona_id)
     if persona is None:
@@ -2727,6 +3036,30 @@ def _run_free_floating_assignment_once(
         session_id=session_id,
         message=message,
     )
+    stream_emitter = (
+        _ChatProtocolV2Emitter(
+            turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
+            client_message_id=client_message_id,
+            on_update=lambda emitter: persist_mission_chat_turn(
+                session_id=session_id,
+                client_message_id=client_message_id,
+                turn_id=emitter.turn_id,
+                elements=emitter.elements,
+            ),
+        )
+        if stream
+        else None
+    )
+
+    def _stream_delta(delta: str | None) -> None:
+        _emit_chat_delta(delta)
+        if stream_emitter is not None:
+            stream_emitter.delta(delta)
+
+    def _stream_progress(payload: dict[str, object] | None) -> None:
+        if stream_emitter is not None:
+            stream_emitter.progress(payload)
+
     try:
         # Keep the model run out of SessionDB. The canonical operator transcript
         # is written below; persisting the internal run as a second hidden
@@ -2741,9 +3074,12 @@ def _run_free_floating_assignment_once(
             chat_message,
             session_id=None,
             max_wall_seconds=max_seconds,
-            stream_callback=_emit_chat_delta if stream else None,
+            stream_callback=_stream_delta if stream else None,
+            trace_callback=_stream_progress if stream_emitter is not None else None,
         )
     except Exception as exc:
+        if stream_emitter is not None:
+            stream_emitter.finish(state="failed")
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
         return 2, {
             "ok": False,
@@ -2754,7 +3090,19 @@ def _run_free_floating_assignment_once(
         }
 
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=8000)
-    _append_persona_assistant_text(session_db=session_db, session_id=session_id, text=reply_text)
+    _append_persona_assistant_text(
+        session_db=session_db,
+        session_id=session_id,
+        text=reply_text,
+        client_message_id=client_message_id,
+    )
+    if stream_emitter is not None:
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+        )
     _update_persona_chat_token_counts(
         session_db=session_db,
         session_id=session_id,
@@ -2781,12 +3129,13 @@ def _run_free_floating_assignment_once(
         user_message=message,
         assistant_response=reply_text,
     )
-    return 0, {
+    data = {
         "ok": True,
         "execution_state": "completed",
         "session_id": session_id,
         "reply": reply_text,
-        "turn_id": None,
+        "turn_id": stream_emitter.turn_id if stream_emitter is not None else None,
+        "client_message_id": client_message_id,
         "run_ids": [],
         "task_id": None,
         "input_tokens": getattr(chat_result, "input_tokens", None),
@@ -2794,6 +3143,16 @@ def _run_free_floating_assignment_once(
         "total_tokens": getattr(chat_result, "total_tokens", None),
         "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
     }
+    if stream_emitter is not None:
+        data["protocol_version"] = 2
+        data["turn_elements"] = stream_emitter.elements
+        stream_emitter.finish(
+            state="completed",
+            input_tokens=data.get("input_tokens"),
+            output_tokens=data.get("output_tokens"),
+            total_tokens=data.get("total_tokens"),
+        )
+    return 0, data
 
 
 def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, json_output: bool, terminal_state: str) -> int:
@@ -2922,21 +3281,51 @@ def _normalize_cli_persona_or_template_id(persona_id: str) -> str:
 
 
 def _cmd_task_create(args) -> int:
-    from agent_runtime.mission_goal import create_mission_goal
+    from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
 
-    data = create_mission_goal(
-        title=args.title,
-        description=args.description,
-        requested_by=args.requested_by,
-        start_daemon_mode=getattr(args, "start_daemon", None),
-    )
+    if getattr(args, "request_json", None):
+        try:
+            request = json.loads(Path(args.request_json).read_text(encoding="utf-8"))
+        except Exception as exc:
+            data = {
+                "schema_version": 1,
+                "error": {
+                    "code": "invalid_request",
+                    "message": "Could not read goal-create request JSON.",
+                    "retryable": False,
+                    "safe_details": {"error_class": type(exc).__name__},
+                },
+            }
+        else:
+            data = create_mission_goal_from_request(request)
+    else:
+        if not args.title or not args.description:
+            data = {
+                "schema_version": 1,
+                "error": {
+                    "code": "invalid_request",
+                    "message": "--title and --description are required unless --request-json is provided.",
+                    "retryable": False,
+                    "safe_details": {},
+                },
+            }
+        else:
+            data = create_mission_goal(
+                title=args.title,
+                description=args.description,
+                requested_by=args.requested_by,
+                start_daemon_mode=getattr(args, "start_daemon", None),
+            )
     if args.json:
         print(emit_json(data))
     else:
+        if data.get("error"):
+            print((data["error"] or {}).get("message") or "goal create failed")
+            return 1
         daemon_summary = (data.get("daemon_start") or {}).get("summary", "daemon start not attempted")
         dirty_summary = (((data.get("new_goal_hygiene") or {}).get("dirty_state_after_cleanup") or {}).get("summary"))
         print(f"{data.get('task_id')} [{data.get('state')}] {data.get('title')} dirty={dirty_summary} daemon={daemon_summary}")
-    return 0
+    return 1 if data.get("error") else 0
 
 
 def _cmd_task_list(args) -> int:

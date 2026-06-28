@@ -63,6 +63,99 @@ def test_snapshot_projects_blueprint_run_records(isolate_agent_runtime_root):
     assert any(item["id"] == "one_agent_smoke" for item in snap["blueprints"])
 
 
+def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_root):
+    n = now()
+    task = Task(
+        id="stage38",
+        title="Stage 38 projection",
+        description="Project Neko, Dev, QA, and proof gate.",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Stage 38 projection", objective="Project flow."),
+            current_stage_id="scope",
+            blueprint_id="neko_dev_qa_basic",
+            blueprint_version=1,
+            slots={
+                "lead": {"role": "neko", "required": True},
+                "builder": {"role": "builder", "required": True},
+                "verifier": {"role": "verifier", "required": True},
+            },
+            bindings={
+                "lead": "neko_supervisor",
+                "builder": "dev",
+                "verifier": "qa",
+            },
+            stages=[
+                MissionPlanStage(
+                    id="scope",
+                    title="Scope",
+                    objective="Scope the mission.",
+                    owner="neko_supervisor",
+                    owner_slot="lead",
+                    repo="hermes-agent",
+                    kind="planning",
+                    status=StageStatus.IMPLEMENTING,
+                ),
+                MissionPlanStage(
+                    id="implement",
+                    title="Implement",
+                    objective="Implement.",
+                    owner="dev",
+                    owner_slot="builder",
+                    repo="hermes-agent",
+                    kind="implementation",
+                    depends_on=["scope"],
+                    proof_gate={"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"]},
+                ),
+                MissionPlanStage(
+                    id="verify",
+                    title="Verify",
+                    objective="Verify proof.",
+                    owner="qa",
+                    owner_slot="verifier",
+                    repo="hermes-agent",
+                    kind="qa_verdict",
+                    depends_on=["implement"],
+                    proof_gate={"required": True, "minimum_status": "approved", "required_proof_types": ["qa_verdict"]},
+                    blocks_qa_until=False,
+                ),
+            ],
+        ),
+    )
+    TaskStore().create(task)
+    events = EventLog()
+    events.append(
+        Event(
+            ts=n,
+            type="run.progress",
+            task_id=task.id,
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={"summary": "Neko scoped the mission.", "redaction_status": "safe"},
+        )
+    )
+
+    snap = build_snapshot(event_log=events)
+    row = next(item for item in snap["tasks"] if item["task_id"] == "stage38")
+
+    assert snap["parity"]["contract_version"] == 38
+    assert "mission_level_state" in snap["parity"]["capabilities"]
+    assert row["mission_level_state"]["blueprint_id"] == "neko_dev_qa_basic"
+    assert [(actor["persona_id"], actor["presence"]) for actor in row["mission_level_state"]["actors"]] == [
+        ("neko_supervisor", "waiting"),
+        ("dev", "queued"),
+        ("qa", "queued"),
+    ]
+    assert row["mission_flow_timeline"]["items"][0]["stage_id"] == "scope"
+    assert row["proof_gate_state"]["gate_state"] == "incomplete"
+    assert row["proof_gate_state"]["missing_stage_ids"] == ["implement", "verify"]
+    assert row["proof_gate_state"]["why_not_ready"]
+    assert row["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is True
+
+
 def test_snapshot_unscoped_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root):
     ts = TaskStore()
     n = now()

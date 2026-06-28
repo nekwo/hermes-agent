@@ -5,6 +5,7 @@ import re
 from typing import Any, Iterable
 
 from .models import PersonaInstance
+from .mission_chat_turns import mission_chat_turn_elements
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 
@@ -530,6 +531,10 @@ def _safe_recent_messages(
         role = _safe_message_role(raw.get("role"))
         if role not in {"operator", "agent"}:
             continue
+        client_message_id = safe_assignment_text(
+            raw.get("platform_message_id") or raw.get("client_message_id"),
+            limit=240,
+        )
         curated = _curate_chat_message_text(
             role, raw.get("content") or raw.get("text")
         )
@@ -544,21 +549,29 @@ def _safe_recent_messages(
             continue
         if status == "redacted":
             redacted = True
-        rows.append(
-            {
-                "id": safe_assignment_text(raw.get("id"), limit=120)
-                or f"{session_id}:{index}",
-                "role": role,
-                "text": text,
-                "timestamp": _iso_timestamp(
-                    raw.get("created_at")
-                    or raw.get("timestamp")
-                    or raw.get("time")
-                    or raw.get("updated_at")
-                ),
-                "redaction_status": status,
-            }
-        )
+        row = {
+            "id": safe_assignment_text(raw.get("id"), limit=120)
+            or f"{session_id}:{index}",
+            "role": role,
+            "text": text,
+            "timestamp": _iso_timestamp(
+                raw.get("created_at")
+                or raw.get("timestamp")
+                or raw.get("time")
+                or raw.get("updated_at")
+            ),
+            "redaction_status": status,
+        }
+        if client_message_id:
+            row["client_message_id"] = client_message_id
+        if role == "agent" and client_message_id:
+            elements = mission_chat_turn_elements(
+                session_id=session_id,
+                client_message_id=client_message_id,
+            )
+            if elements:
+                row["turn_elements"] = elements
+        rows.append(row)
     rows = rows[-_bounded_message_tail(limit):]
     return rows, "redacted" if redacted else "safe"
 

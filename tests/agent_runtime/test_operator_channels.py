@@ -99,3 +99,34 @@ def test_operator_channel_reports_missing_history_loudly():
         for warning in channels[0]["warnings"]
     )
     assert any(warning["code"] == "trace_empty" for warning in channels[0]["warnings"])
+
+
+def test_operator_channel_allows_quiet_chat_without_trace():
+    session_id = "persona_chat_personainst_profile_alice_quiet"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _instance(
+                "personainst_profile_alice",
+                session_id=session_id,
+                updated_at="2026-06-25T21:54:04Z",
+            )
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "title": "Alice Agent chat",
+                "message_count": 2,
+                "messages": [
+                    {"role": "operator", "text": "hi"},
+                    {"role": "agent", "text": "hello"},
+                ],
+                "updated_at": "2026-06-25T21:54:04Z",
+            }
+        ],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 1
+    assert channels[0]["warnings"] == []
