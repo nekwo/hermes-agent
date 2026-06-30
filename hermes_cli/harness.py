@@ -4090,43 +4090,43 @@ def _persona_by_id(cfg, persona_id: str):
         profile_id = safe_assignment_token(raw.split(":", 1)[1])
         if not profile_id:
             return None
-        for persona in personas:
-            if str(getattr(persona, "hermes_profile", "") or "") == profile_id:
-                return AgentPersona(
-                    id=f"profile:{profile_id}",
-                    display_name=f"{_display_name_for_profile(profile_id)} Agent",
-                    role=str(getattr(persona, "role", None) or "dev"),
-                    model=getattr(persona, "model", None),
-                    provider=getattr(persona, "provider", None),
-                    api_mode=getattr(persona, "api_mode", None),
-                    toolsets=list(getattr(persona, "toolsets", []) or []),
-                    system_prompt_path=str(getattr(persona, "system_prompt_path", "") or ""),
-                    autonomy=str(getattr(persona, "autonomy", "review") or "review"),
-                    hermes_profile=profile_id,
-                    skills=list(getattr(persona, "skills", []) or []),
-                    soul_overlay_path=getattr(persona, "soul_overlay_path", None),
-                    required_mcp_servers=list(getattr(persona, "required_mcp_servers", []) or []),
-                    include_profile_memory=True,
-                    include_core_context_files=bool(getattr(persona, "include_core_context_files", False)),
-                    repo_scope=getattr(persona, "repo_scope", None),
-                    repo_scope_label=getattr(persona, "repo_scope_label", None),
-                    iteration_budget=getattr(persona, "iteration_budget", None),
-                    max_wall_seconds=getattr(persona, "max_wall_seconds", None),
-                    max_api_calls=getattr(persona, "max_api_calls", None),
-                    max_total_tokens=getattr(persona, "max_total_tokens", None),
-                    readiness=dict(getattr(persona, "readiness", {}) or {}),
-                )
+        matching_profile_persona = next(
+            (
+                persona
+                for persona in personas
+                if str(getattr(persona, "hermes_profile", "") or "") == profile_id
+            ),
+            None,
+        )
+        default_model = getattr(matching_profile_persona, "model", None) if matching_profile_persona is not None else None
+        default_provider = getattr(matching_profile_persona, "provider", None) if matching_profile_persona is not None else None
+        default_api_mode = getattr(matching_profile_persona, "api_mode", None) if matching_profile_persona is not None else None
+        default_autonomy = getattr(matching_profile_persona, "autonomy", None) if matching_profile_persona is not None else None
+        default_include_core = (
+            bool(getattr(matching_profile_persona, "include_core_context_files", False))
+            if matching_profile_persona is not None
+            else False
+        )
+        default_readiness = (
+            dict(getattr(matching_profile_persona, "readiness", {}) or {})
+            if matching_profile_persona is not None
+            else {}
+        )
         return AgentPersona(
             id=f"profile:{profile_id}",
             display_name=f"{_display_name_for_profile(profile_id)} Agent",
-            role="dev",
-            model=getattr(cfg, "default_model", None),
-            provider=getattr(cfg, "default_provider", None),
-            api_mode=getattr(cfg, "default_api_mode", None),
-            toolsets=[],
+            role="profile",
+            model=default_model or getattr(cfg, "default_model", None),
+            provider=default_provider or getattr(cfg, "default_provider", None),
+            api_mode=default_api_mode or getattr(cfg, "default_api_mode", None),
+            toolsets=["file", "search", "session_search", "todo", "skills"],
             system_prompt_path="",
+            autonomy=str(default_autonomy or "review"),
             hermes_profile=profile_id,
+            skills=[],
             include_profile_memory=True,
+            include_core_context_files=default_include_core,
+            readiness=default_readiness,
         )
     normalized = _normalize_cli_persona_id(raw)
     for persona in personas:

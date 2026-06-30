@@ -2029,6 +2029,213 @@ def test_persona_chat_context_includes_prior_turns(isolate_agent_runtime_root):
     assert enriched.endswith("what did I mention?")
 
 
+def test_profile_persona_resolution_does_not_borrow_role_skills(monkeypatch, isolate_agent_runtime_root):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    cfg.default_provider = "openai-codex"
+    cfg.default_model = "gpt-default"
+    cfg.personas["neko_supervisor"] = {
+        "display_name": "Neko Mission Lead",
+        "hermes_profile": "alice",
+        "provider": "openai-codex",
+        "model": "gpt-5.5",
+        "api_mode": "codex_responses",
+        "skills": ["harness-mission-lead", "systematic-debugging"],
+        "toolsets": ["terminal", "mission_goal"],
+    }
+
+    persona = harness._persona_by_id(cfg, "profile:alice")
+
+    assert persona is not None
+    assert persona.id == "profile:alice"
+    assert persona.role == "profile"
+    assert persona.hermes_profile == "alice"
+    assert persona.skills == []
+    assert persona.model == "gpt-5.5"
+    assert persona.provider == "openai-codex"
+    assert "mission_goal" not in persona.toolsets
+
+
+def test_profile_prompt_observability_uses_profile_skills_and_chat_title(
+    monkeypatch,
+    tmp_path,
+    isolate_agent_runtime_root,
+):
+    from agent_runtime import prompt_observability
+
+    profile_dir = tmp_path / "alice"
+    profile_dir.mkdir()
+    (profile_dir / ".skills_prompt_snapshot.json").write_text(
+        json.dumps(
+            {
+                "skills": [
+                    {"skill_name": "agent-runtime-harness"},
+                    {"skill_name": "creative-ideation"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prompt_observability, "get_profile_dir", lambda profile: profile_dir)
+    db = _TranscriptDB()
+    db.create_session("persona_chat_alice", "agent_runtime_persona_chat")
+    db.set_session_title("persona_chat_alice", "Alice Agent chat")
+
+    context = prompt_observability.mission_chat_prompt_observability(
+        persona=AgentPersona(
+            id="profile:alice",
+            display_name="Alice Agent",
+            role="profile",
+            model="gpt-test",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            toolsets=["file", "skills"],
+            system_prompt_path="",
+            hermes_profile="alice",
+            skills=[],
+        ),
+        persona_instance_id="personainst_profile_alice",
+        session_id="persona_chat_alice",
+        session_db=db,
+    )
+
+    assert context["chat_id"] == "persona_chat_alice"
+    assert context["chat_title"] == "Alice Agent chat"
+    assert context["chat_name"] == "Alice Agent chat"
+    assert context["chat"]["source"] == "agent_runtime_persona_chat"
+    assert [item["name"] for item in context["skills"]] == [
+        "agent-runtime-harness",
+        "creative-ideation",
+    ]
+    assert {item["source"] for item in context["skills"]} == {
+        "profile_skills_snapshot"
+    }
+
+
+def test_prompt_observability_refreshes_stale_derived_fields(
+    monkeypatch,
+    tmp_path,
+    isolate_agent_runtime_root,
+):
+    from agent_runtime import prompt_observability
+
+    profile_dir = tmp_path / "alice"
+    profile_dir.mkdir()
+    (profile_dir / ".skills_prompt_snapshot.json").write_text(
+        json.dumps({"skills": [{"skill_name": "fresh-profile-skill"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prompt_observability, "get_profile_dir", lambda profile: profile_dir)
+    db = _TranscriptDB()
+    db.create_session("persona_chat_alice", "agent_runtime_persona_chat")
+    db.set_session_title("persona_chat_alice", "Alice Agent chat")
+    stale = {
+        "context_id": "ctx_stale",
+        "persona_id": "profile:alice",
+        "persona_instance_id": "personainst_profile_alice",
+        "profile": "alice",
+        "session_id": "persona_chat_alice",
+        "skills": [
+            {
+                "name": "harness-mission-lead",
+                "kind": "skill",
+                "status": "loaded",
+                "hash_tracked": True,
+                "source": "persona_definition",
+            }
+        ],
+    }
+    prompt_observability.persist_prompt_observability_context(stale)
+    built = prompt_observability.mission_chat_prompt_observability(
+        persona=AgentPersona(
+            id="profile:alice",
+            display_name="Alice Agent",
+            role="profile",
+            model="gpt-test",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            toolsets=["file", "skills"],
+            system_prompt_path="",
+            hermes_profile="alice",
+            skills=[],
+        ),
+        persona_instance_id="personainst_profile_alice",
+        session_id="persona_chat_alice",
+        session_db=db,
+    )
+
+    merged = prompt_observability._merge_latest_contexts([built])
+
+    refreshed = merged[0]
+    assert refreshed["context_id"] == "ctx_stale"
+    assert refreshed["chat_title"] == "Alice Agent chat"
+    assert [item["name"] for item in refreshed["skills"]] == ["fresh-profile-skill"]
+    assert refreshed["skills"][0]["source"] == "profile_skills_snapshot"
+
+
+def test_snapshot_prompt_observability_builds_profile_instance_context(
+    monkeypatch,
+    tmp_path,
+    isolate_agent_runtime_root,
+):
+    from agent_runtime import prompt_observability
+    from agent_runtime.models import PersonaInstance, WorkerSessionState
+
+    profile_dir = tmp_path / "alice"
+    profile_dir.mkdir()
+    (profile_dir / ".skills_prompt_snapshot.json").write_text(
+        json.dumps({"skills": [{"skill_name": "alice-profile-skill"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prompt_observability, "get_profile_dir", lambda profile: profile_dir)
+    db = _TranscriptDB()
+    db.create_session("persona_chat_personainst_profile_alice", "agent_runtime_persona_chat")
+    db.set_session_title("persona_chat_personainst_profile_alice", "Alice Agent chat")
+    stale = {
+        "context_id": "ctx_stale_profile_alice",
+        "persona_id": "profile:alice",
+        "persona_instance_id": "personainst_profile_alice",
+        "profile": "alice",
+        "session_id": "persona_chat_personainst_profile_alice",
+        "skills": [
+            {
+                "name": "harness-mission-lead",
+                "kind": "skill",
+                "status": "loaded",
+                "hash_tracked": True,
+                "source": "persona_definition",
+            }
+        ],
+    }
+    prompt_observability.persist_prompt_observability_context(stale)
+
+    snapshot = prompt_observability.snapshot_prompt_observability(
+        personas=[],
+        persona_instances=[
+            PersonaInstance(
+                id="personainst_profile_alice",
+                persona_id="profile:alice",
+                role="profile",
+                display_name="Alice Agent",
+                profile_id="alice",
+                runtime_root=".",
+                state=WorkerSessionState.IDLE,
+                mode="chat",
+                session_id="persona_chat_personainst_profile_alice",
+            )
+        ],
+        session_db=db,
+    )
+
+    context = snapshot["chat_contexts"][0]
+    assert context["context_id"] == "ctx_stale_profile_alice"
+    assert context["chat_id"] == "persona_chat_personainst_profile_alice"
+    assert context["chat_title"] == "Alice Agent chat"
+    assert [item["name"] for item in context["skills"]] == ["alice-profile-skill"]
+    assert context["skills"][0]["source"] == "profile_skills_snapshot"
+
+
 def test_persona_instance_close_cli_closes_only_free_floating_assignment(monkeypatch, isolate_agent_runtime_root):
     from argparse import Namespace
     from hermes_cli import harness

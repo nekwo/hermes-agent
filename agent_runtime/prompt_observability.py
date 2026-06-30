@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterable
 
 from hermes_cli.profiles import get_profile_dir
@@ -57,6 +58,7 @@ def mission_chat_prompt_observability(
     ).hexdigest()[:16]
     surface = safe_assignment_text(surface_prompt, limit=4000) or ""
     history = _chat_history_context(session_db=session_db, session_id=session_id)
+    chat = _chat_metadata(session_db=session_db, session_id=session_id)
     return {
         "context_id": context_id,
         "prompt_mode": prompt_mode,
@@ -66,6 +68,10 @@ def mission_chat_prompt_observability(
         "display_name": safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id,
         "role": safe_assignment_token(getattr(persona, "role", None)) or "agent",
         "session_id": safe_assignment_text(session_id, limit=200),
+        "chat_id": chat.get("id"),
+        "chat_title": chat.get("title"),
+        "chat_name": chat.get("name"),
+        "chat": chat,
         "task_id": safe_assignment_token(task_id),
         "goal_id": safe_assignment_token(goal_id),
         "turn_id": safe_assignment_token(turn_id),
@@ -170,13 +176,13 @@ def snapshot_prompt_observability(
     }
     for instance in persona_instances:
         persona_id = safe_assignment_token(getattr(instance, "persona_id", None))
-        persona = by_persona.get(persona_id)
+        persona = by_persona.get(persona_id) or _profile_persona_from_instance(instance)
         if persona is None:
             continue
         contexts.append(
             mission_chat_prompt_observability(
                 persona=persona,
-                persona_instance_id=getattr(instance, "id", None),
+                persona_instance_id=_persona_instance_id(instance),
                 session_id=getattr(instance, "session_id", None),
                 task_id=getattr(instance, "current_task_id", None),
                 goal_id=getattr(instance, "goal_id", None),
@@ -207,7 +213,7 @@ def snapshot_prompt_observability(
             "qa_default": False,
         },
         "surface_prompt_default": "",
-        "chat_contexts": _merge_latest_contexts(contexts),
+        "chat_contexts": _merge_latest_contexts(contexts, session_db=session_db),
     }
 
 
@@ -243,7 +249,11 @@ def load_latest_prompt_observability_contexts() -> list[dict[str, Any]]:
     return rows
 
 
-def _merge_latest_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _merge_latest_contexts(
+    contexts: list[dict[str, Any]],
+    *,
+    session_db: Any | None = None,
+) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
@@ -262,7 +272,7 @@ def _merge_latest_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any
         key = key_for(item)
         if key in seen:
             continue
-        _backfill_derived_fields(item, built_by_key.get(key))
+        _backfill_derived_fields(item, built_by_key.get(key), session_db=session_db)
         merged.append(item)
         seen.add(key)
     for item in contexts:
@@ -274,7 +284,12 @@ def _merge_latest_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any
     return merged
 
 
-def _backfill_derived_fields(item: dict[str, Any], built: dict[str, Any] | None) -> None:
+def _backfill_derived_fields(
+    item: dict[str, Any],
+    built: dict[str, Any] | None,
+    *,
+    session_db: Any | None = None,
+) -> None:
     """Add `skills` / `context_budget` to persisted contexts that predate them.
 
     Persisted observability rows are written at chat time, so rows captured
@@ -282,27 +297,84 @@ def _backfill_derived_fields(item: dict[str, Any], built: dict[str, Any] | None)
     built context (correct per-persona set) or the profile snapshot, and
     recompute the budget from the row's own model selection + final input.
     """
-    if not item.get("skills"):
-        if built and built.get("skills"):
-            item["skills"] = built["skills"]
-        else:
-            profile = safe_assignment_token(item.get("profile"))
-            names = _profile_snapshot_skill_names(profile) if profile else []
-            if names:
-                item["skills"] = [
-                    {
-                        "name": safe_assignment_token(name) or name,
-                        "kind": "skill",
-                        "status": "loaded",
-                        "hash_tracked": False,
-                        "source": "profile_skills_snapshot",
-                    }
-                    for name in names[:80]
-                ]
+    if built:
+        for key in ("skills", "chat_id", "chat_title", "chat_name", "chat"):
+            value = built.get(key)
+            if value:
+                item[key] = value
+    if not item.get("chat_id") or not item.get("chat_title"):
+        chat = _chat_metadata(
+            session_db=session_db,
+            session_id=safe_assignment_text(item.get("session_id"), limit=200),
+        )
+        if chat:
+            item["chat_id"] = chat.get("id")
+            item["chat_title"] = chat.get("title")
+            item["chat_name"] = chat.get("name")
+            item["chat"] = chat
+    if not item.get("skills") or _profile_prompt_skills_need_snapshot(item):
+        profile = safe_assignment_token(item.get("profile"))
+        names = _profile_snapshot_skill_names(profile) if profile else []
+        if names:
+            item["skills"] = [
+                {
+                    "name": safe_assignment_token(name) or name,
+                    "kind": "skill",
+                    "status": "loaded",
+                    "hash_tracked": False,
+                    "source": "profile_skills_snapshot",
+                }
+                for name in names[:80]
+            ]
     if item.get("context_budget") is None:
         budget = _context_budget(item.get("model_selection"), item.get("final_model_input"))
         if budget is not None:
             item["context_budget"] = budget
+
+
+def _persona_instance_id(instance: Any) -> str | None:
+    return safe_assignment_token(
+        getattr(instance, "id", None) or getattr(instance, "persona_instance_id", None)
+    )
+
+
+def _profile_persona_from_instance(instance: Any) -> Any | None:
+    raw_persona_id = str(getattr(instance, "persona_id", "") or "").strip()
+    profile = safe_assignment_token(getattr(instance, "profile_id", None))
+    lowered = raw_persona_id.lower()
+    if lowered.startswith("profile:"):
+        profile = safe_assignment_token(raw_persona_id.split(":", 1)[1])
+    elif lowered.startswith("profile_"):
+        profile = safe_assignment_token(raw_persona_id[len("profile_") :])
+    if not profile:
+        return None
+    display_name = (
+        safe_assignment_text(getattr(instance, "display_name", None), limit=120)
+        or f"{profile.replace('_', ' ').title()} Agent"
+    )
+    return SimpleNamespace(
+        id=f"profile:{profile}",
+        display_name=display_name,
+        role="profile",
+        hermes_profile=profile,
+        skills=[],
+        toolsets=["file", "search", "session_search", "todo", "skills"],
+    )
+
+
+def _profile_prompt_skills_need_snapshot(item: dict[str, Any]) -> bool:
+    persona_id = str(item.get("persona_id") or "").strip().lower()
+    if not (persona_id.startswith("profile:") or persona_id.startswith("profile_")):
+        return False
+    skills = item.get("skills")
+    if not isinstance(skills, list) or not skills:
+        return True
+    sources = {
+        safe_assignment_token(entry.get("source"))
+        for entry in skills
+        if isinstance(entry, dict)
+    }
+    return "profile_skills_snapshot" not in sources
 
 
 _DEFAULT_COMPACTION_RATIO = 0.50
@@ -484,6 +556,35 @@ def _skills_context(persona: Any, profile: str) -> list[dict[str, Any]]:
             }
         )
     return skills
+
+
+def _chat_metadata(*, session_db: Any | None, session_id: str | None) -> dict[str, Any]:
+    safe_id = safe_assignment_text(session_id, limit=200)
+    if not safe_id:
+        return {}
+    title = None
+    source = None
+    if session_db is not None:
+        try:
+            title = safe_assignment_text(session_db.get_session_title(safe_id), limit=160)
+        except Exception:
+            title = None
+        try:
+            raw = session_db.get_session(safe_id)
+        except Exception:
+            raw = None
+        if isinstance(raw, dict):
+            if not title:
+                title = safe_assignment_text(raw.get("title"), limit=160)
+            source = safe_assignment_token(raw.get("source"))
+    data: dict[str, Any] = {
+        "id": safe_id,
+        "title": title,
+        "name": title,
+    }
+    if source:
+        data["source"] = source
+    return data
 
 
 def _profile_context_files(profile: str) -> list[dict[str, Any]]:
