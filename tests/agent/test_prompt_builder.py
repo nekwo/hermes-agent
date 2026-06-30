@@ -818,27 +818,26 @@ class TestBuildContextFilesPrompt:
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "BLOCKED" in result
 
-    def test_hermes_md_beats_agents_md(self, tmp_path):
-        """When both exist, .hermes.md wins and AGENTS.md is not loaded."""
+    def test_hermes_md_and_agents_md_both_load(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("Agent guidelines here.")
         (tmp_path / ".hermes.md").write_text("Hermes project rules.")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Hermes project rules" in result
-        assert "Agent guidelines" not in result
+        assert "Agent guidelines" in result
 
-    def test_agents_md_beats_claude_md(self, tmp_path):
+    def test_agents_md_and_claude_md_both_load(self, tmp_path):
         (tmp_path / "AGENTS.md").write_text("Agent guidelines here.")
         (tmp_path / "CLAUDE.md").write_text("Claude guidelines here.")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Agent guidelines" in result
-        assert "Claude guidelines" not in result
+        assert "Claude guidelines" in result
 
-    def test_claude_md_beats_cursorrules(self, tmp_path):
+    def test_claude_md_and_cursorrules_both_load(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text("Claude guidelines here.")
         (tmp_path / ".cursorrules").write_text("Cursor rules here.")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Claude guidelines" in result
-        assert "Cursor rules" not in result
+        assert "Cursor rules" in result
 
     def test_loads_claude_md(self, tmp_path):
         (tmp_path / "CLAUDE.md").write_text("Use type hints everywhere.")
@@ -872,17 +871,16 @@ class TestBuildContextFilesPrompt:
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "BLOCKED" in result
 
-    def test_hermes_md_beats_all_others(self, tmp_path):
-        """When all four types exist, only .hermes.md is loaded."""
+    def test_all_project_context_sources_load(self, tmp_path):
         (tmp_path / ".hermes.md").write_text("Hermes wins.")
-        (tmp_path / "AGENTS.md").write_text("Agents lose.")
-        (tmp_path / "CLAUDE.md").write_text("Claude loses.")
-        (tmp_path / ".cursorrules").write_text("Cursor loses.")
+        (tmp_path / "AGENTS.md").write_text("Agents load.")
+        (tmp_path / "CLAUDE.md").write_text("Claude loads.")
+        (tmp_path / ".cursorrules").write_text("Cursor loads.")
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Hermes wins" in result
-        assert "Agents lose" not in result
-        assert "Claude loses" not in result
-        assert "Cursor loses" not in result
+        assert "Agents load" in result
+        assert "Claude loads" in result
+        assert "Cursor loads" in result
 
     def test_cursorrules_loads_when_only_option(self, tmp_path):
         """Cursorrules still loads when no higher-priority files exist."""
@@ -927,43 +925,6 @@ class TestFindHermesMd:
         repo.mkdir()
         (repo / ".git").mkdir()
         assert _find_hermes_md(repo) is None
-
-    def test_no_git_root_checks_cwd_only(self, tmp_path):
-        """Outside a git repo, only cwd is checked — parents are NOT walked.
-
-        Walking parents with no git root to stop the loop would climb all
-        the way to / and pick up a .hermes.md planted in /tmp, /home, or /
-        on a shared system — a cross-user prompt-injection vector.
-        """
-        from unittest.mock import patch
-
-        parent = tmp_path / "parent"
-        parent.mkdir()
-        (parent / ".hermes.md").write_text("planted by another user")
-        cwd = parent / "work"
-        cwd.mkdir()
-        # No git root anywhere up the tree.
-        with patch("agent.prompt_builder._find_git_root", return_value=None):
-            assert _find_hermes_md(cwd) is None
-
-    def test_no_git_root_finds_in_cwd(self, tmp_path):
-        """Outside a git repo, a .hermes.md in cwd itself is still found."""
-        from unittest.mock import patch
-
-        (tmp_path / ".hermes.md").write_text("local rules")
-        with patch("agent.prompt_builder._find_git_root", return_value=None):
-            assert _find_hermes_md(tmp_path) == tmp_path / ".hermes.md"
-
-    def test_walks_parents_inside_git_repo(self, tmp_path):
-        """Inside a git repo, parent walk up to the git root still works."""
-        from unittest.mock import patch
-
-        (tmp_path / ".hermes.md").write_text("repo root rules")
-        sub = tmp_path / "a" / "b"
-        sub.mkdir(parents=True)
-        # Simulate cwd being inside a repo rooted at tmp_path.
-        with patch("agent.prompt_builder._find_git_root", return_value=tmp_path):
-            assert _find_hermes_md(sub) == tmp_path / ".hermes.md"
 
 
 class TestFindGitRoot:
@@ -1255,46 +1216,6 @@ class TestEnvironmentHints:
         assert "Terminal backend: modal" in result
         assert "Linux 6.8.0" in result
         assert "/workspace" in result
-
-    def test_probe_remote_backend_imports_real_factory(self, monkeypatch):
-        """Regression for #53667: the probe imported a nonexistent
-        ``get_environment`` from ``tools.environments`` and always died with
-        ``ImportError: cannot import name 'get_environment'`` (cosmetic — it
-        only dropped the live backend description to a static fallback). The
-        real factory is ``_create_environment`` in ``tools.terminal_tool``;
-        the probe must import and call THAT, returning a parsed line instead
-        of None."""
-        import agent.prompt_builder as _pb
-
-        monkeypatch.setenv("TERMINAL_ENV", "docker")
-        _pb._clear_backend_probe_cache()
-
-        class _FakeEnv:
-            def execute(self, cmd, timeout=None):
-                return {
-                    "returncode": 0,
-                    "output": (
-                        "os=Linux\nkernel=6.8.0\nhome=/root\n"
-                        "cwd=/workspace\nuser=root\n"
-                    ),
-                }
-
-        created = {}
-
-        def _fake_create_environment(*, env_type, **kwargs):
-            created["env_type"] = env_type
-            return _FakeEnv()
-
-        # Patch the REAL factory in tools.terminal_tool — the probe imports it
-        # locally, so the import itself must succeed (the bug was here).
-        import tools.terminal_tool as _tt
-        monkeypatch.setattr(_tt, "_create_environment", _fake_create_environment)
-
-        line = _pb._probe_remote_backend("docker")
-        assert created.get("env_type") == "docker"
-        assert line is not None
-        assert "Linux 6.8.0" in line
-        assert "root" in line
 
     def test_remote_backend_list_covers_known_sandboxes(self):
         """Regression guard: if someone adds a remote backend, they must list it here."""

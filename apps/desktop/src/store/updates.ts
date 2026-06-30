@@ -185,7 +185,6 @@ export function maybeNotifyUpdateAvailable(status: DesktopUpdateStatus | null) {
       }
     },
     durationMs: 0,
-    icon: 'gift',
     id: UPDATE_TOAST_ID,
     kind: 'info',
     message: translateNow('notifications.updateReadyMessage', behind),
@@ -399,10 +398,6 @@ export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promis
           id: UPDATE_TOAST_ID,
           kind: 'success',
           message: translateNow('updates.manualPickedUp'),
-          // No action button here, but it's still update-lifecycle news — keep
-          // it with the other update toasts instead of the ambient bottom-right
-          // stack.
-          placement: 'default',
           title: translateNow('updates.allSetTitle')
         })
       } else {
@@ -616,7 +611,6 @@ export function startUpdatePoller(): void {
   }
 
   pollerStarted = true
-  void checkUpdates()
   void checkBackendUpdates()
   void refreshDesktopVersion()
   bridge.onProgress(ingestProgress)
@@ -639,7 +633,6 @@ export function startUpdatePoller(): void {
   window.addEventListener('focus', onFocus)
   backgroundTimer = setInterval(
     () => {
-      void checkUpdates()
       void checkBackendUpdates()
     },
     30 * 60 * 1000
@@ -667,7 +660,6 @@ function onFocus() {
   }
 
   lastFocusAt = now
-  void checkUpdates()
   void checkBackendUpdates()
   void refreshDesktopVersion()
 }

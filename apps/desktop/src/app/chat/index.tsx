@@ -45,7 +45,7 @@ import {
   $sessions,
   sessionPinId
 } from '@/store/session'
-import { isSecondaryWindow, isWatchWindow } from '@/store/windows'
+import { isSecondaryWindow } from '@/store/windows'
 import type { ModelOptionsResponse } from '@/types/hermes'
 
 import { routeSessionId } from '../routes'
@@ -342,9 +342,8 @@ export function ChatView({
 
   const threadLoading = threadLoadingState(loadingSession, busy, awaitingResponse, lastVisibleIsUser)
   // Hide the composer in the exhausted error state too: there's no live runtime
-  // to send to until a retry rebinds one. Watch windows are pure spectators of a
-  // subagent run driven elsewhere — no composer, transcript is read-only.
-  const showChatBar = !loadingSession && !resumeExhausted && !isWatchWindow()
+  // to send to until a retry rebinds one.
+  const showChatBar = !loadingSession && !resumeExhausted
   const threadKey = selectedSessionId || activeSessionId || (isRoutedSessionView ? location.pathname : 'new')
 
   const modelOptionsQuery = useQuery<ModelOptionsResponse>({
@@ -358,10 +357,7 @@ export function ChatView({
         throw new Error('Hermes gateway unavailable')
       }
 
-      return gateway.request<ModelOptionsResponse>('model.options', {
-        session_id: activeSessionId,
-        explicit_only: true
-      })
+      return gateway.request<ModelOptionsResponse>('model.options', { session_id: activeSessionId })
     },
     enabled: gatewayOpen
   })

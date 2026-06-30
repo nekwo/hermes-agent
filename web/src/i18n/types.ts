@@ -139,8 +139,6 @@ export interface Translations {
     activeSessions: string;
     recentSessions: string;
     restartGateway: string;
-    restartGatewayConfirmMessage?: string;
-    restartGatewayConfirmTitle?: string;
     restartingGateway: string;
     running: string;
     runningRemote: string;
@@ -149,9 +147,6 @@ export interface Translations {
     startedInBackground: string;
     stopped: string;
     updateHermes: string;
-    updateHermesConfirmMessage?: string;
-    updateHermesConfirmNow?: string;
-    updateHermesConfirmTitle?: string;
     updatingHermes: string;
     waitingForOutput: string;
   };
@@ -506,14 +501,6 @@ export interface Translations {
     showLess: string;
     showMore: string;
     showValue: string;
-    customTitle: string;
-    customHint: string;
-    customConfigured: string;
-    addCustomKey: string;
-    customKeyName: string;
-    customKeyNamePlaceholder: string;
-    add: string;
-    invalidKeyName: string;
   };
 
   // ── OAuth ──

@@ -1,0 +1,1 @@
+{"schema_version":1,"error":{"code":"duplicate_conflict","message":"Same idempotency key was submitted with different mission content.","retryable":false,"safe_details":{"idempotency_key":"stage38-fixture-key"}}}

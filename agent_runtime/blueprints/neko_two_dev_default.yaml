@@ -1,0 +1,78 @@
+id: neko_two_dev_default
+version: 1
+title: Neko Two Dev Default
+description: Neko scopes and coordinates; Backend Dev and Launcher Dev handle implementation slices. QA is not part of the default path.
+slots:
+  - id: lead
+    role: neko
+    required: true
+    description: Mission lead that clarifies scope and routes recovery.
+  - id: backend_builder
+    role: backend_dev
+    required: true
+    description: Backend/API/data specialist for backend-relevant slices.
+  - id: builder
+    role: dev
+    required: true
+    description: Launcher/frontend/runtime specialist for implementation slices.
+stages:
+  - id: scope
+    title: Scope
+    objective: Clarify scope, acceptance criteria, proof expectation, and which Dev specialist owns each slice.
+    owner_slot: lead
+    repo: hermes-agent
+    kind: scope
+    blocks_qa_until: false
+    proof_gate:
+      required: false
+  - id: backend_implementation
+    title: Backend Implementation
+    objective: Implement or verify backend/API/data contract changes needed by the mission; pass with an explicit no-backend-change note when not applicable.
+    owner_slot: backend_builder
+    repo: EterniaBackend
+    kind: implementation
+    depends_on: [scope]
+    blocks_qa_until: false
+    proof_gate:
+      required: false
+  - id: implement
+    title: Launcher Implementation
+    objective: Implement the launcher/runtime slice and attach focused proof.
+    owner_slot: builder
+    repo: EterniaLauncher
+    kind: implementation
+    depends_on: [backend_implementation]
+    blocks_qa_until: false
+    proof_gate:
+      required: true
+      minimum_status: passed
+      required_proof_types: [test_run]
+edges:
+  - source: scope
+    outcome: ready
+    target: backend_implementation
+  - source: scope
+    outcome: missing_input
+    target: intervention
+  - source: backend_implementation
+    outcome: passed
+    target: implement
+  - source: backend_implementation
+    outcome: blocked
+    target: scope
+  - source: backend_implementation
+    outcome: needs_fixes
+    target: backend_implementation
+  - source: implement
+    outcome: passed
+    target: done
+  - source: implement
+    outcome: blocked
+    target: scope
+  - source: implement
+    outcome: needs_fixes
+    target: implement
+limits:
+  max_attempts_per_stage: 3
+  max_total_stages: 16
+on_unhandled: intervention

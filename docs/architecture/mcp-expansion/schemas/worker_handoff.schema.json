@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eternia.local/schemas/mcp-expansion/worker_handoff.schema.json",
+  "title": "Worker handoff envelope",
+  "description": "What every Stage 4 worker writes to qa-artifacts/<run_dir>/worker_handoff.safe.json. Read by arcadia_agentops_summarize_worker_result and arcadia_pm_classify_closure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "worker_id",
+    "profile",
+    "card_id",
+    "started_at",
+    "ended_at",
+    "workspace",
+    "commands",
+    "artifacts",
+    "redaction_scan",
+    "not_tested",
+    "silent_outcome"
+  ],
+  "properties": {
+    "worker_id": { "type": "string", "minLength": 1 },
+    "profile": {
+      "type": "string",
+      "description": "Hermes profile the worker ran under, e.g. 'claude_launcher_qa'."
+    },
+    "card_id": {
+      "type": "string",
+      "description": "Kanban task id the worker claimed. Required — workers without a card_id cannot produce a handoff."
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "ended_at": { "type": "string", "format": "date-time" },
+
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cwd", "commit", "branch", "dirty"],
+      "properties": {
+        "cwd":    { "type": "string", "minLength": 1 },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "branch": { "type": "string", "minLength": 1 },
+        "dirty":  { "type": "boolean" }
+      }
+    },
+
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["cmd", "exit_code", "duration_s"],
+        "properties": {
+          "cmd":                   { "type": "string", "minLength": 1 },
+          "exit_code":             { "type": "integer" },
+          "duration_s":            { "type": "number", "minimum": 0 },
+          "stdout_artifact_path":  { "type": "string" },
+          "stderr_artifact_path":  { "type": "string" }
+        }
+      }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "path", "sha256", "size_bytes"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "log",
+              "screenshot",
+              "envelope",
+              "diff",
+              "manifest",
+              "test_run_log",
+              "redaction_scan",
+              "other"
+            ]
+          },
+          "path":       { "type": "string", "minLength": 1 },
+          "sha256":     { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "size_bytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+
+    "screenshots": {
+      "type": "array",
+      "description": "Launcher-QA workers only. Empty array elsewhere.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "path", "blank_pixel_ratio"],
+        "properties": {
+          "label":             { "type": "string", "minLength": 1 },
+          "path":              { "type": "string", "minLength": 1 },
+          "blank_pixel_ratio": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+
+    "redaction_scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files_scanned", "findings", "patterns_checked"],
+      "properties": {
+        "files_scanned":    { "type": "integer", "minimum": 0 },
+        "findings":         { "type": "integer", "minimum": 0 },
+        "patterns_checked": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "not_tested": {
+      "type": "array",
+      "description": "Scope the worker did NOT cover. 'not tested' is a deliberate doctrine field — empty array means the worker claims full scope.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "silent_outcome": {
+      "type": "boolean",
+      "description": "True if the worker returned the [SILENT] sentinel (no observable change). Per hermes-already-has-routines.md cron pattern. Not a failure."
+    },
+
+    "failure_class": {
+      "type": "string",
+      "enum": [
+        "MISSING_CONTEXT",
+        "AUTH_REQUIRED",
+        "HOST_ENV_MISSING",
+        "TOOLING_PARITY_FAIL",
+        "MCP_DISCOVERY_FAIL",
+        "MCP_TOOL_CALL_FAIL",
+        "QA_GATE_FAIL",
+        "REDACTION_FAIL",
+        "ARTIFACT_MISSING",
+        "PROCESS_STALE",
+        "NOT_RUN_MISSING_CONTEXT"
+      ]
+    },
+
+    "owner_recommendation": {
+      "type": "string",
+      "enum": ["tony", "alice", "pm", "reviewer", "same_card"],
+      "description": "Whom the worker thinks should pick this up next. Advisory; PM may override via classify_closure."
+    },
+
+    "summary_md": {
+      "type": "string",
+      "description": "Markdown summary written into the closure note. Plain text, no secrets."
+    }
+  }
+}

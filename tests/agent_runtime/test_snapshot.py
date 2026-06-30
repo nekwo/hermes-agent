@@ -1,0 +1,879 @@
+from hermes_time import now
+from utils import atomic_json_write
+from agent_runtime.blueprints.runs import BlueprintRunStore
+from agent_runtime.config import AgentRuntimeConfig
+from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
+from agent_runtime.persona_assignments import PersonaInstanceStore
+from agent_runtime.proof_rules import ProofType
+from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
+from agent_runtime.snapshot import build_snapshot, write_snapshot
+from agent_runtime.states import RunState, StageStatus, TaskState
+from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
+from agent_runtime.events import EventLog
+
+
+def test_snapshot_contains_task_summary_and_no_raw_logs(isolate_agent_runtime_root):
+    ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
+    snap=build_snapshot(task_store=ts)
+    assert snap["tasks"][0]["task_id"] == "t"
+    assert "stdout" not in str(snap).lower()
+    assert snap["summary"]["dirty"] is True
+    assert snap["dirty_state"]["runtime"]["open_task_ids"] == ["t"]
+    write_snapshot(snap)
+    assert (isolate_agent_runtime_root / "snapshot.json").exists()
+
+
+def test_snapshot_projects_blueprint_run_records(isolate_agent_runtime_root):
+    n = now()
+    task = Task(
+        id="task_blueprint_snapshot",
+        title="Blueprint snapshot",
+        description="record projection",
+        state=TaskState.DONE,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Blueprint snapshot", objective="record projection"),
+            blueprint_id="one_agent_smoke",
+            blueprint_version=1,
+            bindings={"builder": "dev"},
+            binding_sources={"builder": "persona:dev"},
+            stages=[
+                MissionPlanStage(
+                    id="build",
+                    title="Build",
+                    objective="Build",
+                    owner="builder",
+                    owner_slot="builder",
+                    repo="hermes-agent",
+                    kind="implementation",
+                    status=StageStatus.PASSED,
+                )
+            ],
+        ),
+    )
+    BlueprintRunStore().record_task_terminal(task, result="passed", ended_at=n)
+
+    snap = build_snapshot()
+
+    assert snap["blueprint_runs"][0]["task_id"] == "task_blueprint_snapshot"
+    assert snap["blueprint_runs"][0]["blueprint_id"] == "one_agent_smoke"
+    assert snap["blueprint_runs"][0]["per_stage_outcomes"] == {"build": "passed"}
+    assert any(item["id"] == "one_agent_smoke" for item in snap["blueprints"])
+
+
+def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_root):
+    n = now()
+    task = Task(
+        id="stage38",
+        title="Stage 38 projection",
+        description="Project Neko, Dev, QA, and proof gate.",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Stage 38 projection", objective="Project flow."),
+            current_stage_id="scope",
+            blueprint_id="neko_dev_qa_basic",
+            blueprint_version=1,
+            slots={
+                "lead": {"role": "neko", "required": True},
+                "builder": {"role": "builder", "required": True},
+                "verifier": {"role": "verifier", "required": True},
+            },
+            bindings={
+                "lead": "neko_supervisor",
+                "builder": "dev",
+                "verifier": "qa",
+            },
+            stages=[
+                MissionPlanStage(
+                    id="scope",
+                    title="Scope",
+                    objective="Scope the mission.",
+                    owner="neko_supervisor",
+                    owner_slot="lead",
+                    repo="hermes-agent",
+                    kind="planning",
+                    status=StageStatus.IMPLEMENTING,
+                ),
+                MissionPlanStage(
+                    id="implement",
+                    title="Implement",
+                    objective="Implement.",
+                    owner="dev",
+                    owner_slot="builder",
+                    repo="hermes-agent",
+                    kind="implementation",
+                    depends_on=["scope"],
+                    proof_gate={"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"]},
+                ),
+                MissionPlanStage(
+                    id="verify",
+                    title="Verify",
+                    objective="Verify proof.",
+                    owner="qa",
+                    owner_slot="verifier",
+                    repo="hermes-agent",
+                    kind="qa_verdict",
+                    depends_on=["implement"],
+                    proof_gate={"required": True, "minimum_status": "approved", "required_proof_types": ["qa_verdict"]},
+                    blocks_qa_until=False,
+                ),
+            ],
+        ),
+    )
+    TaskStore().create(task)
+    events = EventLog()
+    events.append(
+        Event(
+            ts=n,
+            type="run.progress",
+            task_id=task.id,
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={"summary": "Neko scoped the mission.", "redaction_status": "safe"},
+        )
+    )
+
+    snap = build_snapshot(event_log=events)
+    row = next(item for item in snap["tasks"] if item["task_id"] == "stage38")
+
+    assert snap["parity"]["contract_version"] == 38
+    assert "mission_level_state" in snap["parity"]["capabilities"]
+    assert row["mission_level_state"]["blueprint_id"] == "neko_dev_qa_basic"
+    assert [(actor["persona_id"], actor["presence"]) for actor in row["mission_level_state"]["actors"]] == [
+        ("neko_supervisor", "waiting"),
+        ("dev", "queued"),
+        ("qa", "queued"),
+    ]
+    assert row["mission_flow_timeline"]["items"][0]["stage_id"] == "scope"
+    assert row["proof_gate_state"]["gate_state"] == "incomplete"
+    assert row["proof_gate_state"]["missing_stage_ids"] == ["implement", "verify"]
+    assert row["proof_gate_state"]["why_not_ready"]
+    assert row["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is True
+
+
+def test_snapshot_unscoped_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root):
+    ts = TaskStore()
+    n = now()
+    ts.create(
+        Task(
+            id="unscoped",
+            title="Fresh Mission Control goal",
+            description="Created before Neko has written a mission plan.",
+            state=TaskState.CREATED,
+            created_at=n,
+            updated_at=n,
+            requested_by="tony",
+        )
+    )
+
+    snap = build_snapshot(task_store=ts)
+    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+
+    assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
+    assert all(stream["events"] for stream in roles.values())
+    assert roles["dev"]["events"][0]["type"] == "role_stream.status"
+    assert roles["qa"]["events"][0]["payload"]["display_title"] == "QA Agent ready"
+
+
+def test_snapshot_role_stream_projects_decision_summary_thinking_fields(isolate_agent_runtime_root):
+    ts = TaskStore()
+    events = EventLog()
+    n = now()
+    ts.create(
+        Task(
+            id="thinking_task",
+            title="Harness thinking log smoke",
+            description="Show safe process summaries.",
+            state=TaskState.DONE,
+            created_at=n,
+            updated_at=n,
+            requested_by="tony",
+        )
+    )
+    events.append(
+        Event(
+            ts=n,
+            type="run.progress",
+            task_id="thinking_task",
+            run_id="run_slot",
+            persona_id="dev",
+            payload={
+                "type": "run.progress",
+                "phase": "thinking_process",
+                "step": "decision_summary",
+                "status": "completed",
+                "summary": "Agent decision process summarized",
+                "decision_type": "request_test_run",
+                "reasoning_summary": "Request Harness proof before QA.",
+            },
+        )
+    )
+
+    snap = build_snapshot(task_store=ts, event_log=events)
+    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+    event = roles["dev"]["events"][0]
+
+    assert event["payload"]["display_kind"] == "thinking_summary"
+    assert event["payload"]["phase"] == "thinking_process"
+    assert event["payload"]["step"] == "decision_summary"
+    assert event["payload"]["decision_type"] == "request_test_run"
+    assert event["payload"]["reasoning_summary"] == "Request Harness proof before QA."
+
+
+def test_snapshot_exposes_terminal_and_active_run_execution_truth(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    n = now()
+    ts.create(Task(id="done", title="Done", description="d", state=TaskState.DONE, created_at=n, updated_at=n, requested_by="tony"))
+    ts.create(Task(id="active", title="Active", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
+    runs.open_run("dev", "active", stage_id=None)
+
+    snap = build_snapshot(task_store=ts, run_store=runs)
+    by_id = {task["task_id"]: task for task in snap["tasks"]}
+
+    assert by_id["done"]["execution_status"] == "complete"
+    assert by_id["done"]["can_start_run"] is False
+    assert by_id["done"]["run_blocked_reason"] == "mission is terminal"
+    assert by_id["active"]["execution_status"] == "running"
+    assert by_id["active"]["active_persona_ids"] == ["dev"]
+    assert by_id["active"]["can_start_run"] is False
+    assert snap["summary"]["active_runs"] == 1
+    assert snap["summary"]["running_runs"] == 1
+
+
+def test_snapshot_top_level_proofs_include_status_and_command_metadata(isolate_agent_runtime_root):
+    ts = TaskStore()
+    proofs = ProofStore()
+    n = now()
+    task = Task(id="proofed", title="Proofed", description="d", state=TaskState.DONE, created_at=n, updated_at=n, requested_by="tony")
+    ts.create(task)
+    proofs.attach(
+        Proof(
+            id="proof_test",
+            task_id=task.id,
+            stage_id="stage_1",
+            type=ProofType.TEST_RUN,
+            title="Command proof: pytest tests/example.py",
+            path_or_value="proofs/proofed/artifacts/proof_test.log",
+            created_by="harness",
+            created_at=n,
+            metadata={"status": "passed", "exit_code": 0, "duration_ms": 42},
+            redaction_status="safe",
+        )
+    )
+
+    snap = build_snapshot(task_store=ts, proof_store=proofs)
+
+    assert snap["proofs"] == [
+        {
+            "proof_id": "proof_test",
+            "task_id": "proofed",
+            "stage_id": "stage_1",
+            "type": "test_run",
+            "title": "Command proof: pytest tests/example.py",
+            "status": "passed",
+            "exit_code": 0,
+            "duration_ms": 42,
+            "has_artifact": True,
+            "redaction_status": "safe",
+            "created_by": "harness",
+            "created_at": n,
+        }
+    ]
+
+
+def test_snapshot_exposes_typed_mission_role_and_stage_streams(isolate_agent_runtime_root):
+    ts = TaskStore()
+    events = EventLog()
+    n = now()
+    task = Task(
+        id="typed",
+        title="Fix Mission Control terminals",
+        description="d",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        current_stage_id="launcher_implementation",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Fix Mission Control terminals", objective="d"),
+            current_stage_id="launcher_implementation",
+            stages=[
+                MissionPlanStage(
+                    id="backend_contract_smoke",
+                    title="Backend",
+                    objective="Backend",
+                    owner="backend_dev",
+                    repo="EterniaBackend",
+                    kind="proof_only",
+                    status=StageStatus.READY_FOR_QA,
+                    proof_recipe_id="backend_contract_smoke",
+                    proof_ids=["proof_backend"],
+                ),
+                MissionPlanStage(
+                    id="launcher_implementation",
+                    title="Launcher",
+                    objective="Launcher",
+                    owner="dev",
+                    repo="EterniaLauncher",
+                    kind="implementation",
+                    status=StageStatus.IMPLEMENTING,
+                    depends_on=["backend_contract_smoke"],
+                ),
+                MissionPlanStage(
+                    id="qa_release",
+                    title="QA",
+                    objective="QA",
+                    owner="qa",
+                    repo="EterniaLauncher",
+                    kind="qa_verdict",
+                    depends_on=["backend_contract_smoke", "launcher_implementation"],
+                    blocks_qa_until=False,
+                ),
+            ],
+        ),
+    )
+    ts.create(task)
+    events.append(Event(n, "worker_session.opened", task.id, None, "backend_dev", {"stage_id": "backend_contract_smoke"}))
+    events.append(Event(n, "run.tool.finished", task.id, "run_launcher", "dev", {"stage_id": "launcher_implementation", "tool_name": "terminal", "summary": "flutter test passed"}))
+
+    snap = build_snapshot(task_store=ts, event_log=events)
+    item = snap["tasks"][0]
+
+    assert item["mission_plan"]["current_stage_id"] == "launcher_implementation"
+    roles = {stream["persona_id"]: stream for stream in item["role_streams"]}
+    assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
+    assert roles["backend_dev"]["events"][0]["type"] == "worker_session.opened"
+    stages = {stream["stage_id"]: stream for stream in item["stage_streams"]}
+    assert stages["launcher_implementation"]["events"][0]["type"] == "run.tool.finished"
+
+
+def test_snapshot_typed_plan_keeps_empty_backend_stream_selectable(isolate_agent_runtime_root):
+    ts = TaskStore()
+    n = now()
+    task = Task(
+        id="typed_missing_backend",
+        title="Fix Mission Control role logs",
+        description="Show Neko, Backend Dev, Launcher Dev, and QA logs even when one role has no events yet.",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        current_stage_id="launcher_implementation",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Fix Mission Control role logs", objective="Show all role logs."),
+            current_stage_id="launcher_implementation",
+            stages=[
+                MissionPlanStage(
+                    id="launcher_implementation",
+                    title="Launcher",
+                    objective="Launcher",
+                    owner="dev",
+                    repo="EterniaLauncher",
+                    kind="implementation",
+                    status=StageStatus.IMPLEMENTING,
+                ),
+                MissionPlanStage(
+                    id="qa_release",
+                    title="QA",
+                    objective="QA",
+                    owner="qa",
+                    repo="EterniaLauncher",
+                    kind="qa_verdict",
+                    depends_on=["launcher_implementation"],
+                    blocks_qa_until=False,
+                ),
+            ],
+        ),
+    )
+    ts.create(task)
+
+    snap = build_snapshot(task_store=ts)
+    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+
+    assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
+    assert roles["backend_dev"]["display_name"] == "Backend Dev Agent"
+    assert roles["backend_dev"]["events"][0]["type"] == "role_stream.status"
+    assert roles["backend_dev"]["events"][0]["persona_id"] == "backend_dev"
+    assert roles["backend_dev"]["events"][0]["payload"]["redaction_status"] == "safe"
+    assert "no redaction-safe events" in roles["backend_dev"]["events"][0]["payload"]["display_summary"]
+    assert roles["backend_dev"]["active_run_ids"] == []
+    assert all(stream["events"] for stream in roles.values())
+
+
+def test_snapshot_role_streams_use_task_window_not_global_tail(isolate_agent_runtime_root):
+    ts = TaskStore()
+    events = EventLog()
+    n = now()
+    task = Task(
+        id="typed_stream_tail",
+        title="Fix Mission Control role logs",
+        description="Keep every role visible even after one role emits many events.",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        current_stage_id="launcher_implementation",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Fix Mission Control role logs", objective="Show all role logs."),
+            current_stage_id="launcher_implementation",
+            stages=[
+                MissionPlanStage(
+                    id="launcher_implementation",
+                    title="Launcher",
+                    objective="Launcher",
+                    owner="dev",
+                    repo="EterniaLauncher",
+                    kind="implementation",
+                    status=StageStatus.IMPLEMENTING,
+                ),
+                MissionPlanStage(
+                    id="qa_release",
+                    title="QA",
+                    objective="QA",
+                    owner="qa",
+                    repo="EterniaLauncher",
+                    kind="qa_verdict",
+                    depends_on=["launcher_implementation"],
+                    blocks_qa_until=False,
+                ),
+            ],
+        ),
+    )
+    ts.create(task)
+    events.append(Event(n, "mission_plan.updated", task.id, "run_neko", "neko_supervisor", {"summary": "Neko scoped the mission."}))
+    for index in range(25):
+        events.append(Event(n, "run.tool.finished", task.id, "run_slot", "dev", {"summary": f"Dev tool event {index}"}))
+
+    snap = build_snapshot(task_store=ts, event_log=events)
+    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+
+    assert roles["neko_supervisor"]["events"][0]["type"] == "mission_plan.updated"
+    assert roles["dev"]["events"]
+
+
+def test_snapshot_next_action_owner_reports_backend_specialist_for_backend_stage(isolate_agent_runtime_root):
+    ts = TaskStore()
+    n = now()
+    ts.create(
+        Task(
+            id="backend",
+            title="Stage 47",
+            description="d",
+            state=TaskState.RUNNING,
+            created_at=n,
+            updated_at=n,
+            requested_by="tony",
+            affected_repos=["EterniaBackend", "EterniaLauncher"],
+            current_stage_id="stage_47_backend_contract_proof",
+            stages=[
+                TaskStage(
+                    id="stage_47_backend_contract_proof",
+                    title="Backend Contract Proof",
+                    objective="Attach backend proof before the Launcher release gate.",
+                    status=StageStatus.IMPLEMENTING,
+                    test_plan=["python manage.py test api.tests.SystemHealthContractTests"],
+                )
+            ],
+        )
+    )
+
+    snap = build_snapshot(task_store=ts)
+
+    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
+    assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "backend_dev"
+
+
+def test_snapshot_routes_budget_approval_to_neko_before_cap(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    n = now()
+    ts.create(Task(id="budget", title="Budget", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
+    waiting = runs.open_run("dev", "budget", stage_id="stage_1", session_id="session_budget")
+    waiting.state = RunState.WAITING_ON_APPROVAL
+    waiting.error = {"type": "run_budget_exceeded"}
+    runs.update(waiting)
+    incidents.open(Incident(id="inc_budget", task_id="budget", run_id=waiting.id, kind="run_budget_exceeded", summary="budget", detail_path=None, opened_at=n))
+
+    snap = build_snapshot(task_store=ts, run_store=runs, incident_store=incidents)
+
+    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
+    assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
+
+
+def test_snapshot_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    n = now()
+    ts.create(Task(id="budget", title="Budget", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony", open_incident_ids=["inc_loop"]))
+    waiting = runs.open_run("backend_dev", "budget", stage_id="backend_implementation", session_id="session_budget")
+    waiting.progress = {
+        "loop_warning": "read_search_without_patch_threshold",
+        "read_search_count": 6,
+        "read_search_limit": 6,
+        "patch_count": 0,
+        "proof_count": 0,
+    }
+    waiting.state = RunState.WAITING_ON_APPROVAL
+    waiting.error = {"type": "run_budget_exceeded"}
+    runs.update(waiting)
+    incidents.open(Incident(id="inc_loop", task_id="budget", run_id=waiting.id, kind="run_budget_exceeded", summary="budget", detail_path=None, opened_at=n))
+
+    snap = build_snapshot(task_store=ts, run_store=runs, incident_store=incidents)
+
+    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
+    assert snap["tasks"][0]["next_action"]["reason"] == "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
+    assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
+
+
+def test_snapshot_exposes_specialist_agent_repo_scope_labels(isolate_agent_runtime_root):
+    class AgentList:
+        def list_all(self):
+            return [
+                AgentPersona(
+                    id="backend_dev",
+                    display_name="Backend Dev Agent",
+                    role="dev",
+                    model="gpt-5.5",
+                    provider="openai-codex",
+                    api_mode="codex_responses",
+                    toolsets=["file", "search", "terminal"],
+                    system_prompt_path="personas/dev/system.md",
+                    hermes_profile="backend-dev",
+                    repo_scope="X:/Unreal Engine/Engine/EterniaBackend",
+                    repo_scope_label="EterniaBackend",
+                )
+            ]
+
+    snap = build_snapshot(agent_store=AgentList())
+    agent = snap["agents"][0]
+
+    assert agent["persona_id"] == "backend_dev"
+    assert agent["display_name"] == "Backend Dev Agent"
+    assert agent["role"] == "dev"
+    assert agent["hermes_profile"] == "backend-dev"
+    assert agent["repo_scope_label"] == "EterniaBackend"
+    assert "X:/Unreal" not in repr(agent)
+
+
+def test_snapshot_exposes_available_profile_personas_without_changing_agents(tmp_path, monkeypatch, isolate_agent_runtime_root):
+    from agent_runtime import snapshot as snapshot_mod
+
+    hermes_home = tmp_path / "hermes_home"
+    profiles_root = hermes_home / "profiles"
+    alice = profiles_root / "alice"
+    reviewer = profiles_root / "reviewer"
+    alice.mkdir(parents=True)
+    reviewer.mkdir(parents=True)
+    (alice / "profile.yaml").write_text("description: Alice mission lead profile\n", encoding="utf-8")
+    (reviewer / "profile.yaml").write_text("description: Reviews release proof\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    class AgentList:
+        def list_all(self):
+            return [
+                AgentPersona(
+                    id="neko_supervisor",
+                    display_name="Neko Mission Lead",
+                    role="alice_supervisor",
+                    model="gpt-5.5",
+                    provider="openai-codex",
+                    api_mode="codex_responses",
+                    toolsets=["file", "search", "terminal"],
+                    system_prompt_path="personas/neko/system.md",
+                    hermes_profile="alice",
+                )
+                ]
+
+    original_available_profile_templates = snapshot_mod.available_profile_templates
+    monkeypatch.setattr(snapshot_mod, "available_profile_templates", lambda: [])
+    before = build_snapshot(agent_store=AgentList())
+    monkeypatch.setattr(snapshot_mod, "available_profile_templates", original_available_profile_templates)
+    snap = build_snapshot(agent_store=AgentList())
+
+    assert snap["agents"] == before["agents"]
+    assert snap["agents"][0]["persona_id"] == "neko_supervisor"
+    assert snap["agents"][0]["display_name"] == "Neko Mission Lead"
+    assert snap["agents"][0]["hermes_profile"] == "alice"
+
+    by_id = {item["persona_id"]: item for item in snap["available_personas"]}
+    assert set(by_id) == {"profile:alice", "profile:reviewer"}
+    assert by_id["profile:alice"]["template_only"] is True
+    assert by_id["profile:alice"]["source"] == "hermes_profile"
+    assert by_id["profile:alice"]["role"] == "profile"
+    assert by_id["profile:alice"]["hermes_profile"] == "alice"
+    assert by_id["profile:alice"]["display_name"] == "Alice"
+    assert by_id["profile:alice"]["profile_readiness"] == "available"
+    assert by_id["profile:alice"]["backs_persona_id"] == "neko_supervisor"
+    assert by_id["profile:alice"]["description"] == "Alice mission lead profile"
+    assert "backs_persona_id" not in by_id["profile:reviewer"]
+    assert "reviewer" not in by_id
+
+
+def test_snapshot_exposes_canonical_persona_instance_ids(monkeypatch, isolate_agent_runtime_root):
+    import agent_runtime.snapshot as snapshot_mod
+
+    cfg = AgentRuntimeConfig(
+        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
+            enabled=True,
+            worker_session_store=True,
+            persona_instance_runtime=True,
+            persona_assignment_store=True,
+        )
+    )
+    monkeypatch.setattr(snapshot_mod, "load_agent_runtime_config", lambda: cfg)
+    created = PersonaInstanceStore().create_free_floating("profile:reviewer")
+
+    snap = build_snapshot()
+    by_id = {item["persona_instance_id"]: item for item in snap["persona_instances"]}
+
+    assert created.id == "personainst_profile_reviewer"
+    assert by_id[created.id]["agent_profile_id"] == "personainst_profile_reviewer"
+    assert by_id[created.id]["persona_id"] == "profile:reviewer"
+    assert by_id[created.id]["lifecycle_mode"] == "free_floating"
+
+
+def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root):
+    archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
+    (archive / "tasks").mkdir(parents=True)
+    atomic_json_write(
+        archive / "manifest.json",
+        {"reason": "Tony cleared ready missions", "created_at_utc": "2026-06-01T01:02:03Z"},
+    )
+    atomic_json_write(
+        archive / "tasks" / "task_archived.json",
+        {"id": "task_archived", "title": "Archived mission from disk", "state": "done"},
+    )
+
+    snap = build_snapshot()
+
+    archived = snap["archived_tasks"][0]
+    assert archived["task_id"] == "task_archived"
+    assert archived["title"] == "Archived mission from disk"
+    assert archived["state"] == "archived"
+    assert archived["original_state"] == "done"
+    assert archived["archive_batch"] == "20260601T010203Z_clear_ready"
+    assert archived["archive_reason"] == "Tony cleared ready missions"
+    assert archived["archived_at"] == "2026-06-01T01:02:03Z"
+
+
+def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isolate_agent_runtime_root):
+    archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
+    (archive / "tasks").mkdir(parents=True)
+    (archive / "runs").mkdir(parents=True)
+    (archive / "proofs" / "task_archived").mkdir(parents=True)
+    atomic_json_write(
+        archive / "manifest.json",
+        {"reason": "Tony cleared ready missions", "created_at_utc": "2026-06-01T01:02:03Z"},
+    )
+    atomic_json_write(
+        archive / "tasks" / "task_archived.json",
+        {"id": "task_archived", "title": "Archived mission from disk", "state": "done"},
+    )
+    atomic_json_write(
+        archive / "runs" / "run_dev.json",
+        {
+            "id": "run_slot",
+            "persona_id": "dev",
+            "task_id": "task_archived",
+            "stage_id": "stage_impl",
+            "state": "completed",
+            "started_at": "2026-06-01T01:03:00Z",
+            "finished_at": "2026-06-01T01:05:00Z",
+            "session_id": "safe_session",
+            "final_decision": {
+                "type": "request_test_run",
+                "summary": "Implemented archived transcript mapping.",
+                "rationale": "Tests are required before QA handoff.",
+            },
+            "llm": {
+                "provider": "openai-codex",
+                "model": "gpt-5.5",
+                "session_id": "safe_session",
+                "api_calls": 2,
+                "tool_turns": 1,
+                "input_tokens": 100,
+                "output_tokens": 25,
+                "total_tokens": 125,
+                "validation_status": "valid",
+                "decision_type": "request_test_run",
+                "timing": {
+                    "persona_runtime_ms": 118000,
+                    "provider_call_ms": 90000,
+                    "profile_conversation_call_total_ms": 87000,
+                    "profile_provider_stream_consume_ms": 84000,
+                    "unsafe-key": 1,
+                    "secret": "drop",
+                },
+            },
+        },
+    )
+    atomic_json_write(
+        archive / "proofs" / "task_archived" / "proof_dev.json",
+        {
+            "id": "proof_dev",
+            "task_id": "task_archived",
+            "stage_id": "stage_impl",
+            "type": "command",
+            "created_by": "dev",
+            "path_or_value": "artifact.log",
+            "metadata": {"status": "passed", "exit_code": 0, "duration_ms": 321},
+        },
+    )
+
+    snap = build_snapshot()
+
+    archived = snap["archived_tasks"][0]
+    assert archived["runs"][0]["run_id"] == "run_slot"
+    assert archived["runs"][0]["decision_summary"] == "Implemented archived transcript mapping."
+    assert archived["runs"][0]["decision_rationale"] == "Tests are required before QA handoff."
+    assert archived["runs"][0]["reasoning_summary"] == "Tests are required before QA handoff."
+    assert archived["runs"][0]["duration_ms"] == 120000
+    assert archived["runs"][0]["llm"]["total_tokens"] == 125
+    assert archived["runs"][0]["llm"]["timing"] == {
+        "persona_runtime_ms": 118000,
+        "provider_call_ms": 90000,
+        "profile_conversation_call_total_ms": 87000,
+        "profile_provider_stream_consume_ms": 84000,
+    }
+    assert archived["persona_timing_summaries"] == [
+        {
+            "persona_id": "dev",
+            "run_count": 1,
+            "run_ids": ["run_slot"],
+            "duration_ms": 120000,
+            "persona_runtime_ms": 118000,
+            "provider_call_ms": 90000,
+            "provider_call_count": 1,
+            "conversation_call_ms": 87000,
+            "conversation_call_count": 1,
+            "stream_consume_ms": 84000,
+            "api_calls": 2,
+            "tool_turns": 1,
+            "total_tokens": 125,
+            "input_tokens": 100,
+            "output_tokens": 25,
+        }
+    ]
+    assert archived["proof_summaries"] == [
+        {
+            "proof_id": "proof_dev",
+            "type": "command",
+            "status": "passed",
+            "exit_code": 0,
+            "duration_ms": 321,
+            "created_by": "dev",
+            "has_artifact": True,
+        }
+    ]
+    assert [event["type"] for event in archived["recent_events"]] == [
+        "run.progress",
+        "run.decision",
+        "proof.attached",
+    ]
+    assert archived["recent_events"][0]["summary"] == "Agent decision process summarized"
+    assert archived["recent_events"][0]["phase"] == "thinking_process"
+    assert archived["recent_events"][0]["step"] == "decision_summary"
+    assert archived["recent_events"][0]["reasoning_summary"] == "Tests are required before QA handoff."
+    assert archived["recent_events"][1]["summary"] == "Implemented archived transcript mapping."
+    assert archived["recent_events"][1]["rationale"] == "Tests are required before QA handoff."
+    assert archived["recent_events"][1]["reasoning_summary"] == "Tests are required before QA handoff."
+
+
+def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root):
+    archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
+    (archive / "tasks").mkdir(parents=True)
+    (archive / "runs").mkdir(parents=True)
+    atomic_json_write(
+        archive / "manifest.json",
+        {"reason": "Tony cleared ready missions", "created_at_utc": "2026-06-01T01:02:03Z"},
+    )
+    atomic_json_write(
+        archive / "tasks" / "task_archived.json",
+        {
+            "id": "task_archived",
+            "title": "Archived typed mission",
+            "state": "cancelled",
+            "created_at": "2026-06-01T01:02:00Z",
+            "updated_at": "2026-06-01T01:05:00Z",
+            "current_stage_id": "launcher_impl",
+            "mission_plan": {
+                "enabled": True,
+                "current_stage_id": "launcher_impl",
+                "stages": [
+                    {"id": "backend_contract", "owner": "backend_dev", "status": "ready"},
+                    {"id": "launcher_impl", "owner": "dev", "status": "implementing"},
+                    {"id": "qa_release", "owner": "qa", "status": "ready"},
+                ],
+            },
+        },
+    )
+    atomic_json_write(
+        archive / "runs" / "run_neko.json",
+        {
+            "id": "run_neko",
+            "persona_id": "neko_supervisor",
+            "task_id": "task_archived",
+            "state": "completed",
+            "started_at": "2026-06-01T01:03:00Z",
+            "finished_at": "2026-06-01T01:04:00Z",
+            "final_decision": {
+                "type": "propose_acceptance",
+                "summary": "Scoped the typed mission.",
+            },
+        },
+    )
+
+    archived = build_snapshot()["archived_tasks"][0]
+    roles = {stream["persona_id"]: stream for stream in archived["role_streams"]}
+
+    assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
+    assert roles["neko_supervisor"]["events"][0]["type"] == "run.progress"
+    assert roles["neko_supervisor"]["events"][0]["payload"]["display_kind"] == "thinking_summary"
+    assert roles["neko_supervisor"]["events"][1]["type"] == "run.decision"
+    assert roles["backend_dev"]["events"][0]["type"] == "role_stream.status"
+    assert roles["backend_dev"]["events"][0]["payload"]["display_title"] == "Backend Dev Agent archived"
+    assert roles["dev"]["events"][0]["payload"]["redaction_status"] == "safe"
+    assert roles["qa"]["events"][0]["payload"]["display_title"] == "QA Agent archived"
+
+
+def test_snapshot_drops_unsafe_archived_decision_process_text(isolate_agent_runtime_root):
+    archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
+    (archive / "tasks").mkdir(parents=True)
+    (archive / "runs").mkdir(parents=True)
+    atomic_json_write(archive / "manifest.json", {"reason": "Tony cleared ready missions"})
+    atomic_json_write(archive / "tasks" / "task_archived.json", {"id": "task_archived", "title": "Archived", "state": "done"})
+    atomic_json_write(
+        archive / "runs" / "run_dev.json",
+        {
+            "id": "run_slot",
+            "persona_id": "dev",
+            "task_id": "task_archived",
+            "state": "completed",
+            "final_decision": {
+                "type": "request_test_run",
+                "summary": "C:/Users/beast/private_token.txt",
+                "rationale": "SECRET hidden chain-of-thought must be dropped",
+                "reasoning_summary": "~/private/plan.md",
+            },
+        },
+    )
+
+    archived = build_snapshot()["archived_tasks"][0]
+
+    encoded = repr(archived)
+    assert "C:/Users" not in encoded
+    assert "private_token" not in encoded
+    assert "SECRET" not in encoded
+    assert "~/private" not in encoded
+    assert archived["runs"][0]["decision_summary"] is None
+    assert archived["runs"][0]["decision_rationale"] is None
+    assert archived["runs"][0]["reasoning_summary"] is None
+    assert archived["recent_events"] == []

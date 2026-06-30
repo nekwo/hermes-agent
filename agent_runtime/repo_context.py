@@ -1,0 +1,251 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+import re
+
+
+@dataclass(frozen=True, slots=True)
+class RepoExecutionContext:
+    """Redaction-safe execution context for a task's affected repository."""
+
+    workdir: Path
+    repo_label: str
+    source: str
+    context_files: tuple[str, ...] = field(default_factory=tuple)
+    context_excerpts: tuple[RepoContextExcerpt, ...] = field(default_factory=tuple)
+
+    @property
+    def context_loaded_label(self) -> str:
+        return ", ".join(self.context_files) if self.context_files else "none"
+
+
+@dataclass(frozen=True, slots=True)
+class RepoContextExcerpt:
+    label: str
+    content: str
+    truncated: bool = False
+
+
+def repo_execution_context_for_task(task, explicit_workdir=None) -> RepoExecutionContext | None:
+    """Resolve the first safe affected repo workdir for persona execution.
+
+    Returns None when the task has no affected repos. Raises ValueError when the
+    task supplied affected repos but none resolve safely, matching command-proof
+    fail-closed behavior.
+    """
+
+    if explicit_workdir is not None:
+        workdir = Path(explicit_workdir).expanduser()
+        if not workdir.is_dir():
+            raise ValueError("affected repo workdir does not exist or is not a directory")
+        return _context_for_workdir(workdir, source="explicit")
+
+    affected_repos = [str(repo).strip() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()]
+    for repo in affected_repos:
+        resolved = resolve_affected_repo_workdir(repo)
+        if resolved is not None:
+            source = _normalize_repo_alias(repo) or "absolute"
+            return _context_for_workdir(resolved, source=source)
+
+    if affected_repos:
+        raise ValueError(
+            "could not resolve a valid affected repo workdir; "
+            f"affected_repos={safe_affected_repo_labels(affected_repos)!r}"
+        )
+    return None
+
+
+def command_workdir_for_task(task, explicit_workdir=None) -> Path:
+    ctx = repo_execution_context_for_task(task, explicit_workdir=explicit_workdir)
+    if ctx is not None:
+        return ctx.workdir
+    return Path.cwd()
+
+
+def safe_affected_repo_labels(repos: list[str] | tuple[str, ...] | None) -> list[str]:
+    labels: list[str] = []
+    for repo in repos or []:
+        text = str(repo or "").strip()
+        if not text:
+            continue
+        alias = _normalize_repo_alias(text)
+        if alias:
+            display_label = _repo_alias_display_label(alias)
+            if display_label is not None:
+                labels.append(display_label)
+                continue
+        resolved = resolve_affected_repo_workdir(text)
+        if resolved is not None:
+            labels.append(_safe_repo_label(resolved.name))
+            continue
+        if alias:
+            labels.append(f"{_safe_repo_label(alias)} (unresolved)")
+            continue
+        name = Path(text).name if (":" in text or "/" in text or "\\" in text) else text
+        labels.append(f"{_safe_repo_label(name)} (unresolved; path withheld)")
+    return labels
+
+
+def resolve_affected_repo_workdir(repo: str) -> Path | None:
+    path = Path(repo).expanduser()
+    if path.is_absolute() and path.is_dir():
+        return _git_root_for(path) or path
+
+    alias = _normalize_repo_alias(repo)
+    if alias in _REPO_ALIAS_PATHS:
+        for candidate in _REPO_ALIAS_PATHS[alias]:
+            resolved = Path(candidate).expanduser()
+            if resolved.is_dir():
+                return _git_root_for(resolved) or resolved
+    if alias in _HARNESS_REPO_ALIASES:
+        root = Path(__file__).resolve().parents[1]
+        if root.is_dir():
+            return root
+    return None
+
+
+def _git_root_for(path: Path) -> Path | None:
+    current = path.resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _context_for_workdir(workdir: Path, *, source: str) -> RepoExecutionContext:
+    resolved = workdir.resolve()
+    context_files = _project_context_files(resolved)
+    return RepoExecutionContext(
+        workdir=resolved,
+        repo_label=_safe_repo_label(resolved.name),
+        source=_safe_repo_label(source) or "repo",
+        context_files=context_files,
+        context_excerpts=_project_context_excerpts(resolved),
+    )
+
+
+def _project_context_files(workdir: Path) -> tuple[str, ...]:
+    loaded: list[str] = []
+    for canonical, candidates in (
+        (".hermes.md", (".hermes.md", "HERMES.md")),
+        ("AGENTS.md", ("AGENTS.md", "agents.md")),
+        ("CLAUDE.md", ("CLAUDE.md", "claude.md")),
+        (".cursorrules", (".cursorrules",)),
+    ):
+        if any((workdir / candidate).is_file() for candidate in candidates):
+            loaded.append(canonical)
+    cursor_rules = workdir / ".cursor" / "rules"
+    try:
+        if cursor_rules.is_dir() and any(path.suffix == ".mdc" for path in cursor_rules.iterdir()):
+            loaded.append(".cursor/rules/*.mdc")
+    except OSError:
+        pass
+    return tuple(loaded)
+
+
+def _project_context_excerpts(workdir: Path) -> tuple[RepoContextExcerpt, ...]:
+    excerpts: list[RepoContextExcerpt] = []
+    total_chars = 0
+    for label, candidates in (
+        (".hermes.md", (".hermes.md", "HERMES.md")),
+        ("AGENTS.md", ("AGENTS.md", "agents.md")),
+        ("CLAUDE.md", ("CLAUDE.md", "claude.md")),
+        (".cursorrules", (".cursorrules",)),
+    ):
+        path = next((workdir / candidate for candidate in candidates if (workdir / candidate).is_file()), None)
+        if path is None:
+            continue
+        remaining = _MAX_CONTEXT_TOTAL_CHARS - total_chars
+        if remaining <= 0:
+            break
+        excerpt = _read_context_excerpt(path, label=label, char_limit=min(_MAX_CONTEXT_FILE_CHARS, remaining))
+        if excerpt is None:
+            continue
+        total_chars += len(excerpt.content)
+        excerpts.append(excerpt)
+    return tuple(excerpts)
+
+
+def _read_context_excerpt(path: Path, *, label: str, char_limit: int) -> RepoContextExcerpt | None:
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    text, line_truncated = _sanitize_context_text(raw)
+    if not text:
+        return None
+    truncated = line_truncated or len(text) > char_limit
+    if truncated:
+        text = text[:char_limit].rstrip()
+    return RepoContextExcerpt(label=label, content=text, truncated=truncated)
+
+
+def _sanitize_context_text(raw: str) -> tuple[str, bool]:
+    lines: list[str] = []
+    truncated = False
+    for line in raw.replace("\x00", "").splitlines():
+        clean = line.rstrip()
+        if _SECRET_ASSIGNMENT_RE.search(clean):
+            clean = _SECRET_ASSIGNMENT_RE.sub(r"\1<redacted>", clean)
+        if len(clean) > _MAX_CONTEXT_LINE_CHARS:
+            clean = f"{clean[:_MAX_CONTEXT_LINE_CHARS].rstrip()} ... [truncated]"
+            truncated = True
+        lines.append(clean)
+    return "\n".join(lines).strip(), truncated
+
+
+def _safe_repo_label(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip("-._")
+    return cleaned[:64] or "repo"
+
+
+def _normalize_repo_alias(value: str) -> str:
+    stripped = value.strip().lower()
+    if re.search(r"[^a-z0-9 _-]", stripped):
+        return ""
+    return re.sub(r"[ _-]+", "-", stripped).strip("-")
+
+
+_HARNESS_REPO_ALIASES = frozenset({"agent-runtime-harness", "hermes-agent"})
+_REPO_ALIAS_PATHS = {
+    "eterniabackend": (
+        "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend",
+        "X:/Unreal Engine/Engine/EterniaBackend",
+        "X:/Unreal Engine/Engine/eternia-backend",
+    ),
+    "eternia-backend": (
+        "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend",
+        "X:/Unreal Engine/Engine/EterniaBackend",
+        "X:/Unreal Engine/Engine/eternia-backend",
+    ),
+    "backend": ("X:/Unreal Engine/Engine/EterniaBackend/eternia-backend", "X:/Unreal Engine/Engine/EterniaBackend"),
+    "eternialauncher": ("X:/Unreal Engine/Engine/Launcher/EterniaLauncher",),
+    "eternia-launcher": ("X:/Unreal Engine/Engine/Launcher/EterniaLauncher",),
+    "frontend": ("X:/Unreal Engine/Engine/Launcher/EterniaLauncher",),
+    "launcher": ("X:/Unreal Engine/Engine/Launcher/EterniaLauncher",),
+}
+
+_REPO_ALIAS_DISPLAY_LABELS = {
+    "eterniabackend": "EterniaBackend",
+    "eternia-backend": "EterniaBackend",
+    "backend": "EterniaBackend",
+    "eternialauncher": "EterniaLauncher",
+    "eternia-launcher": "EterniaLauncher",
+    "frontend": "EterniaLauncher",
+    "launcher": "EterniaLauncher",
+    "agent-runtime-harness": "hermes-agent",
+    "hermes-agent": "hermes-agent",
+}
+
+_MAX_CONTEXT_FILE_CHARS = 2500
+_MAX_CONTEXT_TOTAL_CHARS = 7000
+_MAX_CONTEXT_LINE_CHARS = 500
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"((?:api[_-]?key|token|secret|password|authorization|bearer|credential)\s*[:=]\s*)[^,\s]+",
+    re.IGNORECASE,
+)
+
+
+def _repo_alias_display_label(alias: str) -> str | None:
+    return _REPO_ALIAS_DISPLAY_LABELS.get(alias)

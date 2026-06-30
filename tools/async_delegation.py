@@ -40,18 +40,46 @@ import logging
 import threading
 import time
 import uuid
+import weakref
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures.thread import _worker
 from typing import Any, Callable, Dict, List, Optional
-
-from tools.daemon_pool import DaemonThreadPoolExecutor
-from tools.thread_context import propagate_context_to_thread
 
 logger = logging.getLogger(__name__)
 
-# Back-compat alias — the daemon executor now lives in tools.daemon_pool so
-# other subsystems (tool_executor, memory_manager, delegate_tool, skills_hub)
-# can share it. Existing imports of ``_DaemonThreadPoolExecutor`` keep working.
-_DaemonThreadPoolExecutor = DaemonThreadPoolExecutor
+
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """ThreadPoolExecutor variant whose workers do not block process exit.
+
+    Stdlib ``ThreadPoolExecutor`` workers are non-daemon. Background
+    delegation is explicitly best-effort detached work, so a long child should
+    be interruptible by ``/stop``/shutdown but must not keep a CLI process alive
+    after the user exits.
+    """
+
+    def _adjust_thread_count(self) -> None:
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            thread_name = "%s_%d" % (self._thread_name_prefix or self, num_threads)
+            t = threading.Thread(
+                name=thread_name,
+                target=_worker,
+                args=(
+                    weakref.ref(self, weakref_cb),
+                    self._work_queue,
+                    self._initializer,
+                    self._initargs,
+                ),
+                daemon=True,
+            )
+            t.start()
+            self._threads.add(t)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +219,7 @@ def dispatch_async_delegation(
                     f"Async delegation capacity reached ({max_async_children} "
                     f"running). Wait for one to finish (its result will re-enter "
                     f"the chat), or run this task synchronously "
-                    f"(background=false). Raise delegation.max_concurrent_children in "
+                    f"(background=false). Raise delegation.max_async_children in "
                     f"config.yaml to allow more concurrent background subagents."
                 ),
             }
@@ -219,9 +247,7 @@ def dispatch_async_delegation(
             _finalize(delegation_id, result, status)
 
     try:
-        # Propagate the dispatching profile so the detached child resolves
-        # get_hermes_home() under the right profile.
-        executor.submit(propagate_context_to_thread(_worker))
+        executor.submit(_worker)
     except Exception as exc:  # pragma: no cover — pool submit failure is rare
         with _records_lock:
             _records.pop(delegation_id, None)
@@ -372,7 +398,7 @@ def dispatch_async_delegation_batch(
                 "error": (
                     f"Async delegation capacity reached ({max_async_children} "
                     f"running). Wait for one to finish (its result will re-enter "
-                    f"the chat), or raise delegation.max_concurrent_children in "
+                    f"the chat), or raise delegation.max_async_children in "
                     f"config.yaml to allow more concurrent background units."
                 ),
             }
@@ -406,8 +432,7 @@ def dispatch_async_delegation_batch(
             _finalize_batch(delegation_id, combined, status)
 
     try:
-        # Propagate the dispatching profile to the detached batch children.
-        executor.submit(propagate_context_to_thread(_worker))
+        executor.submit(_worker)
     except Exception as exc:  # pragma: no cover
         with _records_lock:
             _records.pop(delegation_id, None)

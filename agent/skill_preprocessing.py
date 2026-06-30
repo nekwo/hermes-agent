@@ -2,10 +2,9 @@
 
 import logging
 import re
+import shutil
 import subprocess
 from pathlib import Path
-
-from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
@@ -68,17 +67,18 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
     Failures return a short ``[inline-shell error: ...]`` marker instead of
     raising, so one bad snippet can't wreck the whole skill message.
     """
-    _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
     try:
+        bash_exe = shutil.which("bash")
+        if not bash_exe:
+            return "[inline-shell error: bash not found]"
         completed = subprocess.run(
-            ["bash", "-c", command],
+            [bash_exe, "-c", command],
             cwd=str(cwd) if cwd else None,
             capture_output=True,
             text=True,
             timeout=max(1, int(timeout)),
             check=False,
             stdin=subprocess.DEVNULL,
-            **_popen_kwargs,
         )
     except subprocess.TimeoutExpired:
         return f"[inline-shell timeout after {timeout}s: {command}]"

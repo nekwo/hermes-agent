@@ -228,74 +228,41 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     }
 
 
-def _record_codex_app_server_compaction(
-    agent,
-    turn,
+def _emit_provider_timing(
+    agent: Any,
+    step: str,
+    duration_ms: int,
     *,
-    approx_tokens: int | None = None,
-    force: bool = False,
-) -> bool:
-    """Record a Codex-native context compaction boundary in Hermes state.
-
-    The app-server owns the compacted thread context, so Hermes should not
-    rewrite local transcript rows here; state.db records the boundary via the
-    session event/usage counters while preserving the visible transcript.
-    """
-    if not force and not getattr(turn, "compacted", False):
-        return False
-
-    thread_id = getattr(turn, "thread_id", None) or ""
-    turn_id = getattr(turn, "turn_id", None) or ""
-    logger.info(
-        "codex app-server compaction observed: session=%s thread=%s turn=%s force=%s",
-        getattr(agent, "session_id", None) or "none",
-        thread_id,
-        turn_id,
-        force,
-    )
-    if not force:
-        try:
-            from agent.conversation_compression import COMPACTION_STATUS
-
-            agent._emit_status(COMPACTION_STATUS)
-        except Exception:
-            pass
-
-    compressor = getattr(agent, "context_compressor", None)
-    if compressor is not None:
-        compressor.compression_count = getattr(
-            compressor, "compression_count", 0
-        ) + 1
-        compressor.last_compression_rough_tokens = approx_tokens or 0
-        if not getattr(turn, "token_usage_last", None):
-            compressor.last_prompt_tokens = -1
-            compressor.last_completion_tokens = 0
-            compressor.awaiting_real_usage_after_compression = True
-
-    agent._last_compaction_in_place = False
+    status: str = "completed",
+    timing_values: Dict[str, int] | None = None,
+    **extra: Any,
+) -> None:
+    callback = getattr(agent, "status_callback", None)
+    if callback is None:
+        return
     try:
-        if getattr(agent, "event_callback", None):
-            agent.event_callback(
-                "session:compress",
-                {
-                    "platform": getattr(agent, "platform", None) or "",
-                    "session_id": getattr(agent, "session_id", None) or "",
-                    "old_session_id": "",
-                    "in_place": False,
-                    "compression_count": getattr(
-                        compressor, "compression_count", 0
-                    )
-                    if compressor is not None
-                    else 0,
-                    "runtime": "codex_app_server",
-                    "thread_id": thread_id,
-                    "turn_id": turn_id,
-                },
-            )
+        callback(
+            {
+                "type": "run.progress",
+                "phase": "timing",
+                "step": f"provider_{step}",
+                "status": status,
+                "summary": f"Provider {step.replace('_', ' ')} {status} in {duration_ms}ms.",
+                "duration_ms": max(0, int(duration_ms)),
+                "timing_key": f"provider_{step}_ms",
+                "timing_values": timing_values or {},
+                "provider": getattr(agent, "provider", None),
+                "model": getattr(agent, "model", None),
+                "api_mode": getattr(agent, "api_mode", None),
+                **extra,
+            }
+        )
     except Exception:
-        logger.debug("event_callback error on codex session:compress", exc_info=True)
+        logger.debug("provider timing callback failed", exc_info=True)
 
-    return True
+
+def _elapsed_ms(started: float) -> int:
+    return max(0, int((time.perf_counter() - started) * 1000))
 
 
 def run_codex_app_server_turn(
@@ -314,10 +281,7 @@ def run_codex_app_server_turn(
     Called from run_conversation() when agent.api_mode == "codex_app_server".
     Returns the same dict shape as the chat_completions path.
     """
-    from agent.transports.codex_app_server_session import (
-        CodexAppServerSession,
-        _ServerRequestRouting,
-    )
+    from agent.transports.codex_app_server_session import CodexAppServerSession
 
     # Lazy session: one CodexAppServerSession per AIAgent instance.
     # Spawned on first turn, reused across turns, closed at AIAgent
@@ -334,27 +298,6 @@ def run_codex_app_server_turn(
             approval_callback = _get_approval_callback()
         except Exception:
             approval_callback = None
-
-        # Gateway / cron contexts have no UI to surface codex's approval
-        # requests through, so codex app-server exec / apply_patch requests
-        # fail closed (silently decline) by default. When the user has
-        # explicitly opted out of Hermes approvals — via `approvals.mode: off`
-        # in config, the /yolo session toggle, or --yolo / HERMES_YOLO_MODE —
-        # honor that and let codex's own sandbox permission profile
-        # (~/.codex/config.toml) be the policy gate instead of double-gating
-        # with a missing Hermes UI. Defaults (manual/smart/unset) preserve the
-        # current fail-closed behavior — this is a no-op for those users.
-        auto_approve_requests = False
-        try:
-            from tools.approval import is_approval_bypass_active
-
-            auto_approve_requests = is_approval_bypass_active()
-        except Exception:
-            logger.debug(
-                "codex app-server: approval-bypass lookup failed; "
-                "keeping fail-closed default",
-                exc_info=True,
-            )
 
         def _on_codex_event(note: dict) -> None:
             # Bridge Codex app-server item/started notifications to Hermes
@@ -375,10 +318,6 @@ def run_codex_app_server_turn(
         agent._codex_session = CodexAppServerSession(
             cwd=cwd,
             approval_callback=approval_callback,
-            request_routing=_ServerRequestRouting(
-                auto_approve_exec=auto_approve_requests,
-                auto_approve_apply_patch=auto_approve_requests,
-            ),
             on_event=_on_codex_event,
         )
 
@@ -431,28 +370,6 @@ def run_codex_app_server_turn(
     if turn.projected_messages:
         messages.extend(turn.projected_messages)
 
-        # Persist the newly-projected assistant/tool messages ourselves.
-        # This path is an early return that bypasses conversation_loop, whose
-        # normal per-step _persist_session() calls would otherwise flush them.
-        # The inbound user turn was already flushed at turn start
-        # (turn_context.py _persist_session), and _flush_messages_to_session_db
-        # is idempotent via the intrinsic _DB_PERSISTED_MARKER — so this writes
-        # ONLY the new codex projected rows and does NOT re-write the user turn.
-        # Keeping the agent as the sole persister lets us return
-        # agent_persisted=True below, so the gateway skips its own DB write and
-        # we avoid the #860/#42039 duplicate user-message write (append_message
-        # is a raw INSERT with no dedup, so a gateway re-write would duplicate
-        # the already-flushed user turn). See gateway/run.py agent_persisted.
-        if getattr(agent, "_session_db", None) is not None:
-            try:
-                agent._flush_messages_to_session_db(messages)
-            except Exception:
-                logger.debug(
-                    "codex app-server projected-message flush failed",
-                    exc_info=True,
-                )
-
-
     # Counter ticks for the agent-improvement loop.
     # _turns_since_memory and _user_turn_count are ALREADY incremented
     # in the run_conversation() pre-loop block (lines ~11793-11817) so we
@@ -463,7 +380,6 @@ def run_codex_app_server_turn(
     agent._iters_since_skill = (
         getattr(agent, "_iters_since_skill", 0) + turn.tool_iterations
     )
-    _record_codex_app_server_compaction(agent, turn)
     usage_result = _record_codex_app_server_usage(agent, turn)
     api_calls = 1
 
@@ -515,18 +431,6 @@ def run_codex_app_server_turn(
         "completed": not turn.interrupted and turn.error is None,
         "partial": turn.interrupted or turn.error is not None,
         "error": turn.error,
-        # The codex app-server runtime IS an early-return path that bypasses
-        # conversation_loop, but we flush the projected assistant/tool messages
-        # ourselves above (see the _flush_messages_to_session_db call after
-        # messages.extend). The inbound user turn was already flushed at turn
-        # start (turn_context._persist_session) and the flush dedups via
-        # _DB_PERSISTED_MARKER, so state.db ends up with each real message
-        # exactly once and session_search / conversation-distill see the full
-        # gateway conversation. Report agent_persisted=True so the gateway
-        # skips its own append_to_transcript DB write — writing again there
-        # would re-INSERT the already-flushed user turn (append_message has no
-        # dedup), reintroducing the #860 / #42039 duplicate-write bug.
-        "agent_persisted": True,
         "codex_thread_id": turn.thread_id,
         "codex_turn_id": turn.turn_id,
         **usage_result,
@@ -571,14 +475,6 @@ def _event_field(event: Any, name: str, default: Any = None) -> Any:
     return value if value is not None else default
 
 
-def _item_field(item: Any, name: str, default: Any = None) -> Any:
-    """Field access for nested Response items (attr-style SDK object or dict)."""
-    value = getattr(item, name, None)
-    if value is None and isinstance(item, dict):
-        value = item.get(name, default)
-    return value if value is not None else default
-
-
 def _raise_stream_error(event: Any) -> None:
     """Raise a ``_StreamErrorEvent`` from a ``type=error`` SSE frame.
 
@@ -603,6 +499,7 @@ def _consume_codex_event_stream(
     on_first_delta=None,
     on_event=None,
     interrupt_check=None,
+    stream_stats: Dict[str, Any] | None = None,
 ) -> SimpleNamespace:
     """Consume a Codex Responses SSE event stream and return a final response.
 
@@ -641,15 +538,25 @@ def _consume_codex_event_stream(
     collected_text_deltas: List[str] = []
     has_tool_calls = False
     first_delta_fired = False
-    active_message_phase: str | None = None
     terminal_status: str = "completed"
     terminal_usage: Any = None
     terminal_response_id: str = None
     terminal_incomplete_details: Any = None
     terminal_error: Any = None
     saw_terminal = False
+    stream_started = time.perf_counter()
+    if stream_stats is not None:
+        stream_stats.setdefault("event_count", 0)
+        stream_stats.setdefault("text_delta_count", 0)
+        stream_stats.setdefault("reasoning_delta_count", 0)
+        stream_stats.setdefault("tool_call_event_count", 0)
+        stream_stats.setdefault("output_item_count", 0)
 
     for event in event_iter:
+        if stream_stats is not None:
+            stream_stats["event_count"] = int(stream_stats.get("event_count", 0)) + 1
+            if stream_stats.get("first_event_ms") is None:
+                stream_stats["first_event_ms"] = _elapsed_ms(stream_started)
         if on_event is not None:
             try:
                 on_event(event)
@@ -675,35 +582,11 @@ def _consume_codex_event_stream(
         if event_type == "error":
             _raise_stream_error(event)
 
-        # Track the phase of the active streamed message item.  Codex/Harmony
-        # ``commentary``/``analysis`` text is mid-turn preamble/progress
-        # narration, never the final answer.  We still collect completed output
-        # items for replay, but route those deltas to the reasoning callback so
-        # they display like thinking text instead of assistant content.
-        if event_type == "response.output_item.added":
-            item = _event_field(event, "item")
-            item_type = _item_field(item, "type", "")
-            if item_type == "message":
-                phase = _item_field(item, "phase", None)
-                active_message_phase = phase.strip().lower() if isinstance(phase, str) else None
-            else:
-                active_message_phase = None
-            if "function_call" in str(item_type):
-                has_tool_calls = True
-            continue
-
         if "output_text.delta" in event_type or event_type == "response.output_text.delta":
+            if stream_stats is not None:
+                stream_stats["text_delta_count"] = int(stream_stats.get("text_delta_count", 0)) + 1
             delta_text = _event_field(event, "delta", "")
-            is_commentary_delta = active_message_phase in {"commentary", "analysis"}
-            if delta_text and is_commentary_delta:
-                # Commentary streams through the reasoning channel, not the
-                # visible answer stream (and stays out of output_text).
-                if on_reasoning_delta is not None:
-                    try:
-                        on_reasoning_delta(delta_text)
-                    except Exception:
-                        logger.debug("Codex stream on_reasoning_delta raised", exc_info=True)
-            elif delta_text:
+            if delta_text:
                 collected_text_deltas.append(delta_text)
                 if not has_tool_calls:
                     if not first_delta_fired:
@@ -722,9 +605,13 @@ def _consume_codex_event_stream(
 
         if "function_call" in event_type:
             has_tool_calls = True
+            if stream_stats is not None:
+                stream_stats["tool_call_event_count"] = int(stream_stats.get("tool_call_event_count", 0)) + 1
             # fall through — function_call items still get added on output_item.done
 
         if "reasoning" in event_type and "delta" in event_type:
+            if stream_stats is not None:
+                stream_stats["reasoning_delta_count"] = int(stream_stats.get("reasoning_delta_count", 0)) + 1
             reasoning_text = _event_field(event, "delta", "")
             if reasoning_text and on_reasoning_delta is not None:
                 try:
@@ -734,6 +621,8 @@ def _consume_codex_event_stream(
             continue
 
         if event_type == "response.output_item.done":
+            if stream_stats is not None:
+                stream_stats["output_item_count"] = int(stream_stats.get("output_item_count", 0)) + 1
             done_item = _event_field(event, "item")
             if done_item is not None:
                 collected_output_items.append(done_item)
@@ -741,6 +630,9 @@ def _consume_codex_event_stream(
 
         if event_type in _TERMINAL_EVENT_TYPES:
             saw_terminal = True
+            if stream_stats is not None:
+                stream_stats["terminal_event_type"] = event_type
+                stream_stats["terminal_event_ms"] = _elapsed_ms(stream_started)
             resp_obj = _event_field(event, "response")
             if resp_obj is not None:
                 terminal_usage = getattr(resp_obj, "usage", None)
@@ -811,6 +703,10 @@ def _consume_codex_event_stream(
         incomplete_details=terminal_incomplete_details,
         error=terminal_error,
     )
+    if stream_stats is not None:
+        stream_stats["consume_ms"] = _elapsed_ms(stream_started)
+        stream_stats["saw_terminal_count"] = 1 if saw_terminal else 0
+        final._stream_stats = dict(stream_stats)
     return final
 
 
@@ -825,7 +721,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     """
     import httpx as _httpx
 
+    client_started = time.perf_counter()
     active_client = client or agent._ensure_primary_openai_client(reason="codex_stream_direct")
+    _emit_provider_timing(agent, "client_resolve", _elapsed_ms(client_started))
     max_stream_retries = 1
     # Accumulate streamed text so callers / compat shims can read it.
     agent._codex_streamed_text_parts: list = []
@@ -853,8 +751,23 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         stream_kwargs["stream"] = True
 
         try:
+            create_started = time.perf_counter()
             event_stream = active_client.responses.create(**stream_kwargs)
+            _emit_provider_timing(
+                agent,
+                "responses_create",
+                _elapsed_ms(create_started),
+                attempt=attempt + 1,
+            )
         except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
+            _emit_provider_timing(
+                agent,
+                "responses_create",
+                _elapsed_ms(create_started),
+                status="failed",
+                attempt=attempt + 1,
+                error_class=type(exc).__name__,
+            )
             if attempt < max_stream_retries:
                 logger.debug(
                     "Codex Responses stream connect failed (attempt %s/%s); retrying. %s error=%s",
@@ -868,9 +781,17 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             # Compatibility: some mocks/providers return a concrete response
             # instead of an iterable.  Pass it straight through.
             if hasattr(event_stream, "output") and not hasattr(event_stream, "__iter__"):
+                _emit_provider_timing(
+                    agent,
+                    "concrete_response",
+                    0,
+                    attempt=attempt + 1,
+                    timing_values={"provider_stream_event_count": 0},
+                )
                 return event_stream
 
             try:
+                stream_stats: Dict[str, Any] = {}
                 final = _consume_codex_event_stream(
                     event_stream,
                     model=api_kwargs.get("model"),
@@ -879,8 +800,53 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     on_first_delta=on_first_delta,
                     on_event=_on_event,
                     interrupt_check=_interrupt_check,
+                    stream_stats=stream_stats,
+                )
+                if stream_stats.get("first_event_ms") is not None:
+                    _emit_provider_timing(
+                        agent,
+                        "stream_first_event",
+                        int(stream_stats.get("first_event_ms") or 0),
+                        attempt=attempt + 1,
+                    )
+                timing_values = {
+                    "provider_stream_event_count": int(stream_stats.get("event_count", 0) or 0),
+                    "provider_stream_text_delta_count": int(stream_stats.get("text_delta_count", 0) or 0),
+                    "provider_stream_reasoning_delta_count": int(stream_stats.get("reasoning_delta_count", 0) or 0),
+                    "provider_stream_tool_call_event_count": int(stream_stats.get("tool_call_event_count", 0) or 0),
+                    "provider_stream_output_item_count": int(stream_stats.get("output_item_count", 0) or 0),
+                    "provider_stream_saw_terminal_count": int(stream_stats.get("saw_terminal_count", 0) or 0),
+                }
+                if stream_stats.get("terminal_event_ms") is not None:
+                    timing_values["provider_stream_terminal_event_ms"] = int(stream_stats.get("terminal_event_ms") or 0)
+                _emit_provider_timing(
+                    agent,
+                    "stream_consume",
+                    int(stream_stats.get("consume_ms", 0) or 0),
+                    attempt=attempt + 1,
+                    terminal_event_type=stream_stats.get("terminal_event_type"),
+                    timing_values=timing_values,
                 )
             except (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ConnectError, ConnectionError) as exc:
+                _emit_provider_timing(
+                    agent,
+                    "stream_consume",
+                    int(stream_stats.get("consume_ms", 0) or 0) if "stream_stats" in locals() else 0,
+                    status="failed",
+                    attempt=attempt + 1,
+                    error_class=type(exc).__name__,
+                    timing_values=(
+                        {
+                            "provider_stream_event_count": int(stream_stats.get("event_count", 0) or 0),
+                            "provider_stream_text_delta_count": int(stream_stats.get("text_delta_count", 0) or 0),
+                            "provider_stream_reasoning_delta_count": int(stream_stats.get("reasoning_delta_count", 0) or 0),
+                            "provider_stream_tool_call_event_count": int(stream_stats.get("tool_call_event_count", 0) or 0),
+                            "provider_stream_output_item_count": int(stream_stats.get("output_item_count", 0) or 0),
+                        }
+                        if "stream_stats" in locals()
+                        else {}
+                    ),
+                )
                 if attempt < max_stream_retries:
                     logger.debug(
                         "Codex Responses stream transport failed mid-iteration "

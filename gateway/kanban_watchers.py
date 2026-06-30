@@ -18,8 +18,6 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from agent.i18n import t
-
 # Match the logger run.py uses (logging.getLogger(__name__) where __name__ ==
 # "gateway.run") so extracted log records keep their original logger name.
 logger = logging.getLogger("gateway.run")
@@ -162,9 +160,7 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban notifier: kanban_db not importable; notifier disabled")
             return
 
-        # "status" covers dashboard drag-drop and `_set_status_direct()`
-        # writes — surface those transitions to subscribers too.
-        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
+        TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out")
         # Subscriptions are removed only when the task reaches a truly final
         # status (done / archived). We used to also unsub on any terminal
         # event kind (gave_up / crashed / timed_out / blocked), but that
@@ -254,13 +250,11 @@ class GatewayKanbanWatchersMixin:
                             for sub in subs:
                                 owner_profile = sub.get("notifier_profile") or None
                                 if owner_profile and owner_profile != notifier_profile:
-                                    _owner_adapters = getattr(self, "_profile_adapters", {}).get(owner_profile)
-                                    if not _owner_adapters:
-                                        logger.debug(
-                                            "kanban notifier: subscription for %s owned by profile %s; current profile %s has no adapter for it, skipping",
-                                            sub.get("task_id"), owner_profile, notifier_profile,
-                                        )
-                                        continue
+                                    logger.debug(
+                                        "kanban notifier: subscription for %s owned by profile %s; current profile %s skipping",
+                                        sub.get("task_id"), owner_profile, notifier_profile,
+                                    )
+                                    continue
                                 platform = (sub.get("platform") or "").lower()
                                 if platform not in active_platforms:
                                     logger.debug(
@@ -310,17 +304,7 @@ class GatewayKanbanWatchersMixin:
                             self._kanban_advance, sub, d["cursor"], board_slug,
                         )
                         continue
-                    sub_profile = sub.get("notifier_profile") or ""
-                    # Route via the SAME chokepoint the authorization path uses
-                    # (gateway/authz_mixin.py::_authorization_adapter): a stamped
-                    # profile with its own adapter-registry entry must be served
-                    # by THAT profile's same-platform adapter and must NOT silently
-                    # fall back to the default profile's adapter — otherwise a
-                    # secondary profile's task notification is delivered by the
-                    # wrong bot (the cross-profile mis-delivery this whole change
-                    # exists to fix). The helper returns None only when the profile
-                    # (or default) genuinely has no adapter for the platform.
-                    adapter = self._authorization_adapter(plat, sub_profile or None)
+                    adapter = self.adapters.get(plat)
                     if adapter is None:
                         logger.debug(
                             "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
@@ -335,7 +319,6 @@ class GatewayKanbanWatchersMixin:
                         )
                         continue
                     title = (task.title if task else sub["task_id"])[:120]
-                    board_tag = f"[{board_slug}] " if board_slug else ""
                     for ev in d["events"]:
                         kind = ev.kind
                         # Identity prefix: attribute terminal pings to the
@@ -362,25 +345,25 @@ class GatewayKanbanWatchersMixin:
                                 r = lines[0][:160] if lines else task.result[:160]
                                 handoff = f"\n{r}"
                             msg = (
-                                f"✔ {board_tag}{tag}Kanban {sub['task_id']} done"
+                                f"✔ {tag}Kanban {sub['task_id']} done"
                                 f" — {title}{handoff}"
                             )
                         elif kind == "blocked":
                             reason = ""
                             if ev.payload and ev.payload.get("reason"):
                                 reason = f": {str(ev.payload['reason'])[:160]}"
-                            msg = f"⏸ {board_tag}{tag}Kanban {sub['task_id']} blocked{reason}"
+                            msg = f"⏸ {tag}Kanban {sub['task_id']} blocked{reason}"
                         elif kind == "gave_up":
                             err = ""
                             if ev.payload and ev.payload.get("error"):
                                 err = f"\n{str(ev.payload['error'])[:200]}"
                             msg = (
-                                f"✖ {board_tag}{tag}Kanban {sub['task_id']} gave up "
+                                f"✖ {tag}Kanban {sub['task_id']} gave up "
                                 f"after repeated spawn failures{err}"
                             )
                         elif kind == "crashed":
                             msg = (
-                                f"✖ {board_tag}{tag}Kanban {sub['task_id']} worker crashed "
+                                f"✖ {tag}Kanban {sub['task_id']} worker crashed "
                                 f"(pid gone); dispatcher will retry"
                             )
                         elif kind == "timed_out":
@@ -388,22 +371,10 @@ class GatewayKanbanWatchersMixin:
                             if ev.payload and ev.payload.get("limit_seconds"):
                                 limit = int(ev.payload["limit_seconds"])
                             msg = (
-                                f"⏱ {board_tag}{tag}Kanban {sub['task_id']} timed out "
+                                f"⏱ {tag}Kanban {sub['task_id']} timed out "
                                 f"(max_runtime={limit}s); will retry"
                             )
-                        elif kind == "status":
-                            new_status = ""
-                            if ev.payload and ev.payload.get("status"):
-                                new_status = str(ev.payload["status"])
-                            msg = f"🔄 {board_tag}{tag}Kanban {sub['task_id']} → {new_status}"
                         else:
-                            # archived / unblocked are claimed by TERMINAL_KINDS
-                            # (so the cursor advances past them and they can't
-                            # wedge a later completed/blocked event behind an
-                            # unclaimed row) but are intentionally SILENT: an
-                            # archive needs no user ping, and unblocked is an
-                            # internal transition. They are also excluded from
-                            # _WAKE_KINDS below, so they never wake the creator.
                             continue
                         metadata: dict[str, Any] = {}
                         if sub.get("thread_id"):
@@ -489,78 +460,6 @@ class GatewayKanbanWatchersMixin:
                         # same state. See the longer comment on TERMINAL_KINDS
                         # above for the failure mode this prevents.
                         task_terminal = task and task.status in {"done", "archived"}
-                        _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked")
-                        _wake_kinds = {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
-                        if _wake_kinds:
-                            try:
-                                _session_key = getattr(task, "session_id", None) or ""
-                                if _session_key:
-                                    _title = (task.title if task else sub["task_id"])[:120]
-                                    _assignee = task.assignee if task else ""
-                                    _parts = []
-                                    if "completed" in _wake_kinds: _parts.append(t("gateway.kanban.wake.completed"))
-                                    if "gave_up" in _wake_kinds: _parts.append(t("gateway.kanban.wake.gave_up"))
-                                    if "crashed" in _wake_kinds: _parts.append(t("gateway.kanban.wake.crashed"))
-                                    if "timed_out" in _wake_kinds: _parts.append(t("gateway.kanban.wake.timed_out"))
-                                    if "blocked" in _wake_kinds: _parts.append(t("gateway.kanban.wake.blocked"))
-                                    _status = t("gateway.kanban.wake.status_joiner").join(_parts) or t("gateway.kanban.wake.status_default")
-                                    _synth = t(
-                                        "gateway.kanban.wake.message",
-                                        task_id=sub["task_id"],
-                                        status=_status,
-                                        title=_title,
-                                        assignee=_assignee,
-                                        board=board_slug,
-                                    )
-                                    from gateway.session import SessionSource
-                                    from gateway.platforms.base import MessageEvent, MessageType
-                                    # KNOWN LIMITATION (tracked follow-up): the
-                                    # subscription row does not persist the
-                                    # creator's chat_type, and it is not carried
-                                    # on the session-context bridge, so we cannot
-                                    # faithfully reconstruct the creator's real
-                                    # session key here. build_session_key() keys
-                                    # DMs (":dm:<chat_id>") on a wholly different
-                                    # shape from group/thread, so any hardcoded
-                                    # value mis-routes some creators. "group" is
-                                    # the least-surprising default for the
-                                    # dashboard/group flows this wake primarily
-                                    # serves; DM-originated creators are handled
-                                    # by the follow-up that stamps + persists
-                                    # chat_type end-to-end. handle_message()
-                                    # get_or_create_session's the target, so a
-                                    # mismatch degrades to "wake lands in a fresh
-                                    # group session" — never an exception.
-                                    _source = SessionSource(
-                                        platform=plat,
-                                        chat_id=sub["chat_id"],
-                                        chat_type="group",
-                                        thread_id=sub.get("thread_id") or None,
-                                        user_id=sub.get("user_id"),
-                                        profile=sub_profile or None,
-                                    )
-                                    _synth_event = MessageEvent(
-                                        text=_synth,
-                                        message_type=MessageType.TEXT,
-                                        source=_source,
-                                        internal=True,
-                                    )
-                                    await adapter.handle_message(_synth_event)
-                                    logger.info(
-                                        "kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
-                                        sub["task_id"], platform_str, sub["chat_id"], sub_profile or "default", _wake_kinds,
-                                    )
-                            except Exception as _wk_err:
-                                # Best-effort: the notification itself already
-                                # delivered and the cursor has advanced, so a
-                                # broken wake path must not wedge the tick — but
-                                # log at WARNING with a traceback rather than
-                                # DEBUG so a persistently-failing wake is visible
-                                # in normal logs instead of silently no-op'ing.
-                                logger.warning(
-                                    "kanban notifier: wakeup injection failed for %s: %s",
-                                    sub["task_id"], _wk_err, exc_info=True,
-                                )
                         if task_terminal:
                             await asyncio.to_thread(
                                 self._kanban_unsub, sub, board_slug,
@@ -741,6 +640,133 @@ class GatewayKanbanWatchersMixin:
                     path, exc,
                 )
 
+    async def _kanban_blocked_pm_hook_watcher(self, interval: float = 5.0) -> None:
+        """React to committed Kanban `blocked` events by routing PM."""
+        try:
+            from hermes_cli.config import load_config as _load_config
+            from hermes_cli import kanban_db as _kb
+            from hermes_cli.kanban_blocked_pm import (
+                BlockedPmHookConfig,
+                handle_blocked_event,
+                unseen_blocked_events,
+            )
+        except Exception:
+            logger.warning("kanban blocked PM hook: imports unavailable; disabled")
+            return
+
+        env_override = os.environ.get("HERMES_KANBAN_PM_BLOCKED_HOOK", "").strip().lower()
+        try:
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning("kanban blocked PM hook: cannot load config (%s); disabled", exc)
+            return
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        hook_cfg = kanban_cfg.get("pm_blocked_hook", {}) if isinstance(kanban_cfg, dict) else {}
+        if not isinstance(hook_cfg, dict):
+            hook_cfg = {}
+        enabled = bool(hook_cfg.get("enabled", False))
+        if env_override in {"1", "true", "yes", "on"}:
+            enabled = True
+        elif env_override in {"0", "false", "no", "off"}:
+            enabled = False
+        if not enabled:
+            logger.info(
+                "kanban blocked PM hook: disabled "
+                "(set kanban.pm_blocked_hook.enabled=true to enable)"
+            )
+            return
+
+        pm_config = BlockedPmHookConfig(
+            pm_assignee=str(hook_cfg.get("assignee") or "pm"),
+            workspace_kind=str(hook_cfg.get("workspace_kind") or "scratch"),
+            workspace_path=hook_cfg.get("workspace_path"),
+            priority=int(hook_cfg.get("priority", 100) or 100),
+        )
+        dispatch_after_create = bool(hook_cfg.get("dispatch_after_create", True))
+        cursors: dict[str, int] = getattr(self, "_kanban_blocked_pm_hook_cursors", {})
+        self._kanban_blocked_pm_hook_cursors = cursors
+
+        await asyncio.sleep(5)
+
+        while self._running:
+            try:
+                def _tick_once() -> list[str]:
+                    outputs: list[str] = []
+                    try:
+                        boards = _kb.list_boards(include_archived=False)
+                    except Exception:
+                        boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+                    seen_db_paths: set[str] = set()
+                    for board_meta in boards:
+                        slug = board_meta.get("slug") or _kb.DEFAULT_BOARD
+                        db_path = board_meta.get("db_path")
+                        try:
+                            resolved_db_path = (
+                                str(Path(db_path).expanduser().resolve())
+                                if db_path
+                                else str(_kb.kanban_db_path(slug).resolve())
+                            )
+                        except Exception:
+                            resolved_db_path = f"slug:{slug}"
+                        if resolved_db_path in seen_db_paths:
+                            continue
+                        seen_db_paths.add(resolved_db_path)
+                        conn = None
+                        try:
+                            conn = _kb.connect(board=slug)
+                            cursor = int(cursors.get(resolved_db_path, 0) or 0)
+                            events = unseen_blocked_events(conn, after_event_id=cursor)
+                            if not events:
+                                max_row = conn.execute(
+                                    "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
+                                ).fetchone()
+                                cursors[resolved_db_path] = max(
+                                    cursor, int(max_row["m"] or 0)
+                                )
+                                continue
+                            created_any = False
+                            for event in events:
+                                result = handle_blocked_event(conn, event, pm_config)
+                                cursors[resolved_db_path] = max(
+                                    cursors.get(resolved_db_path, 0), int(event.id)
+                                )
+                                if result.created_pm_task_id:
+                                    created_any = True
+                                    outputs.append(
+                                        f"{slug}:{event.task_id}->"
+                                        f"{result.created_pm_task_id}:{result.action}"
+                                    )
+                            if created_any and dispatch_after_create:
+                                try:
+                                    _kb.dispatch_once(conn, board=slug, max_spawn=1)
+                                except Exception as exc:
+                                    logger.warning(
+                                        "kanban blocked PM hook: dispatch after create "
+                                        "failed on board %s: %s",
+                                        slug,
+                                        exc,
+                                    )
+                        except Exception as exc:
+                            logger.warning(
+                                "kanban blocked PM hook: board %s tick failed: %s",
+                                slug,
+                                exc,
+                            )
+                        finally:
+                            if conn is not None:
+                                conn.close()
+                    return outputs
+
+                routed = await asyncio.to_thread(_tick_once)
+                for item in routed:
+                    logger.info("kanban blocked PM hook routed %s", item)
+            except Exception as exc:
+                logger.warning("kanban blocked PM hook tick failed: %s", exc)
+            for _ in range(int(max(1, interval))):
+                if not self._running:
+                    return
+                await asyncio.sleep(1)
+
     async def _kanban_dispatcher_watcher(self) -> None:
         """Embedded kanban dispatcher — one tick every `dispatch_interval_seconds`.
 
@@ -825,6 +851,26 @@ class GatewayKanbanWatchersMixin:
             )
             interval = 60.0
         interval = max(interval, 1.0)  # sanity floor — tighter than this is a footgun
+
+        raw_claim_ttl = kanban_cfg.get(
+            "claim_ttl_seconds", _kb.DEFAULT_CLAIM_TTL_SECONDS
+        )
+        try:
+            claim_ttl_seconds = int(raw_claim_ttl)
+        except (TypeError, ValueError):
+            logger.warning(
+                "kanban dispatcher: invalid kanban.claim_ttl_seconds=%r; using default %d",
+                raw_claim_ttl,
+                _kb.DEFAULT_CLAIM_TTL_SECONDS,
+            )
+            claim_ttl_seconds = _kb.DEFAULT_CLAIM_TTL_SECONDS
+        if claim_ttl_seconds < 60:
+            logger.warning(
+                "kanban dispatcher: kanban.claim_ttl_seconds=%r is below 60; using default %d",
+                raw_claim_ttl,
+                _kb.DEFAULT_CLAIM_TTL_SECONDS,
+            )
+            claim_ttl_seconds = _kb.DEFAULT_CLAIM_TTL_SECONDS
 
         # Read max_spawn config to limit concurrent kanban tasks
         max_spawn = kanban_cfg.get("max_spawn", None)
@@ -1019,6 +1065,7 @@ class GatewayKanbanWatchersMixin:
                     max_spawn=max_spawn,
                     max_in_progress=max_in_progress,
                     failure_limit=failure_limit,
+                    ttl_seconds=claim_ttl_seconds,
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,

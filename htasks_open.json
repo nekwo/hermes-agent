@@ -1,0 +1,50 @@
+[
+  {
+    "state": "blocked",
+    "task_id": "debug_67758578",
+    "title": "T",
+    "updated_at": "2026-06-23T22:20:47.098778Z"
+  },
+  {
+    "state": "running",
+    "task_id": "task_1",
+    "title": "T",
+    "updated_at": "2026-06-23T20:12:46.413435Z"
+  },
+  {
+    "state": "created",
+    "task_id": "task_1500c055",
+    "title": "Investigate NSFW filter leakage hardening plan clean scratch",
+    "updated_at": "2026-06-10T05:39:03.145102Z"
+  },
+  {
+    "state": "blocked",
+    "task_id": "task_8db29105",
+    "title": "T",
+    "updated_at": "2026-06-23T05:32:40.645796Z"
+  },
+  {
+    "state": "running",
+    "task_id": "task_bd3dbad4",
+    "title": "Smoke test Neko supervisor default graph",
+    "updated_at": "2026-06-25T17:34:27.788568Z"
+  },
+  {
+    "state": "running",
+    "task_id": "task_dbg_blueprint",
+    "title": "T",
+    "updated_at": "2026-06-21T22:17:00.981413Z"
+  },
+  {
+    "state": "running",
+    "task_id": "task_debug_probe",
+    "title": "Cross repo mission",
+    "updated_at": "2026-06-23T20:11:32.116215Z"
+  },
+  {
+    "state": "running",
+    "task_id": "task_e854e16a",
+    "title": "Integrate Cammy Tagger v2 NSFW image verdicts into backend media safety",
+    "updated_at": "2026-06-11T14:27:18.864491Z"
+  }
+]

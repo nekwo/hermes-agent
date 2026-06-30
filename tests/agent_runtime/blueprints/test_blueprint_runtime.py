@@ -1,0 +1,558 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from hermes_time import now
+
+from agent_runtime.actions import HarnessActionType
+from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
+from agent_runtime.blueprints.routing import apply_decision_outcome, apply_stage_outcome, derive_stage_outcome, next_target
+from agent_runtime.blueprints.runs import BlueprintRunStore
+from agent_runtime.blueprints.schema import StageOutcome, blueprint_from_dict, validate_bindings, validate_blueprint
+from agent_runtime.decision_schema import AgentDecision, DecisionType
+from agent_runtime.mission_plan import mission_plan_summary, validate_mission_plan
+from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
+from agent_runtime.proof_rules import ProofType
+from agent_runtime.state_machine import MissionStateMachine
+from agent_runtime.states import StageStatus, TaskState
+
+
+def test_schema_rejects_undeclared_owner_slot():
+    bp = blueprint_from_dict(
+        {
+            "id": "bad_owner",
+            "version": 1,
+            "title": "Bad Owner",
+            "slots": [{"id": "builder", "role": "builder"}],
+            "stages": [{"id": "build", "title": "Build", "objective": "Build", "owner_slot": "ghost"}],
+            "edges": [{"source": "build", "outcome": "passed", "target": "done"}],
+            "limits": {"max_attempts_per_stage": 1, "max_total_stages": 1},
+        }
+    ) if False else None
+
+    raw = {
+        "id": "bad_owner",
+        "version": 1,
+        "title": "Bad Owner",
+        "slots": [{"id": "builder", "role": "builder"}],
+        "stages": [{"id": "build", "title": "Build", "objective": "Build", "owner_slot": "ghost"}],
+        "edges": [{"source": "build", "outcome": "passed", "target": "done"}],
+        "limits": {"max_attempts_per_stage": 1, "max_total_stages": 1},
+    }
+    with pytest.raises(ValueError, match="owner_slot 'ghost' is not declared"):
+        blueprint_from_dict(raw)
+
+
+def test_schema_rejects_unprefixed_bindings():
+    bp = BlueprintStore().get("one_agent_smoke")
+
+    assert validate_bindings(bp, {"builder": "gpt-launcher"}) == [
+        "binding for slot builder must start with persona: or profile:"
+    ]
+
+
+def test_one_agent_blueprint_instantiates_to_mission_plan_and_run_slot():
+    bp = BlueprintStore().get("one_agent_smoke")
+    plan = instantiate_blueprint(bp, goal="smoke", bindings={"builder": "profile:gpt-launcher"})
+    task = Task(
+        id="task_blueprint_smoke",
+        title="Smoke",
+        description="smoke",
+        state=TaskState.CREATED,
+        created_at=now(),
+        updated_at=now(),
+        requested_by="test",
+        mission_plan=plan,
+        current_stage_id=plan.current_stage_id,
+    )
+
+    assert validate_mission_plan(plan) == []
+    assert plan.blueprint_id == "one_agent_smoke"
+    assert plan.blueprint_version == 1
+    assert plan.bindings == {"builder": "gpt-launcher"}
+    assert plan.binding_sources == {"builder": "profile:gpt-launcher"}
+    assert plan.stages[0].owner == "gpt-launcher"
+    assert plan.stages[0].owner_slot == "builder"
+
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "builder"
+
+    summary = mission_plan_summary(task)
+    assert summary["blueprint_id"] == "one_agent_smoke"
+    assert summary["stages"][0]["owner_slot"] == "builder"
+
+
+def test_blueprint_output_type_code_feature_materializes_test_run_gate():
+    bp = blueprint_from_dict(
+        {
+            "id": "code_output",
+            "version": 1,
+            "title": "Code Output",
+            "slots": [{"id": "builder", "role": "builder"}],
+            "stages": [
+                {
+                    "id": "build",
+                    "title": "Build",
+                    "objective": "Build the feature.",
+                    "owner_slot": "builder",
+                    "output_type": "code feature",
+                }
+            ],
+            "edges": [{"source": "build", "outcome": "passed", "target": "done"}],
+        }
+    )
+    plan = instantiate_blueprint(bp, goal="ship code", bindings={"builder": "persona:dev"})
+
+    assert plan.stages[0].output_type == "code feature"
+    assert plan.stages[0].proof_gate["required_proof_types"] == ["test_run"]
+    assert plan.stages[0].proof_gate["required"] is True
+
+
+def test_blueprint_output_type_design_document_materializes_artifact_gate():
+    bp = blueprint_from_dict(
+        {
+            "id": "design_output",
+            "version": 1,
+            "title": "Design Output",
+            "slots": [{"id": "builder", "role": "builder"}],
+            "stages": [
+                {
+                    "id": "design",
+                    "title": "Design",
+                    "objective": "Write the design.",
+                    "owner_slot": "builder",
+                    "output_type": "design document",
+                }
+            ],
+            "edges": [{"source": "design", "outcome": "passed", "target": "done"}],
+        }
+    )
+    plan = instantiate_blueprint(bp, goal="ship docs", bindings={"builder": "persona:dev"})
+
+    assert plan.stages[0].output_type == "design document"
+    assert plan.stages[0].proof_gate["required_proof_types"] == ["artifact"]
+    assert "test_run" not in plan.stages[0].proof_gate["required_proof_types"]
+
+
+def test_blueprint_output_type_infers_from_existing_proof_gate():
+    bp = blueprint_from_dict(
+        {
+            "id": "inferred_output",
+            "version": 1,
+            "title": "Inferred Output",
+            "slots": [{"id": "builder", "role": "builder"}],
+            "stages": [
+                {
+                    "id": "build",
+                    "title": "Build",
+                    "objective": "Build the feature.",
+                    "owner_slot": "builder",
+                    "proof_gate": {"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"]},
+                }
+            ],
+            "edges": [{"source": "build", "outcome": "passed", "target": "done"}],
+        }
+    )
+
+    assert bp.stages[0].output_type == "code feature"
+
+
+def test_legacy_plan_without_owner_slot_normalizes_to_owner():
+    plan = MissionPlan(
+        mission_intent=MissionIntent(title="Legacy", objective="Legacy"),
+        stages=[
+            MissionPlanStage(
+                id="legacy_dev",
+                title="Legacy Dev",
+                objective="Do it",
+                owner="dev",
+                repo="hermes-agent",
+                kind="implementation",
+            )
+        ],
+        current_stage_id="legacy_dev",
+    )
+    task = Task(
+        id="task_legacy",
+        title="Legacy",
+        description="Legacy",
+        state=TaskState.CREATED,
+        created_at=now(),
+        updated_at=now(),
+        requested_by="test",
+        mission_plan=plan,
+    )
+
+    assert validate_mission_plan(plan) == []
+    assert mission_plan_summary(task)["stages"][0]["owner_slot"] == "dev"
+
+
+def test_two_agent_blueprint_validates_and_instantiates_with_swapped_bindings():
+    bp = BlueprintStore().get("two_agent_build_verify")
+
+    assert validate_blueprint(bp) == []
+    plan = instantiate_blueprint(
+        bp,
+        goal="swap smoke",
+        bindings={"builder": "profile:gpt-launcher", "verifier": "persona:qa"},
+    )
+
+    assert validate_mission_plan(plan) == []
+    assert [stage.owner_slot for stage in plan.stages] == ["builder", "verifier"]
+    assert plan.bindings == {"builder": "gpt-launcher", "verifier": "qa"}
+    assert any(edge["source"] == "verify" and edge["target"] == "implement" for edge in plan.edges)
+
+
+def test_blueprint_outcome_edges_route_build_verify_loop():
+    task = _blueprint_task("two_agent_build_verify")
+    plan = task.mission_plan
+
+    assert apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="implemented") == "verify"
+    assert plan.current_stage_id == "verify"
+    assert MissionStateMachine().next_action(task).slot_id == "verifier"
+
+    assert apply_stage_outcome(task, "verify", StageOutcome.FAILED, reason="failed verification") == "implement"
+    assert plan.current_stage_id == "implement"
+    implement = next(stage for stage in plan.stages if stage.id == "implement")
+    assert implement.status == StageStatus.REWORK
+    assert plan.stage_attempts == {"implement": 1, "verify": 1}
+
+
+def test_blueprint_REWORK_routes_back_until_stage_attempt_limit():
+    task = _blueprint_task("two_agent_build_verify")
+    plan = task.mission_plan
+
+    apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="attempt 1")
+    apply_stage_outcome(task, "verify", StageOutcome.REWORK, reason="needs fixes 1")
+    apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="attempt 2")
+    result = apply_stage_outcome(task, "verify", StageOutcome.REWORK, reason="needs fixes 2")
+
+    assert result == "intervention"
+    assert task.state == TaskState.RUNNING
+    assert plan.current_stage_id == "verify"
+    assert plan.stage_attempts == {"implement": 2, "verify": 2}
+    assert "blueprint retry limit exceeded" in task.operator_notes[-1]
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
+    assert "adjudication" in action.reason
+
+
+def test_blueprint_verify_passed_routes_to_done():
+    task = _blueprint_task("two_agent_build_verify")
+
+    apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="implemented")
+    result = apply_stage_outcome(task, "verify", StageOutcome.PASSED, reason="APPROVED")
+
+    assert result == "done"
+    assert task.mission_plan.current_stage_id is None
+    assert MissionStateMachine().next_action(task).type == HarnessActionType.COMPLETE_TASK
+
+
+def test_blueprint_terminal_run_writes_versioned_record(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    first = _blueprint_task("two_agent_build_verify")
+    first.id = "task_blueprint_record_first"
+
+    apply_stage_outcome(first, "implement", StageOutcome.PASSED, reason="implemented")
+    assert apply_stage_outcome(first, "verify", StageOutcome.PASSED, reason="APPROVED") == "done"
+
+    second = _blueprint_task("two_agent_build_verify", bindings={"builder": "persona:backend_dev", "verifier": "persona:qa"})
+    second.id = "task_blueprint_record_second"
+    second.mission_plan.blueprint_version = 2
+    apply_stage_outcome(second, "implement", StageOutcome.PASSED, reason="implemented")
+    assert apply_stage_outcome(second, "verify", StageOutcome.PASSED, reason="APPROVED") == "done"
+
+    records = BlueprintRunStore().list_all()
+    assert [record.task_id for record in records] == ["task_blueprint_record_first", "task_blueprint_record_second"]
+    assert [record.blueprint_version for record in records] == [1, 2]
+    assert records[0].bindings == {"builder": "dev", "verifier": "qa"}
+    assert records[1].bindings == {"builder": "backend_dev", "verifier": "qa"}
+    assert records[0].per_stage_outcomes == {"implement": "passed", "verify": "passed"}
+
+
+def test_blueprint_on_unhandled_route_is_honored():
+    bp = blueprint_from_dict(
+        {
+            "id": "unhandled_to_done",
+            "version": 1,
+            "title": "Unhandled To Done",
+            "slots": [{"id": "builder", "role": "builder"}],
+            "stages": [{"id": "build", "title": "Build", "objective": "Build", "owner_slot": "builder"}],
+            "edges": [{"source": "build", "outcome": "passed", "target": "done"}],
+            "on_unhandled": "done",
+        }
+    )
+    plan = instantiate_blueprint(bp, goal="smoke", bindings={"builder": "persona:dev"})
+    task = _task_with_plan(plan)
+
+    assert next_target(plan, "build", StageOutcome.BLOCKED) == "done"
+    assert apply_stage_outcome(task, "build", StageOutcome.BLOCKED, reason="unhandled") == "done"
+    assert MissionStateMachine().next_action(task).type == HarnessActionType.COMPLETE_TASK
+
+
+def test_decision_and_proof_derive_stage_outcome_and_route_edge():
+    task = _blueprint_task("two_agent_build_verify")
+    apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="implemented")
+    decision = AgentDecision(
+        type=DecisionType.REPORT_QA_VERDICT,
+        summary="QA approved",
+        rationale="evidence passed",
+        payload={"review_scope": "implementation", "verdict": "approved", "proof_ids": ["proof_verify"], "findings": []},
+    )
+
+    result = MissionStateMachine().apply_decision(task, decision, actor="qa")
+
+    assert result.from_state == TaskState.RUNNING
+    assert task.mission_plan.current_stage_id is None
+    assert MissionStateMachine().next_action(task).type == HarnessActionType.COMPLETE_TASK
+
+
+def test_request_test_run_proofs_drive_blueprint_outcome():
+    task = _blueprint_task("one_agent_smoke", bindings={"builder": "persona:dev"})
+    stage = task.mission_plan.stages[0]
+    decision = AgentDecision(
+        type=DecisionType.REQUEST_TEST_RUN,
+        summary="proof",
+        rationale="collect proof",
+        payload={"stage_id": "build", "commands": ["python -c pass"]},
+    )
+    proof = Proof(
+        id="proof_build",
+        task_id=task.id,
+        stage_id="build",
+        type=ProofType.TEST_RUN,
+        title="passed",
+        path_or_value="proof.log",
+        created_by="dev",
+        created_at=now(),
+        metadata={"status": "passed", "exit_code": 0},
+        redaction_status="safe",
+    )
+
+    assert derive_stage_outcome(decision, stage, proofs=[proof]) == StageOutcome.PASSED
+    assert apply_decision_outcome(task, decision, proofs=[proof]) == "done"
+
+
+def test_required_blueprint_proof_gate_missing_proof_surfaces_hud_evidence():
+    task = _blueprint_task("one_agent_smoke", bindings={"builder": "persona:dev"})
+    stage = task.mission_plan.stages[0]
+    decision = AgentDecision(
+        type=DecisionType.REQUEST_TEST_RUN,
+        summary="proof",
+        rationale="collect proof",
+        payload={"stage_id": "build", "commands": ["python -c pass"]},
+    )
+
+    assert stage.proof_gate["required"] is True
+    assert derive_stage_outcome(decision, stage, proofs=[]) == StageOutcome.MISSING_INPUT
+
+    assert apply_decision_outcome(task, decision, proofs=[]) == "intervention"
+    assert task.state == TaskState.RUNNING
+    evidence = task.harness_self_heal["evidence_stack"]
+    assert evidence[0]["kind"] == "proof_gate"
+    assert evidence[0]["missing"] == ["missing test_run proof"]
+
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
+
+
+def test_blueprint_cli_non_dry_run_creates_persisted_task(tmp_path):
+    env = os.environ.copy()
+    env["HERMES_AGENT_RUNTIME_ROOT"] = str(tmp_path / "runtime")
+    cmd = [
+        sys.executable,
+        "-m",
+        "hermes_cli.main",
+        "harness",
+        "blueprint",
+        "run",
+        "one_agent_smoke",
+        "--goal",
+        "smoke",
+        "--bind",
+        "builder=persona:dev",
+        "--json",
+    ]
+    created = subprocess.run(cmd, cwd=Path(__file__).resolve().parents[3], env=env, capture_output=True, text=True, timeout=30)
+
+    assert created.returncode == 0, created.stderr
+    data = json.loads(created.stdout)
+    assert data["created"] is True
+    assert data["next_action"]["type"] == "run_slot"
+
+    shown = subprocess.run(
+        [sys.executable, "-m", "hermes_cli.main", "harness", "task", "show", data["task_id"], "--json"],
+        cwd=Path(__file__).resolve().parents[3],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert shown.returncode == 0, shown.stderr
+    shown_data = json.loads(shown.stdout)
+    task_data = shown_data.get("task") or shown_data
+    assert task_data["mission_plan"]["blueprint_id"] == "one_agent_smoke"
+    assert task_data["mission_plan"]["current_stage_id"] == "build"
+
+
+def test_blueprint_cli_matrix_run_reports_isolated_cases(tmp_path):
+    env = os.environ.copy()
+    env["HERMES_AGENT_RUNTIME_ROOT"] = str(tmp_path / "runtime")
+    cmd = [
+        sys.executable,
+        "-m",
+        "hermes_cli.main",
+        "harness",
+        "blueprint",
+        "matrix-run",
+        "two_agent_build_verify",
+        "--goal",
+        "swap smoke",
+        "--bind",
+        "verifier=persona:qa",
+        "--vary",
+        "builder=persona:dev,persona:backend_dev",
+        "--dry-run",
+        "--json",
+    ]
+    completed = subprocess.run(cmd, cwd=Path(__file__).resolve().parents[3], env=env, capture_output=True, text=True, timeout=30)
+
+    assert completed.returncode == 0, completed.stderr
+    data = json.loads(completed.stdout)
+    assert data["ok"] is True
+    assert data["dry_run"] is True
+    assert data["case_count"] == 2
+    assert [item["bindings"]["builder"] for item in data["results"]] == ["persona:dev", "persona:backend_dev"]
+    assert all(item["next_action"]["type"] == "run_slot" for item in data["results"])
+
+
+def test_resolver_finds_existing_persona_for_profile_binding():
+    from agent_runtime.blueprints.resolve import BindingResolver
+    from agent_runtime.models import AgentPersona
+
+    wrapper = AgentPersona(
+        id="launcher_dev",
+        display_name="Launcher Dev",
+        role="dev",
+        model="m",
+        provider="p",
+        api_mode="a",
+        toolsets=[],
+        system_prompt_path="personas/dev/system.md",
+        hermes_profile="gpt-launcher",
+    )
+    resolver = BindingResolver(
+        configured=[wrapper],
+        profile_exists=lambda name: name == "gpt-launcher",
+    )
+    # profile binding resolves to the persona that already wraps the profile
+    assert resolver.resolve("profile:gpt-launcher", slot_role="builder") == "launcher_dev"
+    # direct persona binding resolves to itself
+    assert resolver.resolve("persona:launcher_dev", slot_role="builder") == "launcher_dev"
+
+
+def test_resolver_promotes_unwrapped_profile_into_persisted_persona(tmp_path, monkeypatch):
+    from agent_runtime.blueprints.resolve import BindingResolver
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.store import AgentStore
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    store = AgentStore()
+    dev_template = AgentPersona(
+        id="dev",
+        display_name="Dev",
+        role="dev",
+        model="m",
+        provider="p",
+        api_mode="a",
+        toolsets=[],
+        system_prompt_path="personas/dev/system.md",
+    )
+    resolver = BindingResolver(
+        agent_store=store,
+        configured=[dev_template],
+        profile_exists=lambda name: name == "fresh-profile",
+    )
+
+    persona_id = resolver.resolve("profile:fresh-profile", slot_role="builder")
+    promoted = store.get(persona_id)
+    assert promoted.hermes_profile == "fresh-profile"
+    assert promoted.role == "dev"
+    # find-only mode refuses to promote
+    find_only = BindingResolver(
+        agent_store=AgentStore(),
+        configured=[dev_template],
+        profile_exists=lambda name: name == "other-profile",
+        allow_promote=False,
+    )
+    with pytest.raises(ValueError, match="has no persona"):
+        find_only.resolve("profile:other-profile", slot_role="builder")
+
+
+def test_save_blueprint_round_trips_and_rejects_invalid(tmp_path):
+    from agent_runtime.blueprints.schema import blueprint_from_dict
+    from agent_runtime.blueprints.store import BlueprintStore, blueprint_to_dict, save_blueprint
+
+    spec = {
+        "id": "edit_smoke",
+        "version": 2,
+        "title": "Edit Smoke",
+        "slots": [{"id": "builder", "role": "builder"}],
+        "stages": [{"id": "build", "title": "Build", "objective": "Build", "owner_slot": "builder"}],
+        "edges": [
+            {"source": "build", "outcome": "passed", "target": "done"},
+            {"source": "build", "outcome": "blocked", "target": "intervention"},
+        ],
+        "limits": {"max_attempts_per_stage": 1, "max_total_stages": 2},
+    }
+    bp = blueprint_from_dict(spec)
+    path = save_blueprint(bp, root=tmp_path)
+    assert path.exists()
+
+    # reloaded from disk by the store and round-trips to the same canonical dict
+    reloaded = BlueprintStore(roots=[tmp_path]).get("edit_smoke")
+    assert reloaded.version == 2
+    assert blueprint_to_dict(reloaded) == blueprint_to_dict(bp)
+
+    # an invalid spec (edge to unknown stage) is rejected before any write
+    bad = dict(spec, edges=[{"source": "build", "outcome": "passed", "target": "ghost"}])
+    with pytest.raises(ValueError, match="not a known stage or terminal target"):
+        blueprint_from_dict(bad)
+
+
+def test_resolver_rejects_unknown_persona_binding():
+    from agent_runtime.blueprints.resolve import BindingResolver
+
+    resolver = BindingResolver(configured=[], profile_exists=lambda name: False)
+    with pytest.raises(ValueError, match="does not exist"):
+        resolver.resolve("persona:ghost", slot_role="builder")
+
+
+def _blueprint_task(blueprint_id: str, *, bindings: dict[str, str] | None = None) -> Task:
+    bp = BlueprintStore().get(blueprint_id)
+    bindings = bindings or {"builder": "persona:dev", "verifier": "persona:qa"}
+    plan = instantiate_blueprint(bp, goal="swap smoke", bindings=bindings)
+    return _task_with_plan(plan)
+
+
+def _task_with_plan(plan: MissionPlan) -> Task:
+    return Task(
+        id=f"task_{plan.blueprint_id or 'blueprint'}",
+        title="Blueprint",
+        description="swap smoke",
+        state=TaskState.CREATED,
+        created_at=now(),
+        updated_at=now(),
+        requested_by="test",
+        mission_plan=plan,
+        current_stage_id=plan.current_stage_id,
+    )

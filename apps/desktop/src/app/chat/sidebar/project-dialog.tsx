@@ -87,25 +87,21 @@ export function ProjectDialog() {
   }
 
   const pickFolder = async () => {
-    try {
-      const dir = await pickProjectFolder()
+    const dir = await pickProjectFolder()
 
-      if (!dir) {
-        return
-      }
-
-      const projectId = state?.projectId
-
-      if (mode === 'add-folder' && projectId) {
-        await runSubmit(() => addProjectFolder(projectId, dir))
-
-        return
-      }
-
-      setFolders(prev => (prev.includes(dir) ? prev : [...prev, dir]))
-    } catch (err) {
-      notifyError(err, p.createFailed)
+    if (!dir) {
+      return
     }
+
+    const projectId = state?.projectId
+
+    if (mode === 'add-folder' && projectId) {
+      await runSubmit(() => addProjectFolder(projectId, dir))
+
+      return
+    }
+
+    setFolders(prev => (prev.includes(dir) ? prev : [...prev, dir]))
   }
 
   const submit = async () => {
@@ -149,7 +145,7 @@ export function ProjectDialog() {
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
-      <DialogContent className="max-w-md" onInteractOutside={event => event.preventDefault()}>
+      <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {mode === 'create' && <DialogDescription>{p.createDesc}</DialogDescription>}

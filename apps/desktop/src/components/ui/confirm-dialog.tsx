@@ -26,8 +26,6 @@ interface ConfirmDialogProps {
   doneLabel?: string
   cancelLabel?: string
   destructive?: boolean
-  /** Close as soon as onConfirm resolves — for optimistic actions that finish in the background. */
-  dismissOnConfirm?: boolean
 }
 
 // Shared confirmation dialog: Enter confirms (from anywhere in the dialog),
@@ -43,8 +41,7 @@ export function ConfirmDialog({
   busyLabel,
   doneLabel,
   cancelLabel,
-  destructive = false,
-  dismissOnConfirm = false
+  destructive = false
 }: ConfirmDialogProps) {
   const { t } = useI18n()
   const [status, setStatus] = useState<'done' | 'idle' | 'saving'>('idle')
@@ -67,20 +64,8 @@ export function ConfirmDialog({
       return
     }
 
-    setError(null)
-
-    if (dismissOnConfirm) {
-      try {
-        await onConfirm()
-        onClose()
-      } catch (err) {
-        setError(err instanceof Error ? err.message : t.errors.genericFailure)
-      }
-
-      return
-    }
-
     setStatus('saving')
+    setError(null)
 
     try {
       await onConfirm()

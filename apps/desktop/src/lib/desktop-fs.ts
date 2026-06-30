@@ -32,12 +32,6 @@ export function isDesktopFsRemoteMode() {
   return $connection.get()?.mode === 'remote'
 }
 
-// Active profile for FS/git REST calls. Without it the Electron api bridge
-// hits the primary (local) backend even when the user switched to a remote profile.
-export function desktopFsProfile(): string | undefined {
-  return $connection.get()?.profile || undefined
-}
-
 function fsPath(endpoint: string, filePath: string) {
   return `/api/fs/${endpoint}?path=${encodeURIComponent(filePath)}`
 }
@@ -52,26 +46,24 @@ function bridge() {
   return desktop
 }
 
-function remoteFsApi<T>(path: string, body?: Record<string, unknown>): Promise<T> {
-  return bridge().api<T>(
-    body ? { body, method: 'POST', path, profile: desktopFsProfile() } : { path, profile: desktopFsProfile() }
-  )
-}
-
 export async function readDesktopDir(path: string): Promise<HermesReadDirResult> {
+  const desktop = bridge()
+
   if (!isDesktopFsRemoteMode()) {
-    return bridge().readDir(path)
+    return desktop.readDir(path)
   }
 
-  return remoteFsApi<HermesReadDirResult>(fsPath('list', path))
+  return desktop.api<HermesReadDirResult>({ path: fsPath('list', path) })
 }
 
 export async function readDesktopFileText(path: string): Promise<HermesReadFileTextResult> {
+  const desktop = bridge()
+
   if (!isDesktopFsRemoteMode()) {
-    return bridge().readFileText(path)
+    return desktop.readFileText(path)
   }
 
-  return remoteFsApi<HermesReadFileTextResult>(fsPath('read-text', path))
+  return desktop.api<HermesReadFileTextResult>({ path: fsPath('read-text', path) })
 }
 
 // Save UTF-8 text back to a file. Local writes go through the hardened Electron
@@ -89,17 +81,23 @@ export async function writeDesktopFileText(path: string, content: string): Promi
     return desktop.writeTextFile(path, content)
   }
 
-  const result = await remoteFsApi<{ ok?: boolean; path?: string }>('/api/fs/write-text', { content, path })
+  const result = await desktop.api<{ ok?: boolean; path?: string }>({
+    body: { content, path },
+    method: 'POST',
+    path: '/api/fs/write-text'
+  })
 
   return { path: result.path || path }
 }
 
 export async function readDesktopFileDataUrl(path: string): Promise<string> {
+  const desktop = bridge()
+
   if (!isDesktopFsRemoteMode()) {
-    return bridge().readFileDataUrl(path)
+    return desktop.readFileDataUrl(path)
   }
 
-  const result = await remoteFsApi<string | { dataUrl?: string }>(fsPath('read-data-url', path))
+  const result = await desktop.api<string | { dataUrl?: string }>({ path: fsPath('read-data-url', path) })
 
   return typeof result === 'string' ? result : result.dataUrl || ''
 }
@@ -111,7 +109,9 @@ export async function desktopGitRoot(path: string): Promise<string | null> {
     return desktop.gitRoot ? desktop.gitRoot(path) : null
   }
 
-  return (await remoteFsApi<{ root: string | null }>(fsPath('git-root', path))).root
+  const result = await desktop.api<{ root: string | null }>({ path: fsPath('git-root', path) })
+
+  return result.root
 }
 
 export async function desktopDefaultCwd(): Promise<{ branch: string; cwd: string } | null> {
@@ -119,7 +119,7 @@ export async function desktopDefaultCwd(): Promise<{ branch: string; cwd: string
     return null
   }
 
-  return remoteFsApi<{ branch: string; cwd: string }>('/api/fs/default-cwd')
+  return bridge().api<{ branch: string; cwd: string }>({ path: '/api/fs/default-cwd' })
 }
 
 // Reveal a path in the OS file manager (Finder / Explorer / Files). Local only.
@@ -155,20 +155,16 @@ export async function copyTextToClipboard(text: string): Promise<void> {
   await bridge().writeClipboard(text)
 }
 
-// Working-tree-vs-HEAD diff for one file. Empty when unchanged / not a repo.
-// Remote gateway → backend git (/api/git/file-diff); local → Electron git.
+// Working-tree-vs-HEAD diff for one file. Empty when unchanged / not a repo /
+// remote backend (the diff view simply doesn't show then). Local only.
 export async function desktopFileDiff(repoRoot: string, filePath: string): Promise<string> {
-  if (isDesktopFsRemoteMode()) {
-    const result = await remoteFsApi<{ diff: string }>(
-      `/api/git/file-diff?path=${encodeURIComponent(repoRoot)}&file=${encodeURIComponent(filePath)}`
-    )
+  const desktop = bridge()
 
-    return result.diff || ''
+  if (isDesktopFsRemoteMode() || !desktop.git?.fileDiff) {
+    return ''
   }
 
-  const git = bridge().git
-
-  return git?.fileDiff ? git.fileDiff(repoRoot, filePath) : ''
+  return desktop.git.fileDiff(repoRoot, filePath)
 }
 
 export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Promise<string[]> {
@@ -178,9 +174,9 @@ export async function selectDesktopPaths(options?: HermesSelectPathsOptions): Pr
     return desktop.selectPaths(options)
   }
 
-  if (!options?.directories) {
-    return desktop.selectPaths(options)
+  if (!options?.directories || options.multiple !== false) {
+    return []
   }
 
-  return remotePicker ? remotePicker.selectPaths({ ...options, multiple: false }) : []
+  return remotePicker ? remotePicker.selectPaths(options) : []
 }

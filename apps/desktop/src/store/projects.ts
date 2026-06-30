@@ -2,14 +2,9 @@ import { atom } from 'nanostores'
 
 import { liveSessionProjectId, type SidebarProjectTree } from '@/app/chat/sidebar/projects/workspace-groups'
 import type { HermesGitBranch } from '@/global'
-import { translateNow } from '@/i18n'
-import { desktopDefaultCwd, selectDesktopPaths, writeDesktopFileText } from '@/lib/desktop-fs'
-import { desktopGit } from '@/lib/desktop-git'
-import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { persistentAtom } from '@/lib/persisted'
 import { activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
 import { setSidebarAgentsGrouped } from '@/store/layout'
-import { notify } from '@/store/notifications'
 import { requestFreshSession } from '@/store/profile'
 import { $selectedStoredSessionId, $sessions, workspaceCwdForNewSession } from '@/store/session'
 import type { ProjectInfo, ProjectsPayload } from '@/types/hermes'
@@ -28,24 +23,6 @@ export const $activeProjectId = atom<null | string>(null)
 // source of project membership — the desktop no longer derives it.
 export const $projectTree = atom<SidebarProjectTree[]>([])
 export const $projectTreeLoading = atom(false)
-
-// False when the connected backend predates the projects.* JSON-RPC surface
-// (same semver label, older install). Null until the first probe.
-export const $projectsRpcAvailable = atom<boolean | null>(null)
-
-function markProjectsRpcSuccess(): void {
-  $projectsRpcAvailable.set(true)
-}
-
-function markProjectsRpcFailure(err: unknown): void {
-  if (isMissingRpcMethod(err)) {
-    $projectsRpcAvailable.set(false)
-  }
-}
-
-function projectsStaleBackendError(): Error {
-  return new Error(translateNow('sidebar.projects.staleBackend'))
-}
 
 // Client-side cache eviction (Apollo-style optimistic layer): ids the user just
 // deleted/archived. The backend tree is a snapshot that still lists them until
@@ -237,9 +214,7 @@ function applyPayload(payload: ProjectsPayload): void {
 export async function refreshProjects(): Promise<void> {
   try {
     applyPayload(await gatewayRequest<ProjectsPayload>('projects.list'))
-    markProjectsRpcSuccess()
-  } catch (err) {
-    markProjectsRpcFailure(err)
+  } catch {
     // Backend may not be ready; keep the last known list.
   }
 }
@@ -277,10 +252,7 @@ export async function refreshProjectTree(): Promise<void> {
         $removedSessionIds.set(pending)
       }
     }
-
-    markProjectsRpcSuccess()
-  } catch (err) {
-    markProjectsRpcFailure(err)
+  } catch {
     // Backend may not be ready; keep the last known tree.
   } finally {
     $projectTreeLoading.set(false)
@@ -308,7 +280,7 @@ export async function fetchProjectSessions(projectId: string): Promise<SidebarPr
 let didScanRepos = false
 
 export async function scanAndRecordRepos(force = false): Promise<void> {
-  const scan = desktopGit()?.scanRepos
+  const scan = window.hermesDesktop?.git?.scanRepos
 
   if (!scan || (didScanRepos && !force)) {
     return
@@ -362,19 +334,20 @@ export async function generateProjectIdea(name: string): Promise<string> {
   }
 }
 
-// Write IDEA.md to a project's primary folder (best-effort). Routes through the
-// remote-aware fs write, so it lands on the backend for a remote gateway and on
-// disk locally — the project is created regardless of whether the file lands.
+// Write IDEA.md to a project's primary folder (desktop only, best-effort). Local
+// fs write is hardened in the electron main; a remote backend / missing bridge
+// just skips it.
 async function writeProjectIdea(folder: null | string | undefined, idea: string): Promise<void> {
   const dir = (folder || '').trim()
   const body = idea.trim()
+  const write = window.hermesDesktop?.writeTextFile
 
-  if (!dir || !body) {
+  if (!dir || !body || !write) {
     return
   }
 
   try {
-    await writeDesktopFileText(`${dir.replace(/[/\\]+$/, '')}/IDEA.md`, body.endsWith('\n') ? body : `${body}\n`)
+    await write(`${dir.replace(/[/\\]+$/, '')}/IDEA.md`, body.endsWith('\n') ? body : `${body}\n`)
   } catch {
     // Best-effort: the project is created regardless of whether IDEA.md lands.
   }
@@ -436,34 +409,17 @@ function projectInfoToTreeNode(project: ProjectInfo): SidebarProjectTree {
 }
 
 export async function createProject(input: CreateProjectInput): Promise<ProjectInfo | null> {
-  if ($projectsRpcAvailable.get() === false) {
-    throw projectsStaleBackendError()
-  }
-
-  let res: { project: ProjectInfo | null }
-
-  try {
-    res = await gatewayRequest<{ project: ProjectInfo | null }>('projects.create', {
-      name: input.name,
-      folders: input.folders ?? [],
-      primary_path: input.primaryPath,
-      slug: input.slug,
-      description: input.description,
-      icon: input.icon,
-      color: input.color,
-      board_slug: input.boardSlug,
-      use: input.use ?? false
-    })
-  } catch (err) {
-    if (isMissingRpcMethod(err)) {
-      $projectsRpcAvailable.set(false)
-      throw projectsStaleBackendError()
-    }
-
-    throw err
-  }
-
-  markProjectsRpcSuccess()
+  const res = await gatewayRequest<{ project: ProjectInfo | null }>('projects.create', {
+    name: input.name,
+    folders: input.folders ?? [],
+    primary_path: input.primaryPath,
+    slug: input.slug,
+    description: input.description,
+    icon: input.icon,
+    color: input.color,
+    board_slug: input.boardSlug,
+    use: input.use ?? false
+  })
 
   // Not optimistic (the create awaits the RPC first, so there's nothing to roll
   // back): apply the server's row into the cached list + tree at once, so it
@@ -487,8 +443,6 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectI
     if (input.use) {
       $activeProjectId.set(created.id)
     }
-
-    setSidebarAgentsGrouped(true)
   }
 
   reconcileProjects()
@@ -636,15 +590,6 @@ export interface ProjectDialogState {
 export const $projectDialog = atom<null | ProjectDialogState>(null)
 
 export function openProjectCreate(): void {
-  if ($projectsRpcAvailable.get() === false) {
-    notify({
-      kind: 'warning',
-      message: translateNow('sidebar.projects.staleBackend')
-    })
-
-    return
-  }
-
   $projectDialog.set({ mode: 'create' })
 }
 
@@ -685,7 +630,7 @@ export async function startWorkInRepo(
   repoPath: string,
   options?: { name?: string; branch?: string; base?: string; existingBranch?: string }
 ): Promise<null | { path: string; branch: string }> {
-  const git = desktopGit()
+  const git = window.hermesDesktop?.git
 
   if (!git || !repoPath) {
     return null
@@ -700,7 +645,7 @@ export async function startWorkInRepo(
 // Local branches for the composer's "convert a branch into a worktree" picker.
 // Empty on a remote backend / non-repo (the Electron probe can't run).
 export async function listRepoBranches(repoPath: string): Promise<HermesGitBranch[]> {
-  const git = desktopGit()
+  const git = window.hermesDesktop?.git
 
   if (!git?.branchList || !repoPath) {
     return []
@@ -710,7 +655,7 @@ export async function listRepoBranches(repoPath: string): Promise<HermesGitBranc
 }
 
 export async function switchBranchInRepo(repoPath: string, branch: string): Promise<void> {
-  const git = desktopGit()
+  const git = window.hermesDesktop?.git
 
   if (!git || !repoPath || !branch.trim()) {
     return
@@ -763,7 +708,7 @@ export async function removeWorktreePath(
   worktreePath: string,
   options?: { force?: boolean }
 ): Promise<void> {
-  const git = desktopGit()
+  const git = window.hermesDesktop?.git
 
   if (!git) {
     return
@@ -787,15 +732,20 @@ export async function copyPath(path: null | string): Promise<void> {
   }
 }
 
-// Pick a project folder via the remote-aware picker: a remote gateway browses
-// the backend filesystem (seeded at its default cwd) where sessions run; local
-// mode opens the native dialog. Returns the absolute path, or null if cancelled.
+// Open the native directory picker (reuses the Electron default-project-dir
+// chooser). Returns the chosen absolute path, or null when cancelled.
 export async function pickProjectFolder(): Promise<null | string> {
-  const [dir] = await selectDesktopPaths({
-    defaultPath: (await desktopDefaultCwd())?.cwd,
-    directories: true,
-    multiple: false
-  })
+  const pick = window.hermesDesktop?.settings?.pickDefaultProjectDir
 
-  return dir || null
+  if (!pick) {
+    return null
+  }
+
+  try {
+    const result = await pick()
+
+    return result.canceled ? null : result.dir
+  } catch {
+    return null
+  }
 }

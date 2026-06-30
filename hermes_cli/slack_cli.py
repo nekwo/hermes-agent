@@ -76,8 +76,6 @@ def _build_full_manifest(
         "im:history",
         "im:read",
         "im:write",
-        "mpim:history",
-        "mpim:read",
         "users:read",
     ]
 
@@ -86,7 +84,6 @@ def _build_full_manifest(
         "message.channels",
         "message.groups",
         "message.im",
-        "message.mpim",
     ]
 
     if include_assistant:

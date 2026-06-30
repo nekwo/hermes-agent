@@ -1,6 +1,6 @@
 import { atom, computed } from 'nanostores'
 
-import { getProfiles, setApiRequestProfile, STARTUP_REQUEST_TIMEOUT_MS } from '@/hermes'
+import { getProfiles, setApiRequestProfile } from '@/hermes'
 import { queryClient } from '@/lib/query-client'
 import {
   arraysEqual,
@@ -13,7 +13,6 @@ import {
 } from '@/lib/storage'
 import { $gateway, ensureGatewayForProfile } from '@/store/gateway'
 import { setConnection } from '@/store/session'
-import { resetStarmapGraph } from '@/store/starmap'
 import type { ProfileInfo } from '@/types/hermes'
 
 // Canonical key for a profile: trimmed, empty → "default". Used everywhere we
@@ -36,13 +35,6 @@ export const $profiles = atom<ProfileInfo[]>([])
 
 export function setActiveProfile(name: string): void {
   $activeProfile.set(name || 'default')
-}
-
-export async function refreshProfiles(): Promise<ProfileInfo[]> {
-  const { profiles } = await getProfiles()
-  $profiles.set(profiles)
-
-  return profiles
 }
 
 // ── Rail order ─────────────────────────────────────────────────────────────
@@ -110,10 +102,7 @@ interface ActiveProfileResponse {
 // Best-effort: failures (backend not up yet) leave the prior values intact.
 export async function refreshActiveProfile(): Promise<void> {
   try {
-    const res = await window.hermesDesktop.api<ActiveProfileResponse>({
-      path: '/api/profiles/active',
-      timeoutMs: STARTUP_REQUEST_TIMEOUT_MS
-    })
+    const res = await window.hermesDesktop.api<ActiveProfileResponse>({ path: '/api/profiles/active' })
 
     setActiveProfile(res.current || 'default')
   } catch {
@@ -121,7 +110,8 @@ export async function refreshActiveProfile(): Promise<void> {
   }
 
   try {
-    await refreshProfiles()
+    const { profiles } = await getProfiles()
+    $profiles.set(profiles)
   } catch {
     // Leave the cached list in place.
   }
@@ -178,7 +168,6 @@ $activeGatewayProfile.subscribe(value => {
   if (_lastRoutedProfile !== null && _lastRoutedProfile !== key) {
     // Profile-scoped settings + the unified session list are now stale.
     void queryClient.invalidateQueries()
-    resetStarmapGraph()
   }
 
   _lastRoutedProfile = key

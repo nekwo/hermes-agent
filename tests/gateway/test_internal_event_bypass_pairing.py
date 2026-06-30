@@ -42,6 +42,7 @@ class _FakeRegistry:
 
 def _build_runner(monkeypatch, tmp_path) -> GatewayRunner:
     """Create a GatewayRunner with notifications set to 'all'."""
+    monkeypatch.setenv("HERMES_BACKGROUND_AGENT_TURNS", "1")
     (tmp_path / "config.yaml").write_text(
         "display:\n  background_process_notifications: all\n",
         encoding="utf-8",
@@ -276,6 +277,7 @@ async def test_notify_on_complete_uses_session_store_origin_for_group_topic(monk
     import tools.process_registry as pr_module
     from gateway.session import SessionSource
 
+    monkeypatch.setenv("HERMES_BACKGROUND_AGENT_TURNS", "1")
     sessions = [
         SimpleNamespace(
             output_buffer="done\n", exited=True, exit_code=0, command="echo test"

@@ -86,6 +86,21 @@ def test_single_handler_builders(name, builder, kw, argv):
     assert ns.func is handler
 
 
+def test_postinstall_parser_accepts_non_interactive_aliases():
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers(dest="command")
+    handler = _h("postinstall")
+    build_postinstall_parser(sub, cmd_postinstall=handler)
+
+    yes = parser.parse_args(["postinstall", "--yes"])
+    non_interactive = parser.parse_args(["postinstall", "--non-interactive"])
+
+    assert yes.func is handler
+    assert yes.yes is True
+    assert non_interactive.func is handler
+    assert non_interactive.non_interactive is True
+
+
 def test_dashboard_builder_two_handlers():
     parser = argparse.ArgumentParser(prog="hermes")
     sub = parser.add_subparsers(dest="command")

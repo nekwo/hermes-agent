@@ -10,7 +10,6 @@ import type { HermesGateway } from '@/hermes'
 import { getGlobalModelOptions } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { displayModelName, modelDisplayParts } from '@/lib/model-status-label'
-import { normalize } from '@/lib/text'
 import {
   $visibleModels,
   collapseModelFamilies,
@@ -45,10 +44,7 @@ export function ModelVisibilityDialog({
     queryKey: ['model-options', sessionId || 'global'],
     queryFn: (): Promise<ModelOptionsResponse> => {
       if (gw && sessionId) {
-        return gw.request<ModelOptionsResponse>('model.options', {
-          session_id: sessionId,
-          explicit_only: true
-        })
+        return gw.request<ModelOptionsResponse>('model.options', { session_id: sessionId })
       }
 
       return getGlobalModelOptions()
@@ -67,7 +63,7 @@ export function ModelVisibilityDialog({
     setVisibleModels(toggleModelVisibility($visibleModels.get(), providers, provider.slug, model))
   }
 
-  const q = normalize(search)
+  const q = search.trim().toLowerCase()
 
   const matches = (provider: ModelOptionProvider, model: string) =>
     !q || `${model} ${provider.name} ${provider.slug} ${displayModelName(model)}`.toLowerCase().includes(q)

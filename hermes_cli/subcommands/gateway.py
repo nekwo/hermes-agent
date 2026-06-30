@@ -169,26 +169,26 @@ def build_gateway_parser(
         dest="start_now",
         action="store_true",
         default=None,
-        help="Start the gateway service immediately after installing",
+        help=argparse.SUPPRESS,
     )
     gateway_install.add_argument(
         "--no-start-now",
         dest="start_now",
         action="store_false",
-        help="Do not start the gateway service after installing",
+        help=argparse.SUPPRESS,
     )
     gateway_install.add_argument(
         "--start-on-login",
         dest="start_on_login",
         action="store_true",
         default=None,
-        help="Enable the service to start automatically on login/boot",
+        help=argparse.SUPPRESS,
     )
     gateway_install.add_argument(
         "--no-start-on-login",
         dest="start_on_login",
         action="store_false",
-        help="Do not enable the service to start on login/boot",
+        help=argparse.SUPPRESS,
     )
     gateway_install.add_argument(
         "--elevated-handoff",

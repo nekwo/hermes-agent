@@ -11,7 +11,6 @@ import { type Translations, useI18n } from '@/i18n'
 import { sessionTitle } from '@/lib/chat-runtime'
 import { triggerHaptic } from '@/lib/haptics'
 import { handoffOriginSource, sessionSourceLabel } from '@/lib/session-source'
-import { coarseElapsed } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { $attentionSessionIds } from '@/store/session'
 import { canOpenSessionWindow, openSessionInNewWindow } from '@/store/windows'
@@ -36,13 +35,22 @@ interface SidebarSessionRowProps extends React.ComponentProps<'div'> {
   dragHandleProps?: React.HTMLAttributes<HTMLElement>
 }
 
-const AGE_KEY = { day: 'ageDay', hour: 'ageHour', minute: 'ageMin' } as const
+const AGE_TICKS: ReadonlyArray<[number, 'ageDay' | 'ageHour' | 'ageMin']> = [
+  [86_400_000, 'ageDay'],
+  [3_600_000, 'ageHour'],
+  [60_000, 'ageMin']
+]
 
 function formatAge(seconds: number, r: Translations['sidebar']['row']): string {
-  const { unit, value } = coarseElapsed(Date.now() - seconds * 1000)
+  const delta = Math.max(0, Date.now() - seconds * 1000)
 
-  // Under a minute reads as "now" — the sidebar never shows a seconds tick.
-  return unit === 'second' ? r.ageNow : `${value}${r[AGE_KEY[unit]]}`
+  for (const [ms, key] of AGE_TICKS) {
+    if (delta >= ms) {
+      return `${Math.floor(delta / ms)}${r[key]}`
+    }
+  }
+
+  return r.ageNow
 }
 
 export function SidebarSessionRow({
@@ -121,7 +129,7 @@ export function SidebarSessionRow({
           </div>
         }
         className={cn(
-          'group row-hover relative',
+          'group relative cursor-pointer transition-colors duration-100 ease-out hover:bg-(--ui-row-hover-background) hover:transition-none',
           isSelected && 'bg-(--ui-row-active-background)',
           isWorking && 'text-foreground',
           // Opaque surface while lifted so the dragged row erases what's under

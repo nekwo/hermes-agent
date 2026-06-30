@@ -2,7 +2,6 @@ import type { ThreadMessageLike } from '@assistant-ui/react'
 
 import { dedupeGeneratedImageEchoesInParts } from '@/lib/generated-images'
 import { mediaDisplayLabel, mediaMarkdownHref } from '@/lib/media'
-import { normalize } from '@/lib/text'
 import { parseTodos } from '@/lib/todos'
 import type { SessionMessage, UsageStats } from '@/types/hermes'
 
@@ -53,9 +52,6 @@ export type GatewayEventPayload = {
   credential_warning?: string
   personality?: string
   usage?: Partial<UsageStats>
-  // agent.terminal.output — live chunk for a read-only agent terminal tab
-  process_id?: string
-  chunk?: string
   // clarify.request
   request_id?: string
   question?: string
@@ -286,7 +282,7 @@ function firstStringField(record: Record<string, unknown>, keys: readonly string
 }
 
 function normalizeToolMatchValue(value: string): string {
-  return normalize(value)
+  return value.trim().toLowerCase()
 }
 
 function collectToolMatchValues(query: string, context: string, preview: string): string[] {

@@ -520,7 +520,7 @@ def test_auth_add_xai_oauth_sets_active_provider(tmp_path, monkeypatch):
     _write_auth_store(tmp_path, {"version": 1, "providers": {}})
     access_token = "xai-test-access-token"
     monkeypatch.setattr(
-        "hermes_cli.auth._xai_oauth_device_code_login",
+        "hermes_cli.auth._xai_oauth_loopback_login",
         lambda **kwargs: {
             "tokens": {
                 "access_token": access_token,
@@ -529,10 +529,10 @@ def test_auth_add_xai_oauth_sets_active_provider(tmp_path, monkeypatch):
                 "token_type": "Bearer",
             },
             "discovery": {"token_endpoint": "https://auth.x.ai/token"},
-            "redirect_uri": "",
+            "redirect_uri": "http://127.0.0.1:7777/callback",
             "base_url": "https://api.x.ai/v1",
             "last_refresh": "2026-06-02T10:00:00Z",
-            "source": "oauth-device-code",
+            "source": "oauth-loopback",
         },
     )
 
@@ -545,6 +545,7 @@ def test_auth_add_xai_oauth_sets_active_provider(tmp_path, monkeypatch):
         label = None
         timeout = None
         no_browser = False
+        manual_paste = False
 
     auth_add_command(_Args())
 
@@ -553,10 +554,9 @@ def test_auth_add_xai_oauth_sets_active_provider(tmp_path, monkeypatch):
     assert payload["active_provider"] == "xai-oauth"
     # providers singleton written by _save_xai_oauth_tokens
     assert payload["providers"]["xai-oauth"]["tokens"]["access_token"] == access_token
-    assert payload["providers"]["xai-oauth"]["auth_mode"] == "oauth_device_code"
     # pool seeded from singleton by _seed_from_singletons("xai-oauth")
     entries = payload["credential_pool"]["xai-oauth"]
-    entry = next(item for item in entries if item["source"] == "device_code")
+    entry = next(item for item in entries if item["source"] == "loopback_pkce")
     assert entry["refresh_token"] == "xai-refresh-token"
 
 
@@ -1859,7 +1859,7 @@ def test_auth_remove_copilot_suppresses_all_variants(tmp_path, monkeypatch):
         return_value=("ghp_fake", "gh"),
     ), patch(
         "hermes_cli.copilot_auth.get_copilot_api_token",
-        return_value=("ghu_fake_api", None),
+        return_value="ghu_fake_api",
     ):
         auth_remove_command(SimpleNamespace(provider="copilot", target="1"))
 

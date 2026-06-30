@@ -367,6 +367,87 @@ def test_load_provider_state_malformed_global_does_not_break_profile(profile_env
     assert state["access_token"] == "profile-token"
 
 
+def test_codex_runtime_uses_global_pool_when_profile_singleton_is_empty(profile_env):
+    """Stale empty profile Codex state must not block the global credential pool."""
+    from hermes_cli.auth import resolve_codex_runtime_credentials
+
+    _write(profile_env["global"] / "auth.json", _make_auth_store(pool={
+        "openai-codex": [{
+            "id": "glob-codex",
+            "label": "global-codex",
+            "auth_type": "oauth",
+            "priority": 0,
+            "source": "manual:device_code",
+            "access_token": "global-codex-access-token",
+            "refresh_token": "global-codex-refresh-token",
+        }],
+    }))
+    _write(profile_env["profile"] / "auth.json", _make_auth_store(
+        providers={
+            "openai-codex": {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": "", "refresh_token": ""},
+            },
+        },
+        pool={"openai-codex": []},
+    ))
+
+    creds = resolve_codex_runtime_credentials(refresh_if_expiring=False)
+
+    assert creds["source"] == "credential_pool"
+    assert creds["api_key"] == "global-codex-access-token"
+
+
+def test_codex_runtime_prefers_global_singleton_over_profile_stale_pool(profile_env):
+    """A stale profile pool must not shadow a usable global Codex singleton."""
+    from hermes_cli.auth import resolve_codex_runtime_credentials
+
+    _write(profile_env["global"] / "auth.json", _make_auth_store(
+        providers={
+            "openai-codex": {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": "global-singleton-access-token", "refresh_token": "global-singleton-refresh-token"},
+                "last_refresh": "2026-05-29T00:00:00Z",
+            },
+        },
+        pool={
+            "openai-codex": [{
+                "id": "glob-codex",
+                "label": "global-codex",
+                "auth_type": "oauth",
+                "priority": 0,
+                "source": "manual:device_code",
+                "access_token": "global-pool-access-token",
+                "refresh_token": "global-pool-refresh-token",
+            }],
+        },
+    ))
+    _write(profile_env["profile"] / "auth.json", _make_auth_store(
+        providers={
+            "openai-codex": {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": "", "refresh_token": ""},
+            },
+        },
+        pool={
+            "openai-codex": [{
+                "id": "profile-stale",
+                "label": "profile-stale",
+                "auth_type": "oauth",
+                "priority": 0,
+                "source": "manual:device_code",
+                "access_token": "profile-stale-access-token",
+                "refresh_token": "profile-stale-refresh-token",
+            }],
+        },
+    ))
+
+    creds = resolve_codex_runtime_credentials(refresh_if_expiring=False)
+
+    assert creds["source"] == "global-auth-store"
+    assert creds["api_key"] == "global-singleton-access-token"
+
+
 # ---------------------------------------------------------------------------
 # Classic mode — no fallback path should ever trigger
 # ---------------------------------------------------------------------------

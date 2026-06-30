@@ -1,0 +1,72 @@
+# Agent Runtime Harness — Staged Implementation Plan
+
+> Purpose: replace flaky Kanban-as-agent-manager behavior with a lean, reliable,
+> Hermes-native ticking agent harness. GPT personas are first-class Hermes actors
+> invoked through Hermes' model/tool runtime; the harness owns state, proof,
+> transitions, and scheduling. Not a wrapper system.
+
+## Canonical docs (read these)
+
+The 70+ exploratory stage docs were folded down on 2026-06-25 into three canonical
+documents after the codebase was rewritten several times. The journey is in git history;
+these three are the live truth.
+
+1. **[01 — Architecture: Entities + Agent Graph](01-architecture.md)** — *LOCKED.* The
+   entity model (`Template → durable Level Instance → swappable Chat → Goal/Task`),
+   tasks-as-HUD, and the consolidated agent graph (one node = one agent; the persona
+   pipeline is retired). **What the system is.**
+
+2. **[02 — Blueprint Goal-Flow Engine](02-execution-engine.md)** — the execution engine:
+   a stable graph of swappable agent bindings (slots/bindings/edges/proof gates), 1 to N
+   agents; the slot↔instance/chat/goal binding; dynamic stage-shaped HUD/skills/proof;
+   the coordinator permission scope. **How a goal runs.** Implementation reference lives
+   beside the code at `agent_runtime/docs/blueprint_goal_flow_stages.md`.
+
+3. **[03 — Retirement Ledger](03-retirement-ledger.md)** — the single grep-gated
+   worklist for deleting the legacy execution path (the `TaskState` ladder remnants, the
+   `has_typed_plan` dual-orchestrator fork, role-shaped HUD/skill map, launcher
+   cross-stack special cases). **What gets deleted.**
+
+## Product stance
+
+Build the smallest reliable core first:
+
+```text
+Mission state machine + Agent state + Mission Daemon + GPT persona runtime + Proof gates
+```
+
+Do **not** start with Launcher UI, Unreal UI, Postgres, Centrifugo, or Claude/CLI
+wrappers. Those are consumers/adapters.
+
+## MVP success criteria
+
+The first end-to-end vertical slice works locally when:
+
+```text
+hermes harness blueprint run one_agent_smoke --goal "..." --bind builder=profile:gpt-launcher
+  -> agent receives the objective, acts, returns evidence
+  -> result + stage outcome visible in Mission Control snapshot
+hermes harness blueprint run two_agent_build_verify --goal "..." \
+    --bind builder=profile:gpt-launcher --bind verifier=persona:qa
+  -> builder works, verifier checks, failed verify routes back (bounded), passed -> done
+```
+
+## AAA non-negotiables
+
+See [02 — AAA non-negotiables](02-execution-engine.md#aaa-non-negotiables) for the full,
+current statement (proof is harness-owned evidence the goal owner *adjudicates*; an unmet
+check escalates, it does not dead-end). In short:
+
+- State transitions are explicit and tested.
+- The harness, not the model, owns proof validation; the goal owner adjudicates.
+- Dev claims are backed by commits/diff/test output; visual QA needs passed tests + a
+  screenshot or video.
+- Process failures are incidents/retryable run failures, not product task failures.
+- No duplicate recovery spam; no Claude/CLI wrappers in the core design.
+
+---
+
+*Historical note:* Stages 01–77 (the exploratory journey, including the rewrites) were
+removed from the working tree on 2026-06-25 and folded into the three docs above. To read
+the original staging, check out a commit before that date, e.g.
+`git show baf366cb4:docs/agent-runtime-harness/76-unified-template-instance-chat-goal-model.md`.

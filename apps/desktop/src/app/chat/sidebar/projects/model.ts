@@ -3,7 +3,6 @@ import { useEffect, useMemo, useState } from 'react'
 
 import type { HermesGitWorktree } from '@/global'
 import type { SessionInfo } from '@/hermes'
-import { desktopGit } from '@/lib/desktop-git'
 import { mapPool } from '@/lib/pool'
 import { $sidebarWorkspaceCollapsedIds, toggleWorkspaceNodeCollapsed } from '@/store/layout'
 import { $worktreeRefreshToken } from '@/store/projects'
@@ -89,7 +88,7 @@ export function useRepoWorktreeMap(
   const refreshToken = useStore($worktreeRefreshToken)
 
   useEffect(() => {
-    const git = desktopGit()
+    const git = window.hermesDesktop?.git
 
     if (!enabled || !repoPaths.length || !git?.worktreeList) {
       setMap({})

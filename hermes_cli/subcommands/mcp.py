@@ -61,11 +61,6 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
     mcp_add_p.add_argument("--auth", choices=["oauth", "header"], help="Auth method")
     mcp_add_p.add_argument("--preset", help="Known MCP preset name")
     mcp_add_p.add_argument(
-        "--connect-timeout",
-        type=float,
-        help="Timeout in seconds for initial connection and tool discovery",
-    )
-    mcp_add_p.add_argument(
         "--env",
         nargs="*",
         default=[],
@@ -79,6 +74,16 @@ def build_mcp_parser(subparsers, *, cmd_mcp: Callable) -> None:
 
     mcp_test_p = mcp_sub.add_parser("test", help="Test MCP server connection")
     mcp_test_p.add_argument("name", help="Server name to test")
+    mcp_test_p.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "One-shot environment variable for this MCP test run "
+            "(repeatable). NOT saved to config.yaml. Stdio MCP servers only."
+        ),
+    )
 
     mcp_cfg_p = mcp_sub.add_parser(
         "configure", aliases=["config"], help="Toggle tool selection"

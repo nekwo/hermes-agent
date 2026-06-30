@@ -3,7 +3,8 @@
 // Hidden BrowserWindow used by tier-2 link-title resolution: when curl can't
 // read a page <title> (bot walls, JS-rendered pages), we briefly load the URL
 // in an offscreen window and read its title. That window loads arbitrary
-// user-linked pages, so it must never emit sound or trigger real downloads.
+// user-linked pages — including YouTube/`watch` URLs that autoplay — so it must
+// never be allowed to emit sound.
 
 function linkTitleWindowOptions(partitionSession) {
   return {
@@ -38,34 +39,4 @@ function createLinkTitleWindow(BrowserWindow, partitionSession) {
   return window
 }
 
-// Cancel any download the title-fetch window triggers. Without this, a link
-// artifact URL served with Content-Disposition: attachment auto-downloads every
-// time the Artifacts page renders and fetchLinkTitle loads it.
-function guardLinkTitleSession(partitionSession) {
-  try {
-    partitionSession.on('will-download', (_event, item) => item.cancel())
-  } catch {
-    // best-effort; worst case is a spurious download
-  }
-}
-
-// Read the page title from a title-fetch window. Callers schedule this from
-// timers that can fire after finish() destroys the window, so every access must
-// guard isDestroyed and swallow Electron's "Object has been destroyed" throws.
-function readLinkTitleWindowTitle(window) {
-  try {
-    if (!window || window.isDestroyed()) return ''
-    const contents = window.webContents
-    if (!contents || contents.isDestroyed()) return ''
-    return contents.getTitle() || ''
-  } catch {
-    return ''
-  }
-}
-
-module.exports = {
-  createLinkTitleWindow,
-  guardLinkTitleSession,
-  linkTitleWindowOptions,
-  readLinkTitleWindowTitle
-}
+module.exports = { createLinkTitleWindow, linkTitleWindowOptions }

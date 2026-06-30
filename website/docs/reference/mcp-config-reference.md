@@ -57,10 +57,67 @@ mcp_servers:
 | `timeout` | number | both | Tool call timeout in seconds (default: `300`) |
 | `connect_timeout` | number | both | Initial connection timeout in seconds (default: `60`) |
 | `supports_parallel_tool_calls` | bool | both | Allow tools from this server to run concurrently |
-| `skip_preflight` | bool | HTTP | Bypass the fail-fast content-type probe for valid Streamable HTTP endpoints whose HEAD/GET answers a non-MCP content type (default: `false`) |
 | `tools` | mapping | both | Filtering and utility-tool policy |
 | `auth` | string | HTTP | Authentication method. Set to `oauth` to enable OAuth 2.1 with PKCE |
 | `sampling` | mapping | both | Server-initiated LLM request policy (see MCP guide) |
+
+## One-shot stdio env overrides
+
+Durable `env` (above) is the right place for long-lived environment values that
+belong with the server definition. For values you want to inject **for a
+single run** — temp file paths, nonces, local ports, short-lived credentials —
+Hermes supports two non-persistent override surfaces. Neither writes anything
+back to `config.yaml`.
+
+| Surface | Where set | Scope |
+|---|---|---|
+| `hermes mcp test <name> --env KEY=VALUE` | CLI flag | The single `mcp test` invocation |
+| `HERMES_MCP_ENV_<SERVER>_<KEY>=value` | Parent process env | Every stdio MCP discovery/session for that server in this process |
+
+Both layers are merged on top of the safe baseline and the durable `env`. The
+final merge order, lowest to highest precedence, is:
+
+1. Safe baseline (`PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `TERM`, `SHELL`,
+   `TMPDIR`, plus all `XDG_*` variables) from the parent process.
+2. Durable `mcp_servers.<name>.env` from `config.yaml`.
+3. Process-level namespaced overlay (`HERMES_MCP_ENV_<SERVER>_<KEY>`).
+4. CLI `--env KEY=VALUE` overlay (currently only on `hermes mcp test`).
+
+### Server-name normalization
+
+For the `HERMES_MCP_ENV_<SERVER>_<KEY>` form, the server name is uppercased and
+every run of non-alphanumeric characters becomes a single `_`:
+
+| Configured name | Env prefix |
+|---|---|
+| `launcher-qa` | `HERMES_MCP_ENV_LAUNCHER_QA_` |
+| `stagec-launcher-qa` | `HERMES_MCP_ENV_STAGEC_LAUNCHER_QA_` |
+| `my.server` | `HERMES_MCP_ENV_MY_SERVER_` |
+
+Note that `foo-bar` and `foo_bar` both normalize to `FOO_BAR_`. If you use
+similar names, pick distinct ones.
+
+### Security model
+
+Hermes deliberately does **not** inherit arbitrary parent env vars into MCP
+subprocesses — see the safe-baseline list above. The two override surfaces are
+the explicit opt-in:
+
+- The `HERMES_MCP_ENV_<SERVER>_<KEY>` prefix is the namespace boundary. A
+  parent env var without that prefix will not cross into the child.
+- `--env` is an explicit per-run flag.
+
+Hermes never logs override values. The CLI prints the count and key names
+(`Applied 2 one-shot env override(s): RUNTIME_FILE, TOKEN`) but not values.
+
+### Caveats
+
+- Don't put long-lived secrets in shell history. Prefer temp files or a secret
+  manager and inject the resolved value into the env immediately before the
+  command.
+- On Windows PowerShell, inline POSIX-style `KEY=VALUE cmd` syntax does not
+  work. Use `$env:HERMES_MCP_ENV_FOO_TOKEN = "…"; hermes mcp test foo` or a
+  short `.ps1` wrapper.
 
 ## `tools` policy keys
 

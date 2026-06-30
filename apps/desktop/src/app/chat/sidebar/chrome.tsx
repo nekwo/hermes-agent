@@ -1,7 +1,6 @@
 import type * as React from 'react'
 
 import { Codicon } from '@/components/ui/codicon'
-import { RowButton } from '@/components/ui/row-button'
 import { cn } from '@/lib/utils'
 
 // Shared, content-agnostic sidebar chrome — used by both the flat session
@@ -65,7 +64,7 @@ export function SidebarRowCluster({ className, ...props }: React.ComponentProps<
 
 /** Session row main tap target. */
 export function SidebarRowBody({ className, ...props }: React.ComponentProps<'button'>) {
-  return <RowButton className={cn(rowInset, 'bg-transparent text-left', className)} {...props} />
+  return <button className={cn(rowInset, 'bg-transparent text-left', className)} type="button" {...props} />
 }
 
 /** Tappable label — underline/truncate live on the inner span, not the button. */
@@ -76,9 +75,9 @@ export function SidebarRowLink({
   ...props
 }: React.ComponentProps<'button'> & { labelClassName?: string }) {
   return (
-    <RowButton className={cn('min-w-0 shrink bg-transparent p-0 text-left', className)} {...props}>
+    <button className={cn('min-w-0 shrink bg-transparent p-0 text-left', className)} type="button" {...props}>
       <span className={cn(rowLabel, labelClassName)}>{children}</span>
-    </RowButton>
+    </button>
   )
 }
 

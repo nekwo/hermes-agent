@@ -13,7 +13,7 @@ import { triggerHaptic } from '@/lib/haptics'
 import { Download, Loader2, PawPrint, Pencil, Trash2 } from '@/lib/icons'
 import { selectableCardClass } from '@/lib/selectable-card'
 import { cn } from '@/lib/utils'
-import { $petInfo, $petRoam, setPetRoam } from '@/store/pet'
+import { $petInfo } from '@/store/pet'
 import {
   $petBusy,
   $petGallery,
@@ -54,7 +54,6 @@ export function PetSettings() {
   const error = useStore($petGalleryError)
   const busySlug = useStore($petBusy)
   const petInfo = useStore($petInfo)
-  const roam = useStore($petRoam)
   const [query, setQuery] = useState('')
   const [confirmDelete, setConfirmDelete] = useState<GalleryPet | null>(null)
   const [renameTarget, setRenameTarget] = useState<GalleryPet | null>(null)
@@ -143,7 +142,7 @@ export function PetSettings() {
                     {copy.unreachable}
                   </p>
                 ) : shown.length === 0 ? (
-                  <p className="wrap-anywhere text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
+                  <p className="text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">
                     {copy.noMatch(query)}
                   </p>
                 ) : (
@@ -278,26 +277,6 @@ export function PetSettings() {
             }
             description={copy.scaleDesc}
             title={copy.scaleTitle}
-          />
-        )}
-
-        {enabled && (
-          <ListRow
-            action={
-              <SegmentedControl
-                onChange={id => {
-                  setPetRoam(id === 'on')
-                  triggerHaptic('crisp')
-                }}
-                options={[
-                  { id: 'off', label: copy.off },
-                  { id: 'on', label: copy.on }
-                ]}
-                value={roam ? 'on' : 'off'}
-              />
-            }
-            description={copy.roamDesc}
-            title={copy.roamTitle}
           />
         )}
       </div>

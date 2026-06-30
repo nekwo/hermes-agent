@@ -445,43 +445,139 @@ class TestMcpTest:
         assert "Connected" in out
         assert "Tools discovered: 2" in out
 
-    def test_probe_uses_configured_connect_timeout(self, monkeypatch):
-        """OAuth-capable probes must not hard-code a short 30s timeout."""
-        import asyncio
-        from hermes_cli import mcp_config
-        import tools.mcp_tool as mcp_tool
 
-        captured = {}
+# ---------------------------------------------------------------------------
+# Tests: cmd_mcp_test --env one-shot runtime overrides
+# ---------------------------------------------------------------------------
 
-        class FakeServer:
-            _tools = []
+class TestMcpTestRuntimeEnv:
+    """One-shot ``--env KEY=VALUE`` overrides for ``hermes mcp test``."""
 
-            async def shutdown(self):
-                captured["shutdown"] = True
+    def _seed_stdio_server(self, tmp_path):
+        _seed_config(tmp_path, {
+            "foo": {"command": "/bin/true", "env": {"FOO_BASE": "base"}},
+        })
 
-        async def fake_connect(name, config):
-            return FakeServer()
+    def test_runtime_env_passes_to_probe(self, tmp_path, monkeypatch):
+        self._seed_stdio_server(tmp_path)
+        captured: Dict[str, Any] = {}
 
-        def fake_run_on_mcp_loop(coro, timeout):
-            captured["outer_timeout"] = timeout
-            return asyncio.run(coro)
+        def mock_probe(name, config, **kw):
+            captured["config"] = config
+            return []
 
-        async def fake_wait_for(awaitable, timeout):
-            captured["inner_timeout"] = timeout
-            return await awaitable
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", mock_probe
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
 
-        monkeypatch.setattr(mcp_tool, "_ensure_mcp_loop", lambda: None)
-        monkeypatch.setattr(mcp_tool, "_stop_mcp_loop_if_idle", lambda: None)
-        monkeypatch.setattr(mcp_tool, "_connect_server", fake_connect)
-        monkeypatch.setattr(mcp_tool, "_run_on_mcp_loop", fake_run_on_mcp_loop)
-        monkeypatch.setattr(mcp_config.asyncio, "wait_for", fake_wait_for)
+        cmd_mcp_test(_make_args(name="foo", env=["RUNTIME_FILE=/tmp/r"]))
 
-        assert mcp_config._probe_single_server(
-            "supabase", {"connect_timeout": 300}
-        ) == []
-        assert captured["inner_timeout"] == 300.0
-        assert captured["outer_timeout"] == 310.0
-        assert captured["shutdown"] is True
+        assert captured["config"]["runtime_env"] == {"RUNTIME_FILE": "/tmp/r"}
+        # Durable env stays alongside, NOT replaced.
+        assert captured["config"]["env"] == {"FOO_BASE": "base"}
+
+    def test_runtime_env_does_not_persist(self, tmp_path, monkeypatch):
+        self._seed_stdio_server(tmp_path)
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server",
+            lambda name, config, **kw: [],
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="foo", env=["SECRET_KEY=topsecret"]))
+
+        from hermes_cli.config import load_config
+        saved = load_config()
+        # The on-disk config must not gain runtime_env or the secret key.
+        srv = saved["mcp_servers"]["foo"]
+        assert "runtime_env" not in srv
+        assert "SECRET_KEY" not in srv.get("env", {})
+
+    def test_runtime_env_invalid_kv_aborts(self, tmp_path, capsys, monkeypatch):
+        self._seed_stdio_server(tmp_path)
+        probe_called = {"hit": False}
+
+        def mock_probe(*a, **kw):
+            probe_called["hit"] = True
+            return []
+
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", mock_probe
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="foo", env=["NO_EQUALS_HERE"]))
+        out = capsys.readouterr().out
+        assert "Invalid --env value" in out
+        assert probe_called["hit"] is False
+
+    def test_runtime_env_invalid_name_aborts(self, tmp_path, capsys,
+                                              monkeypatch):
+        self._seed_stdio_server(tmp_path)
+        probe_called = {"hit": False}
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server",
+            lambda *a, **kw: probe_called.__setitem__("hit", True) or [],
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="foo", env=["1BAD=value"]))
+        out = capsys.readouterr().out
+        assert "Invalid --env variable name" in out
+        assert probe_called["hit"] is False
+
+    def test_runtime_env_rejected_for_http(self, tmp_path, capsys, monkeypatch):
+        _seed_config(tmp_path, {
+            "ink": {"url": "https://mcp.example/mcp"},
+        })
+        probe_called = {"hit": False}
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server",
+            lambda *a, **kw: probe_called.__setitem__("hit", True) or [],
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="ink", env=["DEBUG=true"]))
+        out = capsys.readouterr().out
+        assert "only supported for stdio MCP servers" in out
+        assert probe_called["hit"] is False
+
+    def test_runtime_env_value_never_printed(self, tmp_path, capsys,
+                                              monkeypatch):
+        self._seed_stdio_server(tmp_path)
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server",
+            lambda name, config, **kw: [],
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(
+            _make_args(name="foo", env=["TOKEN=super-secret-value"])
+        )
+        captured = capsys.readouterr()
+        assert "super-secret-value" not in captured.out
+        assert "super-secret-value" not in captured.err
+        # The key name is fine to show.
+        assert "TOKEN" in captured.out
+        assert "Applied 1 one-shot env override" in captured.out
+
+    def test_no_env_arg_is_backward_compatible(self, tmp_path, monkeypatch):
+        """Existing call sites that don't pass --env behave identically."""
+        self._seed_stdio_server(tmp_path)
+        captured: Dict[str, Any] = {}
+
+        def mock_probe(name, config, **kw):
+            captured["config"] = config
+            return []
+
+        monkeypatch.setattr(
+            "hermes_cli.mcp_config._probe_single_server", mock_probe
+        )
+        from hermes_cli.mcp_config import cmd_mcp_test
+
+        cmd_mcp_test(_make_args(name="foo"))
+        assert "runtime_env" not in captured["config"]
 
 
 # ---------------------------------------------------------------------------
@@ -527,27 +623,6 @@ class TestEnvVarInterpolation:
         assert _interpolate_env_vars(42) == 42
         assert _interpolate_env_vars(True) is True
         assert _interpolate_env_vars(None) is None
-
-    def test_interpolate_cursor_env_prefix(self, monkeypatch):
-        """Cursor-style ${env:VAR} resolves the same secret as ${VAR}."""
-        monkeypatch.setenv("MY_KEY", "secret123")
-        from tools.mcp_tool import _interpolate_env_vars
-
-        assert _interpolate_env_vars("Bearer ${env:MY_KEY}") == "Bearer secret123"
-
-    def test_interpolate_cursor_env_prefix_missing(self, monkeypatch):
-        """An unset ${env:VAR} keeps its literal placeholder, like ${VAR}."""
-        monkeypatch.delenv("MISSING_VAR", raising=False)
-        from tools.mcp_tool import _interpolate_env_vars
-
-        assert _interpolate_env_vars("Bearer ${env:MISSING_VAR}") == "Bearer ${env:MISSING_VAR}"
-
-    def test_env_ref_name_strips_prefix(self):
-        from tools.mcp_tool import _env_ref_name
-
-        assert _env_ref_name("env:API_KEY") == "API_KEY"
-        assert _env_ref_name("API_KEY") == "API_KEY"
-        assert _env_ref_name(" env:API_KEY ") == "API_KEY"
 
 
 # ---------------------------------------------------------------------------
@@ -612,99 +687,6 @@ class TestProbeEnvResolution:
 
         assert tools == [("do_thing", "a tool")]
         assert seen["config"]["headers"]["Authorization"] == "Bearer jwt-token-xyz"
-
-
-class TestProbeCapabilityGating:
-    """The ``details`` probe must not fire prompts/list or resources/list at
-    servers that either disabled them in config or never advertised them.
-
-    Regression for the Unreal MCP server case: it answers
-    ``Call to unknown method "prompts/list"``, so an unconditional probe logged
-    a hard error and ``tools.prompts: false`` (the documented workaround) had no
-    effect because the probe never consulted config or capabilities.
-    """
-
-    class _FakeTool:
-        name = "do_thing"
-        description = "a tool"
-
-    class _Caps:
-        def __init__(self, prompts=None, resources=None):
-            self.prompts = prompts
-            self.resources = resources
-
-    class _InitResult:
-        def __init__(self, caps):
-            self.capabilities = caps
-
-    def _make_server(self, called, caps):
-        outer = self
-
-        class _Result(list):
-            @property
-            def prompts(self):
-                return self
-
-            @property
-            def resources(self):
-                return self
-
-        class _Session:
-            async def list_prompts(self_inner):
-                called.append("prompts")
-                return _Result()
-
-            async def list_resources(self_inner):
-                called.append("resources")
-                return _Result()
-
-        class _FakeServer:
-            _tools = [outer._FakeTool()]
-            session = _Session()
-            initialize_result = outer._InitResult(caps)
-
-            async def shutdown(self_inner):
-                return None
-
-        return _FakeServer()
-
-    def _run_probe(self, monkeypatch, config, caps):
-        import hermes_cli.mcp_config as mc
-
-        called: list[str] = []
-
-        async def _fake_connect(name, cfg):
-            return self._make_server(called, caps)
-
-        monkeypatch.setattr("tools.mcp_tool._connect_server", _fake_connect)
-        details: dict = {}
-        mc._probe_single_server("srv", config, details=details)
-        return called, details
-
-    def test_config_disables_prompts_probe(self, monkeypatch):
-        # Server advertises both, but user turned prompts off.
-        caps = self._Caps(prompts=object(), resources=object())
-        called, details = self._run_probe(
-            monkeypatch, {"url": "http://x/mcp", "tools": {"prompts": False}}, caps
-        )
-        assert "prompts" not in called
-        assert "resources" in called
-
-    def test_unadvertised_capability_not_probed(self, monkeypatch):
-        # Unreal case: no prompts capability advertised → never call it.
-        caps = self._Caps(prompts=None, resources=None)
-        called, _ = self._run_probe(monkeypatch, {"url": "http://x/mcp"}, caps)
-        assert called == []
-
-    def test_advertised_and_enabled_is_probed(self, monkeypatch):
-        caps = self._Caps(prompts=object(), resources=object())
-        called, details = self._run_probe(monkeypatch, {"url": "http://x/mcp"}, caps)
-        assert set(called) == {"prompts", "resources"}
-
-    def test_missing_capability_info_falls_back_to_probe(self, monkeypatch):
-        # No initialize_result captured → preserve legacy always-try behaviour.
-        called, _ = self._run_probe(monkeypatch, {"url": "http://x/mcp"}, None)
-        assert set(called) == {"prompts", "resources"}
 
 
 class TestStripBearerPrefix:
@@ -776,8 +758,6 @@ class TestConfigHelpers:
 
         assert _env_key_for_server("ink") == "MCP_INK_API_KEY"
         assert _env_key_for_server("my-server") == "MCP_MY_SERVER_API_KEY"
-        assert _env_key_for_server("my.server") == "MCP_MY_SERVER_API_KEY"
-        assert _env_key_for_server("github/mcp") == "MCP_GITHUB_MCP_API_KEY"
 
 
 # ---------------------------------------------------------------------------
@@ -870,9 +850,7 @@ class TestMcpLogin:
         # Probe returns tools even though auth never completed.
         monkeypatch.setattr(
             "hermes_cli.mcp_config._probe_single_server",
-            lambda name, cfg, connect_timeout=30: [
-                ("search_files", "d"), ("read_file_content", "d"),
-            ],
+            lambda name, cfg: [("search_files", "d"), ("read_file_content", "d")],
         )
         # No token file is created → _oauth_tokens_present() returns False.
         from hermes_cli.mcp_config import cmd_mcp_login
@@ -894,10 +872,7 @@ class TestMcpLogin:
         # cmd_mcp_login wipes tokens before probing, then the real OAuth flow
         # writes a fresh token during the probe. Simulate that: the mocked
         # probe drops a token file, mirroring a successful authorization.
-        seen = {}
-
-        def mock_probe(name, cfg, connect_timeout=30):
-            seen["connect_timeout"] = connect_timeout
+        def mock_probe(name, cfg):
             token_dir.mkdir(exist_ok=True)
             (token_dir / "realserver.json").write_text('{"access_token": "x"}')
             return [("a", "d"), ("b", "d"), ("c", "d")]
@@ -913,9 +888,6 @@ class TestMcpLogin:
 
         assert "Authenticated — 3 tool(s) available" in out
         assert "no OAuth token" not in out
-        # The login path must grant a human enough time to finish the browser
-        # OAuth round-trip — far longer than the 30s probe default.
-        assert seen["connect_timeout"] >= 180
 
 
 # ---------------------------------------------------------------------------

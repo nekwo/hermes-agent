@@ -47,24 +47,13 @@ def _driver_cmd(override: Optional[str]) -> str:
 
 
 def _child_env() -> Dict[str, str]:
-    """cua-driver child env: telemetry opt-in policy + secret sanitization.
-
-    cua-driver is a third-party binary — it must never inherit provider
-    API keys (#53503/#55709/#58889 lineage). Each layer degrades
-    gracefully so permission probes never break on a helper import error.
-    """
+    """cua-driver child env honoring the Hermes telemetry opt-in policy."""
     try:
         from tools.computer_use.cua_backend import cua_driver_child_env
 
-        env = cua_driver_child_env()
+        return cua_driver_child_env()
     except Exception:
-        env = dict(os.environ)
-    try:
-        from tools.environments.local import _sanitize_subprocess_env
-
-        return _sanitize_subprocess_env(env)
-    except Exception:
-        return env
+        return dict(os.environ)
 
 
 def _run(binary: str, *args: str, timeout: float) -> subprocess.CompletedProcess:

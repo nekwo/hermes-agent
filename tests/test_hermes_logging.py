@@ -31,20 +31,23 @@ def _reset_logging_state():
     assertions are stable regardless of test ordering.
     """
     hermes_logging._logging_initialized = False
-    # File handlers now live behind the async QueueListener, not on the root
-    # logger; tear down any leaked from other xdist tests in this worker.
-    hermes_logging._reset_queued_handlers()
     root = logging.getLogger()
     prev_root_level = root.level
     root.setLevel(logging.NOTSET)
-    # Snapshot the remaining (non-file) handlers so we can strip whatever the
-    # test adds.
-    pre_existing = list(root.handlers)
+    # Strip ALL RotatingFileHandlers — not just the ones we added — so that
+    # handlers leaked from other test modules in the same xdist worker don't
+    # pollute our counts.
+    pre_existing = []
+    for h in list(root.handlers):
+        if isinstance(h, RotatingFileHandler):
+            root.removeHandler(h)
+            h.close()
+        else:
+            pre_existing.append(h)
     # Ensure the record factory is installed (it's idempotent).
     hermes_logging._install_session_record_factory()
     yield
-    # Restore — tear down async file logging + remove handlers added by the test.
-    hermes_logging._reset_queued_handlers()
+    # Restore — remove any handlers added during the test.
     for h in list(root.handlers):
         if h not in pre_existing:
             root.removeHandler(h)
@@ -78,7 +81,7 @@ class TestSetupLogging:
         root = logging.getLogger()
 
         agent_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "agent.log" in getattr(h, "baseFilename", "")
         ]
@@ -90,7 +93,7 @@ class TestSetupLogging:
         root = logging.getLogger()
 
         error_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "errors.log" in getattr(h, "baseFilename", "")
         ]
@@ -103,7 +106,7 @@ class TestSetupLogging:
 
         root = logging.getLogger()
         agent_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "agent.log" in getattr(h, "baseFilename", "")
         ]
@@ -117,7 +120,7 @@ class TestSetupLogging:
 
         root = logging.getLogger()
         agent_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "agent.log" in getattr(h, "baseFilename", "")
         ]
@@ -128,7 +131,7 @@ class TestSetupLogging:
 
         root = logging.getLogger()
         agent_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "agent.log" in getattr(h, "baseFilename", "")
         ]
@@ -141,7 +144,7 @@ class TestSetupLogging:
 
         root = logging.getLogger()
         agent_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "agent.log" in getattr(h, "baseFilename", "")
         ]
@@ -162,7 +165,8 @@ class TestSetupLogging:
         test_logger.info("test message for agent.log")
 
         # Flush handlers
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         agent_log = hermes_home / "logs" / "agent.log"
         assert agent_log.exists()
@@ -175,7 +179,8 @@ class TestSetupLogging:
         test_logger = logging.getLogger("test_hermes_logging.warning_test")
         test_logger.warning("this is a warning")
 
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         agent_log = hermes_home / "logs" / "agent.log"
         errors_log = hermes_home / "logs" / "errors.log"
@@ -188,7 +193,8 @@ class TestSetupLogging:
         test_logger = logging.getLogger("test_hermes_logging.info_test")
         test_logger.info("info only message")
 
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         errors_log = hermes_home / "logs" / "errors.log"
         if errors_log.exists():
@@ -204,7 +210,7 @@ class TestSetupLogging:
 
         root = logging.getLogger()
         agent_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "agent.log" in getattr(h, "baseFilename", "")
         ]
@@ -222,7 +228,7 @@ class TestSetupLogging:
 
         root = logging.getLogger()
         agent_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "agent.log" in getattr(h, "baseFilename", "")
         ]
@@ -248,7 +254,7 @@ class TestGatewayMode:
         root = logging.getLogger()
 
         gw_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "gateway.log" in getattr(h, "baseFilename", "")
         ]
@@ -259,7 +265,7 @@ class TestGatewayMode:
         root = logging.getLogger()
 
         gw_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "gateway.log" in getattr(h, "baseFilename", "")
         ]
@@ -272,7 +278,7 @@ class TestGatewayMode:
 
         root = logging.getLogger()
         gw_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "gateway.log" in getattr(h, "baseFilename", "")
         ]
@@ -280,7 +286,8 @@ class TestGatewayMode:
 
         logging.getLogger("gateway.run").info("gateway connected after cli init")
 
-        hermes_logging.flush_log_queue()
+        for h in root.handlers:
+            h.flush()
 
         gw_log = hermes_home / "logs" / "gateway.log"
         assert gw_log.exists()
@@ -294,7 +301,7 @@ class TestGatewayMode:
 
         root = logging.getLogger()
         gw_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "gateway.log" in getattr(h, "baseFilename", "")
         ]
@@ -307,7 +314,8 @@ class TestGatewayMode:
         gw_logger = logging.getLogger("plugins.platforms.telegram.adapter")
         gw_logger.info("telegram connected")
 
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         gw_log = hermes_home / "logs" / "gateway.log"
         assert gw_log.exists()
@@ -323,7 +331,8 @@ class TestGatewayMode:
         agent_logger = logging.getLogger("agent.context_compressor")
         agent_logger.info("compressing context")
 
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         gw_log = hermes_home / "logs" / "gateway.log"
         if gw_log.exists():
@@ -347,7 +356,8 @@ class TestGatewayMode:
         gw_logger.info("gateway msg")
         file_logger.info("file msg")
 
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         agent_log = hermes_home / "logs" / "agent.log"
         content = agent_log.read_text()
@@ -363,7 +373,7 @@ class TestGuiMode:
         root = logging.getLogger()
 
         gui_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "gui.log" in getattr(h, "baseFilename", "")
         ]
@@ -375,7 +385,7 @@ class TestGuiMode:
 
         root = logging.getLogger()
         gui_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in root.handlers
             if isinstance(h, RotatingFileHandler)
             and "gui.log" in getattr(h, "baseFilename", "")
         ]
@@ -388,7 +398,8 @@ class TestGuiMode:
         logging.getLogger("tui_gateway.ws").info("ws connected")
         logging.getLogger("gateway.run").info("gateway event")
 
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         gui_log = hermes_home / "logs" / "gui.log"
         assert gui_log.exists()
@@ -409,7 +420,8 @@ class TestSessionContext:
         test_logger = logging.getLogger("test.session_tag")
         test_logger.info("tagged message")
 
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         agent_log = hermes_home / "logs" / "agent.log"
         content = agent_log.read_text()
@@ -424,7 +436,8 @@ class TestSessionContext:
         test_logger = logging.getLogger("test.no_session")
         test_logger.info("untagged message")
 
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         agent_log = hermes_home / "logs" / "agent.log"
         content = agent_log.read_text()
@@ -444,7 +457,8 @@ class TestSessionContext:
         test_logger = logging.getLogger("test.cleared")
         test_logger.info("after clear")
 
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            h.flush()
 
         agent_log = hermes_home / "logs" / "agent.log"
         content = agent_log.read_text()
@@ -459,12 +473,14 @@ class TestSessionContext:
         def thread_a():
             hermes_logging.set_session_context("thread_a_session")
             logging.getLogger("test.thread_a").info("from thread A")
-            hermes_logging.flush_log_queue()
+            for h in logging.getLogger().handlers:
+                h.flush()
 
         def thread_b():
             hermes_logging.set_session_context("thread_b_session")
             logging.getLogger("test.thread_b").info("from thread B")
-            hermes_logging.flush_log_queue()
+            for h in logging.getLogger().handlers:
+                h.flush()
 
         ta = threading.Thread(target=thread_a)
         tb = threading.Thread(target=thread_b)
@@ -685,7 +701,7 @@ class TestAddRotatingHandler:
         )
 
         rotating_handlers = [
-            h for h in hermes_logging.rotating_file_handlers()
+            h for h in logger.handlers
             if isinstance(h, RotatingFileHandler)
         ]
         assert len(rotating_handlers) == 1
@@ -709,7 +725,7 @@ class TestAddRotatingHandler:
             log_filter=component_filter,
         )
 
-        handlers = [h for h in hermes_logging.rotating_file_handlers() if isinstance(h, RotatingFileHandler)]
+        handlers = [h for h in logger.handlers if isinstance(h, RotatingFileHandler)]
         assert len(handlers) == 1
         assert component_filter in handlers[0].filters
         # Clean up
@@ -730,7 +746,7 @@ class TestAddRotatingHandler:
             formatter=formatter,
         )
 
-        handlers = [h for h in hermes_logging.rotating_file_handlers() if isinstance(h, RotatingFileHandler)]
+        handlers = [h for h in logger.handlers if isinstance(h, RotatingFileHandler)]
         assert len(handlers) == 1
         # No _SessionFilter on the handler — record factory handles it
         assert len(handlers[0].filters) == 0
@@ -738,7 +754,7 @@ class TestAddRotatingHandler:
         # But session_tag still works (via record factory)
         hermes_logging.set_session_context("factory_test")
         logger.info("test msg")
-        hermes_logging.flush_log_queue()
+        handlers[0].flush()
         content = log_path.read_text()
         assert "[factory_test]" in content
 
@@ -786,10 +802,10 @@ class TestAddRotatingHandler:
                     formatter=formatter,
                 )
                 handler = next(
-                    h for h in hermes_logging.rotating_file_handlers() if isinstance(h, RotatingFileHandler)
+                    h for h in logger.handlers if isinstance(h, RotatingFileHandler)
                 )
                 logger.info("a" * 256)
-                hermes_logging.flush_log_queue()
+                handler.flush()
         finally:
             os.umask(old_umask)
 
@@ -800,85 +816,6 @@ class TestAddRotatingHandler:
             if isinstance(h, RotatingFileHandler):
                 logger.removeHandler(h)
                 h.close()
-
-
-class TestWindowsConcurrentLogLockTimeout:
-    """Windows concurrent-log-handler lock timeouts stay inside logging."""
-
-    def _make_logger_and_handler(self, log_path: Path):
-        logger = logging.getLogger(f"_test_concurrent_lock_timeout_{log_path.stem}")
-        logger.handlers.clear()
-        logger.propagate = False
-        logger.setLevel(logging.INFO)
-
-        handler = hermes_logging._ManagedRotatingFileHandler(
-            str(log_path), maxBytes=1, backupCount=1, encoding="utf-8",
-        )
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        logger.addHandler(handler)
-        return logger, handler
-
-    def test_helper_only_matches_windows_concurrent_lock_timeout(self):
-        with patch.object(hermes_logging.sys, "platform", "win32"):
-            assert hermes_logging._is_windows_concurrent_log_lock_timeout(
-                RuntimeError("Cannot acquire lock after 20 attempts")
-            )
-            assert not hermes_logging._is_windows_concurrent_log_lock_timeout(
-                RuntimeError("some other logging failure")
-            )
-
-        with patch.object(hermes_logging.sys, "platform", "linux"):
-            assert not hermes_logging._is_windows_concurrent_log_lock_timeout(
-                RuntimeError("Cannot acquire lock after 20 attempts")
-            )
-
-    def test_lock_timeout_routed_to_handle_error_is_suppressed(self, tmp_path, capsys):
-        """Mirror CLH's real control flow.
-
-        ``concurrent-log-handler``'s ``emit()`` wraps its whole body in
-        ``try/except Exception: self.handleError(record)``, so the lock
-        RuntimeError raised in ``_do_lock()`` is caught *inside* CLH and routed
-        to ``handleError`` with the exception live in ``sys.exc_info()``.  We
-        invoke ``handleError`` the same way CLH would and assert no traceback
-        reaches stderr (the slash-worker surface)."""
-        logger, handler = self._make_logger_and_handler(tmp_path / "agent.log")
-        record = logger.makeRecord(
-            logger.name, logging.INFO, __file__, 0, "force rollover", (), None,
-        )
-        try:
-            with patch.object(hermes_logging.sys, "platform", "win32"):
-                try:
-                    raise RuntimeError("Cannot acquire lock after 20 attempts")
-                except RuntimeError:
-                    handler.handleError(record)
-
-            captured = capsys.readouterr()
-            assert "Cannot acquire lock after 20 attempts" not in captured.err
-            assert "--- Logging error ---" not in captured.err
-        finally:
-            logger.removeHandler(handler)
-            handler.close()
-
-    def test_other_errors_routed_to_handle_error_still_print(self, tmp_path, capsys):
-        """An unrelated failure routed through ``handleError`` must still emit the
-        normal stdlib logging-error output — only the known CLH timeout is silent."""
-        logger, handler = self._make_logger_and_handler(tmp_path / "agent.log")
-        record = logger.makeRecord(
-            logger.name, logging.INFO, __file__, 0, "force rollover", (), None,
-        )
-        try:
-            with patch.object(hermes_logging.sys, "platform", "win32"):
-                try:
-                    raise RuntimeError("unexpected logging failure")
-                except RuntimeError:
-                    handler.handleError(record)
-
-            captured = capsys.readouterr()
-            assert "unexpected logging failure" in captured.err
-            assert "--- Logging error ---" in captured.err
-        finally:
-            logger.removeHandler(handler)
-            handler.close()
 
 
 class TestReadLoggingConfig:
@@ -937,7 +874,7 @@ class TestExternalRotationRecovery:
         # Match the record factory that hermes_logging installs at import time.
         record.session_tag = ""
         handler.emit(record)
-        hermes_logging.flush_log_queue()
+        handler.flush()
 
     def test_recovers_after_external_rename(self, tmp_path):
         """logrotate-style external rename: ``mv gateway.log gateway.log.1``.
@@ -1053,7 +990,9 @@ class TestExternalRotationRecovery:
         rotated = hermes_home / "logs" / "gateway.log.1"
 
         logging.getLogger("gateway.run").info("line BEFORE rotation")
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            try: h.flush()
+            except Exception: pass
         assert "BEFORE rotation" in gw_path.read_text()
 
         # External actor renames the file out from under us.
@@ -1066,7 +1005,9 @@ class TestExternalRotationRecovery:
         hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
 
         logging.getLogger("gateway.run").info("line AFTER rotation")
-        hermes_logging.flush_log_queue()
+        for h in logging.getLogger().handlers:
+            try: h.flush()
+            except Exception: pass
 
         # The new record must reach the live gateway.log, not the rotated
         # backup.  Allen's logs had everything past the rotation point
@@ -1145,40 +1086,3 @@ class TestSafeStderr:
             logger.info("Session hygiene: 400 messages — auto-compressing")
         finally:
             logger.removeHandler(handler)
-
-
-class TestAsyncQueueLogging:
-    """File logging runs through a QueueListener so emits never block on the
-    cross-process rotation lock (Windows event-loop-stall fix)."""
-
-    def test_file_handlers_not_on_root(self, hermes_home):
-        hermes_logging.setup_logging(hermes_home=hermes_home)
-        root = logging.getLogger()
-        # Rotating file handlers live on the async listener, never on root.
-        assert not any(isinstance(h, RotatingFileHandler) for h in root.handlers)
-        # Exactly one queue handler funnels records to the listener.
-        queue_handlers = [
-            h for h in root.handlers if getattr(h, "_hermes_queue", False)
-        ]
-        assert len(queue_handlers) == 1
-        # The real file handlers are discoverable via the accessor.
-        assert any(
-            "agent.log" in getattr(h, "baseFilename", "")
-            for h in hermes_logging.rotating_file_handlers()
-        )
-
-    def test_records_reach_file_through_queue(self, hermes_home):
-        hermes_logging.setup_logging(hermes_home=hermes_home)
-        logging.getLogger("test_async.queue").info("through the queue")
-        hermes_logging.flush_log_queue()
-        agent_log = hermes_home / "logs" / "agent.log"
-        assert "through the queue" in agent_log.read_text()
-
-    def test_queue_preserves_per_handler_levels(self, hermes_home):
-        hermes_logging.setup_logging(hermes_home=hermes_home)
-        logging.getLogger("test_async.levels").info("info-level line")
-        hermes_logging.flush_log_queue()
-        errors_log = hermes_home / "logs" / "errors.log"
-        # INFO must not reach the WARNING+ errors.log even through the queue.
-        if errors_log.exists():
-            assert "info-level line" not in errors_log.read_text()
