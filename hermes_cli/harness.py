@@ -14,6 +14,7 @@ from pathlib import Path
 
 from hermes_time import now
 from hermes_constants import get_hermes_home
+from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
@@ -27,7 +28,16 @@ from agent_runtime.decision_contract_registry import canonical_role_value, contr
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.default_plan import ensure_default_mission_plan
 from agent_runtime.daemon import MissionDaemon, read_daemon_status, start_daemon, stop_daemon
-from agent_runtime.errors import NotFound
+from agent_runtime.errors import (
+    AgentRuntimeError,
+    AlreadyExists,
+    EventPayloadTooLarge,
+    InvalidTransition,
+    NotFound,
+    ProofMissing,
+    StaleRun,
+    StoreCorrupt,
+)
 from agent_runtime.events import EventLog
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
 from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
@@ -51,6 +61,13 @@ from agent_runtime.persona_assignments import (
 )
 from agent_runtime.persona_diagnostics import PersonaDiagnosticController, PersonaDiagnosticOptions
 from agent_runtime.profile_context import active_profile_name
+from agent_runtime.realm_sync import (
+    RealmSyncError,
+    publish_realm_sync,
+    pull_realm_sync,
+    realm_sync_status,
+    sync_artifacts_for_workspace_agent,
+)
 from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.mission_chat_turns import persist_mission_chat_turn
@@ -66,6 +83,7 @@ from agent_runtime.planning import apply_planning_decision
 from agent_runtime.states import TaskState, RunState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
+from agent_runtime.store import RealmStore, WorkspaceStore
 from agent_runtime.ticker import TickEngine
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
@@ -73,6 +91,103 @@ from agent_runtime.tool_turn_history import persist_tool_turn_actual
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_session_summary
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
+
+
+STAGE42_SCHEMA_VERSION = 1
+ERROR_EXIT_CODES = {
+    "not_found": 3,
+    "realm_not_found": 3,
+    "workspace_not_found": 3,
+    "goal_not_found": 3,
+    "run_not_found": 3,
+    "lane_not_found": 3,
+    "worker_not_found": 3,
+    "persona_not_found": 3,
+    "blueprint_not_found": 3,
+    "invalid_request": 2,
+    "invalid_payload": 2,
+    "blueprint_invalid": 2,
+    "repo_scope_invalid": 2,
+    "invalid_binding": 2,
+    "unbound_required_slot": 2,
+    "invalid_isolation": 2,
+    "duplicate_conflict": 4,
+    "already_exists": 4,
+    "agent_busy": 4,
+    "agent_already_assigned": 4,
+    "lane_budget_exceeded": 4,
+    "repo_locked": 4,
+    "spawn_scope_exhausted": 4,
+    "kill_scope_denied": 4,
+    "sync_conflict": 4,
+    "sync_behind": 4,
+    "sync_secret_excluded": 4,
+    # Permission / auth (5)
+    "permission_denied": 5,
+    "membership_denied": 5,
+    "role_insufficient": 5,
+    "provider_auth_missing": 5,
+    "provider_auth_expired": 5,
+    "sync_auth_failed": 5,
+    # State / precondition (6)
+    "goal_blocked": 6,
+    "goal_terminal": 6,
+    "invalid_transition": 6,
+    "stale_run": 6,
+    "planning_locked": 6,
+    "proof_missing": 6,
+    "proof_gate_failed": 6,
+    "needs_operator_confirm": 6,
+    # Skills / readiness (6)
+    "skill_hash_mismatch": 6,
+    "missing_skill": 6,
+    "skill_install_failed": 6,
+    "profile_not_ready": 6,
+    "confirmation_required": 8,
+    # Runtime / infra (7)
+    "runtime_unavailable": 7,
+    "daemon_offline": 7,
+    "wrong_runtime_root": 7,
+    "profile_mismatch": 7,
+    "snapshot_stale": 7,
+    "contract_version_mismatch": 7,
+    "context_bundle_too_large": 7,
+    "budget_exhausted": 7,
+    "stagec_visual_failed": 7,
+    "sync_remote_unreachable": 7,
+    "install_clone_failed": 7,
+    "install_venv_failed": 7,
+    "install_postinstall_failed": 7,
+    "install_dependency_missing": 7,
+    # Data integrity (1)
+    "store_corrupt": 1,
+    "event_payload_too_large": 1,
+    "internal_error": 1,
+    "timeout": 124,
+}
+
+
+def _add_stage42_global_args(parser, *, mutation: bool = False) -> None:
+    def add(*flags, **kwargs):
+        if any(flag in parser._option_string_actions for flag in flags):  # noqa: SLF001 - argparse has no public query
+            return
+        parser.add_argument(*flags, **kwargs)
+
+    add("-o", "--output", choices=["json", "table", "yaml", "wide"], default=None)
+    add("--json", action="store_true", help="Alias for -o json")
+    add("-q", "--quiet", action="store_true")
+    add("--no-color", action="store_true")
+    add("--fields", default=None)
+    add("--sort", default=None)
+    add("--filter", action="append", default=[])
+    add("--limit", type=int, default=None)
+    add("--cursor", default=None)
+    add("--watch", "-w", action="store_true")
+    add("--since", default=None)
+    if mutation:
+        add("--dry-run", action="store_true")
+        add("--yes", "-y", action="store_true")
+        add("--idempotency-key", default=None)
 
 
 def _add_coordinator_permission_args(parser) -> None:
@@ -86,6 +201,7 @@ def _add_coordinator_permission_args(parser) -> None:
 
 def build_parser(parent_subparsers) -> None:
     parser = parent_subparsers.add_parser("harness", help="Experimental Agent Runtime Harness")
+    _add_stage42_global_args(parser)
     subs = parser.add_subparsers(dest="harness_command")
     parser.set_defaults(func=harness_command)
 
@@ -95,6 +211,31 @@ def build_parser(parent_subparsers) -> None:
 
     goal = subs.add_parser("goal", help="Create and run Harness goals in-process")
     goal_subs = goal.add_subparsers(dest="goal_command")
+    goal_list = goal_subs.add_parser("list", help="List Harness goals")
+    goal_list.add_argument("--workspace", default=None)
+    goal_list.add_argument("--state", choices=["open", "done", "blocked", "all"], default="open")
+    _add_stage42_global_args(goal_list)
+    goal_list.set_defaults(func=_cmd_goal_list)
+    goal_show = goal_subs.add_parser("show", help="Show one Harness goal")
+    goal_show.add_argument("goal_id")
+    goal_show.add_argument("--full", action="store_true")
+    _add_stage42_global_args(goal_show)
+    goal_show.set_defaults(func=_cmd_goal_show)
+    goal_history = goal_subs.add_parser("history", help="Show redaction-safe goal event history")
+    goal_history.add_argument("goal_id")
+    goal_history.add_argument("--limit", type=int, default=50)
+    _add_stage42_global_args(goal_history)
+    goal_history.set_defaults(func=_cmd_goal_history)
+    goal_create = goal_subs.add_parser("create", help="Create a Harness goal")
+    goal_create.add_argument("--title")
+    goal_create.add_argument("--description")
+    goal_create.add_argument("--requested-by", default="cli")
+    goal_create.add_argument("--request-json")
+    goal_create.add_argument("--workspace", default=None)
+    goal_create.add_argument("--start-daemon", dest="start_daemon", action="store_true", default=None)
+    goal_create.add_argument("--no-start-daemon", dest="start_daemon", action="store_false")
+    _add_stage42_global_args(goal_create, mutation=True)
+    goal_create.set_defaults(func=_cmd_goal_create)
     goal_run = goal_subs.add_parser("run", help="Create a goal and run bounded ticks until a meaningful boundary")
     goal_run.add_argument("--title", required=True)
     goal_run.add_argument("--description", required=True)
@@ -108,8 +249,25 @@ def build_parser(parent_subparsers) -> None:
     goal_run.add_argument("--non-goal", action="append", default=[])
     goal_run.add_argument("--blueprint", default="neko_two_dev_default", help="Blueprint id for graph-routed goal creation")
     goal_run.add_argument("--bind", action="append", default=[], help="Bind a blueprint slot, e.g. builder=persona:dev")
-    goal_run.add_argument("--json", action="store_true")
+    goal_run.add_argument("--workspace", default=None)
+    _add_stage42_global_args(goal_run, mutation=True)
     goal_run.set_defaults(func=_cmd_goal_run)
+    goal_unblock = goal_subs.add_parser("unblock", help="Operator-unblock a Harness goal")
+    goal_unblock.add_argument("goal_id")
+    goal_unblock.add_argument("--reason", required=True)
+    goal_unblock.add_argument("--state", choices=["created", "pm_ready_for_dev", "dev_implementing", "qa_testing"], default="created")
+    goal_unblock.add_argument("--rescope", action="store_true")
+    _add_stage42_global_args(goal_unblock, mutation=True)
+    goal_unblock.set_defaults(func=_cmd_goal_unblock)
+    goal_cancel = goal_subs.add_parser("cancel", help="Cancel a Harness goal")
+    goal_cancel.add_argument("goal_id")
+    goal_cancel.add_argument("--reason", required=True)
+    _add_stage42_global_args(goal_cancel, mutation=True)
+    goal_cancel.set_defaults(func=_cmd_goal_cancel)
+    goal_archive = goal_subs.add_parser("archive", help="Archive a terminal Harness goal")
+    goal_archive.add_argument("goal_id")
+    _add_stage42_global_args(goal_archive, mutation=True)
+    goal_archive.set_defaults(func=_cmd_goal_archive)
 
     blueprint = subs.add_parser("blueprint", help="Validate and run Agent Runtime blueprints headlessly")
     blueprint_subs = blueprint.add_subparsers(dest="blueprint_command", required=True)
@@ -190,6 +348,91 @@ def build_parser(parent_subparsers) -> None:
     task_archive.add_argument("--json", action="store_true")
     task_archive.set_defaults(func=_cmd_task_archive)
 
+    workspace = subs.add_parser("workspace", help="Manage Harness workspaces")
+    workspace_subs = workspace.add_subparsers(dest="workspace_command", required=True)
+    workspace_list = workspace_subs.add_parser("list", help="List workspaces")
+    _add_stage42_global_args(workspace_list)
+    workspace_list.set_defaults(func=_cmd_workspace_list)
+    workspace_show = workspace_subs.add_parser("show", help="Show one workspace")
+    workspace_show.add_argument("workspace_id")
+    _add_stage42_global_args(workspace_show)
+    workspace_show.set_defaults(func=_cmd_workspace_show)
+    workspace_create = workspace_subs.add_parser("create", help="Create a workspace")
+    workspace_create.add_argument("--name", required=True)
+    workspace_create.add_argument("--realm", default=None)
+    workspace_create.add_argument("--agent", action="append", default=[])
+    workspace_create.add_argument("--blueprint", default=None)
+    workspace_create.add_argument("--isolation", choices=["soft", "hard"], default="soft")
+    workspace_create.add_argument("--max-lanes", type=int, default=None)
+    _add_stage42_global_args(workspace_create, mutation=True)
+    workspace_create.set_defaults(func=_cmd_workspace_create)
+    workspace_use = workspace_subs.add_parser("use", help="Set active workspace")
+    workspace_use.add_argument("workspace_id")
+    _add_stage42_global_args(workspace_use, mutation=True)
+    workspace_use.set_defaults(func=_cmd_workspace_use)
+    workspace_actors = workspace_subs.add_parser("actors", help="List typed actors in a workspace")
+    workspace_actors.add_argument("workspace_id")
+    workspace_actors.add_argument("--kind", default=None)
+    _add_stage42_global_args(workspace_actors)
+    workspace_actors.set_defaults(func=_cmd_workspace_actors)
+    workspace_add_agent = workspace_subs.add_parser("add-agent", help="Add a persona to a workspace roster")
+    workspace_add_agent.add_argument("workspace_id")
+    workspace_add_agent.add_argument("persona_id")
+    _add_stage42_global_args(workspace_add_agent, mutation=True)
+    workspace_add_agent.set_defaults(func=_cmd_workspace_add_agent)
+    workspace_remove_agent = workspace_subs.add_parser("remove-agent", help="Remove a persona from a workspace roster")
+    workspace_remove_agent.add_argument("workspace_id")
+    workspace_remove_agent.add_argument("persona_id")
+    _add_stage42_global_args(workspace_remove_agent, mutation=True)
+    workspace_remove_agent.set_defaults(func=_cmd_workspace_remove_agent)
+    workspace_rename = workspace_subs.add_parser("rename", help="Rename a workspace")
+    workspace_rename.add_argument("workspace_id")
+    workspace_rename.add_argument("name")
+    _add_stage42_global_args(workspace_rename, mutation=True)
+    workspace_rename.set_defaults(func=_cmd_workspace_rename)
+    workspace_archive = workspace_subs.add_parser("archive", help="Archive a workspace")
+    workspace_archive.add_argument("workspace_id")
+    _add_stage42_global_args(workspace_archive, mutation=True)
+    workspace_archive.set_defaults(func=_cmd_workspace_archive)
+
+    realm = subs.add_parser("realm", help="Manage Harness realms")
+    realm_subs = realm.add_subparsers(dest="realm_command", required=True)
+    realm_list = realm_subs.add_parser("list", help="List realms")
+    _add_stage42_global_args(realm_list)
+    realm_list.set_defaults(func=_cmd_realm_list)
+    realm_show = realm_subs.add_parser("show", help="Show one realm")
+    realm_show.add_argument("realm_id")
+    _add_stage42_global_args(realm_show)
+    realm_show.set_defaults(func=_cmd_realm_show)
+    realm_create = realm_subs.add_parser("create", help="Create a realm")
+    realm_create.add_argument("--name", required=True)
+    realm_create.add_argument("--server", default=None)
+    _add_stage42_global_args(realm_create, mutation=True)
+    realm_create.set_defaults(func=_cmd_realm_create)
+    realm_bind = realm_subs.add_parser("bind-server", help="Bind a realm to an Eternia server id")
+    realm_bind.add_argument("realm_id")
+    realm_bind.add_argument("server_id")
+    _add_stage42_global_args(realm_bind, mutation=True)
+    realm_bind.set_defaults(func=_cmd_realm_bind_server)
+    realm_use = realm_subs.add_parser("use", help="Set active realm")
+    realm_use.add_argument("realm_id")
+    _add_stage42_global_args(realm_use, mutation=True)
+    realm_use.set_defaults(func=_cmd_realm_use)
+    realm_sync = realm_subs.add_parser("sync", help="Git-backed selective sync for non-source-controlled realm artifacts")
+    realm_sync_subs = realm_sync.add_subparsers(dest="realm_sync_command", required=True)
+    realm_sync_status_cmd = realm_sync_subs.add_parser("status", help="Show realm sync state")
+    realm_sync_status_cmd.add_argument("realm_id")
+    _add_stage42_global_args(realm_sync_status_cmd)
+    realm_sync_status_cmd.set_defaults(func=_cmd_realm_sync_status)
+    realm_sync_pull = realm_sync_subs.add_parser("pull", help="Pull and materialize realm sync artifacts")
+    realm_sync_pull.add_argument("realm_id")
+    _add_stage42_global_args(realm_sync_pull, mutation=True)
+    realm_sync_pull.set_defaults(func=_cmd_realm_sync_pull)
+    realm_sync_publish = realm_sync_subs.add_parser("publish", help="Publish allowlisted realm sync artifacts")
+    realm_sync_publish.add_argument("realm_id")
+    _add_stage42_global_args(realm_sync_publish, mutation=True)
+    realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
+
     playground = subs.add_parser("playground", help="Replay captured contract-failure scenarios against current contracts")
     playground_subs = playground.add_subparsers(dest="playground_command", required=True)
     playground_list = playground_subs.add_parser("list", help="List captured replay scenarios")
@@ -222,10 +465,12 @@ def build_parser(parent_subparsers) -> None:
     lane_subs = lane.add_subparsers(dest="lane_command", required=True)
     lane_list = lane_subs.add_parser("list", help="List lanes")
     lane_list.add_argument("--json", action="store_true")
+    _add_stage42_global_args(lane_list)
     lane_list.set_defaults(func=_cmd_lane_list)
     lane_show = lane_subs.add_parser("show", help="Show one lane")
     lane_show.add_argument("lane_id")
     lane_show.add_argument("--json", action="store_true")
+    _add_stage42_global_args(lane_show)
     lane_show.set_defaults(func=_cmd_lane_show)
     for command_name in ("pause", "park", "resume", "drain"):
         command = lane_subs.add_parser(command_name, help=f"{command_name.title()} a lane")
@@ -295,10 +540,12 @@ def build_parser(parent_subparsers) -> None:
     worker_list.add_argument("--persona", dest="persona_id", default=None)
     worker_list.add_argument("--active", action="store_true")
     worker_list.add_argument("--json", action="store_true")
+    _add_stage42_global_args(worker_list)
     worker_list.set_defaults(func=_cmd_worker_list)
     worker_show = worker_subs.add_parser("show", help="Show one worker session")
     worker_show.add_argument("worker_session_id")
     worker_show.add_argument("--json", action="store_true")
+    _add_stage42_global_args(worker_show)
     worker_show.set_defaults(func=_cmd_worker_show)
     for command_name in ("pause", "resume", "interrupt", "nudge", "possess", "release"):
         command = worker_subs.add_parser(command_name, help=f"{command_name.title()} a worker session")
@@ -340,7 +587,8 @@ def build_parser(parent_subparsers) -> None:
     persona_permission_set.set_defaults(func=_cmd_persona_permission_set)
     persona_assignments = persona_subs.add_parser("assignments", help="List persona assignments")
     persona_assignments.add_argument("--persona", dest="persona_id", default=None)
-    persona_assignments.add_argument("--task", dest="task_id", default=None)
+    persona_assignments.add_argument("--goal", dest="goal_id", default=None)
+    persona_assignments.add_argument("--task", dest="task_id", default=None, help="Deprecated alias for --goal")
     persona_assignments.add_argument("--json", action="store_true")
     persona_assignments.set_defaults(func=_cmd_persona_assignments)
     persona_message = persona_subs.add_parser("message", help="Queue a bounded operator message assignment for one persona")
@@ -557,9 +805,17 @@ def build_parser(parent_subparsers) -> None:
     daemon_foreground.set_defaults(func=_cmd_daemon)
     daemon_run_once.set_defaults(func=_cmd_daemon)
 
-    agents = subs.add_parser("agents", help="List harness personas")
+    agent = subs.add_parser("agent", help="List harness agent definitions")
+    agent_subs = agent.add_subparsers(dest="agent_command", required=True)
+    agent_list = agent_subs.add_parser("list", help="List persisted/configured agent definitions")
+    agent_list.add_argument("--all-profiles", action="store_true")
+    _add_stage42_global_args(agent_list)
+    agent_list.set_defaults(func=_cmd_agent_list)
+
+    agents = subs.add_parser("agents", help="Deprecated alias for `agent list`")
+    agents.add_argument("--all-profiles", action="store_true")
     agents.add_argument("--json", action="store_true")
-    agents.set_defaults(func=_cmd_agents)
+    agents.set_defaults(func=_cmd_agent_list)
 
     skills = subs.add_parser("install-harness-skills", help="Install versioned Harness skills into configured persona profiles")
     skills.add_argument("--active-profile-only", action="store_true", help="Install all Harness skills only into the active Hermes profile")
@@ -617,10 +873,938 @@ def build_parser(parent_subparsers) -> None:
     snap.add_argument("--json", action="store_true")
     snap.set_defaults(func=_cmd_snapshot)
 
+    pets = subs.add_parser("pets", help="Mission Control Petdex bridge")
+    pets_subs = pets.add_subparsers(dest="pets_command", required=True)
+    pets_gallery = pets_subs.add_parser("gallery", help="List Petdex pets for Launcher")
+    pets_gallery.add_argument("--local-only", action="store_true", help="Only include installed pets; skip the remote manifest")
+    pets_gallery.add_argument("--limit", type=int, default=0, help="Maximum remote rows; 0 = all")
+    pets_gallery.add_argument("--query", default="", help="Filter by slug/display name substring")
+    pets_gallery.add_argument("--json", action="store_true")
+    pets_gallery.set_defaults(func=_cmd_pets_gallery)
+    pets_install = pets_subs.add_parser("install", help="Install a Petdex pet by slug")
+    pets_install.add_argument("slug")
+    pets_install.add_argument("--force", action="store_true")
+    pets_install.add_argument("--json", action="store_true")
+    pets_install.set_defaults(func=_cmd_pets_install)
+    pets_sprite = pets_subs.add_parser("sprite", help="Return an installed pet spritesheet payload")
+    pets_sprite.add_argument("slug")
+    pets_sprite.add_argument("--json", action="store_true")
+    pets_sprite.set_defaults(func=_cmd_pets_sprite)
+    pets_thumb = pets_subs.add_parser("thumb", help="Return a Petdex pet thumbnail")
+    pets_thumb.add_argument("slug")
+    pets_thumb.add_argument("--url", default="", help="Optional Petdex spritesheet URL for non-installed gallery pets")
+    pets_thumb.add_argument("--json", action="store_true")
+    pets_thumb.set_defaults(func=_cmd_pets_thumb)
+
 
 def harness_command(args) -> int:
     print("Use `hermes harness --help`.")
     return 0
+
+
+def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None, message: str | None = None) -> int:
+    error_code = code or _error_code_for_exception(exc)
+    safe_details = {"error_class": type(exc).__name__}
+    if isinstance(exc, RealmSyncError):
+        safe_details.update(exc.safe_details)
+    envelope = _error_envelope(
+        error_code,
+        message or _safe_error_message(exc),
+        retryable=getattr(exc, "retryable", False) or error_code in {"runtime_unavailable", "daemon_offline", "timeout"},
+        safe_details=safe_details,
+    )
+    _print_stage42(envelope, args=args, default_output="json")
+    return ERROR_EXIT_CODES.get(error_code, 1)
+
+
+def _error_code_for_exception(exc: BaseException) -> str:
+    if isinstance(exc, NotFound):
+        return "not_found"
+    if isinstance(exc, AlreadyExists):
+        return "already_exists"
+    if isinstance(exc, ChatBusyError):
+        return "agent_busy"
+    if isinstance(exc, RealmSyncError):
+        return exc.code
+    # A persisted-entity file that does not exist on disk is a lookup miss,
+    # not an internal error — map it to the not-found taxonomy (exit 3).
+    if isinstance(exc, FileNotFoundError):
+        return "not_found"
+    if isinstance(exc, json.JSONDecodeError):
+        return "invalid_payload"
+    # Typed AgentRuntimeError subclasses map to their precondition/integrity codes.
+    for exc_type, code in (
+        (InvalidTransition, "invalid_transition"),
+        (StaleRun, "stale_run"),
+        (ProofMissing, "proof_missing"),
+        (StoreCorrupt, "store_corrupt"),
+        (EventPayloadTooLarge, "event_payload_too_large"),
+    ):
+        if isinstance(exc, exc_type):
+            return code
+    if isinstance(exc, ValueError):
+        text = str(exc)
+        if text in ERROR_EXIT_CODES:
+            return text
+        return "invalid_request"
+    if isinstance(exc, AgentRuntimeError):
+        return "internal_error"
+    return "internal_error"
+
+
+def _error_envelope(code: str, message: str, *, retryable: bool = False, safe_details: dict | None = None, hint: str | None = None, correlation_id: str | None = None) -> dict:
+    return {
+        "schema_version": STAGE42_SCHEMA_VERSION,
+        "kind": "error",
+        "error": {
+            "code": code,
+            "message": message,
+            "hint": hint or _error_hint(code),
+            "retryable": bool(retryable),
+            "error_id": f"err_{uuid.uuid4().hex[:8]}",
+            "correlation_id": correlation_id,
+            "safe_details": safe_details or {},
+        },
+    }
+
+
+def _error_hint(code: str) -> str:
+    return {
+        "confirmation_required": "Re-run with --yes after confirming the destructive operation.",
+        "not_found": "Check the id with the matching list command.",
+        "goal_not_found": "Run `hermes harness goal list --json` and retry with a listed id.",
+        "workspace_not_found": "Run `hermes harness workspace list --json` and retry with a listed id.",
+        "realm_not_found": "Run `hermes harness realm list --json` and retry with a listed id.",
+        "sync_conflict": "Resolve conflicts in the realm sync git repo, then retry.",
+        "sync_behind": "Run `hermes harness realm sync pull <realm> --json` before publishing.",
+        "sync_secret_excluded": "Remove secrets/state from the realm sync allowlist source before retrying.",
+        "sync_remote_unreachable": "Check network/git remote availability and retry.",
+        "sync_auth_failed": "Reconnect realm sync credentials through the backend-authorized provider flow.",
+    }.get(code, "Inspect safe_details and retry after correcting the request.")
+
+
+_ABS_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|[\\/])[^\s\"']*[\\/][^\s\"']*")
+
+
+def _redact_paths(text: str) -> str:
+    """Replace absolute filesystem paths with their basename.
+
+    The error contract forbids absolute paths in messages (they leak the
+    runtime root). A bare `realm_nope.json` is enough for the operator.
+    """
+
+    def _basename(match: "re.Match[str]") -> str:
+        token = match.group(0)
+        return re.split(r"[\\/]", token)[-1] or token
+
+    return _ABS_PATH_RE.sub(_basename, text)
+
+
+def _safe_error_message(exc: BaseException) -> str:
+    text = " ".join(str(exc or type(exc).__name__).split())
+    text = _redact_paths(text)
+    return text[:300] or type(exc).__name__
+
+
+def _load_request_json(raw: str) -> dict:
+    """Resolve a ``--request-json`` value to a parsed object.
+
+    Accepts either a path to a JSON file or an inline JSON document. Inline
+    JSON (or a malformed file) that fails to parse raises ``json.JSONDecodeError``
+    which the CLI maps to ``invalid_payload`` (exit 2) — never the file-not-found
+    ``internal_error`` the bare ``Path(...).read_text()`` produced.
+    """
+    candidate = (raw or "").strip()
+    looks_inline = candidate[:1] in {"{", "["}
+    if not looks_inline:
+        try:
+            path = Path(candidate)
+            if path.is_file():
+                candidate = path.read_text(encoding="utf-8")
+        except OSError:
+            # Not a usable path — fall through and parse the literal as JSON.
+            pass
+    return json.loads(candidate)
+
+
+def _list_envelope(item_kind: str, items: list[dict], *, cursor: str | None = None, truncated: bool = False) -> dict:
+    return {
+        "schema_version": STAGE42_SCHEMA_VERSION,
+        "kind": "list",
+        "item_kind": item_kind,
+        "count": len(items),
+        "items": items,
+        "cursor": cursor,
+        "truncated": bool(truncated),
+    }
+
+
+def _object_envelope(kind: str, item: dict, *, warnings: list[dict] | None = None) -> dict:
+    data = {"schema_version": STAGE42_SCHEMA_VERSION, "kind": kind, **item}
+    if warnings:
+        data["warnings"] = warnings
+    return data
+
+
+def _print_stage42(data: dict, *, args, default_output: str | None = None) -> None:
+    output = "json" if getattr(args, "json", False) else (getattr(args, "output", None) or default_output or ("table" if sys.stdout.isatty() else "json"))
+    data = _apply_fields(data, getattr(args, "fields", None))
+    if getattr(args, "quiet", False):
+        print(_quiet_output(data))
+        return
+    if output == "json":
+        print(emit_json(data))
+    elif output == "yaml":
+        import yaml
+
+        print(yaml.safe_dump(json.loads(emit_json(data)), sort_keys=False, allow_unicode=True))
+    else:
+        print(_table_output(data, wide=output == "wide"))
+
+
+def _apply_fields(data: dict, fields_text: str | None) -> dict:
+    if not fields_text:
+        return data
+    fields = [field.strip() for field in fields_text.split(",") if field.strip()]
+    if data.get("kind") == "list":
+        kept = []
+        for item in data.get("items") or []:
+            kept.append({key: item.get(key) for key in fields if key in item})
+        return {**data, "items": kept}
+    return {key: data.get(key) for key in ["schema_version", "kind", *fields] if key in data}
+
+
+def _quiet_output(data: dict) -> str:
+    if data.get("kind") == "list":
+        return "\n".join(str(item.get("id") or item.get("task_id") or "") for item in data.get("items") or [] if item)
+    return str(data.get("id") or data.get("task_id") or "")
+
+
+def _table_output(data: dict, *, wide: bool = False) -> str:
+    if data.get("kind") == "error":
+        err = data.get("error") or {}
+        return f"{err.get('code')}: {err.get('message')}"
+    if data.get("kind") == "list":
+        items = list(data.get("items") or [])
+        if not items:
+            return f"no {data.get('item_kind', 'items')}"
+        keys = list(items[0].keys()) if wide else [key for key in ("id", "title", "name", "state", "workspace_id", "realm_id", "updated_at") if key in items[0]]
+        return "\n".join("  ".join(str(item.get(key, "")) for key in keys) for item in items)
+    keys = [key for key in ("id", "title", "name", "state", "workspace_id", "realm_id", "updated_at") if key in data]
+    return "  ".join(str(data.get(key, "")) for key in keys) if keys else emit_json(data)
+
+
+def _require_yes(args, code: str = "confirmation_required") -> bool:
+    if getattr(args, "yes", False) or getattr(args, "dry_run", False):
+        return True
+    _print_stage42(
+        _error_envelope(code, "This destructive operation requires --yes.", retryable=False),
+        args=args,
+        default_output="json",
+    )
+    return False
+
+
+def _goal_row(task: Task, *, full: bool = False) -> dict:
+    from agent_runtime.mission_plan import mission_plan_summary
+
+    workspace_id = getattr(task, "workspace_id", None)
+    realm_id = None
+    if workspace_id:
+        try:
+            realm_id = WorkspaceStore().get(workspace_id).realm_id
+        except Exception:
+            realm_id = None
+    plan = getattr(task, "mission_plan", None)
+    stage_id = getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
+    row = {
+        "id": getattr(task, "goal_id", None) or task.id,
+        "task_id": task.id,
+        "title": task.title,
+        "state": str(task.state),
+        "workspace_id": workspace_id,
+        "realm_id": realm_id,
+        "stage": stage_id,
+        "updated_at": task.updated_at,
+    }
+    if full:
+        runs = RunStore().list_for_task(task.id)
+        proofs = ProofStore().list_for_task(task.id)
+        incidents = [item for item in IncidentStore().list_all() if item.task_id == task.id and item.closed_at is None]
+        row.update(
+            {
+                "graph": mission_plan_summary(task),
+                "run_ids": [run.id for run in runs],
+                "proof_ids": [proof.id for proof in proofs],
+                "open_incident_ids": [incident.id for incident in incidents],
+            }
+        )
+    return row
+
+
+def _resolve_goal(value: str) -> Task:
+    try:
+        return TaskStore().get_goal(value)
+    except NotFound as exc:
+        raise NotFound(f"goal not found: {value}") from exc
+
+
+def _sort_rows(rows: list[dict], sort_key: str | None) -> list[dict]:
+    key = str(sort_key or "").strip()
+    if not key:
+        return rows
+    reverse = key.startswith("-")
+    if reverse:
+        key = key[1:]
+    return sorted(rows, key=lambda item: str(item.get(key, "")), reverse=reverse)
+
+
+def _goal_contention_warnings(task: Task) -> list[dict]:
+    try:
+        assignment_store = PersonaAssignmentStore()
+        warnings: list[dict] = []
+        for assignment in assignment_store.list_for_task(task.id):
+            warnings.extend(assignment_store.contention_warnings(persona_id=assignment.persona_id, goal_id=getattr(task, "goal_id", None) or task.id))
+        return warnings
+    except Exception:
+        return []
+
+
+def _cmd_goal_list(args) -> int:
+    store = TaskStore()
+    if args.state == "all":
+        tasks = store.list_all()
+    elif args.state == "done":
+        tasks = store.list_by_state(TaskState.DONE)
+    elif args.state == "blocked":
+        tasks = store.list_by_state(TaskState.BLOCKED)
+    else:
+        tasks = store.list_open()
+    if args.workspace:
+        tasks = [task for task in tasks if getattr(task, "workspace_id", None) == args.workspace]
+    rows = _sort_rows([_goal_row(task) for task in tasks], getattr(args, "sort", None))
+    limit = getattr(args, "limit", None)
+    truncated = False
+    if limit is not None and limit >= 0 and len(rows) > limit:
+        rows = rows[:limit]
+        truncated = True
+    _print_stage42(_list_envelope("goal", rows, cursor=getattr(args, "cursor", None), truncated=truncated), args=args)
+    return 0
+
+
+def _cmd_goal_show(args) -> int:
+    task = _resolve_goal(args.goal_id)
+    _print_stage42(_object_envelope("goal", _goal_row(task, full=True)), args=args)
+    return 0
+
+
+def _cmd_goal_history(args) -> int:
+    task = _resolve_goal(args.goal_id)
+    events = _task_events(task.id, limit=max(1, int(getattr(args, "limit", 50) or 50)), since_text=getattr(args, "since", None))
+    if not events.get("ok"):
+        return emit_harness_error(ValueError(events.get("message") or events.get("error")), args=args, code="invalid_request")
+    rows = [
+        {
+            "id": f"event_{index}",
+            "goal_id": getattr(task, "goal_id", None) or task.id,
+            "task_id": task.id,
+            "type": _event_value(event, "type"),
+            "run_id": _event_value(event, "run_id"),
+            "persona_id": _event_value(event, "persona_id"),
+            "ts": _event_value(event, "ts"),
+        }
+        for index, event in enumerate(events.get("items", []), start=1)
+    ]
+    _print_stage42(_list_envelope("goal_event", rows), args=args)
+    return 0
+
+
+def _cmd_goal_create(args) -> int:
+    from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
+
+    if getattr(args, "request_json", None):
+        request = _load_request_json(args.request_json)
+        data = create_mission_goal_from_request(request)
+    else:
+        if not args.title or not args.description:
+            return emit_harness_error(ValueError("--title and --description are required unless --request-json is provided"), args=args, code="invalid_request")
+        if getattr(args, "dry_run", False):
+            _print_stage42(
+                _object_envelope("goal", {"id": f"goal_dry_{uuid.uuid4().hex[:6]}", "title": args.title, "state": "dry_run", "workspace_id": getattr(args, "workspace", None), "updated_at": now()}),
+                args=args,
+                default_output="json",
+            )
+            return 0
+        data = create_mission_goal(
+            title=args.title,
+            description=args.description,
+            requested_by=args.requested_by,
+            start_daemon_mode=getattr(args, "start_daemon", None),
+            idempotency_key=getattr(args, "idempotency_key", None),
+        )
+    if data.get("error"):
+        err = data["error"]
+        _print_stage42(_error_envelope(err.get("code") or "invalid_request", err.get("message") or "goal create failed", retryable=bool(err.get("retryable")), safe_details=err.get("safe_details") or {}), args=args, default_output="json")
+        return ERROR_EXIT_CODES.get(err.get("code"), 1)
+    task = TaskStore().get(data.get("task_id"))
+    if getattr(args, "workspace", None):
+        WorkspaceStore().get(args.workspace)
+        task.workspace_id = args.workspace
+        task.updated_at = now()
+        TaskStore().update(task, actor="cli", reason="assigned workspace")
+        task = TaskStore().get(task.id)
+    _print_stage42(_object_envelope("goal", _goal_row(task), warnings=_goal_contention_warnings(task)), args=args, default_output="json")
+    return 0
+
+
+def _cmd_goal_unblock(args) -> int:
+    task = _resolve_goal(args.goal_id)
+    if task.state in {TaskState.DONE, TaskState.CANCELLED}:
+        _print_stage42(
+            _error_envelope("goal_terminal", f"{task.id} is terminal: {task.state.value}", retryable=False, correlation_id=getattr(task, "goal_id", None) or task.id),
+            args=args,
+            default_output="json",
+        )
+        return 6
+    previous_state = task.state.value
+    incident_store = IncidentStore()
+    closed_incident_ids: list[str] = []
+    open_incident_ids = {
+        incident.id
+        for incident in incident_store.list_open()
+        if getattr(incident, "task_id", None) == task.id
+    }
+    open_incident_ids.update(task.open_incident_ids or [])
+    for incident_id in sorted(open_incident_ids):
+        try:
+            incident_store.close(incident_id, reason=f"operator unblock: {_safe_operator_text(args.reason)}")
+            closed_incident_ids.append(incident_id)
+        except Exception:
+            pass
+    task = TaskStore().get(task.id)
+    task.state = TaskState(args.state)
+    task.open_incident_ids = []
+    if args.rescope:
+        task.current_stage_id = None
+        if task.mission_plan is not None:
+            task.mission_plan.current_stage_id = None
+        task.stages = []
+        task.affected_repos = []
+        task.assigned_persona_ids = {}
+        ensure_default_mission_plan(task)
+    task.updated_at = now()
+    TaskStore().update(task, actor="cli", reason=f"operator unblock: {_safe_operator_text(args.reason)}")
+    task = TaskStore().get(task.id)
+    row = _goal_row(task)
+    row.update({"from": previous_state, "to": task.state.value, "closed_incident_ids": closed_incident_ids, "rescope": bool(args.rescope)})
+    _print_stage42(_object_envelope("goal", row), args=args, default_output="json")
+    return 0
+
+
+def _cmd_goal_cancel(args) -> int:
+    if not _require_yes(args):
+        return 8
+    task = _resolve_goal(args.goal_id)
+    task = TaskStore().cancel(task.id, reason=args.reason, actor="cli")
+    _print_stage42(_object_envelope("goal", _goal_row(task)), args=args)
+    return 0
+
+
+def _cmd_goal_archive(args) -> int:
+    if not _require_yes(args):
+        return 8
+    task = _resolve_goal(args.goal_id)
+    data = TaskStore().archive(task.id, actor="cli", reason="operator archive goal command")
+    row = {"id": getattr(task, "goal_id", None) or task.id, "task_id": task.id, "state": "archived" if data.get("archived_count") else "skipped", "updated_at": now()}
+    _print_stage42(_object_envelope("goal", row, warnings=data.get("skipped_tasks") or []), args=args)
+    return 0 if data.get("archived_count") else 6
+
+
+def _workspace_row(workspace, *, full: bool = False) -> dict:
+    tasks = TaskStore().list_for_workspace(workspace.id)
+    row = {
+        "id": workspace.id,
+        "name": workspace.name,
+        "realm_id": workspace.realm_id,
+        "agents": len(workspace.agent_ids or []),
+        "goals": len(tasks),
+        "isolation": workspace.isolation,
+        "updated_at": workspace.updated_at,
+    }
+    if full:
+        row.update(
+            {
+                "kind": "workspace",
+                "slug": workspace.slug,
+                "agent_ids": list(workspace.agent_ids or []),
+                "default_blueprint_id": workspace.default_blueprint_id,
+                "max_concurrent_lanes": workspace.max_concurrent_lanes,
+                "goal_ids": [getattr(task, "goal_id", None) or task.id for task in tasks],
+                "archived": bool(workspace.archived),
+                "created_at": workspace.created_at,
+            }
+        )
+    return row
+
+
+def _cmd_workspace_list(args) -> int:
+    rows = [_workspace_row(item) for item in WorkspaceStore().list_all()]
+    _print_stage42(_list_envelope("workspace", _sort_rows(rows, getattr(args, "sort", None))), args=args)
+    return 0
+
+
+def _cmd_workspace_show(args) -> int:
+    item = WorkspaceStore().get(args.workspace_id)
+    _print_stage42(_object_envelope("workspace", _workspace_row(item, full=True)), args=args)
+    return 0
+
+
+def _cmd_workspace_create(args) -> int:
+    if getattr(args, "dry_run", False):
+        row = {"id": f"ws_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "realm_id": args.realm, "agents": len(args.agent or []), "goals": 0, "isolation": args.isolation, "updated_at": now()}
+        _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
+        return 0
+    if args.realm:
+        RealmStore().get(args.realm)
+    item = WorkspaceStore().create(
+        name=args.name,
+        agent_ids=list(args.agent or []),
+        default_blueprint_id=args.blueprint,
+        isolation=args.isolation,
+        max_concurrent_lanes=args.max_lanes,
+        realm_id=args.realm,
+    )
+    if args.realm:
+        realm = RealmStore().get(args.realm)
+        if item.id not in realm.workspace_ids:
+            realm.workspace_ids.append(item.id)
+            RealmStore().save(realm)
+    _print_stage42(_object_envelope("workspace", _workspace_row(item), warnings=[]), args=args, default_output="json")
+    return 0
+
+
+def _cmd_workspace_use(args) -> int:
+    WorkspaceStore().set_active(args.workspace_id)
+    item = WorkspaceStore().get(args.workspace_id)
+    _print_stage42(_object_envelope("workspace", _workspace_row(item)), args=args, default_output="json")
+    return 0
+
+
+def _cmd_workspace_actors(args) -> int:
+    workspace = WorkspaceStore().get(args.workspace_id)
+    snapshot = build_snapshot()
+    wanted_goal_ids = {
+        getattr(task, "goal_id", None) or task.id
+        for task in TaskStore().list_for_workspace(workspace.id)
+    }
+    actors: list[dict] = []
+    for goal in snapshot.get("goals") or []:
+        if goal.get("id") not in wanted_goal_ids:
+            continue
+        mission = goal.get("mission_level_state") if isinstance(goal, dict) else None
+        for actor in (mission or {}).get("actors", []):
+            if getattr(args, "kind", None) and actor.get("kind") != args.kind:
+                continue
+            actors.append(actor)
+    _print_stage42(_list_envelope("actor", actors), args=args)
+    return 0
+
+
+def _known_persona_ids() -> set[str]:
+    """Persona definition ids across every `.hermes` profile (Add-agent source)."""
+    known: set[str] = set()
+    for profile in list_profiles():
+        try:
+            personas = ensure_persisted_personas(load_agent_runtime_config(Path(profile.path) / "config.yaml"))
+        except Exception:
+            continue
+        known.update(persona.id for persona in personas)
+    try:
+        known.update(persona.id for persona in ensure_persisted_personas(load_agent_runtime_config()))
+    except Exception:
+        pass
+    return known
+
+
+def _validate_roster_persona(persona_id: str) -> None:
+    """Reject an unknown persona before it pollutes a workspace roster.
+
+    Adding an agent is meant to sync that agent's skills/soul/memory/context —
+    a non-existent persona has none, so this must fail rather than silently
+    persist garbage (`persona_not_found`, exit 3).
+    """
+    if persona_id not in _known_persona_ids():
+        raise NotFound(f"persona not found: {persona_id}")
+
+
+def _cmd_workspace_add_agent(args) -> int:
+    try:
+        _validate_roster_persona(args.persona_id)
+    except NotFound as exc:
+        return emit_harness_error(exc, args=args, code="persona_not_found")
+    if getattr(args, "dry_run", False):
+        item = WorkspaceStore().get(args.workspace_id)
+        row = _workspace_row(item)
+        row["agents"] = len(set([*item.agent_ids, args.persona_id]))
+        warnings = _workspace_agent_sync_warnings(item.id, args.persona_id)
+        _print_stage42(_object_envelope("workspace", row, warnings=warnings), args=args, default_output="json")
+        return 0
+    item = WorkspaceStore().add_agent(args.workspace_id, args.persona_id)
+    warnings = _workspace_agent_sync_warnings(item.id, args.persona_id)
+    _print_stage42(_object_envelope("workspace", _workspace_row(item), warnings=warnings), args=args, default_output="json")
+    return 0
+
+
+def _workspace_agent_sync_warnings(workspace_id: str, persona_id: str) -> list[dict]:
+    artifacts = sync_artifacts_for_workspace_agent(workspace_id, persona_id)
+    if not artifacts:
+        return []
+    return [
+        {
+            "code": "realm_sync_set_updated",
+            "message": "Workspace agent artifacts are now included in the realm sync allowlist.",
+            "artifact_count": len(artifacts),
+            "artifacts": artifacts,
+        }
+    ]
+
+
+def _cmd_workspace_remove_agent(args) -> int:
+    if not _require_yes(args):
+        return 8
+    if getattr(args, "dry_run", False):
+        item = WorkspaceStore().get(args.workspace_id)
+    else:
+        item = WorkspaceStore().remove_agent(args.workspace_id, args.persona_id)
+    _print_stage42(_object_envelope("workspace", _workspace_row(item)), args=args, default_output="json")
+    return 0
+
+
+def _cmd_workspace_rename(args) -> int:
+    item = WorkspaceStore().get(args.workspace_id) if getattr(args, "dry_run", False) else WorkspaceStore().rename(args.workspace_id, args.name)
+    row = _workspace_row(item)
+    if getattr(args, "dry_run", False):
+        row["name"] = args.name
+    _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
+    return 0
+
+
+def _cmd_workspace_archive(args) -> int:
+    if not _require_yes(args):
+        return 8
+    item = WorkspaceStore().get(args.workspace_id) if getattr(args, "dry_run", False) else WorkspaceStore().archive(args.workspace_id)
+    _print_stage42(_object_envelope("workspace", _workspace_row(item, full=True)), args=args, default_output="json")
+    return 0
+
+
+def _realm_row(realm, *, full: bool = False) -> dict:
+    workspaces = [item for item in WorkspaceStore().list_all(include_archived=True) if item.realm_id == realm.id]
+    workspace_ids = list(dict.fromkeys([*(realm.workspace_ids or []), *[item.id for item in workspaces]]))
+    row = {
+        "id": realm.id,
+        "name": realm.name,
+        "server_id": realm.server_id,
+        "workspaces": len(workspace_ids),
+        "sync": "in_sync",
+        "updated_at": realm.updated_at,
+    }
+    if full:
+        row.update({"kind": "realm", "slug": realm.slug, "workspace_ids": workspace_ids, "sync_manifest_ref": realm.sync_manifest_ref, "archived": bool(realm.archived), "created_at": realm.created_at})
+    return row
+
+
+def _cmd_realm_list(args) -> int:
+    rows = [_realm_row(item) for item in RealmStore().list_all()]
+    _print_stage42(_list_envelope("realm", _sort_rows(rows, getattr(args, "sort", None))), args=args)
+    return 0
+
+
+def _cmd_realm_show(args) -> int:
+    item = RealmStore().get(args.realm_id)
+    _print_stage42(_object_envelope("realm", _realm_row(item, full=True)), args=args)
+    return 0
+
+
+def _cmd_realm_create(args) -> int:
+    if getattr(args, "dry_run", False):
+        row = {"id": f"realm_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "server_id": args.server, "workspaces": 0, "sync": "in_sync", "updated_at": now()}
+        _print_stage42(_object_envelope("realm", row), args=args, default_output="json")
+        return 0
+    item = RealmStore().create(name=args.name, server_id=args.server)
+    _print_stage42(_object_envelope("realm", _realm_row(item)), args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_bind_server(args) -> int:
+    item = RealmStore().get(args.realm_id) if getattr(args, "dry_run", False) else RealmStore().bind_server(args.realm_id, args.server_id)
+    row = _realm_row(item)
+    if getattr(args, "dry_run", False):
+        row["server_id"] = args.server_id
+    _print_stage42(_object_envelope("realm", row), args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_use(args) -> int:
+    RealmStore().set_active(args.realm_id)
+    item = RealmStore().get(args.realm_id)
+    _print_stage42(_object_envelope("realm", _realm_row(item)), args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_sync_status(args) -> int:
+    try:
+        data = realm_sync_status(args.realm_id)
+    except RealmSyncError as exc:
+        return emit_harness_error(exc, args=args)
+    _print_stage42(data, args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_sync_pull(args) -> int:
+    try:
+        data = pull_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)))
+    except RealmSyncError as exc:
+        return emit_harness_error(exc, args=args)
+    _print_stage42(data, args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_sync_publish(args) -> int:
+    if not _require_yes(args):
+        return 8
+    try:
+        data = publish_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)))
+    except RealmSyncError as exc:
+        return emit_harness_error(exc, args=args)
+    _print_stage42(data, args=args, default_output="json")
+    return 0
+
+
+def _cmd_agent_list(args) -> int:
+    rows: list[dict] = []
+    if getattr(args, "all_profiles", False):
+        for profile in list_profiles():
+            try:
+                cfg = load_agent_runtime_config(Path(profile.path) / "config.yaml")
+                personas = ensure_persisted_personas(cfg)
+            except Exception:
+                continue
+            for persona in personas:
+                rows.append(_agent_definition_row(persona, profile_name=profile.name))
+    else:
+        for persona in ensure_persisted_personas(load_agent_runtime_config()):
+            rows.append(_agent_definition_row(persona, profile_name=active_profile_name()))
+    deduped: dict[tuple[str, str | None], dict] = {}
+    for row in rows:
+        deduped[(row["id"], row.get("profile"))] = row
+    _print_stage42(_list_envelope("agent", _sort_rows(list(deduped.values()), getattr(args, "sort", None))), args=args)
+    return 0
+
+
+def _agent_definition_row(persona: AgentPersona, *, profile_name: str | None) -> dict:
+    return {
+        "id": persona.id,
+        "name": persona.display_name,
+        "role": str(persona.role),
+        "profile": profile_name or persona.hermes_profile,
+        "state": "available",
+        "updated_at": None,
+    }
+
+
+def _cmd_pets_gallery(args) -> int:
+    from agent.pet import store
+
+    query = str(getattr(args, "query", "") or "").strip().lower()
+    limit = max(0, int(getattr(args, "limit", 0) or 0))
+    local_only = bool(getattr(args, "local_only", False))
+    installed = {pet.slug: pet for pet in store.installed_pets()}
+    rows: list[dict] = []
+    seen: set[str] = set()
+    manifest_error = ""
+
+    if not local_only:
+        try:
+            from agent.pet.manifest import fetch_manifest
+
+            entries = fetch_manifest()
+            if query:
+                entries = [
+                    entry
+                    for entry in entries
+                    if query in entry.slug.lower() or query in entry.display_name.lower()
+                ]
+            if limit:
+                entries = entries[:limit]
+            for entry in entries:
+                seen.add(entry.slug)
+                rows.append(
+                    {
+                        "slug": entry.slug,
+                        "displayName": entry.display_name,
+                        "kind": entry.kind,
+                        "submittedBy": entry.submitted_by,
+                        "installed": entry.slug in installed,
+                        "spritesheetUrl": entry.spritesheet_url,
+                        "petJsonUrl": entry.pet_json_url,
+                        "zipUrl": entry.zip_url,
+                        "curated": "/curated/" in entry.spritesheet_url,
+                        "generated": entry.slug in installed and installed[entry.slug].generated,
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - Launcher can still use local pets
+            manifest_error = f"manifest unavailable: {exc}"
+
+    for slug, pet in installed.items():
+        if slug in seen:
+            continue
+        if query and query not in slug.lower() and query not in pet.display_name.lower():
+            continue
+        rows.append(_installed_pet_gallery_row(pet))
+
+    data = {"ok": True, "localOnly": local_only, "pets": rows}
+    if manifest_error:
+        data["manifestError"] = manifest_error
+    print(emit_json(data) if getattr(args, "json", False) else json.dumps(data, indent=2))
+    return 0
+
+
+def _cmd_pets_install(args) -> int:
+    from agent.pet import store
+    from agent.pet.manifest import ManifestError
+
+    slug = str(getattr(args, "slug", "") or "").strip()
+    try:
+        pet = store.install_pet(slug, force=bool(getattr(args, "force", False)))
+    except (store.PetStoreError, ManifestError) as exc:
+        data = {"ok": False, "slug": slug, "error": str(exc)}
+        print(emit_json(data) if getattr(args, "json", False) else data["error"])
+        return 2
+    data = {"ok": True, "pet": _installed_pet_gallery_row(pet)}
+    print(emit_json(data) if getattr(args, "json", False) else json.dumps(data, indent=2))
+    return 0
+
+
+def _cmd_pets_sprite(args) -> int:
+    from agent.pet import store
+
+    slug = str(getattr(args, "slug", "") or "").strip()
+    pet = store.load_pet(slug)
+    if pet is None or not pet.exists:
+        data = {"ok": False, "slug": slug, "error": f"pet '{slug}' is not installed"}
+        print(emit_json(data) if getattr(args, "json", False) else data["error"])
+        return 2
+    data = {"ok": True, "pet": _pet_sprite_payload_for_launcher(pet)}
+    print(emit_json(data) if getattr(args, "json", False) else json.dumps(data, indent=2))
+    return 0
+
+
+def _cmd_pets_thumb(args) -> int:
+    import base64
+
+    from agent.pet import store
+
+    slug = str(getattr(args, "slug", "") or "").strip()
+    data = store.thumbnail_png(slug, source_url=str(getattr(args, "url", "") or ""))
+    payload = (
+        {"ok": True, "slug": slug, "dataUri": "data:image/png;base64," + base64.standard_b64encode(data).decode("ascii")}
+        if data
+        else {"ok": False, "slug": slug}
+    )
+    print(emit_json(payload) if getattr(args, "json", False) else json.dumps(payload, indent=2))
+    return 0
+
+
+def _installed_pet_gallery_row(pet) -> dict:
+    return {
+        "slug": pet.slug,
+        "displayName": pet.display_name,
+        "description": pet.description,
+        "kind": "local",
+        "submittedBy": "",
+        "installed": True,
+        "spritesheetUrl": "",
+        "petJsonUrl": "",
+        "zipUrl": "",
+        "curated": False,
+        "generated": pet.generated,
+    }
+
+
+def _pet_sheet_revision(path: Path) -> str:
+    try:
+        stat = path.stat()
+    except OSError:
+        return ""
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+def _pet_row_frame_counts(spritesheet: Path) -> dict[str, int]:
+    try:
+        from PIL import Image
+
+        from agent.pet import constants, render
+
+        with Image.open(spritesheet) as opened:
+            image = opened.convert("RGBA")
+        cols = max(1, image.width // constants.FRAME_W)
+        row_count = max(1, image.height // constants.FRAME_H)
+        rows = constants.state_rows_for_grid(row_count)
+        out: dict[str, int] = {}
+        for row_idx, name in enumerate(rows[:row_count]):
+            top = row_idx * constants.FRAME_H
+            count = 0
+            for col in range(cols):
+                left = col * constants.FRAME_W
+                frame = image.crop((left, top, left + constants.FRAME_W, top + constants.FRAME_H))
+                if render._frame_is_blank(frame):
+                    break
+                count += 1
+            out[name] = count
+        return out
+    except Exception:  # noqa: BLE001 - cosmetic payload; renderer can fall back
+        return {}
+
+
+def _pet_state_rows(spritesheet: Path) -> list[str]:
+    try:
+        from PIL import Image
+
+        from agent.pet import constants
+
+        with Image.open(spritesheet) as opened:
+            row_count = max(1, opened.height // constants.FRAME_H)
+        return list(constants.state_rows_for_grid(row_count))
+    except Exception:  # noqa: BLE001
+        from agent.pet import constants
+
+        return list(constants.STATE_ROWS)
+
+
+def _pet_sprite_payload_for_launcher(pet) -> dict:
+    import base64
+
+    from agent.pet import constants, render
+
+    raw = pet.spritesheet.read_bytes()
+    suffix = pet.spritesheet.suffix.lower()
+    mime = "image/png" if suffix == ".png" else "image/webp"
+    return {
+        "slug": pet.slug,
+        "displayName": pet.display_name,
+        "description": pet.description,
+        "mime": mime,
+        "spritesheetBase64": base64.standard_b64encode(raw).decode("ascii"),
+        "spritesheetRevision": _pet_sheet_revision(pet.spritesheet),
+        "frameW": constants.FRAME_W,
+        "frameH": constants.FRAME_H,
+        "framesPerState": constants.FRAMES_PER_STATE,
+        "framesByState": render.state_frame_counts(pet.spritesheet),
+        "framesByRow": _pet_row_frame_counts(pet.spritesheet),
+        "loopMs": constants.LOOP_MS,
+        "scale": constants.DEFAULT_SCALE,
+        "stateRows": _pet_state_rows(pet.spritesheet),
+    }
 
 
 def _cmd_blueprint_list(args) -> int:
@@ -914,10 +2098,22 @@ def _cmd_goal_run(args) -> int:
             non_goals=list(args.non_goal or []),
             blueprint_id=args.blueprint,
             bindings=bindings,
+            workspace_id=getattr(args, "workspace", None),
         )
     )
-    if args.json:
-        print(emit_json(result))
+    if getattr(args, "json", False) or getattr(args, "output", None):
+        task = TaskStore().get(result.task_id)
+        row = _goal_row(task)
+        row.update(
+            {
+                "stop_reason": result.stop_reason,
+                "actions_taken": result.actions_taken,
+                "run_ids": list(result.run_ids),
+                "proof_ids": list(result.proof_ids),
+                "open_incident_ids": list(result.open_incident_ids),
+            }
+        )
+        _print_stage42(_object_envelope("goal", row, warnings=_goal_contention_warnings(task)), args=args, default_output="json")
     else:
         print(f"goal {result.task_id}: stop={result.stop_reason} state={result.final_task_state} actions={result.actions_taken}")
     return result.exit_code
@@ -1053,8 +2249,9 @@ def _cmd_persona_assignments(args) -> int:
         print(emit_json(data) if args.json else data["error"])
         return 2
     store = PersonaAssignmentStore()
-    if args.task_id:
-        assignments = store.list_for_task(args.task_id)
+    goal_id = getattr(args, "goal_id", None) or getattr(args, "task_id", None)
+    if goal_id:
+        assignments = store.list_for_goal(goal_id)
     elif args.persona_id:
         assignments = store.list_for_persona(_normalize_cli_persona_id(args.persona_id))
     else:
@@ -3285,13 +4482,13 @@ def _cmd_task_create(args) -> int:
 
     if getattr(args, "request_json", None):
         try:
-            request = json.loads(Path(args.request_json).read_text(encoding="utf-8"))
+            request = _load_request_json(args.request_json)
         except Exception as exc:
             data = {
                 "schema_version": 1,
                 "error": {
-                    "code": "invalid_request",
-                    "message": "Could not read goal-create request JSON.",
+                    "code": "invalid_payload",
+                    "message": _redact_paths("Could not parse goal-create request JSON."),
                     "retryable": False,
                     "safe_details": {"error_class": type(exc).__name__},
                 },
@@ -3710,7 +4907,7 @@ def _cmd_lane_list(args) -> int:
     from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
 
     lanes = [runtime_instance_summary(item) for item in GoalRuntimeInstanceStore().list_all()]
-    print(emit_json(lanes) if args.json else "\n".join(f"{item['lane_id']} {item['state']} task={item['task_id']}" for item in lanes))
+    _print_stage42(_list_envelope("lane", _sort_rows(lanes, getattr(args, "sort", None))), args=args, default_output="json")
     return 0
 
 
@@ -3719,11 +4916,13 @@ def _cmd_lane_show(args) -> int:
 
     try:
         lane = runtime_instance_summary(GoalRuntimeInstanceStore().get(args.lane_id))
-    except Exception:
-        data = {"ok": False, "error": "lane_not_found", "lane_id": args.lane_id}
-        print(emit_json(data) if args.json else f"lane not found: {args.lane_id}")
-        return 1
-    print(emit_json(lane) if args.json else f"{lane['lane_id']} {lane['state']} task={lane['task_id']}")
+    except (NotFound, FileNotFoundError):
+        return emit_harness_error(
+            NotFound(f"lane not found: {args.lane_id}"),
+            args=args,
+            code="lane_not_found",
+        )
+    _print_stage42(_object_envelope("lane", lane), args=args, default_output="json")
     return 0
 
 
@@ -3881,10 +5080,12 @@ def _cmd_run_show(args) -> int:
     proof_store = ProofStore()
     try:
         run = run_store.get(args.run_id)
-    except NotFound:
-        data = {"ok": False, "error": "run_not_found", "run_id": args.run_id, "message": f"Run not found: {args.run_id}"}
-        print(emit_json(data) if args.json else data["message"])
-        return 1
+    except (NotFound, FileNotFoundError):
+        return emit_harness_error(
+            NotFound(f"run not found: {args.run_id}"),
+            args=args,
+            code="run_not_found",
+        )
     proof_records = [
         proof
         for proof in proof_store.list_for_task(run.task_id)
@@ -3945,17 +5146,21 @@ def _cmd_worker_list(args) -> int:
         if getattr(args, "persona_id", None):
             workers = [worker for worker in workers if worker.persona_id == args.persona_id]
     data = [worker_session_summary(worker) for worker in workers]
-    if args.json:
-        print(emit_json(data))
-    else:
-        print("\n".join(f"{item['worker_session_id']} {item['persona_id']} {item['state']} task={item['task_id']}" for item in data))
+    _print_stage42(_list_envelope("worker", _sort_rows(data, getattr(args, "sort", None))), args=args, default_output="json")
     return 0
 
 
 def _cmd_worker_show(args) -> int:
-    worker = WorkerSessionStore().get(args.worker_session_id)
+    try:
+        worker = WorkerSessionStore().get(args.worker_session_id)
+    except (NotFound, FileNotFoundError):
+        return emit_harness_error(
+            NotFound(f"worker not found: {args.worker_session_id}"),
+            args=args,
+            code="worker_not_found",
+        )
     data = worker_session_summary(worker)
-    print(emit_json(data) if args.json else f"{data['worker_session_id']} {data['persona_id']} {data['state']}")
+    _print_stage42(_object_envelope("worker", data), args=args, default_output="json")
     return 0
 
 

@@ -94,14 +94,7 @@ def prepare_new_goal_runtime(
                     reason="fresh active run belongs to another task",
                 )
 
-    if foreground_mode and park_open_tasks:
-        for task in tasks:
-            if task.id in exclude_task_ids:
-                continue
-            if task.state in {TaskState.DONE, TaskState.CANCELLED}:
-                continue
-            runtime_store.park_open_task(task.id, reason="new foreground goal parked preserved open task")
-            parked_task_ids.append(task.id)
+    # Lane-only runtime: new goals no longer park preserved open goals.
 
     if cleanup_stage47_temp:
         for task in task_store.list_open():
@@ -173,13 +166,10 @@ def activate_foreground_runtime(
     return {
         "instance_id": instance.id,
         "target_task_id": instance.task_id,
-        "queue_mode": instance.lane,
+        "queue_mode": "lane",
+        "lane_id": instance.lane,
         "state": instance.state,
-        "parked_open_task_ids": [
-            item.task_id
-            for item in runtime_store.list_all()
-            if item.lane == "background" and item.state == "parked"
-        ],
+        "parked_open_task_ids": [],
     }
 
 
@@ -265,26 +255,23 @@ def _append_runtime_event(event_log: EventLog, event_type: str, *, task_id: str,
 
 
 def _foreground_dirty_summary(*, runtime_instances, runs, history_open_tasks, blocking_active_run_ids: list[str]) -> dict[str, Any]:
-    foreground = None
-    for instance in runtime_instances:
-        if instance.lane == "foreground" and instance.state in {"active", "waiting"}:
-            foreground = instance
-    foreground_task_id = getattr(foreground, "task_id", None)
+    active_lane_task_ids = {
+        getattr(instance, "task_id", None)
+        for instance in runtime_instances
+        if str(getattr(instance, "state", "") or "") in {"queued", "activating", "running", "active", "waiting"}
+    }
     foreground_active_runs = [
-        run.id for run in runs if run.state in ACTIVE_RUN_STATES and getattr(run, "task_id", None) == foreground_task_id
-    ]
-    background_task_ids = [
-        instance.task_id for instance in runtime_instances if instance.lane == "background" and instance.state == "parked"
+        run.id for run in runs if run.state in ACTIVE_RUN_STATES and getattr(run, "task_id", None) in active_lane_task_ids
     ]
     foreground_clean = not foreground_active_runs and not blocking_active_run_ids
     return {
-        "foreground_task_id": foreground_task_id,
-        "foreground_runtime_instance_id": getattr(foreground, "id", None),
+        "foreground_task_id": None,
+        "foreground_runtime_instance_id": None,
         "foreground_clean": foreground_clean,
         "foreground_active_runs": len(foreground_active_runs),
         "foreground_active_run_ids": foreground_active_runs,
-        "background_open_tasks": len(set(background_task_ids)),
-        "background_task_ids": list(dict.fromkeys(background_task_ids))[:25],
+        "background_open_tasks": 0,
+        "background_task_ids": [],
         "blocking_active_run_ids": _dedupe(blocking_active_run_ids),
         "history": {
             "open_preserved_task_count": len(history_open_tasks),

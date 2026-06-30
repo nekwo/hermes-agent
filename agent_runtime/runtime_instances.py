@@ -59,24 +59,14 @@ class GoalRuntimeInstanceStore:
         self.event_log = event_log or EventLog()
 
     def create_foreground(self, *, task_id: str, started_by: str = "cli") -> GoalRuntimeInstance:
-        self.park_foreground_except(task_id, reason="new foreground goal activated")
-        ts = now()
+        # Deprecated compatibility path: every goal is now a lane, so activating
+        # a goal must not park any other open goal.
         existing = self.active_for_task(task_id)
         if existing:
-            instance = replace(existing, lane=FOREGROUND_LANE, state=ACTIVE_STATE, updated_at=ts, parked_reason=None)
-            self.save(instance, event_type="foreground_runtime.activated", reason="reactivated existing runtime instance")
+            instance = replace(existing, state="running", updated_at=now(), parked_reason=None, state_reason="lane reactivated")
+            self.save(instance, event_type="lane.activated", reason="reactivated existing lane")
             return instance
-        instance = GoalRuntimeInstance(
-            id=f"goalrt_{uuid.uuid4().hex[:12]}",
-            task_id=task_id,
-            lane=FOREGROUND_LANE,
-            state=ACTIVE_STATE,
-            created_at=ts,
-            updated_at=ts,
-            started_by=_safe_token(started_by),
-        )
-        self.save(instance, event_type="foreground_runtime.activated", reason="created foreground runtime instance")
-        return instance
+        return self.create_lane(task_id=task_id, started_by=started_by, state="running")
 
     def create_lane(
         self,
@@ -92,10 +82,11 @@ class GoalRuntimeInstanceStore:
         if state not in LANE_STATES:
             raise ValueError(f"unsupported lane state: {state}")
         ts = now()
+        instance_id = f"goalrt_{uuid.uuid4().hex[:12]}"
         instance = GoalRuntimeInstance(
-            id=f"goalrt_{uuid.uuid4().hex[:12]}",
+            id=instance_id,
             task_id=task_id,
-            lane=FOREGROUND_LANE,
+            lane=instance_id,
             state=state,
             created_at=ts,
             updated_at=ts,
@@ -141,24 +132,24 @@ class GoalRuntimeInstanceStore:
         if existing:
             instance = replace(
                 existing,
-                lane=BACKGROUND_LANE,
-                state=PARKED_STATE,
+                state="parked_by_operator",
                 updated_at=ts,
                 parked_reason=_safe_reason(reason),
                 active_run_ids=[],
             )
         else:
+            instance_id = f"goalrt_{uuid.uuid4().hex[:12]}"
             instance = GoalRuntimeInstance(
-                id=f"goalrt_{uuid.uuid4().hex[:12]}",
+                id=instance_id,
                 task_id=task_id,
-                lane=BACKGROUND_LANE,
-                state=PARKED_STATE,
+                lane=instance_id,
+                state="parked_by_operator",
                 created_at=ts,
                 updated_at=ts,
                 started_by="harness",
                 parked_reason=_safe_reason(reason),
             )
-        self.save(instance, event_type="foreground_runtime.parked_task", reason=reason)
+        self.save(instance, event_type="lane.transitioned", reason=reason)
         return instance
 
     def mark_terminal_for_task(self, task_id: str, *, reason: str) -> list[str]:
@@ -172,14 +163,7 @@ class GoalRuntimeInstanceStore:
         return closed
 
     def park_foreground_except(self, task_id: str, *, reason: str) -> list[str]:
-        parked: list[str] = []
-        for instance in self.list_all():
-            if instance.task_id == task_id:
-                continue
-            if instance.lane == FOREGROUND_LANE and instance.state in {ACTIVE_STATE, WAITING_STATE}:
-                self.park_open_task(instance.task_id, reason=reason)
-                parked.append(instance.id)
-        return parked
+        return []
 
     def save(self, instance: GoalRuntimeInstance, *, event_type: str | None = None, reason: str = "") -> GoalRuntimeInstance:
         path = paths.runtime_instance_path(instance.id)
@@ -228,14 +212,11 @@ class GoalRuntimeInstanceStore:
 
     def active_for_task(self, task_id: str) -> GoalRuntimeInstance | None:
         for item in reversed(self.list_for_task(task_id)):
-            if item.state in {ACTIVE_STATE, WAITING_STATE, PARKED_STATE}:
+            if item.state in {ACTIVE_STATE, WAITING_STATE, PARKED_STATE, "queued", "activating", "running", "blocked", "parked_by_budget", "parked_by_repo_lock", "parked_by_operator"}:
                 return item
         return None
 
     def active_foreground(self) -> GoalRuntimeInstance | None:
-        for item in reversed(self.list_all()):
-            if item.lane == FOREGROUND_LANE and item.state in {ACTIVE_STATE, WAITING_STATE}:
-                return item
         return None
 
 
@@ -267,17 +248,14 @@ def runtime_instance_summary(instance: GoalRuntimeInstance) -> dict[str, Any]:
 
 
 def runtime_instances_summary(instances: list[GoalRuntimeInstance]) -> dict[str, Any]:
-    active_foreground = [
-        item for item in instances if item.lane == FOREGROUND_LANE and item.state in {ACTIVE_STATE, WAITING_STATE}
-    ]
-    background = [item for item in instances if item.lane == BACKGROUND_LANE and item.state == PARKED_STATE]
+    lane_rows = [runtime_instance_summary(item) for item in instances]
     return {
-        "foreground": runtime_instance_summary(active_foreground[-1]) if active_foreground else None,
-        "foreground_active_count": len(active_foreground),
-        "background_parked_count": len(background),
-        "background_task_ids": [item.task_id for item in background[:25]],
-        "instances": [runtime_instance_summary(item) for item in instances],
-        "lanes": [runtime_instance_summary(item) for item in instances],
+        "foreground": None,
+        "foreground_active_count": 0,
+        "background_parked_count": 0,
+        "background_task_ids": [],
+        "instances": lane_rows,
+        "lanes": lane_rows,
     }
 
 

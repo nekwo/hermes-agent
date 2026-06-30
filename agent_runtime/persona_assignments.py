@@ -10,6 +10,7 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
+from .errors import AgentRuntimeError
 from .events import EventLog
 from .models import AgentPersona, Event, PersonaAssignment, PersonaInstance, WorkerSession
 from .serde import from_jsonable, to_jsonable
@@ -46,7 +47,7 @@ LIVE_RUN_STATES = frozenset(
 )
 
 
-class ChatBusyError(RuntimeError):
+class ChatBusyError(AgentRuntimeError):
     def __init__(self, instance: PersonaInstance, *, active_run_id: str | None, active_worker_session_id: str | None):
         super().__init__("chat_busy")
         self.instance = instance
@@ -153,13 +154,31 @@ class PersonaInstanceStore:
             self._write(existing)
         return self.get(instance_id)
 
-    def ensure_for_goal(self, persona: AgentPersona, *, goal_id: str, spawned_by: str | None) -> PersonaInstance:
-        instance = self.ensure_for_persona(persona)
+    def ensure_for_goal(self, persona: AgentPersona, *, goal_id: str, spawned_by: str | None, placement_id: str | None = None) -> PersonaInstance:
+        normalized_goal = safe_optional_token(goal_id)
+        placement = safe_assignment_token(placement_id) or safe_assignment_token(f"{normalized_goal}:{persona.id}")
+        instance_id = persona_instance_id_for_placement(placement)
+        try:
+            instance = self.get(instance_id)
+        except Exception:
+            ts = now()
+            instance = PersonaInstance(
+                id=instance_id,
+                persona_id=persona.id,
+                role=str(persona.role),
+                display_name=persona.display_name,
+                profile_id=persona.hermes_profile,
+                runtime_root=str(paths.store_root()),
+                state=WorkerSessionState.IDLE,
+                updated_at=ts,
+            )
+            self._write(instance)
+            self._event("persona_instance.created", instance, {"mode": "task_bound", "placement_id": placement})
         changed = False
         updates = {
             "mode": "task_bound",
-            "current_task_id": safe_optional_token(goal_id),
-            "goal_id": safe_optional_token(goal_id),
+            "current_task_id": normalized_goal,
+            "goal_id": normalized_goal,
             "spawned_by": safe_optional_token(spawned_by),
         }
         for attr, value in updates.items():
@@ -557,7 +576,10 @@ class PersonaAssignmentStore:
 
     def create_or_resume(self, spec: PersonaAssignmentSpec) -> PersonaAssignment:
         persona_id = safe_assignment_token(spec.persona_id)
-        instance_id = spec.persona_instance_id or persona_instance_id_for(persona_id)
+        goal_id = safe_optional_token(spec.goal_id or spec.task_id)
+        instance_id = spec.persona_instance_id or (
+            persona_instance_id_for_placement(f"{goal_id}:{persona_id}") if goal_id else persona_instance_id_for(persona_id)
+        )
         signal_hash = assignment_signal_hash_from_parts(
             persona_id=persona_id,
             task_id=spec.task_id,
@@ -602,7 +624,7 @@ class PersonaAssignmentStore:
                 created_at=ts,
                 updated_at=ts,
                 task_id=safe_optional_token(spec.task_id),
-                goal_id=safe_optional_token(spec.goal_id),
+                goal_id=goal_id,
                 stage_id=safe_optional_token(spec.stage_id),
                 operation_id=safe_optional_token(spec.operation_id),
                 repo_bundle_id=safe_optional_token(spec.repo_bundle_id),
@@ -620,6 +642,31 @@ class PersonaAssignmentStore:
                 signal_hash=signal_hash,
             )
         )
+
+    def contention_warnings(self, *, persona_id: str | None = None, goal_id: str | None = None, task_id: str | None = None) -> list[dict[str, Any]]:
+        wanted_persona = safe_assignment_token(persona_id) if persona_id else None
+        wanted_goal = safe_optional_token(goal_id or task_id)
+        warnings: list[dict[str, Any]] = []
+        for assignment in self.list_all():
+            if assignment.state not in ACTIVE_ASSIGNMENT_STATES:
+                continue
+            if wanted_persona and assignment.persona_id != wanted_persona:
+                continue
+            existing_goal = safe_optional_token(assignment.goal_id or assignment.task_id)
+            if wanted_goal and existing_goal == wanted_goal:
+                continue
+            warnings.append(
+                {
+                    "code": "agent_already_assigned",
+                    "message": f"{assignment.persona_id} already has an active assignment on another goal.",
+                    "persona_id": assignment.persona_id,
+                    "persona_instance_id": assignment.persona_instance_id,
+                    "assignment_id": assignment.id,
+                    "goal_id": existing_goal,
+                    "retryable": False,
+                }
+            )
+        return warnings
 
     def get(self, assignment_id: str) -> PersonaAssignment:
         raw = json.loads(paths.persona_assignment_path(assignment_id).read_text(encoding="utf-8"))
@@ -649,6 +696,20 @@ class PersonaAssignmentStore:
     def list_for_task(self, task_id: str) -> list[PersonaAssignment]:
         normalized = safe_optional_token(task_id)
         return [assignment for assignment in self.list_all() if assignment.task_id == normalized]
+
+    def list_for_goal(self, goal_id: str) -> list[PersonaAssignment]:
+        """Group assignments by the canonical goal id.
+
+        Matches on ``goal_id`` (the Stage 39 grouping key); for legacy records
+        where ``goal_id`` was never stamped, falls back to ``task_id`` so the
+        old ``goal_id == task.id`` records still resolve.
+        """
+        normalized = safe_optional_token(goal_id)
+        return [
+            assignment
+            for assignment in self.list_all()
+            if (assignment.goal_id or assignment.task_id) == normalized
+        ]
 
     def find_active(self, *, persona_id: str | None = None, task_id: str | None = None, stage_id: str | None = None, kind: str | None = None) -> list[PersonaAssignment]:
         wanted_persona = safe_assignment_token(persona_id) if persona_id else None

@@ -72,6 +72,7 @@ def test_parity_warnings_clean_when_trace_matches_instance():
         "persona_chat_trace": [
             {"persona_id": "profile:alice", "persona_instance_id": "personainst_profile_alice", "entries": []},
         ],
+        "operator_channels": [],
         "summary": {"open_tasks": 0},
         "tasks": [],
     }

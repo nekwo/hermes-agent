@@ -15,7 +15,7 @@ from . import paths
 from .errors import AlreadyExists, NotFound
 from .events import EventLog
 from .locks import archive_lock, task_lock, run_lock
-from .models import AgentPersona, AgentRun, Event, GoalRuntimeInstance, Incident, Proof, Task
+from .models import AgentPersona, AgentRun, Event, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
 from .persona_assignments import PersonaAssignmentStore
 from .proof_rules import ProofType
 from .recovery_flags import mark_incident_closed_for_recovery
@@ -43,6 +43,32 @@ def _safe_session_id(value) -> str | None:
     return None
 
 
+def _safe_model_id(value) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    cleaned = "".join(ch if ch.isalnum() or ch in "_.:-" else "_" for ch in text)
+    return cleaned.strip("._:-")[:120] or None
+
+
+def _safe_display_name(value) -> str:
+    return " ".join(str(value or "").split())[:160]
+
+
+def _slugify(value) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return slug[:80] or "item"
+
+
+def _dedupe_ids(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        clean = _safe_model_id(value)
+        if clean and clean not in result:
+            result.append(clean)
+    return result
+
+
 def _read_json(path: Path) -> dict:
     if not path.exists():
         raise NotFound(str(path))
@@ -54,6 +80,7 @@ def _read_model(cls: type[T], path: Path) -> T:
 
 
 def _write_model(path: Path, model) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json_write(path, to_jsonable(model), indent=2, sort_keys=True)
 
 
@@ -94,7 +121,19 @@ class TaskStore:
         return self.get(task.id)
 
     def get(self, task_id: str) -> Task:
-        return _read_model(Task, paths.task_path(task_id))
+        task = _read_model(Task, paths.task_path(task_id))
+        return self._canonicalize_current_stage(task)
+
+    def get_goal(self, goal_or_task_id: str) -> Task:
+        value = str(goal_or_task_id or "").strip()
+        try:
+            return self.get(value)
+        except NotFound:
+            pass
+        for task in self.list_all():
+            if getattr(task, "goal_id", None) == value:
+                return task
+        raise NotFound(value)
 
     def update(self, task: Task, *, actor: str = "harness", reason: str = "") -> None:
         path = paths.task_path(task.id)
@@ -144,7 +183,21 @@ class TaskStore:
         return [task for task in self.list_all() if task.state in wanted]
 
     def list_all(self) -> list[Task]:
-        return _list_models(Task, paths.tasks_dir())
+        return [self._canonicalize_current_stage(task) for task in _list_models(Task, paths.tasks_dir())]
+
+    def list_for_workspace(self, workspace_id: str | None) -> list[Task]:
+        normalized = _safe_model_id(workspace_id)
+        return [task for task in self.list_all() if _safe_model_id(getattr(task, "workspace_id", None)) == normalized]
+
+    def _canonicalize_current_stage(self, task: Task) -> Task:
+        plan = getattr(task, "mission_plan", None)
+        if plan is not None:
+            current = getattr(plan, "current_stage_id", None)
+            if current != getattr(task, "current_stage_id", None):
+                task.current_stage_id = current
+        if not getattr(task, "goal_id", None):
+            task.goal_id = task.id
+        return task
 
     def archive_ready(self, *, actor: str = "cli", reason: str = "archive ready terminal tasks") -> dict:
         return ArchiveStore(event_log=self.event_log).archive_ready(actor=actor, reason=reason)
@@ -344,6 +397,152 @@ class AgentStore:
 
     def list_all(self) -> list[AgentPersona]:
         return _list_models(AgentPersona, paths.agents_dir())
+
+
+class WorkspaceStore:
+    def create(
+        self,
+        *,
+        name: str,
+        agent_ids: list[str] | None = None,
+        default_blueprint_id: str | None = None,
+        isolation: str = "soft",
+        max_concurrent_lanes: int | None = None,
+        realm_id: str | None = None,
+        workspace_id: str | None = None,
+    ) -> Workspace:
+        clean_name = _safe_display_name(name)
+        if not clean_name:
+            raise ValueError("workspace name is required")
+        clean_isolation = str(isolation or "soft").strip().lower()
+        if clean_isolation not in {"soft", "hard"}:
+            raise ValueError("invalid_isolation")
+        ts = now()
+        slug = _slugify(clean_name)
+        item = Workspace(
+            id=_safe_model_id(workspace_id) or f"ws_{slug}_{uuid.uuid4().hex[:6]}",
+            slug=slug,
+            name=clean_name,
+            agent_ids=_dedupe_ids(agent_ids or []),
+            default_blueprint_id=_safe_model_id(default_blueprint_id),
+            isolation=clean_isolation,
+            max_concurrent_lanes=max_concurrent_lanes if max_concurrent_lanes is None else max(1, int(max_concurrent_lanes)),
+            realm_id=_safe_model_id(realm_id),
+            created_at=ts,
+            updated_at=ts,
+        )
+        path = paths.workspace_path(item.id)
+        if path.exists():
+            raise AlreadyExists(item.id)
+        _write_model(path, item)
+        return self.get(item.id)
+
+    def get(self, workspace_id: str) -> Workspace:
+        return _read_model(Workspace, paths.workspace_path(workspace_id))
+
+    def list_all(self, *, include_archived: bool = False) -> list[Workspace]:
+        items = _list_models(Workspace, paths.workspaces_dir())
+        if not include_archived:
+            items = [item for item in items if not item.archived]
+        return sorted(items, key=lambda item: (item.name.lower(), item.id))
+
+    def save(self, item: Workspace) -> Workspace:
+        item.updated_at = now()
+        _write_model(paths.workspace_path(item.id), item)
+        return self.get(item.id)
+
+    def set_active(self, workspace_id: str | None) -> dict:
+        value = _safe_model_id(workspace_id)
+        if value:
+            self.get(value)
+        _write_model(paths.active_workspace_path(), {"workspace_id": value, "updated_at": now()})
+        return {"workspace_id": value}
+
+    def active_id(self) -> str | None:
+        try:
+            raw = _read_json(paths.active_workspace_path())
+        except Exception:
+            return None
+        return _safe_model_id(raw.get("workspace_id"))
+
+    def add_agent(self, workspace_id: str, persona_id: str) -> Workspace:
+        item = self.get(workspace_id)
+        persona = _safe_model_id(persona_id)
+        if persona and persona not in item.agent_ids:
+            item.agent_ids.append(persona)
+        return self.save(item)
+
+    def remove_agent(self, workspace_id: str, persona_id: str) -> Workspace:
+        item = self.get(workspace_id)
+        persona = _safe_model_id(persona_id)
+        item.agent_ids = [value for value in item.agent_ids if value != persona]
+        return self.save(item)
+
+    def rename(self, workspace_id: str, name: str) -> Workspace:
+        item = self.get(workspace_id)
+        item.name = _safe_display_name(name)
+        item.slug = _slugify(item.name)
+        return self.save(item)
+
+    def archive(self, workspace_id: str) -> Workspace:
+        item = self.get(workspace_id)
+        item.archived = True
+        return self.save(item)
+
+
+class RealmStore:
+    def create(self, *, name: str, server_id: str | None = None, realm_id: str | None = None) -> Realm:
+        clean_name = _safe_display_name(name)
+        if not clean_name:
+            raise ValueError("realm name is required")
+        ts = now()
+        slug = _slugify(clean_name)
+        item = Realm(
+            id=_safe_model_id(realm_id) or f"realm_{slug}_{uuid.uuid4().hex[:6]}",
+            slug=slug,
+            name=clean_name,
+            server_id=_safe_model_id(server_id),
+            created_at=ts,
+            updated_at=ts,
+        )
+        path = paths.realm_path(item.id)
+        if path.exists():
+            raise AlreadyExists(item.id)
+        _write_model(path, item)
+        return self.get(item.id)
+
+    def get(self, realm_id: str) -> Realm:
+        return _read_model(Realm, paths.realm_path(realm_id))
+
+    def list_all(self, *, include_archived: bool = False) -> list[Realm]:
+        items = _list_models(Realm, paths.realms_dir())
+        if not include_archived:
+            items = [item for item in items if not item.archived]
+        return sorted(items, key=lambda item: (item.name.lower(), item.id))
+
+    def save(self, item: Realm) -> Realm:
+        item.updated_at = now()
+        _write_model(paths.realm_path(item.id), item)
+        return self.get(item.id)
+
+    def bind_server(self, realm_id: str, server_id: str) -> Realm:
+        item = self.get(realm_id)
+        item.server_id = _safe_model_id(server_id)
+        return self.save(item)
+
+    def set_active(self, realm_id: str | None) -> dict:
+        value = _safe_model_id(realm_id)
+        if value:
+            self.get(value)
+        _write_model(paths.active_realm_path(), {"realm_id": value, "updated_at": now()})
+        return {"realm_id": value}
+
+    def active_id(self) -> str | None:
+        try:
+            raw = _read_json(paths.active_realm_path())
+        except Exception:
+            return None
+        return _safe_model_id(raw.get("realm_id"))
 
 
 class RunStore:

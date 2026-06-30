@@ -131,6 +131,7 @@ def create_mission_goal(
     ts = now()
     task = Task(
         id=f"task_{uuid.uuid4().hex[:8]}",
+        goal_id=f"goal_{uuid.uuid4().hex[:8]}",
         title=title,
         description=description,
         state=TaskState.CREATED,
@@ -343,6 +344,7 @@ def _create_response(task: Task, *, state: str, duplicate_of: str | None, extra:
             "schema_version": 1,
             "mission_id": task.id,
             "task_id": task.id,
+            "goal_id": getattr(task, "goal_id", None) or task.id,
             "blueprint_id": getattr(plan, "blueprint_id", None),
             "blueprint_version": getattr(plan, "blueprint_version", None),
             "state": state,

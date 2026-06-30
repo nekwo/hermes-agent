@@ -20,4 +20,15 @@ def build_postinstall_parser(subparsers, *, cmd_postinstall: Callable) -> None:
         description="One-shot post-install for pip users. Installs system "
         "dependencies that pip cannot provide, then runs setup if needed.",
     )
+    postinstall_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Run dependency bootstrap non-interactively.",
+    )
+    postinstall_parser.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Alias for --yes for scripted installers.",
+    )
     postinstall_parser.set_defaults(func=cmd_postinstall)

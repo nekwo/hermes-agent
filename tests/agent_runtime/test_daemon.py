@@ -82,19 +82,19 @@ def test_daemon_uses_settled_loop_and_records_compact_stop_reason(isolate_agent_
     assert status["settle_stop_reason"] == "task_terminal"
 
 
-def test_daemon_foreground_uses_target_task_id(isolate_agent_runtime_root):
+def test_daemon_lane_queue_ignores_target_task_id(isolate_agent_runtime_root):
     engine = TargetRecordingEngine()
     daemon = MissionDaemon(engine_factory=lambda: engine, target_task_id="task_new", interval_seconds=0, idle_interval_seconds=0)
 
     daemon.run_foreground(max_loops=1)
     status = read_daemon_status()
 
-    assert engine.calls == [{"task_id": "task_new", "max_actions": 10}]
-    assert status["target_task_id"] == "task_new"
-    assert status["queue_mode"] == "foreground"
+    assert engine.calls == [{"task_id": None, "max_actions": 10}]
+    assert status["queue_mode"] == "lane"
+    assert "target_task_id" not in status
 
 
-def test_targeted_daemon_exits_when_target_reaches_terminal_boundary(isolate_agent_runtime_root):
+def test_lane_daemon_does_not_exit_on_target_terminal_boundary(isolate_agent_runtime_root):
     engine = SettledEngine(stop_reason="task_terminal")
     sleeps = []
     daemon = MissionDaemon(engine_factory=lambda: engine, target_task_id="task_done", interval_seconds=10, idle_interval_seconds=30, sleep_fn=sleeps.append)
@@ -102,11 +102,11 @@ def test_targeted_daemon_exits_when_target_reaches_terminal_boundary(isolate_age
     result = daemon.run_foreground(max_loops=3)
     status = read_daemon_status()
 
-    assert result["loops"] == 1
-    assert result["stopped"] is True
-    assert engine.calls == 1
-    assert sleeps == []
-    assert status["target_task_id"] == "task_done"
+    assert result["loops"] == 3
+    assert result["stopped"] is False
+    assert engine.calls == 3
+    assert sleeps == [10, 10, 10]
+    assert "target_task_id" not in status
     assert status["settle_stop_reason"] == "task_terminal"
 
 
@@ -180,7 +180,7 @@ def test_daemon_start_does_not_spawn_duplicate_when_pid_alive(monkeypatch, isola
     assert spawned == []
 
 
-def test_daemon_start_reports_target_conflict_when_existing_daemon_is_global(monkeypatch, isolate_agent_runtime_root):
+def test_daemon_start_ignores_target_when_existing_daemon_is_global(monkeypatch, isolate_agent_runtime_root):
     from agent_runtime import daemon as daemon_mod
 
     daemon_mod._write_daemon_status({"state": "running", "pid": 1234, "queue_mode": "global"})
@@ -189,8 +189,7 @@ def test_daemon_start_reports_target_conflict_when_existing_daemon_is_global(mon
     result = daemon_mod.start_daemon(task_id="task_new")
 
     assert result["started"] is False
-    assert result["error"] == "daemon_target_conflict"
-    assert result["requested_task_id"] == "task_new"
+    assert "error" not in result
 
 
 def test_daemon_start_records_spawned_pid(monkeypatch, isolate_agent_runtime_root):
@@ -207,10 +206,12 @@ def test_daemon_start_records_spawned_pid(monkeypatch, isolate_agent_runtime_roo
 
     assert result["started"] is True
     assert result["pid"] == 5678
-    assert result["target_task_id"] == "task_new"
+    assert result["target_task_id"] is None
+    assert result["queue_mode"] == "lane"
     assert status["state"] == "starting"
     assert status["pid"] == 5678
-    assert status["target_task_id"] == "task_new"
+    assert status["target_task_id"] is None
+    assert status["queue_mode"] == "lane"
 
 
 def test_daemon_start_refuses_live_lease_before_spawning(monkeypatch, isolate_agent_runtime_root):
@@ -348,16 +349,16 @@ def test_daemon_stop_escalates_to_force_kill_and_reports_offline(monkeypatch, is
     assert status["last_pid"] == 1234
 
 
-def test_daemon_writes_final_offline_status_on_clean_exit(isolate_agent_runtime_root):
+def test_lane_daemon_leaves_last_status_on_loop_bound_exit(isolate_agent_runtime_root):
     engine = SettledEngine(stop_reason="task_terminal")
     daemon = MissionDaemon(engine_factory=lambda: engine, target_task_id="task_gone", interval_seconds=0, idle_interval_seconds=0)
 
     daemon.run_foreground(max_loops=3)
     status = read_daemon_status()
 
-    assert status["state"] == "offline"
-    assert status["last_pid"] == __import__("os").getpid()
-    assert "stopped_at" in status
+    assert status["state"] == "active"
+    assert status["pid"] == __import__("os").getpid()
+    assert status["settle_stop_reason"] == "task_terminal"
 
 
 def test_daemon_exit_does_not_clobber_status_owned_by_other_live_pid(monkeypatch, isolate_agent_runtime_root):
@@ -391,7 +392,7 @@ def test_lease_held_start_does_not_clobber_owner_status(monkeypatch, isolate_age
     assert engine.calls == 0
 
 
-def test_targeted_daemon_archives_terminal_task_on_exit(isolate_agent_runtime_root):
+def test_lane_daemon_does_not_auto_archive_target_task_on_exit(isolate_agent_runtime_root):
     from agent_runtime.store import TaskStore
 
     ts = now()
@@ -403,4 +404,4 @@ def test_targeted_daemon_archives_terminal_task_on_exit(isolate_agent_runtime_ro
     daemon.run_foreground(max_loops=3)
 
     remaining = [t.id for t in store.list_all()]
-    assert "task_term" not in remaining
+    assert "task_term" in remaining

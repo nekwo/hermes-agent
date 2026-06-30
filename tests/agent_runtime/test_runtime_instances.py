@@ -23,7 +23,7 @@ def _task(task_id: str, state=TaskState.CREATED) -> Task:
     )
 
 
-def test_new_goal_hygiene_parks_open_tasks_without_archive(isolate_agent_runtime_root):
+def test_new_goal_hygiene_preserves_open_tasks_without_parking(isolate_agent_runtime_root):
     task_store = TaskStore()
     task_store.create(_task("task_old"))
 
@@ -36,23 +36,21 @@ def test_new_goal_hygiene_parks_open_tasks_without_archive(isolate_agent_runtime
 
     assert paths.task_path("task_old").exists()
     assert not paths.deleted_archive_dir().exists()
-    assert report["parked_open_task_ids"] == ["task_old"]
-    instance = GoalRuntimeInstanceStore().latest_for_task("task_old")
-    assert instance is not None
-    assert instance.lane == "background"
-    assert instance.state == "parked"
+    assert report["parked_open_task_ids"] == []
+    assert GoalRuntimeInstanceStore().latest_for_task("task_old") is None
 
 
-def test_activate_foreground_runtime_parks_previous_foreground(isolate_agent_runtime_root):
+def test_activate_foreground_runtime_is_lane_compat_without_parking(isolate_agent_runtime_root):
     store = GoalRuntimeInstanceStore()
     first = store.create_foreground(task_id="task_old", started_by="test")
 
     activated = activate_foreground_runtime("task_new", started_by="test", runtime_store=store)
 
     assert activated["target_task_id"] == "task_new"
-    assert store.get(first.id).lane == "background"
-    assert store.get(first.id).state == "parked"
-    assert store.active_foreground().task_id == "task_new"
+    assert activated["queue_mode"] == "lane"
+    assert store.get(first.id).lane == first.id
+    assert store.get(first.id).state == "running"
+    assert store.active_foreground() is None
 
 
 def test_new_goal_hygiene_cancels_stale_foreign_active_run(isolate_agent_runtime_root):

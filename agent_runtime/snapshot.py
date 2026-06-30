@@ -50,7 +50,7 @@ from .state_machine import MissionStateMachine
 from .serde import from_jsonable, to_jsonable
 from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
-from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
+from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RealmStore, RunStore, TaskStore, WorkspaceStore
 from .tool_visibility import (
     agent_hud_state_for_persona,
     permission_state_for_persona,
@@ -116,6 +116,10 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     proof_batches = proof_batch_store.list_all()
     repo_bundles = repo_bundle_store.list_all()
     runtime_instances = runtime_instance_store.list_all()
+    workspace_store = WorkspaceStore()
+    realm_store = RealmStore()
+    workspaces = workspace_store.list_all(include_archived=True)
+    realms = realm_store.list_all(include_archived=True)
     blueprint_runs = blueprint_run_store.list_all()
     agent_summaries = [_agent_summary(a) for a in agents]
     available_personas = _available_persona_summary(agents)
@@ -142,7 +146,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     session_db = _default_persona_session_db()
     data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
         "decision_contract_hash": contract_hash(),
         "event_contract_version": CONTRACT_SCHEMA_VERSION,
@@ -193,6 +197,28 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             )
             for t in tasks
         ],
+        "goals": [
+            _goal_projection_from_task(
+                t,
+                proof_store.list_for_task(t.id),
+                tasks,
+                incidents,
+                runs,
+                event_log.for_task(t.id, limit=200),
+                workers=workers,
+                run_store=run_store,
+                persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
+                repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
+                runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
+                workspaces=workspaces,
+            )
+            for t in tasks
+        ],
+        "workspaces": [_workspace_summary(item, tasks=tasks) for item in workspaces],
+        "realms": [_realm_summary(item, workspaces=workspaces) for item in realms],
+        "active_workspace_id": workspace_store.active_id(),
+        "active_realm_id": realm_store.active_id(),
+        "warnings": _snapshot_warnings(persona_assignments),
         "archived_tasks": _archived_task_summaries(),
         "agents": agent_summaries,
         "available_personas": available_personas,
@@ -1013,7 +1039,8 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
 
 def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None):
     gate = task_verdict_proof_satisfied(task, proofs)
-    current = next((s for s in task_stage_records(task) if s.id == task.current_stage_id), None)
+    current_stage_id = _task_current_stage_id(task)
+    current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
     untriaged = untriaged_issue_discoveries(task)
     child_count = len([item for item in (all_tasks or []) if getattr(item, "parent_task_id", None) == task.id])
     open_incidents = [item for item in (incidents or []) if item.task_id == task.id and item.closed_at is None]
@@ -1030,12 +1057,15 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
     runtime_lane = _runtime_lane_summary(runtime_instances or [])
     return {
         "task_id": task.id,
+        "goal_id": getattr(task, "goal_id", None) or task.id,
         "title": task.title,
         "state": str(task.state),
+        "workspace_id": getattr(task, "workspace_id", None),
+        "realm_id": None,
         "mission_state": _mission_lifecycle_state(task, active_runs, open_incidents, gate),
         "parent_task_id": task.parent_task_id,
         "child_task_count": child_count,
-        "current_stage_id": task.current_stage_id,
+        "current_stage_id": current_stage_id,
         "current_stage_title": current.title if current else None,
         "simplified_phase": simplified_phase_for_task(task, bundles),
         "active_assignment_id": next((assignment.id for assignment in assignments if assignment.state in ACTIVE_ASSIGNMENT_STATES), None),
@@ -1100,6 +1130,103 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
     }
 
 
+def _task_current_stage_id(task) -> str | None:
+    plan = getattr(task, "mission_plan", None)
+    return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
+
+
+def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, workspaces=None) -> dict:
+    row = _task_summary(
+        task,
+        proofs,
+        all_tasks,
+        incidents,
+        runs,
+        events,
+        workers=workers,
+        run_store=run_store,
+        persona_assignments=persona_assignments,
+        repo_bundles=repo_bundles,
+        runtime_instances=runtime_instances,
+    )
+    workspace_id = getattr(task, "workspace_id", None)
+    realm_id = None
+    for workspace in workspaces or []:
+        if getattr(workspace, "id", None) == workspace_id:
+            realm_id = getattr(workspace, "realm_id", None)
+            break
+    row.update(
+        {
+            "id": getattr(task, "goal_id", None) or task.id,
+            "kind": "goal",
+            "task_id": task.id,
+            "workspace_id": workspace_id,
+            "realm_id": realm_id,
+        }
+    )
+    return row
+
+
+def _workspace_summary(workspace, *, tasks) -> dict:
+    goals = [task for task in tasks if getattr(task, "workspace_id", None) == workspace.id]
+    return {
+        "id": workspace.id,
+        "kind": "workspace",
+        "name": workspace.name,
+        "slug": workspace.slug,
+        "realm_id": workspace.realm_id,
+        "agents": len(workspace.agent_ids or []),
+        "agent_ids": list(workspace.agent_ids or []),
+        "goals": len(goals),
+        "isolation": workspace.isolation,
+        "max_concurrent_lanes": workspace.max_concurrent_lanes,
+        "default_blueprint_id": workspace.default_blueprint_id,
+        "archived": bool(workspace.archived),
+        "updated_at": workspace.updated_at,
+    }
+
+
+def _realm_summary(realm, *, workspaces) -> dict:
+    workspace_ids = [workspace.id for workspace in workspaces if getattr(workspace, "realm_id", None) == realm.id]
+    configured_ids = list(getattr(realm, "workspace_ids", []) or [])
+    merged_ids = list(dict.fromkeys([*configured_ids, *workspace_ids]))
+    return {
+        "id": realm.id,
+        "kind": "realm",
+        "name": realm.name,
+        "slug": realm.slug,
+        "server_id": realm.server_id,
+        "workspaces": len(merged_ids),
+        "workspace_ids": merged_ids,
+        "sync": "in_sync",
+        "archived": bool(realm.archived),
+        "updated_at": realm.updated_at,
+    }
+
+
+def _snapshot_warnings(persona_assignments) -> list[dict]:
+    warnings: list[dict] = []
+    active = [item for item in persona_assignments or [] if getattr(item, "state", None) in ACTIVE_ASSIGNMENT_STATES]
+    for assignment in active:
+        goal_id = getattr(assignment, "goal_id", None) or getattr(assignment, "task_id", None)
+        for other in active:
+            if other is assignment:
+                continue
+            other_goal = getattr(other, "goal_id", None) or getattr(other, "task_id", None)
+            if assignment.persona_id == other.persona_id and goal_id and other_goal and goal_id != other_goal:
+                warnings.append(
+                    {
+                        "code": "agent_already_assigned",
+                        "persona_id": assignment.persona_id,
+                        "goal_id": goal_id,
+                        "other_goal_id": other_goal,
+                        "assignment_id": assignment.id,
+                    }
+                )
+                break
+    return warnings
+
+
 def _mission_lifecycle_state(task, active_runs, open_incidents, gate) -> str:
     if task.state == TaskState.CANCELLED:
         return "cancelled"
@@ -1134,21 +1261,39 @@ def _mission_level_state(task, *, active_runs, active_workers, events, role_stre
     for persona_id in actor_ids:
         owned_stages = stage_by_owner.get(persona_id, [])
         active_owned = next((stage for stage in owned_stages if stage.id == active_stage_id), None)
+        actor_stage = active_owned if active_owned is not None else (owned_stages[0] if owned_stages else None)
         latest = _latest_actor_event(persona_id, events)
         runs = [run for run in active_runs if getattr(run, "persona_id", None) == persona_id]
         workers = [worker for worker in active_workers if getattr(worker, "persona_id", None) == persona_id]
+        stream = stream_by_id.get(persona_id) or {}
+        status = getattr(getattr(actor_stage, "status", None), "value", getattr(actor_stage, "status", None))
         actors.append(
             {
+                "id": f"actor_{persona_id}",
+                "kind": "agent",
                 "actor_id": persona_id,
                 "persona_id": persona_id,
+                "persona_instance_id": next(iter(stream.get("persona_instance_ids") or []), None),
+                "goal_id": getattr(task, "goal_id", None) or task.id,
+                "task_id": task.id,
+                "chat_session_id": next((getattr(worker, "session_id", None) for worker in workers if getattr(worker, "session_id", None)), None),
+                "worker_session_id": next((getattr(worker, "id", None) for worker in workers), None),
                 "display_name": _display_name_for_persona(persona_id),
+                "label": _display_name_for_persona(persona_id),
                 "role": _actor_role_for_persona(persona_id),
                 "presence": _actor_presence(active_owned, owned_stages, runs, workers),
-                "stage_id": active_owned.id if active_owned is not None else (owned_stages[0].id if owned_stages else None),
+                "stage_id": getattr(actor_stage, "id", None),
+                "flow": {
+                    "blueprint_id": getattr(plan, "blueprint_id", None),
+                    "stage": getattr(actor_stage, "id", None),
+                    "status": status,
+                },
                 "state_label": _actor_state_label(active_owned, owned_stages, runs, workers),
+                "state": _actor_state_label(active_owned, owned_stages, runs, workers),
                 "active_run_ids": [run.id for run in runs],
                 "active_worker_session_ids": [worker.id for worker in workers],
                 "latest_safe_event": latest,
+                "latest_event": latest,
                 "budget": _actor_budget_summary(runs, stream_by_id.get(persona_id)),
                 "hidden_by_blueprint": False,
             }
@@ -1643,6 +1788,7 @@ def _role_streams(task, events, runs, workers, *, persona_assignments=None, role
                 "persona_id": role_id,
                 "display_name": _display_name_for_persona(role_id),
                 "current_stage_id": _role_current_stage(task, role_id),
+                "persona_instance_ids": [assignment.persona_instance_id for assignment in role_assignments if getattr(assignment, "persona_instance_id", None)],
                 "active_run_ids": [run.id for run in role_runs if run.state in ACTIVE_RUN_STATES],
                 "active_worker_session_ids": [
                     worker.id

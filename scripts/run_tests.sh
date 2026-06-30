@@ -78,6 +78,15 @@ echo "  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)"
 
 cd "$REPO_ROOT"
 
+RUNNER_PATH="$SCRIPT_DIR/run_tests_parallel.py"
+if command -v cygpath >/dev/null 2>&1 && [[ "$PYTHON" == *.exe ]]; then
+  RUNNER_PATH="$(cygpath -w "$RUNNER_PATH")"
+elif [[ "$PYTHON" == *.exe && "$RUNNER_PATH" =~ ^/mnt/([A-Za-z])/(.*)$ ]]; then
+  drive="${BASH_REMATCH[1]^^}"
+  rest="${BASH_REMATCH[2]//\//\\}"
+  RUNNER_PATH="${drive}:\\${rest}"
+fi
+
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
@@ -89,4 +98,4 @@ exec env -i \
   ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
   ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \
-  "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
+  "$PYTHON" "$RUNNER_PATH" "$@"

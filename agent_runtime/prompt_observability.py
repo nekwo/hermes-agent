@@ -100,10 +100,12 @@ def mission_chat_prompt_observability(
             },
         ],
         "context_files": _profile_context_files(profile),
+        "skills": _skills_context(persona, profile),
         "chat_history_context": history,
         "retrieval_context": [],
         "final_model_input": _safe_final_model_input(final_model_input),
         "model_selection": _safe_model_selection(model_selection),
+        "context_budget": _context_budget(model_selection, final_model_input),
         "prompt_flags": {
             "skip_context_files": False,
             "skip_memory": False,
@@ -252,10 +254,15 @@ def _merge_latest_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any
             safe_assignment_token(item.get("persona_id")) or "",
         )
 
+    built_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in contexts:
+        built_by_key.setdefault(key_for(item), item)
+
     for item in load_latest_prompt_observability_contexts():
         key = key_for(item)
         if key in seen:
             continue
+        _backfill_derived_fields(item, built_by_key.get(key))
         merged.append(item)
         seen.add(key)
     for item in contexts:
@@ -265,6 +272,218 @@ def _merge_latest_contexts(contexts: list[dict[str, Any]]) -> list[dict[str, Any
         merged.append(item)
         seen.add(key)
     return merged
+
+
+def _backfill_derived_fields(item: dict[str, Any], built: dict[str, Any] | None) -> None:
+    """Add `skills` / `context_budget` to persisted contexts that predate them.
+
+    Persisted observability rows are written at chat time, so rows captured
+    before these fields existed lack them. Backfill skills from the freshly
+    built context (correct per-persona set) or the profile snapshot, and
+    recompute the budget from the row's own model selection + final input.
+    """
+    if not item.get("skills"):
+        if built and built.get("skills"):
+            item["skills"] = built["skills"]
+        else:
+            profile = safe_assignment_token(item.get("profile"))
+            names = _profile_snapshot_skill_names(profile) if profile else []
+            if names:
+                item["skills"] = [
+                    {
+                        "name": safe_assignment_token(name) or name,
+                        "kind": "skill",
+                        "status": "loaded",
+                        "hash_tracked": False,
+                        "source": "profile_skills_snapshot",
+                    }
+                    for name in names[:80]
+                ]
+    if item.get("context_budget") is None:
+        budget = _context_budget(item.get("model_selection"), item.get("final_model_input"))
+        if budget is not None:
+            item["context_budget"] = budget
+
+
+_DEFAULT_COMPACTION_RATIO = 0.50
+_CODEX_GPT55_WINDOW_CAP = 272_000
+
+
+def _static_context_window(model: str, provider: str | None) -> int | None:
+    """Resolve a model's context window from the static fallback map.
+
+    Network-free (this runs in the per-turn observability path) — mirrors the
+    longest-key-first substring fallback in ``agent.model_metadata`` and applies
+    the known ChatGPT-Codex OAuth cap (gpt-5.5 → 272K instead of the 1.05M raw).
+    """
+    name = (model or "").lower()
+    if not name:
+        return None
+    try:
+        from agent.model_metadata import DEFAULT_CONTEXT_LENGTHS
+    except Exception:
+        return None
+    window: int | None = None
+    for key in sorted(DEFAULT_CONTEXT_LENGTHS, key=len, reverse=True):
+        if key.lower() in name:
+            try:
+                window = int(DEFAULT_CONTEXT_LENGTHS[key])
+            except (TypeError, ValueError):
+                window = None
+            break
+    if not window:
+        return None
+    prov = (provider or "").lower()
+    if window > _CODEX_GPT55_WINDOW_CAP and "codex" in prov and "gpt-5.5" in name:
+        window = _CODEX_GPT55_WINDOW_CAP
+    return window
+
+
+def _compaction_ratio(model: str, provider: str | None) -> float:
+    """The fraction of the window at which Hermes compacts (0.5 default)."""
+    try:
+        from agent.auxiliary_client import _compression_threshold_for_model
+
+        override = _compression_threshold_for_model(
+            model, provider, allow_codex_gpt55_autoraise=True
+        )
+        if isinstance(override, (int, float)) and 0 < float(override) <= 1:
+            return float(override)
+    except Exception:
+        pass
+    return _DEFAULT_COMPACTION_RATIO
+
+
+def _estimate_used_tokens(final_model_input: dict[str, Any] | None) -> int | None:
+    if not isinstance(final_model_input, dict):
+        return None
+    messages = final_model_input.get("messages")
+    if not isinstance(messages, list):
+        return None
+    total_bytes = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        raw = message.get("bytes")
+        if isinstance(raw, int) and raw > 0:
+            total_bytes += raw
+        else:
+            total_bytes += len(str(message.get("content") or "").encode("utf-8"))
+    if total_bytes <= 0:
+        return None
+    return max(1, total_bytes // 4)
+
+
+def _context_budget(
+    model_selection: dict[str, Any] | None,
+    final_model_input: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Per-model context budget for the Sent-to-model bar: window + compaction line.
+
+    Returns None (UI omits the bar) when the model/window can't be resolved.
+    """
+    sel = model_selection if isinstance(model_selection, dict) else {}
+    model = sel.get("effective_model") or sel.get("chat_model") or sel.get("default_model")
+    provider = sel.get("effective_provider") or sel.get("chat_provider") or sel.get("default_provider")
+    if not model:
+        return None
+    window = _static_context_window(str(model), provider)
+    if not window:
+        return None
+    ratio = _compaction_ratio(str(model), provider)
+    return {
+        "model": safe_assignment_text(str(model), limit=120),
+        "provider": safe_assignment_token(provider) if provider else None,
+        "window_tokens": int(window),
+        "compaction_ratio": round(float(ratio), 4),
+        "compaction_tokens": int(window * ratio),
+        "used_tokens": _estimate_used_tokens(final_model_input),
+        "used_estimated": True,
+    }
+
+
+def _profile_snapshot_skill_names(profile: str) -> list[str]:
+    """Skill names compiled into the profile's prompt (the skills snapshot).
+
+    Used when a persona declares no per-agent skill subset (e.g. a bare profile
+    identity) — the profile still compiles its skills snapshot into the prompt,
+    so reporting zero would contradict the loaded `.skills_prompt_snapshot.json`.
+    """
+    try:
+        profile_dir = get_profile_dir(profile)
+    except Exception:
+        return []
+    if profile_dir is None:
+        return []
+    path = profile_dir / ".skills_prompt_snapshot.json"
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    entries = data.get("skills") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return []
+    names: list[str] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            name = str(entry.get("skill_name") or entry.get("frontmatter_name") or "").strip()
+            if name:
+                names.append(name)
+    return names
+
+
+def _skills_context(persona: Any, profile: str) -> list[dict[str, Any]]:
+    """Redaction-safe list of the skills compiled into this persona's prompt.
+
+    Reports skill *identity* and install/hash status (names only — never SKILL.md
+    bodies). Hash-tracked harness skills surface drift; the rest are reported as
+    declared/loaded so Mission Control can show exactly what shapes the prompt.
+    Falls back to the profile skills snapshot when the persona declares none.
+    """
+    declared = [str(item).strip() for item in (getattr(persona, "skills", None) or []) if str(item).strip()]
+    source_label = "persona_definition"
+    if not declared:
+        declared = _profile_snapshot_skill_names(profile)
+        source_label = "profile_skills_snapshot"
+    if not declared:
+        return []
+    tracked: set[str] = set()
+    mismatched: set[str] = set()
+    missing: set[str] = set()
+    try:
+        from .skill_install import HARNESS_SKILLS, harness_skill_hash_mismatches
+
+        tracked = {name for name in declared if name in HARNESS_SKILLS}
+        mismatched = set(harness_skill_hash_mismatches(sorted(tracked)))
+    except Exception:
+        pass
+    try:
+        from .profile_readiness import _missing_skill_names
+
+        missing = set(_missing_skill_names(sorted(tracked)))
+    except Exception:
+        pass
+    skills: list[dict[str, Any]] = []
+    for name in declared[:80]:
+        token = safe_assignment_token(name) or name
+        if name in missing:
+            status = "missing"
+        elif name in mismatched:
+            status = "hash_mismatch"
+        else:
+            status = "loaded"
+        skills.append(
+            {
+                "name": token,
+                "kind": "skill",
+                "status": status,
+                "hash_tracked": name in tracked,
+                "source": source_label,
+            }
+        )
+    return skills
 
 
 def _profile_context_files(profile: str) -> list[dict[str, Any]]:

@@ -110,7 +110,7 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills", "mission_goal"],
             system_prompt_path="personas/neko_supervisor/system.md",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
-            skills=["harness-mission-lead"],
+            skills=["harness-mission-lead", "harness-runtime-model"],
         ),
         AgentPersona(
             id="dev",

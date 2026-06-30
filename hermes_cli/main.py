@@ -2690,12 +2690,16 @@ def cmd_postinstall(args):
     print("⚕ Hermes post-install bootstrap")
     print()
 
+    interactive = not (getattr(args, "yes", False) or getattr(args, "non_interactive", False))
     for dep in ("node", "browser", "ripgrep", "ffmpeg"):
-        ensure_dependency(dep)
+        ensure_dependency(dep, interactive=interactive)
 
     if not _has_any_provider_configured():
         print()
-        cmd_setup(args)
+        if interactive:
+            cmd_setup(args)
+        else:
+            print("✓ Post-install complete. Provider setup skipped for non-interactive install.")
     else:
         print()
         print("✓ Post-install complete.")
@@ -13464,7 +13468,14 @@ def main():
 
     # Execute the command
     if hasattr(args, "func"):
-        code = args.func(args)
+        try:
+            code = args.func(args)
+        except Exception as exc:
+            if getattr(args, "command", None) == "harness":
+                from hermes_cli.harness import emit_harness_error
+
+                sys.exit(emit_harness_error(exc, args=args))
+            raise
         if getattr(args, "command", None) == "harness" and isinstance(code, int):
             sys.exit(code)
     else:

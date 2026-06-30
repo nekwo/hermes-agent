@@ -108,5 +108,5 @@ def test_neko_prompt_slices_broad_specialist_work_before_dev():
     prompt = load_bundled_prompt("alice_supervisor")
 
     assert "broad specialist mission" in prompt
-    assert "slice it for Dev" in prompt
-    assert "do not send broad multi-repo work straight to Dev" in prompt
+    assert "slice it for the rightful graph-selected specialist" in prompt
+    assert "keep the visible path faithful to the active blueprint" in prompt

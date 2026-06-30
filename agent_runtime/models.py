@@ -96,6 +96,47 @@ class Task:
     plan_review: PlanReview | None = None
     mission_plan: MissionPlan | None = None
     planning_locked: bool = False
+    goal_id: str | None = None
+    workspace_id: str | None = None
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.goal_id:
+            self.goal_id = self.id
+
+
+# Deprecated compatibility alias for one release while persisted files and
+# legacy imports still use Task as the storage record name.
+Goal = Task
+
+
+@dataclass(slots=True)
+class Workspace:
+    id: str
+    slug: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+    agent_ids: list[str] = field(default_factory=list)
+    default_blueprint_id: str | None = None
+    isolation: str = "soft"
+    max_concurrent_lanes: int | None = None
+    realm_id: str | None = None
+    archived: bool = False
+    schema_version: int = 1
+
+
+@dataclass(slots=True)
+class Realm:
+    id: str
+    slug: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+    server_id: str | None = None
+    workspace_ids: list[str] = field(default_factory=list)
+    sync_manifest_ref: str | None = None
+    archived: bool = False
     schema_version: int = 1
 
 

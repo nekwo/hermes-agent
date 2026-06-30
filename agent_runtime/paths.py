@@ -52,6 +52,14 @@ def runtime_instances_dir() -> Path:
     return store_root() / "runtime_instances"
 
 
+def workspaces_dir() -> Path:
+    return store_root() / "workspaces"
+
+
+def realms_dir() -> Path:
+    return store_root() / "realms"
+
+
 def repo_bundles_task_dir(task_id: str) -> Path:
     return repo_bundles_dir() / _safe_path_token(task_id)
 
@@ -213,6 +221,22 @@ def runtime_instance_path(instance_id: str) -> Path:
     return runtime_instances_dir() / f"{_safe_path_token(instance_id)}.json"
 
 
+def workspace_path(workspace_id: str) -> Path:
+    return workspaces_dir() / f"{_safe_path_token(workspace_id)}.json"
+
+
+def realm_path(realm_id: str) -> Path:
+    return realms_dir() / f"{_safe_path_token(realm_id)}.json"
+
+
+def active_workspace_path() -> Path:
+    return store_root() / "active_workspace.json"
+
+
+def active_realm_path() -> Path:
+    return store_root() / "active_realm.json"
+
+
 def run_path(run_id: str) -> Path:
     return runs_dir() / f"{run_id}.json"
 
@@ -236,4 +260,3 @@ def incident_detail_path(incident_id: str) -> Path:
 def _safe_path_token(value: str) -> str:
     text = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in str(value or "").strip())
     return text.strip("._")[:120] or "item"
-

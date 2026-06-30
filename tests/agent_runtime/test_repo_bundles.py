@@ -332,6 +332,7 @@ def test_ticker_links_repo_bundle_to_assignment_and_marks_delivery(isolate_agent
     task_store = TaskStore()
     task_data = _task_with_plan()
     task_data.current_stage_id = "backend_contract"
+    task_data.mission_plan.current_stage_id = "backend_contract"
     task = task_store.create(task_data)
     ProofStore().attach(
         Proof(
@@ -404,6 +405,7 @@ def test_ticker_marks_request_test_run_bundle_delivered_after_passing_proof(isol
     task_store = TaskStore()
     task_data = _task_with_plan("task_request_test_bundle")
     task_data.current_stage_id = "backend_contract"
+    task_data.mission_plan.current_stage_id = "backend_contract"
     task = task_store.create(task_data)
     proof_store = ProofStore()
 
@@ -429,6 +431,7 @@ def test_qa_review_does_not_regress_delivered_bundle_to_running(isolate_agent_ru
     task_store = TaskStore()
     task_data = _task_with_plan("task_qa_bundle")
     task_data.current_stage_id = "backend_contract"
+    task_data.mission_plan.current_stage_id = "backend_contract"
     task = task_store.create(task_data)
     proof_store = ProofStore()
     dev_engine = TickEngine(
@@ -451,6 +454,7 @@ def test_qa_review_does_not_regress_delivered_bundle_to_running(isolate_agent_ru
     local_proof = proof_store.get("proof_requested_ok")
     _attach_product_promotion_proofs(task, proof_store, after=local_proof.created_at)
     task.current_stage_id = "qa_release"
+    task.mission_plan.current_stage_id = "qa_release"
     task_store.update(task, actor="test", reason="advance to QA")
 
     qa_result = TickEngine(

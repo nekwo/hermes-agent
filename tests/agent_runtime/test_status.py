@@ -17,7 +17,7 @@ def test_status_counts_open_tasks():
     assert s["dirty_state"]["runtime"]["open_task_ids"] == ["t"]
 
 
-def test_status_surfaces_parked_background_task_ids(isolate_agent_runtime_root):
+def test_status_lane_only_does_not_report_background_task_ids(isolate_agent_runtime_root):
     ts = TaskStore()
     n = now()
     ts.create(Task(id="task_foreground", title="F", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
@@ -29,9 +29,8 @@ def test_status_surfaces_parked_background_task_ids(isolate_agent_runtime_root):
     s = build_status(task_store=ts)
 
     assert s["open_tasks"] == 2
-    assert s["background_open_tasks"] == 1
-    assert s["background_task_ids"] == ["task_background"]
-    assert s["unparked_open_tasks"] == 0
+    assert s["background_open_tasks"] == 0
+    assert s["background_task_ids"] == []
 
 
 def test_status_surfaces_swarm_certification_state(isolate_agent_runtime_root):

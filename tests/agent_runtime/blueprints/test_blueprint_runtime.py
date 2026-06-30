@@ -77,7 +77,7 @@ def test_one_agent_blueprint_instantiates_to_mission_plan_and_run_slot():
     assert plan.blueprint_version == 1
     assert plan.bindings == {"builder": "gpt-launcher"}
     assert plan.binding_sources == {"builder": "profile:gpt-launcher"}
-    assert plan.stages[0].owner == "builder"
+    assert plan.stages[0].owner == "gpt-launcher"
     assert plan.stages[0].owner_slot == "builder"
 
     action = MissionStateMachine().next_action(task)
@@ -310,7 +310,7 @@ def test_decision_and_proof_derive_stage_outcome_and_route_edge():
 
     result = MissionStateMachine().apply_decision(task, decision, actor="qa")
 
-    assert result.from_state == TaskState.CREATED
+    assert result.from_state == TaskState.RUNNING
     assert task.mission_plan.current_stage_id is None
     assert MissionStateMachine().next_action(task).type == HarnessActionType.COMPLETE_TASK
 

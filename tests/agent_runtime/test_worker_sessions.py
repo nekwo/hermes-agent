@@ -337,7 +337,10 @@ def test_worker_cli_lists_and_controls_sessions(isolate_agent_runtime_root):
         text=True,
         timeout=30,
     )
-    rows = json.loads(listed.stdout)
+    listed_envelope = json.loads(listed.stdout)
+    assert listed_envelope["kind"] == "list"
+    assert listed_envelope["item_kind"] == "worker"
+    rows = listed_envelope["items"]
     assert rows[0]["worker_session_id"] == worker.id
 
     possessed = subprocess.run(

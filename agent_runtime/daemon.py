@@ -58,7 +58,7 @@ class MissionDaemon:
         sleep_fn: Callable[[float], None] = time.sleep,
     ):
         self.engine_factory = engine_factory or TickEngine
-        self.target_task_id = _safe_task_id(target_task_id)
+        self.target_task_id = None
         self.foreground_runtime_instance_id = _safe_task_id(foreground_runtime_instance_id)
         self.interval_seconds = interval_seconds
         self.idle_interval_seconds = idle_interval_seconds
@@ -108,7 +108,7 @@ class MissionDaemon:
                     "loops": loops,
                     "heartbeat_at": _utc_now(),
                     "target_task_id": self.target_task_id,
-                    "queue_mode": "foreground" if self.target_task_id else "global",
+                    "queue_mode": "lane",
                     "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                 })
                 _refresh_daemon_lease(os.getpid())
@@ -118,10 +118,7 @@ class MissionDaemon:
                 try:
                     engine = self.engine_factory()
                     if hasattr(engine, "run_until_settled"):
-                        if self.target_task_id:
-                            tick = engine.run_until_settled(task_id=self.target_task_id, max_actions=10)
-                        else:
-                            tick = engine.run_until_settled(max_actions=10)
+                        tick = engine.run_until_settled(max_actions=10)
                     else:
                         tick = engine.tick_once()
                 except Exception as exc:
@@ -131,7 +128,7 @@ class MissionDaemon:
                         "loops": loops,
                         "heartbeat_at": _utc_now(),
                         "target_task_id": self.target_task_id,
-                        "queue_mode": "foreground" if self.target_task_id else "global",
+                        "queue_mode": "lane",
                         "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                         "error_class": type(exc).__name__,
                         "error_summary": "Mission Daemon tick failed",
@@ -143,10 +140,6 @@ class MissionDaemon:
                 wait_seconds = 0 if actions and stop_reason == "max_actions" else (self.interval_seconds if actions else self.idle_interval_seconds)
                 next_wake = _utc_now() + timedelta(seconds=wait_seconds)
                 _write_daemon_status(_status_from_tick(tick, loops=loops, wait_seconds=wait_seconds, next_wake_at=next_wake))
-                if self.target_task_id and stop_reason == "task_terminal":
-                    self._stop_requested = True
-                    self._archive_terminal_target()
-                    break
                 if wait_seconds > 0 and not self._stop_requested:
                     self._sleep_with_stop(wait_seconds)
         finally:
@@ -193,7 +186,7 @@ class MissionDaemon:
                 "mode": "mission_daemon",
                 "self_driven": True,
                 "pid": os.getpid(),
-                "queue_mode": "foreground" if self.target_task_id else "global",
+                "queue_mode": "lane",
             }
             if reason:
                 payload["reason"] = str(reason)[:120]
@@ -237,21 +230,12 @@ def _write_final_offline_status(pid: int, *, loops: int, last_tick_id: str | Non
 
 
 def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: str | None = None, interval_seconds: float | None = None, idle_interval_seconds: float | None = None) -> dict:
-    task_id = _safe_task_id(task_id)
+    task_id = None
     foreground_runtime_instance_id = _safe_task_id(foreground_runtime_instance_id)
     status = read_daemon_status()
     pid = status.get("pid")
     if isinstance(pid, int) and _pid_is_alive(pid):
         existing_target = _safe_task_id(status.get("target_task_id"))
-        if task_id and existing_target != task_id:
-            return {
-                "started": False,
-                "pid": pid,
-                "state": status.get("state", "running"),
-                "target_task_id": existing_target,
-                "requested_task_id": task_id,
-                "error": "daemon_target_conflict",
-            }
         return {"started": False, "pid": pid, "state": status.get("state", "running")}
     lease = _read_daemon_lease()
     lease_pid = lease.get("pid") if isinstance(lease, dict) else None
@@ -259,8 +243,6 @@ def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: 
         return {"started": False, "pid": lease_pid, "state": "running", "error": "daemon_lease_held"}
 
     cmd = [sys.executable, "-m", "hermes_cli.main", "harness", "daemon", "foreground"]
-    if task_id:
-        cmd.extend(["--task", task_id])
     if interval_seconds is not None:
         cmd.extend(["--interval", str(interval_seconds)])
     if idle_interval_seconds is not None:
@@ -273,10 +255,10 @@ def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: 
         "pid": proc.pid,
         "heartbeat_at": _utc_now(),
         "target_task_id": task_id,
-        "queue_mode": "foreground" if task_id else "global",
+        "queue_mode": "lane",
         "foreground_runtime_instance_id": foreground_runtime_instance_id,
     })
-    return {"started": True, "pid": proc.pid, "state": "starting", "target_task_id": task_id, "queue_mode": "foreground" if task_id else "global"}
+    return {"started": True, "pid": proc.pid, "state": "starting", "target_task_id": task_id, "queue_mode": "lane"}
 
 
 def stop_daemon() -> dict:
@@ -437,9 +419,11 @@ def _status_from_tick(tick: TickResult, *, loops: int, wait_seconds: float, next
     previous = read_daemon_status()
     if previous.get("target_task_id"):
         status["target_task_id"] = previous.get("target_task_id")
-        status["queue_mode"] = previous.get("queue_mode") or "foreground"
+        status["queue_mode"] = previous.get("queue_mode") or "lane"
     elif previous.get("queue_mode"):
         status["queue_mode"] = previous.get("queue_mode")
+    else:
+        status["queue_mode"] = "lane"
     if previous.get("foreground_runtime_instance_id"):
         status["foreground_runtime_instance_id"] = previous.get("foreground_runtime_instance_id")
     stop_reason = getattr(tick, "stop_reason", None)

@@ -132,7 +132,7 @@ def test_persona_diagnostic_records_assignment_when_enabled(tmp_path, monkeypatc
 
     assert result.ok is True
     assert result.assignment_id
-    assert result.persona_instance_id == "personainst_neko_supervisor"
+    assert result.persona_instance_id == f"personainst_{result.task_id}_neko_supervisor"
     assignment = PersonaAssignmentStore().get(result.assignment_id)
     assert assignment.state == "completed"
     assert assignment.task_id == result.task_id

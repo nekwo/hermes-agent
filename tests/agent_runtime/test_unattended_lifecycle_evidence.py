@@ -59,7 +59,7 @@ def test_burn_in_driver_emits_daemon_lifecycle_events(isolate_agent_runtime_root
     assert "daemon.stopped" in types
 
 
-def test_mission_daemon_emits_lifecycle_events_for_target(isolate_agent_runtime_root):
+def test_mission_daemon_emits_global_lane_lifecycle_events(isolate_agent_runtime_root):
     from datetime import datetime, timezone
 
     from agent_runtime.daemon import MissionDaemon
@@ -80,7 +80,7 @@ def test_mission_daemon_emits_lifecycle_events_for_target(isolate_agent_runtime_
     make_task("task_daemonlife")
     MissionDaemon(engine_factory=SettledEngine, target_task_id="task_daemonlife", interval_seconds=0, idle_interval_seconds=0).run_foreground(max_loops=2)
 
-    types = [event.type for event in EventLog().for_task("task_daemonlife", limit=0)]
+    types = [event.type for event in EventLog().tail(20)]
     assert "daemon.started" in types
     assert "daemon.stopped" in types
 

@@ -2210,7 +2210,7 @@ def test_run_slot_spawns_attributed_persona_instance(isolate_agent_runtime_root)
     )
 
     assert result.ok is True
-    instance = PersonaInstanceStore().get(persona_instance_id_for("backend_dev"))
+    instance = PersonaInstanceStore().get(persona_instance_id_for_placement(f"{task.id}:backend_dev"))
     assert instance.goal_id == task.id
     assert instance.spawned_by == "neko_supervisor"
     summary = persona_instance_summary(instance)
@@ -2267,7 +2267,7 @@ def test_tick_observe_only_links_assignment_to_run_and_worker(monkeypatch, isola
     worker = workers.list_for_task(task.id)[0]
     assert assignment.state == "completed"
     assert run.progress["assignment_id"] == assignment.id
-    assert run.progress["persona_instance_id"] == "personainst_dev"
+    assert run.progress["persona_instance_id"] == persona_instance_id_for_placement(f"{task.id}:dev")
     assert worker.current_assignment_id == assignment.id
 
 

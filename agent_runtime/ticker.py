@@ -27,7 +27,7 @@ from .persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
     persona_assignment_store_enabled,
-    persona_instance_id_for,
+    persona_instance_id_for_placement,
 )
 from .planning import _advance_to_next_dev_stage, _all_stages_dev_complete, _has_backend_contract_delivery_packet, _needs_cross_stack_launcher_completion, _needs_sequential_specialist_join
 from .incidents import MODEL_INVALID_OUTPUT, RUN_BUDGET_EXCEEDED, classify_exception
@@ -420,8 +420,9 @@ class TickEngine:
         if action.type == HarnessActionType.RUN_SLOT:
             PersonaInstanceStore().ensure_for_goal(
                 persona,
-                goal_id=task.id,
+                goal_id=getattr(task, "goal_id", None) or task.id,
                 spawned_by=_spawned_by_for_harness_action(action, task=task),
+                placement_id=f"{getattr(task, 'goal_id', None) or task.id}:{persona.id}",
             )
         worker_store = self.worker_session_store if _enterprise_worker_sessions_enabled(self.config) else None
         assignment = None
@@ -1391,9 +1392,10 @@ def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id
         title=str(title),
         message=str(objective or action.reason),
         created_by="harness",
-        persona_instance_id=persona_instance_id_for(persona_id),
+        persona_instance_id=persona_instance_id_for_placement(f"{getattr(task, 'goal_id', None) or task.id}:{persona_id}"),
         task_id=task.id,
-        stage_id=task.current_stage_id,
+        goal_id=getattr(task, "goal_id", None) or task.id,
+        stage_id=getattr(getattr(task, "mission_plan", None), "current_stage_id", None) or task.current_stage_id,
         repo_bundle_id=repo_bundle_id,
         repo=repo,
         affected_paths=affected_paths,

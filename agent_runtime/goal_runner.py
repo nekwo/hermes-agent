@@ -37,6 +37,7 @@ class GoalRunOptions:
     non_goals: list[str] = field(default_factory=list)
     blueprint_id: str | None = DEFAULT_GOAL_BLUEPRINT_ID
     bindings: dict[str, str] = field(default_factory=dict)
+    workspace_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -187,6 +188,7 @@ class MissionRuntimeController:
                 mission_plan.mission_intent.non_goals = list(options.non_goals)
         task = Task(
             id=f"task_{uuid.uuid4().hex[:8]}",
+            goal_id=f"goal_{uuid.uuid4().hex[:8]}",
             title=options.title,
             description=options.description,
             state=TaskState.CREATED,
@@ -199,6 +201,7 @@ class MissionRuntimeController:
             affected_repos=list(options.affected_repos),
             mission_plan=mission_plan,
             current_stage_id=mission_plan.current_stage_id if mission_plan is not None else None,
+            workspace_id=options.workspace_id,
         )
         return self.task_store.create(task)
 
