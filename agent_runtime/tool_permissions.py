@@ -32,6 +32,9 @@ class ChatToolPermission:
     reason: str = ""
     source: str = "operator"
     updated_at: str = ""
+    expires_at: str = ""
+    turns_remaining: int | None = None
+    expired: bool = False
 
 
 class ChatToolPermissionStore:
@@ -48,16 +51,41 @@ class ChatToolPermissionStore:
         mode = str(item.get("mode") or PERMISSION_MODE_PROFILE_DEFAULT)
         if mode not in SUPPORTED_PERMISSION_MODES:
             mode = PERMISSION_MODE_PROFILE_DEFAULT
-        return ChatToolPermission(
+        record = ChatToolPermission(
             persona_id=str(item.get("persona_id") or persona_id),
             session_id=str(item.get("session_id") or session_id),
             mode=mode,
             reason=str(item.get("reason") or ""),
             source=str(item.get("source") or "operator"),
             updated_at=str(item.get("updated_at") or ""),
+            expires_at=str(item.get("expires_at") or ""),
+            turns_remaining=_optional_int(item.get("turns_remaining")),
         )
+        if _permission_expired(record):
+            return ChatToolPermission(
+                persona_id=record.persona_id,
+                session_id=record.session_id,
+                mode=PERMISSION_MODE_PROFILE_DEFAULT,
+                reason=record.reason,
+                source=f"{record.source}:expired",
+                updated_at=record.updated_at,
+                expires_at=record.expires_at,
+                turns_remaining=record.turns_remaining,
+                expired=True,
+            )
+        return record
 
-    def set(self, *, persona_id: str, session_id: str, mode: str, reason: str, source: str = "operator") -> ChatToolPermission:
+    def set(
+        self,
+        *,
+        persona_id: str,
+        session_id: str,
+        mode: str,
+        reason: str,
+        source: str = "operator",
+        expires_at: str | None = None,
+        turns_remaining: int | None = None,
+    ) -> ChatToolPermission:
         resolved_mode = mode if mode in SUPPORTED_PERMISSION_MODES else PERMISSION_MODE_PROFILE_DEFAULT
         record = ChatToolPermission(
             persona_id=persona_id,
@@ -66,9 +94,11 @@ class ChatToolPermissionStore:
             reason=reason,
             source=source,
             updated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            expires_at=str(expires_at or ""),
+            turns_remaining=turns_remaining if turns_remaining is None else max(0, int(turns_remaining)),
         )
         raw = self._read()
-        raw[_key(persona_id, session_id)] = {
+        payload = {
             "persona_id": record.persona_id,
             "session_id": record.session_id,
             "mode": record.mode,
@@ -76,9 +106,40 @@ class ChatToolPermissionStore:
             "source": record.source,
             "updated_at": record.updated_at,
         }
+        if record.expires_at:
+            payload["expires_at"] = record.expires_at
+        if record.turns_remaining is not None:
+            payload["turns_remaining"] = record.turns_remaining
+        raw[_key(persona_id, session_id)] = payload
         self.path.parent.mkdir(parents=True, exist_ok=True)
         atomic_json_write(self.path, raw, indent=2, sort_keys=True)
         return record
+
+    def consume_turn(self, *, persona_id: str, session_id: str | None) -> ChatToolPermission | None:
+        if not session_id:
+            return None
+        raw = self._read()
+        key = _key(persona_id, session_id)
+        item = raw.get(key)
+        if not isinstance(item, dict):
+            return None
+        record = self.get(persona_id=persona_id, session_id=session_id)
+        if record is None:
+            return None
+        if record.mode != PERMISSION_MODE_UNBOUNDED or record.turns_remaining is None:
+            return record
+        next_turns = max(0, record.turns_remaining - 1)
+        if next_turns == 0:
+            item["mode"] = PERMISSION_MODE_PROFILE_DEFAULT
+            item["source"] = "operator:elevation_expired"
+            item["turns_remaining"] = 0
+        else:
+            item["turns_remaining"] = next_turns
+        item["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        raw[key] = item
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(self.path, raw, indent=2, sort_keys=True)
+        return self.get(persona_id=persona_id, session_id=session_id)
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -102,11 +163,14 @@ def permission_options_for_chat(
     return ToolVisibilityOptions(
         permission_mode=mode,
         permission_source=record.source if record is not None else "persona_role_policy",
+        permission_expired=bool(record.expired) if record is not None else False,
         session_id=session_id,
         task_id=task_id,
         goal_id=goal_id,
         runtime_root=runtime_root,
         blocked_tool_names=extra_blocked_tools_for_permission_mode(mode),
+        expires_at=record.expires_at if record is not None and record.expires_at else None,
+        turns_remaining=record.turns_remaining if record is not None else None,
     )
 
 
@@ -126,3 +190,33 @@ def permission_mode_is_unbounded(mode: str | None) -> bool:
 
 def _key(persona_id: str, session_id: str) -> str:
     return f"{persona_id.strip()}::{session_id.strip()}"
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _permission_expired(record: ChatToolPermission) -> bool:
+    if record.mode == PERMISSION_MODE_PROFILE_DEFAULT:
+        return False
+    if record.turns_remaining is not None and record.turns_remaining <= 0:
+        return True
+    if not record.expires_at:
+        return False
+    raw = record.expires_at.strip()
+    try:
+        expires_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at <= datetime.now(timezone.utc)

@@ -2042,7 +2042,7 @@ def test_profile_persona_resolution_does_not_borrow_role_skills(monkeypatch, iso
         "model": "gpt-5.5",
         "api_mode": "codex_responses",
         "skills": ["harness-mission-lead", "systematic-debugging"],
-        "toolsets": ["terminal", "mission_goal"],
+        "toolsets": ["terminal", "code_execution", "browser", "mission_goal"],
     }
 
     persona = harness._persona_by_id(cfg, "profile:alice")
@@ -2054,7 +2054,9 @@ def test_profile_persona_resolution_does_not_borrow_role_skills(monkeypatch, iso
     assert persona.skills == []
     assert persona.model == "gpt-5.5"
     assert persona.provider == "openai-codex"
-    assert "mission_goal" not in persona.toolsets
+    assert "terminal" in persona.toolsets
+    assert "code_execution" in persona.toolsets
+    assert "mission_goal" in persona.toolsets
 
 
 def test_profile_prompt_observability_uses_profile_skills_and_chat_title(
@@ -2525,6 +2527,8 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     assert summary["tool_resolution"]["persona_id"] == "profile:alice"
     assert summary["turn_tool_context"]["persona_id"] == "profile:alice"
     assert "read_file" in summary["tool_resolution"]["final_model_tools"]
+    assert "terminal" in summary["tool_resolution"]["final_model_tools"]
+    assert "execute_code" in summary["tool_resolution"]["final_model_tools"]
     assert "send_message" in summary["tool_resolution"]["blocked_tool_names"]
     assert summary["permission_state"]["mode"] == "profile_default"
     assert summary["agent_hud_state"]["tool_count"] == len(summary["tool_resolution"]["final_model_tools"])

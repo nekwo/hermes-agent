@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from .config import ensure_persisted_personas, load_agent_runtime_config
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .daemon import read_daemon_status
@@ -7,6 +9,8 @@ from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .dirty_state import build_dirty_state
 from .events import EventLog
 from .observability import build_observability
+from .operator_channels import operator_channel_summary
+from .parity import ProjectionAccountant
 from .persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
@@ -15,6 +19,7 @@ from .persona_assignments import (
     persona_instance_runtime_enabled,
     persona_instance_summary,
 )
+from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, persona_chat_history_summary, persona_chat_trace_summary
 from .profile_readiness import profile_readiness_for_persona
 from .provider_health import provider_health_for_personas
 from .incidents import RUN_BUDGET_EXCEEDED
@@ -25,9 +30,11 @@ from .state_machine import MissionStateMachine
 from .states import RunState, TaskState
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from .worker_sessions import WorkerSessionStore, worker_session_summary
+from .snapshot import _default_persona_session_db, _parity_envelope
 
 
 def build_status(task_store: TaskStore | None = None, run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, proof_store: ProofStore | None = None, event_log: EventLog | None = None, worker_session_store: WorkerSessionStore | None = None) -> dict:
+    _build_started = time.perf_counter()
     task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
     incident_store = incident_store or IncidentStore()
@@ -62,6 +69,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     active_workers = worker_session_store.find_active()
     dirty_state = build_dirty_state(tasks=tasks, runs=runs, incidents=incidents, workers=workers, runtime_instances=runtime_instances)
     foreground_dirty_state = dirty_state.get("runtime", {}).get("foreground", {})
+    recent_events = event_log.tail(20)
     data = {
         "open_tasks": len([t for t in tasks if t.state not in {TaskState.DONE, TaskState.CANCELLED}]),
         "open_task_ids": dirty_state.get("runtime", {}).get("open_task_ids", []),
@@ -93,7 +101,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             },
         },
         "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=event_log.tail(20), execution_mode=cfg.execution_mode, worker_sessions=workers),
+        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=cfg.execution_mode, worker_sessions=workers),
         "next_actions": [
             _next_action(
                 t,
@@ -123,6 +131,31 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             "assignment_store_enabled": persona_assignment_store_enabled(cfg),
         }
         data["persona_instances"] = [persona_instance_summary(instance) for instance in instances]
+        session_db = _default_persona_session_db()
+        history_accountant = ProjectionAccountant("persona_chat_history")
+        trace_accountant = ProjectionAccountant("persona_chat_trace")
+        data["persona_chat_history"] = persona_chat_history_summary(
+            persona_instances=instances,
+            session_db=session_db,
+            message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+            accountant=history_accountant,
+        )
+        data["persona_chat_trace"] = persona_chat_trace_summary(
+            persona_instances=instances,
+            event_log=event_log,
+            message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+            accountant=trace_accountant,
+        )
+        data["operator_channels"] = operator_channel_summary(
+            persona_instances=instances,
+            persona_chat_history=data["persona_chat_history"],
+            persona_chat_trace=data["persona_chat_trace"],
+        )
+        completeness = {
+            "persona_chat_history": history_accountant.summary(),
+            "persona_chat_trace": trace_accountant.summary(),
+        }
+        drop_samples = history_accountant.drop_samples() + trace_accountant.drop_samples()
         if persona_assignment_store_enabled(cfg):
             assignment_store = PersonaAssignmentStore(event_log=event_log)
             assignments = assignment_store.list_all()
@@ -132,6 +165,15 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             }
     else:
         data["persona_instance_runtime"] = {"enabled": False}
+        completeness = {}
+        drop_samples = []
+    data["parity"] = _parity_envelope(
+        data,
+        build_started=_build_started,
+        last_event=recent_events[-1] if recent_events else None,
+        completeness=completeness,
+        drop_samples=drop_samples,
+    )
     return data
 
 

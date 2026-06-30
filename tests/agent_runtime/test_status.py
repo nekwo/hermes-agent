@@ -1,11 +1,24 @@
 from hermes_time import now
+from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import Incident, Proof, Task, TaskStage
 from agent_runtime.proof_rules import ProofType
+from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.status import build_status
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
 from agent_runtime.repo_bundles import acquire_repo_bundle_locks
+
+
+def _persona_runtime_config() -> AgentRuntimeConfig:
+    return AgentRuntimeConfig(
+        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
+            enabled=True,
+            worker_session_store=True,
+            persona_instance_runtime=True,
+            persona_assignment_store=True,
+        )
+    )
 
 
 def test_status_counts_open_tasks():
@@ -40,6 +53,32 @@ def test_status_surfaces_swarm_certification_state(isolate_agent_runtime_root):
     assert s["swarm"]["certification"]["required"] is True
     assert s["swarm"]["certification"]["state"] == "red"
     assert s["swarm"]["certification"]["consecutive_green"] == 0
+
+
+def test_status_projects_operator_channels_for_persona_instances(monkeypatch, isolate_agent_runtime_root):
+    monkeypatch.setattr(
+        "agent_runtime.status.load_agent_runtime_config",
+        lambda: _persona_runtime_config(),
+    )
+
+    s = build_status()
+
+    assert s["persona_instance_runtime"]["enabled"] is True
+    assert s["persona_instances"]
+    assert s["operator_channels"]
+    assert {
+        channel["persona_instance_id"] for channel in s["operator_channels"]
+    }.issuperset(
+        {
+            instance["persona_instance_id"]
+            for instance in s["persona_instances"]
+            if instance["persona_instance_id"]
+        }
+    )
+    assert "persona_chat_history" in s
+    assert "persona_chat_trace" in s
+    assert "included" in s["parity"]["completeness"]["persona_chat_history"]
+    assert "included" in s["parity"]["completeness"]["persona_chat_trace"]
 
 
 def test_status_surfaces_lanes_repo_locks_and_swarm_budget(isolate_agent_runtime_root):

@@ -31,6 +31,7 @@ from .repo_context import RepoExecutionContext, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
 from .store import RunStore, _safe_session_id
 from .tool_permissions import (
+    ChatToolPermissionStore,
     extra_blocked_tools_for_permission_mode,
     permission_mode_is_unbounded,
     permission_options_for_chat,
@@ -195,7 +196,7 @@ class GPTPersonaRuntime:
         if binding.readiness == "missing_profile":
             raise ValueError(binding.summary)
         assert_provider_health_for_persona(persona)
-        return self._runner.run(
+        result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
                 provider=persona.provider or self._default_provider,
@@ -223,6 +224,8 @@ class GPTPersonaRuntime:
                 runtime_root=paths.store_root(),
             )
         )
+        ChatToolPermissionStore().consume_turn(persona_id=persona.id, session_id=session_id)
+        return result
 
     def mission_chat_reply(
         self,
@@ -273,7 +276,7 @@ class GPTPersonaRuntime:
         health_persona.provider = runtime_provider
         health_persona.model = runtime_model
         assert_provider_health_for_persona(health_persona)
-        return self._runner.run(
+        result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
                 provider=runtime_provider,
@@ -306,6 +309,8 @@ class GPTPersonaRuntime:
                 runtime_root=paths.store_root(),
             )
         )
+        ChatToolPermissionStore().consume_turn(persona_id=persona.id, session_id=perm_session_id)
+        return result
 
 
 # Source label for the agent's own scratch turns during an operator chat reply.

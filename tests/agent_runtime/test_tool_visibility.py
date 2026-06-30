@@ -148,6 +148,29 @@ def test_chat_permission_store_can_expand_chat_to_unbounded(tmp_path):
     assert "terminal" in visibility["final_model_tools"]
 
 
+def test_expired_unbounded_permission_falls_back_to_profile_default(tmp_path):
+    persona = _persona("neko_supervisor")
+    store = ChatToolPermissionStore(path=tmp_path / "tool_permissions.json")
+
+    store.set(
+        persona_id=persona.id,
+        session_id="session_expired",
+        mode="unbounded",
+        reason="operator enabled full tools briefly",
+        expires_at="2000-01-01T00:00:00Z",
+    )
+
+    options = permission_options_for_chat(
+        persona,
+        session_id="session_expired",
+        store=store,
+    )
+    state = permission_state_for_persona(persona, options)
+
+    assert state["mode"] == "profile_default"
+    assert state["expired"] is True
+
+
 def test_turn_tool_context_loads_last_actual_tool_schema(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     persona = _persona("dev")

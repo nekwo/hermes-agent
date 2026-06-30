@@ -73,6 +73,20 @@ ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
 
 DEFAULT_SUPERVISOR_PERSONA_ID = "neko_supervisor"
 
+PROFILE_CHAT_FALLBACK_TOOLSETS = (
+    "file",
+    "search",
+    "terminal",
+    "code_execution",
+    "web",
+    "browser",
+    "vision",
+    "session_search",
+    "todo",
+    "skills",
+    "mission_goal",
+)
+
 
 PERSONA_BLOCKED_TOOLS = frozenset(
     {
@@ -118,6 +132,32 @@ def blocked_tool_names(persona: AgentPersona) -> frozenset[str]:
 
 def effective_toolsets(persona: AgentPersona) -> list[str]:
     return validate_toolsets(role_from_persona(persona), persona.toolsets)
+
+
+def profile_chat_toolsets(profile_id: str, personas: list[AgentPersona] | tuple[AgentPersona, ...] | None = None) -> list[str]:
+    """Resolve the toolsets for a raw profile-backed operator chat persona.
+
+    A ``profile:<name>`` chat is not a typed blueprint slot, but when it backs a
+    known mission persona (Alice/Neko is the common case) it should inherit that
+    persona's production tool surface instead of a reduced legacy profile-chat
+    subset. If no typed persona owns the profile, fall back to the supervisor
+    chat ceiling so the operator channel remains command-capable.
+    """
+
+    profile = str(profile_id or "").strip()
+    matching = next(
+        (
+            persona
+            for persona in personas or []
+            if str(getattr(persona, "hermes_profile", "") or "").strip() == profile
+        ),
+        None,
+    )
+    toolsets = list(getattr(matching, "toolsets", []) or []) if matching is not None else list(PROFILE_CHAT_FALLBACK_TOOLSETS)
+    for toolset in PROFILE_CHAT_FALLBACK_TOOLSETS:
+        if toolset == "mission_goal" and toolset not in toolsets:
+            toolsets.append(toolset)
+    return [toolset for toolset in toolsets if toolset]
 
 
 def all_registered_toolsets() -> list[str]:

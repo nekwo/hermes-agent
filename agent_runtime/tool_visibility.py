@@ -39,6 +39,7 @@ _MUTATING_TOOLS = frozenset(
 class ToolVisibilityOptions:
     permission_mode: str = "profile_default"
     permission_source: str = "persona_role_policy"
+    permission_expired: bool = False
     repo_scope: str | None = None
     workdir: str | Path | None = None
     session_id: str | None = None
@@ -80,6 +81,7 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
         "profile_readiness_summary": readiness.get("summary"),
         "permission_mode": opts.permission_mode,
         "permission_source": opts.permission_source,
+        "permission_expired": bool(opts.permission_expired),
         "session_id": opts.session_id,
         "task_id": opts.task_id,
         "goal_id": opts.goal_id,
@@ -131,6 +133,7 @@ def permission_state_for_persona(persona: AgentPersona, options: ToolVisibilityO
         "session_id": visibility.get("session_id"),
         "mode": visibility.get("permission_mode") or "profile_default",
         "source": visibility.get("permission_source") or "persona_role_policy",
+        "expired": bool(visibility.get("permission_expired")),
         "repo_scope": visibility.get("repo_scope"),
         "workdir": visibility.get("workdir"),
         "can_mutate_files": bool(visibility["mutation_boundary"]["can_mutate_files"]),

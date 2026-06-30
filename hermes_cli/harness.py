@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from hermes_time import now
@@ -74,6 +74,7 @@ from agent_runtime.mission_chat_turns import persist_mission_chat_turn
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
+from agent_runtime.personas import profile_chat_toolsets
 from agent_runtime.prompt_observability import mission_chat_prompt_observability, persist_prompt_observability_context
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
@@ -584,6 +585,9 @@ def build_parser(parent_subparsers) -> None:
     persona_permission_set.add_argument("--session-id", required=True)
     persona_permission_set.add_argument("--mode", choices=["profile_default", "read_only", "unbounded"], required=True)
     persona_permission_set.add_argument("--reason", required=True)
+    persona_permission_set.add_argument("--turns", type=int, default=None)
+    persona_permission_set.add_argument("--ttl-seconds", type=int, default=None)
+    persona_permission_set.add_argument("--expires-at", default=None)
     persona_permission_set.add_argument("--json", action="store_true")
     persona_permission_set.set_defaults(func=_cmd_persona_permission_set)
     persona_assignments = persona_subs.add_parser("assignments", help="List persona assignments")
@@ -2225,12 +2229,18 @@ def _cmd_persona_permission_set(args) -> int:
         data = {"ok": False, "error": f"persona not found: {args.persona_id}"}
         print(emit_json(data) if args.json else data["error"])
         return 2
+    expires_at = str(args.expires_at or "").strip() or None
+    ttl_seconds = getattr(args, "ttl_seconds", None)
+    if expires_at is None and ttl_seconds is not None and ttl_seconds > 0:
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")
     record = ChatToolPermissionStore().set(
         persona_id=persona.id,
         session_id=str(args.session_id or ""),
         mode=str(args.mode or "profile_default"),
         reason=str(args.reason or ""),
         source="operator",
+        expires_at=expires_at,
+        turns_remaining=getattr(args, "turns", None),
     )
     data = {
         "ok": True,
@@ -2241,6 +2251,8 @@ def _cmd_persona_permission_set(args) -> int:
             "reason": record.reason,
             "source": record.source,
             "updated_at": record.updated_at,
+            "expires_at": record.expires_at or None,
+            "turns_remaining": record.turns_remaining,
         },
         "permission_state": permission_state_for_chat(persona, session_id=record.session_id),
     }
@@ -4199,7 +4211,7 @@ def _persona_by_id(cfg, persona_id: str):
             model=default_model or getattr(cfg, "default_model", None),
             provider=default_provider or getattr(cfg, "default_provider", None),
             api_mode=default_api_mode or getattr(cfg, "default_api_mode", None),
-            toolsets=["file", "search", "session_search", "todo", "skills"],
+            toolsets=profile_chat_toolsets(profile_id, personas),
             system_prompt_path="",
             autonomy=str(default_autonomy or "review"),
             hermes_profile=profile_id,

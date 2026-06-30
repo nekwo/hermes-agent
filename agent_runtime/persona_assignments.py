@@ -13,6 +13,7 @@ from . import paths
 from .errors import AgentRuntimeError
 from .events import EventLog
 from .models import AgentPersona, Event, PersonaAssignment, PersonaInstance, WorkerSession
+from .personas import profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
 from .states import RunState, WorkerSessionState
 from .tool_visibility import (
@@ -962,6 +963,12 @@ def _profile_visibility_persona(instance: PersonaInstance) -> AgentPersona | Non
         profile_id = persona_id.split(":", 1)[1].strip()
     resolved_persona_id = persona_id or (f"profile:{profile_id}" if profile_id else "profile:unknown")
     display_name = instance.display_name or _display_name_for_template(profile_id or resolved_persona_id)
+    try:
+        from .config import ensure_persisted_personas, load_agent_runtime_config
+
+        persisted_personas = list(ensure_persisted_personas(load_agent_runtime_config()))
+    except Exception:
+        persisted_personas = []
     return AgentPersona(
         id=resolved_persona_id,
         display_name=display_name,
@@ -969,7 +976,7 @@ def _profile_visibility_persona(instance: PersonaInstance) -> AgentPersona | Non
         model=None,
         provider=None,
         api_mode="codex_responses",
-        toolsets=["file", "search", "session_search", "todo", "skills"],
+        toolsets=profile_chat_toolsets(profile_id, persisted_personas),
         system_prompt_path="",
         autonomy="propose_only",
         hermes_profile=profile_id or None,

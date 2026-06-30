@@ -161,6 +161,32 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
     assert fake.kwargs["blocked_tool_names"] == []
 
 
+def test_chat_permission_unbounded_one_turn_expires_after_success(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    FakeAIAgent.instances.clear()
+    session_id = "session_unbounded_once"
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    store = ChatToolPermissionStore()
+    store.set(
+        persona_id=neko.id,
+        session_id=session_id,
+        mode="unbounded",
+        reason="operator enabled one turn",
+        turns_remaining=1,
+    )
+    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
+
+    runtime.chat_reply(neko, "run the command", session_id=session_id)
+
+    fake = FakeAIAgent.instances[0]
+    assert fake.kwargs["enabled_toolsets"] == all_registered_toolsets()
+    assert fake.kwargs["blocked_tool_names"] == []
+    record = store.get(persona_id=neko.id, session_id=session_id)
+    assert record is not None
+    assert record.mode == "profile_default"
+    assert record.turns_remaining == 0
+
+
 def test_chat_reply_can_disable_internal_session_persistence(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     FakeAIAgent.instances.clear()
