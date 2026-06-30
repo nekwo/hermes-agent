@@ -275,13 +275,106 @@ def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path
     runtime = GPTPersonaRuntime(
         default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
     )
-    runtime.mission_chat_reply(neko, "run echo PARITY_OK_2026", permission_session_id="session_mission_chat")
+
+    def agent_ready(_agent):
+        return None
+
+    runtime.mission_chat_reply(
+        neko,
+        "run echo PARITY_OK_2026",
+        permission_session_id="session_mission_chat",
+        agent_ready_callback=agent_ready,
+    )
 
     system_message = captured["request"].system_message
     assert "Never fabricate" in system_message
     assert "actually use your tools" in system_message
     # And the chat-trace callback is wired on the canonical operator path too.
     assert captured["request"].progress_callback is not None
+    assert captured["request"].agent_ready_callback is agent_ready
+
+
+def test_profile_role_sentinel_resolves_to_supervisor_capabilities():
+    # A synthetic operator-channel persona built from a raw Hermes profile carries
+    # the "profile" role sentinel. It must resolve (not raise 'profile' is not a
+    # valid AgentRole) and intersect down to its own configured toolsets.
+    from agent_runtime.personas import (
+        AgentRole,
+        coerce_agent_role,
+        effective_toolsets,
+        role_from_persona,
+    )
+    from agent_runtime.models import AgentPersona
+
+    assert coerce_agent_role("profile") == AgentRole.ALICE_SUPERVISOR
+
+    profile = AgentPersona(
+        id="profile:alice",
+        display_name="Alice Agent",
+        role="profile",
+        model="gpt-5.5",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        toolsets=["file", "search", "session_search", "todo", "skills"],
+        system_prompt_path="",
+        hermes_profile="alice",
+    )
+
+    assert role_from_persona(profile) == AgentRole.ALICE_SUPERVISOR
+    # The profile's own toolsets survive the supervisor-ceiling intersection.
+    assert effective_toolsets(profile) == ["file", "search", "session_search", "todo", "skills"]
+
+
+def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
+    # Regression: the operator chat path (mission_chat_reply -> toolset/blocked
+    # resolution -> role_from_persona) used to raise "'profile' is not a valid
+    # AgentRole" for every profile persona, killing the whole turn before the model.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime.models import AgentPersona
+
+    profile = AgentPersona(
+        id="profile:alice",
+        display_name="Alice Agent",
+        role="profile",
+        model="gpt-5.5",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        toolsets=["file", "search", "session_search", "todo", "skills"],
+        system_prompt_path="",
+        # None -> binding "inherits active profile" so the test does not depend on a
+        # profile on disk; the role="profile" sentinel still drives toolset resolution.
+        hermes_profile=None,
+    )
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="hi from alice",
+                session_id="session_profile_chat",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    result = runtime.mission_chat_reply(
+        profile, "say hi", permission_session_id="session_profile_chat"
+    )
+
+    assert result.final_response == "hi from alice"
+    request = captured["request"]
+    # Toolsets resolved through the supervisor ceiling; mission_goal augmentation
+    # (the operator-channel goal capability) is available to the profile chat.
+    assert "mission_goal" in request.enabled_toolsets
+    assert set(["file", "search", "session_search", "todo", "skills"]).issubset(
+        set(request.enabled_toolsets)
+    )
 
 
 def test_chat_reply_without_session_records_no_trace(tmp_path, monkeypatch):

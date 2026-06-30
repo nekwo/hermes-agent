@@ -240,6 +240,7 @@ class GPTPersonaRuntime:
         stream_callback: Callable[[str | None], None] | None = None,
         pre_trace_callback: Callable[[dict], None] | None = None,
         trace_callback: Callable[[dict], None] | None = None,
+        agent_ready_callback: Callable[[object], Callable[[], None] | None] | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -291,6 +292,7 @@ class GPTPersonaRuntime:
                 user_message=message,
                 system_message=_mission_chat_surface_message(surface_prompt),
                 stream_callback=stream_callback,
+                agent_ready_callback=agent_ready_callback,
                 # Key chat trace on the real chat session: Mission Control passes
                 # session_id=None (the transcript is already baked into the
                 # message) but the permission/session lineage lives on

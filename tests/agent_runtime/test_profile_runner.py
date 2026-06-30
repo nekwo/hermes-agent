@@ -200,6 +200,26 @@ def test_runner_forwards_stream_callback_to_agent():
     assert deltas == ["He"]
 
 
+def test_runner_calls_agent_ready_callback_and_cleanup():
+    events = []
+
+    def agent_ready(agent):
+        events.append(("ready", agent.session_id))
+        return lambda: events.append(("cleanup", agent.session_id))
+
+    result = ProfileAgentRunner(agent_factory=FakeAgent).run(
+        AgentRunRequest(
+            profile=None,
+            user_message="hi",
+            session_id="session_ready",
+            agent_ready_callback=agent_ready,
+        )
+    )
+
+    assert result.final_response == "ok"
+    assert events == [("ready", "session_ready"), ("cleanup", "session_ready")]
+
+
 def test_runner_persists_provider_conversation_timing_from_agent_status_callback():
     progress_events = []
 

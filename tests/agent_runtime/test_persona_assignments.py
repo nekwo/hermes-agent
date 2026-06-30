@@ -2104,13 +2104,70 @@ def test_profile_prompt_observability_uses_profile_skills_and_chat_title(
     assert context["chat_title"] == "Alice Agent chat"
     assert context["chat_name"] == "Alice Agent chat"
     assert context["chat"]["source"] == "agent_runtime_persona_chat"
-    assert [item["name"] for item in context["skills"]] == [
+    assert context["used_skills"] == []
+    assert [item["name"] for item in context["accessible_skills"]] == [
         "agent-runtime-harness",
         "creative-ideation",
     ]
-    assert {item["source"] for item in context["skills"]} == {
+    assert context["skills"] == context["accessible_skills"]
+    assert {item["source"] for item in context["accessible_skills"]} == {
         "profile_skills_snapshot"
     }
+    assert {item["status"] for item in context["accessible_skills"]} == {
+        "accessible"
+    }
+
+
+def test_prompt_observability_reports_used_skill_from_skill_view_trace(
+    monkeypatch,
+    tmp_path,
+    isolate_agent_runtime_root,
+):
+    from agent_runtime import prompt_observability
+
+    profile_dir = tmp_path / "alice"
+    profile_dir.mkdir()
+    (profile_dir / ".skills_prompt_snapshot.json").write_text(
+        json.dumps({"skills": [{"skill_name": "agent-runtime-harness"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prompt_observability, "get_profile_dir", lambda profile: profile_dir)
+
+    context = prompt_observability.mission_chat_prompt_observability(
+        persona=AgentPersona(
+            id="profile:alice",
+            display_name="Alice Agent",
+            role="profile",
+            model="gpt-test",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            toolsets=["file", "skills"],
+            system_prompt_path="",
+            hermes_profile="alice",
+            skills=[],
+        ),
+        persona_instance_id="personainst_profile_alice",
+        session_id="persona_chat_alice",
+        trace_events=[
+            {
+                "tool_name": "skill_view",
+                "step": "tool_finished",
+                "status": "passed",
+                "skill_name": "agent-runtime-harness",
+            },
+            {
+                "tool_name": "skills_list",
+                "step": "tool_finished",
+                "status": "passed",
+                "skill_name": "creative-ideation",
+            },
+        ],
+    )
+
+    assert [item["name"] for item in context["used_skills"]] == [
+        "agent-runtime-harness"
+    ]
+    assert context["used_skills"][0]["source"] == "skill_view_trace"
 
 
 def test_prompt_observability_refreshes_stale_derived_fields(
@@ -2145,6 +2202,26 @@ def test_prompt_observability_refreshes_stale_derived_fields(
                 "source": "persona_definition",
             }
         ],
+        "used_skills": None,
+        "model_selection": {
+            "effective_provider": "openai-codex",
+            "effective_model": "gpt-5.5",
+        },
+        "final_model_input": {
+            "messages": [
+                {"role": "system", "bytes": 40},
+                {"role": "user", "bytes": 60},
+            ]
+        },
+        "context_budget": {
+            "model": "gpt-5.5",
+            "provider": "openai-codex",
+            "window_tokens": 272000,
+            "compaction_ratio": 0.85,
+            "compaction_tokens": 231200,
+            "used_tokens": None,
+            "used_estimated": True,
+        },
     }
     prompt_observability.persist_prompt_observability_context(stale)
     built = prompt_observability.mission_chat_prompt_observability(
@@ -2170,8 +2247,11 @@ def test_prompt_observability_refreshes_stale_derived_fields(
     refreshed = merged[0]
     assert refreshed["context_id"] == "ctx_stale"
     assert refreshed["chat_title"] == "Alice Agent chat"
-    assert [item["name"] for item in refreshed["skills"]] == ["fresh-profile-skill"]
-    assert refreshed["skills"][0]["source"] == "profile_skills_snapshot"
+    assert refreshed["used_skills"] == []
+    assert [item["name"] for item in refreshed["accessible_skills"]] == ["fresh-profile-skill"]
+    assert refreshed["skills"] == refreshed["accessible_skills"]
+    assert refreshed["accessible_skills"][0]["source"] == "profile_skills_snapshot"
+    assert refreshed["context_budget"]["used_tokens"] == 25
 
 
 def test_snapshot_prompt_observability_builds_profile_instance_context(
@@ -2232,8 +2312,10 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
     assert context["context_id"] == "ctx_stale_profile_alice"
     assert context["chat_id"] == "persona_chat_personainst_profile_alice"
     assert context["chat_title"] == "Alice Agent chat"
-    assert [item["name"] for item in context["skills"]] == ["alice-profile-skill"]
-    assert context["skills"][0]["source"] == "profile_skills_snapshot"
+    assert context["used_skills"] == []
+    assert [item["name"] for item in context["accessible_skills"]] == ["alice-profile-skill"]
+    assert context["skills"] == context["accessible_skills"]
+    assert context["accessible_skills"][0]["source"] == "profile_skills_snapshot"
 
 
 def test_persona_instance_close_cli_closes_only_free_floating_assignment(monkeypatch, isolate_agent_runtime_root):

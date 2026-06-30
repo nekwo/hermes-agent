@@ -31,6 +31,7 @@ def mission_chat_prompt_observability(
     current_message: str | None = None,
     final_model_input: dict[str, Any] | None = None,
     model_selection: dict[str, Any] | None = None,
+    trace_events: Iterable[dict[str, Any]] | None = None,
     prompt_mode: str = "normal_hermes_profile_chat",
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
@@ -59,6 +60,11 @@ def mission_chat_prompt_observability(
     surface = safe_assignment_text(surface_prompt, limit=4000) or ""
     history = _chat_history_context(session_db=session_db, session_id=session_id)
     chat = _chat_metadata(session_db=session_db, session_id=session_id)
+    accessible_skills = _accessible_skills_context(persona, profile)
+    used_skills = used_skills_context(
+        final_model_input=final_model_input,
+        trace_events=trace_events,
+    )
     return {
         "context_id": context_id,
         "prompt_mode": prompt_mode,
@@ -106,7 +112,9 @@ def mission_chat_prompt_observability(
             },
         ],
         "context_files": _profile_context_files(profile),
-        "skills": _skills_context(persona, profile),
+        "used_skills": used_skills,
+        "accessible_skills": accessible_skills,
+        "skills": accessible_skills,
         "chat_history_context": history,
         "retrieval_context": [],
         "final_model_input": _safe_final_model_input(final_model_input),
@@ -298,9 +306,17 @@ def _backfill_derived_fields(
     recompute the budget from the row's own model selection + final input.
     """
     if built:
-        for key in ("skills", "chat_id", "chat_title", "chat_name", "chat"):
+        for key in (
+            "used_skills",
+            "accessible_skills",
+            "skills",
+            "chat_id",
+            "chat_title",
+            "chat_name",
+            "chat",
+        ):
             value = built.get(key)
-            if value:
+            if value is not None and value != []:
                 item[key] = value
     if not item.get("chat_id") or not item.get("chat_title"):
         chat = _chat_metadata(
@@ -312,11 +328,17 @@ def _backfill_derived_fields(
             item["chat_title"] = chat.get("title")
             item["chat_name"] = chat.get("name")
             item["chat"] = chat
-    if not item.get("skills") or _profile_prompt_skills_need_snapshot(item):
+    if not item.get("accessible_skills") and item.get("skills"):
+        item["accessible_skills"] = item.get("skills")
+    if item.get("used_skills") is None:
+        item["used_skills"] = used_skills_context(
+            final_model_input=item.get("final_model_input")
+        )
+    if not item.get("accessible_skills") or _profile_prompt_skills_need_snapshot(item):
         profile = safe_assignment_token(item.get("profile"))
         names = _profile_snapshot_skill_names(profile) if profile else []
         if names:
-            item["skills"] = [
+            item["accessible_skills"] = [
                 {
                     "name": safe_assignment_token(name) or name,
                     "kind": "skill",
@@ -326,7 +348,10 @@ def _backfill_derived_fields(
                 }
                 for name in names[:80]
             ]
-    if item.get("context_budget") is None:
+            item["skills"] = item["accessible_skills"]
+    elif item.get("skills") is None:
+        item["skills"] = item["accessible_skills"]
+    if _context_budget_needs_refresh(item):
         budget = _context_budget(item.get("model_selection"), item.get("final_model_input"))
         if budget is not None:
             item["context_budget"] = budget
@@ -366,7 +391,7 @@ def _profile_prompt_skills_need_snapshot(item: dict[str, Any]) -> bool:
     persona_id = str(item.get("persona_id") or "").strip().lower()
     if not (persona_id.startswith("profile:") or persona_id.startswith("profile_")):
         return False
-    skills = item.get("skills")
+    skills = item.get("accessible_skills") or item.get("skills")
     if not isinstance(skills, list) or not skills:
         return True
     sources = {
@@ -375,6 +400,15 @@ def _profile_prompt_skills_need_snapshot(item: dict[str, Any]) -> bool:
         if isinstance(entry, dict)
     }
     return "profile_skills_snapshot" not in sources
+
+
+def _context_budget_needs_refresh(item: dict[str, Any]) -> bool:
+    budget = item.get("context_budget")
+    if not isinstance(budget, dict):
+        return True
+    if budget.get("used_tokens") is None and _estimate_used_tokens(item.get("final_model_input")) is not None:
+        return True
+    return False
 
 
 _DEFAULT_COMPACTION_RATIO = 0.50
@@ -506,12 +540,13 @@ def _profile_snapshot_skill_names(profile: str) -> list[str]:
     return names
 
 
-def _skills_context(persona: Any, profile: str) -> list[dict[str, Any]]:
-    """Redaction-safe list of the skills compiled into this persona's prompt.
+def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any]]:
+    """Redaction-safe list of skills accessible to this persona/profile.
 
     Reports skill *identity* and install/hash status (names only — never SKILL.md
     bodies). Hash-tracked harness skills surface drift; the rest are reported as
-    declared/loaded so Mission Control can show exactly what shapes the prompt.
+    accessible so Mission Control can distinguish the catalog from actual
+    turn-level skill use.
     Falls back to the profile skills snapshot when the persona declares none.
     """
     declared = [str(item).strip() for item in (getattr(persona, "skills", None) or []) if str(item).strip()]
@@ -545,7 +580,7 @@ def _skills_context(persona: Any, profile: str) -> list[dict[str, Any]]:
         elif name in mismatched:
             status = "hash_mismatch"
         else:
-            status = "loaded"
+            status = "accessible"
         skills.append(
             {
                 "name": token,
@@ -556,6 +591,88 @@ def _skills_context(persona: Any, profile: str) -> list[dict[str, Any]]:
             }
         )
     return skills
+
+
+def used_skills_context(
+    *,
+    final_model_input: dict[str, Any] | None = None,
+    trace_events: Iterable[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Redaction-safe list of skills actually loaded/read during this turn."""
+    names: list[str] = []
+    for entry in _list_used_skill_entries(final_model_input):
+        _append_used_skill_name(names, _extract_skill_name(entry))
+    for entry in trace_events or ():
+        if not isinstance(entry, dict):
+            continue
+        tool_name = safe_assignment_token(entry.get("tool_name") or entry.get("tool")).lower()
+        if tool_name != "skill_view":
+            continue
+        if not _skill_trace_event_counts_as_used(entry):
+            continue
+        _append_used_skill_name(names, _extract_skill_name(entry))
+    return [
+        {
+            "name": name,
+            "kind": "skill",
+            "status": "used",
+            "hash_tracked": False,
+            "source": "skill_view_trace",
+        }
+        for name in names
+    ]
+
+
+def _list_used_skill_entries(final_model_input: dict[str, Any] | None) -> list[Any]:
+    if not isinstance(final_model_input, dict):
+        return []
+    entries = final_model_input.get("used_skills")
+    if isinstance(entries, list):
+        return entries
+    trace = final_model_input.get("skill_trace")
+    if isinstance(trace, list):
+        return trace
+    return []
+
+
+def _skill_trace_event_counts_as_used(entry: dict[str, Any]) -> bool:
+    status = safe_assignment_token(entry.get("status")).lower()
+    if status in {"failed", "error", "errored", "blocked"}:
+        return False
+    step = safe_assignment_token(entry.get("step")).lower()
+    if step and step not in {"tool_finished", "completed", "finished"}:
+        return False
+    return True
+
+
+def _append_used_skill_name(names: list[str], value: str | None) -> None:
+    token = safe_assignment_token(value)
+    if token and token not in names:
+        names.append(token)
+
+
+def _extract_skill_name(entry: Any) -> str | None:
+    if isinstance(entry, str):
+        return entry
+    if not isinstance(entry, dict):
+        return None
+    for key in ("skill_name", "skill", "identifier", "name"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    for key in ("input", "invocation", "tool_input", "result", "metadata"):
+        nested = entry.get(key)
+        if isinstance(nested, dict):
+            name = _extract_skill_name(nested)
+            if name:
+                return name
+    command = entry.get("command_label")
+    if isinstance(command, str):
+        lowered = command.strip()
+        for prefix in ("skill_view ", "skills view "):
+            if lowered.lower().startswith(prefix):
+                return lowered[len(prefix) :].strip().split()[0]
+    return None
 
 
 def _chat_metadata(*, session_db: Any | None, session_id: str | None) -> dict[str, Any]:

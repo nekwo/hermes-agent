@@ -24,6 +24,33 @@ def test_harness_parser_exposes_task_create():
     assert args.command == "harness" and args.task_command == "create"
 
 
+def test_harness_mission_chat_steer_no_active_turn_returns_structured_json(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    args = parser().parse_args(
+        [
+            "harness",
+            "mission-chat",
+            "steer",
+            "--session-id",
+            "session_missing",
+            "--message",
+            "for neko",
+            "--client-message-id",
+            "client_1",
+            "--json",
+        ]
+    )
+
+    assert args.func(args) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is False
+    assert data["capability_id"] == "mission.chat.steer"
+    assert data["execution_state"] == "rejected"
+    assert data["error_kind"] == "no_active_turn"
+    assert data["session_id"] == "session_missing"
+    assert data["client_message_id"] == "client_1"
+
+
 def test_harness_task_create_reports_new_goal_hygiene(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     monkeypatch.setattr(

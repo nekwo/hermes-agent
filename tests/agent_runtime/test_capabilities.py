@@ -17,6 +17,7 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert envelope["write_boundary"] == "hermes harness --json"
     assert len(ids) == len(set(ids))
     assert "mission.chat.message" in ids
+    assert "mission.chat.steer" in ids
     assert "persona.profile.instantiate" in ids
     assert "persona.instance.create" in ids
     assert "persona.instance.open_chat" in ids
@@ -51,6 +52,10 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert "session_id" in by_id["mission.chat.message"]["allowed_args"]
     assert {"provider", "model"}.issubset(set(by_id["mission.chat.message"]["allowed_args"]))
     assert by_id["mission.chat.message"]["default_args"]["surface_prompt"] == ""
+    assert by_id["mission.chat.steer"]["group"] == "steer"
+    assert by_id["mission.chat.steer"]["execution_semantics"] == "control_state_change"
+    assert by_id["mission.chat.steer"]["args_schema"]["required"] == ["session_id", "message"]
+    assert "client_message_id" in by_id["mission.chat.steer"]["allowed_args"]
     assert by_id["persona.permission_preview"]["execution_semantics"] == "read_only"
     assert by_id["persona.permission_override"]["danger"] == "warning"
     assert by_id["persona.permission_override"]["args_schema"]["properties"]["turns"]["type"] == "integer"
@@ -99,6 +104,7 @@ def test_snapshot_emits_callable_capability_descriptors(isolate_agent_runtime_ro
     assert snap["capabilities"]["schema_version"] == 1
     assert capability_ids().issubset(ids)
     assert "mission.chat.message" in ids
+    assert "mission.chat.steer" in ids
     assert "persona.instance.message" not in ids
     assert "daemon.start" in ids
 

@@ -71,6 +71,7 @@ from agent_runtime.realm_sync import (
 from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.mission_chat_turns import persist_mission_chat_turn
+from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.prompt_observability import mission_chat_prompt_observability, persist_prompt_observability_context
@@ -731,6 +732,14 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
     mission_chat_message.add_argument("--json", action="store_true")
     mission_chat_message.set_defaults(func=_cmd_mission_chat_message)
+    mission_chat_steer = mission_chat_subs.add_parser("steer", help="Steer an active streamed Mission Control chat turn")
+    mission_chat_steer.add_argument("--session-id", required=True)
+    mission_chat_steer.add_argument("--message", required=True)
+    mission_chat_steer.add_argument("--client-message-id", required=True)
+    mission_chat_steer.add_argument("--persona", dest="persona_id", default=None)
+    mission_chat_steer.add_argument("--persona-instance-id", default=None)
+    mission_chat_steer.add_argument("--json", action="store_true")
+    mission_chat_steer.set_defaults(func=_cmd_mission_chat_steer)
 
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")
@@ -2699,6 +2708,47 @@ def _cmd_persona_instance_message(args) -> int:
     )
 
 
+def _cmd_mission_chat_steer(args) -> int:
+    session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
+    client_message_id = safe_assignment_text(getattr(args, "client_message_id", None), limit=200)
+    message = safe_assignment_text(getattr(args, "message", None), limit=12000)
+    if not session_id or not client_message_id or not message:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.steer",
+            "execution_state": "rejected",
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "error_kind": "invalid_request",
+            "error": "session_id, client_message_id, and non-empty message are required",
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    try:
+        data = submit_mission_chat_steer(
+            runtime_root=paths.store_root(),
+            session_id=session_id,
+            message=message,
+            client_message_id=client_message_id,
+            persona_id=safe_assignment_token(getattr(args, "persona_id", None)) or None,
+            persona_instance_id=safe_assignment_token(getattr(args, "persona_instance_id", None)) or None,
+        )
+    except ValueError as exc:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.steer",
+            "execution_state": "rejected",
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "error_kind": "invalid_request",
+            "error": safe_assignment_text(str(exc), limit=240),
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    print(emit_json(data) if args.json else (data.get("error") or data.get("execution_state") or "accepted"))
+    return 0
+
+
 def _cmd_mission_chat_message(args) -> int:
     cfg = load_agent_runtime_config()
     normalized_persona = _normalize_cli_persona_or_template_id(args.persona_id)
@@ -2904,9 +2954,26 @@ def _cmd_mission_chat_message(args) -> int:
         if stream_emitter is not None:
             stream_emitter.delta(delta)
 
+    trace_payloads: list[dict[str, object]] = []
+
     def _stream_progress(payload: dict[str, object] | None) -> None:
+        if payload:
+            trace_payloads.append(payload)
         if stream_emitter is not None:
             stream_emitter.progress(payload)
+
+    def _agent_ready_for_steer(agent):
+        if not getattr(args, "stream", False):
+            return None
+        handle = start_active_mission_chat_turn(
+            runtime_root=paths.store_root(),
+            session_id=session_id,
+            agent=agent,
+            persona_id=normalized_persona,
+            persona_instance_id=instance.id,
+            client_message_id=client_message_id,
+        )
+        return handle.close
 
     try:
         chat_result = GPTPersonaRuntime(
@@ -2929,12 +2996,25 @@ def _cmd_mission_chat_message(args) -> int:
                 session_id=session_id,
                 trace_payload=payload,
             ),
-            trace_callback=_stream_progress if stream_emitter is not None else None,
+            trace_callback=_stream_progress,
+            agent_ready_callback=_agent_ready_for_steer,
         )
-        prompt_context = {
-            **prompt_context,
-            "final_model_input": (getattr(chat_result, "raw", {}) or {}).get("model_input_observability"),
-        }
+        final_model_input = (getattr(chat_result, "raw", {}) or {}).get("model_input_observability")
+        prompt_context = mission_chat_prompt_observability(
+            persona=persona,
+            persona_instance_id=instance.id,
+            session_id=session_id,
+            task_id=task_id,
+            goal_id=goal_id,
+            turn_id=safe_assignment_token(client_message_id),
+            surface_prompt=getattr(args, "surface_prompt", "") or "",
+            limiting_wrapper_active=False,
+            session_db=session_db,
+            current_message=message,
+            final_model_input=final_model_input,
+            model_selection=model_selection,
+            trace_events=trace_payloads,
+        )
         persist_tool_turn_actual(
             persona_id=normalized_persona,
             session_id=session_id,

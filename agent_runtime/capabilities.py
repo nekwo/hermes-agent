@@ -49,6 +49,21 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "normal",
     },
     {
+        "id": "mission.chat.steer",
+        "target_kind": "persona",
+        "label": "Steer Active Turn",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["session_id", "message"],
+        "allowed_args": [
+            "client_message_id",
+            "persona_id",
+            "persona_instance_id",
+        ],
+        "default_args": {"title": "Steer active Mission Control chat turn"},
+        "danger": "normal",
+    },
+    {
         "id": "persona.profile.instantiate",
         "target_kind": "persona",
         "label": "Create Agent Profile",

@@ -22,6 +22,34 @@ class AutonomyLevel(StrEnum):
 DEFAULT_PERSONA_IDS = frozenset({"neko_supervisor", "dev", "backend_dev", "qa"})
 
 
+# Synthetic operator-channel personas built from a raw Hermes profile carry the
+# "profile" role sentinel (see ``hermes_cli.harness._persona_by_id``). They are not
+# a typed mission slot, so it is not a real ``AgentRole`` — passing it straight into
+# ``AgentRole(...)`` raises ``'profile' is not a valid AgentRole`` and kills the whole
+# operator chat turn. For capability/toolset resolution on that chat path a profile
+# behaves as the supervisor class: the most permissive ceiling, so the profile's own
+# configured toolsets pass the ``validate_toolsets`` intersection unchanged and the
+# ``mission_goal`` operator capability stays available.
+PROFILE_ROLE_SENTINEL = "profile"
+PROFILE_CHAT_ROLE = AgentRole.ALICE_SUPERVISOR
+
+
+def coerce_agent_role(role: AgentRole | str | None) -> AgentRole:
+    """Resolve a persona role token to an ``AgentRole``.
+
+    Tolerates the synthetic ``"profile"`` sentinel (mapping it to the supervisor
+    class); every other value still resolves strictly so a genuinely-misconfigured
+    typed persona surfaces instead of being silently coerced.
+    """
+
+    if isinstance(role, AgentRole):
+        return role
+    text = str(role or "").strip()
+    if text.lower() == PROFILE_ROLE_SENTINEL:
+        return PROFILE_CHAT_ROLE
+    return AgentRole(text)
+
+
 ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
     AgentRole.PM: frozenset({"file", "session_search", "todo", "skills"}),
     AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills"}),
@@ -74,7 +102,7 @@ PER_ROLE_TOOL_DENIES: dict[AgentRole, frozenset[str]] = {
 
 
 def role_from_persona(persona: AgentPersona) -> AgentRole:
-    return persona.role if isinstance(persona.role, AgentRole) else AgentRole(persona.role)
+    return coerce_agent_role(persona.role)
 
 
 def validate_toolsets(role: AgentRole | str, configured: list[str]) -> list[str]:

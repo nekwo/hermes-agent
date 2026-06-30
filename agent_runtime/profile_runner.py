@@ -56,6 +56,7 @@ class AgentRunRequest:
     task_id: str | None = None
     progress_callback: Callable[[dict[str, Any]], None] | None = None
     stream_callback: Callable[[str | None], None] | None = None
+    agent_ready_callback: Callable[[Any], Callable[[], None] | None] | None = None
     runtime_root: Path | None = None
     workdir: Path | None = None
     stop_on_repeated_read_search: bool = False
@@ -193,22 +194,26 @@ class ProfileAgentRunner:
             )
             timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
             budget_guard.set_interrupt_callback(lambda reason: _interrupt_agent_for_budget(agent, reason))
+            agent_ready_cleanup = _notify_agent_ready(request, agent)
             max_wall_seconds = _positive_float(request.max_wall_seconds)
             if max_wall_seconds is None:
-                conversation_started = time.perf_counter()
-                conversation_kwargs: dict[str, Any] = {
-                    "user_message": request.user_message,
-                    "system_message": request.system_message,
-                    "task_id": request.task_id,
-                }
-                if request.stream_callback is not None:
-                    conversation_kwargs["stream_callback"] = request.stream_callback
-                raw_result = agent.run_conversation(**conversation_kwargs)
-                _attach_model_input_observability(raw_result, agent=agent, request=request)
-                timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started)
-                if budget_guard.tripped_reason:
-                    raise RunBudgetExceeded(budget_guard.tripped_reason, session_id=getattr(agent, "session_id", None))
-                return raw_result, agent, timing
+                try:
+                    conversation_started = time.perf_counter()
+                    conversation_kwargs: dict[str, Any] = {
+                        "user_message": request.user_message,
+                        "system_message": request.system_message,
+                        "task_id": request.task_id,
+                    }
+                    if request.stream_callback is not None:
+                        conversation_kwargs["stream_callback"] = request.stream_callback
+                    raw_result = agent.run_conversation(**conversation_kwargs)
+                    _attach_model_input_observability(raw_result, agent=agent, request=request)
+                    timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started)
+                    if budget_guard.tripped_reason:
+                        raise RunBudgetExceeded(budget_guard.tripped_reason, session_id=getattr(agent, "session_id", None))
+                    return raw_result, agent, timing
+                finally:
+                    _cleanup_agent_ready(agent_ready_cleanup, request)
 
             expired = Event()
 
@@ -253,6 +258,7 @@ class ProfileAgentRunner:
                 raise
             finally:
                 timer.cancel()
+                _cleanup_agent_ready(agent_ready_cleanup, request)
             if expired.is_set():
                 raise RunBudgetExceeded(f"live run budget exceeded: wall_seconds={max_wall_seconds:g}", session_id=getattr(agent, "session_id", None))
             if budget_guard.tripped_reason:
@@ -271,6 +277,44 @@ def _enforce_result_budgets(result: AgentRunResult, request: AgentRunRequest) ->
         total_tokens = _positive_int(result.total_tokens)
         if total_tokens is not None and total_tokens > max_total_tokens:
             raise RunBudgetExceeded(f"live run budget exceeded: total_tokens={total_tokens}/{max_total_tokens}", session_id=result.session_id)
+
+
+def _notify_agent_ready(request: AgentRunRequest, agent: Any) -> Callable[[], None] | None:
+    callback = request.agent_ready_callback
+    if callback is None:
+        return None
+    try:
+        return callback(agent)
+    except Exception as exc:
+        _emit_agent_ready_callback_warning(request, exc, phase="start")
+        return None
+
+
+def _cleanup_agent_ready(cleanup: Callable[[], None] | None, request: AgentRunRequest) -> None:
+    if cleanup is None:
+        return
+    try:
+        cleanup()
+    except Exception as exc:
+        _emit_agent_ready_callback_warning(request, exc, phase="cleanup")
+
+
+def _emit_agent_ready_callback_warning(request: AgentRunRequest, exc: Exception, *, phase: str) -> None:
+    if request.progress_callback is None:
+        return
+    try:
+        request.progress_callback(
+            {
+                "type": "run.progress",
+                "phase": "agent_ready_callback",
+                "severity": "warning",
+                "step": phase,
+                "status": "failed",
+                "summary": f"Agent ready callback {phase} failed: {type(exc).__name__}",
+            }
+        )
+    except Exception:
+        return
 
 
 def _emit_budget_pressure_warning(result: AgentRunResult, request: AgentRunRequest) -> None:
@@ -664,6 +708,9 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
     command_full = _safe_operator_command(invocation)
     if command_full:
         payload["command_full"] = command_full
+    skill_name = _safe_skill_tool_name(tool_name, invocation)
+    if skill_name:
+        payload["skill_name"] = skill_name
     return payload
 
 
@@ -678,6 +725,9 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
     exit_code = _safe_exit_code((result or {}).get("exit_code") if isinstance(result, dict) else None)
     if exit_code is not None:
         payload["exit_code"] = exit_code
+    skill_name = _safe_skill_tool_name(tool_name, invocation) or _safe_skill_tool_name(tool_name, result)
+    if skill_name:
+        payload["skill_name"] = skill_name
     dev_work_payload = _dev_work_payload(tool_name, status=status, result=result, invocation=invocation)
     if dev_work_payload:
         payload.update(dev_work_payload)
@@ -775,6 +825,29 @@ def _safe_command_label(invocation: Any) -> str | None:
     if re.search(r"(^|\s)([A-Za-z]:/|//|/home/|/users/|/x/|/c/|~)", text.lower()):
         return None
     return f"{text[:237]}..." if len(text) > 240 else text
+
+
+def _safe_skill_tool_name(tool_name: str | None, value: Any) -> str | None:
+    if (tool_name or "").lower() != "skill_view":
+        return None
+    return _safe_skill_identifier_from_value(value)
+
+
+def _safe_skill_identifier_from_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        return _safe_label(value)
+    if not isinstance(value, dict):
+        return None
+    for key in ("skill_name", "skill", "identifier", "name"):
+        raw = value.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return _safe_label(raw)
+    for key in ("input", "tool_input", "invocation", "metadata", "result"):
+        nested = value.get(key)
+        found = _safe_skill_identifier_from_value(nested)
+        if found:
+            return found
+    return None
 
 
 # Operator-console field extractors. These feed the trusted Mission Control
