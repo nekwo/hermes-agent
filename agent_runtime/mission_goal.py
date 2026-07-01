@@ -28,7 +28,7 @@ from .blueprints.store import BlueprintStore
 from .cli_format import task_summary
 from .config import load_agent_runtime_config
 from .daemon import start_daemon
-from .default_plan import ensure_default_mission_plan
+from .default_plan import ensure_default_mission_plan, specialize_default_plan_for_task
 from .goal_hygiene import (
     activate_foreground_runtime,
     prepare_new_goal_runtime,
@@ -257,6 +257,7 @@ def _attach_requested_blueprint_plan(
         plan.mission_intent.title = task.title
         plan.mission_intent.acceptance_criteria = list(task.acceptance_criteria or [])
         plan.mission_intent.source_task_id = task.id
+    specialize_default_plan_for_task(task, plan)
     task.mission_plan = plan
     task.current_stage_id = plan.current_stage_id
     return None

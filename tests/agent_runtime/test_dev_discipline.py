@@ -182,6 +182,24 @@ def test_progress_sink_preserves_autonomy_and_self_heal_fields_across_tool_event
     assert progress["read_search_count"] == 1
 
 
+def test_progress_sink_preserves_internal_repo_execution_metadata_across_events():
+    runs = RunStore()
+    run = runs.open_run("dev", "task_progress_repo")
+    run.progress = {
+        "repo_execution": {"workdir": "X:/runtime/wt/repo_123", "isolated": True},
+        "repo_baseline": {"git_head": "abc123", "dirty_paths": ["preexisting.txt"]},
+    }
+    runs.update(run)
+    sink = RunProgressSink(run_store=runs, run_id=run.id)
+
+    sink.emit("run.progress", {"type": "run.progress", "phase": "timing", "step": "provider_call", "status": "started"})
+
+    progress = runs.get(run.id).progress or {}
+    assert progress["repo_execution"]["workdir"] == "X:/runtime/wt/repo_123"
+    assert progress["repo_baseline"]["dirty_paths"] == ["preexisting.txt"]
+    assert progress["step"] == "provider_call"
+
+
 def test_progress_sink_uses_autonomy_read_search_limit_for_loop_warning():
     runs = RunStore()
     run = runs.open_run("dev", "task_progress_budget")

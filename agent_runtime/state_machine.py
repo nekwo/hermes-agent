@@ -11,7 +11,7 @@ from .default_plan import ensure_default_mission_plan
 from .context_requests import has_unresolved_context_request
 from .decision_schema import AgentDecision, DecisionType
 from .dev_discipline import needs_supervisor_slicing
-from .models import Event, Task, TaskStage
+from .models import Event, MissionPlanStage, Task
 from .mission_plan import (
     current_plan_stage,
     is_mission_lead_actor,
@@ -20,6 +20,7 @@ from .mission_plan import (
 from .packets import record_decision_packets
 from .packets import latest_packet
 from .planning import _all_stages_dev_complete, _all_stages_passed, _advance_to_next_dev_stage, _has_backend_contract_proof, _is_cross_stack_backend_first, _needs_cross_stack_launcher_completion, _stage_mentions_launcher, apply_planning_decision
+from .proof_gates import stage_proof_satisfied
 from .reconciler import reconcile_task
 from .recovery_flags import block_recovery_attempted_for_current_signal
 from .scope_control import needs_pm_triage_before_dev
@@ -83,9 +84,7 @@ class MissionStateMachine:
             return _run_slot(mission, "neko_supervisor", "blueprint intervention needs Neko goal-owner adjudication")
         current = current_plan_stage(mission)
         if current is None:
-            if getattr(mission, "requires_visual_proof", False) and not _has_visual_proof(mission, proof_store=self.proof_store):
-                return _run_slot(mission, "dev", "blueprint mission requires visual proof before terminal close")
-            return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="blueprint has no remaining stages")
+            return _blueprint_terminal_action(mission, proof_store=self.proof_store)
         reconciliation = reconcile_task(mission)
         if reconciliation.needs_supervisor:
             return _run_slot(mission, "neko_supervisor", f"blueprint needs Neko transition reconciliation: {reconciliation.findings[0].kind}")
@@ -99,9 +98,7 @@ class MissionStateMachine:
             apply_stage_outcome(mission, current.id, StageOutcome.PASSED, reason=f"blueprint stage {current.id} already ready")
             current = current_plan_stage(mission)
             if current is None:
-                if getattr(mission, "requires_visual_proof", False) and not _has_visual_proof(mission, proof_store=self.proof_store):
-                    return _run_slot(mission, "dev", "blueprint mission requires visual proof before terminal close")
-                return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="blueprint has no remaining stages")
+                return _blueprint_terminal_action(mission, proof_store=self.proof_store)
         if current.status == StageStatus.BLOCKED:
             return _run_slot(mission, "neko_supervisor", f"blueprint stage {current.id} needs goal-owner adjudication")
         if plan.current_stage_id != current.id:
@@ -158,6 +155,50 @@ class MissionStateMachine:
                 )
             )
         return StateMachineResult(from_state=before, to_state=after, events=events)
+
+
+def _blueprint_terminal_action(mission: Task, *, proof_store=None) -> HarnessAction:
+    plan = getattr(mission, "mission_plan", None)
+    if plan is not None:
+        blocker = _first_incomplete_or_unproven_blueprint_stage(mission, proof_store=proof_store)
+        if blocker is not None:
+            stage, reason, proof_blocked = blocker
+            plan.current_stage_id = stage.id
+            mission.current_stage_id = stage.id
+            if proof_blocked:
+                stage.status = StageStatus.BLOCKED
+                stage.updated_at = now()
+                return _run_slot(mission, "neko_supervisor", reason)
+            if stage.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.REWORK}:
+                stage.status = StageStatus.IMPLEMENTING
+                stage.updated_at = now()
+            slot_id = stage.owner_slot or stage.owner or "neko_supervisor"
+            return _run_slot(mission, slot_id, reason)
+    if getattr(mission, "requires_visual_proof", False) and not _has_visual_proof(mission, proof_store=proof_store):
+        return _run_slot(mission, "dev", "blueprint mission requires visual proof before terminal close")
+    return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="blueprint has no remaining stages")
+
+
+def _first_incomplete_or_unproven_blueprint_stage(mission: Task, *, proof_store=None) -> tuple[MissionPlanStage, str, bool] | None:
+    plan = getattr(mission, "mission_plan", None)
+    if plan is None:
+        return None
+    proofs = None
+    if proof_store is not None:
+        try:
+            proofs = list(proof_store.list_for_task(mission.id))
+        except Exception:
+            proofs = []
+    for stage in list(getattr(plan, "stages", None) or []):
+        if stage.status != StageStatus.PASSED:
+            status = stage.status.value if hasattr(stage.status, "value") else str(stage.status)
+            return stage, f"blueprint terminal close blocked: stage {stage.id} is {status}, not passed", False
+        if proofs is not None:
+            gate = stage_proof_satisfied(stage, proofs)
+            if not gate.allowed:
+                missing = ", ".join(gate.missing or ["missing required proof"])
+                return stage, f"blueprint terminal close blocked: stage {stage.id} proof gate unsatisfied ({missing})", True
+    return None
 
 
 def _has_visual_proof(mission: Task, *, proof_store=None) -> bool:

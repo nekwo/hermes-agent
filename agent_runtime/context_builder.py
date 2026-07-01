@@ -757,6 +757,8 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
     stage_state = _stage_self_heal_state(task, run.stage_id or task.current_stage_id)
     role = _hud_owner(run)
     config = config or load_agent_runtime_config()
+    simplified_contract = getattr(config, "simplified_agent_contract", None)
+    simplified_contract_enabled = bool(getattr(simplified_contract, "enabled", False))
     worker_actions = worker_actions_for_role(role, task, run, config=config, proof_store=proof_store)
     primary_action = primary_worker_action(worker_actions)
     next_move = _next_move_from_worker_action(primary_action) if primary_action is not None else _next_required_move(task, run, handoff=handoff, stage_state=stage_state)
@@ -773,12 +775,23 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
     recommended_action = _recommended_action(decision_menu, next_move=next_move, role=role)
     if recommended_action:
         agent_hud["recommended_action"] = recommended_action
+    contract_mode = "normal_worker_flow" if worker_actions else "closed_choice"
+    if worker_actions and simplified_contract_enabled:
+        contract_mode = "simplified_agent_contract"
     hud = {
         "task_id": task.id,
         "agent_hud": agent_hud,
         "terminal_feedback": _terminal_feedback(task, run),
         "decision_contract_hash": contract_hash(),
-        "decision_contract_mode": "normal_worker_flow" if worker_actions else "closed_choice",
+        "decision_contract_mode": contract_mode,
+        "decision_contract_migration": {
+            "feature_flag": "simplified_agent_contract.enabled",
+            "enabled": simplified_contract_enabled,
+            "exposure": "simplified_worker_actions" if worker_actions and simplified_contract_enabled else contract_mode,
+            "rollback": "disable simplified_agent_contract.enabled to restore closed_choice/normal_worker_flow exposure",
+            "legacy_aliases_allowed": bool(getattr(simplified_contract, "allow_legacy_decision_aliases", True)),
+            "internal_state_machine_retained": bool(getattr(simplified_contract, "keep_internal_state_machine", True)),
+        },
         "phase": handoff.get("mission_phase") or str(task.state),
         "current_owner": run.persona_id,
         "role": role,

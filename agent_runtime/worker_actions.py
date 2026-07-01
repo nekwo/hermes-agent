@@ -43,7 +43,14 @@ class WorkerAction:
 
 def normal_worker_flow_enabled(config: RuntimeConfig | None) -> bool:
     flow = getattr(config, "normal_worker_flow", None)
-    return bool(getattr(flow, "enabled", False))
+    simplified = getattr(config, "simplified_agent_contract", None)
+    return bool(
+        getattr(flow, "enabled", False)
+        or (
+            getattr(simplified, "enabled", False)
+            and getattr(simplified, "expose_only_simplified_actions", False)
+        )
+    )
 
 
 def worker_actions_for_role(

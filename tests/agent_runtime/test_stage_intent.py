@@ -1,6 +1,6 @@
 from hermes_time import now
 
-from agent_runtime.models import Task, TaskStage
+from agent_runtime.models import MissionPlanStage, Task, TaskStage
 from agent_runtime.stage_intent import no_product_edit_recipe_conflicts_with_stage, no_product_edit_recipe_for_stage, stage_requires_product_edit
 from agent_runtime.states import StageStatus, TaskState
 
@@ -129,3 +129,23 @@ def test_generic_recipe_stage_stays_no_edit_after_backend_correction_notes():
     assert no_product_edit_recipe_for_stage(stage) == "backend_contract_smoke"
     assert stage_requires_product_edit(task, stage) is False
     assert no_product_edit_recipe_conflicts_with_stage(task, stage, "backend_contract_smoke") is False
+
+
+def test_typed_proof_only_stage_overrides_legacy_implementation_id_marker():
+    task = _task()
+    task.affected_repos = ["EterniaBackend", "EterniaLauncher"]
+    stage = MissionPlanStage(
+        id="implement",
+        title="Launcher No-Edit Contract Smoke",
+        objective="Collect the Harness-owned launcher_contract_smoke proof without editing Launcher product files.",
+        owner="dev",
+        repo="EterniaLauncher",
+        kind="proof_only",
+        status=StageStatus.IMPLEMENTING,
+        proof_recipe_id="launcher_contract_smoke",
+        requires_product_edit=False,
+        test_plan=["proof_recipe:launcher_contract_smoke"],
+    )
+
+    assert stage_requires_product_edit(task, stage) is False
+    assert no_product_edit_recipe_conflicts_with_stage(task, stage, "launcher_contract_smoke") is False

@@ -108,6 +108,32 @@ def test_create_mission_goal_accepts_canonical_stage38_request(tmp_path, monkeyp
     assert duplicate["task_id"] == data["task_id"]
 
 
+def test_create_mission_goal_explicit_no_edit_cross_stack_blueprint_uses_recipe_gates(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    data = create_mission_goal(
+        title="No-edit cross-stack proof",
+        description="No-edit cross-stack proof for Backend and Launcher; do not modify product files.",
+        requested_by="tony",
+        start_daemon_mode=False,
+        requested_blueprint_id="neko_two_dev_default",
+        blueprint_selection_mode="explicit",
+        repo_scope=["EterniaBackend", "EterniaLauncher"],
+        acceptance_criteria=["Backend and Launcher no-product-edit proofs pass."],
+    )
+
+    task = TaskStore().get(data["task_id"])
+    backend = next(stage for stage in task.mission_plan.stages if stage.id == "backend_implementation")
+    launcher = next(stage for stage in task.mission_plan.stages if stage.id == "implement")
+
+    assert backend.kind == "proof_only"
+    assert backend.proof_recipe_id == "backend_contract_smoke"
+    assert backend.proof_gate["proof_recipe_id"] == "backend_contract_smoke"
+    assert launcher.kind == "proof_only"
+    assert launcher.proof_recipe_id == "launcher_contract_smoke"
+    assert launcher.proof_gate["proof_recipe_id"] == "launcher_contract_smoke"
+
+
 def test_create_mission_goal_rejects_idempotency_conflict(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
 

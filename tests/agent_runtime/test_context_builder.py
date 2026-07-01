@@ -8,7 +8,7 @@ from agent_runtime.models import AgentRun, MissionIntent, MissionPlan, MissionPl
 from agent_runtime.packets import make_packet, record_packet
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.repo_bundles import RepoBundleStore
-from agent_runtime.runtime_config import MissionPlanConfig, NormalWorkerFlowConfig, RoleEnvelopeConfig, RuntimeConfig
+from agent_runtime.runtime_config import MissionPlanConfig, NormalWorkerFlowConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import ProofStore
 from agent_runtime.role_checklists import RoleChecklistStore
@@ -824,6 +824,24 @@ def test_dev_mission_hud_exposes_closed_request_test_run_choice_and_commands():
         "pytest tests/agent_runtime/test_context_builder.py -q"
     ]
     assert "common.request_file_reads" in [item["shape_id"] for item in hud["context_expansion_menu"]]
+
+
+def test_simplified_agent_contract_flag_exposes_worker_actions_with_rollback_metadata():
+    task = make_task()
+    task.stages[0].test_plan = ["pytest tests/agent_runtime/test_context_builder.py -q"]
+    cfg = RuntimeConfig(
+        normal_worker_flow=NormalWorkerFlowConfig(enabled=False),
+        simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True),
+    )
+
+    hud = build_context(task, make_run(), config=cfg).mission_hud
+
+    assert hud["decision_contract_mode"] == "simplified_agent_contract"
+    assert hud["decision_contract_migration"]["enabled"] is True
+    assert hud["decision_contract_migration"]["legacy_aliases_allowed"] is True
+    assert hud["decision_contract_migration"]["internal_state_machine_retained"] is True
+    assert "disable simplified_agent_contract.enabled" in hud["decision_contract_migration"]["rollback"]
+    assert hud["worker_action_menu"]
 
 
 def test_dev_mission_hud_prefers_patch_before_proof_for_product_edit_stage():

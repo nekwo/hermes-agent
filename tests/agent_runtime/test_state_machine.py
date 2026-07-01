@@ -11,6 +11,7 @@ from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import MissionPlanConfig, RuntimeConfig
 from agent_runtime.recovery_flags import mark_block_recovery_attempt, mark_incident_closed_for_recovery
 from agent_runtime.state_machine import MissionStateMachine
+from agent_runtime.store import ProofStore
 from agent_runtime.states import StageStatus, TaskState
 
 
@@ -778,6 +779,47 @@ def test_state_machine_closes_APPROVED_mission_with_existing_proof_without_pm_mo
 
     assert action.type == HarnessActionType.COMPLETE_TASK
     assert "no remaining stages" in action.reason
+
+
+def test_blueprint_terminal_close_reopens_unfinished_stage_instead_of_completing():
+    mission = mark_graph_complete(make_mission(TaskState.RUNNING))
+    mission.mission_plan.stages.append(
+        MissionPlanStage(
+            id="launcher_contract",
+            title="Launcher Contract",
+            objective="Collect launcher proof.",
+            owner="dev",
+            owner_slot="dev",
+            repo="EterniaLauncher",
+            kind="proof_only",
+            status=StageStatus.IMPLEMENTING,
+            proof_gate={"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"]},
+        )
+    )
+
+    action = MissionStateMachine(proof_store=ProofStore()).next_action(mission)
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "dev"
+    assert mission.current_stage_id == "launcher_contract"
+    assert "launcher_contract" in action.reason
+
+
+def test_blueprint_terminal_close_blocks_passed_stage_with_missing_required_proof():
+    mission = mark_graph_complete(make_mission(TaskState.RUNNING))
+    mission.mission_plan.stages[0].proof_gate = {
+        "required": True,
+        "minimum_status": "passed",
+        "required_proof_types": ["test_run"],
+    }
+
+    action = MissionStateMachine(proof_store=ProofStore()).next_action(mission)
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
+    assert mission.current_stage_id == "qa_release"
+    assert mission.mission_plan.stages[0].status == StageStatus.BLOCKED
+    assert "proof gate unsatisfied" in action.reason
 
 
 def test_cross_stack_backend_only_qa_state_routes_to_neko_launcher_release():

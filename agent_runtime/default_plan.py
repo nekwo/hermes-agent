@@ -32,8 +32,7 @@ def build_default_mission_plan(
     merged_bindings = {**DEFAULT_TASK_BLUEPRINT_BINDINGS, **dict(bindings or {})}
     plan = instantiate_blueprint(bp, goal=task.description or task.title, bindings=merged_bindings)
     _alias_default_slots_to_personas(plan)
-    _specialize_default_implementation_stage(task, plan)
-    _ensure_default_retry_edges(plan)
+    specialize_default_plan_for_task(task, plan)
     _align_default_plan_to_task_state(task, plan)
     if plan.mission_intent is not None:
         plan.mission_intent.title = task.title
@@ -59,6 +58,19 @@ def ensure_default_mission_plan(
         task.mission_plan = plan
     task.current_stage_id = plan.current_stage_id
     return plan
+
+
+def specialize_default_plan_for_task(task: Task, plan: MissionPlan) -> None:
+    """Apply task-aware defaults to the bundled Neko two-Dev graph.
+
+    Explicit blueprint creation uses the same bundled graph but instantiates it
+    before the final Task object exists. Keeping this as a public hook prevents
+    explicit ``--blueprint neko_two_dev_default`` goals from bypassing no-edit
+    proof recipe specialization.
+    """
+
+    _specialize_default_implementation_stage(task, plan)
+    _ensure_default_retry_edges(plan)
 
 
 def _has_plan(task: Task) -> bool:
@@ -117,6 +129,29 @@ def _align_default_plan_to_task_state(task: Task, plan: MissionPlan) -> None:
 def _specialize_default_implementation_stage(task: Task, plan: MissionPlan) -> None:
     repos = {_repo_for_text(str(item)) for item in (getattr(task, "affected_repos", None) or [])}
     flags = {str(item).strip().lower() for item in (getattr(task, "risk_flags", None) or [])}
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", None) or [])),
+            " ".join(flags),
+        ]
+    ).lower()
+    no_product_edit = any(
+        marker in text
+        for marker in (
+            "no-edit",
+            "no edit",
+            "no-product-edit",
+            "no product edit",
+            "no_product_edit",
+            "without product edits",
+            "no product changes",
+        )
+    )
+    if no_product_edit and "EterniaBackend" in repos and "EterniaLauncher" in repos:
+        _specialize_default_no_edit_cross_stack_plan(plan)
+        return
     implement = next((stage for stage in plan.stages if stage.id == "implement"), None)
     if implement is None:
         return
@@ -127,6 +162,39 @@ def _specialize_default_implementation_stage(task: Task, plan: MissionPlan) -> N
         plan.slots.setdefault("backend_dev", {"role": "backend_dev", "required": True, "description": "Backend implementation specialist."})
         plan.bindings.setdefault("backend_dev", "backend_dev")
         plan.binding_sources.setdefault("backend_dev", "persona:backend_dev")
+
+
+def _specialize_default_no_edit_cross_stack_plan(plan: MissionPlan) -> None:
+    if plan.blueprint_id != DEFAULT_TASK_BLUEPRINT_ID:
+        return
+    backend = next((stage for stage in plan.stages if stage.id == "backend_implementation"), None)
+    launcher = next((stage for stage in plan.stages if stage.id == "implement"), None)
+    if backend is not None:
+        backend.title = "Backend No-Edit Contract Proof"
+        backend.objective = "Collect the Harness-owned backend_contract_smoke proof without inspecting, editing, or patching backend product files."
+        backend.kind = "proof_only"
+        backend.proof_recipe_id = "backend_contract_smoke"
+        backend.requires_product_edit = False
+        backend.proof_gate = {
+            "required": True,
+            "minimum_status": "passed",
+            "required_proof_types": ["test_run"],
+            "proof_recipe_id": "backend_contract_smoke",
+        }
+        backend.test_plan = ["proof_recipe:backend_contract_smoke"]
+    if launcher is not None:
+        launcher.title = "Launcher No-Edit Contract Proof"
+        launcher.objective = "Collect the Harness-owned launcher_contract_smoke proof after backend proof is attached, without editing Launcher product files."
+        launcher.kind = "proof_only"
+        launcher.proof_recipe_id = "launcher_contract_smoke"
+        launcher.requires_product_edit = False
+        launcher.proof_gate = {
+            "required": True,
+            "minimum_status": "passed",
+            "required_proof_types": ["test_run"],
+            "proof_recipe_id": "launcher_contract_smoke",
+        }
+        launcher.test_plan = ["proof_recipe:launcher_contract_smoke"]
 
 
 def _ensure_default_retry_edges(plan: MissionPlan) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.migrations import effective_config_summary, migration_status, validate_runtime_config
+from agent_runtime.runtime_config import SimplifiedAgentContractConfig
 from utils import atomic_json_write
 
 
@@ -38,17 +39,20 @@ def test_effective_config_summary_is_redaction_safe(isolate_agent_runtime_root):
     assert "harness-dev-delivery" in summary["effective_personas"]["dev"]["skills"]
     assert summary["production_envelope"]["production_ready"] is False
     assert {item["id"] for item in summary["production_envelope"]["items"]} == {"H5", "H6", "H7", "H8", "H9", "H10"}
-    assert any(item["id"] == "H5" for item in summary["production_envelope"]["blockers"])
+    assert not any(item["id"] == "H5" for item in summary["production_envelope"]["blockers"])
 
 
-def test_h5_envelope_does_not_advertise_inert_migration_flags_as_controls():
-    summary = effective_config_summary(AgentRuntimeConfig())
+def test_h5_envelope_advertises_behavioral_migration_and_rollback_controls():
+    summary = effective_config_summary(
+        AgentRuntimeConfig(simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True))
+    )
     h5 = next(item for item in summary["production_envelope"]["items"] if item["id"] == "H5")
 
-    assert h5["status"] == "not_implemented"
-    assert any("no behavioral consumer" in blocker for blocker in h5["blockers"])
-    assert not any("controls new HUD contract exposure" in control for control in h5["controls"])
-    assert not any("keeps compatibility shim available" in control for control in h5["controls"])
+    assert h5["status"] == "implemented"
+    assert not h5["blockers"]
+    assert any("controls simplified HUD/worker-action contract exposure" in control for control in h5["controls"])
+    assert any("compatibility shim" in control for control in h5["controls"])
+    assert any("disable simplified_agent_contract.enabled" in control for control in h5["controls"])
 
 
 def test_migration_status_counts_existing_runtime_records(isolate_agent_runtime_root):

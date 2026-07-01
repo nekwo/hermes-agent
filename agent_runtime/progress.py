@@ -38,6 +38,11 @@ _SAFE_PROGRESS_KEYS = {
     "command_label",
 }
 
+_INTERNAL_RUN_PROGRESS_KEYS = {
+    "repo_baseline",
+    "repo_execution",
+}
+
 
 class RunProgressSink:
     def __init__(self, *, run_store: RunStore, event_log: EventLog | None = None, run_id: str):
@@ -52,7 +57,12 @@ class RunProgressSink:
                 return None
             merged_payload = update_progress_telemetry(run.progress, event_type, payload or {})
             safe_payload = _safe_progress_payload(event_type, merged_payload)
-            run.progress = safe_payload
+            preserved = {
+                key: value
+                for key, value in (run.progress or {}).items()
+                if key in _INTERNAL_RUN_PROGRESS_KEYS
+            }
+            run.progress = {**preserved, **safe_payload}
             run.last_heartbeat_at = now()
             if not self.run_store.update(run):
                 return None

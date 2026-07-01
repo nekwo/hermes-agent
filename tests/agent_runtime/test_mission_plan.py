@@ -3,6 +3,7 @@ import pytest
 from hermes_time import now
 
 from agent_runtime.decision_schema import DecisionPayloadInvalid
+from agent_runtime.default_plan import ensure_default_mission_plan
 from agent_runtime.mission_plan import (
     attach_proofs_to_plan_stage,
     blocking_stages_ready_for_qa,
@@ -117,6 +118,28 @@ def test_backend_no_product_edit_investigation_uses_default_blueprint_without_im
 
     assert_default_blueprint_plan(plan, task)
     assert not any(stage.id == "backend_investigation" for stage in plan.stages)
+
+
+def test_default_no_edit_cross_stack_plan_uses_harness_owned_proof_recipes():
+    task = make_task(
+        title="H1 H2 no-edit cross-stack proof",
+        description="Run a no-edit cross-stack goal against backend and launcher without product edits.",
+        affected_repos=["EterniaBackend", "EterniaLauncher"],
+        acceptance_criteria=["Backend and Launcher no-product-edit proofs pass."],
+    )
+
+    plan = ensure_default_mission_plan(task)
+    backend = next(stage for stage in plan.stages if stage.id == "backend_implementation")
+    launcher = next(stage for stage in plan.stages if stage.id == "implement")
+
+    assert backend.kind == "proof_only"
+    assert backend.proof_recipe_id == "backend_contract_smoke"
+    assert backend.proof_gate["proof_recipe_id"] == "backend_contract_smoke"
+    assert backend.requires_product_edit is False
+    assert launcher.kind == "proof_only"
+    assert launcher.proof_recipe_id == "launcher_contract_smoke"
+    assert launcher.proof_gate["proof_recipe_id"] == "launcher_contract_smoke"
+    assert launcher.requires_product_edit is False
 
 
 def test_backend_product_hardening_nongoal_keeps_blueprint_authority():

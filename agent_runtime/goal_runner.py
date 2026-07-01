@@ -8,7 +8,7 @@ from typing import Any, Callable
 from hermes_time import now
 
 from .blueprints import BlueprintStore, instantiate_blueprint
-from .default_plan import DEFAULT_TASK_BLUEPRINT_BINDINGS, DEFAULT_TASK_BLUEPRINT_ID
+from .default_plan import DEFAULT_TASK_BLUEPRINT_BINDINGS, DEFAULT_TASK_BLUEPRINT_ID, specialize_default_plan_for_task
 from .goal_hygiene import prepare_new_goal_runtime
 from .locks import HarnessLockUnavailable, tick_lock
 from .models import Task
@@ -203,6 +203,9 @@ class MissionRuntimeController:
             current_stage_id=mission_plan.current_stage_id if mission_plan is not None else None,
             workspace_id=options.workspace_id,
         )
+        if mission_plan is not None:
+            specialize_default_plan_for_task(task, mission_plan)
+            task.current_stage_id = mission_plan.current_stage_id
         return self.task_store.create(task)
 
     def _build_result(
