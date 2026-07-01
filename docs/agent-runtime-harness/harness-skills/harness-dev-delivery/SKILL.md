@@ -10,8 +10,9 @@ Use this skill for non-trivial Backend Dev or Launcher Dev Harness ticks.
 ## Delivery Rules
 
 - Start from the latest Neko `handoff_packet` and current stage.
-- Read Mission HUD before choosing an action. Treat `mission_hud.agent_hud` as the only live control panel.
-- Choose one visible `agent_hud.options[]` item. Prefer `agent_hud.recommended_action`; copy `decision_type`, `shape_id`, allowed keys, enum values, and `payload_skeleton` from that object. Do not invent payload fields, checklist item IDs, checklist statuses, packet fields, stage IDs, owners, or proof lanes.
+- Read Mission HUD before choosing an action. Treat `mission_hud.agent_hud.status_lane` as Harness-verified status and `mission_hud.agent_hud` action fields as bounded steering/handoff affordances.
+- For product-edit work, do the work with native tools: inspect narrowly, patch files, run focused self-tests, then hand off with the visible delivery action. Do not turn patching or testing into a per-operation HUD form.
+- Prefer the recommended visible action and use only its allowed payload keys. Do not invent payload fields, checklist item IDs, checklist statuses, packet fields, stage IDs, owners, proof lanes, or `delivery.work_status`.
 - If `validation_repair` is present, repair from `validation_repair.corrected_shape` and retry once. Do not repeat the same malformed payload. If the corrected shape is insufficient, emit `block` with a redaction-safe `log_ref`.
 - Treat delivery as a first-class packet, not prose. Put acceptance-critical information in supported `payload.delivery` fields only. If the HUD or packet registry does not expose a field needed for the task, use a supported generic field such as `findings`, `recommendations`, `known_gaps`, or `questions`, and report the missing packet field as a Harness protocol gap.
 - If Harness says fields were dropped, normalized, stale, or unsupported, assume QA cannot review those details. Repair the delivery packet once using supported fields before asking QA to approve.
@@ -111,7 +112,7 @@ If blocked:
 }
 ```
 
-Use the HUD `recommended_action.payload_skeleton` first. The template above is explanatory guidance for deciding what substance belongs in the delivery.
+Use the HUD recommended action first. The template above is explanatory guidance for deciding what substance belongs in the delivery.
 
 ## Request Context
 
@@ -149,7 +150,6 @@ Attach `payload.delivery` only to Dev delivery decisions that support delivery p
 
 ```json
 {
-  "work_status": "proof_requested",
   "repo_bundle_id": "bundle_id_from_agent_hud_or_empty",
   "source_handoff_packet_id": "packet_id_or_event_id",
   "self_test_evidence_ids": [],
@@ -173,15 +173,7 @@ Attach `payload.delivery` only to Dev delivery decisions that support delivery p
 }
 ```
 
-`work_status` must match the decision:
-
-- `planned` for `propose_stage_plan`
-- `patch_proposed` for `propose_patch`
-- `proof_requested` for `request_test_run`
-- `ready_for_qa` for `request_qa_review` only when the active graph includes QA
-- `blocked` for `block`
-- `issue_discovered` for `report_issue_discovery`
-- `correct_stage` has no `delivery` object and no `work_status`; use `test_plan` and `corrections` to repair the current stage.
+Do not set `work_status`; Harness derives any compatibility status from the decision type. `correct_stage` has no `delivery` object; use `test_plan` and `corrections` to repair the current stage.
 
 ## Normal Worker Flow Delivery Template
 
@@ -197,7 +189,6 @@ Use this shape for product-edit stages when the HUD primary action is `deliver_p
     "changed_files": ["relative/path.dart"],
     "tests": ["flutter test test/features/mission_control/mission_control_page_test.dart: passed"],
     "delivery": {
-      "work_status": "patch_proposed",
       "repo_bundle_id": "bundle_id_from_agent_hud_or_empty",
       "self_test_evidence_ids": ["selftest_id_from_hud"],
       "changed_files": ["relative/path.dart"],
@@ -223,7 +214,6 @@ Use this only when the HUD exposes `request_gate`, for no-edit/certification sta
     "stage_id": "stage_id",
     "commands": ["python -m pytest -q tests/path/test_file.py"],
     "delivery": {
-      "work_status": "proof_requested",
       "source_handoff_packet_id": "packet_id_or_event_id",
       "consumed_contract_packet_ids": [],
       "consumed_proof_ids": [],

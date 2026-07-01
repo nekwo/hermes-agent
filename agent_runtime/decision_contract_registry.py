@@ -740,7 +740,7 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
         allowed_roles=(AgentRole.DEV, AgentRole.QA),
         required_payload_keys=("stage_id",),
         optional_payload_keys=("corrections", "audit_notes", "affected_paths", "test_plan", "target_stage_id", "set_current_stage_id"),
-        shape_hint="Repair current-stage instructions/proof gates, or reroute to a known target_stage_id. Do not attach delivery/work_status here.",
+        shape_hint="Repair current-stage instructions/proof gates, or reroute to a known target_stage_id. Do not attach delivery here.",
     ),
     DecisionType.REQUEST_FILE_READS: DecisionContract(
         DecisionType.REQUEST_FILE_READS,
@@ -753,7 +753,7 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
         allowed_roles=_DEV_ONLY,
         optional_payload_keys=("patch", "summary", "changed_files", "tests", "delivery", "proof_ids", "known_gaps"),
         nested_contracts=("delivery",),
-        shape_hint="Use after actual code edits or a concrete patch plan; delivery.work_status must be patch_proposed when attached.",
+        shape_hint="Use after actual code edits or a concrete patch plan; Harness derives any compatibility delivery status.",
     ),
     DecisionType.REQUEST_TEST_RUN: DecisionContract(
         DecisionType.REQUEST_TEST_RUN,
@@ -967,7 +967,7 @@ _HUD_SHAPES: dict[str, HudShape] = {
         DecisionType.CORRECT_STAGE,
         "Correct Stage",
         _DEV_ONLY,
-        "Use when current stage instructions are stale or ambiguous; do not put delivery/work_status here.",
+        "Use when current stage instructions are stale or ambiguous; do not put delivery here.",
         payload_template={"stage_id": "<current stage>", "target_stage_id": "<known stage id when rerouting>", "corrections": ["<exact correction>"], "audit_notes": ["<why>"], "affected_paths": ["<relative path>"], "test_plan": ["<focused proof command>"]},
     ),
     "dev.propose_stage_plan": HudShape(

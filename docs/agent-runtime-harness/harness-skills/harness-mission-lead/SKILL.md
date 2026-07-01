@@ -10,8 +10,8 @@ Use this skill when acting as Neko Mission Lead for an Agent Runtime Harness tas
 ## Operating Contract
 
 - Emit exactly one normal AgentDecision JSON object.
-- Read Mission HUD before choosing an action. Treat `mission_hud.agent_hud` as the only live control panel.
-- Choose one visible `agent_hud.options[]` item. Prefer `agent_hud.recommended_action`; copy `decision_type`, `shape_id`, allowed keys, enum values, and `payload_skeleton` from that object. Do not invent payload fields, checklist item IDs, checklist statuses, packet fields, stage IDs, owners, or proof lanes.
+- Read Mission HUD before choosing an action. Treat it as two-sided: STATUS is Harness-verified diff/proof/gate truth, ACTION is the bounded steering/handoff surface.
+- Prefer the recommended visible action and use only its allowed payload keys. Do not invent payload fields, checklist item IDs, checklist statuses, packet fields, stage IDs, owners, proof lanes, or `delivery.work_status`.
 - If `validation_repair` is present, repair from `validation_repair.corrected_shape` and retry once. Do not repeat the same malformed payload. If repair is not possible from the corrected shape, emit `block` with a redaction-safe `log_ref`.
 - Treat Harness communication as first-class packets. Assignments, handoffs, missing input, blockers, and repair feedback must use supported HUD/packet fields only. If important mission content has no supported packet field, put it in a supported `operator_note` only as a temporary hint and request/record a Harness packet-protocol gap; do not invent a new field.
 - If Harness reports dropped, normalized, stale, or unsupported packet fields, repair the packet from the HUD choices before steering another role.
@@ -26,6 +26,9 @@ Use this skill when acting as Neko Mission Lead for an Agent Runtime Harness tas
 - When asked "what graph/flow are you using?", answer from the supplied active task's `mission_plan` / `agent_hud.current_assignment`, not from the most recent running goal, old chat memory, `status.agents`, or installed-agent rosters. Name `blueprint_id`, active stage, stage order, owners, and outgoing edges visible in the task; add the `mission_plan.agent_topology` steering graph (`root` + `steers` edges, e.g. `lead → builder → verifier`) when the operator asks who steers/coordinates whom. If no `mission_plan` is supplied, say the graph context is unavailable and request the exact task instead of guessing.
 - Read `agent_hud.evidence_stack` before every route/release. Missing proof, stale proof, failed proof, and `BLOCKED` entries are advisory evidence for Neko to adjudicate; they are not terminal dead-ends by themselves.
 - Treat the graph as living chats. You may steer existing nodes with normal verbs (`persona.instance.message`, `worker.nudge`, `worker.resume`, use output, re-prompt, re-scope, or re-route along existing edges) without a permission grant.
+- Use the steering surface as verbs, not as a wiring diagram: `route`, `spawn`, `re-scope`, `resolve`, and `verdict-back` are the bounded coordination moves. The HUD's `available_now` flag is authoritative for whether the affordance is executable this tick.
+- Apply S1-S7 steering discipline: bounded live read-model, executable verbs, summarized spawn return, terminal lifecycle, visible steer events, permission/fan-out caps, and scale certification. If the HUD reports truncation/completeness drops, steer from the summary and artifact refs rather than asking a child to replay raw output.
+- Spawn heavy investigation instead of doing large exploration in your own context. Check child progress with `progress_peek` plus returned summary/proof refs only; never inline or absorb a child's transcript. The pointer travels, the bytes stay put.
 - Treat create/kill as restructure verbs, not steering. Spawning a placement-backed instance (`persona.instance.create` or `persona.instance.open_chat` with `add_instance`) consumes `CoordinatorPermissionScope.max_spawns`; closing an instance or canceling a run requires kill scope. If Harness returns `needs_operator_confirm`, stop and surface the exact confirm need instead of retrying.
 - Kill scope is provenance-sensitive. Own-spawned instances are those with `spawned_by` equal to your coordinator id; operator-placed, unattributed, or other-spawned placements require an explicit operator grant even when you can keep steering them by message/nudge/resume.
 - When the HUD shows a blocked escalation without an open incident, choose a visible Neko action that either routes the smallest recovery owner, requests one exact missing input/proof lane, or reports the bounded blocker with evidence. Do not repeat a prior route blindly, and do not treat `TaskState.BLOCKED` as mission completion.
@@ -64,7 +67,7 @@ When `agent_hud` is present, prefer this product shape in the decision summary/r
 }
 ```
 
-Use the HUD `recommended_action.payload_skeleton` first. The template below is explanatory guidance for choosing owner/repo/proof intent; the registry remains the field source of truth.
+Use the HUD recommended action first. The template below is explanatory guidance for choosing owner/repo/proof intent; the registry remains the field source of truth.
 
 ## Handoff Packet Shape
 

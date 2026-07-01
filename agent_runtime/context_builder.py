@@ -340,7 +340,7 @@ def _validation_repair_hud(repair_error: str | None, *, run: AgentRun, mission_h
     if corrected:
         hud["corrected_shape"] = corrected
         hud["allowed_retry_action"] = corrected.get("decision_type")
-        hud["retry_rule"] = "Retry once with corrected_shape.payload_skeleton and no unknown fields; then block with exact feedback."
+        hud["retry_rule"] = "Retry once with the corrected visible action shape and no unknown fields; then block with exact feedback."
     for key in ("decision_type", "invalid_field", "invalid_value", "repair_attempt", "max_repair_attempts"):
         if payload.get(key) is not None:
             hud[key] = payload[key]
@@ -415,7 +415,7 @@ def _repair_hint_for_message(message: str) -> dict[str, Any]:
         return {
             "invalid_field": "payload",
             "repair_mode": "closed_payload_contract",
-            "shape_hint": "Remove unsupported payload keys. Choose one Mission HUD agent_hud.options item and include only keys listed in agent_hud.recommended_action.allowed_payload_keys.",
+            "shape_hint": "Remove unsupported payload keys. Use the Mission HUD recommended visible action and include only keys listed in agent_hud.recommended_action.allowed_payload_keys.",
         }
     if "stages[" in text and "unsupported keys" in text:
         return {
@@ -793,7 +793,7 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
         "environment_fingerprint_status": stage_state.get("environment_fingerprint_status", "unknown"),
         "next_required_move": next_move,
         "required_next_decision": next_move.get("decision_type") if isinstance(next_move, dict) else _required_next_decision(task, run),
-        "shape_lookup_rule": "Live workers choose one agent_hud.options item and use agent_hud.recommended_action.allowed_payload_keys. Unknown payload keys fail validation; request bounded context instead of inventing fields.",
+        "shape_lookup_rule": "Live workers use the recommended visible action and agent_hud.recommended_action.allowed_payload_keys. Unknown payload keys fail validation; request bounded context instead of inventing fields.",
         "decision_menu": decision_menu,
         "context_expansion_menu": context_expansion_menu,
         "decision_shape_index": shape_index,
@@ -951,7 +951,7 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str) -> dict[str, 
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "qa_waiting_on": qa_waiting_on(repo_bundles),
         "contract": contract_for_persona(run.persona_id, role=role),
-        "response_rule": "Choose one visible option from agent_hud.options. Use agent_hud.recommended_action.payload_skeleton for the primary move. Unknown fields are invalid; open only the named skill_ref when deeper guidance is needed.",
+        "response_rule": "Read STATUS for Harness-verified diff/proof/gate truth, then use the recommended visible ACTION affordance. Unknown fields are invalid; open only the named skill_ref when deeper guidance is needed.",
     }
     evidence_stack = _task_evidence_stack(task)
     if evidence_stack:

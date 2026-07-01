@@ -1102,9 +1102,11 @@ def test_repeated_invalid_packet_contract_escalates_after_bounded_repair():
     assert run.error["class"] == "DecisionPayloadInvalid"
     assert run.error["message"] == "delivery.next_owner is invalid"
     assert run.llm["validation_status"] == "invalid"
-    open_incidents = incidents.list_open()
-    assert len(open_incidents) == 1
-    assert open_incidents[0].summary == "delivery.next_owner is invalid"
+    assert incidents.list_open() == []
+    all_incidents = incidents.list_all()
+    assert len(all_incidents) == 1
+    assert all_incidents[0].summary == "delivery.next_owner is invalid"
+    assert all_incidents[0].closed_at is not None
     assert ts.get("task_1").state == TaskState.RUNNING
 
 
@@ -1272,7 +1274,7 @@ def test_tick_skips_mission_with_open_incident():
     assert runtime.personas == []
 
 
-def test_run_until_settled_allows_neko_to_repair_blocked_incident():
+def test_run_until_settled_closes_model_invalid_output_without_neko_loop():
     ts = TaskStore()
     task = make_task()
     task.state = TaskState.BLOCKED
@@ -1284,11 +1286,14 @@ def test_run_until_settled_allows_neko_to_repair_blocked_incident():
 
     res = engine.run_until_settled(task_id="task_1", max_actions=1)
 
-    assert res.actions_taken[0].ok
-    assert res.stop_reason == "max_actions"
+    assert res.actions_taken == []
+    assert res.stop_reason == "no_eligible_action"
     assert incidents.list_open() == []
+    assert incidents.get("inc_1").closed_at is not None
     assert ts.get("task_1").state == TaskState.RUNNING
     assert ts.get("task_1").open_incident_ids == []
+    closed_events = [event for event in EventLog().for_task("task_1", limit=0) if event.type == "incident.closed"]
+    assert closed_events[-1].payload["reason"] == "contract_simplification_normalized_model_invalid_output"
 
 
 def test_run_until_settled_stops_on_open_environment_blocker_without_neko_retry():

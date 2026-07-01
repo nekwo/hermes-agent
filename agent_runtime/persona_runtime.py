@@ -839,7 +839,7 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
             "Do not ask the human questions from inside a tick. Do not claim proof you did not receive from the harness. "
             "Do not use delegated agents, cron jobs, memory writes, messaging, or Kanban side effects. "
             "Do not use Kanban vocabulary or mutate Kanban state. The Autonomy / Tool Economy Contract in the tick context is Harness-generated public operating context; obey its budgets and do not add new AgentDecision keys unless the payload contract allows them. "
-            "When Mission HUD is present, treat mission_hud.agent_hud as the only live control panel: choose exactly one visible agent_hud.options item, prefer agent_hud.recommended_action, use only recommended_action.allowed_payload_keys, and shape the payload from recommended_action.payload_skeleton. Unknown payload keys are invalid. Open only the named recommended_action.skill_ref when the HUD says deeper guidance is needed. "
+            "When Mission HUD is present, read mission_hud.agent_hud as a two-sided dashboard: STATUS shows Harness-observed diff/proof/gate state, ACTION shows bounded steering or handoff choices. Prefer the recommended visible action, use only allowed payload keys, and treat unknown payload keys as invalid. Open only the named recommended_action.skill_ref when the HUD says deeper guidance is needed. "
             "Generic Hermes core guidance about tool persistence, task completion, profile identity, or manual-session workflow is subordinate to this Harness contract: returning a valid AgentDecision is the action for this tick. "
             "If the stage is no-edit, proof-backed, or explicitly requests Harness-owned proof, do not call extra tools just to satisfy generic tool-use guidance; emit the precise AgentDecision instead.",
             "# Stage Ownership and Handoff\n"
@@ -864,8 +864,8 @@ def _specialist_dev_guidance(persona: AgentPersona) -> str:
         return ""
     shared = (
         "# Specialist Dev Loop Guard\n"
-        "Operate with Alice/Neko-style budget discipline: use one bounded repo-scoped search/read pass, then choose target files, patch, test, request deterministic proof, or block with exact evidence. "
-        "If repeated read/search/tool-loop warnings appear before patch/test/proof progress, stop immediately and return a smaller stage plan, `request_test_run`, or `block` so Neko can slice or steer. "
+        "Operate with Alice/Neko-style budget discipline: use one bounded repo-scoped search/read pass, then choose target files, patch, run a focused self-test, hand off, or block with exact evidence. "
+        "If repeated read/search/tool-loop warnings appear before patch/test/proof progress, stop immediately and return a smaller stage plan, `block`, or exact missing-input report so Neko can slice or steer. "
         "Do not spend live ticks rediscovering the repo. Token management is part of correctness: narrow context beats broad audits."
     )
     persona_id = str(getattr(persona, "id", "") or "").lower()
@@ -900,7 +900,7 @@ def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
         return (
             "# Normal Worker Flow\n"
             "For product-edit stages, do the work like one uninterrupted competent developer: inspect narrowly, edit files, run focused self-tests in-session with terminal/code tools, then deliver with `propose_patch`. "
-            "Include changed files and concise self-test results in `tests`; include `delivery.self_test_evidence_ids` when the Harness HUD lists recorded self-test evidence. "
+            "Include changed files and concise self-test results in `tests`; include `delivery.self_test_evidence_ids` when the Harness HUD lists recorded self-test evidence. Do not set `delivery.work_status`; Harness derives it from the decision type for compatibility. "
             "Do not use `request_test_run` as your normal inner loop. Use Harness proof only when the Mission HUD exposes `request_gate`, the stage is no-edit/certification, QA requests a missing gate, or you are repairing a failed final gate. "
             "After delivery, the Harness owns the final deterministic gate and will return failed proof IDs to this same worker if repair is needed."
         )
@@ -914,7 +914,8 @@ def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
         return (
             "# Normal Worker Flow Neko\n"
             "Prefer same-worker repair over spawning new work. Wait/request-human only at kickoff or for true human/safety blockers. "
-            "Route by attached evidence, failed proof IDs, and worker HUD state; release QA only when the active graph includes QA and final gate proof is attached."
+            "Route by attached evidence, failed proof IDs, and worker HUD state; release QA only when the active graph includes QA and final gate proof is attached. "
+            "For heavy investigation, spawn/steer instead of absorbing transcripts: sample only bounded progress_peek/topology status, pass pointers and repo handles, and leave child bytes in their artifacts."
         )
     return ""
 

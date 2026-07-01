@@ -120,6 +120,7 @@ class TickEngine:
             result = TickResult(tick_id=f"tick_{uuid.uuid4().hex[:8]}", started_at=now())
             self._active_tick_id = result.tick_id
             result.incidents_opened.extend(mark_stale_runs(self.run_store, self.incident_store, heartbeat_ttl_seconds=self.config.heartbeat_ttl_seconds))
+            closed_model_invalid_tasks = self._close_model_invalid_output_incidents(task_id=task_id)
             if task_id:
                 task = self.task_store.get(task_id)
                 tasks = [] if task.state in {TaskState.DONE, TaskState.CANCELLED} else [task]
@@ -131,6 +132,9 @@ class TickEngine:
                     open_incidents_by_task.setdefault(incident.task_id, []).append(incident)
             result.tasks_seen = len(tasks)
             for task in tasks:
+                if task.id in closed_model_invalid_tasks:
+                    result.skipped.append(task.id)
+                    continue
                 task_incidents = open_incidents_by_task.get(task.id, [])
                 if _hard_environment_blocker_incidents(task_incidents):
                     result.skipped.append(task.id)
@@ -294,6 +298,18 @@ class TickEngine:
         if task_id is None:
             return len(incidents)
         return sum(1 for incident in incidents if incident.task_id == task_id)
+
+    def _close_model_invalid_output_incidents(self, *, task_id: str | None = None) -> set[str]:
+        closed_task_ids: set[str] = set()
+        for incident in list(self.incident_store.list_open()):
+            if incident.kind != MODEL_INVALID_OUTPUT:
+                continue
+            if task_id is not None and incident.task_id != task_id:
+                continue
+            self.incident_store.close(incident.id, reason="contract_simplification_normalized_model_invalid_output")
+            if incident.task_id:
+                closed_task_ids.add(incident.task_id)
+        return closed_task_ids
 
     def _apply_no_progress_guard(self, task: Task, run, persona_id: str, decision_type: str, envelope) -> None:
         threshold = max(1, int(getattr(getattr(self.config, "role_envelope", None), "max_no_progress_repeats", 1) or 1))
@@ -1210,10 +1226,11 @@ class TickEngine:
                 inc = Incident(id=f"inc_{uuid.uuid4().hex[:8]}", task_id=task.id, run_id=run.id, kind=classification.kind, summary=classification.summary, detail_path=None, opened_at=now())
                 self.incident_store.open(inc)
                 if classification.kind == MODEL_INVALID_OUTPUT:
+                    self.incident_store.close(inc.id, reason="contract_simplification_normalized_model_invalid_output")
                     current_task.state = TaskState.RUNNING
-                    current_task.open_incident_ids = _dedupe(list(current_task.open_incident_ids or []), [inc.id])
+                    current_task.open_incident_ids = [item for item in (current_task.open_incident_ids or []) if item != inc.id]
                     current_task.updated_at = now()
-                    self.task_store.update(current_task, actor="harness", reason="model invalid output routed to Neko intervention steering")
+                    self.task_store.update(current_task, actor="harness", reason="model invalid output normalized without Neko intervention loop")
                 elif classification.kind == RUN_BUDGET_EXCEEDED:
                     current_task.open_incident_ids = _dedupe(list(current_task.open_incident_ids or []), [inc.id])
                     current_task.updated_at = now()
@@ -2021,7 +2038,6 @@ def _autocorrect_downstream_visual_block_to_current_stage_proof(task: Task, deci
         "stage_id": current_stage_id,
         "commands": current_commands,
         "delivery": {
-            "work_status": "proof_requested",
             "source_handoff_packet_id": "",
             "consumed_contract_packet_ids": [],
             "consumed_proof_ids": [],
@@ -2396,7 +2412,6 @@ def _ensure_backend_contract_packet_for_handoff(task: Task, proof_ids: list[str]
     source_packet_id = str((source_packet or {}).get("packet_id") or "").strip()
     body = {
         "source_handoff_packet_id": source_packet_id,
-        "work_status": "proof_requested",
         "consumed_contract_packet_ids": [],
         "consumed_proof_ids": [],
         "produced_contract_packet_id": contract_packet_id,
