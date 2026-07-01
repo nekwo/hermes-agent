@@ -17,6 +17,12 @@ from hermes_time import now
 from . import paths
 
 HARNESS_WORKTREE_GC_TTL_SECONDS = 24 * 60 * 60
+# Bound same-day churn: keep at most this many clean worktrees per source repo.
+# Older clean worktrees beyond the cap are reaped even within the TTL window.
+HARNESS_WORKTREE_GC_MAX_PER_REPO = 12
+# Never count-cap a worktree younger than this — a freshly created worktree is
+# almost certainly an in-flight run, so age it out before it becomes eligible.
+HARNESS_WORKTREE_GC_MIN_AGE_SECONDS = 15 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,44 +175,100 @@ def _ensure_isolated_worktree(source_root: Path, base: Path) -> Path:
     raise ValueError(f"could not create isolated git worktree for agent run: {last_error}")
 
 
+def _worktree_is_reapable(worktree: Path, *, protected: set[Path]) -> bool:
+    """A worktree is safe to GC only if it is a clean git worktree we don't protect."""
+    try:
+        resolved = worktree.resolve()
+    except OSError:
+        return False
+    if resolved in protected or not worktree.is_dir():
+        return False
+    if _git_root_for(worktree) is None:
+        return False
+    # Never reap a worktree that carries uncommitted work.
+    if _git_output(worktree, ["git", "status", "--short"]):
+        return False
+    return True
+
+
+def _remove_harness_worktree(source_root: Path, worktree: Path, *, reason: str) -> bool:
+    result = subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree)],
+        cwd=source_root,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=60,
+        check=False,
+    )
+    if result.returncode == 0:
+        _log_worktree_event(
+            "worktree_gc_removed",
+            {"worktree": str(worktree), "source_root_label": source_root.name, "reason": reason},
+        )
+        return True
+    return False
+
+
+def _registered_worktree_paths(source_root: Path) -> set[Path]:
+    """Resolved paths of git worktrees registered to source_root (excludes the main checkout)."""
+    lines = _git_output(source_root, ["git", "worktree", "list", "--porcelain"])
+    found: set[Path] = set()
+    seen_main = False
+    for line in lines:
+        if not line.startswith("worktree "):
+            continue
+        raw = line[len("worktree "):].strip()
+        try:
+            resolved = Path(raw).resolve()
+        except OSError:
+            continue
+        if not seen_main:
+            seen_main = True  # first entry is the main working tree — never GC it
+            continue
+        found.add(resolved)
+    return found
+
+
 def _gc_stale_harness_worktrees(source_root: Path, base_dir: Path, *, protected: set[Path] | None = None) -> None:
     if not base_dir.exists() or not base_dir.is_dir():
         return
     protected = protected or set()
-    cutoff = time.time() - HARNESS_WORKTREE_GC_TTL_SECONDS
+    now_ts = time.time()
+    cutoff = now_ts - HARNESS_WORKTREE_GC_TTL_SECONDS
+    # Only worktrees registered to *this* source_root can be removed via it; scoping
+    # to them makes the per-repo count cap correct even though base_dir is shared.
+    owned = _registered_worktree_paths(source_root)
+    survivors: list[tuple[float, Path]] = []
     for worktree in sorted(base_dir.iterdir()):
         try:
             resolved = worktree.resolve()
         except OSError:
             continue
-        if resolved in protected or not worktree.is_dir():
+        if resolved not in owned or not _worktree_is_reapable(worktree, protected=protected):
             continue
         try:
-            if worktree.stat().st_mtime >= cutoff:
-                continue
+            mtime = worktree.stat().st_mtime
         except OSError:
             continue
-        if _git_root_for(worktree) is None:
+        # TTL pass: reap clean worktrees older than the TTL (original behavior).
+        if mtime < cutoff and _remove_harness_worktree(source_root, worktree, reason="ttl"):
             continue
-        status = _git_output(worktree, ["git", "status", "--short"])
-        if status:
-            continue
-        result = subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree)],
-            cwd=source_root,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=60,
-            check=False,
-        )
-        if result.returncode == 0:
-            _log_worktree_event(
-                "worktree_gc_removed",
-                {"worktree": str(worktree), "source_root_label": source_root.name},
-            )
+        survivors.append((mtime, worktree))
+    # Count-cap pass: keep the most recent N clean worktrees per repo and reap the
+    # oldest ones beyond the cap even within the TTL — bounds same-day churn. A
+    # min-age grace protects freshly created (likely in-flight) worktrees.
+    if len(survivors) > HARNESS_WORKTREE_GC_MAX_PER_REPO:
+        survivors.sort(key=lambda item: item[0])  # oldest first
+        overflow = survivors[: len(survivors) - HARNESS_WORKTREE_GC_MAX_PER_REPO]
+        for mtime, worktree in overflow:
+            if now_ts - mtime < HARNESS_WORKTREE_GC_MIN_AGE_SECONDS:
+                continue
+            # Re-check cleanliness immediately before removal to avoid racing a run.
+            if _worktree_is_reapable(worktree, protected=protected):
+                _remove_harness_worktree(source_root, worktree, reason="count_cap")
     _run_git_quiet(source_root, ["git", "worktree", "prune"])
 
 

@@ -1798,7 +1798,12 @@ def _record_handoff_observation(
     command_workdir,
     task_store,
 ) -> None:
-    if decision.type not in {DecisionType.PROPOSE_PATCH, DecisionType.REQUEST_QA_REVIEW}:
+    # Fire the observe-the-work lane on every delivery/gate-request signal so the
+    # HUD diff+trace surface has parity across the simplified and legacy contracts:
+    # under the simplified flag a collapsed hand_off projects onto PROPOSE_PATCH,
+    # but on the legacy/rollback path a no-edit dev delivers via REQUEST_TEST_RUN
+    # (and REQUEST_QA_REVIEW), which previously produced no observed-handoff record.
+    if decision.type not in {DecisionType.PROPOSE_PATCH, DecisionType.REQUEST_QA_REVIEW, DecisionType.REQUEST_TEST_RUN}:
         return
     stage_id = str((decision.payload or {}).get("stage_id") or task.current_stage_id or getattr(run, "stage_id", "") or "").strip() or None
     baseline = (getattr(run, "progress", None) or {}).get("repo_baseline") if run is not None else None

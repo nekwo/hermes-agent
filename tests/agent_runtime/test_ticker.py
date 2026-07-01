@@ -55,6 +55,42 @@ def test_handoff_diff_test_tampering_detector_fails_closed():
     assert _handoff_diff_weakens_tests(task, "stage_product") is False
 
 
+def test_handoff_observation_fires_on_legacy_request_test_run_delivery(isolate_agent_runtime_root):
+    # Contract-parity gap: under the simplified flag a collapsed hand_off projects
+    # onto PROPOSE_PATCH (observed), but on the legacy/rollback path a no-edit dev
+    # delivers via REQUEST_TEST_RUN. The harness observe-the-work lane must fire for
+    # it too, so the HUD diff/trace surface is populated regardless of contract mode.
+    from agent_runtime.ticker import _record_handoff_observation
+    from agent_runtime.decision_schema import AgentDecision, DecisionType
+
+    ts = TaskStore()
+    task = make_task_with_id("task_legacy_observe")
+    task.affected_repos = []
+    task.current_stage_id = "implement"
+    ts.create(task)
+    run = RunStore().open_run("dev", task.id, stage_id="implement")
+    decision = AgentDecision(
+        type=DecisionType.REQUEST_TEST_RUN,
+        summary="Legacy no-edit delivery via gate request.",
+        rationale="Rollback path: dev requests the authoritative gate.",
+        payload={"stage_id": "implement", "commands": ["flutter analyze"]},
+    )
+
+    _record_handoff_observation(
+        task,
+        decision,
+        run=run,
+        actor="dev",
+        proof_store=ProofStore(),
+        command_workdir=None,
+        task_store=ts,
+    )
+
+    observations = (ts.get(task.id).harness_self_heal or {}).get("stage_observations") or {}
+    assert "implement" in observations
+    assert observations["implement"]["source"] == "harness_observed_handoff"
+
+
 def test_request_test_run_allows_typed_current_stage_when_legacy_current_stage_is_stale():
     task = make_task_with_id("task_typed_current_stage")
     task.state = TaskState.RUNNING

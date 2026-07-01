@@ -114,6 +114,69 @@ def test_isolated_repo_context_gc_removes_old_clean_runtime_worktrees(tmp_path, 
     assert not old.workdir.exists()
 
 
+def test_isolated_repo_context_gc_count_cap_reaps_oldest_clean_worktrees(tmp_path, monkeypatch):
+    import agent_runtime.repo_context as rc
+
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(rc, "HARNESS_WORKTREE_GC_MAX_PER_REPO", 2)
+    monkeypatch.setattr(rc, "HARNESS_WORKTREE_GC_MIN_AGE_SECONDS", 0)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Harness Test")
+    (repo / "shared.txt").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+    source = RepoExecutionContext(workdir=repo, repo_label="repo", source="test")
+
+    a = isolated_repo_context_for_run(source, task_id="t", run_id="run_a")
+    b = isolated_repo_context_for_run(source, task_id="t", run_id="run_b")
+    c = isolated_repo_context_for_run(source, task_id="t", run_id="run_c")
+    # Make age order deterministic and past the (0s) min-age grace: a < b < c.
+    base = time.time() - 3600
+    for idx, ctx in enumerate((a, b, c)):
+        os.utime(ctx.workdir, (base + idx, base + idx))
+
+    # Creating a 4th worktree runs GC; with cap=2 the oldest clean survivor (a) is reaped.
+    d = isolated_repo_context_for_run(source, task_id="t", run_id="run_d")
+
+    assert not a.workdir.exists()
+    assert b.workdir.exists() and c.workdir.exists() and d.workdir.exists()
+
+
+def test_isolated_repo_context_gc_count_cap_spares_dirty_and_fresh_worktrees(tmp_path, monkeypatch):
+    import agent_runtime.repo_context as rc
+
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(rc, "HARNESS_WORKTREE_GC_MAX_PER_REPO", 1)
+    # Large grace: every existing worktree is "fresh" so the count cap must skip them.
+    monkeypatch.setattr(rc, "HARNESS_WORKTREE_GC_MIN_AGE_SECONDS", 24 * 60 * 60)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Harness Test")
+    (repo / "shared.txt").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+    source = RepoExecutionContext(workdir=repo, repo_label="repo", source="test")
+
+    a = isolated_repo_context_for_run(source, task_id="t", run_id="run_a")
+    b = isolated_repo_context_for_run(source, task_id="t", run_id="run_b")
+    # Age `a` past the grace but leave uncommitted work in it — dirtiness protects it.
+    (a.workdir / "wip.txt").write_text("in progress\n", encoding="utf-8")
+    old = time.time() - (2 * 24 * 60 * 60)
+    os.utime(a.workdir, (old, old))
+
+    c = isolated_repo_context_for_run(source, task_id="t", run_id="run_c")
+
+    # `a` survives because it is dirty; `b` survives because it is within the grace.
+    assert a.workdir.exists() and b.workdir.exists() and c.workdir.exists()
+
+
 def test_isolated_repo_context_fails_closed_when_worktree_create_fails(tmp_path, monkeypatch):
     runtime_root = tmp_path / "runtime"
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
