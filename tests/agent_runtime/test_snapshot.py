@@ -163,6 +163,11 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
         ("slot_lead", "slot_builder", "steers"),
         ("slot_builder", "slot_verifier", "steers"),
     ]
+    assert topology["control_node_id"] == "slot_lead"
+    route_action = next(action for action in topology["steer_actions"] if action["verb"] == "route" and action["target_node_id"] == "slot_builder")
+    assert route_action["available_now"] is True
+    assert topology["completeness"]["stream_event_cap_per_node"] == 3
+    assert len(topology["nodes"][0]["progress_peek"]) <= 3
     assert [(actor["persona_id"], actor["presence"]) for actor in row["mission_level_state"]["actors"]] == [
         ("neko_supervisor", "waiting"),
         ("dev", "queued"),
@@ -244,6 +249,8 @@ def test_snapshot_agent_topology_runtime_spawned_by_overrides_blueprint(isolate_
         ("personainst_topology_spawned_by_neko_supervisor", "personainst_topology_spawned_by_backend_dev"),
         ("personainst_topology_spawned_by_backend_dev", "personainst_topology_spawned_by_dev"),
     ]
+    backend_node = next(node for node in topology["nodes"] if node["persona_id"] == "backend_dev")
+    assert backend_node["spawned_by"] == "personainst_topology_spawned_by_neko_supervisor"
 
 
 def _topology_persona(persona_id: str, display_name: str, role: str) -> AgentPersona:
