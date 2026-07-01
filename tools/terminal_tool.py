@@ -49,6 +49,18 @@ from utils import env_var_enabled
 
 logger = logging.getLogger(__name__)
 
+_HARNESS_NETWORK_ALLOWLIST = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+_HARNESS_BLOCK_PATTERNS = (
+    (re.compile(r"\bgit\s+push\b", re.IGNORECASE), "git_push_requires_operator_approval"),
+    (re.compile(r"\bgit\s+reset\s+--hard\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bgit\s+clean\b[^\n;&|]*(?:-[^\s]*[xdf]|/[xdf])", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\brm\s+-[^\n;&|]*r[^\n;&|]*f\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bRemove-Item\b[^\n;&|]*(?:-Recurse|-r)\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\b(?:cat|type|Get-Content)\b[^\n;&|]*(?:\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)", re.IGNORECASE), "credential_read_blocked"),
+    (re.compile(r"\b(?:kubectl|helm)\s+(?:apply|delete|rollout|scale|patch)\b", re.IGNORECASE), "prod_operation_requires_operator_approval"),
+    (re.compile(r"\bterraform\s+(?:apply|destroy)\b", re.IGNORECASE), "prod_operation_requires_operator_approval"),
+)
+
 
 # ---------------------------------------------------------------------------
 # Global interrupt event: set by the agent when a user interrupt arrives.
@@ -1995,6 +2007,56 @@ def _resolve_command_cwd(
     return default_cwd
 
 
+def _harness_safety_block(command: str) -> str | None:
+    if not os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip():
+        return None
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized:
+        return None
+    for pattern, reason in _HARNESS_BLOCK_PATTERNS:
+        if pattern.search(normalized):
+            return reason
+    network_reason = _harness_network_block_reason(normalized)
+    if network_reason:
+        return network_reason
+    return None
+
+
+def _harness_network_block_reason(command: str) -> str | None:
+    lowered = command.lower()
+    if not re.search(r"\b(curl|wget|iwr|Invoke-WebRequest|Invoke-RestMethod)\b", command, re.IGNORECASE):
+        return None
+    urls = re.findall(r"https?://([^/\s'\"`]+)", command, flags=re.IGNORECASE)
+    if not urls:
+        return "network_command_requires_allowlist"
+    for host in urls:
+        clean_host = host.split(":", 1)[0].strip("[]").lower()
+        if clean_host not in _HARNESS_NETWORK_ALLOWLIST:
+            return "network_command_requires_allowlist"
+    if re.search(r"(secret|token|password|credential|api[_-]?key|authorization|bearer)", lowered):
+        return "credential_exfil_blocked"
+    return None
+
+
+def _log_harness_blocked_attempt(command: str, reason: str) -> None:
+    root = os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()
+    if not root:
+        return
+    try:
+        path = Path(root).expanduser() / "blocked_tool_attempts.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "ts": time.time(),
+            "tool": "terminal",
+            "reason": reason,
+            "command_preview": command[:500],
+        }
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception:
+        logger.warning("Failed to write Harness blocked-command audit", exc_info=True)
+
+
 def terminal_tool(
     command: str,
     background: bool = False,
@@ -2049,6 +2111,17 @@ def terminal_tool(
                 "exit_code": -1,
                 "error": f"Invalid command: expected string, got {type(command).__name__}",
                 "status": "error",
+            }, ensure_ascii=False)
+        harness_block = _harness_safety_block(command)
+        if harness_block is not None:
+            _log_harness_blocked_attempt(command, harness_block)
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": f"BLOCKED by Harness execution safety envelope: {harness_block}",
+                "status": "blocked",
+                "blocked_by": "harness_execution_safety",
+                "block_reason": harness_block,
             }, ensure_ascii=False)
 
         # Get configuration

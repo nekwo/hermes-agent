@@ -27,7 +27,7 @@ from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .profile_runner import AgentRunRequest, AgentRunResult, ProfileAgentRunner, RunBudgetExceeded
 from .progress import ChatProgressSink, RunProgressSink
-from .repo_context import RepoExecutionContext, capture_repo_baseline, repo_execution_context_for_task
+from .repo_context import RepoExecutionContext, capture_repo_baseline, isolated_repo_context_for_run, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
 from .store import RunStore, _safe_session_id
 from .tool_permissions import (
@@ -106,6 +106,7 @@ class GPTPersonaRuntime:
         progress_sink = RunProgressSink(run_store=RunStore(), run_id=run.id)
         repo_ctx = _repo_context_for_persona(persona, ctx)
         if repo_ctx is not None:
+            repo_ctx = isolated_repo_context_for_run(repo_ctx, task_id=ctx.task.id, run_id=run.id)
             ctx.repo_context = _repo_context_for_render(repo_ctx)
             _attach_repo_baseline(run, repo_ctx)
             progress_sink.emit("run.progress", _repo_context_progress_payload(repo_ctx))

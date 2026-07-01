@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import inspect
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -869,6 +870,9 @@ class TickEngine:
                             else:
                                 proof_ids = self._collect_command_proof(task, final_gate_decision, actor=persona.id, run_id=run.id)
                             proof_statuses = _proof_statuses(proof_ids, proof_store=self.proof_store)
+                            test_tampering = _handoff_diff_weakens_tests(task, source_stage_id or None)
+                            if test_tampering:
+                                proof_statuses = ["failed"]
                             proof_batch_id = _record_stage52_proof_batch(self.proof_batch_store, task, final_gate_decision, proof_ids, proof_statuses, role_envelope_id=stage52_envelope.envelope_id if stage52_envelope is not None else None, run_id=run.id, persona_id=persona.id)
                             _record_authoritative_gate_observation(
                                 task,
@@ -887,13 +891,32 @@ class TickEngine:
                                     proof_records.append(self.proof_store.get(proof_id))
                                 except Exception:
                                     continue
-                            apply_decision_outcome(
-                                task,
-                                final_gate_decision,
-                                stage_id=source_stage_id or None,
-                                proofs=proof_records,
-                                reason=final_gate_decision.summary,
-                            )
+                            if test_tampering:
+                                task.risk_flags = _dedupe(list(task.risk_flags or []), ["test_tampering_detected"])
+                                EventLog().append(
+                                    Event(
+                                        ts=now(),
+                                        type="proof.gate_blocked",
+                                        task_id=task.id,
+                                        run_id=run.id,
+                                        persona_id=persona.id,
+                                        payload={
+                                            "status": "failed",
+                                            "gate_source": "auto_after_delivery",
+                                            "stage_id": source_stage_id,
+                                            "proof_ids": proof_ids,
+                                            "summary": "Authoritative gate failed closed because the handoff diff weakens test assertions or skips.",
+                                        },
+                                    )
+                                )
+                            else:
+                                apply_decision_outcome(
+                                    task,
+                                    final_gate_decision,
+                                    stage_id=source_stage_id or None,
+                                    proofs=proof_records,
+                                    reason=final_gate_decision.summary,
+                                )
                             _record_command_proof_self_heal(
                                 task,
                                 proof_ids,
@@ -1664,6 +1687,29 @@ def _record_authoritative_gate_observation(
     root["evidence_stack"] = evidence[-25:]
     task.harness_self_heal = root
     task_store.update(task, actor="harness", reason="record authoritative gate proof lane")
+
+
+def _handoff_diff_weakens_tests(task: Task, stage_id: str | None) -> bool:
+    root = task.harness_self_heal if isinstance(task.harness_self_heal, dict) else {}
+    observations = root.get("stage_observations") if isinstance(root.get("stage_observations"), dict) else {}
+    item = observations.get(stage_id or "_task") if isinstance(observations, dict) else None
+    diff = (item or {}).get("repo_diff", {}).get("diff") if isinstance(item, dict) else ""
+    if not isinstance(diff, str) or not diff.strip():
+        return False
+    in_test_file = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            lowered = line.lower()
+            in_test_file = bool(re.search(r"(^|[/\\])(test|tests)[/\\].*\.(py|dart|js|ts|tsx|jsx)$", lowered) or re.search(r"test_.*\.py|_test\.dart|\.spec\.", lowered))
+            continue
+        if not in_test_file:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("-") and re.search(r"\b(assert|expect|self\.assert|pytest\.raises)\b", stripped):
+            return True
+        if stripped.startswith("+") and re.search(r"\b(skip|skipif|xfail|@pytest\.mark\.skip|Skip\()\b", stripped):
+            return True
+    return False
 
 
 def _emit_run_budget_warning(run, *, task_id: str, actor: str) -> bool:

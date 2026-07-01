@@ -10,7 +10,7 @@ from agent_runtime.actions import HarnessActionType
 from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.events import EventLog
 from agent_runtime.recovery_flags import NEKO_BLOCK_RECOVERY_ATTEMPTED_FLAG
-from agent_runtime.ticker import TickEngine, _emit_decision_process_summary, _validate_request_test_run_targets_current_stage
+from agent_runtime.ticker import TickEngine, _emit_decision_process_summary, _handoff_diff_weakens_tests, _validate_request_test_run_targets_current_stage
 from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.errors import NotFound
@@ -20,6 +20,38 @@ from agent_runtime.runtime_config import ContinuousRoleSessionConfig, MissionPla
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.profile_runner import RunBudgetExceeded
+
+
+def test_handoff_diff_test_tampering_detector_fails_closed():
+    task = make_task_with_id("task_test_tamper")
+    task.harness_self_heal = {
+        "stage_observations": {
+            "stage_1": {
+                "repo_diff": {
+                    "diff": "\n".join(
+                        [
+                            "diff --git a/tests/test_example.py b/tests/test_example.py",
+                            "-    assert result == 42",
+                            "+    assert True",
+                        ]
+                    )
+                }
+            },
+            "stage_product": {
+                "repo_diff": {
+                    "diff": "\n".join(
+                        [
+                            "diff --git a/app/example.py b/app/example.py",
+                            "-    assert result == 42",
+                        ]
+                    )
+                }
+            },
+        }
+    }
+
+    assert _handoff_diff_weakens_tests(task, "stage_1") is True
+    assert _handoff_diff_weakens_tests(task, "stage_product") is False
 
 
 def test_request_test_run_allows_typed_current_stage_when_legacy_current_stage_is_stale():

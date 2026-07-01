@@ -8,6 +8,8 @@ from typing import Any
 
 from hermes_time import now
 
+from . import paths
+
 
 @dataclass(frozen=True, slots=True)
 class RepoExecutionContext:
@@ -65,6 +67,31 @@ def command_workdir_for_task(task, explicit_workdir=None) -> Path:
     if ctx is not None:
         return ctx.workdir
     return Path.cwd()
+
+
+def isolated_repo_context_for_run(repo_ctx: RepoExecutionContext, *, task_id: str, run_id: str) -> RepoExecutionContext:
+    """Create a per-run git worktree for grounded agent execution."""
+
+    source_root = _git_root_for(repo_ctx.workdir)
+    if source_root is None:
+        return repo_ctx
+    worktree = paths.store_root() / "worktrees" / _safe_path_token(task_id) / _safe_path_token(run_id) / _safe_path_token(repo_ctx.repo_label)
+    if not worktree.exists():
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree), "HEAD"],
+            cwd=source_root,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ValueError("could not create isolated git worktree for agent run")
+    return _context_for_workdir(worktree, source=f"{repo_ctx.source}-worktree")
 
 
 def capture_repo_baseline(workdir: str | Path) -> dict[str, Any]:
@@ -307,6 +334,10 @@ def _sanitize_context_text(raw: str) -> tuple[str, bool]:
 def _safe_repo_label(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip("-._")
     return cleaned[:64] or "repo"
+
+
+def _safe_path_token(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip()).strip("._")[:96] or "item"
 
 
 def _normalize_repo_alias(value: str) -> str:
