@@ -433,6 +433,21 @@ def _mission_chat_surface_message(
 def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:
     if role_from_persona(persona) != "dev":
         return None
+    # Ground in the CURRENT mission-plan stage's repo first. task.affected_repos lags
+    # the active stage in a graph blueprint — it holds the *previous* stage's repo — so
+    # grounding off it mis-routes every cross-stack dev (backend_dev lands in
+    # hermes-agent, launcher dev lands in EterniaBackend, each then fails its proof in
+    # the wrong tree). The stage repo is authoritative for the slice this persona owns.
+    # Falls through to the legacy affected_repos/handoff resolution when there is no plan
+    # stage (e.g. CLI goal_run) or the stage repo is unknown/unresolvable.
+    stage_repo = _stage_repo_scope_for_persona(persona, ctx)
+    if stage_repo is not None:
+        try:
+            return repo_execution_context_for_task(
+                type("TaskStageRepoScope", (), {"affected_repos": [stage_repo]})()
+            )
+        except ValueError:
+            pass
     repo_task = ctx.task
     if not (getattr(repo_task, "affected_repos", []) or []):
         handoff_repo = _handoff_repo_scope_for_persona(persona, ctx)
@@ -445,6 +460,31 @@ def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoE
         return repo_execution_context_for_task(repo_task, explicit_workdir=repo_scope if repo_scope else None)
     except ValueError as exc:
         raise DecisionPayloadInvalid("Dev run could not resolve a valid affected repo workdir; fix affected_repos before dispatching Dev.") from exc
+
+
+def _stage_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
+    """Resolve the grounding repo from the current mission-plan stage.
+
+    Authoritative over ``task.affected_repos`` (which lags the active stage). Only
+    returns a repo when it is a known product/harness repo and — if the persona
+    declares a ``repo_scope`` — that scope agrees with the stage repo. A mismatch is
+    a slot/persona mis-binding we surface via the legacy path rather than silently
+    grounding in the wrong tree.
+    """
+    stage = current_plan_stage(ctx.task) or getattr(ctx, "current_stage", None)
+    stage_repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
+    if stage_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
+        return None
+    persona_scope = getattr(persona, "repo_scope", None)
+    if persona_scope:
+        try:
+            scoped = repo_execution_context_for_task(type("TaskPersonaScope", (), {"affected_repos": [persona_scope]})())
+            stage_ctx = repo_execution_context_for_task(type("TaskStageRepo", (), {"affected_repos": [stage_repo]})())
+        except ValueError:
+            return None
+        if scoped is None or stage_ctx is None or scoped.workdir != stage_ctx.workdir:
+            return None
+    return stage_repo
 
 
 def _handoff_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:

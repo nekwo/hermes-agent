@@ -560,6 +560,28 @@ def test_dev_core_context_files_require_explicit_opt_in():
     assert fake.kwargs["skip_context_files"] is False
 
 
+def test_dev_grounds_in_current_stage_repo_not_lagging_affected_repos(monkeypatch):
+    # Regression: task.affected_repos lags the active stage in a graph blueprint (it
+    # holds the previous stage's repo), so grounding MUST use the current mission-plan
+    # stage's repo. Here affected_repos points at the "wrong" repo; grounding must
+    # ignore it and use the stage repo (hermes-agent always resolves to the harness
+    # root, so this stays platform-independent).
+    from agent_runtime import persona_runtime as pr
+
+    task, run = make_task_and_run()
+    task.affected_repos = ["EterniaBackend"]  # stale/lagging value from the previous stage
+    dev = next(persona for persona in default_personas() if persona.id == "dev")
+    dev.repo_scope = None  # no scope -> stage repo is used directly
+    ctx = build_context(task, run)
+    monkeypatch.setattr(pr, "current_plan_stage", lambda _task: type("S", (), {"repo": "hermes-agent"})())
+
+    repo_ctx = pr._repo_context_for_persona(dev, ctx)
+
+    harness_root = Path(pr.__file__).resolve().parents[1]
+    assert repo_ctx is not None
+    assert repo_ctx.workdir == harness_root  # stage repo won, not affected_repos[0]
+
+
 def test_dev_persona_run_is_grounded_in_resolved_repo_and_loads_project_context(tmp_path, monkeypatch):
     FakeAIAgent.instances.clear()
     runtime_root = tmp_path / "runtime"
