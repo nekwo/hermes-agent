@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -2742,7 +2743,8 @@ def test_tick_collects_launcher_stage_command_proof_in_launcher_repo_when_scope_
     backend_repo.mkdir()
     launcher_repo.mkdir()
     ts = TaskStore()
-    task = make_task_with_id("task_launcher_stage_scope")
+    task_id = f"task_launcher_stage_scope_{uuid.uuid4().hex[:8]}"
+    task = make_task_with_id(task_id)
     task.state = TaskState.RUNNING
     task.current_stage_id = "launcher_contract_smoke"
     task.affected_repos = [str(backend_repo), str(launcher_repo)]
@@ -2761,16 +2763,16 @@ def test_tick_collects_launcher_stage_command_proof_in_launcher_repo_when_scope_
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestLauncherStageTestRunRuntime())
 
-    res = engine.tick_once()
+    res = engine.tick_once(task_id=task_id)
 
     assert res.actions_taken[0].ok
-    saved = ts.get("task_launcher_stage_scope")
+    saved = ts.get(task_id)
     proof = engine.proof_store.get(saved.proof_ids[0])
     from agent_runtime import paths
 
     artifact = paths.store_root() / proof.path_or_value
     text = artifact.read_text(encoding="utf-8")
-    assert saved.proof_ids[0].startswith("test_task_launcher_stage_scope_launcher_contract_smoke_")
+    assert saved.proof_ids[0].startswith(f"test_{task_id}_launcher_contract_smoke_")
     assert "workdir: <workdir:EterniaLauncher>" in text
     assert "launcher-proof-ok" in text
     assert proof.metadata["exit_code"] == 0
@@ -2806,7 +2808,8 @@ def test_tick_collects_backend_stage_command_proof_in_backend_repo_despite_launc
     backend_repo.mkdir()
     launcher_repo.mkdir()
     ts = TaskStore()
-    task = make_task_with_id("task_backend_stage_scope")
+    task_id = f"task_backend_stage_scope_{uuid.uuid4().hex[:8]}"
+    task = make_task_with_id(task_id)
     task.state = TaskState.RUNNING
     task.current_stage_id = "backend_no_op_route_proof"
     task.affected_repos = [str(backend_repo), str(launcher_repo)]
@@ -2825,10 +2828,10 @@ def test_tick_collects_backend_stage_command_proof_in_backend_repo_despite_launc
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestBackendStageTestRunRuntime())
 
-    res = engine.tick_once()
+    res = engine.tick_once(task_id=task_id)
 
     assert res.actions_taken[0].ok
-    saved = ts.get("task_backend_stage_scope")
+    saved = ts.get(task_id)
     proof = engine.proof_store.get(saved.proof_ids[0])
     from agent_runtime import paths
 
@@ -2837,6 +2840,31 @@ def test_tick_collects_backend_stage_command_proof_in_backend_repo_despite_launc
     assert "workdir: <workdir:EterniaBackend>" in text
     assert proof.metadata["workdir_label"] == "EterniaBackend"
     assert proof.metadata["exit_code"] == 0
+
+
+def test_command_proof_scope_prefers_typed_stage_repo_over_task_repo_list():
+    task = make_task_with_id("task_stage_repo_authority")
+    task.affected_repos = ["EterniaBackend"]
+    task.current_stage_id = "implement"
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title="Cross-stack", objective="Launcher consumes backend contract."),
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Implementation",
+                objective="Consume the no-change backend contract.",
+                owner="dev",
+                repo="EterniaLauncher",
+                kind="implementation",
+                status=StageStatus.IMPLEMENTING,
+            )
+        ],
+    )
+
+    from agent_runtime.ticker import _command_proof_repo_scope
+
+    assert _command_proof_repo_scope(task, actor="dev", stage_id="implement") == "EterniaLauncher"
 
 
 class MismatchedWorkdirProofRunner:

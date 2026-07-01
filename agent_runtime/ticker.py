@@ -132,6 +132,7 @@ class TickEngine:
                     open_incidents_by_task.setdefault(incident.task_id, []).append(incident)
             result.tasks_seen = len(tasks)
             for task in tasks:
+                loaded_task = copy.deepcopy(task)
                 if task.id in closed_model_invalid_tasks:
                     result.skipped.append(task.id)
                     continue
@@ -192,7 +193,7 @@ class TickEngine:
                     mark_block_recovery_attempt(task)
                     task.updated_at = now()
                     self.task_store.update(task, actor="harness", reason="route task to one bounded Neko recovery pass")
-                result.actions_taken.append(self._execute_action(action, task))
+                result.actions_taken.append(self._execute_action(action, task, loaded_task=loaded_task))
             result.finished_at = now()
             return result
 
@@ -404,7 +405,7 @@ class TickEngine:
             return closed
         return closed
 
-    def _execute_action(self, action: HarnessAction, task: Task) -> HarnessActionResult:
+    def _execute_action(self, action: HarnessAction, task: Task, *, loaded_task: Task | None = None) -> HarnessActionResult:
         if self.persona_runtime is None:
             return HarnessActionResult(action, False, "no persona runtime configured")
         if _action_targets(action, "dev", "backend_dev"):
@@ -624,6 +625,7 @@ class TickEngine:
                 self.run_store.update(run)
                 decision_repair_attempts = 0
                 while True:
+                    pre_context_task = copy.deepcopy(loaded_task or task)
                     context_started = time.perf_counter()
                     _emit_timing_started(self.run_store, run.id, "context_build")
                     ctx = build_context(
@@ -673,6 +675,7 @@ class TickEngine:
                     repair_error = None
                     try:
                         decision_apply_started = time.perf_counter()
+                        proof_workdir_task = copy.deepcopy(pre_context_task)
                         current_run = self.run_store.get(run.id)
                         _attach_stage_self_heal_to_run_progress(current_run, task)
                         validate_dev_progress_gate(persona, current_run, decision)
@@ -781,7 +784,7 @@ class TickEngine:
                     if decision.type == DecisionType.REQUEST_TEST_RUN:
                         if worker_store is not None and worker is not None:
                             worker_store.update_after_run(worker.id, self.run_store.get(run.id), close_reason="waiting_on_proof", count_decision=False)
-                        proof_ids = self._collect_command_proof(task, decision, actor=persona.id, run_id=run.id)
+                        proof_ids = self._collect_command_proof(task, decision, actor=persona.id, run_id=run.id, workdir_task=proof_workdir_task)
                         proof_statuses = _proof_statuses(proof_ids, proof_store=self.proof_store)
                         proof_batch_id = _record_stage52_proof_batch(self.proof_batch_store, task, decision, proof_ids, proof_statuses, role_envelope_id=stage52_envelope.envelope_id if stage52_envelope is not None else None, run_id=run.id, persona_id=persona.id)
                         current_run = self.run_store.get(run.id)
@@ -884,7 +887,7 @@ class TickEngine:
                             if proof_ids:
                                 reused_existing_gate = True
                             else:
-                                proof_ids = self._collect_command_proof(task, final_gate_decision, actor=persona.id, run_id=run.id)
+                                proof_ids = self._collect_command_proof(task, final_gate_decision, actor=persona.id, run_id=run.id, workdir_task=before_task)
                             proof_statuses = _proof_statuses(proof_ids, proof_store=self.proof_store)
                             test_tampering = _handoff_diff_weakens_tests(task, source_stage_id or None)
                             if test_tampering:
@@ -1247,8 +1250,9 @@ class TickEngine:
             return []
         return self.role_envelope_store.close_for_task(task_id, reason=reason, run_id=run_id)
 
-    def _collect_command_proof(self, task: Task, decision, *, actor: str, run_id: str) -> list[str]:
+    def _collect_command_proof(self, task: Task, decision, *, actor: str, run_id: str, workdir_task: Task | None = None) -> list[str]:
         stage_id = str(decision.payload.get("stage_id") or task.current_stage_id or "")
+        workdir_scope_task = workdir_task or task
         recipe_metadata = proof_recipe_metadata(decision.payload) if isinstance(decision.payload, dict) else None
         recipe_workdir = None
         if recipe_metadata and decision.payload.get("repo_scope"):
@@ -1260,7 +1264,7 @@ class TickEngine:
             )
         runner = self.proof_runner or CommandProofRunner(
             proof_store=self.proof_store,
-            workdir=recipe_workdir or _command_workdir_for_task(task, self.command_workdir, actor=actor, stage_id=stage_id),
+            workdir=recipe_workdir or _command_workdir_for_task(workdir_scope_task, self.command_workdir, actor=actor, stage_id=stage_id),
             timeout_seconds=max(
                 1,
                 int(
@@ -3437,12 +3441,19 @@ def _command_proof_repo_scope(task: Task, *, actor: str | None, stage_id: str | 
     """
 
     intent = _command_proof_repo_intent(task, actor=actor, stage_id=stage_id)
+    affected_repos = [str(repo).strip() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()]
+    stage_repo = _command_proof_stage_repo(task, stage_id=stage_id)
+    has_legacy_stage = _has_legacy_command_stage(task, stage_id=stage_id)
+    if intent is not None and (stage_repo is None or has_legacy_stage):
+        for repo in affected_repos:
+            if _repo_text_matches_intent(repo, intent):
+                return repo
+    if stage_repo and not has_legacy_stage:
+        return stage_repo
+    if stage_repo and (intent is None or _repo_text_matches_intent(stage_repo, intent)):
+        return stage_repo
     if intent is None:
         return None
-    affected_repos = [str(repo).strip() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()]
-    for repo in affected_repos:
-        if _repo_text_matches_intent(repo, intent):
-            return repo
     if affected_repos:
         return None
     return {
@@ -3450,6 +3461,21 @@ def _command_proof_repo_scope(task: Task, *, actor: str | None, stage_id: str | 
         "launcher": "EterniaLauncher",
         "harness": "hermes-agent",
     }[intent]
+
+
+def _command_proof_stage_repo(task: Task, *, stage_id: str | None) -> str | None:
+    stage = _stage_for_command_proof(task, stage_id)
+    repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
+    if repo in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
+        return repo
+    return None
+
+
+def _has_legacy_command_stage(task: Task, *, stage_id: str | None) -> bool:
+    target = str(stage_id or getattr(task, "current_stage_id", "") or "").strip()
+    if not target:
+        return False
+    return any(getattr(stage, "id", None) == target for stage in (getattr(task, "stages", None) or []))
 
 
 def _command_proof_repo_intent(task: Task, *, actor: str | None, stage_id: str | None) -> str | None:
@@ -3499,7 +3525,11 @@ def _stage_for_command_proof(task: Task, stage_id: str | None):
     target = str(stage_id or getattr(task, "current_stage_id", "") or "").strip()
     if not target:
         return None
-    for stage in _runtime_stage_records(task):
+    stages = list(_runtime_stage_records(task))
+    legacy_stages = list(getattr(task, "stages", None) or [])
+    seen = {id(stage) for stage in stages}
+    stages.extend(stage for stage in legacy_stages if id(stage) not in seen)
+    for stage in stages:
         if stage.id == target:
             return stage
     return None
