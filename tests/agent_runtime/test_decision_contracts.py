@@ -329,20 +329,21 @@ def test_handoff_packet_drops_unknown_metadata_values_before_redaction_scan():
         )
 
 
-def test_delivery_work_status_must_match_decision_type():
+def test_delivery_work_status_is_derived_from_decision_type():
+    payload = {"stage_id": "stage_1", "commands": ["pytest -q"], "delivery": {"work_status": "ready_for_qa"}}
+    validate_planning_decision(decision(DecisionType.REQUEST_TEST_RUN, payload))
+    assert payload["delivery"]["work_status"] == "proof_requested"
+    assert payload["delivery"]["_normalization"]["renamed_fields"] == ["work_status"]
+    assert "delivery.work_status" in payload["delivery"]["operator_note"]
+
+    omitted = {"stage_id": "stage_1", "commands": ["pytest -q"], "delivery": {}}
     validate_planning_decision(
         decision(
             DecisionType.REQUEST_TEST_RUN,
-            {"stage_id": "stage_1", "commands": ["pytest -q"], "delivery": {"work_status": "proof_requested"}},
+            omitted,
         )
     )
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_planning_decision(
-            decision(
-                DecisionType.REQUEST_TEST_RUN,
-                {"stage_id": "stage_1", "commands": ["pytest -q"], "delivery": {"work_status": "ready_for_qa"}},
-            )
-        )
+    assert omitted["delivery"]["work_status"] == "proof_requested"
 
 
 def test_top_level_payload_keys_are_closed_per_decision_type():

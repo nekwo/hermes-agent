@@ -631,10 +631,11 @@ _OBJECT_CONTRACTS: dict[str, ObjectContract] = {
     ),
     "delivery": ObjectContract(
         id="delivery",
-        required_keys=("work_status",),
+        required_keys=(),
         optional_keys=(
             "delivery_version",
             "source_handoff_packet_id",
+            "work_status",
             "self_test_evidence_ids",
             "repo_bundle_id",
             "changed_files",
@@ -663,7 +664,6 @@ _OBJECT_CONTRACTS: dict[str, ObjectContract] = {
             "next_owner",
             "operator_note",
         ),
-        enum_choices={"work_status": ("planned", "proof_requested", "ready_for_qa", "blocked", "issue_discovered", "patch_proposed")},
         normalization_policy="drop_unknown_with_operator_note",
     ),
     "delivery.contract_packet": ObjectContract(

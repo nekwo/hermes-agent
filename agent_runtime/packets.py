@@ -174,6 +174,7 @@ _DELIVERY_STATUS_FOR_DECISION = {
     "blocked": DecisionType.BLOCK,
     "issue_discovered": DecisionType.REPORT_ISSUE_DISCOVERY,
 }
+_DELIVERY_STATUS_BY_DECISION = {decision: status for status, decision in _DELIVERY_STATUS_FOR_DECISION.items()}
 _SECRET_WORDS = re.compile(r"(?i)\b(secret|token|password|credential|api[_ -]?key|authorization|cookie|bearer|private[_ -]?key)\b")
 _SECRET_VALUE_FRAGMENTS = re.compile(r"(?i)\bsk-[A-Za-z0-9][A-Za-z0-9_-]{7,}\b")
 _SECRET_EXPOSURE_PHRASES = re.compile(
@@ -623,18 +624,26 @@ def _append_operator_note(packet: dict[str, Any], note: str) -> None:
     packet["operator_note"] = f"{existing[:180]}; {note}" if existing else note
 
 
+def _derive_delivery_work_status(packet: dict[str, Any], *, decision_type: DecisionType) -> None:
+    expected = _DELIVERY_STATUS_BY_DECISION.get(decision_type)
+    if expected is None:
+        return
+    existing = str(packet.get("work_status") or "").strip()
+    if existing == expected:
+        return
+    packet["work_status"] = expected
+    reason = "derived missing delivery.work_status from decision_type"
+    if existing:
+        reason = f"normalized delivery.work_status from {existing!r} to {expected!r}"
+    _append_operator_note(packet, reason)
+    _merge_normalization(packet, renamed_fields=["work_status"])
+
+
 def _validate_delivery(packet: dict[str, Any], *, decision_type: DecisionType) -> None:
     _normalize_unknown_packet_metadata(packet, DELIVERY_KEYS, "delivery")
     _normalize_contract_packet_auth_shape(packet)
     _scan_packet_redaction(packet)
-    status = str(packet.get("work_status", "")).strip()
-    if not status:
-        raise DecisionPayloadInvalid("delivery.work_status is required")
-    if status == "patched":
-        raise DecisionPayloadInvalid("delivery.work_status patched is an internal precursor and cannot be emitted as final delivery")
-    expected = _DELIVERY_STATUS_FOR_DECISION.get(status)
-    if expected is None or expected != decision_type:
-        raise DecisionPayloadInvalid("delivery.work_status does not match enclosing decision type")
+    _derive_delivery_work_status(packet, decision_type=decision_type)
     _optional_string_list(packet, "consumed_contract_packet_ids")
     _optional_string_list(packet, "consumed_proof_ids")
     _optional_string_list(packet, "self_test_evidence_ids")
