@@ -1601,6 +1601,21 @@ class NormalFlowPatchRuntime:
         self.contexts.append(ctx)
         from agent_runtime.decision_schema import AgentDecision, DecisionType
 
+        # Mirror production `_attach_repo_baseline`: capture a per-run baseline so
+        # the harness handoff-diff observation attributes only this run's delta and
+        # excludes any pre-existing dirt in the resolved product repo. Without this
+        # the tamper check (`_handoff_diff_weakens_tests`) reads the developer's
+        # live working tree and the test becomes non-deterministic (a stray
+        # uncommitted assertion edit in the product repo would trip the gate).
+        try:
+            from agent_runtime.repo_context import capture_repo_baseline, command_workdir_for_task
+            from agent_runtime.store import RunStore
+
+            run.progress = {**(run.progress or {}), "repo_baseline": capture_repo_baseline(command_workdir_for_task(ctx.task))}
+            RunStore().update(run)
+        except Exception:
+            pass
+
         return AgentDecision(
             type=DecisionType.PROPOSE_PATCH,
             summary="Delivered Mission Control UI patch",
