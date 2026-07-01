@@ -39,6 +39,7 @@ from .personas import blocked_tool_names, effective_toolsets, seed_personas
 from .prompt_observability import snapshot_prompt_observability
 from .profile_readiness import profile_readiness_for_persona
 from .proof_gates import task_verdict_proof_satisfied
+from .realm_sync import read_realm_sync_sidecar
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_summary, simplified_phase_for_task
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary, runtime_instances_summary
 from .repo_context import resolve_affected_repo_workdir
@@ -1236,7 +1237,11 @@ def _realm_summary(realm, *, workspaces) -> dict:
         "server_id": realm.server_id,
         "workspaces": len(merged_ids),
         "workspace_ids": merged_ids,
-        "sync": "in_sync",
+        # Stage 43 (Decision 7): sync state comes ONLY from the cached sidecar
+        # written by the `realm sync status|pull|publish` verbs — build_snapshot
+        # must never shell out to git or resolve artifacts. Absent sidecar →
+        # null so the launcher renders "not checked", not a fake in_sync.
+        "sync": read_realm_sync_sidecar(realm.id),
         "archived": bool(realm.archived),
         "updated_at": realm.updated_at,
     }
