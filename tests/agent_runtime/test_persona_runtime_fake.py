@@ -403,6 +403,56 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
     )
 
 
+def test_mission_chat_reply_honors_core_context_file_opt_in(tmp_path, monkeypatch):
+    # Regression: the operator chat path used to hardcode skip_context_files=False,
+    # forcing the process-cwd repo project docs (e.g. the 72KB hermes-agent
+    # AGENTS.md, truncated to ~65K chars) into EVERY conversational turn — ~20K
+    # tokens of fixed overhead regardless of persona. Operator chat must honor the
+    # persona's include_core_context_files opt-in exactly like the mission-run
+    # (skip_context_files) and free-chat paths. Isolated personas (the default)
+    # stay lean; only an explicit opt-in loads repo docs.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime.models import AgentPersona
+
+    def _capture_skip(include_core: bool) -> bool:
+        persona = AgentPersona(
+            id="profile:alice",
+            display_name="Alice Agent",
+            role="profile",
+            model="gpt-5.5",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            toolsets=["file", "search", "skills"],
+            system_prompt_path="",
+            hermes_profile=None,
+            include_core_context_files=include_core,
+        )
+        captured = {}
+
+        class CapturingRunner:
+            def run(self, request):
+                captured["request"] = request
+                return AgentRunResult(
+                    final_response="ok",
+                    session_id="s",
+                    provider="openai-codex",
+                    model="gpt-5.5",
+                    base_url=None,
+                    messages=[],
+                )
+
+        runtime = GPTPersonaRuntime(
+            default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+        )
+        runtime.mission_chat_reply(persona, "hi", permission_session_id="s")
+        return captured["request"].skip_context_files
+
+    # Default isolated persona -> context files skipped (lean turn).
+    assert _capture_skip(False) is True
+    # Explicit opt-in -> context files loaded (parity with the mission-run path).
+    assert _capture_skip(True) is False
+
+
 def test_chat_reply_without_session_records_no_trace(tmp_path, monkeypatch):
     # A sandbox chat turn with no durable session must not synthesize trace.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
