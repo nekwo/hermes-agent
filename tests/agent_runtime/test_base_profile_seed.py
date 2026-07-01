@@ -27,6 +27,10 @@ def test_seed_personas_is_exactly_the_base_profile():
     # mission_goal capability must NOT be exposed as a broken affordance.
     assert "mission_goal" not in base.toolsets
     assert "file" in base.toolsets and "terminal" in base.toolsets
+    # Base is the operator's default agent -> carries the Mission Control runtime-model
+    # skill so it can read/operate goals + graphs out of the box, but NOT the typed
+    # pipeline delivery skills (it is not a dev/qa worker).
+    assert base.skills == ["harness-runtime-model"]
 
 
 def test_store_seeds_base_only_but_resolution_sees_dormant_catalog():

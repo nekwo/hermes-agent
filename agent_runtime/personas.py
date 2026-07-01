@@ -280,7 +280,11 @@ def seed_personas() -> list[AgentPersona]:
             system_prompt_path="",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
             hermes_profile=BASE_PERSONA_ID,
-            skills=[],
+            # Base is the operator's default agent, so it carries the Mission Control
+            # runtime-model skill (view/operate goals + graphs, incl. agent_topology),
+            # installed into the base profile so its chat can load it on demand. It is NOT
+            # a typed pipeline worker, so it does not carry harness-dev/qa delivery skills.
+            skills=["harness-runtime-model"],
             include_profile_memory=True,
         )
     ]

@@ -9,6 +9,14 @@ description: Hermes Agent Runtime mental model + first-class commands to view an
 
 Default graph `neko_two_dev_default` = **Neko scope → Backend Dev → Launcher Dev** (no QA). **QA is a node only if the selected blueprint binds it.**
 
+**Two graphs live in `mission_plan`** (both from the blueprint): the **stage graph**
+(`.stages` + `.edges` — *execution*: stage owners, `depends_on`, and `outcome → target`
+routing) and the **agent topology** (`.agent_topology` — *supervision*: a `root` plus
+`source → target` `steers` edges, e.g. `lead → builder → verifier`). Default when asked
+"what's the flow" is the stage graph (blueprint id, stages in order, owners, edges); add the
+`agent_topology` steering graph when the operator asks who steers/coordinates whom. The two
+can differ in ordering — topology is a supervision graph, not the execution order.
+
 **Concurrency (target):** goals run as **lanes**; every agent — Neko included — is **instanced per lane**, so concurrent goals with disjoint agents don't fight; binding a busy agent **warns**; true parallel is gated by `swarm enable`. (Today: one foreground goal at a time; `goal_id == task.id`. Stage 39 lands lanes + goal id.)
 
 `hermes` == `python -m hermes_cli.main`. No `hermes harness runtime` command. Always `--json`. Never use raw DB / Python / ad-hoc scripts to inspect.
@@ -21,7 +29,8 @@ Default graph `neko_two_dev_default` = **Neko scope → Backend Dev → Launcher
 | installed agents | `hermes harness agents --json` |
 | graph templates | `hermes harness blueprint list --json` |
 | all goals | `hermes harness task list --json` |
-| full graph for one goal (nodes/edges/bindings) | `hermes harness task show <id> --json` → `.mission_plan` |
+| full graph for one goal (stage nodes/edges/bindings) | `hermes harness task show <id> --json` → `.mission_plan` |
+| supervision/steering graph for one goal | `hermes harness task show <id> --json` → `.mission_plan.agent_topology` (`root` + `steers` edges) |
 | goal event timeline | `hermes harness task history <id> --json` |
 | agent instances (goal_id/spawned_by) | `hermes harness persona list --json` |
 | agent ↔ goal assignments | `hermes harness persona assignments [--persona <id>|--task <id>] --json` |
