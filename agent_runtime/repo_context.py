@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 from pathlib import Path
 import re
 import subprocess
+import tempfile
+import time
 from typing import Any
 
 from hermes_time import now
@@ -75,9 +78,33 @@ def isolated_repo_context_for_run(repo_ctx: RepoExecutionContext, *, task_id: st
     source_root = _git_root_for(repo_ctx.workdir)
     if source_root is None:
         return repo_ctx
-    worktree = paths.store_root() / "worktrees" / _safe_path_token(task_id) / _safe_path_token(run_id) / _safe_path_token(repo_ctx.repo_label)
-    if not worktree.exists():
+    base = _worktree_base_dir() / _worktree_token(source_root, task_id=task_id, run_id=run_id, repo_label=repo_ctx.repo_label)
+    worktree = _ensure_isolated_worktree(source_root, base)
+    return _context_for_workdir(worktree, source=f"{repo_ctx.source}-worktree")
+
+
+def _worktree_token(source_root: Path, *, task_id: str, run_id: str, repo_label: str) -> str:
+    raw = f"{source_root.resolve()}|{task_id}|{run_id}|{repo_label}"
+    digest = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"{_safe_path_token(repo_label)[:24]}_{digest}"
+
+
+def _worktree_base_dir() -> Path:
+    candidate = paths.store_root() / "wt"
+    if len(str(candidate)) <= 90:
+        return candidate
+    return Path(tempfile.gettempdir()) / "hermes-agent-wt"
+
+
+def _ensure_isolated_worktree(source_root: Path, base: Path) -> Path:
+    candidates = [base, *[base.with_name(f"{base.name}_{idx}") for idx in range(1, 4)]]
+    last_error = ""
+    for index, worktree in enumerate(candidates):
+        if worktree.exists() and _git_root_for(worktree) is not None:
+            return worktree
         worktree.parent.mkdir(parents=True, exist_ok=True)
+        if index == 1:
+            _run_git_quiet(source_root, ["git", "worktree", "prune"])
         result = subprocess.run(
             ["git", "worktree", "add", "--detach", str(worktree), "HEAD"],
             cwd=source_root,
@@ -86,12 +113,32 @@ def isolated_repo_context_for_run(repo_ctx: RepoExecutionContext, *, task_id: st
             errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=30,
+            timeout=60,
             check=False,
         )
-        if result.returncode != 0:
-            raise ValueError("could not create isolated git worktree for agent run")
-    return _context_for_workdir(worktree, source=f"{repo_ctx.source}-worktree")
+        if result.returncode == 0:
+            for _ in range(20):
+                if _git_root_for(worktree) is not None:
+                    return worktree
+                time.sleep(0.1)
+            if (worktree / ".git").exists():
+                return worktree
+        last_error = (result.stderr or result.stdout or "").strip()[:500]
+    raise ValueError(f"could not create isolated git worktree for agent run: {last_error}")
+
+
+def _run_git_quiet(cwd: Path, args: list[str]) -> None:
+    subprocess.run(
+        args,
+        cwd=cwd,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+    )
 
 
 def capture_repo_baseline(workdir: str | Path) -> dict[str, Any]:

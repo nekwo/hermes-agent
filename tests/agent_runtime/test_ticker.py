@@ -751,14 +751,19 @@ def test_blueprint_tick_runs_slot_collects_proof_and_completes():
     assert saved.proof_ids
 
 
-def test_invalid_persona_output_opens_incident_and_routes_to_intervention():
+def test_invalid_persona_output_closes_incident_without_intervention_loop():
     ts=TaskStore(); ts.create(make_task())
     engine=TickEngine(task_store=ts, persona_runtime=BadRuntime())
     res=engine.tick_once()
     assert not res.actions_taken[0].ok
     task = ts.get("task_1")
     assert task.state == TaskState.RUNNING
-    assert task.open_incident_ids == [engine.incident_store.list_open()[0].id]
+    assert task.open_incident_ids == []
+    assert engine.incident_store.list_open() == []
+    incidents = engine.incident_store.list_all()
+    assert len(incidents) == 1
+    assert incidents[0].kind == "model_invalid_output"
+    assert incidents[0].closed_at is not None
 
 
 def test_live_dev_tick_emits_preflight_started_before_dispatch():
@@ -1102,9 +1107,11 @@ def test_repeated_invalid_packet_contract_escalates_after_bounded_repair():
     assert run.error["class"] == "DecisionPayloadInvalid"
     assert run.error["message"] == "delivery.next_owner is invalid"
     assert run.llm["validation_status"] == "invalid"
-    open_incidents = incidents.list_open()
-    assert len(open_incidents) == 1
-    assert open_incidents[0].summary == "delivery.next_owner is invalid"
+    assert incidents.list_open() == []
+    all_incidents = incidents.list_all()
+    assert len(all_incidents) == 1
+    assert all_incidents[0].summary == "delivery.next_owner is invalid"
+    assert all_incidents[0].closed_at is not None
     assert ts.get("task_1").state == TaskState.RUNNING
 
 
@@ -1212,7 +1219,8 @@ def test_dev_missing_proof_handoff_routes_to_neko_repair_instead_of_dead_skip():
     assert not res.actions_taken[0].ok
     task = ts.get("task_1")
     assert task.state == TaskState.RUNNING
-    assert task.open_incident_ids == [engine.incident_store.list_open()[0].id]
+    assert task.open_incident_ids == []
+    assert engine.incident_store.list_open() == []
     assert engine.state_machine.next_action(task).type == HarnessActionType.RUN_SLOT
 
 
@@ -1272,7 +1280,7 @@ def test_tick_skips_mission_with_open_incident():
     assert runtime.personas == []
 
 
-def test_run_until_settled_allows_neko_to_repair_blocked_incident():
+def test_run_until_settled_closes_model_invalid_output_without_neko_loop():
     ts = TaskStore()
     task = make_task()
     task.state = TaskState.BLOCKED
@@ -1284,11 +1292,14 @@ def test_run_until_settled_allows_neko_to_repair_blocked_incident():
 
     res = engine.run_until_settled(task_id="task_1", max_actions=1)
 
-    assert res.actions_taken[0].ok
-    assert res.stop_reason == "max_actions"
+    assert res.actions_taken == []
+    assert res.stop_reason == "no_eligible_action"
     assert incidents.list_open() == []
+    assert incidents.get("inc_1").closed_at is not None
     assert ts.get("task_1").state == TaskState.RUNNING
     assert ts.get("task_1").open_incident_ids == []
+    closed_events = [event for event in EventLog().for_task("task_1", limit=0) if event.type == "incident.closed"]
+    assert closed_events[-1].payload["reason"] == "contract_simplification_normalized_model_invalid_output"
 
 
 def test_run_until_settled_stops_on_open_environment_blocker_without_neko_retry():
@@ -1374,7 +1385,7 @@ def test_run_until_settled_does_not_treat_blocked_task_as_boundary_when_recovery
     assert engine._settled_boundary(task_id="task_1") is None
 
 
-def test_neko_incident_steering_receives_open_incident_details():
+def test_model_invalid_output_incident_closes_before_neko_steering():
     ts = TaskStore()
     task = make_task()
     task.state = TaskState.BLOCKED
@@ -1386,8 +1397,11 @@ def test_neko_incident_steering_receives_open_incident_details():
 
     res = TickEngine(task_store=ts, incident_store=incidents, persona_runtime=runtime).tick_once(task_id="task_1")
 
-    assert res.actions_taken[0].ok
-    assert runtime.incident_records == [{"id": "inc_1", "kind": "model_invalid_output", "summary": "proof_ids are required", "run_id": "run_bad"}]
+    assert res.actions_taken == []
+    assert runtime.incident_records is None
+    assert incidents.list_open() == []
+    assert incidents.get("inc_1").closed_at is not None
+    assert ts.get("task_1").open_incident_ids == []
 
 
 def test_tick_skips_task_with_existing_active_run():

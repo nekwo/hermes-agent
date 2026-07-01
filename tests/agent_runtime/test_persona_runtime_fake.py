@@ -723,7 +723,8 @@ def test_dev_persona_can_use_latest_handoff_repo_when_affected_repos_empty(monke
 
     runtime.run_tick(dev, ctx, run=run)
 
-    assert seen["cwd"] == Path(__file__).resolve().parents[2]
+    assert seen["cwd"] != Path(__file__).resolve().parents[2]
+    assert (seen["cwd"] / ".git").exists()
     assert "repo_label: hermes-agent" in seen["user_message"]
 
 

@@ -180,7 +180,6 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
                             "changed_files": [],
                             "tests": ["no product edits; findings synthesized from fulfilled Harness context bundles"],
                             "delivery": {
-                                "work_status": "patch_proposed",
                                 "summary": "<one paragraph no-edit investigation conclusion>",
                                 "findings": ["<grounded leakage cause or verified risk>"],
                                 "recommendations": ["<staged hardening action>"],
@@ -255,7 +254,6 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
                         "changed_files": ["<relative path>"],
                         "tests": ["<self-test command and status or not-run reason>"],
                         "delivery": {
-                            "work_status": "patch_proposed",
                             "self_test_evidence_ids": ["<selftest_id>"],
                         },
                     },
@@ -396,7 +394,6 @@ def _dev_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerA
                     "changed_files": ["<relative path>"],
                     "tests": ["<self-test command and status or not-run reason>"],
                     "delivery": {
-                        "work_status": "patch_proposed",
                         "self_test_evidence_ids": ["<selftest_id>"],
                     },
                 },

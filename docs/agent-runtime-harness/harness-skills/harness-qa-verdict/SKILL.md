@@ -10,8 +10,8 @@ Use this skill for QA review of Harness implementation proof.
 ## QA Contract
 
 - Review proof IDs, packet summaries, and focused target files only when proof metadata is insufficient.
-- Read Mission HUD before choosing an action. Treat `mission_hud.agent_hud` as the only live control panel.
-- Choose one visible `agent_hud.options[]` item. Prefer `agent_hud.recommended_action`; copy `decision_type`, `shape_id`, allowed keys, enum values, and `payload_skeleton` from that object. Do not invent payload fields, checklist item IDs, checklist statuses, packet fields, stage IDs, owners, proof lanes, or QA review keys.
+- Read Mission HUD before choosing an action. Treat STATUS as Harness-verified diff/proof/gate truth and ACTION as the bounded QA verdict or missing-proof surface.
+- Prefer the recommended visible action and use only its allowed payload keys. Do not invent payload fields, checklist item IDs, checklist statuses, packet fields, stage IDs, owners, proof lanes, QA review keys, or `delivery.work_status`.
 - If `validation_repair` is present, repair from `validation_repair.corrected_shape` and retry once. Do not repeat the same malformed payload. If repair is not possible from the corrected shape, emit `block` with a redaction-safe `log_ref`.
 - Treat QA verdicts as first-class review packets. Cite the packet IDs and proof IDs reviewed, and put blocking gaps in supported `qa_review.remaining_gaps` or the HUD's current QA verdict field. Do not reject because information is absent from one prose field when it exists in another supported delivery field.
 - If Harness reports dropped, normalized, stale, or unsupported packet fields, review the normalized packet only and request one exact packet repair when acceptance-critical content was lost.
@@ -26,7 +26,7 @@ Use this skill for QA review of Harness implementation proof.
 - Include `repo_bundle_id` for every rejected or missing-proof lane when the HUD provides one. Never invent a bundle ID; use only IDs shown in `agent_hud.repo_bundles`.
 - In Stage 53 simplified mode, QA's only product actions are `approve`, `reject`, and `request_missing_proof`.
 - Judge final outcome coverage, not every intermediate patch. Separate focused command proof, visual runtime proof, visual acceptance proof, unrelated failures, and proof caveats.
-- Treat Dev self-test evidence as helpful triage context, not release proof. Approval requires Harness final gate proof IDs and required visual/MCP proof when applicable.
+- Treat Dev self-test evidence and observed tool trace proof as helpful triage context, not release proof. Approval requires Harness authoritative final gate proof IDs and required visual/MCP proof when applicable.
 - For product-edit tasks in EterniaBackend or EterniaLauncher, approval also requires the production promotion chain as passed proof records in chronological order: local deterministic product tests, remote test staging k8 pod validation, then production pod rollout proof. EterniaBackend product edits additionally require a local Docker/PostgreSQL integration proof before staging. Accept only the backend `scripts/test.sh` default Postgres tier, or an equivalent proof that cites the backend `docs/testing/README.md` doctrine and real Docker/PostgreSQL services; `scripts/test.sh --sqlite` and mocked-only tests are not release proof. A local final gate or commit alone is not a prod deployment verdict.
 - When reviewing Backend Docker/PostgreSQL proof, accept logs from `python scripts/backend_postgres_proof.py --backend-root "X:\Unreal Engine\Engine\EterniaBackend\eternia-backend"` as release-lane evidence only when the run used the default `scripts/test.sh` Docker/PostgreSQL tier and exited green. Reject dry-run output, SQLite escape-hatch output, or focused-only output when the stage requires full local backend proof.
 - When prod deployment is push-triggered, approve only if the prod proof shows a remote sync step before the push, such as pull/fetch plus rebase when needed, and the push/deploy trigger. If the proof shows only `git push`, classify the prod rollout lane as missing.
@@ -68,7 +68,7 @@ For missing proof:
 }
 ```
 
-Use the HUD `recommended_action.payload_skeleton` first. The template above is explanatory guidance for deciding what substance belongs in the verdict.
+Use the HUD recommended action first. The template above is explanatory guidance for deciding what substance belongs in the verdict.
 
 ## Request Missing Proof
 

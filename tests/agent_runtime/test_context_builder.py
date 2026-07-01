@@ -1215,9 +1215,10 @@ def test_typed_plan_backend_investigation_hud_delivers_after_repeated_context():
 
     assert hud["primary_worker_action"]["action_id"] == "deliver_findings"
     assert hud["next_required_move"]["shape_id"] == "dev.propose_patch"
-    assert hud["decision_menu"][0]["recommended_payload"]["delivery"]["work_status"] == "patch_proposed"
-    assert "findings" in hud["decision_menu"][0]["recommended_payload"]["delivery"]
-    assert "recommendations" in hud["decision_menu"][0]["recommended_payload"]["delivery"]
+    delivery = hud["decision_menu"][0]["recommended_payload"]["delivery"]
+    assert "work_status" not in delivery
+    assert "findings" in delivery
+    assert "recommendations" in delivery
     assert "common.request_file_reads" not in [item["shape_id"] for item in hud["decision_menu"]]
 
 
