@@ -44,7 +44,7 @@ from .role_checklists import apply_decision_checklist_updates, sanitize_decision
 from .role_envelopes import RoleEnvelopeStore
 from .visual_proof import VisualProofRunner
 from .repo_bundles import RepoBundleStore, find_best_bundle_for_action, qa_waiting_on
-from .repo_context import command_workdir_for_task, safe_affected_repo_labels
+from .repo_context import command_workdir_for_task, git_diff_since_baseline, safe_affected_repo_labels
 from .packets import latest_packet, make_packet, record_packet
 from .role_sessions import (
     RoleSessionEnvelope,
@@ -728,6 +728,15 @@ class TickEngine:
                             normal_worker_flow=normal_flow_enabled,
                             mission_plan_flow=None,
                         )
+                        _record_handoff_observation(
+                            task,
+                            decision,
+                            run=self.run_store.get(run.id),
+                            actor=persona.id,
+                            proof_store=self.proof_store,
+                            command_workdir=self.command_workdir,
+                            task_store=self.task_store,
+                        )
                         _record_failed_proof_block_after_reuse(task, decision, actor=persona.id, run_id=run.id)
                         _record_timing_span(self.run_store, run.id, "decision_apply", decision_apply_started)
                     except DecisionPayloadInvalid as exc:
@@ -861,6 +870,15 @@ class TickEngine:
                                 proof_ids = self._collect_command_proof(task, final_gate_decision, actor=persona.id, run_id=run.id)
                             proof_statuses = _proof_statuses(proof_ids, proof_store=self.proof_store)
                             proof_batch_id = _record_stage52_proof_batch(self.proof_batch_store, task, final_gate_decision, proof_ids, proof_statuses, role_envelope_id=stage52_envelope.envelope_id if stage52_envelope is not None else None, run_id=run.id, persona_id=persona.id)
+                            _record_authoritative_gate_observation(
+                                task,
+                                stage_id=source_stage_id or None,
+                                proof_ids=proof_ids,
+                                proof_statuses=proof_statuses,
+                                run_id=run.id,
+                                actor=persona.id,
+                                task_store=self.task_store,
+                            )
                             task.proof_ids = _dedupe(list(task.proof_ids or []), proof_ids)
                             attach_proofs_to_plan_stage(task, source_stage_id or None, proof_ids, proof_store=self.proof_store)
                             proof_records = []
@@ -1546,6 +1564,106 @@ def _should_auto_run_final_gate(config: RuntimeConfig, decision) -> bool:
         return False
     flow = getattr(config, "normal_worker_flow", None)
     return bool(getattr(flow, "enabled", False)) and bool(getattr(flow, "auto_final_gate_after_delivery", False))
+
+
+def _record_handoff_observation(
+    task: Task,
+    decision,
+    *,
+    run,
+    actor: str,
+    proof_store,
+    command_workdir,
+    task_store,
+) -> None:
+    if decision.type not in {DecisionType.PROPOSE_PATCH, DecisionType.REQUEST_QA_REVIEW}:
+        return
+    stage_id = str((decision.payload or {}).get("stage_id") or task.current_stage_id or getattr(run, "stage_id", "") or "").strip() or None
+    baseline = (getattr(run, "progress", None) or {}).get("repo_baseline") if run is not None else None
+    try:
+        workdir = _command_workdir_for_task(task, command_workdir, actor=actor, stage_id=stage_id)
+        diff = git_diff_since_baseline(workdir, baseline if isinstance(baseline, dict) else None)
+    except Exception:
+        diff = {"schema_version": 1, "diff": "", "diff_chars": 0, "error": "diff_capture_failed"}
+    observed_proof_ids: list[str] = []
+    try:
+        for proof in proof_store.list_for_task(task.id):
+            metadata = proof.metadata if isinstance(proof.metadata, dict) else {}
+            if metadata.get("source") != "agent_tool_trace":
+                continue
+            if metadata.get("run_id") != getattr(run, "id", None):
+                continue
+            if stage_id and proof.stage_id and proof.stage_id != stage_id:
+                continue
+            observed_proof_ids.append(proof.id)
+    except Exception:
+        observed_proof_ids = []
+    root = task.harness_self_heal if isinstance(task.harness_self_heal, dict) else {}
+    observations = root.get("stage_observations") if isinstance(root.get("stage_observations"), dict) else {}
+    key = stage_id or "_task"
+    observations[key] = {
+        "schema_version": 1,
+        "captured_at": now().isoformat(),
+        "source": "harness_observed_handoff",
+        "actor": actor,
+        "run_id": getattr(run, "id", None),
+        "stage_id": stage_id,
+        "repo_diff": diff,
+        "observed_proof_ids": observed_proof_ids[:20],
+        "authoritative_gate_proof_ids": [],
+    }
+    root["stage_observations"] = observations
+    evidence = root.get("evidence_stack") if isinstance(root.get("evidence_stack"), list) else []
+    evidence.append(
+        {
+            "kind": "harness_observed_handoff",
+            "severity": "info",
+            "stage_id": stage_id or "",
+            "summary": f"Harness captured handoff diff ({diff.get('diff_chars', 0)} chars) and {len(observed_proof_ids)} observed proof record(s).",
+            "warnings": ["pre-existing dirty paths excluded"] if diff.get("baseline_dirty_count") else [],
+            "recorded_at": now().isoformat(),
+            "recommended_owner": "harness",
+        }
+    )
+    root["evidence_stack"] = evidence[-25:]
+    task.harness_self_heal = root
+    task_store.update(task, actor="harness", reason="record harness observed handoff diff/proof")
+
+
+def _record_authoritative_gate_observation(
+    task: Task,
+    *,
+    stage_id: str | None,
+    proof_ids: list[str],
+    proof_statuses: list[str],
+    run_id: str,
+    actor: str,
+    task_store,
+) -> None:
+    root = task.harness_self_heal if isinstance(task.harness_self_heal, dict) else {}
+    observations = root.get("stage_observations") if isinstance(root.get("stage_observations"), dict) else {}
+    key = stage_id or "_task"
+    current = observations.get(key) if isinstance(observations.get(key), dict) else {}
+    current["authoritative_gate_proof_ids"] = proof_ids[:20]
+    current["authoritative_gate_status"] = "passed" if proof_statuses and all(status == "passed" for status in proof_statuses) else "failed"
+    current["authoritative_gate_recorded_at"] = now().isoformat()
+    current["authoritative_gate_run_id"] = run_id
+    observations[key] = current
+    root["stage_observations"] = observations
+    evidence = root.get("evidence_stack") if isinstance(root.get("evidence_stack"), list) else []
+    evidence.append(
+        {
+            "kind": "harness_authoritative_gate",
+            "severity": "info" if current["authoritative_gate_status"] == "passed" else "warning",
+            "stage_id": stage_id or "",
+            "summary": f"Harness authoritative gate {current['authoritative_gate_status']} with {len(proof_ids)} proof record(s).",
+            "recorded_at": now().isoformat(),
+            "recommended_owner": actor,
+        }
+    )
+    root["evidence_stack"] = evidence[-25:]
+    task.harness_self_heal = root
+    task_store.update(task, actor="harness", reason="record authoritative gate proof lane")
 
 
 def _emit_run_budget_warning(run, *, task_id: str, actor: str) -> bool:

@@ -1096,6 +1096,7 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "untriaged_issue_severities": sorted({str(item.get("severity", "medium")) for item in untriaged}),
         "proof_summaries": [_proof_visibility_summary(proof) for proof in proofs],
         "self_test_summaries": [self_test_summary(item) for item in (self_tests or [])],
+        "verification_status": _verification_status(task),
         "timeline": _task_timeline(task.id, events or []),
         "next_action": next_action,
         "why_not_done": _why_not_done(task, gate, open_incidents, next_action),
@@ -1139,6 +1140,29 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "proof_gate_state": _proof_gate_state(task, proofs),
         "operator_capabilities": _operator_capabilities(task, next_action, gate),
     }
+
+
+def _verification_status(task) -> dict:
+    root = getattr(task, "harness_self_heal", None)
+    observations = root.get("stage_observations") if isinstance(root, dict) else None
+    if not isinstance(observations, dict):
+        return {"stage_observations": []}
+    rows = []
+    for stage_id, item in list(observations.items())[-8:]:
+        if not isinstance(item, dict):
+            continue
+        diff = item.get("repo_diff") if isinstance(item.get("repo_diff"), dict) else {}
+        rows.append(
+            {
+                "stage_id": stage_id,
+                "repo_diff_chars": int(diff.get("diff_chars") or 0),
+                "baseline_dirty_count": int(diff.get("baseline_dirty_count") or 0),
+                "observed_proof_count": len(item.get("observed_proof_ids") or []),
+                "authoritative_gate_status": str(item.get("authoritative_gate_status") or "pending")[:40],
+                "authoritative_gate_proof_count": len(item.get("authoritative_gate_proof_ids") or []),
+            }
+        )
+    return {"stage_observations": rows}
 
 
 def _task_current_stage_id(task) -> str | None:

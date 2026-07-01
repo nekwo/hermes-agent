@@ -956,6 +956,9 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str) -> dict[str, 
     evidence_stack = _task_evidence_stack(task)
     if evidence_stack:
         hud["evidence_stack"] = evidence_stack
+    verification_status = _task_verification_status(task, stage_id=stage_id)
+    if verification_status:
+        hud["verification_status"] = verification_status
     return hud
 
 
@@ -985,6 +988,27 @@ def _task_evidence_stack(task: Task) -> list[dict[str, Any]]:
             safe["recorded_at"] = str(item.get("recorded_at"))[:80]
         safe_stack.append({key: value for key, value in safe.items() if value not in ("", [], {})})
     return safe_stack
+
+
+def _task_verification_status(task: Task, *, stage_id: str | None) -> dict[str, Any] | None:
+    root = getattr(task, "harness_self_heal", None)
+    observations = root.get("stage_observations") if isinstance(root, dict) else None
+    if not isinstance(observations, dict):
+        return None
+    item = observations.get(stage_id or "_task")
+    if not isinstance(item, dict):
+        return None
+    diff = item.get("repo_diff") if isinstance(item.get("repo_diff"), dict) else {}
+    return {
+        "status_lane": {
+            "repo_diff_chars": int(diff.get("diff_chars") or 0),
+            "repo_diff_truncated": bool(diff.get("truncated")),
+            "baseline_dirty_count": int(diff.get("baseline_dirty_count") or 0),
+            "observed_proof_ids": [str(value)[:128] for value in (item.get("observed_proof_ids") or []) if str(value)][:20],
+            "authoritative_gate_proof_ids": [str(value)[:128] for value in (item.get("authoritative_gate_proof_ids") or []) if str(value)][:20],
+            "authoritative_gate_status": str(item.get("authoritative_gate_status") or "pending")[:40],
+        }
+    }
 
 
 def _agent_hud_options(menu: list[dict[str, Any]]) -> list[dict[str, Any]]:

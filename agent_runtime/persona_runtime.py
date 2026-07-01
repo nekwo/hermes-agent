@@ -27,7 +27,7 @@ from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .profile_runner import AgentRunRequest, AgentRunResult, ProfileAgentRunner, RunBudgetExceeded
 from .progress import ChatProgressSink, RunProgressSink
-from .repo_context import RepoExecutionContext, repo_execution_context_for_task
+from .repo_context import RepoExecutionContext, capture_repo_baseline, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
 from .store import RunStore, _safe_session_id
 from .tool_permissions import (
@@ -107,6 +107,7 @@ class GPTPersonaRuntime:
         repo_ctx = _repo_context_for_persona(persona, ctx)
         if repo_ctx is not None:
             ctx.repo_context = _repo_context_for_render(repo_ctx)
+            _attach_repo_baseline(run, repo_ctx)
             progress_sink.emit("run.progress", _repo_context_progress_payload(repo_ctx))
         render_started = time.perf_counter()
         user_message = render_context(ctx)
@@ -626,6 +627,15 @@ def _repo_context_progress_payload(repo_ctx: RepoExecutionContext) -> dict:
         "context_loaded": repo_ctx.context_loaded_label,
         "next_expected": "repo_scoped_audit",
     }
+
+
+def _attach_repo_baseline(run: AgentRun, repo_ctx: RepoExecutionContext) -> None:
+    try:
+        baseline = capture_repo_baseline(repo_ctx.workdir)
+        run.progress = {**(run.progress or {}), "repo_baseline": baseline}
+        RunStore().update(run)
+    except Exception:
+        return
 
 
 

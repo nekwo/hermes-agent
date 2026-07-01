@@ -8,6 +8,7 @@ from agent_runtime.models import AgentRun, Task, TaskStage
 from agent_runtime.packets import make_packet
 from agent_runtime.self_test_evidence import SelfTestEvidenceStore, record_self_test_from_progress
 from agent_runtime.states import RunState, StageStatus, TaskState
+from agent_runtime.store import ProofStore
 
 
 def _run() -> AgentRun:
@@ -48,9 +49,14 @@ def test_records_redaction_safe_self_test_evidence_from_terminal_progress():
     saved = SelfTestEvidenceStore().get(evidence.evidence_id)
     assert saved.command_label == "flutter test test/features/mission_control/mission_control_page_test.dart"
     assert saved.redaction_status == "safe"
-    event = EventLog().for_task(run.task_id, limit=0)[-1]
-    assert event.type == "self_test.recorded"
+    events = EventLog().for_task(run.task_id, limit=0)
+    event = next(item for item in events if item.type == "self_test.recorded")
     assert event.payload["evidence_id"] == evidence.evidence_id
+    proof = ProofStore().get(f"proof_observed_{evidence.evidence_id.removeprefix('selftest_')}")
+    assert proof.metadata["source"] == "agent_tool_trace"
+    assert proof.metadata["authoritative"] is False
+    assert proof.metadata["exit_code"] == 0
+    assert proof.path_or_value.endswith(f"{evidence.evidence_id}.json")
 
 
 def test_preflight_commands_do_not_become_self_test_evidence():
@@ -75,12 +81,10 @@ def test_repeated_failed_self_test_emits_loop_detection_event():
     assert first is not None
     assert second is not None
     events = EventLog().for_task(run.task_id, limit=0)
-    assert [event.type for event in events] == [
-        "self_test.recorded",
-        "self_test.recorded",
-        "self_test.loop_detected",
-    ]
-    assert events[-1].payload["repeat_count"] == 2
+    assert [event.type for event in events].count("self_test.recorded") == 2
+    assert [event.type for event in events].count("proof.attached") == 2
+    loop_event = next(item for item in events if item.type == "self_test.loop_detected")
+    assert loop_event.payload["repeat_count"] == 2
 
 
 def test_delivery_packet_rejects_unknown_self_test_evidence_ids():

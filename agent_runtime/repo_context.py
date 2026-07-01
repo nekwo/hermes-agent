@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
+import subprocess
+from typing import Any
+
+from hermes_time import now
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,47 @@ def command_workdir_for_task(task, explicit_workdir=None) -> Path:
     return Path.cwd()
 
 
+def capture_repo_baseline(workdir: str | Path) -> dict[str, Any]:
+    """Capture pre-run dirty state so handoff diffs do not claim old work."""
+
+    root = _git_root_for(Path(workdir).expanduser()) or Path(workdir).expanduser()
+    status_lines = _git_output(root, ["git", "status", "--short"])
+    return {
+        "schema_version": 1,
+        "captured_at": now().isoformat(),
+        "workdir_label": _safe_repo_label(root.name),
+        "git_head": _git_output(root, ["git", "rev-parse", "--short", "HEAD"], single=True),
+        "dirty_count": len(status_lines),
+        "dirty_paths": _dirty_paths_from_status(status_lines),
+        "status_lines": status_lines[:200],
+    }
+
+
+def git_diff_since_baseline(workdir: str | Path, baseline: dict[str, Any] | None, *, max_chars: int = 50000) -> dict[str, Any]:
+    """Return the current git diff, excluding paths dirty before the run."""
+
+    root = _git_root_for(Path(workdir).expanduser()) or Path(workdir).expanduser()
+    baseline_paths = [str(path) for path in ((baseline or {}).get("dirty_paths") or []) if str(path).strip()]
+    lines = _filter_diff_lines(
+        _git_output(root, ["git", "diff", "--no-ext-diff", "--", "."]),
+        baseline_paths=baseline_paths,
+    )
+    diff_text = "\n".join(lines)
+    truncated = len(diff_text) > max_chars
+    if truncated:
+        diff_text = diff_text[:max_chars].rstrip()
+    return {
+        "schema_version": 1,
+        "captured_at": now().isoformat(),
+        "workdir_label": _safe_repo_label(root.name),
+        "baseline_dirty_count": len(baseline_paths),
+        "excluded_baseline_paths": baseline_paths[:50],
+        "diff": diff_text,
+        "diff_chars": len(diff_text),
+        "truncated": truncated,
+    }
+
+
 def safe_affected_repo_labels(repos: list[str] | tuple[str, ...] | None) -> list[str]:
     labels: list[str] = []
     for repo in repos or []:
@@ -85,6 +130,70 @@ def safe_affected_repo_labels(repos: list[str] | tuple[str, ...] | None) -> list
         name = Path(text).name if (":" in text or "/" in text or "\\" in text) else text
         labels.append(f"{_safe_repo_label(name)} (unresolved; path withheld)")
     return labels
+
+
+def _git_output(workdir: Path, command: list[str], *, single: bool = False) -> Any:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=workdir,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return "" if single else []
+    if result.returncode not in {0, 1}:
+        return "" if single else []
+    text = (result.stdout or "").rstrip()
+    if single:
+        return text.strip().splitlines()[0].strip() if text.strip() else ""
+    return [line.rstrip() for line in text.splitlines() if line.strip()]
+
+
+def _dirty_paths_from_status(status_lines: list[str]) -> list[str]:
+    paths: list[str] = []
+    for line in status_lines:
+        raw = line[3:].strip() if len(line) > 3 else line.strip()
+        parts = [part.strip() for part in raw.split(" -> ") if part.strip()]
+        for part in parts or [raw]:
+            clean = part.strip().strip('"').replace("\\", "/")
+            if clean and clean not in paths:
+                paths.append(clean)
+    return paths[:200]
+
+
+def _filter_diff_lines(lines: list[str], *, baseline_paths: list[str]) -> list[str]:
+    if not baseline_paths:
+        return lines
+    excluded = {path.replace("\\", "/").strip("/") for path in baseline_paths if path}
+    filtered: list[str] = []
+    current: list[str] = []
+    drop_current = False
+    for line in lines:
+        if line.startswith("diff --git "):
+            if current and not drop_current:
+                filtered.extend(current)
+            current = [line]
+            drop_current = _diff_header_touches_excluded_path(line, excluded)
+            continue
+        current.append(line)
+    if current and not drop_current:
+        filtered.extend(current)
+    return filtered
+
+
+def _diff_header_touches_excluded_path(line: str, excluded: set[str]) -> bool:
+    parts = line.split()
+    candidates = []
+    for part in parts[2:4]:
+        if part.startswith(("a/", "b/")):
+            candidates.append(part[2:].replace("\\", "/").strip("/"))
+    return any(candidate in excluded for candidate in candidates)
 
 
 def resolve_affected_repo_workdir(repo: str) -> Path | None:
