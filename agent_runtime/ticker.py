@@ -33,7 +33,7 @@ from .persona_assignments import (
 )
 from .planning import _advance_to_next_dev_stage, _all_stages_dev_complete, _has_backend_contract_delivery_packet, _needs_cross_stack_launcher_completion, _needs_sequential_specialist_join
 from .incidents import MODEL_INVALID_OUTPUT, RUN_BUDGET_EXCEEDED, classify_exception
-from .decision_schema import DecisionPayloadInvalid, DecisionType
+from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .decision_contracts import validate_planning_decision
 from .dev_discipline import validate_dev_progress_gate
 from .proof_runner import CommandProofRunner
@@ -59,6 +59,7 @@ from .role_sessions import (
 
 from .recovery import mark_stale_runs
 from .runtime_config import RuntimeConfig
+from .simplified_contract import project_decision_for_execution, simplified_contract_enabled
 from .recovery_flags import mark_block_recovery_attempt
 from .state_machine import MissionStateMachine
 from .stage_intent import (
@@ -761,6 +762,20 @@ class TickEngine:
                         if persona_role == "dev":
                             _autocorrect_downstream_visual_block_to_current_stage_proof(task, decision)
                         validate_planning_decision(decision)
+                        projection = project_decision_for_execution(
+                            task,
+                            decision,
+                            config=self.config,
+                            actor=persona.id,
+                            run_id=run.id,
+                            event_log=EventLog(),
+                        )
+                        if projection.blocked_reason:
+                            raise DecisionPayloadInvalid(projection.blocked_reason)
+                        public_decision = decision
+                        decision = projection.execution_decision
+                        if decision is not public_decision:
+                            validate_planning_decision(decision)
                         sanitized_payload, ignored_checklist_updates = sanitize_decision_checklist_payload(
                             task,
                             role_id=persona.id,
@@ -812,7 +827,7 @@ class TickEngine:
                             return HarnessActionResult(action, False, "task reached terminal state before decision application", {"run_id": run.id, "task_state": current_task.state.value})
                         task = current_task
                         before_task = copy.deepcopy(task)
-                        normal_flow_enabled = bool(getattr(getattr(self.config, "normal_worker_flow", None), "enabled", False))
+                        normal_flow_enabled = bool(getattr(getattr(self.config, "normal_worker_flow", None), "enabled", False)) or simplified_contract_enabled(self.config)
                         self.state_machine.apply_decision(
                             task,
                             decision,
@@ -953,8 +968,14 @@ class TickEngine:
                                 self.persona_assignment_store.attach_proof(assignment.id, proof_id)
                     elif _should_auto_run_final_gate(self.config, decision):
                         source_stage_id = str(before_task.current_stage_id or run.stage_id or "").strip()
-                        source_stage = next((stage for stage in getattr(before_task, "stages", []) or [] if stage.id == source_stage_id), None)
-                        final_gate_decision = build_final_gate_decision(before_task, source_stage, delivery_packet=latest_packet(before_task.id, "delivery", stage_id=source_stage_id))
+                        source_stage = _stage_for_gate(before_task, source_stage_id)
+                        final_gate_decision = _build_authoritative_stage_gate_decision(
+                            before_task,
+                            source_stage,
+                            delivery_packet=latest_packet(before_task.id, "delivery", stage_id=source_stage_id),
+                        )
+                        if final_gate_decision is not None and final_gate_decision.type == DecisionType.REQUEST_TEST_RUN:
+                            normalize_request_test_run_decision(task, final_gate_decision)
                         if final_gate_decision is not None:
                             if worker_store is not None and worker is not None:
                                 worker_store.update_after_run(worker.id, self.run_store.get(run.id), close_reason="auto_final_gate_after_delivery", count_decision=False)
@@ -1106,7 +1127,18 @@ class TickEngine:
                         self._apply_no_progress_guard(task, run, persona.id, decision.type.value, stage52_envelope)
                     self.task_store.update(task, actor=persona.id, reason=decision.summary)
                     run = _refresh_run_for_update(self.run_store, run)
-                    run.llm = {**(run.llm or {}), "decision_type": decision.type.value, "validation_status": "valid", "retry_attempt": attempt, "retry_max_attempts": max_attempts}
+                    public_type = getattr(getattr(projection, "public_type", None), "value", None)
+                    execution_type = getattr(getattr(projection, "execution_type", None), "value", None)
+                    run.llm = {
+                        **(run.llm or {}),
+                        "decision_type": decision.type.value,
+                        "public_decision_type": public_type or decision.type.value,
+                        "execution_decision_type": execution_type or decision.type.value,
+                        "decision_contract_mode": getattr(projection, "mode", "legacy"),
+                        "validation_status": "valid",
+                        "retry_attempt": attempt,
+                        "retry_max_attempts": max_attempts,
+                    }
                     budget_warning = _emit_run_budget_warning(run, task_id=task.id, actor=persona.id)
                     if envelope is not None:
                         update_envelope_after_invocation(envelope, run, proof_ids_added=proof_ids)
@@ -1198,7 +1230,16 @@ class TickEngine:
                             "repo_bundle_id": assignment.repo_bundle_id,
                         }
                         self.run_store.update(run)
-                    self.run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": decision.type.value, "summary": decision.summary, "rationale": decision.rationale})
+                    final_decision = {
+                        "type": getattr(getattr(projection, "public_type", None), "value", None) or decision.type.value,
+                        "summary": public_decision.summary,
+                        "rationale": public_decision.rationale,
+                    }
+                    execution_type = getattr(getattr(projection, "execution_type", None), "value", None)
+                    if execution_type and execution_type != final_decision["type"]:
+                        final_decision["execution_type"] = execution_type
+                        final_decision["execution_summary"] = decision.summary
+                    self.run_store.close_run(run.id, state=RunState.COMPLETED, final_decision=final_decision)
                     if worker_store is not None and worker is not None:
                         closed_run = self.run_store.get(run.id)
                         worker_store.update_after_run(worker.id, closed_run, close_reason="tick_completed", count_decision=False)
@@ -1688,7 +1729,63 @@ def _should_auto_run_final_gate(config: RuntimeConfig, decision) -> bool:
     if decision.type != DecisionType.PROPOSE_PATCH:
         return False
     flow = getattr(config, "normal_worker_flow", None)
-    return bool(getattr(flow, "enabled", False)) and bool(getattr(flow, "auto_final_gate_after_delivery", False))
+    if bool(getattr(flow, "enabled", False)) and bool(getattr(flow, "auto_final_gate_after_delivery", False)):
+        return True
+    return simplified_contract_enabled(config)
+
+
+def _stage_for_gate(task: Task, stage_id: str | None):
+    wanted = str(stage_id or "").strip()
+    plan = getattr(task, "mission_plan", None)
+    if plan is not None and wanted:
+        stage = next((item for item in getattr(plan, "stages", []) or [] if str(getattr(item, "id", "") or "") == wanted), None)
+        if stage is not None:
+            return stage
+    return next((stage for stage in getattr(task, "stages", []) or [] if str(getattr(stage, "id", "") or "") == wanted), None)
+
+
+def _build_authoritative_stage_gate_decision(task: Task, stage, *, delivery_packet: dict[str, Any] | None = None):
+    if stage is None:
+        return None
+    legacy_product_gate = build_final_gate_decision(task, stage, delivery_packet=delivery_packet)
+    if legacy_product_gate is not None and not str(getattr(stage, "proof_recipe_id", "") or "").strip():
+        return legacy_product_gate
+    stage_id = str(getattr(stage, "id", "") or getattr(task, "current_stage_id", "") or "").strip()
+    recipe_id = str(getattr(stage, "proof_recipe_id", "") or "").strip()
+    if recipe_id:
+        return AgentDecision(
+            type=DecisionType.REQUEST_TEST_RUN,
+            summary="Run authoritative Harness proof recipe after hand_off.",
+            rationale="Collapsed hand_off gates on the Harness rerun, not the agent's observed command.",
+            payload={
+                "stage_id": stage_id,
+                "recipe_id": recipe_id,
+                "proof_intent": "authoritative_gate_after_hand_off",
+            },
+        )
+    commands = _stage_gate_commands(stage)
+    if commands:
+        return AgentDecision(
+            type=DecisionType.REQUEST_TEST_RUN,
+            summary="Run authoritative Harness command gate after hand_off.",
+            rationale="Collapsed hand_off gates on the Harness rerun, not the agent's observed command.",
+            payload={
+                "stage_id": stage_id,
+                "commands": commands,
+                "proof_intent": "authoritative_gate_after_hand_off",
+            },
+        )
+    return build_final_gate_decision(task, stage, delivery_packet=delivery_packet)
+
+
+def _stage_gate_commands(stage) -> list[str]:
+    commands: list[str] = []
+    for item in list(getattr(stage, "test_plan", []) or []):
+        text = str(item or "").strip()
+        if not text or text.startswith("proof_recipe:"):
+            continue
+        commands.append(text)
+    return commands[:3]
 
 
 def _record_handoff_observation(

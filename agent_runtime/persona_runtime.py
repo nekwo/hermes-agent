@@ -16,6 +16,7 @@ from .decision_schema import (
     DECISION_SCHEMA,
     AgentDecision,
     DecisionPayloadInvalid,
+    DecisionType,
     parse_structured_decision,
     validate_decision_for_role,
 )
@@ -831,7 +832,12 @@ def _finish_reason_from_result(result: dict | object) -> str | None:
 def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) -> str:
     role = role_from_persona(persona)
     compact_schema = json.dumps(DECISION_SCHEMA, separators=(",", ":"))
-    payload_contracts = prompt_contract_markdown()
+    try:
+        cfg = load_agent_runtime_config()
+    except Exception:
+        cfg = None
+    simplified_prompt = _simplified_contract_prompt_enabled(cfg)
+    payload_contracts = prompt_contract_markdown(_simplified_contract_decisions_for_role(role) if simplified_prompt else None)
     parts = [load_bundled_prompt(role)]
     overlay = Path(__file__).with_name("prompts") / "shared_harness_overlay.md"
     if overlay.exists():
@@ -848,6 +854,9 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
     normal_flow_guidance = _normal_worker_flow_guidance(persona)
     if normal_flow_guidance:
         parts.append(normal_flow_guidance)
+    simplified_contract_guidance = _simplified_contract_guidance(persona, cfg=cfg)
+    if simplified_contract_guidance:
+        parts.append(simplified_contract_guidance)
     parts.extend(
         [
             "# Universal Harness Rules\n"
@@ -873,6 +882,61 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
         ]
     )
     return "\n\n".join(part for part in parts if part)
+
+
+def _simplified_contract_prompt_enabled(cfg) -> bool:
+    simplified = getattr(cfg, "simplified_agent_contract", None)
+    return bool(
+        getattr(simplified, "enabled", False)
+        and getattr(simplified, "expose_only_simplified_actions", True)
+    )
+
+
+def _simplified_contract_decisions_for_role(role) -> list[DecisionType]:
+    role_value = role.value if hasattr(role, "value") else str(role)
+    if role_value == "dev":
+        return [DecisionType.HAND_OFF, DecisionType.ESCALATE, DecisionType.BLOCK]
+    if role_value == "qa":
+        return [DecisionType.QA_VERDICT, DecisionType.ESCALATE, DecisionType.BLOCK]
+    if role_value == "alice_supervisor":
+        return [DecisionType.SCOPE_ROUTE, DecisionType.ESCALATE, DecisionType.BLOCK, DecisionType.RESOLVE_INCIDENT]
+    return [DecisionType.BLOCK]
+
+
+def _simplified_contract_guidance(persona: AgentPersona, *, cfg) -> str:
+    if not _simplified_contract_prompt_enabled(cfg):
+        return ""
+    role = role_from_persona(persona).value
+    common = (
+        "# Simplified Agent Contract Active\n"
+        "Mission HUD mode is `simplified_agent_contract`. The visible ACTION menu is authoritative. "
+        "Ignore older bundled-prompt mentions of legacy decision names unless terminal feedback explicitly asks for a one-turn repair. "
+        "Do not emit `propose_patch`, `request_test_run`, `request_qa_review`, `propose_acceptance`, `report_issue_discovery`, `report_qa_verdict`, or `approve` while this mode is active. "
+        "The Harness keeps those names only as an internal compatibility state machine and logs parity events when it projects a collapsed signal."
+    )
+    if role == "dev":
+        return (
+            common
+            + "\n\nFor Dev and Backend Dev, allowed public decisions are `hand_off`, `block`, and `escalate`. "
+            "For product-edit stages, no-edit proof stages, exact proof recipes, failed-gate repairs, and contract joins, emit `hand_off` when your slice is ready for Harness attribution/proof. "
+            "`hand_off` replaces both `propose_patch` and `request_test_run`: the Harness captures the isolated-worktree diff and runs the authoritative gate/recipe. "
+            "Use `block` only for exact missing prerequisites, and `escalate` only for a discovered issue too large or unsafe to fold into this stage."
+        )
+    if role == "qa":
+        return (
+            common
+            + "\n\nFor QA, allowed public decisions are `qa_verdict`, `block`, and `escalate`. "
+            "`qa_verdict` replaces `report_qa_verdict` and `approve`; cite existing Harness proof IDs and findings. "
+            "Use `block` for missing proof and `escalate` for out-of-scope or systemic issues."
+        )
+    if role == "alice_supervisor":
+        return (
+            common
+            + "\n\nFor Neko Mission Lead, the normal public routing decision is `scope_route`; it replaces `propose_acceptance`. "
+            "Use `scope_route` for kickoff, rescope, graph-faithful owner/repo routing, and proof-gate release. "
+            "Use `block` for true external blockers and `escalate` for issue discovery; use `resolve_incident` only when the HUD's primary action is Resolve Incident for an existing open incident."
+        )
+    return common
 
 
 def _specialist_dev_guidance(persona: AgentPersona) -> str:

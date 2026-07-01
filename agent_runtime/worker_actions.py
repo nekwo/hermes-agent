@@ -9,6 +9,7 @@ from .models import AgentRun, Task, TaskStage
 from .mission_plan import task_stage_records
 from .profile_context import active_profile_name
 from .runtime_config import RuntimeConfig
+from .simplified_contract import expose_only_simplified_actions
 from .stage_intent import no_product_edit_recipe_for_stage, no_product_edit_recipe_id, stage_requires_product_edit
 from .stage_intent import stage_is_committed_verification_gate
 from .states import StageStatus, TaskState
@@ -64,6 +65,8 @@ def worker_actions_for_role(
     if not normal_worker_flow_enabled(config):
         return []
     resolved = _worker_role(role, run)
+    if expose_only_simplified_actions(config):
+        return _collapsed_actions(resolved, task, run)
     if mission_plan_hud_enabled(config):
         return _typed_actions(resolved, task, run, proof_store=proof_store)
     if resolved == "dev":
@@ -72,6 +75,41 @@ def worker_actions_for_role(
         return _qa_actions(task, run, proof_store=proof_store)
     if resolved == "alice_supervisor":
         return _neko_actions(task, run)
+    return [_block_action(primary=True, reason="Unknown worker role; block with evidence instead of guessing.")]
+
+
+def _collapsed_actions(role: str, task: Task, run: AgentRun) -> list[WorkerAction]:
+    stage = current_plan_stage(task)
+    if role == "alice_supervisor":
+        state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
+        if state == TaskState.BLOCKED and getattr(task, "open_incident_ids", None):
+            return [
+                WorkerAction("resolve_incident", DecisionType.RESOLVE_INCIDENT, "neko.resolve_incident", "Resolve Incident", primary=True, reason="Resolve one open incident or route recovery."),
+                WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+                _block_action(reason="Use only for a true external/human/environment blocker."),
+            ]
+        return [
+            WorkerAction("scope_route", DecisionType.SCOPE_ROUTE, "neko.scope_route", "Scope Route", primary=True, reason="Scope and route one bounded owner/repo/proof gate."),
+            WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            _block_action(reason="Use only for a true external/human/environment blocker."),
+        ]
+    if role == "qa" or (stage is not None and _stage_owner_role(stage.owner) == "qa"):
+        return [
+            WorkerAction("qa_verdict", DecisionType.QA_VERDICT, "qa.verdict", "QA Verdict", primary=True, reason="Issue a verdict over Harness-verified proof."),
+            WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            _block_action(reason="Use when proof cannot be independently verified."),
+        ]
+    if role == "dev":
+        if stage is None:
+            return [
+                _block_action(primary=True, reason="No typed current stage is active; block with the missing-stage evidence."),
+                WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            ]
+        return [
+            WorkerAction("hand_off", DecisionType.HAND_OFF, "dev.hand_off", "Hand Off", primary=True, reason="Signal done; Harness captures diff and reruns the authoritative gate."),
+            _block_action(reason="Use when implementation or proof is blocked by exact evidence."),
+            WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+        ]
     return [_block_action(primary=True, reason="Unknown worker role; block with evidence instead of guessing.")]
 
 

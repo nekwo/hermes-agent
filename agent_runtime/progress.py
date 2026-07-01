@@ -177,7 +177,11 @@ def _maybe_record_self_test(run, event_type: str, payload: dict[str, Any], *, ev
     try:
         cfg = load_agent_runtime_config()
         flow = getattr(cfg, "normal_worker_flow", None)
-        if not bool(getattr(flow, "enabled", False)) or not bool(getattr(flow, "self_test_evidence_capture", False)):
+        simplified = getattr(cfg, "simplified_agent_contract", None)
+        capture_enabled = (
+            bool(getattr(flow, "enabled", False)) and bool(getattr(flow, "self_test_evidence_capture", False))
+        ) or bool(getattr(simplified, "enabled", False))
+        if not capture_enabled:
             return
         record_self_test_from_progress(run, event_type, payload, event_log=event_log)
     except Exception:

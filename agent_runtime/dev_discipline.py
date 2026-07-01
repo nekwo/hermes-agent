@@ -144,7 +144,9 @@ _PROGRESS_OK_DECISIONS = frozenset({
     DecisionType.PROPOSE_STAGE_PLAN,
     DecisionType.CORRECT_STAGE,
     DecisionType.REQUEST_TEST_RUN,
+    DecisionType.HAND_OFF,
     DecisionType.BLOCK,
+    DecisionType.ESCALATE,
     DecisionType.NEEDS_CONTEXT,
     DecisionType.REQUEST_FILE_READS,
     DecisionType.REPORT_ISSUE_DISCOVERY,
@@ -152,6 +154,7 @@ _PROGRESS_OK_DECISIONS = frozenset({
 
 _BUDGET_PRESSURE_OK_DECISIONS = frozenset({
     DecisionType.REQUEST_TEST_RUN,
+    DecisionType.HAND_OFF,
     DecisionType.BLOCK,
     DecisionType.NEEDS_CONTEXT,
 })

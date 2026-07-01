@@ -46,6 +46,35 @@ def validate_planning_decision(decision: AgentDecision) -> None:
         _list_of_strings(p, "paths", required=True)
         if not str(p.get("reason", "")).strip():
             raise DecisionPayloadInvalid("reason is required")
+    elif decision.type == DecisionType.HAND_OFF:
+        if "known_gaps" in p:
+            _list_of_strings(p, "known_gaps")
+        for forbidden in ("delivery", "work_status", "changed_files", "proof_ids"):
+            if forbidden in p:
+                raise DecisionPayloadInvalid(f"hand_off must not declare observed field {forbidden}; Harness derives it from diff/trace/gate")
+    elif decision.type == DecisionType.ESCALATE:
+        require_keys(p, "title", "summary")
+        if not str(p.get("title", "")).strip() or not str(p.get("summary", "")).strip():
+            raise DecisionPayloadInvalid("escalate requires title and summary")
+        if p.get("severity", "medium") not in {"low", "medium", "high", "critical"}:
+            raise DecisionPayloadInvalid("escalate severity must be low, medium, high, or critical")
+        _list_of_strings(p, "evidence")
+    elif decision.type == DecisionType.SCOPE_ROUTE:
+        require_keys(p, "objective", "acceptance_criteria", "target_owner", "target_repo", "proof_gate")
+        if not str(p.get("objective", "")).strip():
+            raise DecisionPayloadInvalid("scope_route objective is required")
+        _list_of_strings(p, "acceptance_criteria", required=True)
+        if str(p.get("target_owner")) not in {"dev", "backend_dev", "qa", "neko_supervisor", "human"}:
+            raise DecisionPayloadInvalid("scope_route target_owner is invalid")
+        if str(p.get("target_repo")) not in {"EterniaLauncher", "EterniaBackend", "hermes-agent", "none"}:
+            raise DecisionPayloadInvalid("scope_route target_repo is invalid")
+        if not isinstance(p.get("proof_gate"), dict):
+            raise DecisionPayloadInvalid("scope_route proof_gate must be an object")
+    elif decision.type == DecisionType.QA_VERDICT:
+        if p.get("verdict") not in {"approved", "needs_fixes", "blocked"}:
+            raise DecisionPayloadInvalid("qa_verdict verdict must be approved, needs_fixes, or blocked")
+        _list_of_strings(p, "findings")
+        _list_of_strings(p, "proof_ids")
     elif decision.type == DecisionType.PROPOSE_STAGE_PLAN:
         stages = p.get("stages")
         if not isinstance(stages, list) or not stages:

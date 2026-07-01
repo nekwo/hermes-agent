@@ -25,6 +25,7 @@ from .repo_context import repo_execution_context_for_task, safe_affected_repo_la
 from .role_checklists import stage_checklist_hud
 from .role_contracts import contract_for_persona
 from .serde import to_jsonable
+from .simplified_contract import expose_only_simplified_actions
 from .stage_intent import stage_is_committed_verification_gate, stage_requires_product_edit
 from .worker_actions import primary_worker_action, worker_actions_for_role
 
@@ -768,11 +769,19 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
         shape_index = {shape_id: shape_index[shape_id] for shape_id in wanted_shape_ids if shape_id in shape_index}
     decision_menu = _worker_action_decision_menu(worker_actions, next_move=next_move, shape_index=shape_index) if worker_actions else _decision_menu(role, next_move=next_move, shape_index=shape_index)
     context_expansion_menu = _context_expansion_menu(role, shape_index=shape_index)
-    agent_hud = _simplified_agent_hud(task, run, role=role)
+    simplified_surface = expose_only_simplified_actions(config)
+    if simplified_surface:
+        shape_index = {shape_id: _strip_shape_fill_surface(shape) for shape_id, shape in shape_index.items()}
+        decision_menu = _strip_payload_fill_surface(decision_menu)
+        context_expansion_menu = []
+    agent_hud = _simplified_agent_hud(task, run, role=role, simplified_contract=simplified_surface)
     agent_hud["options"] = _agent_hud_options(decision_menu)
     if context_expansion_menu:
         agent_hud["context_options"] = _agent_hud_options(context_expansion_menu)
     recommended_action = _recommended_action(decision_menu, next_move=next_move, role=role)
+    if simplified_surface and recommended_action:
+        for key in ("required_payload_keys", "allowed_payload_keys", "nested_required", "enum_choices", "payload_skeleton", "forbid_unknown_payload_keys"):
+            recommended_action.pop(key, None)
     if recommended_action:
         agent_hud["recommended_action"] = recommended_action
     contract_mode = "normal_worker_flow" if worker_actions else "closed_choice"
@@ -833,6 +842,8 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
         hud["worker_action_menu"] = visible_actions
         hud["allowed_alternatives"] = [action["action_id"] for action in visible_actions if not action.get("primary")]
         hud["not_allowed_yet"] = not_allowed
+    if simplified_surface:
+        hud["shape_lookup_rule"] = "Simplified contract is active: agents emit only coordination signals; Harness observes diff, trace, and authoritative gate state."
     typed_stage = current_plan_stage(task)
     ready, blockers = blocking_stages_ready_for_qa(task, proof_store=proof_store)
     hud["typed_mission_plan"] = mission_plan_summary(task)
@@ -929,7 +940,7 @@ def _latest_context_request_feedback(task: Task, run: AgentRun) -> dict[str, Any
     return {key: value for key, value in feedback.items() if value not in (None, "", [], {})}
 
 
-def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str) -> dict[str, Any]:
+def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str, simplified_contract: bool = False) -> dict[str, Any]:
     repo_bundles = RepoBundleStore().list_for_task(task.id)
     active_bundle_id = str((run.progress or {}).get("repo_bundle_id") or "").strip() if isinstance(run.progress, dict) else ""
     active_bundle = next((bundle for bundle in repo_bundles if bundle.id == active_bundle_id), None)
@@ -963,7 +974,7 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str) -> dict[str, 
         "repo_bundles": [repo_bundle_summary(bundle) for bundle in repo_bundles],
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "qa_waiting_on": qa_waiting_on(repo_bundles),
-        "contract": contract_for_persona(run.persona_id, role=role),
+        "contract": contract_for_persona(run.persona_id, role=role, simplified=simplified_contract),
         "response_rule": "Read STATUS for Harness-verified diff/proof/gate truth, then use the recommended visible ACTION affordance. Unknown fields are invalid; open only the named skill_ref when deeper guidance is needed.",
     }
     evidence_stack = _task_evidence_stack(task)
@@ -1370,6 +1381,40 @@ def _worker_action_decision_menu(actions, *, next_move: dict[str, Any], shape_in
             entry["recommended_payload"] = next_move["recommended_payload"]
         menu.append(entry)
     return menu
+
+
+def _strip_payload_fill_surface(menu: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stripped: list[dict[str, Any]] = []
+    removed = {
+        "required_payload_keys",
+        "allowed_payload_keys",
+        "nested_required",
+        "enum_choices",
+        "payload_template",
+        "recommended_payload",
+        "forbid_unknown_payload_keys",
+    }
+    for item in menu:
+        if not isinstance(item, dict):
+            continue
+        stripped.append({key: value for key, value in item.items() if key not in removed and value not in (None, "", [], {})})
+    return stripped
+
+
+def _strip_shape_fill_surface(shape: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(shape, dict):
+        return {}
+    removed = {
+        "required_payload_keys",
+        "allowed_payload_keys",
+        "nested_required",
+        "enum_choices",
+        "payload_template",
+        "recommended_payload",
+        "object_contracts",
+        "extras",
+    }
+    return {key: value for key, value in shape.items() if key not in removed and value not in (None, "", [], {})}
 
 
 def _context_expansion_menu(role: str, *, shape_index: dict[str, Any]) -> list[dict[str, Any]]:
