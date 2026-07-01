@@ -1,4 +1,6 @@
+import os
 import subprocess
+import time
 
 from agent_runtime.repo_context import RepoExecutionContext, capture_repo_baseline, git_diff_since_baseline, isolated_repo_context_for_run
 
@@ -52,3 +54,26 @@ def test_isolated_repo_context_uses_distinct_worktrees_for_parallel_runs(tmp_pat
     assert first.workdir != second.workdir
     assert (second.workdir / "shared.txt").read_text(encoding="utf-8") == "clean\n"
     assert (repo / "shared.txt").read_text(encoding="utf-8") == "dirty live checkout\n"
+
+
+def test_isolated_repo_context_gc_removes_old_clean_runtime_worktrees(tmp_path, monkeypatch):
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Harness Test")
+    (repo / "shared.txt").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+    source = RepoExecutionContext(workdir=repo, repo_label="repo", source="test")
+
+    old = isolated_repo_context_for_run(source, task_id="task_1", run_id="run_old")
+    old_time = time.time() - (3 * 24 * 60 * 60)
+    os.utime(old.workdir, (old_time, old_time))
+
+    new = isolated_repo_context_for_run(source, task_id="task_1", run_id="run_new")
+
+    assert new.workdir.exists()
+    assert not old.workdir.exists()

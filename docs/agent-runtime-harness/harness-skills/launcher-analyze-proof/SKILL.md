@@ -52,11 +52,18 @@ When delivering a product edit in normal worker flow, cite self-test evidence if
 
 ```json
 {
-  "work_status": "patch_proposed",
-  "self_test_evidence_ids": ["selftest_id_from_hud"],
-  "changed_files": ["lib/features/mission_control/mission_control_page.dart"],
-  "known_gaps": [],
-  "next_owner": "neko_supervisor"
+  "type": "propose_patch",
+  "summary": "Mission Control Launcher patch is ready for proof review.",
+  "rationale": "The focused Launcher change is complete and self-test evidence is attached.",
+  "payload": {
+    "summary": "Updated Mission Control Launcher behavior.",
+    "delivery": {
+      "self_test_evidence_ids": ["selftest_id_from_hud"],
+      "changed_files": ["lib/features/mission_control/mission_control_page.dart"],
+      "known_gaps": [],
+      "next_owner": "neko_supervisor"
+    }
+  }
 }
 ```
 
@@ -64,10 +71,18 @@ When requesting an explicit proof gate, keep the delivery packet concise:
 
 ```json
 {
-  "work_status": "proof_requested",
-  "consumed_contract_packet_ids": ["packet_contract_id"],
-  "consumed_proof_ids": ["backend_proof_id"],
-  "known_gaps": [],
-  "next_owner": "neko_supervisor"
+  "type": "request_test_run",
+  "summary": "Run focused Launcher contract proof.",
+  "rationale": "Launcher consumed the backend contract packet and needs a deterministic proof gate.",
+  "payload": {
+    "stage_id": "stage_example",
+    "commands": ["flutter test test/features/mission_control/mission_control_page_test.dart"],
+    "delivery": {
+      "consumed_contract_packet_ids": ["packet_contract_id"],
+      "consumed_proof_ids": ["backend_proof_id"],
+      "known_gaps": [],
+      "next_owner": "neko_supervisor"
+    }
+  }
 }
 ```

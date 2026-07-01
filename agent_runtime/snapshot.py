@@ -59,6 +59,8 @@ from .tool_visibility import (
 )
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
+AGENT_TOPOLOGY_NODE_ID_CAP = 20
+
 
 def _runtime_paths_diagnostic(available_personas: list) -> dict:
     """TEMP diagnostic: report the paths/env this process actually resolved,
@@ -1494,6 +1496,11 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
         root_node_id = next((node_id for node_id in nodes_by_id if node_id not in child_ids), next(iter(nodes_by_id)))
     control_node_id = _topology_control_node_id(task, stages, slot_node_ids, root_node_id)
     steer_actions = _topology_steer_actions(nodes_by_id, edges, control_node_id=control_node_id, task=task)
+    drop_samples: list[dict] = []
+    for node in nodes_by_id.values():
+        node_drops = node.pop("_drops", [])
+        if isinstance(node_drops, list):
+            drop_samples.extend(item for item in node_drops if isinstance(item, dict))
     return {
         "schema_version": 1,
         "source": "runtime_spawned_by" if targets_with_runtime_parent else ("blueprint_agent_topology" if topology_edges or root_slot else "persona_instances"),
@@ -1506,7 +1513,8 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
             "node_count": len(nodes_by_id),
             "edge_count": len(edges),
             "stream_event_cap_per_node": 3,
-            "drops": [],
+            "id_cap_per_node": AGENT_TOPOLOGY_NODE_ID_CAP,
+            "drops": drop_samples[:50],
         },
     }
 
@@ -1516,24 +1524,47 @@ def _agent_topology_node(*, node_id: str, persona_id: str, instance, owned_stage
     workers = [worker for worker in active_workers if getattr(worker, "persona_id", None) == persona_id]
     active_stage = next((stage for stage in owned_stages if getattr(stage, "status", None) in {StageStatus.IMPLEMENTING, StageStatus.READY}), None)
     stage = active_stage or (owned_stages[0] if owned_stages else None)
+    stage_ids, stage_drops = _bounded_topology_ids(
+        [getattr(stage, "id", None) for stage in owned_stages if getattr(stage, "id", None)],
+        node_id=node_id,
+        field="stage_ids",
+    )
+    run_ids, run_drops = _bounded_topology_ids([run.id for run in runs], node_id=node_id, field="active_run_ids")
+    worker_ids, worker_drops = _bounded_topology_ids([worker.id for worker in workers], node_id=node_id, field="active_worker_session_ids")
     return {
         "node_id": node_id,
         "persona_id": persona_id,
         "persona_instance_id": str(getattr(instance, "id", "") or "").strip() or None,
         "display_name": str(getattr(instance, "display_name", "") or "").strip() or fallback_display,
         "role": str(getattr(instance, "role", "") or "").strip() or fallback_role,
-        "stage_ids": [getattr(stage, "id", None) for stage in owned_stages if getattr(stage, "id", None)],
+        "stage_ids": stage_ids,
         "presence": _actor_presence(active_stage, owned_stages, runs, workers),
         "state_label": _actor_state_label(active_stage, owned_stages, runs, workers),
-        "active_run_ids": [run.id for run in runs],
-        "active_worker_session_ids": [worker.id for worker in workers],
+        "active_run_ids": run_ids,
+        "active_worker_session_ids": worker_ids,
         "budget": _actor_budget_summary(runs, stream),
         "current_stage_id": getattr(stage, "id", None),
         "spawned_by": str(getattr(instance, "spawned_by", "") or "").strip() or None,
         "returned_to": str(getattr(instance, "returned_to", "") or "").strip() or None,
         "stream_event_count": len(stream.get("events") or []) if isinstance(stream, dict) else 0,
         "progress_peek": _progress_peek(stream),
+        "_drops": [*stage_drops, *run_drops, *worker_drops],
     }
+
+
+def _bounded_topology_ids(values: list, *, node_id: str, field: str) -> tuple[list[str], list[dict]]:
+    clean = [str(value).strip() for value in values if str(value or "").strip()]
+    if len(clean) <= AGENT_TOPOLOGY_NODE_ID_CAP:
+        return clean, []
+    return clean[:AGENT_TOPOLOGY_NODE_ID_CAP], [
+        {
+            "node_id": node_id,
+            "field": field,
+            "kept": AGENT_TOPOLOGY_NODE_ID_CAP,
+            "dropped": len(clean) - AGENT_TOPOLOGY_NODE_ID_CAP,
+            "reason": "topology_node_id_cap",
+        }
+    ]
 
 
 def _progress_peek(stream: dict) -> list[dict]:

@@ -13,6 +13,8 @@ from hermes_time import now
 
 from . import paths
 
+HARNESS_WORKTREE_GC_TTL_SECONDS = 24 * 60 * 60
+
 
 @dataclass(frozen=True, slots=True)
 class RepoExecutionContext:
@@ -99,10 +101,11 @@ def _worktree_base_dir() -> Path:
 def _ensure_isolated_worktree(source_root: Path, base: Path) -> Path:
     candidates = [base, *[base.with_name(f"{base.name}_{idx}") for idx in range(1, 4)]]
     last_error = ""
+    base.parent.mkdir(parents=True, exist_ok=True)
+    _gc_stale_harness_worktrees(source_root, base.parent, protected={candidate.resolve() for candidate in candidates})
     for index, worktree in enumerate(candidates):
         if worktree.exists() and _git_root_for(worktree) is not None:
             return worktree
-        worktree.parent.mkdir(parents=True, exist_ok=True)
         if index == 1:
             _run_git_quiet(source_root, ["git", "worktree", "prune"])
         result = subprocess.run(
@@ -125,6 +128,42 @@ def _ensure_isolated_worktree(source_root: Path, base: Path) -> Path:
                 return worktree
         last_error = (result.stderr or result.stdout or "").strip()[:500]
     raise ValueError(f"could not create isolated git worktree for agent run: {last_error}")
+
+
+def _gc_stale_harness_worktrees(source_root: Path, base_dir: Path, *, protected: set[Path] | None = None) -> None:
+    if not base_dir.exists() or not base_dir.is_dir():
+        return
+    protected = protected or set()
+    cutoff = time.time() - HARNESS_WORKTREE_GC_TTL_SECONDS
+    for worktree in sorted(base_dir.iterdir()):
+        try:
+            resolved = worktree.resolve()
+        except OSError:
+            continue
+        if resolved in protected or not worktree.is_dir():
+            continue
+        try:
+            if worktree.stat().st_mtime >= cutoff:
+                continue
+        except OSError:
+            continue
+        if _git_root_for(worktree) is None:
+            continue
+        status = _git_output(worktree, ["git", "status", "--short"])
+        if status:
+            continue
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree)],
+            cwd=source_root,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+    _run_git_quiet(source_root, ["git", "worktree", "prune"])
 
 
 def _run_git_quiet(cwd: Path, args: list[str]) -> None:

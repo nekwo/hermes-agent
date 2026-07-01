@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from hermes_time import now
 from utils import atomic_json_write
 from agent_runtime.blueprints.runs import BlueprintRunStore
@@ -6,7 +8,7 @@ from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, M
 from agent_runtime.persona_assignments import PersonaInstanceStore
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
-from agent_runtime.snapshot import build_snapshot, write_snapshot
+from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology_node, build_snapshot, write_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.events import EventLog
@@ -178,6 +180,43 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     assert row["proof_gate_state"]["missing_stage_ids"] == ["implement", "verify"]
     assert row["proof_gate_state"]["why_not_ready"]
     assert row["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is True
+
+
+def test_agent_topology_node_caps_id_lists_and_reports_drops():
+    stages = [
+        SimpleNamespace(id=f"stage_{index}", status=StageStatus.READY)
+        for index in range(AGENT_TOPOLOGY_NODE_ID_CAP + 2)
+    ]
+    runs = [
+        SimpleNamespace(id=f"run_{index}", persona_id="dev", llm={"total_tokens": 1})
+        for index in range(AGENT_TOPOLOGY_NODE_ID_CAP + 3)
+    ]
+    workers = [
+        SimpleNamespace(id=f"worker_{index}", persona_id="dev")
+        for index in range(AGENT_TOPOLOGY_NODE_ID_CAP + 4)
+    ]
+
+    node = _agent_topology_node(
+        node_id="slot_builder",
+        persona_id="dev",
+        instance=SimpleNamespace(id="personainst_dev", display_name="Dev", role="dev"),
+        owned_stages=stages,
+        active_runs=runs,
+        active_workers=workers,
+        stream={},
+        fallback_display="Dev",
+        fallback_role="dev",
+    )
+
+    assert len(node["stage_ids"]) == AGENT_TOPOLOGY_NODE_ID_CAP
+    assert len(node["active_run_ids"]) == AGENT_TOPOLOGY_NODE_ID_CAP
+    assert len(node["active_worker_session_ids"]) == AGENT_TOPOLOGY_NODE_ID_CAP
+    assert {drop["field"] for drop in node["_drops"]} == {
+        "stage_ids",
+        "active_run_ids",
+        "active_worker_session_ids",
+    }
+    assert all(drop["reason"] == "topology_node_id_cap" for drop in node["_drops"])
 
 
 def test_snapshot_agent_topology_runtime_spawned_by_overrides_blueprint(isolate_agent_runtime_root):
