@@ -57,6 +57,80 @@ def test_schema_rejects_unprefixed_bindings():
     ]
 
 
+def test_schema_rejects_unknown_agent_topology_slot():
+    raw = {
+        "id": "bad_agent_topology",
+        "version": 1,
+        "title": "Bad Agent Topology",
+        "slots": [{"id": "builder", "role": "builder"}],
+        "stages": [{"id": "build", "title": "Build", "objective": "Build", "owner_slot": "builder"}],
+        "edges": [{"source": "build", "outcome": "passed", "target": "done"}],
+        "agent_topology": {"root": "lead", "edges": [{"source": "lead", "target": "builder"}]},
+    }
+
+    with pytest.raises(ValueError, match="agent_topology root 'lead' is not a declared slot"):
+        blueprint_from_dict(raw)
+
+
+def test_schema_rejects_agent_topology_cycle():
+    raw = {
+        "id": "cyclic_agent_topology",
+        "version": 1,
+        "title": "Cyclic Agent Topology",
+        "slots": [
+            {"id": "lead", "role": "neko"},
+            {"id": "builder", "role": "builder"},
+        ],
+        "stages": [
+            {"id": "scope", "title": "Scope", "objective": "Scope", "owner_slot": "lead"},
+            {"id": "build", "title": "Build", "objective": "Build", "owner_slot": "builder"},
+        ],
+        "edges": [{"source": "scope", "outcome": "ready", "target": "build"}],
+        "agent_topology": {
+            "root": "lead",
+            "edges": [
+                {"source": "lead", "target": "builder"},
+                {"source": "builder", "target": "lead"},
+            ],
+        },
+    }
+
+    with pytest.raises(ValueError, match="agent_topology cycle"):
+        blueprint_from_dict(raw)
+
+
+def test_blueprint_agent_topology_instantiates_to_mission_plan_summary():
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="topology smoke",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = Task(
+        id="task_topology_smoke",
+        title="Topology Smoke",
+        description="topology smoke",
+        state=TaskState.CREATED,
+        created_at=now(),
+        updated_at=now(),
+        requested_by="test",
+        mission_plan=plan,
+    )
+
+    summary = mission_plan_summary(task)
+    assert summary["agent_topology"] == {
+        "root": "lead",
+        "edges": [
+            {"source": "lead", "target": "builder", "kind": "steers"},
+            {"source": "builder", "target": "backend_builder", "kind": "steers"},
+        ],
+    }
+
+
 def test_one_agent_blueprint_instantiates_to_mission_plan_and_run_slot():
     bp = BlueprintStore().get("one_agent_smoke")
     plan = instantiate_blueprint(bp, goal="smoke", bindings={"builder": "profile:gpt-launcher"})

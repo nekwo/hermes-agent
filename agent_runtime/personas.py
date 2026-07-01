@@ -19,7 +19,12 @@ class AutonomyLevel(StrEnum):
     AUTONOMOUS = "autonomous"
 
 
-DEFAULT_PERSONA_IDS = frozenset({"neko_supervisor", "dev", "backend_dev", "qa"})
+# Base-profile foundation (2026-07): every agent is a free Hermes profile. The typed
+# pipeline personas (neko/dev/backend_dev/qa) are mothballed as dormant templates in
+# ``default_personas()`` and are no longer seeded. The running store seeds ONE base
+# profile; other on-disk profiles surface as available personas and are chattable on demand.
+BASE_PERSONA_ID = "base"
+DEFAULT_PERSONA_IDS = frozenset({BASE_PERSONA_ID})
 
 
 # Synthetic operator-channel personas built from a raw Hermes profile carry the
@@ -244,6 +249,40 @@ def default_personas() -> list[AgentPersona]:
             autonomy=AutonomyLevel.AUTONOMOUS.value,
             skills=["harness-qa-verdict"],
         ),
+    ]
+
+
+def seed_personas() -> list[AgentPersona]:
+    """The personas actually materialized into the running store.
+
+    Base-profile foundation: seed exactly ONE free base profile as the default
+    agent. Other on-disk Hermes profiles surface as available personas and are
+    chattable on demand; they are not seeded here. ``default_personas()`` is
+    retained as dormant typed-pipeline templates for the eventual pipeline
+    rebuild and is intentionally unused by the seed.
+
+    ``mission_goal`` is deliberately excluded from the base toolset: with no
+    pipeline personas seeded, a created goal would route to dev/qa slots that
+    resolve to nothing, so exposing goal-creation would be a broken affordance.
+    Re-add it when the autonomous pipeline is rebuilt on profiles.
+    """
+
+    base_toolsets = [toolset for toolset in PROFILE_CHAT_FALLBACK_TOOLSETS if toolset != "mission_goal"]
+    return [
+        AgentPersona(
+            id=BASE_PERSONA_ID,
+            display_name="Base Agent",
+            role=PROFILE_ROLE_SENTINEL,
+            model=None,
+            provider=None,
+            api_mode="codex_responses",
+            toolsets=base_toolsets,
+            system_prompt_path="",
+            autonomy=AutonomyLevel.PROPOSE_ONLY.value,
+            hermes_profile=BASE_PERSONA_ID,
+            skills=[],
+            include_profile_memory=True,
+        )
     ]
 
 

@@ -62,6 +62,7 @@ class MissionPlan:
     bindings: dict[str, str] = field(default_factory=dict)
     binding_sources: dict[str, str] = field(default_factory=dict)
     edges: list[dict[str, str]] = field(default_factory=list)
+    agent_topology: dict[str, Any] = field(default_factory=dict)
     limits: dict[str, int] = field(default_factory=dict)
     stage_attempts: dict[str, int] = field(default_factory=dict)
     on_unhandled: str = "intervention"

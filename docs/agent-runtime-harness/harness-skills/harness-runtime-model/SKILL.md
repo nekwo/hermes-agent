@@ -7,7 +7,7 @@ description: Hermes Agent Runtime mental model + first-class commands to view an
 
 **Model:** **goal** = a running daemon instance (the mission Tony sets/lists). **graph** = the goal's program (`mission_plan`, instantiated from a blueprint). **nodes** = stages, each owned by one agent. Neko owns the goal + a chat that scopes/steers it; the daemon ticks the graph; each node's bound agent does the work.
 
-Default graph `neko_two_dev_default` = **Neko → Backend Dev → Launcher Dev** (no QA). **QA is a node only if the blueprint binds it.**
+Default graph `neko_two_dev_default` = **Neko scope → Backend Dev → Launcher Dev** (no QA). **QA is a node only if the selected blueprint binds it.**
 
 **Concurrency (target):** goals run as **lanes**; every agent — Neko included — is **instanced per lane**, so concurrent goals with disjoint agents don't fight; binding a busy agent **warns**; true parallel is gated by `swarm enable`. (Today: one foreground goal at a time; `goal_id == task.id`. Stage 39 lands lanes + goal id.)
 
@@ -21,7 +21,7 @@ Default graph `neko_two_dev_default` = **Neko → Backend Dev → Launcher Dev**
 | installed agents | `hermes harness agents --json` |
 | graph templates | `hermes harness blueprint list --json` |
 | all goals | `hermes harness task list --json` |
-| one goal's graph (nodes/edges/bindings) | `hermes harness task show <id> --json` → `.mission_plan` |
+| full graph for one goal (nodes/edges/bindings) | `hermes harness task show <id> --json` → `.mission_plan` |
 | goal event timeline | `hermes harness task history <id> --json` |
 | agent instances (goal_id/spawned_by) | `hermes harness persona list --json` |
 | agent ↔ goal assignments | `hermes harness persona assignments [--persona <id>|--task <id>] --json` |
@@ -30,8 +30,12 @@ Default graph `neko_two_dev_default` = **Neko → Backend Dev → Launcher Dev**
 | lanes | `hermes harness lane list --json` |
 | concurrency gate / daemon | `hermes harness swarm status --json` · `daemon status --json` |
 | aggregate read-model (UI) | `hermes harness snapshot --json` |
+| level agents shown in Mission Control | Stage C MCP `mcp_launcher_qa_get_buttons` with `scope=mission_control.agent` |
+| compact Mission Control graph probe | Stage C MCP `mcp_launcher_qa_get_widget_state` with `widget=mission_control.graph` |
 
 **Is QA in a goal?** `task show <id> --json` → look for a `verify`/`qa` node in `.mission_plan.stages`. Don't infer QA from `agents` (lists installed, not bound).
+
+**Do not use for level agents:** `status.agents`, `hermes harness agents --json`, and old `harness agent list`-style rosters show configured/installed Harness agents. They do **not** show the graph-bound agents currently on a Mission Control level. Use `.mission_plan` for the full graph and Stage C MCP `mission_control.agent` for the visible level-agent selection surface.
 
 ## Operate
 

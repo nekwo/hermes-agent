@@ -74,8 +74,9 @@ from agent_runtime.mission_chat_turns import persist_mission_chat_turn
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
-from agent_runtime.personas import profile_chat_toolsets
+from agent_runtime.personas import profile_chat_toolsets, seed_personas
 from agent_runtime.prompt_observability import mission_chat_prompt_observability, persist_prompt_observability_context
+from agent_runtime.queued_skills import consume_skills_for_next_turn, queue_skill_for_next_turn
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
@@ -736,6 +737,13 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
     mission_chat_message.add_argument("--json", action="store_true")
     mission_chat_message.set_defaults(func=_cmd_mission_chat_message)
+    mission_chat_queue_skill = mission_chat_subs.add_parser("queue-skill", help="Load a skill on the next Mission Control chat turn")
+    mission_chat_queue_skill.add_argument("--persona", dest="persona_id", required=True)
+    mission_chat_queue_skill.add_argument("--persona-instance-id", default=None)
+    mission_chat_queue_skill.add_argument("--session-id", required=True)
+    mission_chat_queue_skill.add_argument("--skill", required=True)
+    mission_chat_queue_skill.add_argument("--json", action="store_true")
+    mission_chat_queue_skill.set_defaults(func=_cmd_mission_chat_queue_skill)
     mission_chat_steer = mission_chat_subs.add_parser("steer", help="Steer an active streamed Mission Control chat turn")
     mission_chat_steer.add_argument("--session-id", required=True)
     mission_chat_steer.add_argument("--message", required=True)
@@ -2933,6 +2941,27 @@ def _cmd_mission_chat_message(args) -> int:
         session_id=session_id,
         message=message,
     )
+    queued_skills = consume_skills_for_next_turn(
+        persona_id=normalized_persona,
+        session_id=session_id,
+    )
+    preloaded_skill_prompt = ""
+    preloaded_skills_loaded: list[str] = []
+    preloaded_skills_missing: list[str] = []
+    if queued_skills:
+        try:
+            from agent.skill_commands import build_preloaded_skills_prompt
+
+            preloaded_skill_prompt, preloaded_skills_loaded, preloaded_skills_missing = (
+                build_preloaded_skills_prompt(
+                    queued_skills,
+                    task_id=session_id,
+                )
+            )
+        except Exception:
+            preloaded_skill_prompt = ""
+            preloaded_skills_loaded = []
+            preloaded_skills_missing = list(queued_skills)
     prompt_context = mission_chat_prompt_observability(
         persona=persona,
         persona_instance_id=instance.id,
@@ -3010,6 +3039,7 @@ def _cmd_mission_chat_message(args) -> int:
             ),
             trace_callback=_stream_progress,
             agent_ready_callback=_agent_ready_for_steer,
+            preloaded_skill_prompt=preloaded_skill_prompt,
         )
         final_model_input = (getattr(chat_result, "raw", {}) or {}).get("model_input_observability")
         prompt_context = mission_chat_prompt_observability(
@@ -3027,6 +3057,34 @@ def _cmd_mission_chat_message(args) -> int:
             model_selection=model_selection,
             trace_events=trace_payloads,
         )
+        if preloaded_skills_loaded:
+            prompt_context["used_skills"] = prompt_context.get("used_skills") or []
+            existing = {
+                safe_assignment_token(item.get("name"))
+                for item in prompt_context["used_skills"]
+                if isinstance(item, dict)
+            }
+            for skill in preloaded_skills_loaded:
+                token = safe_assignment_token(skill)
+                if token and token not in existing:
+                    prompt_context["used_skills"].append(
+                        {
+                            "name": token,
+                            "kind": "skill",
+                            "status": "used",
+                            "hash_tracked": False,
+                            "source": "queued_next_turn_skill",
+                        }
+                    )
+        if preloaded_skills_missing:
+            prompt_context["queued_skill_load_errors"] = [
+                {
+                    "name": safe_assignment_token(skill) or str(skill),
+                    "status": "missing",
+                    "source": "queued_next_turn_skill",
+                }
+                for skill in preloaded_skills_missing
+            ]
         persist_tool_turn_actual(
             persona_id=normalized_persona,
             session_id=session_id,
@@ -3121,6 +3179,8 @@ def _cmd_mission_chat_message(args) -> int:
         "total_tokens": getattr(chat_result, "total_tokens", None),
         "prompt_context_id": prompt_context["context_id"],
         "prompt_observability": prompt_context,
+        "queued_skills_loaded": preloaded_skills_loaded,
+        "queued_skills_missing": preloaded_skills_missing,
         "model_selection": model_selection,
         "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
     }
@@ -3136,6 +3196,62 @@ def _cmd_mission_chat_message(args) -> int:
         _emit_chat_final(data)
     else:
         print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
+    return 0
+
+
+def _cmd_mission_chat_queue_skill(args) -> int:
+    persona_id = safe_assignment_token(getattr(args, "persona_id", None))
+    session_id = safe_assignment_token(getattr(args, "session_id", None))
+    skill = safe_assignment_token(getattr(args, "skill", None))
+    if not persona_id or not session_id or not skill:
+        data = {
+            "ok": False,
+            "error": "persona, session-id, and skill are required",
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    try:
+        from tools.skills_tool import _find_all_skills
+
+        candidates = _find_all_skills()
+    except Exception as exc:
+        data = {
+            "ok": False,
+            "error": "skill catalog is not available",
+            "error_kind": type(exc).__name__,
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    available = {
+        str(item.get(key) or "").strip()
+        for item in candidates
+        if isinstance(item, dict)
+        for key in ("name", "identifier")
+    }
+    if skill not in available:
+        data = {
+            "ok": False,
+            "error": f"skill is not loadable: {skill}",
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    queued = queue_skill_for_next_turn(
+        persona_id=persona_id,
+        session_id=session_id,
+        persona_instance_id=getattr(args, "persona_instance_id", None),
+        skill=skill,
+    )
+    data = {
+        "ok": True,
+        "capability_id": "mission.chat.queue_skill_for_next_turn",
+        "persona_id": persona_id,
+        "persona_instance_id": safe_assignment_token(getattr(args, "persona_instance_id", None)),
+        "session_id": session_id,
+        "skill": skill,
+        "queued_skills": queued.get("skills", []),
+        "next_expected": "send the next Mission Control chat message; queued skills will be preloaded for that turn only",
+    }
+    print(emit_json(data) if args.json else f"queued {skill} for next turn")
     return 0
 
 
@@ -4177,6 +4293,8 @@ def _positive_int_or_zero(value) -> int:
 
 def _persona_by_id(cfg, persona_id: str):
     raw = str(persona_id or "").strip()
+    # ensure_persisted_personas returns the seeded base profile plus the dormant
+    # resolvable catalog, so typed pipeline ids and profile model-inheritance both resolve.
     personas = list(ensure_persisted_personas(cfg))
     if raw.lower().startswith("profile:"):
         profile_id = safe_assignment_token(raw.split(":", 1)[1])
@@ -4554,7 +4672,11 @@ def _normalize_cli_persona_id(persona_id: str) -> str:
         "backend": "backend_dev",
     }
     value = aliases.get(value, value)
-    if value not in {"neko_supervisor", "dev", "backend_dev", "qa", "pm"}:
+    # Accept any seeded persona id (base-profile foundation seeds ``base``) plus the
+    # legacy typed-pipeline ids (dormant, kept for back-compat). Other on-disk profiles
+    # are reached through the ``profile:<name>`` branch, not this normalizer.
+    allowed = {"neko_supervisor", "dev", "backend_dev", "qa", "pm"} | {p.id for p in seed_personas()}
+    if value not in allowed:
         raise ValueError(f"unsupported persona {persona_id!r}")
     return value
 

@@ -9,7 +9,7 @@ import yaml
 from hermes_constants import get_config_path
 from hermes_cli.profiles import profile_exists
 
-from .personas import DEFAULT_PERSONA_IDS, default_personas, validate_toolsets, AgentRole
+from .personas import DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
 
@@ -91,6 +91,9 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
 
 def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
+    # Full resolvable catalog: the typed pipeline personas remain here (dormant, so the
+    # mothballed pipeline can still resolve dev/qa), plus any profile-backed agents declared
+    # in config. Only ``seed_personas()`` (base) is actually seeded into the running store.
     personas = {p.id: p for p in default_personas()}
     head_profile = _head_agent_profile(cfg)
     for p in personas.values():
@@ -102,7 +105,9 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         if persona_id not in personas:
             default_role = AgentRole.PM.value if persona_id == AgentRole.PM.value else AgentRole.DEV.value
             role = str(overrides.get("role", default_role))
-            if role not in {item.value for item in AgentRole}:
+            # Typed roles resolve as before (dormant catalog); profile-backed agents
+            # (role: profile) may also be declared for the base-profile world.
+            if role not in {item.value for item in AgentRole} and role != PROFILE_ROLE_SENTINEL:
                 continue
             personas[persona_id] = _persona_from_overrides(persona_id, role, overrides, cfg)
         p = personas[persona_id]
@@ -128,7 +133,7 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         if "required_mcp_servers" in overrides:
             p.required_mcp_servers = _string_list(overrides["required_mcp_servers"])
         if "toolsets" in overrides:
-            p.toolsets = validate_toolsets(AgentRole(p.role), list(overrides["toolsets"]))
+            p.toolsets = validate_toolsets(coerce_agent_role(p.role), list(overrides["toolsets"]))
     supervisor = personas.get("neko_supervisor")
     if supervisor is not None:
         explicit_supervisor = _explicit_supervisor_profile_override(cfg)
@@ -153,9 +158,12 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
     store = AgentStore()
     stored = {persona.id: persona for persona in store.list_all()}
-    resolved = {persona.id: persona for persona in persona_records_from_config(cfg)}
+    # Base-profile foundation: seed ONLY the base profile into the store. AgentStore is
+    # what Mission Control surfaces (snapshot reads store.list_all()), so the store stays
+    # base-only. The typed pipeline personas are NOT persisted/shown.
+    seed = {persona.id: persona for persona in seed_personas()}
     changed = False
-    for persona_id, persona in resolved.items():
+    for persona_id, persona in seed.items():
         if persona_id not in stored:
             stored[persona_id] = store.save(persona)
             changed = True
@@ -171,7 +179,13 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
                 changed = True
     if changed:
         stored = {persona.id: persona for persona in store.list_all()}
-    return list(stored.values())
+    # Return the seeded store PLUS the dormant resolvable catalog: only base is
+    # seeded/shown, but every persona resolver (get_persisted_persona, blueprint slot
+    # binding, CLI persona lookup) must still find the typed pipeline personas so the
+    # mothballed pipeline keeps functioning. Seeded (base) wins on id collision.
+    catalog = {persona.id: persona for persona in persona_records_from_config(cfg)}
+    merged = {**catalog, **stored}
+    return list(merged.values())
 
 
 def get_persisted_persona(persona_id: str, cfg: AgentRuntimeConfig | None = None):
@@ -221,7 +235,7 @@ def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any
         model=overrides.get("model") or cfg.default_model,
         provider=overrides.get("provider") or cfg.default_provider,
         api_mode=overrides.get("api_mode") or cfg.default_api_mode,
-        toolsets=validate_toolsets(AgentRole(role), list(overrides.get("toolsets") or [])),
+        toolsets=validate_toolsets(coerce_agent_role(role), list(overrides.get("toolsets") or [])),
         system_prompt_path=str(overrides.get("system_prompt_path") or f"personas/{role}/system.md"),
         include_core_context_files=bool(overrides.get("include_core_context_files", False)),
     )

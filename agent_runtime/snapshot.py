@@ -35,7 +35,7 @@ from .persona_assignments import (
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
-from .personas import blocked_tool_names, effective_toolsets
+from .personas import blocked_tool_names, effective_toolsets, seed_personas
 from .prompt_observability import snapshot_prompt_observability
 from .profile_readiness import profile_readiness_for_persona
 from .proof_gates import task_verdict_proof_satisfied
@@ -103,7 +103,11 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     cfg = load_agent_runtime_config()
-    agents = agent_store.list_all() or ensure_persisted_personas(cfg)
+    # Base-profile foundation: Mission Control shows the seeded store (base only). On a
+    # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
+    # also returns the dormant typed catalog for resolution and would surface mothballed
+    # pipeline personas that are not meant to be shown.
+    agents = agent_store.list_all() or seed_personas()
     incidents = incident_store.list_all()
     role_envelope_store = RoleEnvelopeStore(event_log=event_log)
     role_checklist_store = RoleChecklistStore(event_log=event_log)
@@ -138,10 +142,12 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     dirty_state = build_dirty_state(tasks=tasks, runs=runs, incidents=incidents, workers=workers, runtime_instances=runtime_instances)
     persona_assignments = []
     persona_instances = []
+    topology_persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         persona_instances = instance_store.derive_from_workers(agents, workers)
+        topology_persona_instances = persona_instances
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     session_db = _default_persona_session_db()
@@ -194,6 +200,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
                 persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
                 repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
                 runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
+                persona_instances=topology_persona_instances,
             )
             for t in tasks
         ],
@@ -210,6 +217,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
                 persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
                 repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
                 runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
+                persona_instances=topology_persona_instances,
                 workspaces=workspaces,
             )
             for t in tasks
@@ -309,6 +317,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         "capabilities": [
             "goal_create",
             "mission_level_state",
+            "agent_topology",
             "mission_flow_timeline",
             "proof_gate_state",
             "operator_capabilities",
@@ -1037,7 +1046,7 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
-def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None):
+def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None):
     gate = task_verdict_proof_satisfied(task, proofs)
     current_stage_id = _task_current_stage_id(task)
     current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
@@ -1113,6 +1122,8 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
             active_runs=active_runs,
             active_workers=active_workers,
             events=events or [],
+            runtime_instances=runtime_instances or [],
+            persona_instances=persona_instances or [],
             role_streams=_role_streams(
                 task,
                 events or [],
@@ -1135,7 +1146,7 @@ def _task_current_stage_id(task) -> str | None:
     return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
 
 
-def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, workspaces=None) -> dict:
+def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, workspaces=None) -> dict:
     row = _task_summary(
         task,
         proofs,
@@ -1148,6 +1159,7 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         persona_assignments=persona_assignments,
         repo_bundles=repo_bundles,
         runtime_instances=runtime_instances,
+        persona_instances=persona_instances,
     )
     workspace_id = getattr(task, "workspace_id", None)
     realm_id = None
@@ -1243,7 +1255,7 @@ def _mission_lifecycle_state(task, active_runs, open_incidents, gate) -> str:
     return "queued"
 
 
-def _mission_level_state(task, *, active_runs, active_workers, events, role_streams) -> dict:
+def _mission_level_state(task, *, active_runs, active_workers, events, runtime_instances, persona_instances, role_streams) -> dict:
     plan = getattr(task, "mission_plan", None)
     stages = list(getattr(plan, "stages", []) or [])
     stage_by_owner: dict[str, list] = {}
@@ -1306,8 +1318,218 @@ def _mission_level_state(task, *, active_runs, active_workers, events, role_stre
         "blueprint_version": getattr(plan, "blueprint_version", None),
         "active_stage_id": active_stage_id,
         "actors": actors,
+        "agent_topology": _agent_topology(
+            task,
+            active_runs=active_runs,
+            active_workers=active_workers,
+            runtime_instances=runtime_instances,
+            persona_instances=persona_instances,
+            role_streams=role_streams,
+        ),
         "updated_at": getattr(task, "updated_at", None),
     }
+
+
+def _agent_topology(task, *, active_runs, active_workers, runtime_instances, persona_instances, role_streams) -> dict:
+    plan = getattr(task, "mission_plan", None)
+    stages = list(getattr(plan, "stages", []) or [])
+    topology = getattr(plan, "agent_topology", None) if plan is not None else None
+    topology = topology if isinstance(topology, dict) else {}
+    plan_slots = dict(getattr(plan, "slots", {}) or {}) if plan is not None else {}
+    bindings = dict(getattr(plan, "bindings", {}) or {}) if plan is not None else {}
+    topology_edges = [
+        edge
+        for edge in topology.get("edges", []) or []
+        if isinstance(edge, dict)
+    ]
+    root_slot = str(topology.get("root") or "").strip()
+    if not root_slot and topology_edges:
+        root_slot = str(topology_edges[0].get("source") or "").strip()
+    if not root_slot and len(plan_slots) == 1:
+        root_slot = next(iter(plan_slots))
+
+    task_goal_id = str(getattr(task, "goal_id", None) or task.id)
+    runtime_instances = list(runtime_instances or [])
+    persona_instances = list(persona_instances or [])
+    related_instances = [
+        instance
+        for instance in [*runtime_instances, *persona_instances]
+        if _instance_matches_task(instance, task, task_goal_id)
+    ]
+    instances_by_id = {str(getattr(instance, "id", "") or ""): instance for instance in related_instances}
+    instances_by_persona: dict[str, list] = {}
+    for instance in related_instances:
+        persona_id = str(getattr(instance, "persona_id", "") or "").strip()
+        if persona_id:
+            instances_by_persona.setdefault(persona_id, []).append(instance)
+
+    stages_by_slot: dict[str, list] = {}
+    stages_by_persona: dict[str, list] = {}
+    for stage in stages:
+        slot = str(getattr(stage, "owner_slot", None) or getattr(stage, "owner", "") or "").strip()
+        owner = str(getattr(stage, "owner", "") or "").strip()
+        if slot:
+            stages_by_slot.setdefault(slot, []).append(stage)
+        if owner:
+            stages_by_persona.setdefault(owner, []).append(stage)
+
+    stream_by_id = {stream.get("persona_id"): stream for stream in role_streams if isinstance(stream, dict)}
+    nodes_by_id: dict[str, dict] = {}
+    slot_node_ids: dict[str, str] = {}
+
+    def add_node_for_slot(slot: str) -> str | None:
+        slot = str(slot or "").strip()
+        if not slot:
+            return None
+        persona_id = _topology_slot_persona_id(slot, bindings)
+        instance = _instance_for_persona(persona_id, instances_by_persona)
+        owned_stages = stages_by_slot.get(slot) or stages_by_persona.get(persona_id) or []
+        node_id = str(getattr(instance, "id", "") or "").strip() or f"slot_{slot}"
+        slot_node_ids[slot] = node_id
+        nodes_by_id[node_id] = _agent_topology_node(
+            node_id=node_id,
+            persona_id=persona_id or slot,
+            instance=instance,
+            owned_stages=owned_stages,
+            active_runs=active_runs,
+            active_workers=active_workers,
+            stream=stream_by_id.get(persona_id) or {},
+            fallback_display=_display_name_for_persona(persona_id or slot),
+            fallback_role=_actor_role_for_persona(persona_id or slot),
+        )
+        return node_id
+
+    topology_slots: list[str] = []
+    if root_slot:
+        topology_slots.append(root_slot)
+    for edge in topology_edges:
+        for key in ("source", "target"):
+            slot = str(edge.get(key) or "").strip()
+            if slot and slot not in topology_slots:
+                topology_slots.append(slot)
+    if not topology_slots and plan_slots:
+        topology_slots.extend(plan_slots.keys())
+    for slot in topology_slots:
+        add_node_for_slot(slot)
+
+    for instance in related_instances:
+        instance_id = str(getattr(instance, "id", "") or "").strip()
+        if not instance_id or instance_id in nodes_by_id:
+            continue
+        persona_id = str(getattr(instance, "persona_id", "") or "").strip()
+        owned_stages = stages_by_persona.get(persona_id) or []
+        nodes_by_id[instance_id] = _agent_topology_node(
+            node_id=instance_id,
+            persona_id=persona_id,
+            instance=instance,
+            owned_stages=owned_stages,
+            active_runs=active_runs,
+            active_workers=active_workers,
+            stream=stream_by_id.get(persona_id) or {},
+            fallback_display=_display_name_for_persona(persona_id),
+            fallback_role=_actor_role_for_persona(persona_id),
+        )
+
+    edges: list[dict] = []
+    targets_with_runtime_parent: set[str] = set()
+    for instance in related_instances:
+        instance_id = str(getattr(instance, "id", "") or "").strip()
+        parent_ref = str(getattr(instance, "spawned_by", "") or "").strip()
+        parent = _topology_parent_instance(parent_ref, related_instances)
+        parent_id = str(getattr(parent, "id", "") or "").strip() if parent is not None else ""
+        if not instance_id or not parent_id or instance_id not in nodes_by_id or parent_id not in nodes_by_id:
+            continue
+        targets_with_runtime_parent.add(instance_id)
+        edges.append(
+            {
+                "source_node_id": parent_id,
+                "target_node_id": instance_id,
+                "kind": "steers",
+                "source": "runtime_spawned_by",
+            }
+        )
+
+    if topology_edges:
+        for edge in topology_edges:
+            source_id = slot_node_ids.get(str(edge.get("source") or "").strip())
+            target_id = slot_node_ids.get(str(edge.get("target") or "").strip())
+            if not source_id or not target_id or target_id in targets_with_runtime_parent:
+                continue
+            edges.append(
+                {
+                    "source_node_id": source_id,
+                    "target_node_id": target_id,
+                    "kind": str(edge.get("kind") or "steers"),
+                    "source": "blueprint_agent_topology",
+                }
+            )
+
+    root_node_id = slot_node_ids.get(root_slot) if root_slot else None
+    if root_node_id is None and nodes_by_id:
+        child_ids = {edge["target_node_id"] for edge in edges}
+        root_node_id = next((node_id for node_id in nodes_by_id if node_id not in child_ids), next(iter(nodes_by_id)))
+    return {
+        "schema_version": 1,
+        "source": "runtime_spawned_by" if targets_with_runtime_parent else ("blueprint_agent_topology" if topology_edges or root_slot else "persona_instances"),
+        "root_node_id": root_node_id,
+        "nodes": list(nodes_by_id.values()),
+        "edges": edges,
+    }
+
+
+def _agent_topology_node(*, node_id: str, persona_id: str, instance, owned_stages, active_runs, active_workers, stream, fallback_display: str, fallback_role: str) -> dict:
+    runs = [run for run in active_runs if getattr(run, "persona_id", None) == persona_id]
+    workers = [worker for worker in active_workers if getattr(worker, "persona_id", None) == persona_id]
+    active_stage = next((stage for stage in owned_stages if getattr(stage, "status", None) in {StageStatus.IMPLEMENTING, StageStatus.READY}), None)
+    stage = active_stage or (owned_stages[0] if owned_stages else None)
+    return {
+        "node_id": node_id,
+        "persona_id": persona_id,
+        "persona_instance_id": str(getattr(instance, "id", "") or "").strip() or None,
+        "display_name": str(getattr(instance, "display_name", "") or "").strip() or fallback_display,
+        "role": str(getattr(instance, "role", "") or "").strip() or fallback_role,
+        "stage_ids": [getattr(stage, "id", None) for stage in owned_stages if getattr(stage, "id", None)],
+        "presence": _actor_presence(active_stage, owned_stages, runs, workers),
+        "state_label": _actor_state_label(active_stage, owned_stages, runs, workers),
+        "active_run_ids": [run.id for run in runs],
+        "active_worker_session_ids": [worker.id for worker in workers],
+        "budget": _actor_budget_summary(runs, stream),
+        "current_stage_id": getattr(stage, "id", None),
+    }
+
+
+def _instance_matches_task(instance, task, task_goal_id: str) -> bool:
+    return (
+        str(getattr(instance, "goal_id", "") or "") == task_goal_id
+        or str(getattr(instance, "current_task_id", "") or "") == task.id
+        or str(getattr(instance, "task_id", "") or "") == task.id
+    )
+
+
+def _topology_slot_persona_id(slot: str, bindings: dict) -> str:
+    bound = str(bindings.get(slot) or slot).strip()
+    if bound.startswith("persona:") or bound.startswith("profile:"):
+        return bound.split(":", 1)[1].strip()
+    return bound
+
+
+def _instance_for_persona(persona_id: str, instances_by_persona: dict[str, list]):
+    candidates = instances_by_persona.get(persona_id) or []
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: str(getattr(item, "updated_at", "") or ""), reverse=True)[0]
+
+
+def _topology_parent_instance(parent_ref: str, instances: list):
+    if not parent_ref:
+        return None
+    for instance in instances:
+        if str(getattr(instance, "id", "") or "") == parent_ref:
+            return instance
+    for instance in instances:
+        if str(getattr(instance, "persona_id", "") or "") == parent_ref or str(getattr(instance, "role", "") or "") == parent_ref:
+            return instance
+    return None
 
 
 def _mission_flow_timeline(task, events) -> dict:

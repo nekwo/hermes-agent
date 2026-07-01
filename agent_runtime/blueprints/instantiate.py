@@ -57,6 +57,13 @@ def instantiate_blueprint(bp: Blueprint, *, goal: str, bindings: dict[str, str],
         bindings=resolved_bindings,
         binding_sources=dict(bindings),
         edges=[{"source": edge.source, "outcome": edge.outcome.value, "target": edge.target} for edge in bp.edges],
+        agent_topology={
+            "root": bp.agent_topology.root,
+            "edges": [
+                {"source": edge.source, "target": edge.target, "kind": edge.kind}
+                for edge in bp.agent_topology.edges
+            ],
+        },
         limits=asdict(bp.limits),
         stage_attempts={},
         on_unhandled=bp.on_unhandled,

@@ -244,6 +244,7 @@ class GPTPersonaRuntime:
         pre_trace_callback: Callable[[dict], None] | None = None,
         trace_callback: Callable[[dict], None] | None = None,
         agent_ready_callback: Callable[[object], Callable[[], None] | None] | None = None,
+        preloaded_skill_prompt: str | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -293,7 +294,10 @@ class GPTPersonaRuntime:
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,
                 user_message=message,
-                system_message=_mission_chat_surface_message(surface_prompt),
+                system_message=_mission_chat_surface_message(
+                    surface_prompt,
+                    preloaded_skill_prompt=preloaded_skill_prompt,
+                ),
                 stream_callback=stream_callback,
                 agent_ready_callback=agent_ready_callback,
                 # Key chat trace on the real chat session: Mission Control passes
@@ -397,17 +401,25 @@ def _mission_chat_operative_rules() -> str:
     )
 
 
-def _mission_chat_surface_message(surface_prompt: str | None) -> str:
+def _mission_chat_surface_message(
+    surface_prompt: str | None,
+    *,
+    preloaded_skill_prompt: str | None = None,
+) -> str:
     """Compose the operator-chat system message: the non-negotiable operative
     rules first, then the operator's optional per-session surface prompt. The
     rules always apply so the anti-fabrication invariant holds even when the
     operator supplies their own surface prompt."""
 
     operator_surface = (surface_prompt or "").strip()
+    skill_prompt = (preloaded_skill_prompt or "").strip()
     rules = _mission_chat_operative_rules()
+    parts = [rules]
+    if skill_prompt:
+        parts.append(skill_prompt)
     if operator_surface:
-        return f"{rules}\n\n{operator_surface}"
-    return rules
+        parts.append(operator_surface)
+    return "\n\n".join(parts)
 
 
 def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:

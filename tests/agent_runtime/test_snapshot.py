@@ -88,6 +88,13 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
                 "builder": "dev",
                 "verifier": "qa",
             },
+            agent_topology={
+                "root": "lead",
+                "edges": [
+                    {"source": "lead", "target": "builder", "kind": "steers"},
+                    {"source": "builder", "target": "verifier", "kind": "steers"},
+                ],
+            },
             stages=[
                 MissionPlanStage(
                     id="scope",
@@ -143,7 +150,19 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
 
     assert snap["parity"]["contract_version"] == 38
     assert "mission_level_state" in snap["parity"]["capabilities"]
+    assert "agent_topology" in snap["parity"]["capabilities"]
     assert row["mission_level_state"]["blueprint_id"] == "neko_dev_qa_basic"
+    topology = row["mission_level_state"]["agent_topology"]
+    assert topology["root_node_id"] == "slot_lead"
+    assert [(node["node_id"], node["persona_id"]) for node in topology["nodes"]] == [
+        ("slot_lead", "neko_supervisor"),
+        ("slot_builder", "dev"),
+        ("slot_verifier", "qa"),
+    ]
+    assert [(edge["source_node_id"], edge["target_node_id"], edge["kind"]) for edge in topology["edges"]] == [
+        ("slot_lead", "slot_builder", "steers"),
+        ("slot_builder", "slot_verifier", "steers"),
+    ]
     assert [(actor["persona_id"], actor["presence"]) for actor in row["mission_level_state"]["actors"]] == [
         ("neko_supervisor", "waiting"),
         ("dev", "queued"),
@@ -154,6 +173,90 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     assert row["proof_gate_state"]["missing_stage_ids"] == ["implement", "verify"]
     assert row["proof_gate_state"]["why_not_ready"]
     assert row["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is True
+
+
+def test_snapshot_agent_topology_runtime_spawned_by_overrides_blueprint(isolate_agent_runtime_root):
+    n = now()
+    task = Task(
+        id="topology_spawned_by",
+        title="Topology spawned_by",
+        description="Runtime steering should win.",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Topology spawned_by", objective="Runtime steering should win."),
+            current_stage_id="scope",
+            blueprint_id="neko_two_dev_default",
+            blueprint_version=1,
+            slots={
+                "lead": {"role": "neko", "required": True},
+                "backend_builder": {"role": "backend_dev", "required": True},
+                "builder": {"role": "builder", "required": True},
+            },
+            bindings={
+                "lead": "neko_supervisor",
+                "backend_builder": "backend_dev",
+                "builder": "dev",
+            },
+            agent_topology={
+                "root": "lead",
+                "edges": [
+                    {"source": "lead", "target": "builder", "kind": "steers"},
+                    {"source": "builder", "target": "backend_builder", "kind": "steers"},
+                ],
+            },
+            stages=[
+                MissionPlanStage(id="scope", title="Scope", objective="Scope", owner="neko_supervisor", owner_slot="lead", repo="hermes-agent", kind="planning"),
+                MissionPlanStage(id="backend", title="Backend", objective="Backend", owner="backend_dev", owner_slot="backend_builder", repo="EterniaBackend", kind="implementation"),
+                MissionPlanStage(id="launcher", title="Launcher", objective="Launcher", owner="dev", owner_slot="builder", repo="EterniaLauncher", kind="implementation"),
+            ],
+        ),
+    )
+    TaskStore().create(task)
+    store = PersonaInstanceStore()
+    neko = store.ensure_for_goal(
+        _topology_persona("neko_supervisor", "Neko Mission Lead", "neko_supervisor"),
+        goal_id=task.id,
+        spawned_by=None,
+        placement_id="topology_spawned_by:neko_supervisor",
+    )
+    backend = store.ensure_for_goal(
+        _topology_persona("backend_dev", "Backend Dev Agent", "backend_dev"),
+        goal_id=task.id,
+        spawned_by=neko.id,
+        placement_id="topology_spawned_by:backend_dev",
+    )
+    store.ensure_for_goal(
+        _topology_persona("dev", "Launcher Dev Agent", "dev"),
+        goal_id=task.id,
+        spawned_by=backend.id,
+        placement_id="topology_spawned_by:dev",
+    )
+
+    snap = build_snapshot()
+    row = next(item for item in snap["tasks"] if item["task_id"] == task.id)
+
+    topology = row["mission_level_state"]["agent_topology"]
+    assert topology["source"] == "runtime_spawned_by"
+    assert [(edge["source_node_id"], edge["target_node_id"]) for edge in topology["edges"]] == [
+        ("personainst_topology_spawned_by_neko_supervisor", "personainst_topology_spawned_by_backend_dev"),
+        ("personainst_topology_spawned_by_backend_dev", "personainst_topology_spawned_by_dev"),
+    ]
+
+
+def _topology_persona(persona_id: str, display_name: str, role: str) -> AgentPersona:
+    return AgentPersona(
+        id=persona_id,
+        display_name=display_name,
+        role=role,
+        model=None,
+        provider=None,
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="",
+    )
 
 
 def test_snapshot_unscoped_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root):

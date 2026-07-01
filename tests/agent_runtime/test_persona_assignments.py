@@ -1469,6 +1469,12 @@ def test_mission_chat_model_override_is_chat_scoped_and_does_not_mutate_persona(
     monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
     db = _TranscriptDB()
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    # Base-profile foundation: only `base` is seeded into the store now, but this test
+    # asserts the chat override does not mutate the *persisted* typed persona, so persist
+    # `dev` explicitly (it stays resolvable via the dormant catalog either way).
+    from agent_runtime.store import AgentStore as _AgentStore
+    from agent_runtime.config import persona_records_from_config as _persona_records_from_config
+    _AgentStore().save(next(p for p in _persona_records_from_config(cfg) if p.id == "dev"))
     captured: dict = {}
 
     class _FakeRuntime:
@@ -1616,6 +1622,188 @@ def test_mission_chat_model_override_rejects_bad_values_before_turn_is_written(
     assert payload["error_kind"] == "invalid_chat_model_override"
     assert "Hermes profile defaults were not changed" in payload["next_expected"]
     assert db.messages["persona_chat_personainst_dev"] == []
+
+
+def test_mission_chat_queues_skill_for_next_turn_once(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+    from agent_runtime.queued_skills import pending_skills_for_next_turn
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    import tools.skills_tool as skills_tool
+
+    monkeypatch.setattr(
+        skills_tool,
+        "_find_all_skills",
+        lambda: [{"name": "deep-audit", "identifier": "deep-audit"}],
+    )
+
+    code = harness._cmd_mission_chat_queue_skill(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            skill="deep-audit",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["queued_skills"] == ["deep-audit"]
+    assert pending_skills_for_next_turn(
+        persona_id="dev",
+        session_id="persona_chat_personainst_dev",
+    ) == ["deep-audit"]
+
+    import agent.skill_commands as skill_commands
+
+    monkeypatch.setattr(
+        skill_commands,
+        "build_preloaded_skills_prompt",
+        lambda skills, task_id=None: ("PRELOADED SKILL PROMPT", list(skills), []),
+    )
+    captured_prompts: list[str | None] = []
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona_arg, message, **kwargs):
+            captured_prompts.append(kwargs.get("preloaded_skill_prompt"))
+            return SimpleNamespace(
+                final_response="skill queued",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                raw={
+                    "model_input_observability": {
+                        "kind": "redaction_safe_final_model_input",
+                        "message_count": 1,
+                        "messages": [],
+                    }
+                },
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    def _message_args(client_id: str):
+        return SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            title="Operator message",
+            message=f"turn {client_id}",
+            provider=None,
+            model=None,
+            use_agent_default=False,
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id=client_id,
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+
+    assert harness._cmd_mission_chat_message(_message_args("client_skill_1")) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert captured_prompts == ["PRELOADED SKILL PROMPT"]
+    assert payload["queued_skills_loaded"] == ["deep-audit"]
+    assert payload["prompt_observability"]["used_skills"] == [
+        {
+            "name": "deep-audit",
+            "kind": "skill",
+            "status": "used",
+            "hash_tracked": False,
+            "source": "queued_next_turn_skill",
+        }
+    ]
+    assert pending_skills_for_next_turn(
+        persona_id="dev",
+        session_id="persona_chat_personainst_dev",
+    ) == []
+
+    assert harness._cmd_mission_chat_message(_message_args("client_skill_2")) == 0
+    json.loads(capsys.readouterr().out)
+    assert captured_prompts == ["PRELOADED SKILL PROMPT", ""]
+
+
+def test_queue_skill_rejects_missing_skill_without_pending_state(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+    from agent_runtime.queued_skills import pending_skills_for_next_turn
+
+    import tools.skills_tool as skills_tool
+
+    monkeypatch.setattr(skills_tool, "_find_all_skills", lambda: [])
+
+    code = harness._cmd_mission_chat_queue_skill(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            skill="missing-skill",
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert pending_skills_for_next_turn(
+        persona_id="dev",
+        session_id="persona_chat_personainst_dev",
+    ) == []
+
+
+def test_prompt_observability_reports_redaction_safe_available_skill_catalog(
+    monkeypatch, isolate_agent_runtime_root
+):
+    from agent_runtime import prompt_observability
+
+    import tools.skills_tool as skills_tool
+
+    monkeypatch.setattr(
+        skills_tool,
+        "_find_all_skills",
+        lambda: [
+            {
+                "name": "deep-audit",
+                "description": "Inspect the runtime deeply.",
+                "category": "harness",
+                "identifier": "harness/deep-audit",
+            }
+        ],
+    )
+    context = prompt_observability.mission_chat_prompt_observability(
+        persona=_persona("dev"),
+        session_id="persona_chat_personainst_dev",
+    )
+
+    assert context["available_skills"] == [
+        {
+            "name": "deep-audit",
+            "kind": "skill",
+            "status": "available",
+            "hash_tracked": False,
+            "source": "installed_skill_catalog",
+            "category": "harness",
+            "description": "Inspect the runtime deeply.",
+            "loadable": True,
+        }
+    ]
+    assert "content" not in context["available_skills"][0]
+    assert context["skills_catalog"] == context["available_skills"]
 
 
 def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, isolate_agent_runtime_root):

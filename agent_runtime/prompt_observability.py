@@ -61,6 +61,7 @@ def mission_chat_prompt_observability(
     history = _chat_history_context(session_db=session_db, session_id=session_id)
     chat = _chat_metadata(session_db=session_db, session_id=session_id)
     accessible_skills = _accessible_skills_context(persona, profile)
+    available_skills = available_skills_context(accessible_skills=accessible_skills)
     used_skills = used_skills_context(
         final_model_input=final_model_input,
         trace_events=trace_events,
@@ -114,6 +115,8 @@ def mission_chat_prompt_observability(
         "context_files": _profile_context_files(profile),
         "used_skills": used_skills,
         "accessible_skills": accessible_skills,
+        "available_skills": available_skills,
+        "skills_catalog": available_skills,
         "skills": accessible_skills,
         "chat_history_context": history,
         "retrieval_context": [],
@@ -309,6 +312,8 @@ def _backfill_derived_fields(
         for key in (
             "used_skills",
             "accessible_skills",
+            "available_skills",
+            "skills_catalog",
             "skills",
             "chat_id",
             "chat_title",
@@ -349,8 +354,17 @@ def _backfill_derived_fields(
                 for name in names[:80]
             ]
             item["skills"] = item["accessible_skills"]
+            item["available_skills"] = available_skills_context(
+                accessible_skills=item["accessible_skills"]
+            )
+            item["skills_catalog"] = item["available_skills"]
     elif item.get("skills") is None:
         item["skills"] = item["accessible_skills"]
+    if item.get("available_skills") is None:
+        item["available_skills"] = available_skills_context(
+            accessible_skills=item.get("accessible_skills") or item.get("skills") or []
+        )
+        item["skills_catalog"] = item["available_skills"]
     if _context_budget_needs_refresh(item):
         budget = _context_budget(item.get("model_selection"), item.get("final_model_input"))
         if budget is not None:
@@ -593,10 +607,84 @@ def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any
     return skills
 
 
+def available_skills_context(
+    *,
+    accessible_skills: list[dict[str, Any]] | None = None,
+    limit: int = 160,
+) -> list[dict[str, Any]]:
+    """Redaction-safe installed skill catalog for Mission Control.
+
+    This deliberately exposes names and frontmatter descriptions only. It never
+    returns SKILL.md bodies or referenced files.
+    """
+
+    accessible_by_name = {
+        safe_assignment_token(item.get("name")): item
+        for item in accessible_skills or []
+        if isinstance(item, dict) and safe_assignment_token(item.get("name"))
+    }
+    rows: list[dict[str, Any]] = []
+    try:
+        from tools.skills_tool import _find_all_skills
+
+        installed = _find_all_skills()
+    except Exception:
+        installed = []
+    if isinstance(installed, list):
+        for skill in installed:
+            if not isinstance(skill, dict):
+                continue
+            name = safe_assignment_token(skill.get("name"))
+            if not name:
+                continue
+            accessible = accessible_by_name.get(name)
+            status = "accessible" if accessible else "available"
+            if accessible and isinstance(accessible.get("status"), str):
+                status = safe_assignment_token(accessible.get("status")) or status
+            rows.append(
+                {
+                    "name": name,
+                    "kind": "skill",
+                    "status": status,
+                    "hash_tracked": bool(accessible.get("hash_tracked")) if accessible else False,
+                    "source": "installed_skill_catalog",
+                    "category": safe_assignment_token(skill.get("category")) or "skills",
+                    "description": safe_assignment_text(skill.get("description"), limit=220) or "",
+                    "loadable": True,
+                }
+            )
+    if not rows:
+        for name, item in accessible_by_name.items():
+            rows.append(
+                {
+                    "name": name,
+                    "kind": "skill",
+                    "status": safe_assignment_token(item.get("status")) or "accessible",
+                    "hash_tracked": bool(item.get("hash_tracked")),
+                    "source": safe_assignment_token(item.get("source")) or "accessible_skills",
+                    "category": "skills",
+                    "description": "",
+                    "loadable": True,
+                }
+            )
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda item: str(item.get("name", "")).lower()):
+        name = safe_assignment_token(row.get("name"))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        deduped.append(row)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
 def used_skills_context(
     *,
     final_model_input: dict[str, Any] | None = None,
     trace_events: Iterable[dict[str, Any]] | None = None,
+    queued_skills: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Redaction-safe list of skills actually loaded/read during this turn."""
     names: list[str] = []
@@ -611,7 +699,7 @@ def used_skills_context(
         if not _skill_trace_event_counts_as_used(entry):
             continue
         _append_used_skill_name(names, _extract_skill_name(entry))
-    return [
+    rows = [
         {
             "name": name,
             "kind": "skill",
@@ -621,6 +709,20 @@ def used_skills_context(
         }
         for name in names
     ]
+    for skill in queued_skills or ():
+        token = safe_assignment_token(skill)
+        if not token or token in names:
+            continue
+        rows.append(
+            {
+                "name": token,
+                "kind": "skill",
+                "status": "used",
+                "hash_tracked": False,
+                "source": "queued_next_turn_skill",
+            }
+        )
+    return rows
 
 
 def _list_used_skill_entries(final_model_input: dict[str, Any] | None) -> list[Any]:

@@ -108,6 +108,10 @@ def prompt_observability_dir() -> Path:
     return store_root() / "prompt_observability"
 
 
+def queued_skills_dir() -> Path:
+    return store_root() / "queued_skills"
+
+
 def proof_sandbox_root() -> Path:
     return store_root() / "proof_sandbox"
 

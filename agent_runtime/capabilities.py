@@ -64,6 +64,16 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "normal",
     },
     {
+        "id": "mission.chat.queue_skill_for_next_turn",
+        "target_kind": "persona",
+        "label": "Load Skill Next Turn",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["persona_id", "session_id", "skill"],
+        "allowed_args": ["persona_instance_id"],
+        "danger": "normal",
+    },
+    {
         "id": "persona.profile.instantiate",
         "target_kind": "persona",
         "label": "Create Agent Profile",

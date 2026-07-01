@@ -18,6 +18,7 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert len(ids) == len(set(ids))
     assert "mission.chat.message" in ids
     assert "mission.chat.steer" in ids
+    assert "mission.chat.queue_skill_for_next_turn" in ids
     assert "persona.profile.instantiate" in ids
     assert "persona.instance.create" in ids
     assert "persona.instance.open_chat" in ids
@@ -56,6 +57,12 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert by_id["mission.chat.steer"]["execution_semantics"] == "control_state_change"
     assert by_id["mission.chat.steer"]["args_schema"]["required"] == ["session_id", "message"]
     assert "client_message_id" in by_id["mission.chat.steer"]["allowed_args"]
+    assert by_id["mission.chat.queue_skill_for_next_turn"]["args_schema"]["required"] == [
+        "persona_id",
+        "session_id",
+        "skill",
+    ]
+    assert by_id["mission.chat.queue_skill_for_next_turn"]["execution_semantics"] == "control_state_change"
     assert by_id["persona.permission_preview"]["execution_semantics"] == "read_only"
     assert by_id["persona.permission_override"]["danger"] == "warning"
     assert by_id["persona.permission_override"]["args_schema"]["properties"]["turns"]["type"] == "integer"
@@ -105,6 +112,7 @@ def test_snapshot_emits_callable_capability_descriptors(isolate_agent_runtime_ro
     assert capability_ids().issubset(ids)
     assert "mission.chat.message" in ids
     assert "mission.chat.steer" in ids
+    assert "mission.chat.queue_skill_for_next_turn" in ids
     assert "persona.instance.message" not in ids
     assert "daemon.start" in ids
 

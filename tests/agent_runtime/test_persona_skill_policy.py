@@ -85,6 +85,32 @@ def test_stage59_hud_skill_sections_exist_in_role_skills():
         assert "next_required_move" not in text
 
 
+def test_runtime_model_skill_documents_graph_and_level_agent_commands():
+    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
+    text = (root / "harness-runtime-model" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "hermes harness task show <id> --json" in text
+    assert "`.mission_plan`" in text
+    assert "mcp_launcher_qa_get_buttons" in text
+    assert "scope=mission_control.agent" in text
+    assert "mcp_launcher_qa_get_widget_state" in text
+    assert "widget=mission_control.graph" in text
+    assert "status.agents" in text
+    assert "configured/installed Harness agents" in text
+    assert "Neko scope → Backend Dev → Launcher Dev" in text
+    assert "QA is a node only if the selected blueprint binds it" in text
+
+
+def test_mission_lead_skill_answers_graph_from_supplied_task_plan():
+    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
+    text = (root / "harness-mission-lead" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert 'When asked "what graph/flow are you using?"' in text
+    assert "supplied active task's `mission_plan`" in text
+    assert "not from the most recent running goal" in text
+    assert "`blueprint_id`, active stage, stage order, owners, and outgoing edges" in text
+
+
 def test_harness_skill_install_allows_readiness_from_temp_home(tmp_path, monkeypatch):
     from agent_runtime.profile_readiness import profile_readiness_for_persona
     from agent_runtime.skill_install import install_harness_skills
@@ -98,6 +124,24 @@ def test_harness_skill_install_allows_readiness_from_temp_home(tmp_path, monkeyp
 
     assert readiness["missing_skills"] == []
     assert readiness["skill_hash_mismatches"] == []
+
+
+def test_harness_skill_install_repairs_hash_mismatch(tmp_path, monkeypatch):
+    from agent_runtime.skill_install import harness_skill_hash_mismatches, install_harness_skill
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    first = install_harness_skill("harness-runtime-model", hermes_home=tmp_path)
+    assert first.ok is True
+    assert first.changed is True
+
+    installed = Path(first.destination)
+    installed.write_text(installed.read_text(encoding="utf-8") + "\n# stale local edit\n", encoding="utf-8")
+    assert harness_skill_hash_mismatches(["harness-runtime-model"], hermes_home=tmp_path) == ["harness-runtime-model"]
+
+    repaired = install_harness_skill("harness-runtime-model", hermes_home=tmp_path)
+    assert repaired.ok is True
+    assert repaired.changed is True
+    assert harness_skill_hash_mismatches(["harness-runtime-model"], hermes_home=tmp_path) == []
 
 
 def test_harness_skill_cli_defaults_to_persona_profiles(monkeypatch, capsys):
