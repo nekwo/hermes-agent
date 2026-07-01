@@ -96,6 +96,8 @@ def test_status_surfaces_lanes_repo_locks_and_swarm_budget(isolate_agent_runtime
     assert s["lanes"][0]["lane_id"] == lane.id
     assert s["repo_locks"]["lock_count"] == 1
     assert s["swarm_budget"]["global"] == {"total_tokens": 12, "api_calls": 2}
+    assert s["production_envelope"]["production_ready"] is False
+    assert {item["id"] for item in s["production_envelope"]["items"]} >= {"H5", "H6", "H7", "H8", "H9", "H10"}
 
 
 def test_status_marks_next_action_blocked_by_open_incident():

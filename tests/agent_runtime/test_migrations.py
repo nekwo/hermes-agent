@@ -36,6 +36,9 @@ def test_effective_config_summary_is_redaction_safe(isolate_agent_runtime_root):
     assert "super-secret-value" not in str(summary)
     assert summary["personas"]["dev"]["api_token"] == "<redacted>"
     assert "harness-dev-delivery" in summary["effective_personas"]["dev"]["skills"]
+    assert summary["production_envelope"]["production_ready"] is False
+    assert {item["id"] for item in summary["production_envelope"]["items"]} == {"H5", "H6", "H7", "H8", "H9", "H10"}
+    assert any(item["id"] == "H5" for item in summary["production_envelope"]["blockers"])
 
 
 def test_migration_status_counts_existing_runtime_records(isolate_agent_runtime_root):

@@ -24,6 +24,7 @@ from .profile_readiness import profile_readiness_for_persona
 from .provider_health import provider_health_for_personas
 from .incidents import RUN_BUDGET_EXCEEDED
 from .migrations import effective_config_summary
+from .production_envelope import production_envelope_status
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, repo_bundle_summary, repo_lock_summary
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
 from .state_machine import MissionStateMachine
@@ -92,6 +93,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "dirty_state": dirty_state,
         "runtime_health": provider_health_for_personas(agents),
         "runtime_config": effective_config_summary(cfg),
+        "production_envelope": production_envelope_status(cfg),
         "daemon": daemon_status,
         "swarm": {
             "enabled": bool(getattr(getattr(cfg, "swarm", None), "enabled", False)),

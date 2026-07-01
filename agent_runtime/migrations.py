@@ -6,6 +6,7 @@ from typing import Any
 
 from . import paths
 from .config import AgentRuntimeConfig, persona_records_from_config, load_agent_runtime_config
+from .production_envelope import production_envelope_status
 
 CURRENT_RUNTIME_SCHEMA_VERSION = 1
 
@@ -17,6 +18,7 @@ def effective_config_summary(cfg: AgentRuntimeConfig | None = None) -> dict[str,
     data["schema_version"] = int(getattr(cfg, "schema_version", CURRENT_RUNTIME_SCHEMA_VERSION) or CURRENT_RUNTIME_SCHEMA_VERSION)
     data["validation"] = validate_runtime_config(cfg)
     data["migration"] = migration_status()
+    data["production_envelope"] = production_envelope_status(cfg)
     data["effective_personas"] = _effective_persona_summary(cfg)
     return _redaction_safe_config(data)
 

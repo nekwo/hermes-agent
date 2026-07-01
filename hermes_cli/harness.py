@@ -1163,6 +1163,47 @@ def _goal_row(task: Task, *, full: bool = False) -> dict:
     return row
 
 
+def _archived_goal_row(task_id: str, result) -> dict | None:
+    archived = _archived_task_summary(task_id)
+    if not archived:
+        return None
+    task_data = archived.get("task") if isinstance(archived.get("task"), dict) else {}
+    archived_task = archived.get("archived_task") if isinstance(archived.get("archived_task"), dict) else {}
+    goal_id = task_data.get("goal_id") or task_id
+    row = {
+        "id": goal_id,
+        "task_id": task_id,
+        "title": task_data.get("title") or getattr(result, "title", ""),
+        "state": task_data.get("state") or getattr(result, "final_task_state", ""),
+        "workspace_id": task_data.get("workspace_id"),
+        "realm_id": None,
+        "stage": (task_data.get("mission_plan") or {}).get("current_stage_id") or task_data.get("current_stage_id"),
+        "updated_at": task_data.get("updated_at"),
+        "archived": True,
+        "archive_batch": archived.get("archive_batch"),
+        "archive_dir": archived.get("archive_dir"),
+        "manifest_path": archived.get("manifest_path"),
+        "archived_run_ids": list(archived_task.get("run_ids") or []),
+        "archived_proof_ids": list(archived_task.get("proof_ids") or []),
+    }
+    return row
+
+
+def _result_goal_row(result) -> dict:
+    return {
+        "id": getattr(result, "task_id", "") or "",
+        "task_id": getattr(result, "task_id", "") or "",
+        "title": getattr(result, "title", ""),
+        "state": getattr(result, "final_task_state", ""),
+        "workspace_id": None,
+        "realm_id": None,
+        "stage": None,
+        "updated_at": None,
+        "archived": False,
+        "source": "goal_run_result",
+    }
+
+
 def _resolve_goal(value: str) -> Task:
     try:
         return TaskStore().get_goal(value)
@@ -2123,8 +2164,16 @@ def _cmd_goal_run(args) -> int:
         )
     )
     if getattr(args, "json", False) or getattr(args, "output", None):
-        task = TaskStore().get(result.task_id)
-        row = _goal_row(task)
+        task = None
+        try:
+            task = TaskStore().get(result.task_id)
+            row = _goal_row(task)
+            warnings = _goal_contention_warnings(task)
+        except NotFound:
+            row = _archived_goal_row(result.task_id, result)
+            if row is None:
+                row = _result_goal_row(result)
+            warnings = []
         row.update(
             {
                 "stop_reason": result.stop_reason,
@@ -2134,7 +2183,10 @@ def _cmd_goal_run(args) -> int:
                 "open_incident_ids": list(result.open_incident_ids),
             }
         )
-        _print_stage42(_object_envelope("goal", row, warnings=_goal_contention_warnings(task)), args=args, default_output="json")
+        if result.archive_result is not None:
+            row["archive_result"] = result.archive_result
+            row["archived"] = bool(row.get("archived") or result.archive_result.get("archived_count"))
+        _print_stage42(_object_envelope("goal", row, warnings=warnings), args=args, default_output="json")
     else:
         print(f"goal {result.task_id}: stop={result.stop_reason} state={result.final_task_state} actions={result.actions_taken}")
     return result.exit_code

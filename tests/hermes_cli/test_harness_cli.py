@@ -159,6 +159,59 @@ def test_harness_goal_run_returns_controller_exit_code(tmp_path, monkeypatch, ca
     assert data["stop_reason"] == "max_actions"
 
 
+def test_harness_goal_run_json_survives_archive_on_done(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    class Controller:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def run_goal(self, options):
+            assert options.archive_on_done is True
+            task = Task(
+                id="task_archived_goal",
+                title="T",
+                description="D",
+                state=TaskState.DONE,
+                created_at=now(),
+                updated_at=now(),
+                requested_by="cli",
+                goal_id="goal_archived",
+            )
+            TaskStore().create(task)
+            archive_result = TaskStore().archive(task.id, actor="harness", reason="goal runner archive-on-done")
+            return GoalRunResult(
+                ok=True,
+                task_id=task.id,
+                title=task.title,
+                final_task_state="done",
+                stop_reason="task_done",
+                tick_stop_reason="task_terminal",
+                exit_code=0,
+                elapsed_seconds=0.0,
+                actions_taken=1,
+                ticks=1,
+                run_ids=[],
+                proof_ids=[],
+                open_incident_ids=[],
+                all_incident_ids=[],
+                hygiene={},
+                archive_result=archive_result,
+            )
+
+    monkeypatch.setattr("hermes_cli.harness.MissionRuntimeController", Controller)
+
+    args = parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--archive-on-done", "--json"])
+
+    assert args.func(args) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["task_id"] == "task_archived_goal"
+    assert data["archived"] is True
+    assert data["archive_result"]["archived_task_ids"] == ["task_archived_goal"]
+    assert data["archive_batch"]
+    assert data["stop_reason"] == "task_done"
+
+
 def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     ts = TaskStore()
