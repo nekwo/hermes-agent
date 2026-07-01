@@ -43,18 +43,19 @@ def _h5_migration_rollback(cfg: Any) -> dict[str, Any]:
     return _item(
         "H5",
         "migration_rollback",
-        "flag_gated",
+        "not_implemented",
         controls=[
-            "simplified_agent_contract.enabled controls new HUD contract exposure",
-            "simplified_agent_contract.allow_legacy_decision_aliases keeps compatibility shim available",
-            "simplified_agent_contract.keep_internal_state_machine keeps old routing authority live under the HUD",
+            "simplified_agent_contract.enabled currently only opts into repo-bundle routing compatibility",
+            "simplified_agent_contract subflags are parsed for future migration wiring but do not gate contract exposure",
         ],
         flags={
             "simplified_agent_contract.enabled": bool(getattr(simplified, "enabled", False)),
+            "expose_only_simplified_actions": bool(getattr(simplified, "expose_only_simplified_actions", False)),
             "allow_legacy_decision_aliases": bool(getattr(simplified, "allow_legacy_decision_aliases", False)),
             "keep_internal_state_machine": bool(getattr(simplified, "keep_internal_state_machine", False)),
         },
         blockers=[
+            "simplified_agent_contract subflags have no behavioral consumer for old-vs-new contract exposure",
             "dual-run old/new decision renderer parity is not yet enforced as a release gate",
             "automatic rollback for in-flight goals is not yet wired to a migration version switch",
         ],

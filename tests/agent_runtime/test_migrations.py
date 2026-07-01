@@ -41,6 +41,16 @@ def test_effective_config_summary_is_redaction_safe(isolate_agent_runtime_root):
     assert any(item["id"] == "H5" for item in summary["production_envelope"]["blockers"])
 
 
+def test_h5_envelope_does_not_advertise_inert_migration_flags_as_controls():
+    summary = effective_config_summary(AgentRuntimeConfig())
+    h5 = next(item for item in summary["production_envelope"]["items"] if item["id"] == "H5")
+
+    assert h5["status"] == "not_implemented"
+    assert any("no behavioral consumer" in blocker for blocker in h5["blockers"])
+    assert not any("controls new HUD contract exposure" in control for control in h5["controls"])
+    assert not any("keeps compatibility shim available" in control for control in h5["controls"])
+
+
 def test_migration_status_counts_existing_runtime_records(isolate_agent_runtime_root):
     root = isolate_agent_runtime_root
     atomic_json_write(root / "tasks" / "task_1.json", {"id": "task_1", "schema_version": 1})
