@@ -234,27 +234,52 @@ class CommandProofRunner:
             raise DecisionPayloadInvalid(
                 "Smoke/no-edit proof command policy failed at proof execution boundary: refusing to launch an unbounded full-suite command."
             )
+        readiness_failure = _backend_release_gate_readiness_failure(effective_command, self.workdir)
         timed_out = False
         stdout = ""
         stderr = ""
         exit_code: int | None
-        invocation, shell = _shell_invocation(effective_command)
-        monitor = self._monitor_callback(
-            task,
-            stage_id=stage_id,
-            run_id=run_id,
-            actor=actor,
-            command=effective_command,
-            command_index=command_index,
-            commands_requested=commands_requested,
-        )
-        completed = _run_bounded_process(
-            invocation,
-            shell=shell,
-            cwd=self.workdir,
-            timeout_seconds=self.timeout_seconds,
-            progress_callback=monitor,
-        )
+        if readiness_failure is not None:
+            self.event_log.append(
+                Event(
+                    now(),
+                    "backend_release_gate_environment_failed",
+                    task.id,
+                    run_id,
+                    actor,
+                    {
+                        "check_id": readiness_failure["check_id"],
+                        "reason": readiness_failure["reason"],
+                        "stage_id": stage_id,
+                        "command_index": command_index,
+                        "summary": "Backend release gate failed closed before launching the authoritative command.",
+                    },
+                )
+            )
+            completed = _CompletedCommand(
+                stdout="",
+                stderr=f"Backend release gate failed closed: {readiness_failure['reason']}",
+                exit_code=None,
+                timed_out=False,
+            )
+        else:
+            invocation, shell = _shell_invocation(effective_command)
+            monitor = self._monitor_callback(
+                task,
+                stage_id=stage_id,
+                run_id=run_id,
+                actor=actor,
+                command=effective_command,
+                command_index=command_index,
+                commands_requested=commands_requested,
+            )
+            completed = _run_bounded_process(
+                invocation,
+                shell=shell,
+                cwd=self.workdir,
+                timeout_seconds=self.timeout_seconds,
+                progress_callback=monitor,
+            )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
         exit_code = completed.exit_code
@@ -300,6 +325,10 @@ class CommandProofRunner:
                 artifact_lines.extend(["--- missing_expected_markers ---", "\n".join(missing_expected_markers)])
             if cleanup_receipt:
                 artifact_lines.append(f"cleanup_receipt: {cleanup_receipt.get('status')}")
+        if readiness_failure is not None:
+            artifact_lines.append("environment_readiness_status: failed")
+            artifact_lines.append(f"environment_readiness_check: {readiness_failure['check_id']}")
+            artifact_lines.append(f"environment_readiness_reason: {readiness_failure['reason']}")
         if adapted.adapter:
             artifact_lines.extend(
                 [
@@ -314,6 +343,8 @@ class CommandProofRunner:
         if recipe and recipe.get("mode") == "no_product_edit" and dirty_delta:
             status = "failed"
         if recipe and missing_expected_markers:
+            status = "failed"
+        if readiness_failure is not None:
             status = "failed"
         try:
             artifact_bytes = artifact_path.stat().st_size
@@ -365,6 +396,11 @@ class CommandProofRunner:
         if adapted.adapter:
             metadata["original_command"] = redacted_original_command
             metadata["command_adapter"] = adapted.adapter
+        if readiness_failure is not None:
+            metadata["environment_readiness_status"] = "failed"
+            metadata["environment_readiness_check_id"] = readiness_failure["check_id"]
+            metadata["environment_readiness_reason"] = readiness_failure["reason"]
+            metadata["backend_release_gate_fail_closed"] = True
         proof = Proof(
             id=proof_id,
             task_id=task.id,
@@ -465,6 +501,44 @@ def _safe_recipe_metadata(value: dict[str, Any] | None) -> dict[str, Any] | None
         if safe_by_command:
             metadata["expected_markers_by_command"] = safe_by_command
     return metadata
+
+
+def _backend_release_gate_readiness_failure(command: str, workdir: Path) -> dict[str, str] | None:
+    if not _requires_backend_release_docker_precheck(command, workdir):
+        return None
+    for check_id, argv in (
+        ("docker_version", ["docker", "version"]),
+        ("docker_ps", ["docker", "ps"]),
+    ):
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=str(workdir),
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except FileNotFoundError:
+            return {"check_id": check_id, "reason": "docker_not_found"}
+        except subprocess.TimeoutExpired:
+            return {"check_id": check_id, "reason": "docker_probe_timeout"}
+        except OSError:
+            return {"check_id": check_id, "reason": "docker_probe_failed"}
+        if result.returncode != 0:
+            reason = "docker_daemon_unavailable" if check_id == "docker_ps" else "docker_unavailable"
+            detail = _excerpt(_redact_text((result.stderr or result.stdout or "").strip()))
+            return {"check_id": check_id, "reason": reason if not detail else f"{reason}: {detail}"}
+    return None
+
+
+def _requires_backend_release_docker_precheck(command: str, workdir: Path) -> bool:
+    text = str(command or "").strip().lower().replace("\\", "/")
+    if "scripts/test.sh" not in text:
+        return False
+    if "--sqlite" in text or " --dry-run" in text:
+        return False
+    workdir_text = str(workdir).lower().replace("\\", "/")
+    return "eternia-backend" in workdir_text or "backend" in text
 
 
 def _prepare_recipe_sandbox(task: Task, recipe: dict[str, Any], *, command_index: int) -> Path:

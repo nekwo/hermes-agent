@@ -1131,6 +1131,7 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "cross_stack.launcher_released": EventContract("cross_stack.launcher_released", "Launcher released", ("next_state",), ("proof_ids",)),
     "cross_stack.launcher_release_missing": EventContract("cross_stack.launcher_release_missing", "Launcher release missing", ("next_expected",), ("stage_id",)),
     "cross_stack.qa_coordination_release_missing": EventContract("cross_stack.qa_coordination_release_missing", "QA release missing", ("next_expected",), ("stage_id",)),
+    "backend_release_gate_environment_failed": EventContract("backend_release_gate_environment_failed", "Backend release gate environment failed", ("check_id", "reason"), ("stage_id", "command_index")),
     "issue.discovery_reported": EventContract("issue.discovery_reported", "Issue discovered", ("title", "severity"), ("evidence",)),
     "issue.discovery_triaged": EventContract("issue.discovery_triaged", "Issue triaged", ("decision",), ("rationale",)),
     "issue.child_mission_created": EventContract("issue.child_mission_created", "Child mission created", ("task_id",), ("title",)),
