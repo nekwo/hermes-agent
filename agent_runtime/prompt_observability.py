@@ -573,17 +573,32 @@ def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any
     tracked: set[str] = set()
     mismatched: set[str] = set()
     missing: set[str] = set()
+    # Resolve the persona's OWN profile home so skill hash/missing checks run against
+    # the profile the persona actually runs on — mirroring profile_readiness (the
+    # authoritative surface). Without hermes_home these checks fall back to the active
+    # HERMES_HOME, so an isolated persona (e.g. base, whose home differs from the active
+    # profile) shows a false hash_mismatch in the HUD while `harness status` reports
+    # clean. Keep the None fallback (legacy behavior) when the home can't be resolved.
+    profile_home = None
+    try:
+        from .profile_context import resolve_persona_profile
+
+        binding = resolve_persona_profile(persona)
+        profile_home = getattr(binding, "profile_home", None)
+    except Exception:
+        profile_home = None
     try:
         from .skill_install import HARNESS_SKILLS, harness_skill_hash_mismatches
 
         tracked = {name for name in declared if name in HARNESS_SKILLS}
-        mismatched = set(harness_skill_hash_mismatches(sorted(tracked)))
+        mismatched = set(harness_skill_hash_mismatches(sorted(tracked), hermes_home=profile_home))
     except Exception:
         pass
     try:
         from .profile_readiness import _missing_skill_names
 
-        missing = set(_missing_skill_names(sorted(tracked)))
+        skill_root = (profile_home / "skills") if profile_home is not None else None
+        missing = set(_missing_skill_names(sorted(tracked), skill_root=skill_root))
     except Exception:
         pass
     skills: list[dict[str, Any]] = []
