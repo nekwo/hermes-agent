@@ -437,12 +437,34 @@ def _validate_delivery_self_test_refs(task: Task, body: dict[str, Any], *, stage
             raise DecisionPayloadInvalid("delivery.self_test_evidence_ids contains an empty evidence id")
         try:
             evidence = store.get(evidence_id)
-        except FileNotFoundError as exc:
-            raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids unknown evidence id: {evidence_id}") from exc
+        except FileNotFoundError:
+            # The field was authored for SelfTestEvidence ids, but a dev routinely
+            # cites the authoritative command-proof id for the same stage instead
+            # (that proof genuinely exists in the ProofStore). A real proof for
+            # this task/stage is valid self-test evidence — accept it rather than
+            # hard-rejecting a truthful hand-off on a store mismatch. Without this
+            # fallback a re-run of a stage that already produced a passing proof
+            # loops on `unknown evidence id`.
+            _validate_delivery_self_test_proof_ref(task, evidence_id, stage_id=stage_id)
+            continue
         if evidence.task_id != task.id:
             raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different task")
         if stage_id and evidence.stage_id and evidence.stage_id != stage_id:
             raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different stage")
+
+
+def _validate_delivery_self_test_proof_ref(task: Task, evidence_id: str, *, stage_id: str | None) -> None:
+    from .errors import NotFound
+    from .store import ProofStore
+
+    try:
+        proof = ProofStore().get(evidence_id)
+    except (NotFound, FileNotFoundError) as exc:
+        raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids unknown evidence id: {evidence_id}") from exc
+    if proof.task_id != task.id:
+        raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different task")
+    if stage_id and proof.stage_id and proof.stage_id != stage_id:
+        raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different stage")
 
 
 def content_hash(body: dict[str, Any]) -> str:

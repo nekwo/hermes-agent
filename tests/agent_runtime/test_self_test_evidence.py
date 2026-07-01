@@ -134,3 +134,93 @@ def test_delivery_packet_rejects_unknown_self_test_evidence_ids():
             run_id=run.id,
             stage_id="stage_1",
         )
+
+
+def _delivery_task() -> Task:
+    return Task(
+        id="task_selftest",
+        title="Mission Control test",
+        description="d",
+        state=TaskState.RUNNING,
+        created_at=now(),
+        updated_at=now(),
+        requested_by="tony",
+        current_stage_id="stage_1",
+        stages=[TaskStage(id="stage_1", title="Stage", objective="Do it", status=StageStatus.IMPLEMENTING)],
+    )
+
+
+def _attach_command_proof(*, task_id: str, stage_id: str | None, proof_id: str) -> str:
+    from agent_runtime.models import Proof
+    from agent_runtime.proof_rules import ProofType
+
+    ProofStore().attach(
+        Proof(
+            id=proof_id,
+            task_id=task_id,
+            stage_id=stage_id,
+            type=ProofType.TEST_RUN,
+            title="Command proof: flutter analyze",
+            path_or_value="artifacts/x.log",
+            created_by="dev",
+            created_at=now(),
+            metadata={"status": "passed", "exit_code": 0, "run_id": "run_prior"},
+        )
+    )
+    return proof_id
+
+
+def test_delivery_packet_accepts_authoritative_command_proof_id(isolate_agent_runtime_root):
+    # A dev routinely cites the harness command-proof id (ProofStore) rather than
+    # a SelfTestEvidence id. A real proof for this task/stage must be accepted so a
+    # re-run of a stage that already produced a passing proof does not loop on
+    # `unknown evidence id`.
+    task = _delivery_task()
+    proof_id = _attach_command_proof(task_id=task.id, stage_id="stage_1", proof_id="test_task_selftest_stage_1_run_prior_0_abc123")
+    decision = AgentDecision(type=DecisionType.PROPOSE_PATCH, summary="delivery", rationale="proof passed", payload={})
+
+    packet = make_packet(
+        task=task,
+        decision=decision,
+        packet_type="delivery",
+        body={"work_status": "patch_proposed", "self_test_evidence_ids": [proof_id]},
+        actor="dev",
+        run_id="run_current",
+        stage_id="stage_1",
+    )
+
+    assert packet.body["self_test_evidence_ids"] == [proof_id]
+
+
+def test_delivery_packet_rejects_command_proof_id_from_different_stage(isolate_agent_runtime_root):
+    task = _delivery_task()
+    proof_id = _attach_command_proof(task_id=task.id, stage_id="other_stage", proof_id="test_task_selftest_other_stage_run_prior_0_def456")
+    decision = AgentDecision(type=DecisionType.PROPOSE_PATCH, summary="delivery", rationale="proof passed", payload={})
+
+    with pytest.raises(DecisionPayloadInvalid, match="belongs to a different stage"):
+        make_packet(
+            task=task,
+            decision=decision,
+            packet_type="delivery",
+            body={"work_status": "patch_proposed", "self_test_evidence_ids": [proof_id]},
+            actor="dev",
+            run_id="run_current",
+            stage_id="stage_1",
+        )
+
+
+def test_delivery_packet_rejects_command_proof_id_from_different_task(isolate_agent_runtime_root):
+    task = _delivery_task()
+    proof_id = _attach_command_proof(task_id="task_other", stage_id="stage_1", proof_id="test_task_other_stage_1_run_prior_0_ghi789")
+    decision = AgentDecision(type=DecisionType.PROPOSE_PATCH, summary="delivery", rationale="proof passed", payload={})
+
+    with pytest.raises(DecisionPayloadInvalid, match="belongs to a different task"):
+        make_packet(
+            task=task,
+            decision=decision,
+            packet_type="delivery",
+            body={"work_status": "patch_proposed", "self_test_evidence_ids": [proof_id]},
+            actor="dev",
+            run_id="run_current",
+            stage_id="stage_1",
+        )
