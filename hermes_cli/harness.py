@@ -881,7 +881,8 @@ def build_parser(parent_subparsers) -> None:
     inc = subs.add_parser("incident", help="Manage incidents")
     inc_subs = inc.add_subparsers(dest="incident_command")
     inc_list = inc_subs.add_parser("list")
-    inc_list.add_argument("--open", action="store_true")
+    inc_list.add_argument("--open", action="store_true", help="(default) show only open incidents")
+    inc_list.add_argument("--all", action="store_true", help="include closed incidents")
     inc_list.add_argument("--json", action="store_true")
     inc_list.set_defaults(func=_cmd_incident_list)
     inc_close = inc_subs.add_parser("close")
@@ -5776,7 +5777,7 @@ def _cmd_issue_triage(args) -> int:
 
 
 def _cmd_incident_list(args) -> int:
-    store=IncidentStore(); incidents=store.list_open() if args.open else store.list_all()
+    store=IncidentStore(); incidents=store.list_all() if getattr(args, "all", False) else store.list_open()
     print(emit_json(incidents) if args.json else "\n".join(f"{i.id} {i.kind} {i.summary}" for i in incidents))
     return 0
 

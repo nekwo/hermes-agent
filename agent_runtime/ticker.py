@@ -4,6 +4,7 @@ import copy
 import inspect
 import json
 import re
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -201,9 +202,12 @@ class TickEngine:
                     task.updated_at = now()
                     self.task_store.update(task, actor="harness", reason=action.reason)
                     closed_worker_ids = self._close_terminal_task_workers(task.id, reason="task completed")
+                    closed_assignment_ids = self.persona_assignment_store.close_for_task(task.id, state="completed", reason="task completed")
                     payload = {"state": TaskState.DONE.value, "proof_ids": len(task.proof_ids)}
                     if closed_worker_ids:
                         payload["closed_worker_session_ids"] = closed_worker_ids
+                    if closed_assignment_ids:
+                        payload["closed_persona_assignment_ids"] = closed_assignment_ids
                     result.actions_taken.append(HarnessActionResult(action, True, action.reason, payload))
                     continue
                 if (
@@ -1327,7 +1331,13 @@ class TickEngine:
         workdir_scope_task = workdir_task or task
         recipe_metadata = proof_recipe_metadata(decision.payload) if isinstance(decision.payload, dict) else None
         recipe_workdir = None
-        if recipe_metadata and decision.payload.get("repo_scope"):
+        run_record = self.run_store.get(run_id)
+        isolated_workdir = _isolated_workdir_from_run_progress(run_record)
+        if isolated_workdir is None and actor in {"dev", "backend_dev"} and self.proof_runner is None:
+            raise DecisionPayloadInvalid(
+                "Dev command proof refused: run has no isolated repo worktree; refusing to fall back to the live checkout."
+            )
+        if recipe_metadata and decision.payload.get("repo_scope") and isolated_workdir is None:
             recipe_workdir = _command_workdir_for_task(
                 type("TaskCommandRecipeRepoScope", (), {"affected_repos": [decision.payload["repo_scope"]]})(),
                 self.command_workdir,
@@ -1336,7 +1346,7 @@ class TickEngine:
             )
         runner = self.proof_runner or CommandProofRunner(
             proof_store=self.proof_store,
-            workdir=recipe_workdir or _command_workdir_for_task(workdir_scope_task, self.command_workdir, actor=actor, stage_id=stage_id),
+            workdir=isolated_workdir or recipe_workdir or _command_workdir_for_task(workdir_scope_task, self.command_workdir, actor=actor, stage_id=stage_id),
             timeout_seconds=max(
                 1,
                 int(
@@ -1697,7 +1707,7 @@ def _record_handoff_observation(
     stage_id = str((decision.payload or {}).get("stage_id") or task.current_stage_id or getattr(run, "stage_id", "") or "").strip() or None
     baseline = (getattr(run, "progress", None) or {}).get("repo_baseline") if run is not None else None
     try:
-        workdir = _command_workdir_for_task(task, command_workdir, actor=actor, stage_id=stage_id)
+        workdir = _isolated_workdir_from_run_progress(run) or _command_workdir_for_task(task, command_workdir, actor=actor, stage_id=stage_id)
         diff = git_diff_since_baseline(workdir, baseline if isinstance(baseline, dict) else None)
     except Exception:
         diff = {"schema_version": 1, "diff": "", "diff_chars": 0, "error": "diff_capture_failed"}
@@ -3549,6 +3559,41 @@ def _command_workdir_for_task(task: Task, explicit_workdir=None, *, actor: str |
             "request_test_run could not resolve a valid affected repo workdir; "
             f"affected_repos={safe_repos!r}"
         ) from exc
+
+
+def _isolated_workdir_from_run_progress(run) -> Path | None:
+    progress = getattr(run, "progress", None)
+    if not isinstance(progress, dict):
+        return None
+    execution = progress.get("repo_execution")
+    if not isinstance(execution, dict) or not execution.get("isolated"):
+        return None
+    raw_workdir = str(execution.get("workdir") or "").strip()
+    if not raw_workdir:
+        return None
+    workdir = Path(raw_workdir).expanduser()
+    try:
+        resolved = workdir.resolve()
+    except OSError:
+        return None
+    if not resolved.is_dir():
+        return None
+    if "wt" not in {part.lower() for part in resolved.parts}:
+        return None
+    branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=resolved,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    if branch.returncode != 0 or (branch.stdout or "").strip() != "HEAD":
+        return None
+    return resolved
 
 
 def _command_proof_repo_scope(task: Task, *, actor: str | None, stage_id: str | None) -> str | None:

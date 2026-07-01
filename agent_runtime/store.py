@@ -176,6 +176,9 @@ class TaskStore:
         task.state = TaskState.CANCELLED
         task.updated_at = now()
         self.update(task, actor=actor, reason=_safe_operator_reason(reason))
+        PersonaAssignmentStore(event_log=self.event_log).close_for_task(
+            task_id, state="cancelled", reason=_safe_operator_reason(reason)
+        )
         return self.get(task_id)
 
     def list_by_state(self, *states: TaskState) -> list[Task]:
@@ -1151,6 +1154,12 @@ class IncidentStore:
 
     def open(self, incident: Incident) -> Incident:
         _write_model(paths.incident_path(incident.id), incident)
+        # NOTE: intentionally does NOT auto-link the incident into
+        # task.open_incident_ids. The settle boundary (ticker._settled_boundary)
+        # treats a linked incident as "Neko owns recovery" vs an unlinked one as
+        # a hard stop, so centralized linking here changes stop-vs-recover
+        # semantics. Linking must be done deliberately at the call sites that
+        # want recovery routing, paired with a recovery-semantics review.
         metadata = incident.metadata if isinstance(getattr(incident, "metadata", None), dict) else {}
         payload = {"incident_id": incident.id, "kind": incident.kind}
         for key in ("proof_id", "check_id", "environment_fingerprint", "blocking_event_id", "stage_id", "persona_target", "lane_id", "lane_state_at_open"):

@@ -763,6 +763,30 @@ class PersonaAssignmentStore:
         self._event("persona_assignment.closed", updated, {"state": updated.state})
         return updated
 
+    def close_for_task(self, task_id: str, *, state: str = "completed", reason: str | None = None) -> list[str]:
+        """Close every still-active assignment bound to a task/goal.
+
+        Persona-instance assignments are otherwise only released on *archival*
+        (the files are moved out of the live dir). A task that reaches a
+        terminal state but is not archived keeps its slots ``active``, so
+        ``find_active``/``contention_warnings`` keep emitting
+        ``agent_already_assigned`` and a fresh goal can never claim the persona
+        — the "graveyard starvation" that wedges new goals at finalization.
+        Closing on the terminal transition prevents that.
+        """
+        normalized = safe_optional_token(task_id)
+        if not normalized:
+            return []
+        closed: list[str] = []
+        for assignment in self.list_all():
+            if assignment.state in TERMINAL_ASSIGNMENT_STATES:
+                continue
+            if safe_optional_token(assignment.task_id) != normalized and safe_optional_token(assignment.goal_id) != normalized:
+                continue
+            self.complete(assignment.id, state=state, error=reason)
+            closed.append(assignment.id)
+        return closed
+
     def _write(self, assignment: PersonaAssignment) -> None:
         path = paths.persona_assignment_path(assignment.id)
         path.parent.mkdir(parents=True, exist_ok=True)

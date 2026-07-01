@@ -2832,3 +2832,43 @@ def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(isolate_a
     archived_task = snapshot["archived_tasks"][0]
     assert archived_task["persona_assignment_ids"] == [assignment_id]
     assert archived_task["persona_streams"]["dev"]["assignment_ids"] == [assignment_id]
+
+
+def test_close_for_task_releases_active_assignments_and_leaves_other_goals():
+    store = PersonaAssignmentStore()
+    a = store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="neko_supervisor", kind="scope", title="scope", message="m", task_id="task_g1", goal_id="task_g1")
+    )
+    b = store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", task_id="task_g1", goal_id="task_g1", stage_id="s1")
+    )
+    store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", task_id="task_g2", goal_id="task_g2")
+    )
+
+    assert {"neko_supervisor", "backend_dev", "dev"} <= {x.persona_id for x in store.find_active()}
+
+    closed = store.close_for_task("task_g1", state="cancelled", reason="graveyard cleanup")
+
+    assert set(closed) == {a.id, b.id}
+    active_after = {x.persona_id for x in store.find_active()}
+    assert "neko_supervisor" not in active_after
+    assert "backend_dev" not in active_after
+    assert "dev" in active_after  # a different goal's assignment is untouched
+    assert store.get(a.id).state == "cancelled"
+    assert store.close_for_task("task_g1") == []  # idempotent
+
+
+def test_task_store_cancel_closes_persona_assignments():
+    task_store = TaskStore()
+    task_store.create(_task("task_cancel", state=TaskState.RUNNING))
+    assignment_store = PersonaAssignmentStore()
+    assignment = assignment_store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="neko_supervisor", kind="scope", title="scope", message="m", task_id="task_cancel", goal_id="task_cancel")
+    )
+    assert assignment.id in {x.id for x in assignment_store.find_active(persona_id="neko_supervisor")}
+
+    task_store.cancel("task_cancel", reason="operator cancel")
+
+    assert assignment_store.find_active(persona_id="neko_supervisor") == []
+    assert assignment_store.get(assignment.id).state == "cancelled"
