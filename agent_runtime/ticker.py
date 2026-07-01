@@ -172,6 +172,30 @@ class TickEngine:
                 if persona_id and self.run_store.find_active(task_id=task.id, persona_id=persona_id):
                     result.skipped.append(task.id)
                     continue
+                if persona_id:
+                    budget_block = _runtime_budget_block(
+                        task,
+                        persona_id=persona_id,
+                        run_store=self.run_store,
+                        config=self.config,
+                    )
+                    if budget_block is not None:
+                        incident = self._open_runtime_budget_incident(task, budget_block)
+                        result.incidents_opened.append(incident.id)
+                        result.actions_taken.append(
+                            HarnessActionResult(
+                                action,
+                                False,
+                                budget_block["summary"],
+                                {
+                                    "incident_id": incident.id,
+                                    "budget_kind": budget_block["kind"],
+                                    "total_tokens": budget_block["total_tokens"],
+                                    "limit": budget_block["limit"],
+                                },
+                            )
+                        )
+                        continue
                 if action.type == HarnessActionType.COMPLETE_TASK:
                     task.state = TaskState.DONE
                     task.updated_at = now()
@@ -365,6 +389,54 @@ class TickEngine:
                 cap=getattr(self.config, "neko_extension_cap", 2),
             )
         )
+
+    def _open_runtime_budget_incident(self, task: Task, budget_block: dict[str, Any]) -> Incident:
+        event_type = str(budget_block["event_type"])
+        payload = {
+            "task_id": task.id,
+            "persona_id": budget_block.get("persona_id"),
+            "stage_id": budget_block.get("stage_id") or "",
+            "total_tokens": budget_block["total_tokens"],
+            "limit": budget_block["limit"],
+        }
+        EventLog().append(
+            Event(
+                ts=now(),
+                type=event_type,
+                task_id=task.id,
+                run_id=None,
+                persona_id=budget_block.get("persona_id"),
+                payload=payload,
+            )
+        )
+        incident = Incident(
+            id=f"inc_{uuid.uuid4().hex[:8]}",
+            task_id=task.id,
+            run_id=None,
+            kind=event_type,
+            summary=budget_block["summary"],
+            detail_path=None,
+            opened_at=now(),
+            metadata={
+                "budget_state": {
+                    "kind": budget_block["kind"],
+                    "event_type": event_type,
+                    "total_tokens": budget_block["total_tokens"],
+                    "limit": budget_block["limit"],
+                    "persona_target": budget_block.get("persona_id") or "",
+                    "stage_id": budget_block.get("stage_id") or "",
+                },
+                "stage_id": budget_block.get("stage_id") or "",
+                "persona_target": budget_block.get("persona_id") or "",
+            },
+        )
+        self.incident_store.open(incident)
+        task.open_incident_ids = _dedupe(list(task.open_incident_ids or []), [incident.id])
+        if task.state not in {TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED}:
+            task.state = TaskState.BLOCKED
+        task.updated_at = now()
+        self.task_store.update(task, actor="harness", reason=event_type)
+        return incident
 
     def _record_preflight_started(self, task: Task, persona_id: str) -> None:
         try:
@@ -2233,6 +2305,53 @@ def _safe_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _runtime_budget_block(task: Task, *, persona_id: str, run_store: RunStore, config: RuntimeConfig) -> dict[str, Any] | None:
+    mission_limit = _safe_int(getattr(config, "mission_max_total_tokens", None))
+    mission_total = _run_token_total(run_store.list_for_task(task.id))
+    stage_id = getattr(task, "current_stage_id", None)
+    if mission_limit is not None and mission_limit > 0 and mission_total >= mission_limit:
+        return {
+            "kind": "mission",
+            "event_type": "mission_budget_exceeded",
+            "summary": f"Mission token budget exceeded: total_tokens={mission_total}/{mission_limit}",
+            "task_id": task.id,
+            "persona_id": persona_id,
+            "stage_id": stage_id,
+            "total_tokens": mission_total,
+            "limit": mission_limit,
+        }
+
+    swarm = getattr(config, "swarm", None)
+    if not bool(getattr(swarm, "enabled", False)):
+        return None
+    swarm_limit = _safe_int(getattr(swarm, "global_token_hard_limit", None))
+    swarm_total = _run_token_total(run_store.list_all())
+    if swarm_limit is not None and swarm_limit > 0 and swarm_total >= swarm_limit:
+        return {
+            "kind": "swarm",
+            "event_type": "swarm_budget_exceeded",
+            "summary": f"Swarm token budget exceeded: total_tokens={swarm_total}/{swarm_limit}",
+            "task_id": task.id,
+            "persona_id": persona_id,
+            "stage_id": stage_id,
+            "total_tokens": swarm_total,
+            "limit": swarm_limit,
+        }
+    return None
+
+
+def _run_token_total(runs) -> int:
+    total = 0
+    for run in runs:
+        llm = getattr(run, "llm", None)
+        if not isinstance(llm, dict):
+            continue
+        tokens = _safe_int(llm.get("total_tokens"))
+        if tokens is not None and tokens > 0:
+            total += tokens
+    return total
 
 
 def _persona_value(persona, field: str, default):

@@ -93,8 +93,9 @@ def _h7_cost_fanout(cfg: Any) -> dict[str, Any]:
         "implemented",
         controls=[
             "per-run wall/API/token budgets are validated",
-            "mission token and wall-clock ceilings are validated",
+            "mission token ceilings are enforced before opening another persona run",
             "budget incidents route to bounded Neko continuation or scope recovery",
+            "swarm hard token ceilings are enforced before opening another persona run",
             "swarm soft/hard API and token budgets are surfaced in status",
         ],
         flags={

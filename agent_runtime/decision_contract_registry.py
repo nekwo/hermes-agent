@@ -1140,6 +1140,8 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "persona.worklog": EventContract("persona.worklog", "Persona worklog", ("kind", "source", "message"), ("stage_id", "related_proof_ids")),
     "run.approval_required": EventContract("run.approval_required", "Approval required", ("reason",), ("run_id",)),
     "run.approved": EventContract("run.approved", "Run approved", ("run_id",), ("approval_type",)),
+    "mission_budget_exceeded": EventContract("mission_budget_exceeded", "Mission token budget exceeded", ("task_id", "total_tokens", "limit"), ("persona_id", "stage_id")),
+    "swarm_budget_exceeded": EventContract("swarm_budget_exceeded", "Swarm token budget exceeded", ("total_tokens", "limit"), ("task_id", "persona_id", "stage_id")),
     "run.model_call.started": EventContract("run.model_call.started", "Model call started", ("model",), ("run_id",)),
     "run.model_call.finished": EventContract("run.model_call.finished", "Model call finished", ("model", "total_tokens"), ("run_id",)),
     "run.tool.started": EventContract("run.tool.started", "Tool started", ("tool_name",), ("run_id",)),

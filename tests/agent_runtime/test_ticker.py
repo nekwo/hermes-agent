@@ -17,7 +17,7 @@ from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.errors import NotFound
 from agent_runtime.models import Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
 from agent_runtime.proof_rules import ProofType
-from agent_runtime.runtime_config import ContinuousRoleSessionConfig, MissionPlanConfig, NormalWorkerFlowConfig, RuntimeConfig
+from agent_runtime.runtime_config import ContinuousRoleSessionConfig, MissionPlanConfig, NormalWorkerFlowConfig, RuntimeConfig, SwarmConfig
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.profile_runner import RunBudgetExceeded
@@ -4018,6 +4018,72 @@ def test_budget_approval_continuation_gets_incremental_token_headroom():
     assert retry.actions_taken[0].ok
     assert runtime.seen_session_ids == [("dev", "session_budget")]
     assert runtime.seen_run_limits == [("dev", "session_budget", 200)]
+
+
+def test_mission_token_ceiling_blocks_new_run_and_logs_event(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    prior = runs.open_run("dev", "task_1", stage_id=None)
+    prior.llm = {"total_tokens": 101}
+    runs.update(prior)
+    runs.close_run(prior.id, state=RunState.COMPLETED, final_decision={"type": "hand_off"})
+
+    result = TickEngine(
+        task_store=ts,
+        run_store=runs,
+        incident_store=incidents,
+        persona_runtime=RuntimeMustNotRun(),
+        config=AgentRuntimeConfig(mission_max_total_tokens=100),
+    ).tick_once(task_id="task_1")
+
+    action = result.actions_taken[0]
+    assert action.ok is False
+    assert action.payload["budget_kind"] == "mission"
+    assert len(runs.list_for_task("task_1")) == 1
+    incident = incidents.list_open()[0]
+    assert incident.kind == "mission_budget_exceeded"
+    assert incident.id in ts.get("task_1").open_incident_ids
+    assert ts.get("task_1").state == TaskState.BLOCKED
+    events = EventLog().for_task("task_1", limit=10)
+    assert any(event.type == "mission_budget_exceeded" and event.payload["limit"] == 100 for event in events)
+
+
+def test_swarm_token_hard_limit_blocks_new_run_and_logs_event(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    other = runs.open_run("dev", "task_other", stage_id=None)
+    other.llm = {"total_tokens": 150}
+    runs.update(other)
+    runs.close_run(other.id, state=RunState.COMPLETED, final_decision={"type": "hand_off"})
+
+    cfg = AgentRuntimeConfig(
+        mission_max_total_tokens=1_000,
+        swarm=SwarmConfig(enabled=True, global_token_hard_limit=100, global_token_soft_limit=50),
+    )
+    result = TickEngine(
+        task_store=ts,
+        run_store=runs,
+        incident_store=incidents,
+        persona_runtime=RuntimeMustNotRun(),
+        config=cfg,
+    ).tick_once(task_id="task_1")
+
+    action = result.actions_taken[0]
+    assert action.ok is False
+    assert action.payload["budget_kind"] == "swarm"
+    assert len(runs.list_for_task("task_1")) == 0
+    incident = incidents.list_open()[0]
+    assert incident.kind == "swarm_budget_exceeded"
+    events = EventLog().for_task("task_1", limit=10)
+    assert any(event.type == "swarm_budget_exceeded" and event.payload["total_tokens"] == 150 for event in events)
 
 
 def test_dev_continuation_carries_prior_stage_progress_flags():
