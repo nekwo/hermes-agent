@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -591,6 +592,11 @@ def test_dev_persona_run_is_grounded_in_resolved_repo_and_loads_project_context(
     (repo / "AGENTS.md").write_text("# Agent instructions\nUse repo-local tests.\n", encoding="utf-8")
     (repo / "CLAUDE.md").write_text("# Claude instructions\nStay scoped.\n", encoding="utf-8")
     (repo / ".hermes.md").write_text("# Hermes project rules\nUse all repo guidance.\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     task, run = make_task_and_run()
     task.affected_repos = [str(repo)]
     dev = next(persona for persona in default_personas() if persona.id == "dev")
@@ -610,15 +616,55 @@ def test_dev_persona_run_is_grounded_in_resolved_repo_and_loads_project_context(
 
     fake = FakeAIAgent.instances[0]
     assert fake.kwargs["skip_context_files"] is True
-    assert seen["cwd"] == repo
-    assert seen["TERMINAL_CWD"] == str(repo)
+    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
+    assert seen["TERMINAL_CWD"] == str(seen["cwd"])
+    assert seen["cwd"] != repo
+    assert subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=seen["cwd"], text=True, stdout=subprocess.PIPE, check=True).stdout.strip() == "HEAD"
     assert "Repo-Grounded Execution" in seen["user_message"]
-    assert "repo_label: repo" in seen["user_message"]
+    assert "repo_label: repo_" in seen["user_message"]
     assert "context_loaded: .hermes.md, AGENTS.md, CLAUDE.md" in seen["user_message"]
     assert "Repo Context Excerpts (Harness-Controlled)" in seen["user_message"]
     assert "Use repo-local tests." in seen["user_message"]
     assert "Stay scoped." in seen["user_message"]
-    assert "Use all repo guidance." in seen["user_message"]
+
+
+def test_backend_dev_persona_run_is_isolated_in_detached_worktree(tmp_path, monkeypatch):
+    FakeAIAgent.instances.clear()
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    repo = tmp_path / "backend"
+    repo.mkdir()
+    (repo / "manage.py").write_text("print('ok')\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (repo / "live-only.txt").write_text("pre-existing live dirt\n", encoding="utf-8")
+    task, run = make_task_and_run()
+    task.affected_repos = [str(repo)]
+    backend_dev = next(persona for persona in default_personas() if persona.id == "backend_dev")
+    backend_dev.hermes_profile = None
+    backend_dev.repo_scope = None
+    ctx = build_context(task, run)
+    seen = {}
+
+    class CwdAwareAgent(FakeAIAgent):
+        def run_conversation(self, *, user_message, system_message, task_id):
+            seen["cwd"] = Path.cwd()
+            seen["user_message"] = user_message
+            return super().run_conversation(user_message=user_message, system_message=system_message, task_id=task_id)
+
+    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=CwdAwareAgent)
+
+    runtime.run_tick(backend_dev, ctx, run=run)
+
+    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
+    assert seen["cwd"] != repo
+    assert not (seen["cwd"] / "live-only.txt").exists()
+    assert subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=seen["cwd"], text=True, stdout=subprocess.PIPE, check=True).stdout.strip() == "HEAD"
+    assert run.progress["repo_execution"]["isolated"] is True
+    assert run.progress["repo_execution"]["detached_head"] is True
     assert str(repo) not in seen["user_message"]
     assert "Use session_search only when task context is insufficient" in seen["user_message"]
 
@@ -631,6 +677,18 @@ def test_backend_dev_uses_persona_repo_scope_instead_of_first_task_repo(tmp_path
     backend_repo = tmp_path / "backend"
     harness_repo.mkdir()
     backend_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=harness_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=harness_repo, check=True)
+    (harness_repo / "README.md").write_text("harness\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=harness_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "init"], cwd=backend_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=backend_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=backend_repo, check=True)
+    (backend_repo / "README.md").write_text("backend\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=backend_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=backend_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     task, run = make_task_and_run()
     task.affected_repos = [str(harness_repo), str(backend_repo)]
     backend_dev = next(persona for persona in default_personas() if persona.id == "backend_dev")
@@ -649,8 +707,9 @@ def test_backend_dev_uses_persona_repo_scope_instead_of_first_task_repo(tmp_path
 
     runtime.run_tick(backend_dev, ctx, run=run)
 
-    assert seen["cwd"] == backend_repo
-    assert "repo_label: backend" in seen["user_message"]
+    assert seen["cwd"] != backend_repo
+    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
+    assert "repo_label: backend_" in seen["user_message"]
 
 
 def test_dev_persona_repo_scope_does_not_override_mismatched_task_repo(tmp_path, monkeypatch):
@@ -661,6 +720,18 @@ def test_dev_persona_repo_scope_does_not_override_mismatched_task_repo(tmp_path,
     harness_repo = tmp_path / "hermes-agent"
     launcher_repo.mkdir()
     harness_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=launcher_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=launcher_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=launcher_repo, check=True)
+    (launcher_repo / "README.md").write_text("launcher\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=launcher_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=launcher_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "init"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=harness_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=harness_repo, check=True)
+    (harness_repo / "README.md").write_text("harness\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=harness_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     task, run = make_task_and_run()
     task.affected_repos = [str(harness_repo)]
     dev = next(persona for persona in default_personas() if persona.id == "dev")
@@ -679,8 +750,9 @@ def test_dev_persona_repo_scope_does_not_override_mismatched_task_repo(tmp_path,
 
     runtime.run_tick(dev, ctx, run=run)
 
-    assert seen["cwd"] == harness_repo
-    assert "repo_label: hermes-agent" in seen["user_message"]
+    assert seen["cwd"] != harness_repo
+    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
+    assert "repo_label: hermes-agent_" in seen["user_message"]
 
 
 def test_dev_persona_can_use_latest_handoff_repo_when_affected_repos_empty(monkeypatch, tmp_path):

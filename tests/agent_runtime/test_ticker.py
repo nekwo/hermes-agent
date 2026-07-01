@@ -3269,7 +3269,9 @@ def test_tick_collects_command_proof_in_harness_repo_alias_when_no_explicit_work
     artifact = paths.store_root() / proof.path_or_value
     text = artifact.read_text(encoding="utf-8")
     repo_root = Path(__file__).resolve().parents[2]
-    assert f"workdir: <workdir:{repo_root.name}>" in text
+    assert f"workdir: <workdir:{repo_root.name}_" in text
+    assert proof.metadata["workdir_is_harness_worktree"] is True
+    assert proof.metadata["workdir_head_state"] == "detached"
     assert proof.metadata["exit_code"] == 0
 
 
@@ -3291,7 +3293,9 @@ def test_tick_collects_command_proof_in_hermes_agent_alias_when_no_explicit_work
     artifact = paths.store_root() / proof.path_or_value
     text = artifact.read_text(encoding="utf-8")
     repo_root = Path(__file__).resolve().parents[2]
-    assert f"workdir: <workdir:{repo_root.name}>" in text
+    assert f"workdir: <workdir:{repo_root.name}_" in text
+    assert proof.metadata["workdir_is_harness_worktree"] is True
+    assert proof.metadata["workdir_head_state"] == "detached"
     assert proof.metadata["exit_code"] == 0
 
 

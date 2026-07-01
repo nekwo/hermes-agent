@@ -106,7 +106,10 @@ class GPTPersonaRuntime:
         progress_sink = RunProgressSink(run_store=RunStore(), run_id=run.id)
         repo_ctx = _repo_context_for_persona(persona, ctx)
         if repo_ctx is not None:
-            repo_ctx = isolated_repo_context_for_run(repo_ctx, task_id=ctx.task.id, run_id=run.id)
+            try:
+                repo_ctx = isolated_repo_context_for_run(repo_ctx, task_id=ctx.task.id, run_id=run.id)
+            except ValueError as exc:
+                raise DecisionPayloadInvalid(f"Dev run repo isolation failed closed: {exc}") from exc
             ctx.repo_context = _repo_context_for_render(repo_ctx)
             _attach_repo_baseline(run, repo_ctx)
             progress_sink.emit("run.progress", _repo_context_progress_payload(repo_ctx))
@@ -633,7 +636,20 @@ def _repo_context_progress_payload(repo_ctx: RepoExecutionContext) -> dict:
 def _attach_repo_baseline(run: AgentRun, repo_ctx: RepoExecutionContext) -> None:
     try:
         baseline = capture_repo_baseline(repo_ctx.workdir)
-        run.progress = {**(run.progress or {}), "repo_baseline": baseline}
+        run.progress = {
+            **(run.progress or {}),
+            "repo_baseline": baseline,
+            "repo_execution": {
+                "schema_version": 1,
+                "workdir": str(repo_ctx.workdir),
+                "workdir_label": repo_ctx.workdir.name,
+                "repo_label": repo_ctx.repo_label,
+                "source": repo_ctx.source,
+                "isolated": repo_ctx.source.endswith("-worktree"),
+                "detached_head": baseline.get("git_branch") == "HEAD",
+                "git_head": baseline.get("git_head"),
+            },
+        }
         RunStore().update(run)
     except Exception:
         return

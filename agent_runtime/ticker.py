@@ -46,7 +46,7 @@ from .role_checklists import apply_decision_checklist_updates, sanitize_decision
 from .role_envelopes import RoleEnvelopeStore
 from .visual_proof import VisualProofRunner
 from .repo_bundles import RepoBundleStore, find_best_bundle_for_action, qa_waiting_on
-from .repo_context import command_workdir_for_task, git_diff_since_baseline, safe_affected_repo_labels
+from .repo_context import RepoExecutionContext, command_workdir_for_task, git_diff_since_baseline, isolated_repo_context_for_run, safe_affected_repo_labels
 from .packets import latest_packet, make_packet, record_packet
 from .role_sessions import (
     RoleSessionEnvelope,
@@ -1333,10 +1333,6 @@ class TickEngine:
         recipe_workdir = None
         run_record = self.run_store.get(run_id)
         isolated_workdir = _isolated_workdir_from_run_progress(run_record)
-        if isolated_workdir is None and actor in {"dev", "backend_dev"} and self.proof_runner is None:
-            raise DecisionPayloadInvalid(
-                "Dev command proof refused: run has no isolated repo worktree; refusing to fall back to the live checkout."
-            )
         if recipe_metadata and decision.payload.get("repo_scope") and isolated_workdir is None:
             recipe_workdir = _command_workdir_for_task(
                 type("TaskCommandRecipeRepoScope", (), {"affected_repos": [decision.payload["repo_scope"]]})(),
@@ -1344,9 +1340,12 @@ class TickEngine:
                 actor=actor,
                 stage_id=stage_id,
             )
+        proof_workdir = isolated_workdir or recipe_workdir or _command_workdir_for_task(workdir_scope_task, self.command_workdir, actor=actor, stage_id=stage_id)
+        if isolated_workdir is None and self.proof_runner is None:
+            proof_workdir = _isolate_command_proof_workdir_if_git(proof_workdir, task_id=task.id, run_id=run_id, actor=actor)
         runner = self.proof_runner or CommandProofRunner(
             proof_store=self.proof_store,
-            workdir=isolated_workdir or recipe_workdir or _command_workdir_for_task(workdir_scope_task, self.command_workdir, actor=actor, stage_id=stage_id),
+            workdir=proof_workdir,
             timeout_seconds=max(
                 1,
                 int(
@@ -3578,7 +3577,8 @@ def _isolated_workdir_from_run_progress(run) -> Path | None:
         return None
     if not resolved.is_dir():
         return None
-    if "wt" not in {part.lower() for part in resolved.parts}:
+    parts = {part.lower() for part in resolved.parts}
+    if "wt" not in parts and resolved.parent.name.lower() != "hermes-agent-wt":
         return None
     branch = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -3594,6 +3594,25 @@ def _isolated_workdir_from_run_progress(run) -> Path | None:
     if branch.returncode != 0 or (branch.stdout or "").strip() != "HEAD":
         return None
     return resolved
+
+
+def _isolate_command_proof_workdir_if_git(workdir: Path, *, task_id: str, run_id: str, actor: str | None) -> Path:
+    git_root = _git_root_for_command_workdir(workdir)
+    if git_root is None:
+        return workdir
+    repo_ctx = RepoExecutionContext(workdir=git_root, repo_label=git_root.name, source=f"{actor or 'proof'}-proof")
+    return isolated_repo_context_for_run(repo_ctx, task_id=task_id, run_id=f"{run_id}_proof").workdir
+
+
+def _git_root_for_command_workdir(workdir: Path) -> Path | None:
+    try:
+        start = workdir.resolve()
+    except OSError:
+        return None
+    for candidate in (start, *start.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
 
 
 def _command_proof_repo_scope(task: Task, *, actor: str | None, stage_id: str | None) -> str | None:

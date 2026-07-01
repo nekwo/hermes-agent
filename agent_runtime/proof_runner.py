@@ -365,6 +365,8 @@ class CommandProofRunner:
             "duration_ms": duration_ms,
             "shell": _shell_label(),
             "workdir_label": _safe_workdir_label(self.workdir),
+            "workdir_is_harness_worktree": _is_harness_worktree(self.workdir),
+            "workdir_head_state": _git_head_state(self.workdir),
             "artifact_exists": artifact_exists,
             "artifact_bytes": artifact_bytes,
             "artifact_relative_path": relative_artifact.as_posix(),
@@ -579,7 +581,13 @@ def _dirty_delta(before: list[str] | None, after: list[str] | None) -> list[str]
     if before is None or after is None:
         return []
     prior = set(before)
-    return [line for line in after if line not in prior]
+    return [line for line in after if line not in prior and not _is_harness_litter_status_line(line)]
+
+
+def _is_harness_litter_status_line(line: str) -> bool:
+    raw = str(line or "").replace("\\", "/").strip()
+    path = raw[3:].strip() if len(raw) > 3 else raw
+    return any(part.startswith(".hermes-tmp.") for part in path.split("/") if part)
 
 
 def _missing_expected_markers(stdout: str, stderr: str, recipe: dict[str, Any] | None, *, command_index: int) -> list[str]:
@@ -1038,6 +1046,41 @@ def _display_workdir(workdir: Path) -> str:
 def _safe_workdir_label(workdir: Path) -> str:
     label = "." if not workdir.is_absolute() else workdir.name
     return re.sub(r"[^A-Za-z0-9_. -]+", "_", label).strip()[:120] or "unknown"
+
+
+def _is_harness_worktree(workdir: Path) -> bool:
+    try:
+        resolved = workdir.resolve()
+    except OSError:
+        return False
+    return "wt" in {part.lower() for part in resolved.parts} or resolved.parent.name.lower() == "hermes-agent-wt"
+
+
+def _git_head_state(workdir: Path) -> str:
+    try:
+        resolved = workdir.resolve()
+    except OSError:
+        return "unknown"
+    if not (resolved / ".git").exists():
+        return "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=resolved,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return "unknown"
+    if result.returncode != 0:
+        return "unknown"
+    branch = (result.stdout or "").strip()
+    return "detached" if branch == "HEAD" else "branch"
 
 
 def _redact_text(text: str) -> str:
