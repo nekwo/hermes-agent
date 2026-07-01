@@ -27,6 +27,14 @@ these three are the live truth.
    `has_typed_plan` dual-orchestrator fork, role-shaped HUD/skill map, launcher
    cross-stack special cases). **What gets deleted.**
 
+4. **[04 — Decision / HUD Simplification: Target Model](04-decision-hud-simplification-map.md)** —
+   agents work **unbounded** (edit + run tests with native tools, no per-op decision); the
+   **harness reads the work** (git diff + tool trace + its own gate re-run) instead of making
+   agents fill a validated form, and surfaces it in an operator **HUD dashboard**. Collapses
+   ~19 decision types + the `delivery`/`work_status` packet to ~5 coordination signals
+   (hand off · block · escalate · neko scope/route · qa verdict). Kills the
+   `model_invalid_output` failure class. **What the decision contract simplifies to.**
+
 ## Product stance
 
 Build the smallest reliable core first:
