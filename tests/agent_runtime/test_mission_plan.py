@@ -89,6 +89,41 @@ def test_handoff_payload_does_not_synthesize_per_task_plan():
     assert not any(stage.id == "backend_contract_smoke" for stage in plan.stages)
 
 
+def test_handoff_payload_merges_observed_lane_requirement_into_existing_stage():
+    task = make_task(
+        title="Observed lane no-edit proof",
+        description="Run a no-product-edit cross-stack observed-lane proof.",
+        affected_repos=["EterniaBackend", "EterniaLauncher"],
+    )
+
+    plan = ensure_mission_plan(
+        task,
+        {
+            "objective": "Run backend observed-lane proof.",
+            "acceptance_criteria": [
+                "Backend observed_proof_ids must come from agent_tool_trace.",
+            ],
+            "affected_repos": ["EterniaBackend"],
+            "handoff_packet": {
+                "target_owner": "backend_dev",
+                "target_repo": "EterniaBackend",
+                "proof_gate": {
+                    "required": True,
+                    "recipe_id": "backend_contract_smoke",
+                    "observed_lane_required": True,
+                    "observed_lane_requirement": "agent_tool_trace/run.tool.finished must populate observed_proof_ids",
+                },
+            },
+        },
+        actor="neko_supervisor",
+    )
+
+    backend = next(stage for stage in plan.stages if stage.id == "backend_implementation")
+    assert backend.proof_gate["observed_lane_required"] is True
+    assert "agent_tool_trace" in backend.proof_gate["observed_lane_requirement"]
+    assert backend.proof_gate["proof_recipe_id"] == "backend_contract_smoke"
+
+
 def test_backend_no_product_edit_investigation_uses_default_blueprint_without_implicit_route():
     task = make_task(
         title="Investigate NSFW filter leakage hardening plan",

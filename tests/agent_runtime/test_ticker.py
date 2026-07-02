@@ -109,8 +109,9 @@ def test_observed_trace_requirement_rejects_handoff_without_agent_tool_trace(iso
                 proof_gate={
                     "required": True,
                     "minimum_status": "passed",
-                    "required_proof_types": ["test_run", "agent_tool_trace"],
-                    "observed_lane_expectation": "agent_tool_trace required",
+                    "required_proof_types": ["test_run"],
+                    "observed_lane_required": True,
+                    "observed_lane_requirement": "agent_tool_trace required",
                 },
             )
         ],

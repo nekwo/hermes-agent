@@ -200,6 +200,7 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
         from .default_plan import build_default_mission_plan
 
         plan = build_default_mission_plan(task)
+    _merge_handoff_observed_lane_requirement(plan, payload)
     release_stage_id = str(payload.get("release_stage_id") or "").strip()
     if release_stage_id:
         _set_current_stage(plan, release_stage_id)
@@ -207,6 +208,45 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
     task.mission_plan = plan
     _sync_task_stage_compat_from_plan(task)
     return plan
+
+
+def _merge_handoff_observed_lane_requirement(plan: MissionPlan, payload: dict[str, Any]) -> None:
+    handoff = payload.get("handoff_packet")
+    if not isinstance(handoff, dict):
+        return
+    proof_gate = handoff.get("proof_gate") if isinstance(handoff.get("proof_gate"), dict) else {}
+    observed: dict[str, Any] = {}
+    for key in ("observed_lane_required", "observed_lane_requirement", "observed_lane_expectation"):
+        if key in proof_gate:
+            observed[key] = proof_gate[key]
+    if not observed:
+        return
+    target = _stage_for_handoff(plan, handoff)
+    if target is None:
+        return
+    merged = dict(target.proof_gate or {})
+    merged.update(observed)
+    target.proof_gate = merged
+    target.updated_at = now()
+
+
+def _stage_for_handoff(plan: MissionPlan, handoff: dict[str, Any]) -> MissionPlanStage | None:
+    target_repo = _canonical_repo(str(handoff.get("target_repo") or ""))
+    target_owner = _canonical_owner(str(handoff.get("target_owner") or handoff.get("target_dev_persona") or ""))
+    proof_gate = handoff.get("proof_gate") if isinstance(handoff.get("proof_gate"), dict) else {}
+    recipe = str(proof_gate.get("proof_recipe_id") or proof_gate.get("recipe_id") or "").strip()
+    candidates = [
+        stage
+        for stage in plan.stages
+        if (not target_repo or stage.repo == target_repo)
+        and (not target_owner or _canonical_owner(stage.owner) == target_owner)
+    ]
+    if recipe:
+        recipe_match = next((stage for stage in candidates if stage.proof_recipe_id == recipe), None)
+        if recipe_match is not None:
+            return recipe_match
+    return next((stage for stage in candidates if stage.status in INCOMPLETE_STATUSES), None) or (candidates[0] if candidates else None)
+
 
 def validate_mission_plan(plan: MissionPlan) -> list[str]:
     errors: list[str] = []

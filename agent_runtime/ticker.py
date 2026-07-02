@@ -1889,8 +1889,11 @@ def _stage_requires_observed_agent_trace(task: Task, stage_id: str | None) -> bo
     gate = getattr(stage, "proof_gate", None) if stage is not None else None
     gate = gate if isinstance(gate, dict) else {}
     required = {str(value).strip().lower() for value in (gate.get("required_proof_types") or []) if str(value).strip()}
-    expectation = str(gate.get("observed_lane_expectation") or "").strip().lower()
-    return "agent_tool_trace" in required or "observed_proof" in expectation or "agent_tool_trace" in expectation
+    expectation = " ".join(
+        str(gate.get(key) or "")
+        for key in ("observed_lane_expectation", "observed_lane_requirement")
+    ).strip().lower()
+    return bool(gate.get("observed_lane_required")) or "agent_tool_trace" in required or "observed_proof" in expectation or "agent_tool_trace" in expectation
 
 
 def _observed_agent_tool_trace_proof_ids(task_id: str, *, run_id: str | None, stage_id: str | None, proof_store) -> list[str]:
