@@ -24,6 +24,51 @@ def _run() -> AgentRun:
     )
 
 
+def test_run_progress_sink_captures_observed_proof_independent_of_config(monkeypatch):
+    """R1 regression: the observed lane must populate from a terminal
+    ``run.tool.finished`` whose command lives only in ``command_full`` (the live
+    runner shape), and it must NOT depend on a re-loaded RuntimeConfig in the
+    run-executing process. A config-gated capture resolved the contract as
+    disabled in the run process and silently dropped every observed proof even
+    with the contract enabled at the file/ticker level."""
+
+    from agent_runtime import config as _cfg
+    from agent_runtime.progress import RunProgressSink
+    from agent_runtime.runtime_config import (
+        NormalWorkerFlowConfig,
+        RuntimeConfig,
+        SimplifiedAgentContractConfig,
+    )
+    from agent_runtime.store import RunStore
+
+    disabled = RuntimeConfig(
+        simplified_agent_contract=SimplifiedAgentContractConfig(enabled=False),
+        normal_worker_flow=NormalWorkerFlowConfig(enabled=False),
+    )
+    monkeypatch.setattr(_cfg, "load_agent_runtime_config", lambda *a, **k: disabled, raising=False)
+
+    runs = RunStore()
+    run = runs.open_run("dev", "task_obs_gate", stage_id="implement")
+    RunProgressSink(run_store=runs, run_id=run.id).emit(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "terminal",
+            "status": "passed",
+            "command_full": "python manage.py check",
+            "summary": "Finished tool terminal: passed",
+        },
+    )
+
+    observed = [
+        p
+        for p in ProofStore().list_for_task("task_obs_gate")
+        if (p.metadata or {}).get("source") == "agent_tool_trace"
+    ]
+    assert len(observed) == 1
+    assert observed[0].stage_id == "implement"
+
+
 def test_records_redaction_safe_self_test_evidence_from_terminal_progress():
     run = _run()
 

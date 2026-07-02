@@ -55,6 +55,51 @@ def test_handoff_diff_test_tampering_detector_fails_closed():
     assert _handoff_diff_weakens_tests(task, "stage_product") is False
 
 
+def test_handoff_observation_links_same_stage_observed_proof_from_earlier_turn(isolate_agent_runtime_root):
+    # R1 regression: dev work is multi-turn — the self-test command runs in an
+    # earlier turn (run A) than the handoff turn (run B). The observed lane must
+    # link a same-stage agent_tool_trace proof even when its run_id differs from
+    # the handoff run; keying on run_id alone left observed_proof_ids empty.
+    from agent_runtime.ticker import _record_handoff_observation
+    from agent_runtime.decision_schema import AgentDecision, DecisionType
+    from agent_runtime.models import Proof
+    from agent_runtime.proof_rules import ProofType
+
+    ts = TaskStore()
+    task = make_task_with_id("task_obs_link")
+    task.affected_repos = []
+    task.current_stage_id = "implement"
+    ts.create(task)
+    proofs = ProofStore()
+    proofs.attach(
+        Proof(
+            id="proof_observed_earlier_turn",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="Observed agent proof: flutter analyze",
+            path_or_value="observed.json",
+            created_by="dev",
+            created_at=now(),
+            metadata={"source": "agent_tool_trace", "authoritative": False, "run_id": "run_earlier_turn", "status": "passed"},
+            redaction_status="safe",
+        )
+    )
+    handoff_run = RunStore().open_run("dev", task.id, stage_id="implement")  # a DIFFERENT run id
+    _record_handoff_observation(
+        task,
+        AgentDecision(type=DecisionType.PROPOSE_PATCH, summary="hand off", rationale="done", payload={"stage_id": "implement"}),
+        run=handoff_run,
+        actor="dev",
+        proof_store=proofs,
+        command_workdir=None,
+        task_store=ts,
+    )
+
+    obs = (ts.get(task.id).harness_self_heal or {}).get("stage_observations") or {}
+    assert obs["implement"]["observed_proof_ids"] == ["proof_observed_earlier_turn"]
+
+
 def test_handoff_observation_fires_on_legacy_request_test_run_delivery(isolate_agent_runtime_root):
     # Contract-parity gap: under the simplified flag a collapsed hand_off projects
     # onto PROPOSE_PATCH (observed), but on the legacy/rollback path a no-edit dev

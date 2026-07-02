@@ -8,7 +8,6 @@ from hermes_time import now
 from .dev_discipline import update_progress_telemetry
 from .events import EventLog
 from .models import Event
-from .config import load_agent_runtime_config
 from .self_test_evidence import record_self_test_from_progress
 from .states import RunState
 from .store import RunStore
@@ -174,15 +173,15 @@ def _chat_progress_has_signal(payload: dict[str, Any]) -> bool:
 
 
 def _maybe_record_self_test(run, event_type: str, payload: dict[str, Any], *, event_log: EventLog) -> None:
+    # Observed self-test proofs are additive, redaction-safe records of what the
+    # agent actually ran in-session; they populate the HUD "observed" lane for a
+    # stage. Capture is UNCONDITIONAL for a task run: it must never depend on a
+    # re-loaded RuntimeConfig here, because the run-executing process can resolve
+    # a different config than the ticker that owns the authoritative one (config
+    # path / cross-process resolution). That mismatch silently dropped every
+    # observed proof even with the contract enabled. The downstream gate decides
+    # whether an observed proof is *required*; capturing one is always safe.
     try:
-        cfg = load_agent_runtime_config()
-        flow = getattr(cfg, "normal_worker_flow", None)
-        simplified = getattr(cfg, "simplified_agent_contract", None)
-        capture_enabled = (
-            bool(getattr(flow, "enabled", False)) and bool(getattr(flow, "self_test_evidence_capture", False))
-        ) or bool(getattr(simplified, "enabled", False))
-        if not capture_enabled:
-            return
         record_self_test_from_progress(run, event_type, payload, event_log=event_log)
     except Exception:
         return

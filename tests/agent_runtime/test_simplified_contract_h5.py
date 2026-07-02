@@ -160,9 +160,9 @@ def test_rollback_disabled_flag_leaves_legacy_decision_unprojected(isolate_agent
     assert projection.execution_type == DecisionType.REQUEST_TEST_RUN
 
 
-def test_proof_from_trace_capture_runs_under_simplified_flag(isolate_agent_runtime_root, monkeypatch):
-    cfg = RuntimeConfig(simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True))
-    monkeypatch.setattr("agent_runtime.progress.load_agent_runtime_config", lambda: cfg)
+def test_proof_from_trace_capture_runs_under_simplified_flag(isolate_agent_runtime_root):
+    # Observed-proof capture is now unconditional (no longer gated on a re-loaded
+    # RuntimeConfig inside the progress sink), so no config monkeypatch is needed.
     runs = RunStore()
     run = runs.open_run("dev", "task_h5_trace", stage_id="build")
     sink = RunProgressSink(run_store=runs, run_id=run.id)

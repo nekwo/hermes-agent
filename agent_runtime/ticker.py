@@ -1824,9 +1824,20 @@ def _record_handoff_observation(
             metadata = proof.metadata if isinstance(proof.metadata, dict) else {}
             if metadata.get("source") != "agent_tool_trace":
                 continue
-            if metadata.get("run_id") != getattr(run, "id", None):
-                continue
-            if stage_id and proof.stage_id and proof.stage_id != stage_id:
+            # Link observed self-tests to a stage by STAGE identity, not the exact
+            # handoff turn's run: dev work is multi-turn, so the self-test command
+            # often runs in an earlier turn (run A) than the handoff turn (run B).
+            # Keying on run_id alone dropped every same-stage observed proof. Match
+            # on stage when the proof carries one; fall back to run_id only for
+            # proofs with no stage label so nothing cross-stage bleeds in.
+            proof_stage = proof.stage_id or metadata.get("stage_id")
+            if stage_id:
+                if proof_stage:
+                    if proof_stage != stage_id:
+                        continue
+                elif metadata.get("run_id") != getattr(run, "id", None):
+                    continue
+            elif metadata.get("run_id") != getattr(run, "id", None):
                 continue
             observed_proof_ids.append(proof.id)
     except Exception:
