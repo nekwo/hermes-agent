@@ -277,6 +277,16 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "normal",
     },
     {
+        "id": "worker.takeover",
+        "target_kind": "worker_session",
+        "label": "Take Over",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["worker_session_id", "reason"],
+        "allowed_args": ["actor", "lease_seconds", "cancel_active_run", "approve_destructive"],
+        "danger": "warning",
+    },
+    {
         "id": "run.cancel",
         "target_kind": "run",
         "label": "Cancel Run",
@@ -442,9 +452,9 @@ def _arg_schema_for(item: dict[str, Any]) -> dict[str, Any]:
             properties[name] = {"type": "array", "items": {"type": "string", "minLength": 1}}
         elif name in {"max_actions", "max_seconds", "lease_seconds", "turns"}:
             properties[name] = {"type": "integer", "minimum": 1}
-        elif name in {"coordinator_max_spawns", "coordinator_spawns_used"}:
+        elif name in {"coordinator_max_spawns", "coordinator_spawns_used", "lease_seconds"}:
             properties[name] = {"type": "integer", "minimum": 0}
-        elif name in {"rescope", "foreground", "auto_run", "kill_active", "add_instance", "coordinator_may_kill_own", "coordinator_no_kill_own", "coordinator_may_kill_others", "use_agent_default"}:
+        elif name in {"rescope", "foreground", "auto_run", "kill_active", "add_instance", "cancel_active_run", "approve_destructive", "coordinator_may_kill_own", "coordinator_no_kill_own", "coordinator_may_kill_others", "use_agent_default"}:
             properties[name] = {"type": "boolean"}
         else:
             properties[name] = {"type": "string", "minLength": 1}

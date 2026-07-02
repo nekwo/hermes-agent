@@ -37,9 +37,9 @@ def test_effective_config_summary_is_redaction_safe(isolate_agent_runtime_root):
     assert "super-secret-value" not in str(summary)
     assert summary["personas"]["dev"]["api_token"] == "<redacted>"
     assert "harness-dev-delivery" in summary["effective_personas"]["dev"]["skills"]
-    assert summary["production_envelope"]["production_ready"] is False
+    assert summary["production_envelope"]["production_ready"] is True
     assert {item["id"] for item in summary["production_envelope"]["items"]} == {"H5", "H6", "H7", "H8", "H9", "H10"}
-    assert not any(item["id"] == "H5" for item in summary["production_envelope"]["blockers"])
+    assert summary["production_envelope"]["blockers"] == []
 
 
 def test_h5_envelope_advertises_behavioral_migration_and_rollback_controls():
@@ -55,6 +55,23 @@ def test_h5_envelope_advertises_behavioral_migration_and_rollback_controls():
     assert any("hand_off captures the grounded isolated-worktree diff" in control for control in h5["controls"])
     assert any("compatibility shim" in control for control in h5["controls"])
     assert any("disable simplified_agent_contract.enabled" in control for control in h5["controls"])
+
+
+def test_h6_h8_h9_envelope_names_real_enforcement_controls():
+    summary = effective_config_summary(AgentRuntimeConfig())
+    items = {item["id"]: item for item in summary["production_envelope"]["items"]}
+
+    assert summary["production_envelope"]["production_ready"] is True
+    assert items["H6"]["status"] == "implemented"
+    assert not items["H6"]["blockers"]
+    assert any("worker.takeover" in control for control in items["H6"]["controls"])
+    assert any("approve_destructive" in control for control in items["H6"]["controls"])
+    assert items["H8"]["status"] == "implemented"
+    assert any("heartbeat TTL" in control for control in items["H8"]["controls"])
+    assert any("terminal-idempotent" in control for control in items["H8"]["controls"])
+    assert items["H9"]["status"] == "implemented"
+    assert any("swarm hard token ceilings block" in control for control in items["H9"]["controls"])
+    assert any("repo bundle queueing" in control for control in items["H9"]["controls"])
 
 
 def test_migration_status_counts_existing_runtime_records(isolate_agent_runtime_root):

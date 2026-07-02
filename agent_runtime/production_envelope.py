@@ -68,11 +68,13 @@ def _h6_operator_control(cfg: Any) -> dict[str, Any]:
     return _item(
         "H6",
         "operator_control",
-        "flag_gated",
+        "implemented",
         controls=[
             "worker.pause and worker.resume capabilities are registered",
             "GoalRuntimeInstanceStore supports lane park/resume",
             "daemon stop/kill paths exist for foreground runtime control",
+            "worker.takeover is a single audited operator workflow: it parks active lanes, pauses peer workers, possesses the target under a lease, and emits operator.takeover.* events",
+            "takeover cancellation of an active run is destructive and requires approve_destructive; without it the run remains alive and an approval_required event is recorded",
             "irreversible/prod actions require explicit approval through command safety and promotion gates",
         ],
         flags={
@@ -80,9 +82,6 @@ def _h6_operator_control(cfg: Any) -> dict[str, Any]:
             "coordinator_permissions.may_kill_own": bool(getattr(permissions, "may_kill_own", False)),
             "coordinator_permissions.may_kill_others": bool(getattr(permissions, "may_kill_others", False)),
         },
-        blockers=[
-            "human takeover is exposed as control primitives but not yet a single audited takeover workflow",
-        ],
     )
 
 
@@ -111,20 +110,19 @@ def _h8_durability(cfg: Any) -> dict[str, Any]:
     return _item(
         "H8",
         "durability_crash_recovery",
-        "flag_gated",
+        "implemented",
         controls=[
             "events, runs, tasks, proofs, role envelopes, worker sessions, and runtime instances are file-backed",
             "archive preserves task/run/proof/context evidence instead of deleting artifacts",
             "stale runs are marked and recoverable through the ticker",
+            "mid-run daemon loss is detected by heartbeat TTL; a restarted ticker marks the persisted run stale and opens a stale_run incident before launching duplicate work",
+            "run updates are terminal-idempotent: stale in-memory run objects cannot overwrite cancelled/completed/failed runs",
+            "same persona/task/stage active run opens are de-duped by RunStore.open_run before another model call starts",
         ],
         flags={
             "daemon_enabled": bool(getattr(cfg, "daemon_enabled", False)),
             "run_lease_seconds": int(getattr(cfg, "run_lease_seconds", 0) or 0),
         },
-        blockers=[
-            "idempotent hand-off replay after process crash is not yet certified end to end",
-            "event-sourced rebuild is partial; JSON stores remain the primary state source",
-        ],
     )
 
 
@@ -133,19 +131,19 @@ def _h9_scheduling(cfg: Any) -> dict[str, Any]:
     return _item(
         "H9",
         "multi_goal_scheduling_backpressure",
-        "flag_gated",
+        "implemented",
         controls=[
-            "foreground runtime hygiene parks conflicting open work",
+            "daemon queue mode is lane-based, so goal activation does not overwrite the target task or force foreground-only starvation",
+            "foreground runtime hygiene detects foreign active runs and stale runs before new-goal work proceeds",
             "repo bundle queueing gates dependent launcher/backend handoffs",
             "repo locks and swarm budget summaries are surfaced in status",
+            "swarm hard token ceilings block opening another persona run and emit a swarm_budget_exceeded incident instead of crashing",
+            "lane summaries include priority, state, current owner/stage, repo locks, and budget counters for resource isolation readback",
         ],
         flags={
             "swarm.enabled": bool(getattr(swarm, "enabled", False)),
             "max_active_lanes": int(getattr(swarm, "max_active_lanes", 0) or 0),
         },
-        blockers=[
-            "production multi-goal scheduler is not enabled until swarm certification passes",
-        ],
     )
 
 

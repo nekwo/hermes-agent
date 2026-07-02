@@ -19,6 +19,7 @@ from hermes_cli.profiles import list_profiles
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
 from agent_runtime.continuity import return_summary_to_parent_session
+from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
     authorize_coordinator_action,
@@ -579,6 +580,15 @@ def build_parser(parent_subparsers) -> None:
         command.add_argument("--lease-seconds", type=int, default=900)
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=_cmd_worker_control)
+    worker_takeover = worker_subs.add_parser("takeover", help="Audited human takeover: freeze peers, possess worker, and optionally cancel active run with approval")
+    worker_takeover.add_argument("worker_session_id")
+    worker_takeover.add_argument("--reason", default="operator takeover")
+    worker_takeover.add_argument("--actor", default="operator")
+    worker_takeover.add_argument("--lease-seconds", type=int, default=900)
+    worker_takeover.add_argument("--cancel-active-run", action="store_true")
+    worker_takeover.add_argument("--approve-destructive", action="store_true")
+    worker_takeover.add_argument("--json", action="store_true")
+    worker_takeover.set_defaults(func=_cmd_worker_control)
 
     persona = subs.add_parser("persona", help="Run bounded live-token diagnostics for one persona")
     persona_subs = persona.add_subparsers(dest="persona_command")
@@ -5524,6 +5534,17 @@ def _cmd_worker_control(args) -> int:
     store = WorkerSessionStore()
     command = getattr(args, "worker_command", "")
     reason = getattr(args, "reason", "") or getattr(args, "note", "") or f"operator {command}"
+    if command == "takeover":
+        data = operator_takeover_worker(
+            args.worker_session_id,
+            actor=args.actor,
+            reason=reason,
+            lease_seconds=args.lease_seconds,
+            cancel_active_run=bool(getattr(args, "cancel_active_run", False)),
+            approve_destructive=bool(getattr(args, "approve_destructive", False)),
+        )
+        print(emit_json(data) if args.json else f"{data['worker_session_id']} takeover -> {data['state']}")
+        return 0
     if command == "pause":
         worker = store.pause(args.worker_session_id, actor=args.actor, reason=reason)
     elif command == "resume":

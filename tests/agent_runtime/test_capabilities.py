@@ -76,6 +76,11 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert by_id["persona.instance.return_summary"]["args_schema"]["required"] == ["parent_session_id", "summary"]
     assert by_id["persona.instance.return_summary"]["args_schema"]["properties"]["proof_ids"]["type"] == "array"
     assert by_id["persona.instance.return_summary"]["args_schema"]["properties"]["artifact_refs"]["type"] == "array"
+    assert by_id["worker.takeover"]["danger"] == "warning"
+    assert by_id["worker.takeover"]["execution_semantics"] == "control_state_change"
+    assert by_id["worker.takeover"]["args_schema"]["required"] == ["worker_session_id", "reason"]
+    assert by_id["worker.takeover"]["args_schema"]["properties"]["approve_destructive"]["type"] == "boolean"
+    assert by_id["worker.takeover"]["args_schema"]["properties"]["cancel_active_run"]["type"] == "boolean"
     assert by_id["persona.permission_preview"]["execution_semantics"] == "read_only"
     assert by_id["persona.permission_override"]["danger"] == "warning"
     assert by_id["persona.permission_override"]["args_schema"]["properties"]["turns"]["type"] == "integer"
