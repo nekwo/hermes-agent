@@ -85,6 +85,7 @@ from agent_runtime.scope_control import find_discovery_task
 from agent_runtime.planning import apply_planning_decision
 from agent_runtime.states import TaskState, RunState, WorkerSessionState
 from agent_runtime.status import build_status
+from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.store import RealmStore, WorkspaceStore
 from agent_runtime.ticker import TickEngine
@@ -343,6 +344,16 @@ def build_parser(parent_subparsers) -> None:
     task_unblock.add_argument("--foreground", action="store_true", help="Reactivate this task as the foreground runtime lane")
     task_unblock.add_argument("--json", action="store_true")
     task_unblock.set_defaults(func=_cmd_task_unblock)
+    task_steer = task_subs.add_parser("steer", help="Execute a live topology steer action")
+    task_steer.add_argument("task_id")
+    task_steer.add_argument("--action-id", default=None, help="Snapshot steer action id, e.g. steer:slot_lead:slot_builder:route")
+    task_steer.add_argument("--verb", choices=["route", "spawn", "re-scope", "resolve", "verdict-back"], default=None)
+    task_steer.add_argument("--source-node", dest="source_node_id", default=None)
+    task_steer.add_argument("--target-node", dest="target_node_id", default=None)
+    task_steer.add_argument("--reason", default="operator steer")
+    task_steer.add_argument("--requested-by", default="operator")
+    task_steer.add_argument("--json", action="store_true")
+    task_steer.set_defaults(func=_cmd_task_steer)
     task_archive_ready = task_subs.add_parser("archive-ready", help="Archive terminal ready/done harness tasks while preserving evidence")
     task_archive_ready.add_argument("--json", action="store_true")
     task_archive_ready.set_defaults(func=_cmd_task_archive_ready)
@@ -5020,6 +5031,20 @@ def _cmd_task_unblock(args) -> int:
     }
     print(emit_json(data) if args.json else f"unblocked {task.id}: {previous_state} -> {task.state.value}")
     return 0
+
+
+def _cmd_task_steer(args) -> int:
+    data = execute_steer_action(
+        args.task_id,
+        action_id=getattr(args, "action_id", None),
+        verb=getattr(args, "verb", None),
+        source_node_id=getattr(args, "source_node_id", None),
+        target_node_id=getattr(args, "target_node_id", None),
+        requested_by=getattr(args, "requested_by", "operator"),
+        reason=getattr(args, "reason", "operator steer"),
+    )
+    print(emit_json(data) if args.json else (f"steered {data.get('task_id')}: {data.get('result')}" if data.get("ok") else data.get("error", "steer failed")))
+    return 0 if data.get("ok") else ERROR_EXIT_CODES.get(str(data.get("error_kind") or "invalid_request"), 2)
 
 
 def _clear_task_recovery_markers(task: Task) -> list[str]:

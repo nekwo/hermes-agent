@@ -5,11 +5,12 @@ from utils import atomic_json_write
 from agent_runtime.blueprints.runs import BlueprintRunStore
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
-from agent_runtime.persona_assignments import PersonaInstanceStore
+from agent_runtime.persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology_node, build_snapshot, write_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
+from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.events import EventLog
 
@@ -168,6 +169,14 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     assert topology["control_node_id"] == "slot_lead"
     route_action = next(action for action in topology["steer_actions"] if action["verb"] == "route" and action["target_node_id"] == "slot_builder")
     assert route_action["available_now"] is True
+    assert route_action["capability_id"] == "task.steer"
+    assert route_action["capability_args"] == {
+        "task_id": "stage38",
+        "verb": "route",
+        "source_node_id": "slot_lead",
+        "target_node_id": "slot_builder",
+    }
+    assert any(action["recommended_steer"] for action in topology["steer_actions"])
     assert topology["completeness"]["stream_event_cap_per_node"] == 3
     assert len(topology["nodes"][0]["progress_peek"]) <= 3
     assert [(actor["persona_id"], actor["presence"]) for actor in row["mission_level_state"]["actors"]] == [
@@ -180,6 +189,113 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     assert row["proof_gate_state"]["missing_stage_ids"] == ["implement", "verify"]
     assert row["proof_gate_state"]["why_not_ready"]
     assert row["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is True
+
+
+def test_steer_route_executes_live_available_action(isolate_agent_runtime_root):
+    n = now()
+    TaskStore().create(_steering_task(n))
+
+    result = execute_steer_action(
+        "steer_task",
+        action_id="steer:slot_lead:slot_builder:route",
+        requested_by="operator",
+        reason="hand active slice to builder",
+    )
+
+    assert result["ok"] is True
+    assert result["result"] == "stage_routed"
+    assert result["stage_id"] == "implement"
+    task = TaskStore().get("steer_task")
+    assert task.current_stage_id == "implement"
+    assert task.mission_plan.current_stage_id == "implement"
+    assert next(stage for stage in task.mission_plan.stages if stage.id == "implement").status == StageStatus.IMPLEMENTING
+    assignments = PersonaAssignmentStore().find_active(task_id=task.id, stage_id="implement")
+    assert assignments
+    assert assignments[0].kind == "steer_route"
+    events = EventLog().for_task(task.id, limit=20)
+    assert [event.type for event in events if event.type.startswith("steer.")] == [
+        "steer.requested",
+        "steer.started",
+        "steer.returned",
+    ]
+
+
+def test_steer_spawn_executes_and_records_lineage(isolate_agent_runtime_root):
+    n = now()
+    TaskStore().create(_steering_task(n))
+
+    result = execute_steer_action(
+        "steer_task",
+        action_id="steer:slot_lead:slot_builder:spawn",
+        requested_by="operator",
+        reason="delegate focused helper",
+    )
+
+    assert result["ok"] is True
+    assert result["result"] == "helper_spawned"
+    child = PersonaInstanceStore().get(result["persona_instance_id"])
+    assert child.persona_id == "dev"
+    assert child.goal_id == "steer_task"
+    assert child.spawned_by
+    parent = PersonaInstanceStore().get(child.spawned_by)
+    assert parent.persona_id == "neko_supervisor"
+    assignment = PersonaAssignmentStore().get(result["assignment_id"])
+    assert assignment.kind == "steer_spawn"
+    assert assignment.persona_instance_id == child.id
+
+
+def test_steer_rejects_dead_affordance_and_opens_incident(isolate_agent_runtime_root):
+    n = now()
+    TaskStore().create(_steering_task(n))
+
+    result = execute_steer_action(
+        "steer_task",
+        action_id="steer:slot_builder:slot_lead:route",
+        requested_by="operator",
+        reason="invalid reverse edge",
+    )
+
+    assert result["ok"] is False
+    assert result["error_kind"] == "action_unavailable"
+    incident = IncidentStore().get(result["incident_id"])
+    assert incident.kind == "steer_failed"
+    assert incident.task_id == "steer_task"
+
+
+def _steering_task(n):
+    return Task(
+        id="steer_task",
+        title="Steering task",
+        description="Exercise steering.",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Steering task", objective="Exercise steering."),
+            current_stage_id="scope",
+            blueprint_id="steering_test",
+            blueprint_version=1,
+            slots={
+                "lead": {"role": "neko", "required": True},
+                "builder": {"role": "builder", "required": True},
+            },
+            bindings={
+                "lead": "neko_supervisor",
+                "builder": "dev",
+            },
+            agent_topology={
+                "root": "lead",
+                "edges": [
+                    {"source": "lead", "target": "builder", "kind": "steers"},
+                ],
+            },
+            stages=[
+                MissionPlanStage(id="scope", title="Scope", objective="Scope", owner="neko_supervisor", owner_slot="lead", repo="hermes-agent", kind="planning", status=StageStatus.IMPLEMENTING),
+                MissionPlanStage(id="implement", title="Implement", objective="Implement", owner="dev", owner_slot="builder", repo="hermes-agent", kind="implementation", status=StageStatus.READY),
+            ],
+        ),
+    )
 
 
 def test_agent_topology_node_caps_id_lists_and_reports_drops():

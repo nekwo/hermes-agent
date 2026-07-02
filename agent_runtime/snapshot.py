@@ -51,6 +51,7 @@ from .state_machine import MissionStateMachine
 from .serde import from_jsonable, to_jsonable
 from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
+from .steering import build_steer_actions
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RealmStore, RunStore, TaskStore, WorkspaceStore
 from .tool_visibility import (
     agent_hud_state_for_persona,
@@ -1688,12 +1689,13 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
         child_ids = {edge["target_node_id"] for edge in edges}
         root_node_id = next((node_id for node_id in nodes_by_id if node_id not in child_ids), next(iter(nodes_by_id)))
     control_node_id = _topology_control_node_id(task, stages, slot_node_ids, root_node_id)
-    steer_actions = _topology_steer_actions(nodes_by_id, edges, control_node_id=control_node_id, task=task)
+    steer_actions, steer_action_drops = build_steer_actions(nodes_by_id, edges, control_node_id=control_node_id, task=task)
     drop_samples: list[dict] = []
     for node in nodes_by_id.values():
         node_drops = node.pop("_drops", [])
         if isinstance(node_drops, list):
             drop_samples.extend(item for item in node_drops if isinstance(item, dict))
+    drop_samples.extend(steer_action_drops)
     return {
         "schema_version": 1,
         "source": "runtime_spawned_by" if targets_with_runtime_parent else ("blueprint_agent_topology" if topology_edges or root_slot else "persona_instances"),
@@ -1790,34 +1792,6 @@ def _topology_control_node_id(task, stages: list, slot_node_ids: dict[str, str],
         if slot and slot_node_ids.get(slot):
             return slot_node_ids[slot]
     return root_node_id
-
-
-def _topology_steer_actions(nodes_by_id: dict[str, dict], edges: list[dict], *, control_node_id: str | None, task) -> list[dict]:
-    actions: list[dict] = []
-    has_incidents = bool(getattr(task, "open_incident_ids", None))
-    for edge in edges[:50]:
-        source = edge.get("source_node_id")
-        target = edge.get("target_node_id")
-        if source not in nodes_by_id or target not in nodes_by_id:
-            continue
-        verbs = ["route", "spawn", "re-scope"]
-        if has_incidents:
-            verbs.append("resolve")
-        if nodes_by_id[target].get("role") == "qa" or nodes_by_id[source].get("role") == "qa":
-            verbs.append("verdict-back")
-        available_now = bool(control_node_id and source == control_node_id)
-        for verb in verbs:
-            actions.append(
-                {
-                    "action_id": f"steer:{source}:{target}:{verb}",
-                    "verb": verb,
-                    "source_node_id": source,
-                    "target_node_id": target,
-                    "available_now": available_now,
-                    "disabled_reason": None if available_now else "source node does not currently hold control",
-                }
-            )
-    return actions[:80]
 
 
 def _instance_matches_task(instance, task, task_goal_id: str) -> bool:

@@ -312,6 +312,16 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "default_args": {"state": "created", "rescope": False, "foreground": False},
         "danger": "warning",
     },
+    {
+        "id": "task.steer",
+        "target_kind": "task",
+        "label": "Execute Steer",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["task_id"],
+        "allowed_args": ["action_id", "reason", "requested_by", "source_node_id", "target_node_id", "verb"],
+        "danger": "warning",
+    },
     *(
         {
             "id": f"lane.{verb}",

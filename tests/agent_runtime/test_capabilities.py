@@ -30,6 +30,7 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert "persona.permission_override" in ids
     assert "persona.elevate_tools_once" in ids
     assert "task.run_until_settled" in ids
+    assert "task.steer" in ids
     assert "daemon.start" in ids
     assert "shell.anything" not in ids
     assert all("command" not in item for item in descriptors)
@@ -63,6 +64,12 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
         "skill",
     ]
     assert by_id["mission.chat.queue_skill_for_next_turn"]["execution_semantics"] == "control_state_change"
+    assert by_id["task.steer"]["group"] == "steer"
+    assert by_id["task.steer"]["execution_semantics"] == "control_state_change"
+    assert by_id["task.steer"]["args_schema"]["required"] == ["task_id"]
+    assert {"action_id", "verb", "source_node_id", "target_node_id", "reason", "requested_by"}.issubset(
+        set(by_id["task.steer"]["allowed_args"])
+    )
     assert by_id["persona.permission_preview"]["execution_semantics"] == "read_only"
     assert by_id["persona.permission_override"]["danger"] == "warning"
     assert by_id["persona.permission_override"]["args_schema"]["properties"]["turns"]["type"] == "integer"
