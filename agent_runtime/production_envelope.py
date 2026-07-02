@@ -87,6 +87,7 @@ def _h6_operator_control(cfg: Any) -> dict[str, Any]:
 
 def _h7_cost_fanout(cfg: Any) -> dict[str, Any]:
     swarm = getattr(cfg, "swarm", None)
+    swarm_on = bool(getattr(swarm, "enabled", False))
     return _item(
         "H7",
         "cost_fanout_governance",
@@ -95,7 +96,11 @@ def _h7_cost_fanout(cfg: Any) -> dict[str, Any]:
             "per-run wall/API/token budgets are validated",
             "mission token ceilings are enforced before opening another persona run",
             "budget incidents route to bounded Neko continuation or scope recovery",
-            "swarm hard token ceilings are enforced before opening another persona run",
+            (
+                "swarm hard token ceilings are enforced before opening another persona run"
+                if swarm_on
+                else "swarm hard token ceilings are enforced before opening another persona run once swarm.enabled (implemented + tested; currently gated off — see swarm.enabled)"
+            ),
             "swarm soft/hard API and token budgets are surfaced in status",
         ],
         flags={
@@ -128,6 +133,7 @@ def _h8_durability(cfg: Any) -> dict[str, Any]:
 
 def _h9_scheduling(cfg: Any) -> dict[str, Any]:
     swarm = getattr(cfg, "swarm", None)
+    swarm_on = bool(getattr(swarm, "enabled", False))
     return _item(
         "H9",
         "multi_goal_scheduling_backpressure",
@@ -137,7 +143,11 @@ def _h9_scheduling(cfg: Any) -> dict[str, Any]:
             "foreground runtime hygiene detects foreign active runs and stale runs before new-goal work proceeds",
             "repo bundle queueing gates dependent launcher/backend handoffs",
             "repo locks and swarm budget summaries are surfaced in status",
-            "swarm hard token ceilings block opening another persona run and emit a swarm_budget_exceeded incident instead of crashing",
+            (
+                "swarm hard token ceilings block opening another persona run and emit a swarm_budget_exceeded incident instead of crashing"
+                if swarm_on
+                else "swarm hard token ceilings block opening another persona run and emit a swarm_budget_exceeded incident (implemented + tested; active once swarm.enabled, currently gated off — see swarm.enabled)"
+            ),
             "lane summaries include priority, state, current owner/stage, repo locks, and budget counters for resource isolation readback",
         ],
         flags={

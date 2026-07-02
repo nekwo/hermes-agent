@@ -74,6 +74,27 @@ def test_h6_h8_h9_envelope_names_real_enforcement_controls():
     assert any("repo bundle queueing" in control for control in items["H9"]["controls"])
 
 
+def test_swarm_ceiling_controls_disclose_gating_when_swarm_disabled():
+    # Honesty guard: the swarm hard-token-ceiling controls (H7/H9) must not read
+    # as active enforcement when swarm.enabled is False. With swarm off they must
+    # disclose the gate; with swarm on they read as active (no gated caveat).
+    from agent_runtime.runtime_config import SwarmConfig
+
+    off = effective_config_summary(AgentRuntimeConfig())
+    items_off = {item["id"]: item for item in off["production_envelope"]["items"]}
+    for hid in ("H7", "H9"):
+        ceiling = [c for c in items_off[hid]["controls"] if "swarm hard token ceilings" in c]
+        assert ceiling, hid
+        assert all("swarm.enabled" in c and "gated off" in c for c in ceiling), (hid, ceiling)
+
+    on = effective_config_summary(AgentRuntimeConfig(swarm=SwarmConfig(enabled=True)))
+    items_on = {item["id"]: item for item in on["production_envelope"]["items"]}
+    for hid in ("H7", "H9"):
+        ceiling = [c for c in items_on[hid]["controls"] if "swarm hard token ceilings" in c]
+        assert ceiling, hid
+        assert all("gated off" not in c for c in ceiling), (hid, ceiling)
+
+
 def test_migration_status_counts_existing_runtime_records(isolate_agent_runtime_root):
     root = isolate_agent_runtime_root
     atomic_json_write(root / "tasks" / "task_1.json", {"id": "task_1", "schema_version": 1})
