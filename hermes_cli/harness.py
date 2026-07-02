@@ -412,6 +412,11 @@ def build_parser(parent_subparsers) -> None:
     realm_create.add_argument("--server", default=None)
     _add_stage42_global_args(realm_create, mutation=True)
     realm_create.set_defaults(func=_cmd_realm_create)
+    realm_adopt = realm_subs.add_parser("adopt", help="Adopt server-granted realms from the Eternia backend")
+    realm_adopt.add_argument("--server", default=None, help="Only adopt realms bound to this Eternia server id")
+    realm_adopt.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
+    _add_stage42_global_args(realm_adopt, mutation=True)
+    realm_adopt.set_defaults(func=_cmd_realm_adopt)
     realm_bind = realm_subs.add_parser("bind-server", help="Bind a realm to an Eternia server id")
     realm_bind.add_argument("realm_id")
     realm_bind.add_argument("server_id")
@@ -425,14 +430,17 @@ def build_parser(parent_subparsers) -> None:
     realm_sync_subs = realm_sync.add_subparsers(dest="realm_sync_command", required=True)
     realm_sync_status_cmd = realm_sync_subs.add_parser("status", help="Show realm sync state")
     realm_sync_status_cmd.add_argument("realm_id")
+    realm_sync_status_cmd.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
     _add_stage42_global_args(realm_sync_status_cmd)
     realm_sync_status_cmd.set_defaults(func=_cmd_realm_sync_status)
     realm_sync_pull = realm_sync_subs.add_parser("pull", help="Pull and materialize realm sync artifacts")
     realm_sync_pull.add_argument("realm_id")
+    realm_sync_pull.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
     _add_stage42_global_args(realm_sync_pull, mutation=True)
     realm_sync_pull.set_defaults(func=_cmd_realm_sync_pull)
     realm_sync_publish = realm_sync_subs.add_parser("publish", help="Publish allowlisted realm sync artifacts")
     realm_sync_publish.add_argument("realm_id")
+    realm_sync_publish.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
     _add_stage42_global_args(realm_sync_publish, mutation=True)
     realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
 
@@ -1001,7 +1009,7 @@ def _error_hint(code: str) -> str:
         "sync_behind": "Run `hermes harness realm sync pull <realm> --json` before publishing.",
         "sync_secret_excluded": "Remove secrets/state from the realm sync allowlist source before retrying.",
         "sync_remote_unreachable": "Check network/git remote availability and retry.",
-        "sync_auth_failed": "Reconnect realm sync credentials through the backend-authorized provider flow.",
+        "sync_auth_failed": "Provide a fresh launcher-brokered credential via --credential-file or HERMES_REALM_SYNC_CREDENTIAL.",
     }.get(code, "Inspect safe_details and retry after correcting the request.")
 
 
@@ -1614,9 +1622,35 @@ def _cmd_realm_use(args) -> int:
     return 0
 
 
+def _realm_sync_credential(args):
+    """Parse the launcher-brokered credential from --credential-file or the
+    HERMES_REALM_SYNC_CREDENTIAL env fallback; None when neither is set."""
+    from agent_runtime.realm_membership import load_realm_sync_credential
+
+    return load_realm_sync_credential(getattr(args, "credential_file", None))
+
+
+def _cmd_realm_adopt(args) -> int:
+    from agent_runtime.realm_membership import adopt_realms
+
+    try:
+        credential = _realm_sync_credential(args)
+        if credential is None:
+            raise RealmSyncError(
+                "sync_auth_failed",
+                "realm adopt requires a launcher-brokered credential; pass --credential-file or set HERMES_REALM_SYNC_CREDENTIAL.",
+            )
+        adopted = adopt_realms(credential, server_id=getattr(args, "server", None), dry_run=bool(getattr(args, "dry_run", False)))
+    except RealmSyncError as exc:
+        return emit_harness_error(exc, args=args)
+    rows = [_realm_row(item) for item in adopted]
+    _print_stage42(_list_envelope("realm", _sort_rows(rows, getattr(args, "sort", None))), args=args, default_output="json")
+    return 0
+
+
 def _cmd_realm_sync_status(args) -> int:
     try:
-        data = realm_sync_status(args.realm_id)
+        data = realm_sync_status(args.realm_id, credential=_realm_sync_credential(args))
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")
@@ -1625,7 +1659,7 @@ def _cmd_realm_sync_status(args) -> int:
 
 def _cmd_realm_sync_pull(args) -> int:
     try:
-        data = pull_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)))
+        data = pull_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)), credential=_realm_sync_credential(args))
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")
@@ -1636,7 +1670,7 @@ def _cmd_realm_sync_publish(args) -> int:
     if not _require_yes(args):
         return 8
     try:
-        data = publish_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)))
+        data = publish_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)), credential=_realm_sync_credential(args))
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")
