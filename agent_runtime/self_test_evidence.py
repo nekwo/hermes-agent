@@ -129,7 +129,16 @@ def record_self_test_from_progress(
     if event_type != "run.tool.finished":
         return None
     tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip().lower()
-    if tool_name and tool_name not in {"terminal", "execute_code", "code_execution", "shell", "powershell"}:
+    if tool_name and tool_name not in {
+        "terminal",
+        "execute_code",
+        "code_execution",
+        "shell",
+        "shell_command",
+        "functions.shell_command",
+        "powershell",
+        "pwsh",
+    }:
         return None
     command = _command_from_payload(payload)
     if not looks_like_self_test_command(command):
@@ -278,7 +287,7 @@ def _read_evidence(path) -> SelfTestEvidence:
 
 
 def _command_from_payload(payload: dict[str, Any]) -> str:
-    for key in ("command", "command_label", "summary", "detail"):
+    for key in ("command", "command_label", "command_full", "summary", "detail"):
         value = str(payload.get(key) or "").strip()
         if value:
             return value

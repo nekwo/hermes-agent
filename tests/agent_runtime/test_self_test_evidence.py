@@ -71,6 +71,45 @@ def test_preflight_commands_do_not_become_self_test_evidence():
     assert SelfTestEvidenceStore().list_for_task("task_selftest") == []
 
 
+def test_shell_command_alias_records_observed_self_test_evidence():
+    run = _run()
+
+    evidence = record_self_test_from_progress(
+        run,
+        "run.tool.finished",
+        {
+            "tool_name": "shell_command",
+            "command_label": "python -m pytest tests/agent_runtime/test_snapshot.py -q",
+            "exit_code": 0,
+            "duration_ms": 222,
+        },
+    )
+
+    assert evidence is not None
+    proof = ProofStore().get(
+        f"proof_observed_{evidence.evidence_id.removeprefix('selftest_')}"
+    )
+    assert proof.metadata["source"] == "agent_tool_trace"
+    assert proof.metadata["run_id"] == run.id
+
+
+def test_command_full_can_drive_self_test_classification():
+    run = _run()
+
+    evidence = record_self_test_from_progress(
+        run,
+        "run.tool.finished",
+        {
+            "tool_name": "powershell",
+            "command_full": "flutter analyze lib/features/mission_control/mission_control_page.dart",
+            "exit_code": 0,
+        },
+    )
+
+    assert evidence is not None
+    assert evidence.command_label.startswith("flutter analyze")
+
+
 def test_repeated_failed_self_test_emits_loop_detection_event():
     run = _run()
     payload = {"tool_name": "terminal", "command": "pytest tests/agent_runtime/test_context_builder.py -q", "exit_code": 1}
