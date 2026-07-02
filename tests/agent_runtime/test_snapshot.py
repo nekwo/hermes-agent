@@ -219,6 +219,114 @@ def test_agent_topology_node_caps_id_lists_and_reports_drops():
     assert all(drop["reason"] == "topology_node_id_cap" for drop in node["_drops"])
 
 
+def test_snapshot_projects_bounded_stage_verification_with_parity(isolate_agent_runtime_root):
+    n = now()
+    task = Task(
+        id="stage_verify",
+        title="Stage verification",
+        description="Project observed and authoritative proof lanes.",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        risk_flags=["test_tampering_detected"],
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Stage verification", objective="Show proof lanes."),
+            current_stage_id="stage_13",
+            stages=[
+                MissionPlanStage(
+                    id=f"stage_{index}",
+                    title=f"Stage {index}",
+                    objective="Verify",
+                    owner="dev",
+                    repo="EterniaLauncher",
+                    kind="implementation",
+                )
+                for index in range(14)
+            ],
+        ),
+    )
+    observations = {}
+    for index in range(14):
+        observations[f"stage_{index}"] = {
+            "schema_version": 1,
+            "captured_at": f"2026-07-01T20:{index:02d}:00Z",
+            "source": "harness_observed_handoff",
+            "actor": "dev",
+            "run_id": f"run_observed_{index}",
+            "stage_id": f"stage_{index}",
+            "repo_diff": {
+                "diff": "x" * 120,
+                "diff_chars": 120 + index,
+                "truncated": index == 13,
+                "baseline_dirty_count": 8,
+                "excluded_baseline_paths": [f"dirty_{n}.dart" for n in range(8)],
+            },
+            "observed_proof_ids": [f"proof_observed_{n}" for n in range(10)],
+            "authoritative_gate_proof_ids": ["proof_auth_passed"],
+            "authoritative_gate_status": "passed",
+            "authoritative_gate_run_id": f"run_auth_{index}",
+            "tamper_flag": index == 13,
+        }
+    task.harness_self_heal = {"stage_observations": observations}
+    TaskStore().create(task)
+    proof_store = ProofStore()
+    for proof_index in range(8):
+        proof_store.attach(
+            Proof(
+                id=f"proof_observed_{proof_index}",
+                task_id=task.id,
+                stage_id="stage_13",
+                type=ProofType.TEST_RUN,
+                title="Observed proof",
+                path_or_value="observed.log",
+                created_by="dev",
+                created_at=n,
+                metadata={"status": "passed"},
+            )
+        )
+    proof_store.attach(
+        Proof(
+            id="proof_auth_passed",
+            task_id=task.id,
+            stage_id="stage_13",
+            type=ProofType.TEST_RUN,
+            title="Authoritative proof",
+            path_or_value="auth.log",
+            created_by="harness",
+            created_at=n,
+            metadata={"status": "passed"},
+        )
+    )
+
+    snap = build_snapshot()
+    row = next(item for item in snap["tasks"] if item["task_id"] == task.id)
+    verification = row["stage_verification"]
+
+    assert len(verification["stages"]) == 12
+    assert verification["stages"][0]["stage_id"] == "stage_2"
+    latest = verification["stages"][-1]
+    assert latest["stage_id"] == "stage_13"
+    assert latest["owner"] == "dev"
+    assert latest["repo_diff"]["diff_chars"] == 133
+    assert len(latest["repo_diff"]["excluded_baseline_paths"]) == 6
+    assert len(latest["observed"]["proof_ids"]) == 8
+    assert latest["observed"]["status"] == "passed"
+    assert latest["authoritative"]["status"] == "passed"
+    assert latest["authoritative"]["run_id"] == "run_auth_13"
+    assert latest["tamper_flag"] is True
+    assert verification["completeness"]["truncated"] is True
+    assert "stage_verification" in snap["parity"]["capabilities"]
+    parity = snap["parity"]["completeness"]["stage_verification"]
+    assert parity["considered"] == 14
+    assert parity["included"] == 12
+    assert parity["truncated"] is True
+    assert parity["reasons"]["stage_cap"] == 2
+    assert parity["reasons"]["observed_proof_id_cap"] == 24
+    assert parity["reasons"]["excluded_baseline_path_cap"] == 24
+    assert parity["reasons"]["source_diff_truncated"] == 1
+
+
 def test_snapshot_agent_topology_runtime_spawned_by_overrides_blueprint(isolate_agent_runtime_root):
     n = now()
     task = Task(

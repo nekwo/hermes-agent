@@ -61,6 +61,9 @@ from .tool_visibility import (
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
 AGENT_TOPOLOGY_NODE_ID_CAP = 20
+STAGE_VERIFICATION_STAGE_CAP = 12
+STAGE_VERIFICATION_PROOF_ID_CAP = 8
+STAGE_VERIFICATION_PATH_CAP = 6
 
 
 def _runtime_paths_diagnostic(available_personas: list) -> dict:
@@ -147,6 +150,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     persona_instances = []
     topology_persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
+    stage_verification_accountant = ProjectionAccountant("stage_verification")
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         persona_instances = instance_store.derive_from_workers(agents, workers)
@@ -204,6 +208,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
                 repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
                 runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
                 persona_instances=topology_persona_instances,
+                stage_verification_accountant=stage_verification_accountant,
             )
             for t in tasks
         ],
@@ -290,6 +295,8 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         data["persona_instance_runtime"] = {"enabled": False}
         completeness = {}
         drop_samples = []
+    completeness["stage_verification"] = stage_verification_accountant.summary()
+    drop_samples.extend(stage_verification_accountant.drop_samples())
     data["parity"] = _parity_envelope(
         data,
         build_started=_build_started,
@@ -323,6 +330,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
             "agent_topology",
             "mission_flow_timeline",
             "proof_gate_state",
+            "stage_verification",
             "operator_capabilities",
         ],
         "freshness": {
@@ -1049,7 +1057,7 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
-def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None):
+def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None):
     gate = task_verdict_proof_satisfied(task, proofs)
     current_stage_id = _task_current_stage_id(task)
     current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
@@ -1100,6 +1108,7 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "proof_summaries": [_proof_visibility_summary(proof) for proof in proofs],
         "self_test_summaries": [self_test_summary(item) for item in (self_tests or [])],
         "verification_status": _verification_status(task),
+        "stage_verification": _stage_verification(task, proofs or [], accountant=stage_verification_accountant),
         "timeline": _task_timeline(task.id, events or []),
         "next_action": next_action,
         "why_not_done": _why_not_done(task, gate, open_incidents, next_action),
@@ -1166,6 +1175,185 @@ def _verification_status(task) -> dict:
             }
         )
     return {"stage_observations": rows}
+
+
+def _stage_verification(task, proofs: list, *, accountant: ProjectionAccountant | None = None) -> dict:
+    root = getattr(task, "harness_self_heal", None)
+    observations = root.get("stage_observations") if isinstance(root, dict) else None
+    if not isinstance(observations, dict):
+        return {
+            "schema_version": 1,
+            "stages": [],
+            "completeness": {
+                "stage_cap": STAGE_VERIFICATION_STAGE_CAP,
+                "proof_id_cap": STAGE_VERIFICATION_PROOF_ID_CAP,
+                "excluded_path_cap": STAGE_VERIFICATION_PATH_CAP,
+                "truncated": False,
+            },
+        }
+
+    items = [(str(stage_id or "_task"), item) for stage_id, item in observations.items() if isinstance(item, dict)]
+    items.sort(key=lambda pair: str(pair[1].get("captured_at") or pair[1].get("authoritative_gate_recorded_at") or pair[0]))
+    if accountant is not None:
+        accountant.consider(len(items))
+    selected = items[-STAGE_VERIFICATION_STAGE_CAP:]
+    if len(items) > len(selected):
+        if accountant is not None:
+            accountant.drop(
+                "stage_cap",
+                count=len(items) - len(selected),
+                entity_id=getattr(task, "id", None),
+                detail=f"kept latest {STAGE_VERIFICATION_STAGE_CAP} stage verification rows",
+            )
+            accountant.mark_truncated()
+
+    proof_by_id = {str(getattr(proof, "id", "") or ""): proof for proof in proofs}
+    owners = _stage_owner_by_id(task)
+    rows = []
+    truncated = len(items) > len(selected)
+    for stage_id, item in selected:
+        if accountant is not None:
+            accountant.include()
+        diff = item.get("repo_diff") if isinstance(item.get("repo_diff"), dict) else {}
+        observed_ids, observed_truncated = _bounded_projection_strings(
+            item.get("observed_proof_ids"),
+            cap=STAGE_VERIFICATION_PROOF_ID_CAP,
+            accountant=accountant,
+            drop_code="observed_proof_id_cap",
+            entity_id=stage_id,
+        )
+        authoritative_ids, authoritative_truncated = _bounded_projection_strings(
+            item.get("authoritative_gate_proof_ids"),
+            cap=STAGE_VERIFICATION_PROOF_ID_CAP,
+            accountant=accountant,
+            drop_code="authoritative_proof_id_cap",
+            entity_id=stage_id,
+        )
+        excluded_paths, excluded_truncated = _bounded_projection_strings(
+            diff.get("excluded_baseline_paths"),
+            cap=STAGE_VERIFICATION_PATH_CAP,
+            accountant=accountant,
+            drop_code="excluded_baseline_path_cap",
+            entity_id=stage_id,
+        )
+        source_diff_truncated = bool(diff.get("truncated"))
+        if source_diff_truncated and accountant is not None:
+            accountant.drop("source_diff_truncated", entity_id=stage_id)
+            accountant.mark_truncated()
+        lane_truncated = observed_truncated or authoritative_truncated or excluded_truncated
+        if lane_truncated and accountant is not None:
+            accountant.mark_truncated()
+        truncated = truncated or lane_truncated or source_diff_truncated
+        rows.append(
+            {
+                "stage_id": str(item.get("stage_id") or stage_id)[:128],
+                "owner": owners.get(stage_id) or str(item.get("actor") or "")[:128] or None,
+                "source": str(item.get("source") or "stage_observation")[:80],
+                "captured_at": str(item.get("captured_at") or "")[:80] or None,
+                "repo_diff": {
+                    "diff_chars": _safe_int(diff.get("diff_chars")),
+                    "truncated": source_diff_truncated,
+                    "baseline_dirty_count": _safe_int(diff.get("baseline_dirty_count")),
+                    "excluded_baseline_paths": excluded_paths,
+                    "excluded_baseline_path_count": _safe_int(diff.get("baseline_dirty_count"))
+                    if not isinstance(diff.get("excluded_baseline_paths"), list)
+                    else len(diff.get("excluded_baseline_paths") or []),
+                    "error": str(diff.get("error") or "")[:120] or None,
+                },
+                "observed": {
+                    "kind": "agent_run",
+                    "run_id": str(item.get("run_id") or "")[:128] or None,
+                    "status": _proof_lane_status(observed_ids, proof_by_id=proof_by_id, fallback="not_applicable"),
+                    "proof_ids": observed_ids,
+                    "proof": [_proof_ref(proof_id, proof_by_id=proof_by_id) for proof_id in observed_ids],
+                },
+                "authoritative": {
+                    "kind": "harness_run",
+                    "run_id": str(item.get("authoritative_gate_run_id") or "")[:128] or None,
+                    "status": str(item.get("authoritative_gate_status") or "pending")[:40],
+                    "proof_ids": authoritative_ids,
+                    "proof": [_proof_ref(proof_id, proof_by_id=proof_by_id) for proof_id in authoritative_ids],
+                    "recorded_at": str(item.get("authoritative_gate_recorded_at") or "")[:80] or None,
+                },
+                "tamper_flag": bool(item.get("tamper_flag") or item.get("test_tampering_detected")) or _stage_tamper_flag(task, stage_id),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "stages": rows,
+        "completeness": {
+            "stage_cap": STAGE_VERIFICATION_STAGE_CAP,
+            "proof_id_cap": STAGE_VERIFICATION_PROOF_ID_CAP,
+            "excluded_path_cap": STAGE_VERIFICATION_PATH_CAP,
+            "truncated": truncated,
+        },
+    }
+
+
+def _stage_owner_by_id(task) -> dict[str, str]:
+    plan = getattr(task, "mission_plan", None)
+    owners: dict[str, str] = {}
+    for stage in list(getattr(plan, "stages", []) or []):
+        stage_id = str(getattr(stage, "id", "") or "").strip()
+        owner = str(getattr(stage, "owner", "") or "").strip()
+        if stage_id and owner:
+            owners[stage_id] = owner
+    return owners
+
+
+def _bounded_projection_strings(raw, *, cap: int, accountant: ProjectionAccountant | None, drop_code: str, entity_id: str) -> tuple[list[str], bool]:
+    values = [str(value).strip()[:160] for value in (raw or []) if str(value or "").strip()] if isinstance(raw, list) else []
+    if len(values) <= cap:
+        return values, False
+    if accountant is not None:
+        accountant.drop(drop_code, count=len(values) - cap, entity_id=entity_id, detail=f"kept {cap}")
+    return values[:cap], True
+
+
+def _proof_ref(proof_id: str, *, proof_by_id: dict[str, object]) -> dict:
+    proof = proof_by_id.get(proof_id)
+    metadata = getattr(proof, "metadata", None) if proof is not None else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        "proof_id": proof_id,
+        "status": _proof_status(proof),
+        "type": str(getattr(proof, "type", "") or metadata.get("type") or "proof")[:80],
+        "created_by": str(getattr(proof, "created_by", "") or metadata.get("created_by") or "")[:80] or None,
+    }
+
+
+def _proof_lane_status(proof_ids: list[str], *, proof_by_id: dict[str, object], fallback: str) -> str:
+    if not proof_ids:
+        return fallback
+    statuses = [_proof_status(proof_by_id.get(proof_id)) for proof_id in proof_ids]
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if statuses and all(status == "passed" for status in statuses):
+        return "passed"
+    if any(status == "running" for status in statuses):
+        return "running"
+    return "pending"
+
+
+def _proof_status(proof) -> str:
+    if proof is None:
+        return "unknown"
+    metadata = getattr(proof, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return str(metadata.get("status") or getattr(proof, "status", None) or "captured")[:40]
+
+
+def _stage_tamper_flag(task, stage_id: str) -> bool:
+    flags = {str(flag).strip() for flag in (getattr(task, "risk_flags", None) or [])}
+    return "test_tampering_detected" in flags
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _task_current_stage_id(task) -> str | None:
