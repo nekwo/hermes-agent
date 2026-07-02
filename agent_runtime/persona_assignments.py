@@ -948,6 +948,7 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "mode": instance.mode,
         "goal_id": instance.goal_id,
         "spawned_by": instance.spawned_by,
+        "returned_to": instance.returned_to,
         "current_chat_goal": instance.current_chat_goal,
         "current_work_assignment_id": instance.current_assignment_id,
         "current_assignment_id": instance.current_assignment_id,

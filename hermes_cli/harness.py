@@ -18,6 +18,7 @@ from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
     authorize_coordinator_action,
@@ -723,6 +724,16 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_steer)
     persona_instance_steer.add_argument("--json", action="store_true")
     persona_instance_steer.set_defaults(func=_cmd_persona_instance_steer)
+    persona_instance_return = persona_instance_subs.add_parser("return-summary", help="Post a bounded child summary back into a parent chat session")
+    persona_instance_return.add_argument("persona_instance_id")
+    persona_instance_return.add_argument("--parent-session-id", required=True)
+    persona_instance_return.add_argument("--summary", required=True)
+    persona_instance_return.add_argument("--proof-id", dest="proof_ids", action="append", default=[])
+    persona_instance_return.add_argument("--artifact-ref", dest="artifact_refs", action="append", default=[])
+    persona_instance_return.add_argument("--task", dest="task_id", default=None)
+    persona_instance_return.add_argument("--stage", dest="stage_id", default=None)
+    persona_instance_return.add_argument("--json", action="store_true")
+    persona_instance_return.set_defaults(func=_cmd_persona_instance_return_summary)
     persona_instance_update = persona_instance_subs.add_parser("update-profile", help="Update runtime persona-instance profile overrides without editing the backing Hermes profile")
     persona_instance_update.add_argument("persona_instance_id")
     persona_instance_update.add_argument("--display-name", default=None)
@@ -3435,6 +3446,25 @@ def _cmd_persona_instance_steer(args) -> int:
         persona = None
     data = {"ok": True, "detached": detach, "instance": persona_instance_summary(updated, persona)}
     print(emit_json(data) if args.json else f"steered {persona_instance_id}: parent={updated.spawned_by} goal={updated.goal_id}")
+    return 0
+
+
+def _cmd_persona_instance_return_summary(args) -> int:
+    try:
+        data = return_summary_to_parent_session(
+            args.persona_instance_id,
+            parent_session_id=args.parent_session_id,
+            summary=args.summary,
+            proof_ids=list(getattr(args, "proof_ids", []) or []),
+            artifact_refs=list(getattr(args, "artifact_refs", []) or []),
+            task_id=getattr(args, "task_id", None),
+            stage_id=getattr(args, "stage_id", None),
+        )
+    except Exception as exc:
+        data = {"ok": False, "capability_id": "persona.instance.return_summary", "error": safe_assignment_text(str(exc), limit=240)}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    print(emit_json(data) if args.json else f"returned {data['persona_instance_id']} -> {data['parent_session_id']}")
     return 0
 
 

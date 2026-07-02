@@ -24,6 +24,7 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert "persona.instance.open_chat" in ids
     assert "persona.instance.message" not in ids
     assert "persona.instance.run_once" not in ids
+    assert "persona.instance.return_summary" in ids
     assert "persona.profile.create" in ids
     assert "persona.profile.promote" in ids
     assert "persona.permission_preview" in ids
@@ -70,6 +71,11 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert {"action_id", "verb", "source_node_id", "target_node_id", "reason", "requested_by"}.issubset(
         set(by_id["task.steer"]["allowed_args"])
     )
+    assert by_id["persona.instance.return_summary"]["group"] == "steer"
+    assert by_id["persona.instance.return_summary"]["execution_semantics"] == "control_state_change"
+    assert by_id["persona.instance.return_summary"]["args_schema"]["required"] == ["parent_session_id", "summary"]
+    assert by_id["persona.instance.return_summary"]["args_schema"]["properties"]["proof_ids"]["type"] == "array"
+    assert by_id["persona.instance.return_summary"]["args_schema"]["properties"]["artifact_refs"]["type"] == "array"
     assert by_id["persona.permission_preview"]["execution_semantics"] == "read_only"
     assert by_id["persona.permission_override"]["danger"] == "warning"
     assert by_id["persona.permission_override"]["args_schema"]["properties"]["turns"]["type"] == "integer"
@@ -121,6 +127,7 @@ def test_snapshot_emits_callable_capability_descriptors(isolate_agent_runtime_ro
     assert "mission.chat.steer" in ids
     assert "mission.chat.queue_skill_for_next_turn" in ids
     assert "persona.instance.message" not in ids
+    assert "persona.instance.return_summary" in ids
     assert "daemon.start" in ids
 
 

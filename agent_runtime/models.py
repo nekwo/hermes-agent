@@ -292,6 +292,7 @@ class PersonaInstance:
     mode: str = "configured"
     goal_id: str | None = None
     spawned_by: str | None = None
+    returned_to: str | None = None
     current_chat_goal: str | None = None
     skill_overrides: list[str] | None = None
     current_assignment_id: str | None = None

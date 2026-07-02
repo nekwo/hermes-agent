@@ -11,6 +11,7 @@ HARNESS_SKILLS = frozenset(
     {
         "harness-mission-lead",
         "harness-dev-delivery",
+        "harness-continuity",
         "harness-qa-verdict",
         "harness-runtime-model",
         "launcher-analyze-proof",

@@ -386,6 +386,16 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "warning",
     },
     {
+        "id": "persona.instance.return_summary",
+        "target_kind": "persona_instance",
+        "label": "Return Summary",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["parent_session_id", "summary"],
+        "allowed_args": ["artifact_refs", "proof_ids", "stage_id", "task_id"],
+        "danger": "normal",
+    },
+    {
         "id": "task.archive",
         "target_kind": "task",
         "label": "Archive Task",
@@ -428,7 +438,7 @@ def _arg_schema_for(item: dict[str, Any]) -> dict[str, Any]:
                     },
                 },
             }
-        elif name == "tools":
+        elif name in {"tools", "proof_ids", "artifact_refs"}:
             properties[name] = {"type": "array", "items": {"type": "string", "minLength": 1}}
         elif name in {"max_actions", "max_seconds", "lease_seconds", "turns"}:
             properties[name] = {"type": "integer", "minimum": 1}

@@ -2692,9 +2692,11 @@ def test_run_slot_spawns_attributed_persona_instance(isolate_agent_runtime_root)
     instance = PersonaInstanceStore().get(persona_instance_id_for_placement(f"{task.id}:backend_dev"))
     assert instance.goal_id == task.id
     assert instance.spawned_by == "neko_supervisor"
+    instance.returned_to = "parent_session_r3"
     summary = persona_instance_summary(instance)
     assert summary["goal_id"] == task.id
     assert summary["spawned_by"] == "neko_supervisor"
+    assert summary["returned_to"] == "parent_session_r3"
 
 
 def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent_runtime_root):

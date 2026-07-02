@@ -51,9 +51,12 @@ def test_harness_personas_expose_mission_dev_and_qa_skills():
     personas = {persona.id: persona for persona in default_personas()}
 
     assert "harness-mission-lead" in personas["neko_supervisor"].skills
+    assert "harness-continuity" in personas["neko_supervisor"].skills
     assert "harness-dev-delivery" in personas["dev"].skills
+    assert "harness-continuity" in personas["dev"].skills
     assert "launcher-analyze-proof" in personas["dev"].skills
     assert "harness-dev-delivery" in personas["backend_dev"].skills
+    assert "harness-continuity" in personas["backend_dev"].skills
     assert "launcher-analyze-proof" not in personas["backend_dev"].skills
     assert "harness-qa-verdict" in personas["qa"].skills
 
@@ -72,6 +75,7 @@ def test_stage59_hud_skill_sections_exist_in_role_skills():
     root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
     expected = {
         "harness-mission-lead": {"Scoped Handoff", "Bounded Recovery", "QA Release", "Incident Resolution"},
+        "harness-continuity": {"Spawn And Resume", "Return Command", "Progress Peek", "Never Slurp"},
         "harness-dev-delivery": {"Deliver Patch", "Request Proof Recipe", "Request Context", "Stage Plan", "Report Blocker"},
         "harness-qa-verdict": {"QA Verdict", "Request Missing Proof", "Report Blocker"},
     }
