@@ -80,6 +80,45 @@ def test_flag_on_hud_exposes_collapsed_signals_without_payload_fill_surface():
     assert all("payload_template" not in shape for shape in hud["decision_shape_index"].values())
 
 
+def test_flag_on_proof_only_hud_requires_agent_session_self_test_before_handoff():
+    task = _task("task_h5_observed_lane")
+    task.mission_plan = MissionPlan(
+        enabled=True,
+        mission_intent=MissionIntent(title=task.title, objective=task.description),
+        current_stage_id="build",
+        stages=[
+            MissionPlanStage(
+                id="build",
+                title="Build",
+                objective="Run read-only proof.",
+                owner="dev",
+                repo="hermes-agent",
+                kind="proof_only",
+                status=StageStatus.IMPLEMENTING,
+                proof_recipe_id="harness_runtime_status_snapshot",
+                proof_gate={
+                    "required": True,
+                    "minimum_status": "passed",
+                    "required_proof_types": ["test_run"],
+                    "observed_lane_expectation": "agent_tool_trace required",
+                },
+            )
+        ],
+    )
+    cfg = RuntimeConfig(
+        normal_worker_flow=NormalWorkerFlowConfig(enabled=False),
+        simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True, expose_only_simplified_actions=True),
+    )
+
+    hud = build_context(task, _run(task), config=cfg).mission_hud
+
+    reason = hud["agent_hud"]["recommended_action"]["reason"]
+    assert "Run the focused terminal self-test in this agent session first" in reason
+    assert "agent_tool_trace" in reason
+    assert hud["decision_menu"][0]["decision_type"] == "hand_off"
+    assert "payload_skeleton" not in hud["agent_hud"]["recommended_action"]
+
+
 def test_simplified_projection_maps_hand_off_and_can_reject_legacy_aliases(isolate_agent_runtime_root):
     task = _task("task_h5_projection")
     enabled = RuntimeConfig(simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True))

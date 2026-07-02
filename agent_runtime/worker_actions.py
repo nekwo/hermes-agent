@@ -106,11 +106,27 @@ def _collapsed_actions(role: str, task: Task, run: AgentRun) -> list[WorkerActio
                 WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
             ]
         return [
-            WorkerAction("hand_off", DecisionType.HAND_OFF, "dev.hand_off", "Hand Off", primary=True, reason="Signal done; Harness captures diff and reruns the authoritative gate."),
+            WorkerAction("hand_off", DecisionType.HAND_OFF, "dev.hand_off", "Hand Off", primary=True, reason=_collapsed_dev_hand_off_reason(stage)),
             _block_action(reason="Use when implementation or proof is blocked by exact evidence."),
             WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
         ]
     return [_block_action(primary=True, reason="Unknown worker role; block with evidence instead of guessing.")]
+
+
+def _collapsed_dev_hand_off_reason(stage) -> str:
+    gate = getattr(stage, "proof_gate", None)
+    gate = gate if isinstance(gate, dict) else {}
+    required = {str(item).strip() for item in (gate.get("required_proof_types") or []) if str(item).strip()}
+    expectation = str(gate.get("observed_lane_expectation") or "").strip()
+    proof_only = str(getattr(stage, "kind", "") or "") == "proof_only"
+    has_test_gate = bool(getattr(stage, "proof_recipe_id", None)) or "test_run" in required
+    if expectation or proof_only or has_test_gate:
+        return (
+            "Run the focused terminal self-test in this agent session first so "
+            "run.tool.finished becomes observed agent_tool_trace evidence; then "
+            "hand_off so Harness captures the diff and reruns the authoritative gate."
+        )
+    return "Signal done; Harness captures diff and reruns the authoritative gate."
 
 
 def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerAction]:
