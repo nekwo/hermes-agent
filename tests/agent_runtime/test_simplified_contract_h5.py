@@ -113,7 +113,8 @@ def test_flag_on_proof_only_hud_requires_agent_session_self_test_before_handoff(
     hud = build_context(task, _run(task), config=cfg).mission_hud
 
     reason = hud["agent_hud"]["recommended_action"]["reason"]
-    assert "Run the focused terminal self-test in this agent session first" in reason
+    assert "Run a real focused terminal self-test in this agent session first" in reason
+    assert "not an ad hoc echo/print marker" in reason
     assert "agent_tool_trace" in reason
     assert hud["decision_menu"][0]["decision_type"] == "hand_off"
     assert "payload_skeleton" not in hud["agent_hud"]["recommended_action"]

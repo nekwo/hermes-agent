@@ -122,9 +122,11 @@ def _collapsed_dev_hand_off_reason(stage) -> str:
     has_test_gate = bool(getattr(stage, "proof_recipe_id", None)) or "test_run" in required
     if expectation or proof_only or has_test_gate:
         return (
-            "Run the focused terminal self-test in this agent session first so "
-            "run.tool.finished becomes observed agent_tool_trace evidence; then "
-            "hand_off so Harness captures the diff and reruns the authoritative gate."
+            "Run a real focused terminal self-test in this agent session first "
+            "(pytest, flutter test/analyze, or manage.py check; not an ad hoc "
+            "echo/print marker) so run.tool.finished becomes observed "
+            "agent_tool_trace evidence; then hand_off so Harness captures the "
+            "diff and reruns the authoritative gate."
         )
     return "Signal done; Harness captures diff and reruns the authoritative gate."
 

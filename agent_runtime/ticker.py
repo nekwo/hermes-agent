@@ -827,6 +827,12 @@ class TickEngine:
                             return HarnessActionResult(action, False, "task reached terminal state before decision application", {"run_id": run.id, "task_state": current_task.state.value})
                         task = current_task
                         before_task = copy.deepcopy(task)
+                        _validate_observed_trace_requirement(
+                            task,
+                            decision,
+                            run=self.run_store.get(run.id),
+                            proof_store=self.proof_store,
+                        )
                         normal_flow_enabled = bool(getattr(getattr(self.config, "normal_worker_flow", None), "enabled", False)) or simplified_contract_enabled(self.config)
                         self.state_machine.apply_decision(
                             task,
@@ -1855,6 +1861,53 @@ def _record_handoff_observation(
     root["evidence_stack"] = evidence[-25:]
     task.harness_self_heal = root
     task_store.update(task, actor="harness", reason="record harness observed handoff diff/proof")
+
+
+def _validate_observed_trace_requirement(task: Task, decision, *, run, proof_store) -> None:
+    if decision.type not in {DecisionType.PROPOSE_PATCH, DecisionType.REQUEST_QA_REVIEW, DecisionType.REQUEST_TEST_RUN}:
+        return
+    stage_id = str((decision.payload or {}).get("stage_id") or task.current_stage_id or getattr(run, "stage_id", "") or "").strip() or None
+    if not _stage_requires_observed_agent_trace(task, stage_id):
+        return
+    observed = _observed_agent_tool_trace_proof_ids(
+        task.id,
+        run_id=getattr(run, "id", None),
+        stage_id=stage_id,
+        proof_store=proof_store,
+    )
+    if observed:
+        return
+    raise DecisionPayloadInvalid(
+        "observed agent_tool_trace proof required before hand_off; run a real focused terminal self-test "
+        "(pytest, flutter test/analyze, or manage.py check) in this agent session first. "
+        "Prose or ad hoc echo/print markers do not satisfy the observed lane."
+    )
+
+
+def _stage_requires_observed_agent_trace(task: Task, stage_id: str | None) -> bool:
+    stage = _stage_for_gate(task, stage_id or "")
+    gate = getattr(stage, "proof_gate", None) if stage is not None else None
+    gate = gate if isinstance(gate, dict) else {}
+    required = {str(value).strip().lower() for value in (gate.get("required_proof_types") or []) if str(value).strip()}
+    expectation = str(gate.get("observed_lane_expectation") or "").strip().lower()
+    return "agent_tool_trace" in required or "observed_proof" in expectation or "agent_tool_trace" in expectation
+
+
+def _observed_agent_tool_trace_proof_ids(task_id: str, *, run_id: str | None, stage_id: str | None, proof_store) -> list[str]:
+    observed: list[str] = []
+    try:
+        for proof in proof_store.list_for_task(task_id):
+            metadata = proof.metadata if isinstance(proof.metadata, dict) else {}
+            if metadata.get("source") != "agent_tool_trace":
+                continue
+            if run_id and metadata.get("run_id") != run_id:
+                continue
+            if stage_id and proof.stage_id and proof.stage_id != stage_id:
+                continue
+            observed.append(proof.id)
+    except Exception:
+        return []
+    return observed
 
 
 def _record_authoritative_gate_observation(

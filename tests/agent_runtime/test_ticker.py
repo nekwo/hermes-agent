@@ -11,7 +11,7 @@ from agent_runtime.actions import HarnessActionType
 from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.events import EventLog
 from agent_runtime.recovery_flags import NEKO_BLOCK_RECOVERY_ATTEMPTED_FLAG
-from agent_runtime.ticker import TickEngine, _emit_decision_process_summary, _handoff_diff_weakens_tests, _validate_request_test_run_targets_current_stage
+from agent_runtime.ticker import TickEngine, _emit_decision_process_summary, _handoff_diff_weakens_tests, _validate_observed_trace_requirement, _validate_request_test_run_targets_current_stage
 from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.errors import NotFound
@@ -89,6 +89,60 @@ def test_handoff_observation_fires_on_legacy_request_test_run_delivery(isolate_a
     observations = (ts.get(task.id).harness_self_heal or {}).get("stage_observations") or {}
     assert "implement" in observations
     assert observations["implement"]["source"] == "harness_observed_handoff"
+
+
+def test_observed_trace_requirement_rejects_handoff_without_agent_tool_trace(isolate_agent_runtime_root):
+    task = make_task_with_id("task_observed_required")
+    task.current_stage_id = "implement"
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title="Observed lane", objective="Require observed proof."),
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Implement",
+                objective="Run a real self-test before handoff.",
+                owner="dev",
+                repo="EterniaLauncher",
+                kind="proof_only",
+                status=StageStatus.IMPLEMENTING,
+                proof_gate={
+                    "required": True,
+                    "minimum_status": "passed",
+                    "required_proof_types": ["test_run", "agent_tool_trace"],
+                    "observed_lane_expectation": "agent_tool_trace required",
+                },
+            )
+        ],
+    )
+    run = RunStore().open_run("dev", task.id, stage_id="implement")
+    decision = AgentDecision(
+        type=DecisionType.PROPOSE_PATCH,
+        summary="handoff",
+        rationale="done",
+        payload={"stage_id": "implement"},
+    )
+    proofs = ProofStore()
+
+    with pytest.raises(DecisionPayloadInvalid, match="observed agent_tool_trace proof required"):
+        _validate_observed_trace_requirement(task, decision, run=run, proof_store=proofs)
+
+    proofs.attach(
+        Proof(
+            id="proof_observed_live",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="Observed self-test",
+            path_or_value="self_tests/task/selftest.json",
+            created_by="dev",
+            created_at=now(),
+            metadata={"source": "agent_tool_trace", "run_id": run.id, "status": "passed"},
+            redaction_status="safe",
+        )
+    )
+
+    _validate_observed_trace_requirement(task, decision, run=run, proof_store=proofs)
 
 
 def test_request_test_run_allows_typed_current_stage_when_legacy_current_stage_is_stale():
