@@ -35,6 +35,7 @@ from .persona_assignments import (
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
+from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
 from .prompt_observability import snapshot_prompt_observability
 from .profile_readiness import profile_readiness_for_persona
@@ -318,6 +319,15 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
 
     last_ts = getattr(last_event, "ts", None) if last_event is not None else None
     watermark = events_watermark(last_event_ts=last_ts)
+    resolution = resolve_runtime()
+    warnings = _parity_warnings(data)
+    if suspect_default_root(resolution):
+        warnings.append(
+            {
+                "code": "suspect_default_root",
+                "detail": "runtime root resolved through the default layer, but no tasks/ directory exists; check runtime-root pins",
+            }
+        )
     return {
         "envelope_version": PARITY_ENVELOPE_VERSION,
         "contract_version": 38,
@@ -328,6 +338,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         "projection_age_ms": _projection_age_ms(last_ts),
         "watermark": watermark,
         "runtime_root": _runtime_root_identity(),
+        "resolution": resolution_payload(resolution),
         "profile": _runtime_profile_identity(),
         "capabilities": [
             "goal_create",
@@ -345,7 +356,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         },
         "completeness": completeness,
         "drops": drop_samples,
-        "warnings": _parity_warnings(data),
+        "warnings": warnings,
     }
 
 

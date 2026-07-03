@@ -13,6 +13,7 @@ from .goal_hygiene import prepare_new_goal_runtime
 from .locks import HarnessLockUnavailable, tick_lock
 from .models import Task
 from .runtime_config import RuntimeConfig
+from .resolution import assert_pinned, resolve_runtime
 from .states import TaskState
 from .store import IncidentStore, ProofStore, RunStore, TaskStore
 from .ticker import TickEngine, RunUntilSettledResult
@@ -38,6 +39,7 @@ class GoalRunOptions:
     blueprint_id: str | None = DEFAULT_GOAL_BLUEPRINT_ID
     bindings: dict[str, str] = field(default_factory=dict)
     workspace_id: str | None = None
+    runtime_root: str | None = None
 
 
 @dataclass(slots=True)
@@ -88,6 +90,8 @@ class MissionRuntimeController:
 
     def run_goal(self, options: GoalRunOptions) -> GoalRunResult:
         started = time.monotonic()
+        if options.runtime_root:
+            assert_pinned(resolve_runtime(), pinned_root=options.runtime_root)
         hygiene = self.hygiene_fn(
             task_store=self.task_store,
             run_store=self.run_store,

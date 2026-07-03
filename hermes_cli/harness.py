@@ -37,6 +37,7 @@ from agent_runtime.errors import (
     InvalidTransition,
     NotFound,
     ProofMissing,
+    RuntimeRootMismatch,
     StaleRun,
     StoreCorrupt,
 )
@@ -70,6 +71,7 @@ from agent_runtime.realm_sync import (
     realm_sync_status,
     sync_artifacts_for_workspace_agent,
 )
+from agent_runtime.resolution import resolution_table, resolve_runtime
 from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.mission_chat_turns import persist_mission_chat_turn
@@ -256,6 +258,7 @@ def build_parser(parent_subparsers) -> None:
     goal_run.add_argument("--blueprint", default="neko_two_dev_default", help="Blueprint id for graph-routed goal creation")
     goal_run.add_argument("--bind", action="append", default=[], help="Bind a blueprint slot, e.g. builder=persona:dev")
     goal_run.add_argument("--workspace", default=None)
+    goal_run.add_argument("--runtime-root", default=None, help="Pin the expected resolved Harness runtime root")
     _add_stage42_global_args(goal_run, mutation=True)
     goal_run.set_defaults(func=_cmd_goal_run)
     goal_unblock = goal_subs.add_parser("unblock", help="Operator-unblock a Harness goal")
@@ -803,6 +806,10 @@ def build_parser(parent_subparsers) -> None:
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=_cmd_status)
 
+    doctor = subs.add_parser("doctor", help="Show Harness runtime resolution diagnostics")
+    doctor.add_argument("--json", action="store_true")
+    doctor.set_defaults(func=_cmd_doctor)
+
     health = subs.add_parser("health", help="Check Harness runtime/provider dependencies before live ticks")
     health.add_argument("--json", action="store_true")
     health.set_defaults(func=_cmd_health)
@@ -1007,6 +1014,7 @@ def _error_code_for_exception(exc: BaseException) -> str:
         (ProofMissing, "proof_missing"),
         (StoreCorrupt, "store_corrupt"),
         (EventPayloadTooLarge, "event_payload_too_large"),
+        (RuntimeRootMismatch, "wrong_runtime_root"),
     ):
         if isinstance(exc, exc_type):
             return code
@@ -2204,6 +2212,32 @@ def _cmd_install_harness_skills(args) -> int:
     return 0 if data["ok"] else 1
 
 
+def _cmd_doctor(args) -> int:
+    resolution = resolve_runtime()
+    data = {
+        "runtime_resolution": {
+            "store_root": str(resolution.store_root),
+            "layer": resolution.layer,
+            "hermes_home": resolution.hermes_home,
+            "config_path": resolution.config_path,
+            "trace": list(resolution.trace),
+            "layers": resolution_table(),
+        }
+    }
+    if args.json:
+        print(emit_json(data))
+    else:
+        print("Harness runtime resolution")
+        print(f"resolved: {resolution.store_root} ({resolution.layer})")
+        for row in data["runtime_resolution"]["layers"]:
+            marker = "*" if row["winner"] else " "
+            print(
+                f"{marker} {row['layer']:<7} value={row['value'] or '<unset>'} "
+                f"exists={row['exists']} tasks={row['tasks']}"
+            )
+    return 0
+
+
 def _cmd_goal_run(args) -> int:
     cfg = load_agent_runtime_config()
     os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
@@ -2234,6 +2268,7 @@ def _cmd_goal_run(args) -> int:
             blueprint_id=args.blueprint,
             bindings=bindings,
             workspace_id=getattr(args, "workspace", None),
+            runtime_root=getattr(args, "runtime_root", None),
         )
     )
     if getattr(args, "json", False) or getattr(args, "output", None):

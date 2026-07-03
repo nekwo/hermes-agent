@@ -28,3 +28,7 @@ class AlreadyExists(AgentRuntimeError):
 
 class EventPayloadTooLarge(AgentRuntimeError):
     """Raised when an event payload exceeds the Stage 1 JSONL budget."""
+
+
+class RuntimeRootMismatch(AgentRuntimeError):
+    """Raised when resolved runtime root does not match a caller pin."""
