@@ -16,6 +16,7 @@ from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, PersonaInstance, Proof, Task
 from agent_runtime.mission_chat_turns import mission_chat_turn_elements
 from agent_runtime.persona_assignments import (
+    ACTIVE_ASSIGNMENT_STATES,
     ChatBusyError,
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
@@ -2874,3 +2875,105 @@ def test_task_store_cancel_closes_persona_assignments():
 
     assert assignment_store.find_active(persona_id="neko_supervisor") == []
     assert assignment_store.get(assignment.id).state == "cancelled"
+
+
+def test_task_store_update_terminal_transition_releases_assignments():
+    """Any writer that lands a task in a terminal state via TaskStore.update must
+    release its persona assignments — the persona-diagnostics driver sets DONE
+    directly (bypassing ticker COMPLETE_TASK and TaskStore.cancel), which left
+    done-but-unarchived diag goals holding queued/needs_input slots live on
+    2026-07-03 (task_008d575b / task_8bd8b4af / task_940caf52)."""
+    task_store = TaskStore()
+    task_store.create(_task("task_direct_done", state=TaskState.RUNNING))
+    assignment_store = PersonaAssignmentStore()
+    assignment = assignment_store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", task_id="task_direct_done", goal_id="task_direct_done")
+    )
+    assert assignment_store.find_active(persona_id="backend_dev")
+
+    saved = task_store.get("task_direct_done")
+    saved.state = TaskState.DONE
+    saved.updated_at = now()
+    task_store.update(saved, actor="harness", reason="diagnostic finalize (direct DONE)")
+
+    assert assignment_store.find_active(persona_id="backend_dev") == []
+    assert assignment_store.get(assignment.id).state == "completed"
+
+
+def test_task_store_update_failed_transition_releases_assignments():
+    task_store = TaskStore()
+    task_store.create(_task("task_direct_failed", state=TaskState.RUNNING))
+    assignment_store = PersonaAssignmentStore()
+    assignment = assignment_store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", task_id="task_direct_failed", goal_id="task_direct_failed")
+    )
+
+    saved = task_store.get("task_direct_failed")
+    saved.state = TaskState.FAILED
+    saved.updated_at = now()
+    task_store.update(saved, actor="harness", reason="fatal")
+
+    assert assignment_store.find_active(persona_id="dev") == []
+    assert assignment_store.get(assignment.id).state == "cancelled"
+
+
+def test_task_store_update_non_terminal_transition_keeps_assignments():
+    task_store = TaskStore()
+    task_store.create(_task("task_stays_open", state=TaskState.RUNNING))
+    assignment_store = PersonaAssignmentStore()
+    assignment_store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="qa", kind="task_stage", title="verdict", message="m", task_id="task_stays_open", goal_id="task_stays_open")
+    )
+
+    saved = task_store.get("task_stays_open")
+    saved.state = TaskState.BLOCKED
+    saved.updated_at = now()
+    task_store.update(saved, actor="harness", reason="waiting on operator")
+
+    assert assignment_store.find_active(persona_id="qa"), "non-terminal transitions must not release assignments"
+
+
+def test_contention_warning_self_heals_assignment_held_by_terminal_goal():
+    """A stale active assignment held by a done-but-unarchived goal is released
+    (not warned about): the warning must stay an honest signal of genuinely
+    concurrent goals."""
+    task_store = TaskStore()
+    task_store.create(_task("task_old_done", state=TaskState.DONE))
+    assignment_store = PersonaAssignmentStore()
+    stale = assignment_store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", task_id="task_old_done", goal_id="task_old_done")
+    )
+
+    warnings = assignment_store.contention_warnings(persona_id="backend_dev", goal_id="task_new_goal")
+
+    assert warnings == []
+    assert assignment_store.get(stale.id).state == "completed"
+    assert "owning goal is done" in str(assignment_store.get(stale.id).last_error or "")
+
+
+def test_contention_warning_still_fires_for_genuinely_open_goal():
+    task_store = TaskStore()
+    task_store.create(_task("task_live_goal", state=TaskState.RUNNING))
+    assignment_store = PersonaAssignmentStore()
+    live = assignment_store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", task_id="task_live_goal", goal_id="task_live_goal")
+    )
+
+    warnings = assignment_store.contention_warnings(persona_id="backend_dev", goal_id="task_new_goal")
+
+    assert [w["code"] for w in warnings] == ["agent_already_assigned"]
+    assert assignment_store.get(live.id).state in ACTIVE_ASSIGNMENT_STATES
+
+
+def test_contention_warning_self_heals_assignment_for_archived_goal():
+    """Owning task file gone from the live store (archived) → assignment is
+    releasable, not contention."""
+    assignment_store = PersonaAssignmentStore()
+    stale = assignment_store.create_or_resume(
+        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", task_id="task_gone_archived", goal_id="task_gone_archived")
+    )
+
+    warnings = assignment_store.contention_warnings(persona_id="dev", goal_id="task_new_goal")
+
+    assert warnings == []
+    assert assignment_store.get(stale.id).state == "completed"

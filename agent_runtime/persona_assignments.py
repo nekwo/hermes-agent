@@ -25,6 +25,20 @@ from .tool_visibility import (
 from .tool_permissions import permission_options_for_chat
 
 TERMINAL_ASSIGNMENT_STATES = frozenset({"completed", "blocked", "cancelled"})
+_RELEASABLE_OWNER_TASK_STATES = frozenset({"done", "cancelled", "failed"})
+
+
+def _owning_task_release_state(task_id: str) -> str | None:
+    """Terminal state name of the owning task, ``"archived"`` when the task file
+    has left the live store, or None when the task is live (or unreadable)."""
+    try:
+        path = paths.task_path(task_id)
+        if not path.exists():
+            return "archived"
+        state = str(json.loads(path.read_text(encoding="utf-8")).get("state") or "").strip().lower()
+    except Exception:
+        return None
+    return state if state in _RELEASABLE_OWNER_TASK_STATES else None
 ACTIVE_ASSIGNMENT_STATES = frozenset({"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"})
 ACTIVE_PERSONA_WORKER_STATES = frozenset(
     {
@@ -656,6 +670,12 @@ class PersonaAssignmentStore:
             existing_goal = safe_optional_token(assignment.goal_id or assignment.task_id)
             if wanted_goal and existing_goal == wanted_goal:
                 continue
+            if self._release_if_owning_goal_terminal(assignment):
+                # Self-heal instead of warn: an assignment held by a goal that is
+                # already terminal (or archived out of the live store) is stale
+                # state, not real contention. Release it so the warning stays an
+                # honest signal of genuinely concurrent goals.
+                continue
             warnings.append(
                 {
                     "code": "agent_already_assigned",
@@ -668,6 +688,26 @@ class PersonaAssignmentStore:
                 }
             )
         return warnings
+
+    def _release_if_owning_goal_terminal(self, assignment: PersonaAssignment) -> bool:
+        """Release an active assignment whose owning goal is terminal/archived.
+
+        Returns True when the assignment was released. Free-floating assignments
+        (no owning task/goal) are never touched — their staleness cannot be
+        inferred from task state.
+        """
+        owner = safe_optional_token(assignment.task_id or assignment.goal_id)
+        if not owner:
+            return False
+        owner_state = _owning_task_release_state(owner)
+        if owner_state is None:
+            return False
+        self.complete(
+            assignment.id,
+            state="completed" if owner_state in {"done", "archived"} else "cancelled",
+            error=f"released stale assignment; owning goal is {owner_state}",
+        )
+        return True
 
     def get(self, assignment_id: str) -> PersonaAssignment:
         raw = json.loads(paths.persona_assignment_path(assignment_id).read_text(encoding="utf-8"))

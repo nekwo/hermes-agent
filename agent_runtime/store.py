@@ -25,6 +25,10 @@ from .states import RunState, TaskState
 T = TypeVar("T")
 
 TERMINAL_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED})
+# States that must release persona assignments on entry. FAILED is included even
+# though it is not in TERMINAL_TASK_STATES (a failed task may still be updated):
+# a failed goal must not keep starving its personas' slots either.
+RELEASE_ASSIGNMENT_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED})
 TERMINAL_RUN_STATES = frozenset({RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED})
 ACTIVE_RUN_STATES = frozenset({RunState.QUEUED, RunState.STARTING, RunState.RUNNING, RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL})
 ARCHIVABLE_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED})
@@ -137,12 +141,14 @@ class TaskStore:
 
     def update(self, task: Task, *, actor: str = "harness", reason: str = "") -> None:
         path = paths.task_path(task.id)
+        reached_terminal = False
         with task_lock(task.id):
             previous = self.get(task.id)
             if previous.state in TERMINAL_TASK_STATES:
                 return
             _write_model(path, task)
             if previous.state != task.state:
+                reached_terminal = task.state in RELEASE_ASSIGNMENT_TASK_STATES
                 event_type = "task.transition"
                 if task.state == TaskState.BLOCKED:
                     event_type = "task.blocked"
@@ -165,6 +171,19 @@ class TaskStore:
                         },
                     )
                 )
+        if reached_terminal:
+            # Terminal-transition chokepoint: every writer that lands a task in a
+            # terminal state persists through this method (ticker COMPLETE_TASK,
+            # cancel, planning post-QA guards, persona diagnostics' direct DONE),
+            # so releasing persona assignments here closes every bypass path at
+            # once. Writers that also release explicitly stay correct — releasing
+            # is idempotent. Without this, a done-but-unarchived goal keeps its
+            # slots active and every new goal logs agent_already_assigned.
+            PersonaAssignmentStore(event_log=self.event_log).close_for_task(
+                task.id,
+                state="completed" if task.state == TaskState.DONE else "cancelled",
+                reason=f"task reached {getattr(task.state, 'value', task.state)}",
+            )
 
     def list_open(self) -> list[Task]:
         return [task for task in self.list_all() if task.state not in TERMINAL_TASK_STATES]
