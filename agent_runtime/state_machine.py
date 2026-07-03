@@ -32,6 +32,39 @@ def _run_slot(mission: Task, slot_id: str, reason: str, *, stage_id: str | None 
     return HarnessAction(HarnessActionType.RUN_SLOT, mission.id, reason=reason, slot_id=slot_id, stage_id=stage_id)
 
 
+def _prune_closed_incident_links(mission: Task) -> None:
+    """Drop open_incident_ids entries whose incident is closed in the store.
+
+    An in-flight engine turn can persist a stale in-memory task copy over an
+    operator's incident-close unlink (observed live: a closed incident stayed
+    linked and permanently routed the mission to Neko adjudication). The store
+    is the authority on open incidents; the link list is a routing hint. The
+    prune is in-memory — the row heals on the next engine persist.
+    """
+
+    linked = list(getattr(mission, "open_incident_ids", None) or [])
+    if not linked:
+        return
+    try:
+        from .store import IncidentStore
+
+        store = IncidentStore()
+    except Exception:
+        return
+    pruned: list[str] = []
+    for item in linked:
+        try:
+            incident = store.get(str(item))
+        except Exception:
+            # Unknown id (no record readable) — keep the link, fail safe.
+            pruned.append(item)
+            continue
+        if getattr(incident, "closed_at", None) is None:
+            pruned.append(item)
+    if pruned != linked:
+        mission.open_incident_ids = pruned
+
+
 @dataclass(frozen=True, slots=True)
 class StateMachineResult:
     from_state: TaskState
@@ -54,6 +87,7 @@ class MissionStateMachine:
     def next_action(self, mission: Task) -> HarnessAction:
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         ensure_default_mission_plan(mission)
+        _prune_closed_incident_links(mission)
         child_wake = parent_child_event_wake_action(mission, config=self.config)
         if child_wake is not None:
             return child_wake
@@ -65,6 +99,7 @@ class MissionStateMachine:
     def next_actions(self, mission: Task) -> list[HarnessAction]:
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         ensure_default_mission_plan(mission)
+        _prune_closed_incident_links(mission)
         child_wake = parent_child_event_wake_action(mission, config=self.config)
         if child_wake is not None:
             return [child_wake]

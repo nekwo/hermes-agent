@@ -133,6 +133,39 @@ def test_open_incident_routes_neko_even_when_task_not_blocked():
     assert "open incidents" in action.reason
 
 
+def test_closed_store_incident_link_is_pruned_not_neko_looped(isolate_agent_runtime_root):
+    """A stale open_incident_ids link whose incident is CLOSED in the store
+    must not route Neko adjudication forever (observed live: an in-flight
+    engine turn persisted a stale task copy over the operator's incident-close
+    unlink). Unknown ids with no store record stay linked, fail-safe."""
+
+    import uuid
+
+    from agent_runtime.models import Incident
+    from agent_runtime.store import IncidentStore
+
+    incidents = IncidentStore()
+    incident = Incident(
+        id=f"inc_{uuid.uuid4().hex[:8]}",
+        task_id="mission_1",
+        run_id=None,
+        kind="run_budget_exceeded",
+        summary="budget",
+        detail_path=None,
+        opened_at=now(),
+    )
+    incidents.open(incident)
+    incidents.close(incident.id, reason="operator recovery")
+
+    mission = make_mission(TaskState.RUNNING)
+    mission.open_incident_ids = [incident.id]
+
+    action = MissionStateMachine(config=typed_config()).next_action(mission)
+
+    assert mission.open_incident_ids == []
+    assert "open incidents" not in (action.reason or "")
+
+
 def test_legacy_qa_stage_does_not_count_as_remaining_dev_work():
     mission = make_mission(TaskState.RUNNING)
     mission.risk_flags = []
