@@ -58,7 +58,7 @@ def coerce_agent_role(role: AgentRole | str | None) -> AgentRole:
 ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
     AgentRole.PM: frozenset({"file", "session_search", "todo", "skills"}),
     AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills"}),
-    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills"}),
+    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills", "launcher_qa"}),
     AgentRole.ALICE_SUPERVISOR: frozenset(
         {
             "file",
@@ -246,10 +246,11 @@ def default_personas() -> list[AgentPersona]:
             model=None,
             provider=None,
             api_mode="codex_responses",
-            toolsets=["file", "search", "terminal", "browser", "vision", "session_search", "skills"],
+            toolsets=["file", "search", "terminal", "browser", "vision", "session_search", "skills", "launcher_qa"],
             system_prompt_path="personas/qa/system.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
             skills=["harness-qa-verdict"],
+            required_mcp_servers=["launcher_qa"],
         ),
     ]
 

@@ -13,6 +13,7 @@ from .config import load_agent_runtime_config
 from .self_test_evidence import record_self_test_from_progress
 from .states import RunState
 from .store import RunStore
+from .visual_trace_evidence import record_screenshot_from_progress
 
 _SAFE_PROGRESS_KEYS = {
     "type", "phase", "severity", "step", "state", "tool", "tool_name", "status",
@@ -69,6 +70,7 @@ class RunProgressSink:
             if not self.run_store.update(run):
                 return None
             _maybe_record_self_test(run, event_type, payload or {}, event_log=self.event_log)
+            _maybe_record_visual_screenshot(run, event_type, payload or {}, event_log=self.event_log)
             persisted = self.run_store.get(self.run_id)
             if persisted.state in {RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED}:
                 return None
@@ -188,6 +190,13 @@ def _maybe_record_self_test(run, event_type: str, payload: dict[str, Any], *, ev
     # whether an observed proof is *required*; capturing one is always safe.
     try:
         record_self_test_from_progress(run, event_type, payload, event_log=event_log)
+    except Exception:
+        return
+
+
+def _maybe_record_visual_screenshot(run, event_type: str, payload: dict[str, Any], *, event_log: EventLog) -> None:
+    try:
+        record_screenshot_from_progress(run, event_type, payload, event_log=event_log)
     except Exception:
         return
 

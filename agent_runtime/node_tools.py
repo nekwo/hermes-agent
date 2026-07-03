@@ -356,12 +356,18 @@ def node_tools_available() -> bool:
 def _child_system_prompt(persona: AgentPersona, stage: MissionPlanStage | None) -> str:
     role = str(getattr(persona, "role", "") or "node")
     visual = " If visual proof is required, capture it with your available QA tools." if getattr(stage, "requires_visual_proof", False) else ""
+    qa = (
+        " As QA, re-run the relevant tests yourself; when visual proof is requested, "
+        "use launcher_qa MCP screenshot tools, then end with either satisfied or a concrete steer for the dev child."
+        if role == "qa"
+        else ""
+    )
     return (
         "You are a self-looped Hermes child node running inside the Agent Runtime Harness. "
         "Use your normal tools to complete the assigned stage, run focused proof yourself, "
         "and finish with a concise summary naming changed files, commands run, proof status, "
         "remaining gaps, and whether the root should accept or steer another turn."
-        f"{visual} You do not emit AgentDecision JSON on this root-node path."
+        f"{visual}{qa} You do not emit AgentDecision JSON on this root-node path."
         f" Node role: {role}."
     )
 
