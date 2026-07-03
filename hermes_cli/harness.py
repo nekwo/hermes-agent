@@ -316,6 +316,12 @@ def build_parser(parent_subparsers) -> None:
     create.add_argument("--description")
     create.add_argument("--request-json", help="Path to a Stage 38 canonical goal-create request JSON file")
     create.add_argument("--requested-by", default="cli")
+    create.add_argument(
+        "--affected-repo",
+        action="append",
+        default=[],
+        help="Pin the goal's repo scope (EterniaLauncher, EterniaBackend, hermes-agent, or an alias like launcher/backend). Repeatable.",
+    )
     create.add_argument("--start-daemon", dest="start_daemon", action="store_true", default=None, help="Start the Mission Daemon after creating the task")
     create.add_argument("--no-start-daemon", dest="start_daemon", action="store_false", help="Create the task without starting the Mission Daemon")
     create.add_argument("--json", action="store_true")
@@ -4905,6 +4911,7 @@ def _normalize_cli_persona_or_template_id(persona_id: str) -> str:
 
 def _cmd_task_create(args) -> int:
     from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
+    from agent_runtime.repo_context import canonical_repo_scope_label, known_repo_scope_labels
 
     if getattr(args, "request_json", None):
         try:
@@ -4933,12 +4940,32 @@ def _cmd_task_create(args) -> int:
                 },
             }
         else:
-            data = create_mission_goal(
-                title=args.title,
-                description=args.description,
-                requested_by=args.requested_by,
-                start_daemon_mode=getattr(args, "start_daemon", None),
-            )
+            repo_scope: list[str] = []
+            unknown_repos: list[str] = []
+            for raw_repo in getattr(args, "affected_repo", None) or []:
+                label = canonical_repo_scope_label(raw_repo)
+                if label is None:
+                    unknown_repos.append(str(raw_repo))
+                elif label not in repo_scope:
+                    repo_scope.append(label)
+            if unknown_repos:
+                data = {
+                    "schema_version": 1,
+                    "error": {
+                        "code": "repo_scope_invalid",
+                        "message": f"Unknown --affected-repo value(s); use one of {list(known_repo_scope_labels())} or a resolvable alias.",
+                        "retryable": False,
+                        "safe_details": {"repo_scope": unknown_repos[:4]},
+                    },
+                }
+            else:
+                data = create_mission_goal(
+                    title=args.title,
+                    description=args.description,
+                    requested_by=args.requested_by,
+                    start_daemon_mode=getattr(args, "start_daemon", None),
+                    repo_scope=repo_scope,
+                )
     if args.json:
         print(emit_json(data))
     else:

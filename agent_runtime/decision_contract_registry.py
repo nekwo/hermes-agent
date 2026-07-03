@@ -724,7 +724,7 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
         DecisionType.PROPOSE_ACCEPTANCE,
         allowed_roles=_PM_NEKO,
         required_payload_keys=("objective", "acceptance_criteria"),
-        optional_payload_keys=("non_goals", "affected_repos", "suggested_roles", "requires_visual_proof", "risk_flags", "handoff_packet", "mission_plan", "mission_plan_patch", "release_stage_id"),
+        optional_payload_keys=("non_goals", "affected_repos", "suggested_roles", "requires_visual_proof", "risk_flags", "handoff_packet", "mission_plan", "mission_plan_patch", "release_stage_id", "scope_override_reason"),
         nested_contracts=("handoff_packet", "handoff_packet.proof_gate", "handoff_packet.join_gate", "handoff_packet.self_heal"),
         shape_hint="Neko/PM scope or route one bounded owner; attach handoff_packet for specialist routing.",
     ),
@@ -768,9 +768,9 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
         DecisionType.SCOPE_ROUTE,
         allowed_roles=_PM_NEKO,
         required_payload_keys=("objective", "acceptance_criteria", "target_owner", "target_repo", "proof_gate"),
-        optional_payload_keys=("non_goals", "suggested_roles", "requires_visual_proof", "risk_flags", "release_stage_id"),
+        optional_payload_keys=("non_goals", "suggested_roles", "requires_visual_proof", "risk_flags", "release_stage_id", "scope_override_reason"),
         enum_choices={"target_owner": ("dev", "backend_dev", "qa", "neko_supervisor", "human"), "target_repo": ("EterniaLauncher", "EterniaBackend", "hermes-agent", "none")},
-        shape_hint="Collapsed Neko signal: scope and route one bounded owner/repo/proof gate. Harness derives the handoff packet internally.",
+        shape_hint="Collapsed Neko signal: scope and route one bounded owner/repo/proof gate. Harness derives the handoff packet internally. target_repo must match a repo the goal title/description literally names (e.g. 'hermes-agent') unless scope_override_reason records why the goal text is wrong.",
     ),
     DecisionType.QA_VERDICT: DecisionContract(
         DecisionType.QA_VERDICT,
@@ -1292,6 +1292,7 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "incident.opened": EventContract("incident.opened", "Incident opened", ("incident_id", "kind"), ("summary",)),
     "incident.closed": EventContract("incident.closed", "Incident closed", ("incident_id",), ("reason",)),
     "incident.resolved": EventContract("incident.resolved", "Incident resolved", ("incident_id", "next_state"), ("resolution",)),
+    "scope.override_recorded": EventContract("scope.override_recorded", "Scope override recorded", ("affected_repos",), ("named_repo_scope", "scope_override_reason", "summary")),
     "daemon.started": EventContract("daemon.started", "Mission driver started", ("mode",), ("pid", "queue_mode", "self_driven")),
     "daemon.stopped": EventContract("daemon.stopped", "Mission driver stopped", ("mode",), ("pid", "reason", "self_driven")),
 }

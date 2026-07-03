@@ -160,21 +160,24 @@ def _internal_execution_decision(task: Task, decision: AgentDecision) -> AgentDe
         }
         if target_owner in {"dev", "backend_dev", "qa"}:
             handoff_packet["join_gate"] = {"release_condition": "Target owner completes the current typed stage with Harness-verified proof."}
+        execution_payload = {
+            "objective": payload.get("objective") or decision.summary,
+            "acceptance_criteria": payload.get("acceptance_criteria") or list(getattr(task, "acceptance_criteria", []) or ["Routed owner completes the stage."]),
+            "non_goals": payload.get("non_goals", []),
+            "affected_repos": [target_repo] if target_repo and target_repo != "none" else [],
+            "suggested_roles": [target_owner] if target_owner else [],
+            "requires_visual_proof": bool(payload.get("requires_visual_proof", False)),
+            "risk_flags": payload.get("risk_flags", []),
+            "release_stage_id": payload.get("release_stage_id"),
+            "handoff_packet": handoff_packet,
+        }
+        if str(payload.get("scope_override_reason") or "").strip():
+            execution_payload["scope_override_reason"] = str(payload.get("scope_override_reason")).strip()
         return AgentDecision(
             type=DecisionType.PROPOSE_ACCEPTANCE,
             summary=decision.summary or "Collapsed scope_route signal.",
             rationale=decision.rationale or "Projected scope_route onto the retained internal Neko handoff transition.",
-            payload={
-                "objective": payload.get("objective") or decision.summary,
-                "acceptance_criteria": payload.get("acceptance_criteria") or list(getattr(task, "acceptance_criteria", []) or ["Routed owner completes the stage."]),
-                "non_goals": payload.get("non_goals", []),
-                "affected_repos": [target_repo] if target_repo and target_repo != "none" else [],
-                "suggested_roles": [target_owner] if target_owner else [],
-                "requires_visual_proof": bool(payload.get("requires_visual_proof", False)),
-                "risk_flags": payload.get("risk_flags", []),
-                "release_stage_id": payload.get("release_stage_id"),
-                "handoff_packet": handoff_packet,
-            },
+            payload=execution_payload,
             requires_approval=decision.requires_approval,
             schema_version=decision.schema_version,
         )

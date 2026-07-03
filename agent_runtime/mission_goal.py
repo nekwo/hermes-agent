@@ -161,6 +161,7 @@ def create_mission_goal(
         "session_id": _safe_note((operator or {}).get("session_id")) if operator else None,
         "fingerprint": request_fingerprint,
         "requested_blueprint_id": requested_blueprint_id,
+        "repo_scope_pinned": list(repo_scope or []),
         "created_at": ts,
     }
     task.harness_self_heal["repo_clean_baseline"] = repo_clean_baseline_from_hygiene(hygiene)

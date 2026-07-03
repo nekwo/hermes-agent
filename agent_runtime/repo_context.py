@@ -942,7 +942,49 @@ def _normalize_repo_alias(value: str) -> str:
     return re.sub(r"[ _-]+", "-", stripped).strip("-")
 
 
+def known_repo_scope_labels() -> tuple[str, ...]:
+    """Canonical affected_repos labels the harness can actually resolve."""
+
+    return ("EterniaLauncher", "EterniaBackend", "hermes-agent")
+
+
+def canonical_repo_scope_label(value: str) -> str | None:
+    """Map any known repo alias to its canonical affected_repos label."""
+
+    alias = _normalize_repo_alias(str(value or ""))
+    if not alias:
+        return None
+    return _REPO_ALIAS_DISPLAY_LABELS.get(alias)
+
+
+def explicit_repo_mentions(text: str) -> tuple[str, ...]:
+    """Canonical labels for repos literally named in goal title/description.
+
+    Only explicit repo names count (``hermes-agent``, ``EterniaLauncher``,
+    ``eternia-backend``, ...). Generic words like "launcher" or "backend" are
+    deliberately excluded so ordinary prose does not pin scope.
+    """
+
+    lowered = str(text or "").lower()
+    found: list[str] = []
+    for alias in _EXPLICIT_REPO_MENTION_ALIASES:
+        pattern = alias.replace("-", "[-_ ]")
+        if re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", lowered):
+            label = _REPO_ALIAS_DISPLAY_LABELS.get(alias)
+            if label and label not in found:
+                found.append(label)
+    return tuple(found)
+
+
 _HARNESS_REPO_ALIASES = frozenset({"agent-runtime-harness", "hermes-agent"})
+_EXPLICIT_REPO_MENTION_ALIASES = (
+    "hermes-agent",
+    "agent-runtime-harness",
+    "eternia-launcher",
+    "eternialauncher",
+    "eternia-backend",
+    "eterniabackend",
+)
 _REPO_ALIAS_PATHS = {
     "eterniabackend": (
         "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend",

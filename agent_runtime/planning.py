@@ -186,6 +186,8 @@ def _coerce_neko_budget_acceptance_to_continuation(
 def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, event_log: EventLog | None = None, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool = False) -> Task:
     validate_planning_decision(decision)
     log = event_log or EventLog()
+    if decision.type == DecisionType.PROPOSE_ACCEPTANCE:
+        _validate_affected_repo_scope(task, decision, actor=actor, log=log, run_id=run_id)
     if _coerce_neko_budget_acceptance_to_continuation(task, decision, actor=actor, incident_store=incident_store, log=log, run_id=run_id):
         return task
     if mission_plan_flow and is_mission_lead_actor(task, actor) and decision.type == DecisionType.PROPOSE_ACCEPTANCE:
@@ -284,7 +286,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                     )
                 )
                 return task
-            next_repos = [str(repo).strip() for repo in decision.payload.get("affected_repos", []) if str(repo).strip()]
+            next_repos = _canonical_affected_repos(decision.payload.get("affected_repos", []) or [])
             if next_repos:
                 task.affected_repos = next_repos
             task.updated_at = now()
@@ -802,11 +804,92 @@ def _apply_acceptance(task: Task, payload: dict[str, Any]) -> None:
         task.description = objective
     task.acceptance_criteria = list(payload.get("acceptance_criteria", []))
     task.non_goals = list(payload.get("non_goals", []))
-    affected_repos = [str(repo).strip() for repo in (payload.get("affected_repos", []) or []) if str(repo).strip()]
+    affected_repos = _canonical_affected_repos(payload.get("affected_repos", []) or [])
     task.affected_repos = affected_repos or _affected_repos_from_handoff(payload)
     task.suggested_roles = list(payload.get("suggested_roles", []))
     task.requires_visual_proof = bool(payload.get("requires_visual_proof", task.requires_visual_proof))
     task.risk_flags = list(payload.get("risk_flags", []))
+
+
+def _canonical_affected_repos(repos: Iterable[str]) -> list[str]:
+    from .repo_context import canonical_repo_scope_label
+
+    result: list[str] = []
+    for repo in repos:
+        text = str(repo).strip()
+        if not text:
+            continue
+        label = canonical_repo_scope_label(text) or text
+        if label not in result:
+            result.append(label)
+    return result
+
+
+def _pinned_repo_scope(task: Task) -> list[str]:
+    meta = (getattr(task, "harness_self_heal", None) or {}).get("mission_goal_create")
+    if not isinstance(meta, dict):
+        return []
+    return [str(item).strip() for item in (meta.get("repo_scope_pinned") or []) if str(item).strip()]
+
+
+def _validate_affected_repo_scope(task: Task, decision: AgentDecision, *, actor: str, log: EventLog, run_id: str | None) -> None:
+    """Reject affected_repos that silently contradict the goal's named repo scope.
+
+    A goal that literally names a repo (in its title/description, or via an
+    operator-pinned repo scope at create time) must not be scoped to a
+    different repo without a recorded justification. A mismatch raises
+    ``DecisionPayloadInvalid`` so the ticker's repair-feedback lane sends the
+    contradiction back to Neko instead of silently accepting it.
+    """
+
+    from .persona_assignments import safe_assignment_text
+    from .repo_context import canonical_repo_scope_label, explicit_repo_mentions
+
+    payload = decision.payload if isinstance(decision.payload, dict) else {}
+    repos = [str(repo).strip() for repo in (payload.get("affected_repos") or []) if str(repo).strip()]
+    if not repos:
+        return
+    canonical: list[str] = []
+    for repo in repos:
+        label = canonical_repo_scope_label(repo)
+        if label is not None and label not in canonical:
+            canonical.append(label)
+    if not canonical:
+        # Free-form scope (absolute repo paths, workspace-specific labels) is
+        # outside the canonical-alias contract; only canonical scopes are
+        # cross-checked against the goal's named repo.
+        return
+    pinned = _pinned_repo_scope(task)
+    mentions = list(explicit_repo_mentions(f"{task.title or ''} {task.description or ''}"))
+    conflicts: list[str] = []
+    if pinned and not (set(canonical) & set(pinned)):
+        conflicts.append(f"operator pinned repo scope {pinned}")
+    if mentions and not (set(canonical) & set(mentions)):
+        conflicts.append(f"goal title/description literally names {mentions}")
+    if not conflicts:
+        return
+    override = str(payload.get("scope_override_reason") or "").strip()
+    if not override:
+        raise DecisionPayloadInvalid(
+            f"affected_repos/target_repo {canonical} contradicts the goal's named repo scope "
+            f"({'; '.join(conflicts)}). Scope to the repo the goal names, or include "
+            "scope_override_reason recording why the goal text is wrong."
+        )
+    log.append(
+        Event(
+            now(),
+            "scope.override_recorded",
+            task.id,
+            run_id,
+            actor,
+            {
+                "affected_repos": canonical,
+                "named_repo_scope": pinned or mentions,
+                "scope_override_reason": safe_assignment_text(override, limit=240),
+                "summary": "Scope diverges from the repo named by the goal; justification recorded.",
+            },
+        )
+    )
 
 
 def _affected_repos_from_handoff(payload: dict[str, Any]) -> list[str]:
