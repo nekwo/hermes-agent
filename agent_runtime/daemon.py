@@ -92,7 +92,10 @@ class MissionDaemon:
         signal.signal(signal.SIGTERM, self.request_stop)
         loops = 0
         last_tick_id: str | None = None
-        self._emit_lifecycle_event("daemon.started")
+        # A previous daemon killed mid-turn leaves its run row active with no
+        # engine; reap immediately instead of waiting on the liveness watchdog.
+        orphans_reaped = reap_orphaned_active_runs(reason="daemon_restart_orphan")
+        self._emit_lifecycle_event("daemon.started", orphan_runs_reaped=len(orphans_reaped))
         try:
             heartbeat_stop = threading.Event()
             heartbeat_thread = threading.Thread(target=self._heartbeat_loop, args=(heartbeat_stop,), name="mission-daemon-heartbeat", daemon=True)
@@ -194,7 +197,7 @@ class MissionDaemon:
             # and `task archive` remains available to the operator.
             pass
 
-    def _emit_lifecycle_event(self, event_type: str, *, reason: str | None = None) -> None:
+    def _emit_lifecycle_event(self, event_type: str, *, reason: str | None = None, orphan_runs_reaped: int | None = None) -> None:
         try:
             from hermes_time import now
 
@@ -209,6 +212,8 @@ class MissionDaemon:
             }
             if reason:
                 payload["reason"] = str(reason)[:120]
+            if orphan_runs_reaped:
+                payload["orphan_runs_reaped"] = int(orphan_runs_reaped)
             EventLog().append(Event(now(), event_type, self.target_task_id, None, None, payload))
         except Exception:
             # Lifecycle events are observability; never fail the daemon for them.
@@ -250,6 +255,46 @@ class MissionDaemon:
 
     def _sleep_with_stop(self, wait_seconds: float) -> None:
         self.sleep_fn(wait_seconds)
+
+
+def reap_orphaned_active_runs(*, reason: str) -> list[str]:
+    """Cancel mid-turn runs that lost their driving engine (doc-07 gap 5).
+
+    Only one mission driver holds the daemon lease at a time, so an active
+    (queued/starting/running/waiting-on-tool) run found while the daemon is
+    stopping — or while a fresh daemon is starting after a kill — has no
+    engine left to finish it. Without this reap the run row stays ``running``
+    until the liveness watchdog cancels it minutes later; the watchdog is the
+    backstop, not the contract. WAITING_ON_APPROVAL runs are deliberately
+    parked and survive restarts, so they are never reaped here.
+    """
+
+    from .states import RunState
+    from .store import RunStore
+    from .worker_sessions import WorkerSessionStore
+
+    cancelled_ids: list[str] = []
+    try:
+        runs = RunStore()
+        workers = WorkerSessionStore()
+        for run in runs.find_active():
+            if run.state not in {RunState.QUEUED, RunState.STARTING, RunState.RUNNING, RunState.WAITING_ON_TOOL}:
+                continue
+            try:
+                cancelled = runs.cancel(run.id, reason=reason)
+            except Exception:
+                continue
+            cancelled_ids.append(run.id)
+            try:
+                for worker in workers.find_active(task_id=run.task_id, persona_id=run.persona_id):
+                    if worker.active_run_id and worker.active_run_id != run.id:
+                        continue
+                    workers.update_after_run(worker.id, cancelled, close_reason=reason, count_decision=False)
+            except Exception:
+                continue
+    except Exception:
+        return cancelled_ids
+    return cancelled_ids
 
 
 def _write_final_offline_status(pid: int, *, loops: int, last_tick_id: str | None) -> None:
@@ -318,7 +363,8 @@ def stop_daemon() -> dict:
     if not isinstance(pid, int) or not _pid_is_alive(pid):
         _write_daemon_status({"state": "offline"})
         _clear_daemon_lease(pid if isinstance(pid, int) else None)
-        return {"stopped": False, "state": "offline"}
+        orphans = reap_orphaned_active_runs(reason="daemon_stop_orphan")
+        return {"stopped": False, "state": "offline", "orphan_runs_cancelled": orphans}
     if _is_windows():
         subprocess.run(["taskkill", "/PID", str(pid), "/T"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
@@ -333,9 +379,12 @@ def stop_daemon() -> dict:
         # Do not report offline while the daemon process is still alive; a false
         # offline status invites a second daemon to start and contend for ticks.
         return {"stopped": False, "pid": pid, "state": status.get("state", "running"), "error": "daemon_pid_survived_stop"}
+    # The daemon process is gone; any run it was driving mid-turn can never
+    # finish. Cancel it now instead of waiting on the liveness watchdog.
+    orphans = reap_orphaned_active_runs(reason="daemon_stop_orphan")
     _write_daemon_status({"state": "offline", "last_pid": pid})
     _clear_daemon_lease(pid)
-    return {"stopped": True, "pid": pid, "state": "offline"}
+    return {"stopped": True, "pid": pid, "state": "offline", "orphan_runs_cancelled": orphans}
 
 
 def _wait_for_pid_exit(pid: int, *, timeout_seconds: float) -> bool:

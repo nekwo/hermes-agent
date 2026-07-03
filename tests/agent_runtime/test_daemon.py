@@ -429,3 +429,48 @@ def test_targeted_daemon_archives_terminal_task_on_exit(isolate_agent_runtime_ro
 
     remaining = [t.id for t in store.list_all()]
     assert "task_term" not in remaining
+
+
+def test_daemon_stop_reaps_orphaned_active_run_when_daemon_already_dead(isolate_agent_runtime_root):
+    from agent_runtime import daemon as daemon_mod
+    from agent_runtime.states import RunState
+    from agent_runtime.store import RunStore
+
+    runs = RunStore()
+    orphan = runs.open_run("neko_supervisor", "task_orphan", stage_id="scope", session_id="session_orphan")
+
+    result = daemon_mod.stop_daemon()
+
+    assert orphan.id in result["orphan_runs_cancelled"]
+    reaped = runs.get(orphan.id)
+    assert reaped.state == RunState.CANCELLED
+
+
+def test_daemon_start_reaps_orphan_immediately(isolate_agent_runtime_root):
+    from agent_runtime.states import RunState
+    from agent_runtime.store import RunStore
+
+    runs = RunStore()
+    orphan = runs.open_run("dev", "task_orphan2", stage_id="implement", session_id="session_orphan2")
+    engine = SettledEngine(stop_reason="no_eligible_action")
+
+    MissionDaemon(engine_factory=lambda: engine, interval_seconds=0, idle_interval_seconds=0).run_foreground(max_loops=1)
+
+    reaped = runs.get(orphan.id)
+    assert reaped.state == RunState.CANCELLED
+
+
+def test_waiting_on_approval_run_survives_daemon_reap(isolate_agent_runtime_root):
+    from agent_runtime import daemon as daemon_mod
+    from agent_runtime.states import RunState
+    from agent_runtime.store import RunStore
+
+    runs = RunStore()
+    waiting = runs.open_run("dev", "task_waiting", stage_id="implement", session_id="session_waiting")
+    waiting.state = RunState.WAITING_ON_APPROVAL
+    runs.update(waiting)
+
+    result = daemon_mod.stop_daemon()
+
+    assert result["orphan_runs_cancelled"] == []
+    assert runs.get(waiting.id).state == RunState.WAITING_ON_APPROVAL
