@@ -375,7 +375,19 @@ def _materialize_worktree_local_support(source_root: Path, worktree: Path) -> No
     target_env = worktree / ".env"
     if source_env.is_file() and not target_env.exists():
         try:
-            target_env.write_text("", encoding="utf-8")
+            if (source_root / "manage.py").is_file():
+                # Django settings hard-require env values (_require_env raises on
+                # a missing DJANGO_SECRET_KEY), so an empty placeholder makes
+                # every read-only proof fail in the worktree — live 2026-07-03
+                # (task_826869af): backend_dev blocked 3× on the empty .env even
+                # with a working venv. Copy the repo-local dev env: same machine,
+                # same user, hidden from diff attribution by the exclude below.
+                shutil.copyfile(source_env, target_env)
+            else:
+                # Launcher only needs the file to exist (pubspec declares .env as
+                # an asset); keep the empty placeholder so worktrees do not
+                # duplicate env contents where presence alone satisfies proofs.
+                target_env.write_text("", encoding="utf-8")
             support_patterns.append(".env")
         except OSError:
             _log_worktree_event("worktree_support_failed", {"worktree": str(worktree), "support": ".env"})

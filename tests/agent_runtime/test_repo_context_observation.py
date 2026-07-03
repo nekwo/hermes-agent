@@ -313,3 +313,40 @@ def test_isolated_repo_context_materializes_ignored_env_placeholder(tmp_path, mo
     assert (isolated.workdir / ".env").is_file()
     assert (isolated.workdir / ".env").read_text(encoding="utf-8") == ""
     assert _git(isolated.workdir, "status", "--short").stdout.strip() == ""
+
+
+def test_backend_worktree_env_is_copied_not_empty_placeholder(tmp_path, monkeypatch):
+    """Django settings hard-require env values, so the backend worktree .env must
+    carry the repo-local dev env; an empty placeholder made every read-only
+    proof fail (live 2026-07-03, task_826869af)."""
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    repo = _backend_like_repo(tmp_path)
+    (repo / ".env").write_text("DJANGO_SECRET_KEY=dev-secret\n", encoding="utf-8")
+    source = RepoExecutionContext(workdir=repo, repo_label="eternia-backend", source="test")
+
+    isolated = isolated_repo_context_for_run(source, task_id="t", run_id="run_env")
+
+    env = isolated.workdir / ".env"
+    assert env.is_file()
+    assert env.read_text(encoding="utf-8") == "DJANGO_SECRET_KEY=dev-secret\n"
+    assert _git(isolated.workdir, "status", "--short").stdout.strip() == ""
+
+
+def test_non_django_worktree_env_stays_empty_placeholder(tmp_path, monkeypatch):
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    repo = tmp_path / "launcher"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Harness Test")
+    (repo / "pubspec.yaml").write_text("name: launcher\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+    (repo / ".env").write_text("SECRET=value\n", encoding="utf-8")
+    source = RepoExecutionContext(workdir=repo, repo_label="launcher", source="test")
+
+    isolated = isolated_repo_context_for_run(source, task_id="t", run_id="run_env")
+
+    assert (isolated.workdir / ".env").read_text(encoding="utf-8") == ""

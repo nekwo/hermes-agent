@@ -63,6 +63,17 @@ def derive_stage_outcome(
     if decision.type in {DecisionType.PROPOSE_ACCEPTANCE, DecisionType.REQUEST_QA_REVIEW, DecisionType.COMPLETE, DecisionType.APPROVE}:
         if _scope_stage_ready_without_proof(stage):
             return StageOutcome.READY
+        if decision.type == DecisionType.PROPOSE_ACCEPTANCE:
+            # propose_acceptance is a PLANNING/routing decision. Attributed to
+            # anything but a proof-free scope stage (e.g. Neko's recovery
+            # re-scope while the blocked dev stage is current), it must never
+            # mark that stage passed — the typed-plan release inside
+            # apply_planning_decision is what re-arms/advances stages. Deriving
+            # PASSED here phantom-passed backend_implementation live
+            # (2026-07-03: task_3e2ae539 turn 1; task_826869af looped
+            # neko→implement 5× while the terminal proof gate clawed the
+            # phantom pass back every cycle).
+            return None
         return StageOutcome.PASSED
     if decision.type == DecisionType.PROPOSE_PATCH:
         proof_ids = decision.payload.get("proof_ids")

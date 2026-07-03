@@ -674,3 +674,38 @@ def test_scope_decision_outcome_attributes_to_deciding_stage_not_advanced_stage(
     assert action.slot_id in {"backend_builder", "backend_dev"}, (
         f"next dispatch must be the backend stage owner, got {action.slot_id}"
     )
+
+
+def test_scope_decision_on_gated_dev_stage_yields_no_outcome():
+    """Neko's recovery re-scope runs while the blocked dev stage is current; its
+    propose_acceptance must NOT phantom-pass the proof-gated stage (live
+    task_826869af looped neko->implement 5x on exactly this)."""
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="recovery attribution",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = _task_with_plan(plan)
+    task.mission_plan.current_stage_id = "backend_implementation"
+    task.current_stage_id = "backend_implementation"
+    decision = AgentDecision(
+        type=DecisionType.PROPOSE_ACCEPTANCE,
+        summary="Re-route the blocked backend proof slice to Backend Dev",
+        rationale="recovery",
+        payload={"objective": "recover", "acceptance_criteria": ["backend proof attached"]},
+    )
+
+    MissionStateMachine().apply_decision(
+        task, decision, actor="neko_supervisor", stage_id="backend_implementation"
+    )
+
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+    assert stages["backend_implementation"].status != StageStatus.PASSED, (
+        "a routing decision must never mark a proof-gated dev stage passed"
+    )
+    assert stages["implement"].status != StageStatus.PASSED
