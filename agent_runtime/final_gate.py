@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .decision_schema import AgentDecision, DecisionType
@@ -11,6 +12,8 @@ _DEFAULT_FINAL_GATE_COMMANDS: dict[str, tuple[str, ...]] = {
     "EterniaLauncher": ("flutter analyze",),
     "hermes-agent": ("python -m pytest tests/agent_runtime -q -o addopts=\"\"",),
 }
+
+_GOAL_COMMAND_PREFIXES = ("python", "pytest", "flutter", "dart", "npm", "pnpm", ".eterniabackendvirtualenv")
 
 
 def final_gate_required(task: Task, stage: TaskStage | None, delivery_packet: dict[str, Any] | None = None) -> bool:
@@ -49,11 +52,94 @@ def final_gate_commands(task: Task, stage: TaskStage | None) -> list[str]:
     commands = [_clean_command(item) for item in getattr(stage, "test_plan", []) or [] if _looks_like_command(item)]
     if commands:
         return commands[:3]
+    repo = stage_repo_for_gate(task, stage)
+    goal_named = goal_named_gate_commands(task, repo)
+    if goal_named:
+        return goal_named
+    return list(_DEFAULT_FINAL_GATE_COMMANDS.get(repo, ()))[:3]
+
+
+def stage_repo_for_gate(task: Task, stage: TaskStage | None) -> str:
     typed_stage = _typed_plan_stage(task, stage)
     repo = str(getattr(typed_stage, "repo", "") or getattr(stage, "repo", "") or "").strip()
     if not repo and len(getattr(task, "affected_repos", []) or []) == 1:
         repo = str((task.affected_repos or [""])[0]).strip()
-    return list(_DEFAULT_FINAL_GATE_COMMANDS.get(repo, ()))[:3]
+    return repo
+
+
+def goal_named_gate_commands(task: Task, repo: str | None) -> list[str]:
+    """Goal-named exact proof commands applicable to the stage's repo.
+
+    The skill/docs rule is that a focused proof command literally named by the
+    goal outranks generic proof recipes at the authoritative gate. Commands
+    whose repo hint contradicts the stage repo are excluded so a Launcher
+    stage never gate-runs a harness pytest and vice versa.
+    """
+
+    repo = str(repo or "").strip()
+    result: list[str] = []
+    for command in goal_named_proof_commands(task):
+        hint = _command_repo_hint(command)
+        if hint is not None and repo and hint != repo:
+            continue
+        result.append(command)
+    return result[:3]
+
+
+def goal_named_proof_commands(task: Task) -> list[str]:
+    """Exact runnable proof commands literally named by the goal text.
+
+    Conservative extraction: backtick-quoted spans and standalone/bulleted
+    lines that start with a known runner. Shell plumbing and secret-shaped
+    text are rejected outright.
+    """
+
+    texts = [
+        str(getattr(task, "title", "") or ""),
+        str(getattr(task, "description", "") or ""),
+        *[str(item) for item in (getattr(task, "acceptance_criteria", []) or [])],
+        *[str(item) for item in (getattr(task, "operator_notes", []) or [])],
+    ]
+    found: list[str] = []
+    for text in texts:
+        for command in _extract_command_candidates(text):
+            if command not in found:
+                found.append(command)
+    return found[:3]
+
+
+def _extract_command_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.findall(r"`([^`\n]{4,200})`", text):
+        candidates.append(match)
+    for line in text.splitlines():
+        candidates.append(line.strip().lstrip("-*").strip())
+    result: list[str] = []
+    for candidate in candidates:
+        command = " ".join(str(candidate or "").split())
+        if not command or len(command) > 200:
+            continue
+        if not command.lower().startswith(_GOAL_COMMAND_PREFIXES):
+            continue
+        if not _looks_like_command(command):
+            continue
+        if re.search(r"[<>|;&$]", command):
+            continue
+        if re.search(r"(?i)(secret|token|password|credential)", command):
+            continue
+        result.append(command)
+    return result
+
+
+def _command_repo_hint(command: str) -> str | None:
+    lowered = command.lower()
+    if "manage.py" in lowered or ".eterniabackendvirtualenv" in lowered or "eternia-backend" in lowered:
+        return "EterniaBackend"
+    if lowered.startswith(("flutter", "dart", "npm", "pnpm")) or " lib/" in lowered or "integration_test" in lowered:
+        return "EterniaLauncher"
+    if "agent_runtime" in lowered or "hermes" in lowered:
+        return "hermes-agent"
+    return None
 
 
 def _stage_requires_product_edit(task: Task, stage: TaskStage) -> bool:

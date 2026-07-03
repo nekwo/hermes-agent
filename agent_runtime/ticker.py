@@ -24,7 +24,7 @@ from .config import ensure_persisted_personas, get_persisted_persona, load_agent
 from .locks import HarnessLockUnavailable, tick_lock
 from .liveness import LivenessProbe
 from .events import EventLog
-from .final_gate import build_final_gate_decision
+from .final_gate import build_final_gate_decision, goal_named_gate_commands, stage_repo_for_gate
 from .models import Event, Incident, Task
 from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage
 from .persona_assignments import (
@@ -1898,6 +1898,21 @@ def _build_authoritative_stage_gate_decision(task: Task, stage, *, delivery_pack
     if legacy_product_gate is not None and not str(getattr(stage, "proof_recipe_id", "") or "").strip():
         return legacy_product_gate
     stage_id = str(getattr(stage, "id", "") or getattr(task, "current_stage_id", "") or "").strip()
+    goal_named = goal_named_gate_commands(task, stage_repo_for_gate(task, stage))
+    if goal_named:
+        # A focused proof command literally named by the goal outranks generic
+        # proof recipes at the authoritative gate: the Harness re-runs THAT
+        # command; recipes/defaults remain the fallback when none is named.
+        return AgentDecision(
+            type=DecisionType.REQUEST_TEST_RUN,
+            summary="Run goal-named focused proof command as the authoritative gate.",
+            rationale="The goal names an exact runnable proof command; the Harness gate re-runs it instead of a generic recipe.",
+            payload={
+                "stage_id": stage_id,
+                "commands": goal_named,
+                "proof_intent": "authoritative_gate_after_hand_off",
+            },
+        )
     recipe_id = str(getattr(stage, "proof_recipe_id", "") or "").strip()
     if recipe_id:
         return AgentDecision(
