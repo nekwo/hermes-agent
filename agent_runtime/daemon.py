@@ -60,7 +60,7 @@ class MissionDaemon:
         sleep_fn: Callable[[float], None] = time.sleep,
     ):
         self.engine_factory = engine_factory or TickEngine
-        self.target_task_id = None
+        self.target_task_id = _safe_task_id(target_task_id)
         self.foreground_runtime_instance_id = _safe_task_id(foreground_runtime_instance_id)
         self.interval_seconds = interval_seconds
         self.idle_interval_seconds = idle_interval_seconds
@@ -113,7 +113,7 @@ class MissionDaemon:
                     "loops": loops,
                     "heartbeat_at": _utc_now(),
                     "target_task_id": self.target_task_id,
-                    "queue_mode": "lane",
+                    "queue_mode": self._queue_mode(),
                     "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                 })
                 _refresh_daemon_lease(os.getpid())
@@ -123,7 +123,10 @@ class MissionDaemon:
                 try:
                     engine = self.engine_factory()
                     if hasattr(engine, "run_until_settled"):
-                        tick = engine.run_until_settled(max_actions=10)
+                        if self.target_task_id:
+                            tick = engine.run_until_settled(task_id=self.target_task_id, max_actions=10)
+                        else:
+                            tick = engine.run_until_settled(max_actions=10)
                     else:
                         tick = engine.tick_once()
                 except Exception as exc:
@@ -133,7 +136,7 @@ class MissionDaemon:
                         "loops": loops,
                         "heartbeat_at": _utc_now(),
                         "target_task_id": self.target_task_id,
-                        "queue_mode": "lane",
+                        "queue_mode": self._queue_mode(),
                         "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                         "error_class": type(exc).__name__,
                         "error_summary": "Mission Daemon tick failed",
@@ -145,6 +148,10 @@ class MissionDaemon:
                 wait_seconds = 0 if actions and stop_reason == "max_actions" else (self.interval_seconds if actions else self.idle_interval_seconds)
                 next_wake = _utc_now() + timedelta(seconds=wait_seconds)
                 _write_daemon_status(_status_from_tick(tick, loops=loops, wait_seconds=wait_seconds, next_wake_at=next_wake))
+                if self.target_task_id and stop_reason == "task_terminal":
+                    self._stop_requested = True
+                    self._archive_terminal_target()
+                    break
                 if wait_seconds > 0 and not self._stop_requested:
                     self._sleep_with_stop(wait_seconds)
         finally:
@@ -163,6 +170,9 @@ class MissionDaemon:
             signal.signal(signal.SIGINT, previous_int)
             signal.signal(signal.SIGTERM, previous_term)
         return DaemonLoopResult(loops=loops, last_tick_id=last_tick_id, stopped=self._stop_requested).to_json()
+
+    def _queue_mode(self) -> str:
+        return "foreground" if self.target_task_id else "lane"
 
     def _archive_terminal_target(self) -> None:
         if not self.target_task_id:
@@ -195,7 +205,7 @@ class MissionDaemon:
                 "mode": "mission_daemon",
                 "self_driven": True,
                 "pid": os.getpid(),
-                "queue_mode": "lane",
+                "queue_mode": self._queue_mode(),
             }
             if reason:
                 payload["reason"] = str(reason)[:120]
@@ -259,12 +269,21 @@ def _write_final_offline_status(pid: int, *, loops: int, last_tick_id: str | Non
 
 
 def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: str | None = None, interval_seconds: float | None = None, idle_interval_seconds: float | None = None) -> dict:
-    task_id = None
+    task_id = _safe_task_id(task_id)
     foreground_runtime_instance_id = _safe_task_id(foreground_runtime_instance_id)
     status = read_daemon_status()
     pid = status.get("pid")
     if isinstance(pid, int) and _pid_is_alive(pid):
         existing_target = _safe_task_id(status.get("target_task_id"))
+        if task_id and existing_target != task_id:
+            return {
+                "started": False,
+                "pid": pid,
+                "state": status.get("state", "running"),
+                "target_task_id": existing_target,
+                "requested_task_id": task_id,
+                "error": "daemon_target_conflict",
+            }
         return {"started": False, "pid": pid, "state": status.get("state", "running")}
     lease = _read_daemon_lease()
     lease_pid = lease.get("pid") if isinstance(lease, dict) else None
@@ -272,6 +291,8 @@ def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: 
         return {"started": False, "pid": lease_pid, "state": "running", "error": "daemon_lease_held"}
 
     cmd = [sys.executable, "-m", "hermes_cli.main", "harness", "daemon", "foreground"]
+    if task_id:
+        cmd.extend(["--task", task_id])
     if interval_seconds is not None:
         cmd.extend(["--interval", str(interval_seconds)])
     if idle_interval_seconds is not None:
@@ -279,15 +300,16 @@ def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: 
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if _is_windows() else 0
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
     _write_daemon_lease(proc.pid)
+    queue_mode = "foreground" if task_id else "lane"
     _write_daemon_status({
         "state": "starting",
         "pid": proc.pid,
         "heartbeat_at": _utc_now(),
         "target_task_id": task_id,
-        "queue_mode": "lane",
+        "queue_mode": queue_mode,
         "foreground_runtime_instance_id": foreground_runtime_instance_id,
     })
-    return {"started": True, "pid": proc.pid, "state": "starting", "target_task_id": task_id, "queue_mode": "lane"}
+    return {"started": True, "pid": proc.pid, "state": "starting", "target_task_id": task_id, "queue_mode": queue_mode}
 
 
 def stop_daemon() -> dict:
