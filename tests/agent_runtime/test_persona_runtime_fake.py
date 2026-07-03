@@ -824,3 +824,45 @@ def test_dev_persona_missing_affected_repo_fails_closed_before_home_cwd_fallback
         runtime.run_tick(dev, build_context(task, run), run=run)
 
     assert FakeAIAgent.instances == []
+
+
+def test_dev_grounding_overrides_default_blueprint_placeholder_repo(isolate_agent_runtime_root):
+    """Live regression 2026-07-03 (task_8e1e0832): on the default two-dev
+    blueprint a hermes-agent goal's backend_dev grounded in the
+    backend_implementation placeholder repo (EterniaBackend), so the
+    goal-named gate command ran file-not-found in the wrong tree."""
+
+    from hermes_time import now as _now
+
+    from agent_runtime.default_plan import ensure_default_mission_plan
+    from agent_runtime.models import AgentPersona, Task
+    from agent_runtime.persona_runtime import _stage_repo_scope_for_persona
+    from agent_runtime.states import TaskState
+
+    ts = _now()
+    task = Task(
+        id="task_ground",
+        title="Audit",
+        description="In the hermes-agent repo, audit and report.",
+        state=TaskState.RUNNING,
+        created_at=ts,
+        updated_at=ts,
+        requested_by="test",
+        affected_repos=["hermes-agent"],
+    )
+    plan = ensure_default_mission_plan(task)
+    plan.current_stage_id = "backend_implementation"
+    task.current_stage_id = "backend_implementation"
+    persona = AgentPersona(
+        id="backend_dev",
+        display_name="Backend Dev",
+        role="backend_dev",
+        model="stub",
+        provider="stub",
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="",
+    )
+    ctx = type("Ctx", (), {"task": task, "current_stage": None})()
+
+    assert _stage_repo_scope_for_persona(persona, ctx) == "hermes-agent"

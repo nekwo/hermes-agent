@@ -481,6 +481,14 @@ def _stage_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> s
     stage_repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
     if stage_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
         return None
+    from .final_gate import default_blueprint_placeholder_repo_override
+
+    # On the bundled default blueprint the stage repo is a placeholder; a goal
+    # resolved to a single different repo grounds there instead (observed live
+    # 2026-07-03, task_8e1e0832: backend_dev grounded in an EterniaBackend
+    # worktree for a hermes-agent goal, so the goal-named gate command failed
+    # with file-not-found in the wrong tree).
+    stage_repo = default_blueprint_placeholder_repo_override(ctx.task, stage_repo) or stage_repo
     persona_scope = getattr(persona, "repo_scope", None)
     if persona_scope:
         try:
