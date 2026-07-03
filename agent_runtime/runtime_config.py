@@ -90,6 +90,13 @@ class SimplifiedAgentContractConfig:
 
 
 @dataclass(slots=True)
+class ReadModelConfig:
+    enabled: bool = False
+    serve_snapshot_from_db: bool = True
+    db_filename: str = "read_model.db"
+
+
+@dataclass(slots=True)
 class SwarmConfig:
     enabled: bool = False
     requires_certification: bool = True
@@ -149,6 +156,7 @@ class RuntimeConfig:
     role_envelope: RoleEnvelopeConfig = field(default_factory=RoleEnvelopeConfig)
     repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)
+    read_model: ReadModelConfig = field(default_factory=ReadModelConfig)
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
 

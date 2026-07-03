@@ -11,7 +11,7 @@ from hermes_cli.profiles import profile_exists
 
 from .personas import DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
 
 @dataclass(slots=True)
 class AgentRuntimeConfig(RuntimeConfig):
@@ -35,6 +35,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     role_envelope = _role_envelope_config(raw.get("role_envelope") or {})
     repo_bundle_routing = _repo_bundle_routing_config(raw.get("repo_bundle_routing") or {})
     simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
+    read_model = _read_model_config(raw.get("read_model") or {})
     swarm = _swarm_config(raw.get("swarm") or {})
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
     continuous_role_sessions = _apply_enterprise_role_session_compat(
@@ -82,6 +83,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         role_envelope=role_envelope,
         repo_bundle_routing=repo_bundle_routing,
         simplified_agent_contract=simplified_agent_contract,
+        read_model=read_model,
         swarm=swarm,
         coordinator_permissions=coordinator_permissions,
         personas=raw.get("personas", {}) or {},
@@ -364,6 +366,19 @@ def _simplified_agent_contract_config(raw: dict[str, Any]) -> SimplifiedAgentCon
     )
 
 
+def _read_model_config(raw: dict[str, Any]) -> ReadModelConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = ReadModelConfig()
+    filename = str(raw.get("db_filename", defaults.db_filename) or defaults.db_filename).strip()
+    if not filename or "/" in filename or "\\" in filename:
+        filename = defaults.db_filename
+    return ReadModelConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        serve_snapshot_from_db=bool(raw.get("serve_snapshot_from_db", defaults.serve_snapshot_from_db)),
+        db_filename=filename,
+    )
+
+
 def _swarm_config(raw: dict[str, Any]) -> SwarmConfig:
     raw = raw if isinstance(raw, dict) else {}
     defaults = SwarmConfig()
@@ -452,4 +467,3 @@ def _optional_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
-

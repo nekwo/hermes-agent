@@ -122,6 +122,39 @@ def test_config_loads_live_run_budget_fields(tmp_path):
     assert cfg.live_run_iteration_budget == 9
 
 
+def test_config_loads_read_model_flag_defaults_and_filename_guard(tmp_path):
+    default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
+    assert default_config.read_model.enabled is False
+    assert default_config.read_model.serve_snapshot_from_db is True
+    assert default_config.read_model.db_filename == "read_model.db"
+
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "agent_runtime:\n"
+        "  read_model:\n"
+        "    enabled: true\n"
+        "    serve_snapshot_from_db: false\n"
+        "    db_filename: custom-runtime.db\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_agent_runtime_config(p)
+    assert cfg.read_model.enabled is True
+    assert cfg.read_model.serve_snapshot_from_db is False
+    assert cfg.read_model.db_filename == "custom-runtime.db"
+
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "agent_runtime:\n"
+        "  read_model:\n"
+        "    enabled: true\n"
+        "    db_filename: ../outside.db\n",
+        encoding="utf-8",
+    )
+
+    assert load_agent_runtime_config(bad).read_model.db_filename == "read_model.db"
+
+
 def test_normal_worker_flow_defaults_off_and_can_be_enabled(tmp_path):
     default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
 

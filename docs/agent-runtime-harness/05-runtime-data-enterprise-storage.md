@@ -1,6 +1,6 @@
 # 05 — Runtime Data: Enterprise-Grade Storage & Access (implementation-ready)
 
-Status: **in-progress: RD0 shipped, RD1 next** (2026-07-03, v2 — upgraded from the v1
+Status: **in-progress: RD0-RD2 shipped, RD3 gated next** (2026-07-03, v2 — upgraded from the v1
 proposal with exact modules, schemas, config keys, test files, proof commands,
 rollback paths, and per-stage handoff prompts). Written after the Stage C
 Mission Control capture work surfaced, in one session, every major weakness of
@@ -554,12 +554,14 @@ green runs) the honest `production_envelope` entry. Check your brain first.”
 | Windows path/locking quirks | soak + crash drills run on Windows CI (this machine is the reference) |
 | Half-built RD2 shipping | flag defaults OFF; the equivalence test must exist in the same PR as the flag |
 
-## Baselines (RD0 fills this in)
+## Baselines
 | Metric | 2026-07-03 (pre-work) | Post-RD2 | Post-RD3 | Post-RD4 |
 |---|---|---|---|---|
 | snapshot_bytes | 26.7 MB | | | |
 | event_log_bytes | 60.6 MB (92,484 events) | | | |
 | full build_ms (live root) | ~10,000 | | | |
-| full build_ms (RD0 synthetic 10k events / 50 terminal tasks) | 1,552 | | | |
+| full build_ms (RD0 synthetic 10k events / 50 terminal tasks) | 1,552 | 1,552 (legacy build unchanged) | | |
+| read_model full_rebuild_ms (RD0 synthetic 10k events / 50 terminal tasks) | n/a | 348 | | |
+| read_model render_ms (RD0 synthetic 10k events / 50 terminal tasks) | n/a | 29 | | |
 | incremental_apply_ms | n/a | n/a | | |
 | consumer_visible_lag_ms | ≥ 4,000 (poll) | | | |

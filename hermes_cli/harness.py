@@ -5942,6 +5942,12 @@ def _cmd_incident_close(args) -> int:
 
 
 def _cmd_snapshot(args) -> int:
-    snap=write_snapshot(build_snapshot())
+    cfg = load_agent_runtime_config()
+    snap = write_snapshot(build_snapshot())
+    read_model_cfg = getattr(cfg, "read_model", None)
+    if bool(getattr(read_model_cfg, "enabled", False)) and bool(getattr(read_model_cfg, "serve_snapshot_from_db", True)):
+        from agent_runtime.read_model import ReadModel
+
+        snap = ReadModel().render_snapshot()
     print(emit_json(snap) if args.json else "snapshot written")
     return 0

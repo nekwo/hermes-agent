@@ -486,6 +486,13 @@ def _parity_warnings(data) -> list[dict]:
 def write_snapshot(snapshot: dict | None = None) -> dict:
     snapshot = snapshot or build_snapshot()
     atomic_json_write(paths.snapshot_path(), to_jsonable(snapshot), indent=2, sort_keys=True)
+    cfg = load_agent_runtime_config()
+    read_model_cfg = getattr(cfg, "read_model", None)
+    if bool(getattr(read_model_cfg, "enabled", False)):
+        from .read_model import ReadModel
+
+        watermark = (snapshot.get("parity") or {}).get("watermark") or {}
+        ReadModel().apply_full_rebuild(snapshot, watermark=watermark)
     return snapshot
 
 
