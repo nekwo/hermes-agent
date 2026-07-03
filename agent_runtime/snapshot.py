@@ -317,12 +317,16 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
     """
 
     last_ts = getattr(last_event, "ts", None) if last_event is not None else None
+    watermark = events_watermark(last_event_ts=last_ts)
     return {
         "envelope_version": PARITY_ENVELOPE_VERSION,
         "contract_version": 38,
         "generated_at": data.get("generated_at"),
         "build_ms": int(max(0.0, (time.perf_counter() - build_started)) * 1000),
-        "watermark": events_watermark(last_event_ts=last_ts),
+        "snapshot_bytes": _snapshot_payload_size(data),
+        "event_log_bytes": int(watermark.get("event_offset") or 0),
+        "projection_age_ms": _projection_age_ms(last_ts),
+        "watermark": watermark,
         "runtime_root": _runtime_root_identity(),
         "profile": _runtime_profile_identity(),
         "capabilities": [
@@ -343,6 +347,30 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         "drops": drop_samples,
         "warnings": _parity_warnings(data),
     }
+
+
+def _snapshot_payload_size(data) -> int:
+    try:
+        return len(json.dumps(to_jsonable(data), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    except Exception:
+        return 0
+
+
+def _projection_age_ms(last_event_ts) -> int | None:
+    if last_event_ts is None:
+        return None
+    try:
+        if isinstance(last_event_ts, datetime):
+            ts = last_event_ts
+        else:
+            text = str(last_event_ts)
+            ts = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        current = now()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=current.tzinfo)
+        return max(0, int((current - ts.astimezone(current.tzinfo)).total_seconds() * 1000))
+    except Exception:
+        return None
 
 
 def _runtime_root_identity() -> dict:

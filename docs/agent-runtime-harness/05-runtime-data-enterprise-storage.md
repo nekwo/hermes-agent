@@ -1,6 +1,6 @@
 # 05 — Runtime Data: Enterprise-Grade Storage & Access (implementation-ready)
 
-Status: **implementation-ready spec** (2026-07-03, v2 — upgraded from the v1
+Status: **in-progress: RD0 shipped, RD1 next** (2026-07-03, v2 — upgraded from the v1
 proposal with exact modules, schemas, config keys, test files, proof commands,
 rollback paths, and per-stage handoff prompts). Written after the Stage C
 Mission Control capture work surfaced, in one session, every major weakness of
@@ -560,5 +560,6 @@ green runs) the honest `production_envelope` entry. Check your brain first.”
 | snapshot_bytes | 26.7 MB | | | |
 | event_log_bytes | 60.6 MB (92,484 events) | | | |
 | full build_ms (live root) | ~10,000 | | | |
+| full build_ms (RD0 synthetic 10k events / 50 terminal tasks) | 1,552 | | | |
 | incremental_apply_ms | n/a | n/a | | |
 | consumer_visible_lag_ms | ≥ 4,000 (poll) | | | |

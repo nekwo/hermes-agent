@@ -5,7 +5,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from model_tools import get_tool_definitions, get_toolset_for_tool
+from model_tools import get_toolset_for_tool
+from tools.registry import registry
 
 from .models import AgentPersona
 from .personas import (
@@ -211,18 +212,13 @@ def _cached_profile_readiness_for_visibility(
 
 @lru_cache(maxsize=128)
 def _cached_tool_names_for_toolsets(toolsets: tuple[str, ...], blocked_tool_names: tuple[str, ...]) -> tuple[str, ...]:
-    tools = get_tool_definitions(
-        enabled_toolsets=list(toolsets),
-        blocked_tool_names=list(blocked_tool_names),
-        quiet_mode=True,
-    )
-    return tuple(sorted(_tool_name(tool) for tool in tools if _tool_name(tool)))
-
-
-def _tool_name(tool: dict[str, Any]) -> str:
-    function = tool.get("function") if isinstance(tool, dict) else None
-    name = function.get("name") if isinstance(function, dict) else None
-    return str(name or "").strip()
+    blocked = set(blocked_tool_names)
+    names = [
+        name
+        for name in registry.get_all_tool_names()
+        if name not in blocked and str(get_toolset_for_tool(name) or "") in set(toolsets)
+    ]
+    return tuple(sorted(names))
 
 
 def _blocked_tool_entries(
