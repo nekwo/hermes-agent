@@ -133,6 +133,51 @@ def test_open_incident_routes_neko_even_when_task_not_blocked():
     assert "open incidents" in action.reason
 
 
+def test_running_open_incident_adjudication_is_one_pass_per_signal(isolate_agent_runtime_root):
+    """A RUNNING mission with open incidents gets ONE Neko adjudication pass
+    per evidence signal (observed live: a supervisor answering adjudication
+    with `block` was re-dispatched every ~30-60s forever). Closing an
+    incident changes the signal and re-arms recovery."""
+
+    import uuid
+
+    from agent_runtime.models import Incident
+    from agent_runtime.store import IncidentStore
+
+    incidents = IncidentStore()
+    incident = Incident(
+        id=f"inc_{uuid.uuid4().hex[:8]}",
+        task_id="mission_1",
+        run_id=None,
+        kind="run_hung",
+        summary="hung",
+        detail_path=None,
+        opened_at=now(),
+    )
+    incidents.open(incident)
+
+    mission = make_mission(TaskState.RUNNING)
+    mission.open_incident_ids = [incident.id]
+    machine = MissionStateMachine(config=typed_config())
+
+    first = machine.next_action(mission)
+    assert first.type == HarnessActionType.RUN_SLOT
+    assert "open incidents" in first.reason
+
+    # The harness marks the bounded pass when it dispatches Neko.
+    mark_block_recovery_attempt(mission)
+    second = machine.next_action(mission)
+    assert second.type == HarnessActionType.NOOP
+    assert "waiting on intervention" in second.reason
+
+    # Real progress (incident close) changes the signal and re-arms; the
+    # prune also unlinks the now-closed incident so routing moves on.
+    incidents.close(incident.id, reason="adjudicated")
+    third = machine.next_action(mission)
+    assert mission.open_incident_ids == []
+    assert "open incidents" not in (third.reason or "")
+
+
 def test_closed_store_incident_link_is_pruned_not_neko_looped(isolate_agent_runtime_root):
     """A stale open_incident_ids link whose incident is CLOSED in the store
     must not route Neko adjudication forever (observed live: an in-flight

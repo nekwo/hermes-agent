@@ -153,7 +153,13 @@ class MissionStateMachine:
         if state in {TaskState.DONE, TaskState.CANCELLED}:
             return HarnessAction(HarnessActionType.NOOP, mission.id, reason="blueprint mission is terminal")
         if getattr(mission, "open_incident_ids", None):
-            if state == TaskState.BLOCKED and block_recovery_attempted_for_current_signal(mission):
+            # One bounded adjudication pass per evidence signal in ANY state,
+            # not just BLOCKED: a RUNNING mission whose supervisor answers
+            # adjudication with `block` must settle to wait-on-intervention
+            # instead of re-dispatching Neko forever. Closing an incident,
+            # attaching proof, or recording a packet changes the signal and
+            # re-arms recovery automatically.
+            if block_recovery_attempted_for_current_signal(mission):
                 return HarnessAction(HarnessActionType.NOOP, mission.id, reason="blueprint mission has open incidents waiting on intervention")
             return _run_slot(mission, "neko_supervisor", "blueprint mission has open incidents; Neko must adjudicate")
         if _has_failed_current_stage_test_proof(mission, proof_store=self.proof_store) and _same_stage_retry_blocked(mission):

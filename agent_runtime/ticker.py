@@ -236,12 +236,18 @@ class TickEngine:
                         continue
                     if (
                         _action_targets(action, "neko_supervisor")
-                        and not getattr(action_task, "open_incident_ids", None)
                         and (
-                            action_task.state == TaskState.BLOCKED
+                            bool(getattr(action_task, "open_incident_ids", None))
+                            or action_task.state == TaskState.BLOCKED
                             or action.reason == "needs Neko Mission Lead to resolve post-scoping context request"
                         )
                     ):
+                        # Open-incident adjudication dispatches are ALSO one
+                        # bounded pass per evidence signal: observed live, a
+                        # supervisor that answers adjudication with `block`
+                        # was re-dispatched every ~30-60s forever (the signal
+                        # fingerprint re-arms on incident close / new proof /
+                        # new packet, so real progress always re-enables Neko).
                         mark_block_recovery_attempt(action_task)
                         action_task.updated_at = now()
                         self.task_store.update(action_task, actor="harness", reason="route task to one bounded Neko recovery pass")
