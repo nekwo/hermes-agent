@@ -13,7 +13,7 @@ from . import paths
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .events import EventLog
 from .models import Event, Task
-from .proof_runner import _ABSOLUTE_PATH_PATTERNS, _SECRET_PATTERNS
+from .proof_runner import _ABSOLUTE_PATH_PATTERNS, _SECRET_PATTERNS, adapt_eternia_backend_manage_py_command
 from .serde import to_jsonable
 
 PACKET_SCHEMA_VERSION = 1
@@ -557,6 +557,7 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
         proof_gate["minimum_status"] = "passed"
     if str(proof_gate.get("minimum_status")) not in PROOF_STATUSES:
         raise DecisionPayloadInvalid("handoff_packet.proof_gate.minimum_status is invalid")
+    _normalize_backend_self_test_command(packet, proof_gate)
     if mode in {"backend_first_cross_stack", "sequential_specialists"}:
         if str(packet.get("packet_kind") or "") == "qa_coordination_release":
             _default_qa_coordination_join_gate(packet, proof_gate=proof_gate)
@@ -573,6 +574,27 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
             raise DecisionPayloadInvalid("handoff_packet.self_heal.classification is invalid")
         if "action" in self_heal and str(self_heal.get("action")) not in SELF_HEAL_ACTIONS:
             raise DecisionPayloadInvalid("handoff_packet.self_heal.action is invalid")
+
+
+def _normalize_backend_self_test_command(packet: dict[str, Any], proof_gate: dict[str, Any]) -> None:
+    """Adapt a backend-targeted ``self_test_command`` to the repo-venv interpreter.
+
+    Isolated worktrees carry no Python environment on PATH; the harness proof
+    runner already adapts its OWN commands, but the agent-facing
+    ``self_test_command`` reached the dev un-adapted, so every backend goal
+    burned a discovery turn (naked ``python manage.py check`` → no Django →
+    ``block`` → a full lead recovery turn). Normalize once at packet acceptance
+    so the dev is handed the interpreter that actually exists in the worktree.
+    """
+    if str(packet.get("target_repo") or "") != "EterniaBackend":
+        return
+    command = str(proof_gate.get("self_test_command") or "").strip()
+    if not command:
+        return
+    adapted = adapt_eternia_backend_manage_py_command(command)
+    if adapted != command:
+        proof_gate["self_test_command"] = adapted
+        _append_operator_note(packet, "proof_gate.self_test_command adapted to backend venv interpreter")
 
 
 def _normalize_handoff_repos(packet: dict[str, Any]) -> None:

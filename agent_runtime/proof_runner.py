@@ -755,6 +755,18 @@ def _adapt_eternia_backend_django_command(command: str, *, workdir: str | Path |
 def _adapt_eternia_backend_manage_py_venv(command: str, *, workdir: str | Path | None = None) -> str:
     if "manage.py" not in command or not _looks_like_eternia_backend_context(command, workdir=workdir):
         return command
+    return adapt_eternia_backend_manage_py_command(command)
+
+
+def adapt_eternia_backend_manage_py_command(command: str) -> str:
+    """Rewrite a naked ``python manage.py …`` to the canonical repo-venv interpreter.
+
+    Context-free core of ``_adapt_eternia_backend_manage_py_venv``; callers are
+    responsible for asserting the command targets the EterniaBackend repo. Also
+    reused when normalizing agent-facing handoff self-test commands so devs are
+    told the interpreter that actually exists in a grounded worktree instead of
+    re-discovering it every goal.
+    """
     if ".EterniaBackendVirtualEnv/Scripts/python.exe" in command:
         return command
     stripped = re.sub(

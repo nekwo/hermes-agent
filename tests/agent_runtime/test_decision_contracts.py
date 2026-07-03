@@ -56,6 +56,58 @@ def test_handoff_packet_validates_underivable_core():
     )
 
 
+def test_handoff_backend_self_test_command_adapted_to_venv_interpreter():
+    """A naked `python manage.py …` self-test cannot run in an isolated worktree
+    (no venv on PATH); packet acceptance must hand the dev the canonical repo
+    interpreter instead of letting every backend goal burn a discovery turn."""
+    packet = handoff_packet()
+    packet["proof_gate"]["self_test_command"] = "python manage.py check"
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["self_test_command"] == (
+        ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"
+    )
+    assert "self_test_command adapted" in str(packet.get("operator_note") or "")
+
+
+def test_handoff_backend_self_test_command_already_canonical_untouched():
+    packet = handoff_packet()
+    packet["proof_gate"]["self_test_command"] = ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["self_test_command"] == (
+        ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"
+    )
+    assert "self_test_command adapted" not in str(packet.get("operator_note") or "")
+
+
+def test_handoff_launcher_self_test_command_not_adapted():
+    packet = handoff_packet(
+        handoff_mode="single_specialist",
+        target_owner="dev",
+        target_repo="EterniaLauncher",
+    )
+    packet.pop("next_owner", None)
+    packet.pop("next_repo", None)
+    packet.pop("join_gate", None)
+    packet["proof_gate"]["self_test_command"] = "flutter analyze lib/main.dart"
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["self_test_command"] == "flutter analyze lib/main.dart"
+
+
 def test_handoff_packet_accepts_compact_harness_rules_metadata():
     validate_planning_decision(
         decision(

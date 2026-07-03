@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -192,6 +193,12 @@ def _worktree_is_reapable(worktree: Path, *, protected: set[Path]) -> bool:
 
 
 def _remove_harness_worktree(source_root: Path, worktree: Path, *, reason: str) -> bool:
+    severed = _sever_worktree_reparse_points(worktree)
+    if severed:
+        _log_worktree_event(
+            "worktree_links_severed",
+            {"worktree": str(worktree), "count": severed, "reason": reason},
+        )
     result = subprocess.run(
         ["git", "worktree", "remove", "--force", str(worktree)],
         cwd=source_root,
@@ -210,6 +217,72 @@ def _remove_harness_worktree(source_root: Path, worktree: Path, *, reason: str) 
         )
         return True
     return False
+
+
+def _sever_worktree_reparse_points(worktree: Path) -> int:
+    """Delete link entries (junctions / symlinks) inside a worktree WITHOUT
+    recursing into their targets, returning how many links were severed.
+
+    ``git worktree remove --force`` on Git for Windows traverses directory
+    junctions as plain directories, so removing a worktree that carries a
+    support junction (e.g. the ``.EterniaBackendVirtualEnv`` link materialized
+    for backend self-tests) deletes the REAL target's contents along with the
+    worktree. This happened live on 2026-07-01: the first count-cap GC burst
+    emptied the backend repo's virtualenv through exactly this traversal,
+    and every backend goal afterwards lost its interpreter. Severing the link
+    entries first guarantees only the link dies with the worktree.
+    """
+
+    severed = 0
+    stack = [worktree]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if _entry_is_reparse_point(entry):
+                    if _remove_link_entry(entry.path):
+                        severed += 1
+                    else:
+                        _log_worktree_event(
+                            "worktree_link_sever_failed",
+                            {"worktree": str(worktree), "link": entry.name},
+                        )
+                    continue
+                if entry.is_dir(follow_symlinks=False) and entry.name != ".git":
+                    stack.append(Path(entry.path))
+            except OSError:
+                continue
+    return severed
+
+
+def _entry_is_reparse_point(entry: os.DirEntry) -> bool:
+    if entry.is_symlink():
+        return True
+    if os.name != "nt":
+        return False
+    try:
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _remove_link_entry(path: str) -> bool:
+    """Remove a link entry itself (never its target's contents)."""
+    try:
+        os.rmdir(path)  # junction / directory symlink: drops the reparse point only
+        return True
+    except OSError:
+        pass
+    try:
+        os.unlink(path)  # file symlink
+        return True
+    except OSError:
+        return False
 
 
 def _registered_worktree_paths(source_root: Path) -> set[Path]:
@@ -322,8 +395,27 @@ def _materialize_worktree_local_support(source_root: Path, worktree: Path) -> No
     elif target_venv.exists():
         support_patterns.append(".EterniaBackendVirtualEnv/")
 
+    if target_venv.exists() and not _venv_has_interpreter(target_venv):
+        # A hollow venv link (dir exists, no interpreter) means every agent
+        # self-test that needs it will fail with a confusing per-goal discovery
+        # loop. Surface it as a harness event instead of letting each goal
+        # re-learn it. Live example: the 2026-07-01 GC junction traversal left
+        # the real venv empty and two goals burned 4 extra model turns on it.
+        _log_worktree_event(
+            "worktree_support_degraded",
+            {
+                "worktree": str(worktree),
+                "support": ".EterniaBackendVirtualEnv",
+                "reason": "venv_missing_interpreter",
+            },
+        )
+
     if support_patterns:
         _append_worktree_excludes(worktree, support_patterns)
+
+
+def _venv_has_interpreter(venv_dir: Path) -> bool:
+    return (venv_dir / "Scripts" / "python.exe").exists() or (venv_dir / "bin" / "python").exists()
 
 
 def _link_local_support_dir(source: Path, target: Path) -> bool:

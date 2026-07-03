@@ -177,6 +177,93 @@ def test_isolated_repo_context_gc_count_cap_spares_dirty_and_fresh_worktrees(tmp
     assert a.workdir.exists() and b.workdir.exists() and c.workdir.exists()
 
 
+def _backend_like_repo(tmp_path, *, venv_contents: bool = True):
+    repo = tmp_path / "eternia-backend"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Harness Test")
+    (repo / "manage.py").write_text("# manage\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(".EterniaBackendVirtualEnv/\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+    venv = repo / ".EterniaBackendVirtualEnv"
+    if venv_contents:
+        scripts = venv / "Scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "python.exe").write_text("fake interpreter\n", encoding="utf-8")
+        (venv / "pyvenv.cfg").write_text("home = fake\n", encoding="utf-8")
+    else:
+        venv.mkdir()
+    return repo
+
+
+def test_worktree_removal_severs_venv_link_and_preserves_real_venv(tmp_path, monkeypatch):
+    """git worktree remove --force follows directory junctions on Windows; the
+    GC must sever support links first so the REAL venv survives (live incident
+    2026-07-01: the first count-cap burst emptied the backend venv)."""
+    import agent_runtime.repo_context as rc
+
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    repo = _backend_like_repo(tmp_path)
+    source = RepoExecutionContext(workdir=repo, repo_label="eternia-backend", source="test")
+
+    isolated = isolated_repo_context_for_run(source, task_id="t", run_id="run_a")
+    link = isolated.workdir / ".EterniaBackendVirtualEnv"
+    assert link.exists(), "venv support link must be materialized into the worktree"
+    assert (link / "Scripts" / "python.exe").exists()
+
+    removed = rc._remove_harness_worktree(repo, isolated.workdir, reason="test")
+
+    assert removed is True
+    assert not isolated.workdir.exists()
+    assert (repo / ".EterniaBackendVirtualEnv" / "Scripts" / "python.exe").exists(), (
+        "removing the worktree must never delete the real venv contents through the link"
+    )
+
+
+def test_gc_count_cap_with_venv_links_preserves_real_venv(tmp_path, monkeypatch):
+    import agent_runtime.repo_context as rc
+
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(rc, "HARNESS_WORKTREE_GC_MAX_PER_REPO", 1)
+    monkeypatch.setattr(rc, "HARNESS_WORKTREE_GC_MIN_AGE_SECONDS", 0)
+    repo = _backend_like_repo(tmp_path)
+    source = RepoExecutionContext(workdir=repo, repo_label="eternia-backend", source="test")
+
+    a = isolated_repo_context_for_run(source, task_id="t", run_id="run_a")
+    b = isolated_repo_context_for_run(source, task_id="t", run_id="run_b")
+    base = time.time() - 3600
+    for idx, ctx in enumerate((a, b)):
+        os.utime(ctx.workdir, (base + idx, base + idx))
+
+    c = isolated_repo_context_for_run(source, task_id="t", run_id="run_c")
+
+    assert not a.workdir.exists(), "count cap should reap the oldest clean worktree"
+    assert c.workdir.exists()
+    assert (repo / ".EterniaBackendVirtualEnv" / "Scripts" / "python.exe").exists(), (
+        "count-cap GC must not empty the real venv through the worktree's link"
+    )
+
+
+def test_materialize_worktree_support_logs_degraded_event_for_hollow_venv(tmp_path, monkeypatch):
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    repo = _backend_like_repo(tmp_path, venv_contents=False)
+    source = RepoExecutionContext(workdir=repo, repo_label="eternia-backend", source="test")
+
+    isolated_repo_context_for_run(source, task_id="t", run_id="run_a")
+
+    events_path = runtime_root / "worktree_events.jsonl"
+    assert events_path.is_file()
+    lines = [line for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    degraded = [line for line in lines if '"worktree_support_degraded"' in line]
+    assert degraded, "a hollow venv (no interpreter) must surface a degraded support event"
+    assert any("venv_missing_interpreter" in line for line in degraded)
+
+
 def test_isolated_repo_context_fails_closed_when_worktree_create_fails(tmp_path, monkeypatch):
     runtime_root = tmp_path / "runtime"
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
