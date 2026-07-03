@@ -947,6 +947,14 @@ def build_parser(parent_subparsers) -> None:
     snap = subs.add_parser("snapshot", help="Write redaction-safe snapshot.json")
     snap.add_argument("--json", action="store_true")
     snap.set_defaults(func=_cmd_snapshot)
+    rebuild_read_model = subs.add_parser("rebuild-read-model", help="Rebuild read_model.db from the current event-sourced store")
+    rebuild_read_model.add_argument("--json", action="store_true")
+    rebuild_read_model.set_defaults(func=_cmd_rebuild_read_model)
+    read_projection = subs.add_parser("read", help="Read one projection from read_model.db")
+    read_projection.add_argument("--projection", required=True)
+    read_projection.add_argument("--since-offset", type=int, default=None)
+    read_projection.add_argument("--json", action="store_true")
+    read_projection.set_defaults(func=_cmd_read_projection)
 
     pets = subs.add_parser("pets", help="Mission Control Petdex bridge")
     pets_subs = pets.add_subparsers(dest="pets_command", required=True)
@@ -5950,4 +5958,24 @@ def _cmd_snapshot(args) -> int:
 
         snap = ReadModel().render_snapshot()
     print(emit_json(snap) if args.json else "snapshot written")
+    return 0
+
+
+def _cmd_rebuild_read_model(args) -> int:
+    from agent_runtime.projector import Projector
+    from agent_runtime.read_model import ReadModel
+
+    read_model = ReadModel()
+    Projector(read_model, config=load_agent_runtime_config()).full_rebuild()
+    watermark = read_model.projection_watermark("snapshot")
+    payload = {"ok": True, "watermark": watermark, "db_path": str(read_model.db_path)}
+    print(emit_json(payload) if args.json else f"read model rebuilt: {read_model.db_path}")
+    return 0
+
+
+def _cmd_read_projection(args) -> int:
+    from agent_runtime.read_model import ReadModel
+
+    payload = ReadModel().read_projection(args.projection, since_offset=args.since_offset)
+    print(emit_json(payload) if args.json else emit_json(payload))
     return 0

@@ -47,6 +47,22 @@ class EventLog:
                 if line.strip():
                     yield from_jsonable(Event, json.loads(line))
 
+    def iter_from_offset(self, offset: int) -> Iterator[tuple[int, Event]]:
+        path = paths.events_path()
+        if not path.exists():
+            return
+        start = max(0, int(offset or 0))
+        size = path.stat().st_size
+        if start > size:
+            start = size
+        with open(path, "rb") as handle:
+            handle.seek(start)
+            for raw in handle:
+                if not raw.strip():
+                    continue
+                new_offset = handle.tell()
+                yield new_offset, from_jsonable(Event, json.loads(raw.decode("utf-8")))
+
     def for_task(self, task_id: str, *, limit: int = 50, since: datetime | None = None) -> list[Event]:
         if not paths.events_path().exists():
             return []
@@ -162,6 +178,16 @@ class CachedEventLog(EventLog):
         for line in self._cached_lines():
             if line.strip():
                 yield from_jsonable(Event, json.loads(line))
+
+    def iter_from_offset(self, offset: int) -> Iterator[tuple[int, Event]]:
+        current = 0
+        start = max(0, int(offset or 0))
+        for line in self._cached_lines():
+            raw = (line + "\n").encode("utf-8")
+            current += len(raw)
+            if current <= start or not line.strip():
+                continue
+            yield current, from_jsonable(Event, json.loads(line))
 
     def iter_since(self, ts: datetime) -> Iterator[Event]:
         for line in self._cached_lines():

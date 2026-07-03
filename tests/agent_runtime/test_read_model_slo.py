@@ -6,6 +6,9 @@ import time
 from hermes_time import now
 
 from agent_runtime.models import Event, Task
+from agent_runtime.projector import Projector
+from agent_runtime.read_model import ReadModel
+from agent_runtime.runtime_config import ReadModelConfig, RuntimeConfig
 from agent_runtime.serde import to_jsonable
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import TaskState
@@ -31,6 +34,32 @@ def test_synthetic_snapshot_full_build_within_rd0_slo(isolate_agent_runtime_root
     assert snapshot["parity"]["event_log_bytes"] > 0
     assert snapshot["parity"]["projection_age_ms"] is not None
     assert build_ms <= SLO_FULL_BUILD_MS
+
+
+def test_synthetic_incremental_apply_within_rd3_slo(isolate_agent_runtime_root):
+    _seed_synthetic_runtime(isolate_agent_runtime_root)
+    snapshot = build_snapshot()
+    read_model = ReadModel(isolate_agent_runtime_root / "read_model.db")
+    read_model.apply_full_rebuild(snapshot, watermark=snapshot["parity"]["watermark"])
+    task = Task(
+        id="task_slo_delta",
+        title="SLO delta task",
+        description="Synthetic RD3 incremental task.",
+        state=TaskState.RUNNING,
+        created_at=now(),
+        updated_at=now(),
+        requested_by="rd3_slo",
+    )
+    TaskStore().create(task)
+
+    result = Projector(
+        read_model,
+        config=RuntimeConfig(read_model=ReadModelConfig(enabled=True)),
+    ).apply_pending()
+
+    assert result.applied_events == 1
+    assert result.changed["goals"] == ["task_slo_delta"]
+    assert result.incremental_apply_ms <= SLO_INCREMENTAL_APPLY_MS
 
 
 def _seed_synthetic_runtime(root) -> None:

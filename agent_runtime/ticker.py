@@ -224,6 +224,7 @@ class TickEngine:
                     self.task_store.update(task, actor="harness", reason="route task to one bounded Neko recovery pass")
                 result.actions_taken.append(self._execute_action(action, task, loaded_task=loaded_task))
             result.finished_at = now()
+            self._apply_read_model_pending()
             return result
 
     def run_until_settled(self, *, task_id: str | None = None, max_actions: int = 10, max_seconds: float | None = None) -> RunUntilSettledResult:
@@ -279,7 +280,20 @@ class TickEngine:
         result.open_incidents = self._open_incident_count(task_id=task_id)
         result.final_task_state = self._task_state_value(task_id) if task_id else None
         result.finished_at = now()
+        self._apply_read_model_pending()
         return result
+
+    def _apply_read_model_pending(self) -> None:
+        read_model_cfg = getattr(self.config, "read_model", None)
+        if not bool(getattr(read_model_cfg, "enabled", False)):
+            return
+        try:
+            from .projector import Projector
+            from .read_model import ReadModel
+
+            Projector(ReadModel(), config=self.config).apply_pending()
+        except Exception:
+            return
 
     def _settled_boundary(self, *, task_id: str | None) -> str | None:
         open_incidents = self._open_incident_count(task_id=task_id)
