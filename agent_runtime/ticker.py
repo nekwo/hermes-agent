@@ -2536,7 +2536,9 @@ def _runtime_budget_block(task: Task, *, persona_id: str, run_store: RunStore, c
         }
 
     swarm = getattr(config, "swarm", None)
-    if not bool(getattr(swarm, "enabled", False)):
+    supervision = getattr(config, "supervision", None)
+    hierarchical_budget = bool(getattr(supervision, "hierarchical_budget_enabled", False))
+    if not bool(getattr(swarm, "enabled", False)) and not hierarchical_budget:
         return None
     swarm_limit = _safe_int(getattr(swarm, "global_token_hard_limit", None))
     swarm_total = _run_token_total(run_store.list_all())
@@ -2551,12 +2553,41 @@ def _runtime_budget_block(task: Task, *, persona_id: str, run_store: RunStore, c
             "total_tokens": swarm_total,
             "limit": swarm_limit,
         }
+    if hierarchical_budget:
+        child_limit = _safe_int(getattr(swarm, "per_lane_token_limit", None)) or swarm_limit
+        if child_limit is not None and child_limit > 0:
+            child_total = _child_token_total(run_store.list_for_task(task.id), persona_id=persona_id)
+            if child_total >= child_limit:
+                return {
+                    "kind": "swarm",
+                    "event_type": "swarm_budget_exceeded",
+                    "summary": f"Child token budget exceeded: total_tokens={child_total}/{child_limit}",
+                    "task_id": task.id,
+                    "persona_id": persona_id,
+                    "stage_id": stage_id,
+                    "total_tokens": child_total,
+                    "limit": child_limit,
+                }
     return None
 
 
 def _run_token_total(runs) -> int:
     total = 0
     for run in runs:
+        llm = getattr(run, "llm", None)
+        if not isinstance(llm, dict):
+            continue
+        tokens = _safe_int(llm.get("total_tokens"))
+        if tokens is not None and tokens > 0:
+            total += tokens
+    return total
+
+
+def _child_token_total(runs, *, persona_id: str) -> int:
+    total = 0
+    for run in runs:
+        if getattr(run, "persona_id", None) != persona_id:
+            continue
         llm = getattr(run, "llm", None)
         if not isinstance(llm, dict):
             continue
