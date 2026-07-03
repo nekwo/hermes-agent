@@ -144,7 +144,7 @@ def test_no_required_gate_stage_advances_on_delivery_when_no_gate_command_deriva
     from agent_runtime.ticker import _build_authoritative_stage_gate_decision
 
     task = _goal_task(
-        "Bounded no-edit investigation. In the hermes-agent repo, run `python -m pytest tests/agent_runtime/test_liveness.py -q` and report, with no product edits.",
+        "Bounded no-edit investigation of the hermes-agent watchdog wiring; report findings with no product edits.",
         repos=["hermes-agent"],
     )
     plan = ensure_default_mission_plan(task)
@@ -161,3 +161,40 @@ def test_no_required_gate_stage_advances_on_delivery_when_no_gate_command_deriva
     target = apply_stage_outcome(task, "backend_implementation", StageOutcome.PASSED, reason="delivery accepted; no required gate")
     assert target == "implement"
     assert task.current_stage_id == "implement"
+
+
+def test_default_blueprint_placeholder_repo_yields_to_task_scope(isolate_agent_runtime_root):
+    """Live regression 2026-07-03 (task_49f8ee3b): the default graph's implement
+    stage (placeholder repo EterniaLauncher) made a hermes-agent goal's
+    authoritative gate run 'flutter analyze' in the Launcher; the goal-named
+    focused command was filtered out by the wrong repo hint."""
+
+    from agent_runtime.default_plan import ensure_default_mission_plan
+    from agent_runtime.final_gate import stage_repo_for_gate
+    from agent_runtime.ticker import _build_authoritative_stage_gate_decision
+
+    task = _goal_task(
+        "Bounded no-edit investigation. In the hermes-agent repo, run `python -m pytest tests/agent_runtime/test_liveness.py -q` and report, with no product edits.",
+        repos=["hermes-agent"],
+    )
+    plan = ensure_default_mission_plan(task)
+    stage = next(s for s in plan.stages if s.id == "implement")
+    plan.current_stage_id = "implement"
+    task.current_stage_id = "implement"
+
+    assert stage_repo_for_gate(task, stage) == "hermes-agent"
+    decision = _build_authoritative_stage_gate_decision(task, stage)
+    assert decision is not None
+    assert decision.payload["commands"] == ["python -m pytest tests/agent_runtime/test_liveness.py -q"]
+
+
+def test_explicit_graph_blueprint_stage_repo_is_not_overridden(isolate_agent_runtime_root):
+    from agent_runtime.default_plan import ensure_default_mission_plan
+    from agent_runtime.final_gate import stage_repo_for_gate
+
+    task = _goal_task("Cross-repo goal", repos=["hermes-agent"])
+    plan = ensure_default_mission_plan(task)
+    plan.blueprint_id = "custom_graph_v1"
+    stage = next(s for s in plan.stages if s.id == "implement")
+
+    assert stage_repo_for_gate(task, stage) == "EterniaLauncher"

@@ -25,7 +25,12 @@ from .config import ensure_persisted_personas, get_persisted_persona, load_agent
 from .locks import HarnessLockUnavailable, tick_lock
 from .liveness import LivenessProbe
 from .events import EventLog
-from .final_gate import build_final_gate_decision, goal_named_gate_commands, stage_repo_for_gate
+from .final_gate import (
+    build_final_gate_decision,
+    default_blueprint_placeholder_repo_override,
+    goal_named_gate_commands,
+    stage_repo_for_gate,
+)
 from .models import Event, Incident, Task
 from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage
 from .persona_assignments import (
@@ -4169,7 +4174,7 @@ def _command_proof_stage_repo(task: Task, *, stage_id: str | None) -> str | None
     stage = _stage_for_command_proof(task, stage_id)
     repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
     if repo in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
-        return repo
+        return default_blueprint_placeholder_repo_override(task, repo) or repo
     return None
 
 

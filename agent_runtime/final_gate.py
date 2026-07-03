@@ -62,9 +62,37 @@ def final_gate_commands(task: Task, stage: TaskStage | None) -> list[str]:
 def stage_repo_for_gate(task: Task, stage: TaskStage | None) -> str:
     typed_stage = _typed_plan_stage(task, stage)
     repo = str(getattr(typed_stage, "repo", "") or getattr(stage, "repo", "") or "").strip()
+    override = default_blueprint_placeholder_repo_override(task, repo)
+    if override:
+        return override
     if not repo and len(getattr(task, "affected_repos", []) or []) == 1:
         repo = str((task.affected_repos or [""])[0]).strip()
     return repo
+
+
+def default_blueprint_placeholder_repo_override(task: Task, stage_repo: str | None) -> str | None:
+    """Task-resolved single-repo scope beats a default-blueprint placeholder repo.
+
+    The bundled ``neko_two_dev_default`` graph hardcodes stage repos
+    (backend_implementation=EterniaBackend, implement=EterniaLauncher)
+    regardless of the goal's actual scope. When Neko has resolved the goal to
+    exactly one repo and it contradicts the placeholder, proof commands and
+    the gate workdir must follow the goal's repo — observed live 2026-07-03
+    (task_49f8ee3b): a hermes-agent goal's authoritative gate ran
+    ``flutter analyze`` in EterniaLauncher because the implement placeholder
+    won. Explicit graph blueprints keep their per-stage repos untouched.
+    """
+
+    stage_repo = str(stage_repo or "").strip()
+    if not stage_repo:
+        return None
+    plan = getattr(task, "mission_plan", None)
+    if str(getattr(plan, "blueprint_id", "") or "") != "neko_two_dev_default":
+        return None
+    task_repos = [str(item).strip() for item in (getattr(task, "affected_repos", []) or []) if str(item).strip()]
+    if len(task_repos) == 1 and task_repos[0] != stage_repo:
+        return task_repos[0]
+    return None
 
 
 def goal_named_gate_commands(task: Task, repo: str | None) -> list[str]:
