@@ -43,6 +43,18 @@ def assert_default_blueprint_plan(plan, task):
     assert plan.bindings["dev"] == "dev"
 
 
+def test_running_default_plan_marks_noop_backend_dependency_satisfied():
+    task = make_task(state=TaskState.RUNNING)
+
+    plan = ensure_default_mission_plan(task)
+
+    stages = {stage.id: stage for stage in plan.stages}
+    assert plan.current_stage_id == "implement"
+    assert stages["scope"].status == StageStatus.PASSED
+    assert stages["backend_implementation"].status == StageStatus.PASSED
+    assert stages["implement"].status == StageStatus.IMPLEMENTING
+
+
 def test_mission_lead_actor_resolves_blueprint_slot_binding():
     task = make_task()
     task.mission_plan = MissionPlan(

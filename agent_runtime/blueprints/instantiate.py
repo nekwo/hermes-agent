@@ -46,6 +46,8 @@ def instantiate_blueprint(bp: Blueprint, *, goal: str, bindings: dict[str, str],
         )
         for stage in bp.stages
     ]
+    limits = asdict(bp.limits)
+    limits["strict_depends_on_dispatch"] = 1
     return MissionPlan(
         enabled=True,
         mission_intent=MissionIntent(title=bp.title, objective=goal, acceptance_criteria=[], locked=True),
@@ -64,7 +66,7 @@ def instantiate_blueprint(bp: Blueprint, *, goal: str, bindings: dict[str, str],
                 for edge in bp.agent_topology.edges
             ],
         },
-        limits=asdict(bp.limits),
+        limits=limits,
         stage_attempts={},
         on_unhandled=bp.on_unhandled,
     )

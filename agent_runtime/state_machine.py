@@ -101,6 +101,21 @@ class MissionStateMachine:
                 return _blueprint_terminal_action(mission, proof_store=self.proof_store)
         if current.status == StageStatus.BLOCKED:
             return _run_slot(mission, "neko_supervisor", f"blueprint stage {current.id} needs goal-owner adjudication")
+        dependency = _first_unpassed_blueprint_dependency(plan, current) if _strict_blueprint_dependency_dispatch(plan) else None
+        if dependency is not None:
+            plan.current_stage_id = dependency.id
+            mission.current_stage_id = dependency.id
+            if dependency.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.REWORK}:
+                dependency.status = StageStatus.IMPLEMENTING
+                dependency.updated_at = now()
+            current = dependency
+            if current.status in {StageStatus.READY_FOR_QA, StageStatus.PASSED}:
+                apply_stage_outcome(mission, current.id, StageOutcome.PASSED, reason=f"blueprint dependency {current.id} already ready")
+                current = current_plan_stage(mission)
+                if current is None:
+                    return _blueprint_terminal_action(mission, proof_store=self.proof_store)
+            if current.status == StageStatus.BLOCKED:
+                return _run_slot(mission, "neko_supervisor", f"blueprint dependency {current.id} needs goal-owner adjudication")
         if plan.current_stage_id != current.id:
             release_next_stage(mission, current.id)
         slot_id = current.owner_slot or current.owner
@@ -163,6 +178,31 @@ class MissionStateMachine:
                 )
             )
         return StateMachineResult(from_state=before, to_state=after, events=events)
+
+
+def _first_unpassed_blueprint_dependency(plan, stage: MissionPlanStage) -> MissionPlanStage | None:
+    by_id = {item.id: item for item in list(getattr(plan, "stages", None) or [])}
+    seen: set[str] = set()
+
+    def visit(candidate: MissionPlanStage) -> MissionPlanStage | None:
+        for dep_id in list(getattr(candidate, "depends_on", None) or []):
+            dep = by_id.get(str(dep_id))
+            if dep is None or dep.id in seen:
+                continue
+            seen.add(dep.id)
+            upstream = visit(dep)
+            if upstream is not None:
+                return upstream
+            if dep.status != StageStatus.PASSED:
+                return dep
+        return None
+
+    return visit(stage)
+
+
+def _strict_blueprint_dependency_dispatch(plan) -> bool:
+    limits = getattr(plan, "limits", None) or {}
+    return bool(limits.get("strict_depends_on_dispatch"))
 
 
 def _blueprint_terminal_action(mission: Task, *, proof_store=None) -> HarnessAction:

@@ -257,6 +257,8 @@ def test_neko_two_dev_default_full_suite_no_edit_cross_stack(
     for stage_id, repo in STAGE_REPOS.items():
         assert stages[stage_id].repo == repo
         assert stages[stage_id].status == StageStatus.PASSED
+        assert stages[stage_id].proof_gate["observed_lane_required"] is True
+        assert "agent_tool_trace" in stages[stage_id].proof_gate["observed_lane_requirement"]
     assert stages["scope"].status == StageStatus.PASSED
 
     # Personas ran in blueprint order: neko scoped, backend first, then dev.

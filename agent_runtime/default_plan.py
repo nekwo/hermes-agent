@@ -112,11 +112,14 @@ def _align_default_plan_to_task_state(task: Task, plan: MissionPlan) -> None:
     } and "implement" in by_id:
         if "scope" in by_id:
             by_id["scope"].status = StageStatus.PASSED
+        _mark_default_noop_dependencies_passed(by_id, by_id["implement"])
         by_id["implement"].status = StageStatus.IMPLEMENTING
         plan.current_stage_id = "implement"
     elif state_value in {"dev_ready_for_qa", "qa_testing"} and "verify" in by_id:
         if "scope" in by_id:
             by_id["scope"].status = StageStatus.PASSED
+        if "implement" in by_id:
+            _mark_default_noop_dependencies_passed(by_id, by_id["implement"])
         if "implement" in by_id:
             by_id["implement"].status = StageStatus.READY_FOR_QA
         plan.current_stage_id = "verify"
@@ -164,6 +167,34 @@ def _specialize_default_implementation_stage(task: Task, plan: MissionPlan) -> N
         plan.binding_sources.setdefault("backend_dev", "persona:backend_dev")
 
 
+def _mark_default_noop_dependencies_passed(
+    stages_by_id: dict[str, MissionPlanStage],
+    stage: MissionPlanStage,
+) -> None:
+    for dep_id in list(stage.depends_on or []):
+        dep = stages_by_id.get(dep_id)
+        if dep is None:
+            continue
+        _mark_default_noop_dependencies_passed(stages_by_id, dep)
+        if _is_default_noop_dependency(dep):
+            dep.status = StageStatus.PASSED
+
+
+def _is_default_noop_dependency(stage: MissionPlanStage) -> bool:
+    if stage.id != "backend_implementation":
+        return False
+    gate = getattr(stage, "proof_gate", {}) or {}
+    return not (
+        gate.get("required")
+        or gate.get("required_proof_types")
+        or gate.get("proof_recipe_id")
+        or gate.get("commands")
+        or getattr(stage, "proof_recipe_id", None)
+        or getattr(stage, "requires_product_edit", False)
+        or getattr(stage, "requires_visual_proof", False)
+    )
+
+
 def _specialize_default_no_edit_cross_stack_plan(plan: MissionPlan) -> None:
     if plan.blueprint_id != DEFAULT_TASK_BLUEPRINT_ID:
         return
@@ -180,6 +211,8 @@ def _specialize_default_no_edit_cross_stack_plan(plan: MissionPlan) -> None:
             "minimum_status": "passed",
             "required_proof_types": ["test_run"],
             "proof_recipe_id": "backend_contract_smoke",
+            "observed_lane_required": True,
+            "observed_lane_requirement": "agent_tool_trace/run.tool.finished must populate observed_proof_ids before hand_off",
         }
         backend.test_plan = ["proof_recipe:backend_contract_smoke"]
     if launcher is not None:
@@ -193,6 +226,8 @@ def _specialize_default_no_edit_cross_stack_plan(plan: MissionPlan) -> None:
             "minimum_status": "passed",
             "required_proof_types": ["test_run"],
             "proof_recipe_id": "launcher_contract_smoke",
+            "observed_lane_required": True,
+            "observed_lane_requirement": "agent_tool_trace/run.tool.finished must populate observed_proof_ids before hand_off",
         }
         launcher.test_plan = ["proof_recipe:launcher_contract_smoke"]
 

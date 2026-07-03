@@ -709,3 +709,70 @@ def test_scope_decision_on_gated_dev_stage_yields_no_outcome():
         "a routing decision must never mark a proof-gated dev stage passed"
     )
     assert stages["implement"].status != StageStatus.PASSED
+
+
+def test_dependency_blocked_stage_dispatches_dependency_not_dependent():
+    """Live 2026-07-03 (task_3e2ae539): implement depends_on
+    backend_implementation, but a stale/over-advanced current_stage_id made the
+    scheduler offer the Launcher Dev RUN_SLOT before backend ran. Dispatch must
+    enforce depends_on itself, not trust current_stage_id blindly."""
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="dependency dispatch",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = _task_with_plan(plan)
+    assert task.mission_plan.limits["strict_depends_on_dispatch"] == 1
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+    stages["scope"].status = StageStatus.PASSED
+    stages["backend_implementation"].status = StageStatus.READY
+    stages["implement"].status = StageStatus.IMPLEMENTING
+    task.mission_plan.current_stage_id = "implement"
+    task.current_stage_id = "implement"
+
+    action = MissionStateMachine().next_action(task)
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "backend_builder"
+    assert "backend_implementation" in action.reason
+    assert task.mission_plan.current_stage_id == "backend_implementation"
+    assert stages["backend_implementation"].status == StageStatus.IMPLEMENTING
+    assert stages["implement"].status != StageStatus.PASSED
+
+
+def test_neko_two_dev_default_linear_chain_runs_lead_backend_then_launcher():
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="linear dispatch",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = _task_with_plan(plan)
+    machine = MissionStateMachine()
+
+    first = machine.next_action(task)
+    assert first.type == HarnessActionType.RUN_SLOT
+    assert first.slot_id == "lead"
+
+    assert apply_stage_outcome(task, "scope", StageOutcome.READY, reason="scoped") == "backend_implementation"
+    second = machine.next_action(task)
+    assert second.type == HarnessActionType.RUN_SLOT
+    assert second.slot_id == "backend_builder"
+
+    assert apply_stage_outcome(task, "backend_implementation", StageOutcome.PASSED, reason="backend passed") == "implement"
+    third = machine.next_action(task)
+    assert third.type == HarnessActionType.RUN_SLOT
+    assert third.slot_id == "builder"
+
+    assert apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="launcher passed") == "done"
+    final = machine.next_action(task)
+    assert final.type == HarnessActionType.COMPLETE_TASK
