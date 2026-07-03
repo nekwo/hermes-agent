@@ -545,6 +545,20 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
         _default_qa_coordination_proof_gate(packet, proof_gate)
     if "minimum_status" not in proof_gate:
         proof_gate["minimum_status"] = "passed"
+    # Derivable booleans get defaulted (with an operator note), not hard-failed:
+    # a missing `required` on a gate that names proof types or a recipe means
+    # "required" in the STRICTER reading, and a missing `visual_required` means
+    # no visual lane was asked for. Hard-failing here burned a full lead turn
+    # live (2026-07-03, task_1b102976: neko omitted `required`; retryable=false
+    # killed the goal driver) — the same validated-form-rejects-real-work class
+    # Round 3 closed for delivery packets. qa_coordination_release already gets
+    # this defaulting; fresh_scope handoffs deserve the same.
+    if "required" not in proof_gate and (proof_gate.get("required_proof_types") or proof_gate.get("proof_recipe_id") or proof_gate.get("recipe_id")):
+        proof_gate["required"] = True
+        _append_operator_note(packet, "proof_gate.required defaulted to true from declared proof expectations")
+    if "visual_required" not in proof_gate:
+        proof_gate["visual_required"] = False
+        _append_operator_note(packet, "proof_gate.visual_required defaulted to false")
     for key in ("required", "required_proof_types", "minimum_status", "visual_required"):
         if key not in proof_gate:
             raise DecisionPayloadInvalid(f"handoff_packet.proof_gate missing {key}")

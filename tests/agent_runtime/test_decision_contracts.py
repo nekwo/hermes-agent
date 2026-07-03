@@ -794,3 +794,35 @@ def test_handoff_backend_focused_self_test_alias_adapted():
     assert packet["proof_gate"]["focused_self_test"] == (
         ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"
     )
+
+
+def test_handoff_proof_gate_defaults_required_and_visual_required():
+    """Live 2026-07-03 (task_1b102976): neko omitted proof_gate.required on a
+    fresh_scope handoff and the retryable=false contract failure killed the
+    goal driver. Derivable booleans must default (with an operator note), not
+    hard-fail — same normalization qa_coordination_release already gets."""
+    packet = handoff_packet()
+    packet["proof_gate"].pop("required")
+    packet["proof_gate"].pop("visual_required")
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["required"] is True
+    assert packet["proof_gate"]["visual_required"] is False
+    note = str(packet.get("operator_note") or "")
+    assert "proof_gate.required defaulted" in note
+
+
+def test_handoff_proof_gate_without_any_proof_expectation_still_requires_required():
+    packet = handoff_packet()
+    packet["proof_gate"] = {"minimum_status": "passed"}
+    with pytest.raises(DecisionPayloadInvalid):
+        validate_planning_decision(
+            decision(
+                DecisionType.PROPOSE_ACCEPTANCE,
+                {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+            )
+        )
