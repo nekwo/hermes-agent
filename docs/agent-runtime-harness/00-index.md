@@ -57,6 +57,16 @@ these three are the live truth.
    isolation; the doc-05 read-model dependency is already shipped) → verified deploy → CI
    gates. **How the scheduler becomes distributed AI judgment instead of a serial tick loop.**
 
+7. **[08 — Blueprint-as-Script Collapse](08-blueprint-as-script-collapse.md)** — *proposed;
+   staged plan, not yet implemented.* The over-engineering correction: make the blueprint
+   the executable script and the harness a dumb interpreter of it. Neko's skill authors the
+   stages for the actual goal (nothing baked), agents own their work + proof (the dev's own
+   green test run IS the proof — no harness re-run), steering is the only coordination verb,
+   and the harness shrinks to hang-kill + anti-fake. Stages BS0–BS7 collapse ~13.7k lines of
+   hardcoded flow (`planning.py`/`ticker.py`/`mission_plan.py`/`default_plan.py`/`routing.py`)
+   and dissolve the 2026-07-03 self-drive bug class at the source. **What the recovery tower
+   collapses into once the blueprint is the script.**
+
 ## Product stance
 
 Build the smallest reliable core first:
