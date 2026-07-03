@@ -159,3 +159,23 @@ def test_goal_create_records_pinned_repo_scope(isolate_agent_runtime_root):
     assert task.affected_repos == ["hermes-agent"]
     meta = task.harness_self_heal["mission_goal_create"]
     assert meta["repo_scope_pinned"] == ["hermes-agent"]
+
+
+def test_default_plan_stage_release_does_not_leak_placeholder_repo(isolate_agent_runtime_root):
+    """Live regression 2026-07-03 (task_0cf230b7): Neko's validated acceptance
+    set affected_repos=['hermes-agent'], then the typed-plan stage release
+    overwrote it with the default blueprint's placeholder stage repo
+    (EterniaBackend) and the downstream gate ran in the wrong repo."""
+
+    from agent_runtime.default_plan import ensure_default_mission_plan
+
+    t = make_task("Bounded no-edit investigation. In the hermes-agent repo, verify the daemon status contract and report.")
+    ensure_default_mission_plan(t)
+    apply_planning_decision(
+        t,
+        acceptance({"affected_repos": ["hermes-agent"]}),
+        actor="neko_supervisor",
+        mission_plan_flow=True,
+    )
+
+    assert t.affected_repos == ["hermes-agent"]

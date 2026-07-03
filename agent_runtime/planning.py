@@ -195,7 +195,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
         ensure_mission_plan(task, decision.payload, actor=actor)
         target = release_next_stage(task, str(decision.payload.get("release_stage_id") or "").strip() or None)
         if target is not None:
-            task.affected_repos = [] if target.repo == "none" else [target.repo]
+            task.affected_repos = _release_stage_affected_repos(task, target.repo)
             if target.owner == "qa":
                 task.state = TaskState.RUNNING
             elif target.owner in {"dev", "backend_dev"}:
@@ -844,6 +844,26 @@ def _apply_acceptance(task: Task, payload: dict[str, Any]) -> None:
     task.suggested_roles = list(payload.get("suggested_roles", []))
     task.requires_visual_proof = bool(payload.get("requires_visual_proof", task.requires_visual_proof))
     task.risk_flags = list(payload.get("risk_flags", []))
+
+
+def _release_stage_affected_repos(task: Task, stage_repo: str | None) -> list[str]:
+    """Repo scope to apply when a typed-plan stage is released.
+
+    The released stage's repo normally wins, but the bundled default
+    blueprint's stages carry placeholder repos regardless of the goal's
+    resolved scope — leaking them here overwrote the scope Neko's validated
+    acceptance payload just set (observed live 2026-07-03, task_0cf230b7:
+    a hermes-agent goal became affected_repos=['EterniaBackend'] at release
+    and the downstream gate ran in the wrong repo).
+    """
+
+    repo = str(stage_repo or "").strip()
+    if not repo or repo == "none":
+        return []
+    from .final_gate import default_blueprint_placeholder_repo_override
+
+    override = default_blueprint_placeholder_repo_override(task, repo)
+    return [override or repo]
 
 
 def _canonical_affected_repos(repos: Iterable[str]) -> list[str]:

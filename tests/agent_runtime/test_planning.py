@@ -165,7 +165,10 @@ def test_typed_neko_acceptance_creates_plan_without_shrinking_parent_goal():
         "implement",
     ]
     assert t.current_stage_id == "scope"
-    assert t.affected_repos == ["hermes-agent"]
+    # Neko's validated payload scope (EterniaBackend) survives the release:
+    # the default blueprint's scope-stage placeholder repo (hermes-agent)
+    # must not overwrite an explicitly scoped single-repo goal.
+    assert t.affected_repos == ["EterniaBackend"]
 
 
 def test_typed_qa_approval_rejects_missing_launcher_stage():
