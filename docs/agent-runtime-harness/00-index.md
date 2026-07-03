@@ -57,18 +57,17 @@ these three are the live truth.
    isolation; the doc-05 read-model dependency is already shipped) → verified deploy → CI
    gates. **How the scheduler becomes distributed AI judgment instead of a serial tick loop.**
 
-7. **[08 — Blueprint-as-Script Collapse](08-blueprint-as-script-collapse.md)** —
-   *implementation-ready; staged plan, not yet implemented.* The over-engineering
-   correction: the agents are already capable Hermes `AIAgent` loops, so an agent "type" is
-   just a **prompt + HUD**; the blueprint becomes the executable script and the harness
-   shrinks to four jobs — resolve workdir, inject prompt+HUD, kill hangs, capture diff/trace.
-   Neko's skill authors the stages for the actual goal (nothing baked), each agent runs its
-   native loop to completion (dev's own green test run IS the proof — no harness re-run),
-   steering is the only coordination verb. Stages BS0–BS7 (each with exact modules, symbols,
-   config keys, test names, live-proof commands, rollback, and a handoff prompt) collapse
-   ~13.7k lines of hardcoded flow and make the 2026-07-03 self-drive bug class
-   unrepresentable. **What the recovery tower collapses into once the blueprint is the script
-   and the harness stops babysitting the model.**
+7. **[08 — Root Node + Self-Looped Sub-Agents](08-blueprint-as-script-collapse.md)** —
+   *implementation-ready (v4); staged plan, not yet implemented.* The over-engineering
+   correction, final shape: **every node is a standard self-looped Hermes agent
+   (customizable but simple: prompt + HUD + toolset + workdir), and the root node runs the
+   goal by spawning and steering sub-agent nodes** — the same shape as Hermes'
+   `delegate_task`. The harness is substrate only (run loops, resolve workdirs, capture
+   evidence server-side, kill hangs, persist for Mission Control); **no judgment in
+   Python** — the root's model judges children's work from harness-captured evidence and
+   at worst steers them. Two root-only service tools (`run_node`/`steer_node`), stages
+   N0–N3, deletes the ~13.7k-line decision-contract/gate/incident/adjudication tower at
+   N3 after burn-in, and makes the 2026-07-03 self-drive bug class unrepresentable at N1.
 
 ## Product stance
 
