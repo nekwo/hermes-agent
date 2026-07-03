@@ -12,7 +12,7 @@ from .persona_assignments import PersonaInstanceStore, safe_assignment_text
 from .runtime_config import RuntimeConfig
 
 CHILD_PROGRESS_MIN_INTERVAL_SECONDS = 30
-_RETURN_EVENT_TYPES = {"child.returned", "child.blocked"}
+_RETURN_EVENT_TYPES = {"child.returned", "child.blocked", "child.deploy_failed"}
 _last_progress_emit_by_child: dict[str, datetime] = {}
 
 
@@ -97,6 +97,48 @@ def emit_child_blocked(
                 "summary": _safe_text(summary or reason),
                 "stage_id": safe_assignment_text(stage_id or getattr(child, "current_stage_id", None), limit=160),
                 "run_id": safe_assignment_text(run_id, limit=160),
+            },
+        )
+    )
+    return True
+
+
+def emit_child_deploy_failed(
+    *,
+    child_instance_id: str,
+    reason: str,
+    task_id: str | None = None,
+    assignment_id: str | None = None,
+    stage_id: str | None = None,
+    persona_id: str | None = None,
+    retryable: bool = False,
+    summary: str | None = None,
+    event_log: EventLog | None = None,
+    persona_store: PersonaInstanceStore | None = None,
+) -> bool:
+    event_log = event_log or EventLog()
+    persona_store = persona_store or PersonaInstanceStore(event_log=event_log)
+    try:
+        child = persona_store.get(safe_assignment_text(child_instance_id, limit=160))
+    except Exception:
+        return False
+    parent_node_id = safe_assignment_text(child.spawned_by or "root", limit=160)
+    event_log.append(
+        Event(
+            ts=now(),
+            type="child.deploy_failed",
+            task_id=safe_assignment_text(task_id or child.current_task_id, limit=160),
+            run_id=None,
+            persona_id=safe_assignment_text(persona_id or child.persona_id, limit=160),
+            payload={
+                "parent_node_id": parent_node_id,
+                "child_node_id": safe_assignment_text(child.id, limit=160),
+                "reason": _safe_text(reason),
+                "summary": _safe_text(summary or reason),
+                "assignment_id": safe_assignment_text(assignment_id, limit=160),
+                "stage_id": safe_assignment_text(stage_id or child.current_stage_id, limit=160),
+                "persona_id": safe_assignment_text(persona_id or child.persona_id, limit=160),
+                "retryable": bool(retryable),
             },
         )
     )

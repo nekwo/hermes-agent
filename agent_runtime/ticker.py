@@ -19,6 +19,7 @@ from .actions import HarnessAction, HarnessActionResult, HarnessActionType
 from .autonomy import record_autonomy_packet
 from .blueprints.routing import apply_decision_outcome, is_blueprint_plan
 from .budget_approval import budget_incident_needs_scope_recovery, eligible_budget_approval_incidents
+from .child_events import emit_child_deploy_failed
 from .config import ensure_persisted_personas, get_persisted_persona, load_agent_runtime_config
 from .locks import HarnessLockUnavailable, tick_lock
 from .liveness import LivenessProbe
@@ -575,8 +576,9 @@ class TickEngine:
                 return HarnessActionResult(action, True, "handoff repair reused existing passed proof; routed to QA", handoff_recovery)
         persona_id = _persona_id_for_harness_action(action, task=task, config=self.config, run_store=self.run_store)
         persona = _get_persona(self.agent_store, persona_id, self.config)
+        child_instance = None
         if action.type == HarnessActionType.RUN_SLOT:
-            PersonaInstanceStore().ensure_for_goal(
+            child_instance = PersonaInstanceStore().ensure_for_goal(
                 persona,
                 goal_id=getattr(task, "goal_id", None) or task.id,
                 spawned_by=_spawned_by_for_harness_action(action, task=task),
@@ -588,6 +590,23 @@ class TickEngine:
             assignment = _assignment_from_task_flag(self.persona_assignment_store, task, persona.id)
             repo_bundle = None
             if assignment is None:
+                deploy_warning = _first_deploy_contention_warning(
+                    self.persona_assignment_store,
+                    persona_id=persona.id,
+                    goal_id=getattr(task, "goal_id", None) or task.id,
+                    enabled=_deploy_verification_enabled(self.config),
+                )
+                if deploy_warning is not None:
+                    return _child_deploy_failed_result(
+                        action,
+                        task=task,
+                        persona_id=persona.id,
+                        child_instance_id=getattr(child_instance, "id", None),
+                        reason=str(deploy_warning.get("message") or deploy_warning.get("code") or "agent deployment failed"),
+                        assignment_id=str(deploy_warning.get("assignment_id") or "") or None,
+                        retryable=bool(deploy_warning.get("retryable", False)),
+                        event_log=EventLog(),
+                    )
                 repo_bundle = _repo_bundle_for_action(self.config, self.repo_bundle_store, action, task, persona_id=persona.id)
                 assignment = self.persona_assignment_store.create_or_resume(
                     _assignment_spec_for_action(
@@ -709,7 +728,7 @@ class TickEngine:
                     "repo_bundle_id": assignment.repo_bundle_id,
                 }
                 self.run_store.update(run)
-                self.persona_assignment_store.attach_run(assignment.id, run.id)
+                assignment = self.persona_assignment_store.attach_run(assignment.id, run.id)
                 _mark_repo_bundle_running_for_assignment(self.config, self.repo_bundle_store, assignment, run_id=run.id)
             prior_progress_flags = _prior_stage_run_progress_flags(task, self.run_store, persona.id, exclude_run_id=run.id)
             if prior_progress_flags:
@@ -717,6 +736,31 @@ class TickEngine:
                 self.run_store.update(run)
             if worker_store is not None and worker is not None:
                 worker_store.assign_run(worker.id, run)
+            deploy_failure = _verify_child_deploy_started(
+                config=self.config,
+                run=run,
+                worker=worker_store.get(worker.id) if worker_store is not None and worker is not None else worker,
+                assignment=assignment,
+                child_instance_id=getattr(child_instance, "id", None),
+            )
+            if deploy_failure is not None:
+                if assignment is not None:
+                    self.persona_assignment_store.complete(assignment.id, state="blocked", error=deploy_failure)
+                if worker_store is not None and worker is not None:
+                    worker_store.update_after_run(worker.id, run, close_reason="deploy_failed", count_decision=False)
+                    worker_store.close(worker.id, reason="deploy_failed")
+                self.run_store.cancel(run.id, reason=deploy_failure)
+                return _child_deploy_failed_result(
+                    action,
+                    task=task,
+                    persona_id=persona.id,
+                    child_instance_id=getattr(child_instance, "id", None),
+                    reason=deploy_failure,
+                    assignment_id=getattr(assignment, "id", None),
+                    run_id=run.id,
+                    retryable=True,
+                    event_log=EventLog(),
+                )
             stage52_envelope = None
             if _role_envelope_enabled(self.config):
                 stage52_envelope = self.role_envelope_store.open_or_resume(
@@ -2599,6 +2643,76 @@ def _runtime_budget_block(task: Task, *, persona_id: str, run_store: RunStore, c
                     "limit": child_limit,
                 }
     return None
+
+
+def _deploy_verification_enabled(config: RuntimeConfig) -> bool:
+    supervision = getattr(config, "supervision", None)
+    return bool(getattr(supervision, "deploy_verification_enabled", False))
+
+
+def _first_deploy_contention_warning(store: PersonaAssignmentStore, *, persona_id: str, goal_id: str, enabled: bool) -> dict[str, Any] | None:
+    if not enabled:
+        return None
+    warnings = store.contention_warnings(persona_id=persona_id, goal_id=goal_id)
+    return warnings[0] if warnings else None
+
+
+def _verify_child_deploy_started(*, config: RuntimeConfig, run, worker, assignment, child_instance_id: str | None) -> str | None:
+    if not _deploy_verification_enabled(config):
+        return None
+    if run is None or getattr(run, "state", None) != RunState.RUNNING:
+        return "child run did not enter running state"
+    if getattr(run, "last_heartbeat_at", None) is None:
+        return "child run has no initial heartbeat"
+    if assignment is not None and run.id not in list(getattr(assignment, "run_ids", []) or []):
+        return "child assignment did not attach the opened run"
+    if worker is not None:
+        if getattr(worker, "active_run_id", None) != run.id:
+            return "child worker did not attach the opened run"
+        if getattr(worker, "last_heartbeat_at", None) is None:
+            return "child worker has no initial heartbeat"
+    if not child_instance_id:
+        return "child persona instance was not created"
+    return None
+
+
+def _child_deploy_failed_result(
+    action: HarnessAction,
+    *,
+    task: Task,
+    persona_id: str,
+    child_instance_id: str | None,
+    reason: str,
+    assignment_id: str | None = None,
+    run_id: str | None = None,
+    retryable: bool = False,
+    event_log: EventLog | None = None,
+) -> HarnessActionResult:
+    if child_instance_id:
+        emit_child_deploy_failed(
+            child_instance_id=child_instance_id,
+            reason=reason,
+            task_id=task.id,
+            assignment_id=assignment_id,
+            stage_id=getattr(action, "stage_id", None) or getattr(task, "current_stage_id", None),
+            persona_id=persona_id,
+            retryable=retryable,
+            summary=reason,
+            event_log=event_log or EventLog(),
+        )
+    return HarnessActionResult(
+        action,
+        False,
+        f"child deploy failed: {reason}",
+        {
+            "reason": reason,
+            "assignment_id": assignment_id,
+            "run_id": run_id,
+            "persona_id": persona_id,
+            "stage_id": getattr(action, "stage_id", None) or getattr(task, "current_stage_id", None),
+            "retryable": bool(retryable),
+        },
+    )
 
 
 def _task_for_action(task: Task, action: HarnessAction) -> Task:

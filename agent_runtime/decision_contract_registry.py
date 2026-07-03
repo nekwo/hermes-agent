@@ -1215,6 +1215,7 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "child.progress": EventContract("child.progress", "Child progress", ("parent_node_id", "child_node_id", "phase", "step", "status", "summary"), ("run_id", "stage_id")),
     "child.blocked": EventContract("child.blocked", "Child blocked", ("parent_node_id", "child_node_id", "reason"), ("run_id", "stage_id", "summary")),
     "child.returned": EventContract("child.returned", "Child returned", ("parent_node_id", "child_node_id", "summary"), ("proof_ids", "artifact_refs", "stage_id", "persona_instance_id")),
+    "child.deploy_failed": EventContract("child.deploy_failed", "Child deploy failed", ("parent_node_id", "child_node_id", "reason"), ("assignment_id", "stage_id", "persona_id", "retryable", "summary")),
     "persona.worklog": EventContract("persona.worklog", "Persona worklog", ("kind", "source", "message"), ("stage_id", "related_proof_ids")),
     "run.approval_required": EventContract("run.approval_required", "Approval required", ("reason",), ("run_id",)),
     "run.approved": EventContract("run.approved", "Run approved", ("run_id",), ("approval_type",)),
