@@ -1,5 +1,17 @@
 # 07 — Self-drive gap deep-audit + fix prompt (paste into Claude)
 
+> **CLOSED 2026-07-03 (second session).** All five gaps were reproduced, fixed, and
+> live-proven — see doc-06 §6.1 for the closure record. Commits: `0170c67c2` (gap 1),
+> `9fd801c39` (gap 2), `9d697ae1d` (gap 3), `8989d408c` (gap 4), `634b990ee` (gap 5),
+> `4e5f52bf1` (cheap checks), plus three root-cause fixes for bugs the live acceptance
+> itself surfaced: `303193e9d` (no-required-gate stage never completed),
+> `3ffab38ed`/`138fd1bbc` (default-blueprint placeholder repo leak into scope/gate),
+> `13b19e7c0` (dev grounding in placeholder repo). Live acceptance: task_5ed6f049
+> (1m29s create-to-done, trap description scoped correctly, targeted daemon,
+> goal-named gate proof, auto-archive) and task_5008f128 (chaos drill: mid-turn stop
+> reaped the run immediately, done unattended after restart). Suite: 1293 → 1329.
+> Known residual: Neko no-op plan-release loop after a failed gate (doc-06 §6.1).
+
 Context: the 2026-07-03 live default-run session (doc-06 §6 + commits `2cc24a93d`,
 `3420ecd11`, `c188553f4`, `acb62a2bb`) fixed the untargeted incident gate, stale
 incident links, the Neko adjudication re-dispatch loop, and liveness false positives —

@@ -597,3 +597,51 @@ residual, not claimed.
   strongest evidence.
 - Daemon `_liveness_loop` reads config once at thread start; flag/threshold changes
   need a daemon restart (matches existing daemon config semantics).
+
+### §6.1 — 07 self-drive gap audit closure (2026-07-03, second session)
+
+The five gaps recorded by the first 2026-07-03 session (doc 07) were audited,
+reproduced against main, fixed, and live-proven. Commits `0170c67c2` (gap 1 scope
+guard), `9fd801c39` (gap 2 targeted daemon restore), `9d697ae1d` (gap 3 goal-named
+gate commands), `8989d408c` (gap 4 adjudication incident close), `634b990ee`
+(gap 5 orphan reap), `4e5f52bf1` (liveness status carry + budget-lane audit note).
+Root-cause note for gap 2: live-automation state commit `5a63d0b0b` (2026-06-30)
+had severed daemon targeting AND inverted the five daemon tests guarding it.
+
+Three additional self-drive bugs surfaced during the LIVE acceptance runs and were
+fixed at the root in the same session:
+- `303193e9d` — a stage that declares NO required proof gate never completed when
+  the auto gate had no safe command; the accepted hand_off now completes it
+  (task_49f8ee3b looped backend_implementation 8x).
+- `3ffab38ed` + `138fd1bbc` — default-blueprint placeholder stage repos
+  (scope=hermes-agent, backend_implementation=EterniaBackend,
+  implement=EterniaLauncher) leaked into `task.affected_repos` at typed-plan
+  release and into gate command/workdir selection
+  (`default_blueprint_placeholder_repo_override`).
+- `13b19e7c0` — dev grounding used the placeholder stage repo, so the isolated
+  worktree (and therefore the gate workdir) was the wrong tree
+  (task_8e1e0832: goal-named pytest failed exit-4 file-not-found twice).
+
+Live acceptance (unattended, current main):
+- task_5ed6f049 "Scope contract regression audit": trap description naming
+  hermes-agent only mid-sentence scoped to `['hermes-agent']`, TARGETED daemon
+  (queue_mode foreground), **1m29s create-to-done**, both harness-owned gate
+  proofs ran exactly the goal-named focused command (exit 0), auto-archive batch
+  `20260703T102437950655Z_archive_ready`, zero incidents, zero operator actions.
+- task_5008f128 chaos drill: `daemon stop` mid-turn cancelled in-flight
+  `run_ec9b019f6abd` IMMEDIATELY (stop result `orphan_runs_cancelled`), targeted
+  restart, **done unattended 2m26s** including the kill; archive batch
+  `20260703T102849374432Z_archive_ready`. Final `harness status --json` clean.
+
+New residuals found live (NOT fixed this session):
+- **Neko plan-release loop**: after a failed authoritative gate, Neko adjudication
+  emitted `mission_plan.updated` (propose_acceptance with no release_stage_id)
+  every ~20s without progress (task_8e1e0832, 14:08–14:12); the no-progress guard
+  does not cover this shape. Next step: fingerprint repeated no-op plan releases
+  the same way repeated block decisions are fingerprinted, and settle to
+  wait-on-intervention.
+- Budget-approval lane (audited, no code change): the lane exists end to end via
+  Neko `resolve_incident`/coerced continuation bounded by `neko_extension_cap`;
+  the observed dead-end was the blocked-state-only HUD recommendation, fixed by
+  `8989d408c`. A cap-exhausted incident still requires operator `task unblock`
+  by design.
