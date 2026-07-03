@@ -280,6 +280,9 @@ def render_context(ctx: AgentContext) -> str:
                     f"  run_id: {incident.get('run_id')}",
                 ]
             )
+            if incident.get("underlying_run_terminal"):
+                lines.append(f"  underlying_run_state: {incident.get('underlying_run_state')}")
+                lines.append(f"  resolution_hint: {incident.get('resolution_hint')}")
     if ctx.recent_events:
         lines.extend(["", "## Recent Events"])
         lines.extend(f"- {to_jsonable(event)}" for event in ctx.recent_events)
@@ -592,15 +595,37 @@ def _incident_records(task: Task, *, incident_store=None) -> list[dict[str, Any]
         except Exception:
             records.append({"id": incident_id, "missing": True})
             continue
-        records.append(
-            {
-                "id": incident.id,
-                "kind": str(incident.kind)[:120],
-                "summary": str(incident.summary)[:500],
-                "run_id": str(incident.run_id or "")[:120] or None,
-            }
-        )
+        record = {
+            "id": incident.id,
+            "kind": str(incident.kind)[:120],
+            "summary": str(incident.summary)[:500],
+            "run_id": str(incident.run_id or "")[:120] or None,
+        }
+        terminal_state = _incident_run_terminal_state(incident.run_id)
+        if terminal_state:
+            record["underlying_run_state"] = terminal_state
+            record["underlying_run_terminal"] = True
+            record["resolution_hint"] = (
+                "The underlying run is already terminal; this incident is yours to close with "
+                "resolve_incident and a redaction-safe reason. Do not block on it."
+            )
+        records.append(record)
     return records
+
+
+def _incident_run_terminal_state(run_id: str | None) -> str | None:
+    if not run_id:
+        return None
+    try:
+        from .states import RunState
+        from .store import RunStore
+
+        run = RunStore().get(str(run_id))
+    except Exception:
+        return None
+    if run.state in {RunState.CANCELLED, RunState.FAILED, RunState.COMPLETED, RunState.STALE}:
+        return run.state.value
+    return None
 
 
 def _safe_repo_context(task: Task) -> dict[str, Any] | None:
@@ -1175,11 +1200,15 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
                 "stage_id": stage_id,
                 "recommended_payload": _neko_diagnostic_ack_payload(task),
             }
-        if state == "blocked" and getattr(task, "open_incident_ids", None):
+        if getattr(task, "open_incident_ids", None):
             return {
                 "decision_type": "resolve_incident",
                 "shape_id": "neko.resolve_incident",
-                "reason": "The task is blocked with open incidents; resolve a specific incident only when a bounded recovery route is clear.",
+                "reason": (
+                    "Open incidents are yours to adjudicate. When an incident's underlying run is already "
+                    "terminal (cancelled/failed/hung-reaped), close it with resolve_incident and a "
+                    "redaction-safe reason; block only when recovery genuinely needs a human."
+                ),
                 "stage_id": stage_id,
                 "incident_ids": list(getattr(task, "open_incident_ids", []) or [])[:5],
             }

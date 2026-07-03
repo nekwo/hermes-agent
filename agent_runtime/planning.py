@@ -620,11 +620,46 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             mark_block_recovery_attempt(task)
         task.updated_at = now()
     elif decision.type == DecisionType.BLOCK:
+        if is_mission_lead_actor(task, actor):
+            _reject_mission_lead_block_on_closable_incident(task, incident_store=incident_store)
         _soft_block_task(task, reason=str(decision.summary or "agent reported blocker"), stage_id=task.current_stage_id)
         if is_mission_lead_actor(task, actor):
             mark_block_recovery_attempt(task)
         task.updated_at = now()
     return task
+
+
+def _reject_mission_lead_block_on_closable_incident(task: Task, *, incident_store=None) -> None:
+    """Repair feedback when Neko blocks on an incident it can close itself.
+
+    An open incident whose underlying run is already terminal (cancelled,
+    failed, completed, stale) needs no external actor: the adjudication turn
+    holds the resolve_incident capability, so answering ``block`` just parks
+    the goal on an operator. Raising here routes the repair back to Neko.
+    """
+
+    from .states import RunState
+    from .store import IncidentStore
+
+    store = incident_store or IncidentStore()
+    for incident_id in list(getattr(task, "open_incident_ids", []) or [])[:10]:
+        try:
+            incident = store.get(incident_id)
+        except Exception:
+            continue
+        run_id = getattr(incident, "run_id", None)
+        if not run_id:
+            continue
+        try:
+            run = RunStore().get(str(run_id))
+        except Exception:
+            continue
+        if run.state in {RunState.CANCELLED, RunState.FAILED, RunState.COMPLETED, RunState.STALE}:
+            raise DecisionPayloadInvalid(
+                f"block is not a valid adjudication for incident {incident_id}: its underlying run is already "
+                f"terminal ({run.state.value}). Emit resolve_incident with this incident_id and a "
+                "redaction-safe resolution instead of blocking on an incident you can close."
+            )
 
 
 def _coerce_neko_needs_context_to_handoff_continuation(task: Task, decision: AgentDecision, *, actor: str, log: EventLog, run_id: str | None, proof_store=None) -> bool:

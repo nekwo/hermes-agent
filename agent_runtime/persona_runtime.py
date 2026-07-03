@@ -934,7 +934,10 @@ def _simplified_contract_guidance(persona: AgentPersona, *, cfg) -> str:
             common
             + "\n\nFor Neko Mission Lead, the normal public routing decision is `scope_route`; it replaces `propose_acceptance`. "
             "Use `scope_route` for kickoff, rescope, graph-faithful owner/repo routing, and proof-gate release. "
-            "Use `block` for true external blockers and `escalate` for issue discovery; use `resolve_incident` only when the HUD's primary action is Resolve Incident for an existing open incident."
+            "Open incidents are yours to adjudicate: when an incident's underlying run is already terminal "
+            "(cancelled/failed/hung-reaped), close it with `resolve_incident` and a redaction-safe reason — "
+            "never answer `block` for an incident you can close. Use `block` only for true external blockers "
+            "that genuinely need a human, and `escalate` for issue discovery."
         )
     return common
 

@@ -107,7 +107,7 @@ Use only when Dev delivery/proof packets are present and the active graph's next
 
 ## Incident Resolution
 
-Use when the task is blocked with open incidents and the HUD recommends incident resolution. Resolve only with new evidence or a bounded recovery route; otherwise block with the incident ID and exact remaining blocker. A blocked task without an open incident should stay recoverable through the visible HUD action menu.
+Open incidents on your mission are yours to adjudicate in ANY task state, not only when blocked. When the incident context shows `underlying_run_terminal: true` (the run behind the incident is already cancelled, failed, or hung-reaped), the incident needs no external actor: emit `resolve_incident` with that incident ID and a redaction-safe resolution. Answering `block` for an incident you can close is a contract violation — the Harness rejects it with repair feedback. Reserve `block` for incidents that genuinely require a human (missing credentials, destructive approvals, hardware). Resolve with new evidence or a bounded recovery route; a blocked task without an open incident should stay recoverable through the visible HUD action menu.
 
 ## Recovery Template
 
