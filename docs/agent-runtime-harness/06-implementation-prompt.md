@@ -1,6 +1,11 @@
 # 06 — End-to-end implementation prompt (paste into Claude)
 
-Keep this in lockstep with `06-recursive-agent-supervised-execution.md` (v3). The block
+> **Status 2026-07-03:** this prompt was executed. AS0–AS7 are implemented on branch
+> `recursive-agent-supervised-execution` and independently verified — see doc-06 §6
+> (verification appendix) for the audit, closed gaps, and honest residuals. The prompt
+> is retained for reference and for re-runs on future stages.
+
+Keep this in lockstep with `06-recursive-agent-supervised-execution.md` (v3.1). The block
 below is the complete handoff for implementing AS0–AS7 in one engagement.
 
 ---

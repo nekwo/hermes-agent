@@ -1,12 +1,13 @@
 # 06 — Recursive Agent-Supervised Execution (implementation-ready)
 
-Status: **gaps closed, ready to hand off** (2026-07-03, v3 — v2 was the deep audit of the
-v1 proposal against the live tree at `ff4edffcc` with every code anchor verified file:line;
-v3 closes the remaining open items: the AS5 store-lock and worktree audits were *executed*
-and their results baked in as facts, and every design ambiguity a dev agent would have had
-to resolve — node identity, parent wake mechanism, flag map, event-bloat policy, lane
-concurrency model, timeout defaults — is decided in §2.5. The end-to-end implementation
-prompt lives at `06-implementation-prompt.md`.) The target execution model: the harness stops *ticking* worker turns and
+Status: **implemented + independently verified** (2026-07-03, v3.1 — AS0–AS7 landed on
+branch `recursive-agent-supervised-execution`, commits `60bec0008`…`bbefde6ea` + the v3.1
+verification commit; suite 1290 collected / green; the §6 verification appendix records
+the independent audit of that implementation, the two closed post-implementation gaps
+— in-flight tool-wait grace, `repo_land_lock` consumer honesty — and the real-daemon
+liveness proof. v3 closed all design gaps pre-implementation: §0 is the v2 code-anchor
+audit, §2.5 D1–D7 are the resolved design decisions. The end-to-end implementation prompt
+lives at `06-implementation-prompt.md`.) The target execution model: the harness stops *ticking* worker turns and
 becomes the incorruptible **substrate**; agents become **recursive supervisors** — each node
 schedules and watches only its **direct** children and reports a distilled summary upward.
 This is how the scheduler gets smart: scheduling becomes a distributed judgment made locally
@@ -525,3 +526,74 @@ still serial (hangs + deploy failures are orthogonal to concurrency).
 The end-to-end handoff prompt (all stages, one implementer) is maintained at
 [`06-implementation-prompt.md`](06-implementation-prompt.md) — keep it in lockstep with this
 doc.
+
+---
+
+## 6. Verification appendix (v3.1 — independent audit of the implementation)
+
+AS0–AS7 were implemented on branch `recursive-agent-supervised-execution`
+(`60bec0008` AS0 → `2b383f8fe` AS1 → `92dd1abc6` AS2/AS3 → `31d4fb825` AS4 →
+`2edfe54bd` AS5 → `ac4179557` AS6 → `6ec1dd164` AS7 → `bbefde6ea` offset-commit +
+proof-gate hardening). A second, independent audit then verified the branch against
+this doc and closed two residual gaps.
+
+**Independently verified (not taken from the implementer's report):**
+- Suite: `python -m pytest tests/agent_runtime -q` → green, full count re-run
+  post-audit (see status line); ~29 files changed, +2.4k lines, 8 new test files.
+- AS0 wiring is real: `daemon.py` runs a `mission-daemon-liveness` thread (sibling of
+  the heartbeat thread), clamped 30–120s, status-surfaced; ticker keeps a secondary
+  between-actions poll. Probe is store-only (no model, no snapshot).
+- Flags per D3: `SupervisionConfig` all-off defaults; `liveness_enabled=True`;
+  lane concurrency requires `swarm.enabled` AND burn-in certification
+  (`recursive_supervision_certification_allows_production`, 10 green unattended runs).
+  `production_envelope.py` copy is honest about the gate ("blocked until ledger green").
+- D-decisions honored: child-event inbox with post-turn offset commit
+  (`_commit_child_event_offset`, `bbefde6ea`); child return gate is fail-closed —
+  requires passed + redaction-safe + **harness-owned** proof (agent tool traces
+  rejected: `supervision.child_return_gate_passed`); locks retry-bounded
+  (`_file_lock` deadline + 50ms spin); `incident_lock` wired into
+  `IncidentStore.close`; migrations validate D6 (`liveness_hung_seconds <
+  heartbeat_ttl_seconds`, poll clamp 30–120).
+
+**Gaps found by the audit and closed in v3.1:**
+1. **False-positive hang cancel on long quiet tools (real bug, fixed in code).**
+   `run.tool.started` fires at tool start, then a long legitimate command (a 6-minute
+   build) emits nothing until `finished`; with `liveness_enabled` defaulting ON the
+   probe would have cancelled the run at 300s. Fix: in-flight tool-wait grace — an
+   unmatched `run.tool.started` raises the hung threshold by
+   `tool_wait_timeout_seconds` (default 300 → 600s total, still well under the 900s
+   TTL floor). Regression test added.
+2. **`repo_land_lock` had no consumer — resolved as documentation, not wiring.**
+   The audit confirmed no land-on-handoff path exists anywhere in the runtime: per-run
+   git worktrees share the repository object store, and the harness never writes a
+   lane's diff back to the source root (diffs are consumed as proof/gate inputs).
+   The lock is therefore a ready primitive whose consumer is the *future* land step;
+   wiring it today would serialize nothing. If/when a land step is introduced, it MUST
+   take `repo_land_lock(source_root)` — that requirement stays in §AS5.
+3. **Worker in-session command routing (§AS0 deliverable) — narrower than specced,
+   accepted with rationale.** The shared `tools/terminal_tool.py` already bounds
+   foreground commands (`TERMINAL_TIMEOUT` default 180s, `FOREGROUND_MAX_TIMEOUT`
+   cap) with background-process management, so the "unbounded worker CMD" lane the
+   v1 doc feared is already bounded tool-side for persona runs.
+   `run_liveness_bounded_command` is the harness-side seam (timeout + 10s heartbeat
+   emits + `command_hung` incident) for harness-executed worker commands; rewiring the
+   shared hermes terminal tool (used far beyond the harness) was out of proportion.
+   Residual coverage for anything that slips both bounds: the AS0 probe (with tool
+   grace) + the 900s TTL.
+
+**Live proof (real daemon, no model — isolated `HERMES_AGENT_RUNTIME_ROOT`):** a run
+seeded 400s heartbeat-stale under a real `MissionDaemon.run_foreground` was caught by
+the liveness thread in **0.5s wall-clock** — `run_hung` incident opened, run
+`cancelled`, incident linked into `task.open_incident_ids` (Neko-adjudication route).
+The v1 world would have waited 900s for the passive TTL. Full-goal stall proof with a
+live model remains open until a stall-injection hook exists — tracked as the honest
+residual, not claimed.
+
+**Residuals (explicitly NOT claimed as done):**
+- Production enablement of recursive lanes awaits the burn-in ledger's 10 green
+  unattended runs (by design — the AS7 gate is real, not advisory).
+- A full model-driven stalled-goal proof needs a stall-injection hook (e.g. a test
+  persona whose provider hangs); the real-daemon isolated proof above is the current
+  strongest evidence.
+- Daemon `_liveness_loop` reads config once at thread start; flag/threshold changes
+  need a daemon restart (matches existing daemon config semantics).

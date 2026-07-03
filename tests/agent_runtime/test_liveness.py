@@ -127,6 +127,85 @@ def test_liveness_event_progress_resets_quiet_strikes(isolate_agent_runtime_root
     assert probe._states[run.id].quiet_strikes == 0
 
 
+def test_liveness_in_flight_tool_gets_tool_wait_grace_before_hung(isolate_agent_runtime_root):
+    tasks = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    tasks.create(_task())
+    run = runs.open_run("dev", "task_live")
+    probe = LivenessProbe(
+        config=RuntimeConfig(
+            liveness_poll_seconds=30,
+            liveness_quiet_strikes=1,
+            liveness_hung_seconds=100,
+            tool_wait_timeout_seconds=300,
+            heartbeat_ttl_seconds=900,
+        ),
+        run_store=runs,
+        incident_store=incidents,
+        task_store=tasks,
+    )
+
+    # First poll establishes the probe state (event offset starts at the
+    # current end of the log), then the tool announces itself.
+    probe.poll_once()
+    EventLog().append(
+        Event(
+            ts=now(),
+            type="run.tool.started",
+            task_id="task_live",
+            run_id=run.id,
+            persona_id="dev",
+            payload={"tool_name": "terminal", "run_id": run.id},
+        )
+    )
+    probe.poll_once()
+    assert probe._states[run.id].tool_in_flight is True
+
+    # Quiet past the hung threshold but within the tool-wait grace: a long
+    # legitimate command (build, test suite) must NOT be cancelled.
+    run = runs.get(run.id)
+    run.last_heartbeat_at = now() - timedelta(seconds=200)
+    runs.update(run)
+    probe.poll_once()
+    assert runs.get(run.id).state != RunState.CANCELLED
+    assert probe._states[run.id].classification != "hung"
+
+    # Quiet past hung threshold + grace: now it is genuinely hung.
+    run = runs.get(run.id)
+    run.last_heartbeat_at = now() - timedelta(seconds=500)
+    runs.update(run)
+    result = probe.poll_once()
+    assert result["hung_runs"] == 1
+    assert runs.get(run.id).state == RunState.CANCELLED
+
+    # A finished tool clears the grace on a live probe state.
+    other = runs.open_run("dev", "task_live")
+    probe.poll_once()
+    EventLog().append(
+        Event(
+            ts=now(),
+            type="run.tool.started",
+            task_id="task_live",
+            run_id=other.id,
+            persona_id="dev",
+            payload={"tool_name": "terminal", "run_id": other.id},
+        )
+    )
+    EventLog().append(
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_live",
+            run_id=other.id,
+            persona_id="dev",
+            payload={"tool_name": "terminal", "status": "passed", "run_id": other.id},
+        )
+    )
+    probe.poll_once()
+    assert probe._states[other.id].tool_in_flight is False
+
+
 def test_liveness_config_validation_rejects_hung_threshold_past_ttl():
     cfg = RuntimeConfig(heartbeat_ttl_seconds=60, liveness_hung_seconds=60)
 

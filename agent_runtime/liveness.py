@@ -26,6 +26,7 @@ class _RunProbeState:
     classification: str = "advancing"
     quiet_strikes: int = 0
     poll_count: int = 0
+    tool_in_flight: bool = False
 
 
 class LivenessProbe:
@@ -80,16 +81,25 @@ class LivenessProbe:
             checked += 1
             state = self._states.setdefault(run.id, _RunProbeState(event_offset=_current_event_offset()))
             state.poll_count += 1
-            new_offset, event_advanced = self._consume_run_events(run.id, state.event_offset)
+            new_offset, event_advanced = self._consume_run_events(run.id, state.event_offset, state=state)
             state.event_offset = new_offset
             age_seconds = _age_seconds(ref, run.last_heartbeat_at)
             heartbeat_fresh = age_seconds <= int(getattr(self.config, "liveness_poll_seconds", 60) or 60)
             previous = state.classification
 
+            # A tool that announced run.tool.started but has not finished is
+            # allowed to stay quiet for the tool-wait allowance on top of the
+            # hung threshold: long legitimate commands (builds, test suites)
+            # emit nothing between started and finished, and cancelling them
+            # would be a false positive. The 900s TTL floor still applies.
+            hung_threshold = int(getattr(self.config, "liveness_hung_seconds", 300) or 300)
+            if state.tool_in_flight:
+                hung_threshold += int(getattr(self.config, "tool_wait_timeout_seconds", 300) or 300)
+
             if heartbeat_fresh or event_advanced:
                 state.quiet_strikes = 0
                 state.classification = "advancing"
-            elif age_seconds >= int(getattr(self.config, "liveness_hung_seconds", 300) or 300):
+            elif age_seconds >= hung_threshold:
                 state.quiet_strikes += 1
                 state.classification = "hung"
             else:
@@ -118,13 +128,20 @@ class LivenessProbe:
     def status(self) -> dict[str, Any]:
         return dict(self.last_result, last_poll_at=self.last_poll_at)
 
-    def _consume_run_events(self, run_id: str, offset: int) -> tuple[int, bool]:
+    def _consume_run_events(self, run_id: str, offset: int, *, state: _RunProbeState | None = None) -> tuple[int, bool]:
         latest = max(0, int(offset or 0))
         advanced = False
         for new_offset, evt in self.event_log.iter_from_offset(offset) or ():
             latest = max(latest, int(new_offset or latest))
-            if evt.run_id == run_id and evt.type not in _LIVENESS_EVENT_TYPES:
+            if evt.run_id != run_id:
+                continue
+            if evt.type not in _LIVENESS_EVENT_TYPES:
                 advanced = True
+            if state is not None:
+                if evt.type == "run.tool.started":
+                    state.tool_in_flight = True
+                elif evt.type == "run.tool.finished":
+                    state.tool_in_flight = False
         return latest, advanced
 
     def _should_emit_poll(self, previous: str, state: _RunProbeState) -> bool:

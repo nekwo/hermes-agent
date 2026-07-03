@@ -45,7 +45,8 @@ these three are the live truth.
    data layer becomes production-grade.**
 
 6. **[06 — Recursive Agent-Supervised Execution](06-recursive-agent-supervised-execution.md)** —
-   *audited, implementation-ready (v2).* The target execution model: the harness stops *ticking*
+   *implemented + verified (v3.1) on branch `recursive-agent-supervised-execution`;
+   production recursive lanes remain burn-in-ledger-gated (see doc §6).* The target execution model: the harness stops *ticking*
    worker turns and becomes the incorruptible substrate (gate every handoff, watchdog every
    level, hierarchical budget, event-source everything); agents become recursive supervisors —
    each node schedules/watches only its DIRECT children and reports a distilled summary up
