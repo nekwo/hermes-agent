@@ -57,15 +57,18 @@ these three are the live truth.
    isolation; the doc-05 read-model dependency is already shipped) → verified deploy → CI
    gates. **How the scheduler becomes distributed AI judgment instead of a serial tick loop.**
 
-7. **[08 — Blueprint-as-Script Collapse](08-blueprint-as-script-collapse.md)** — *proposed;
-   staged plan, not yet implemented.* The over-engineering correction: make the blueprint
-   the executable script and the harness a dumb interpreter of it. Neko's skill authors the
-   stages for the actual goal (nothing baked), agents own their work + proof (the dev's own
-   green test run IS the proof — no harness re-run), steering is the only coordination verb,
-   and the harness shrinks to hang-kill + anti-fake. Stages BS0–BS7 collapse ~13.7k lines of
-   hardcoded flow (`planning.py`/`ticker.py`/`mission_plan.py`/`default_plan.py`/`routing.py`)
-   and dissolve the 2026-07-03 self-drive bug class at the source. **What the recovery tower
-   collapses into once the blueprint is the script.**
+7. **[08 — Blueprint-as-Script Collapse](08-blueprint-as-script-collapse.md)** —
+   *implementation-ready; staged plan, not yet implemented.* The over-engineering
+   correction: the agents are already capable Hermes `AIAgent` loops, so an agent "type" is
+   just a **prompt + HUD**; the blueprint becomes the executable script and the harness
+   shrinks to four jobs — resolve workdir, inject prompt+HUD, kill hangs, capture diff/trace.
+   Neko's skill authors the stages for the actual goal (nothing baked), each agent runs its
+   native loop to completion (dev's own green test run IS the proof — no harness re-run),
+   steering is the only coordination verb. Stages BS0–BS7 (each with exact modules, symbols,
+   config keys, test names, live-proof commands, rollback, and a handoff prompt) collapse
+   ~13.7k lines of hardcoded flow and make the 2026-07-03 self-drive bug class
+   unrepresentable. **What the recovery tower collapses into once the blueprint is the script
+   and the harness stops babysitting the model.**
 
 ## Product stance
 
