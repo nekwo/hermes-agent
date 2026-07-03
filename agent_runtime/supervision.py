@@ -91,6 +91,7 @@ def child_return_gate_passed(event: Event, *, proof_store: ProofStore | None = N
     proof_ids = _safe_list(payload.get("proof_ids"))
     if not proof_ids:
         return False, "missing_child_proof"
+    expected_stage_id = safe_assignment_text(payload.get("stage_id"), limit=160)
     for proof_id in proof_ids:
         try:
             proof = proof_store.get(proof_id)
@@ -98,8 +99,17 @@ def child_return_gate_passed(event: Event, *, proof_store: ProofStore | None = N
             return False, "missing_child_proof"
         metadata = proof.metadata if isinstance(getattr(proof, "metadata", None), dict) else {}
         status = str(metadata.get("status") or "").lower()
-        if status and status != "passed":
+        if status != "passed":
             return False, "child_proof_not_passed"
+        if getattr(proof, "redaction_status", None) != "safe":
+            return False, "child_proof_not_redaction_safe"
+        if str(getattr(proof, "created_by", "") or "") != "harness":
+            return False, "child_proof_not_harness_owned"
+        if metadata.get("source") == "agent_tool_trace" or metadata.get("authoritative") is False:
+            return False, "child_proof_not_authoritative"
+        proof_stage = safe_assignment_text(getattr(proof, "stage_id", None) or metadata.get("stage_id"), limit=160)
+        if expected_stage_id and proof_stage and proof_stage != expected_stage_id:
+            return False, "child_proof_wrong_stage"
     return True, "passed"
 
 

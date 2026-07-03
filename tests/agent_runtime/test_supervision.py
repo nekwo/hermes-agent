@@ -100,3 +100,65 @@ def test_recursive_child_return_requires_passed_harness_proof(isolate_agent_runt
     blocked_events = [event for event in EventLog().iter_all() if event.type == "child.blocked"]
     assert blocked_events
     assert "recursive gate failed" in blocked_events[-1].payload["reason"]
+
+
+def test_recursive_child_return_rejects_agent_observed_trace(isolate_agent_runtime_root):
+    task_store = TaskStore()
+    proof_store = ProofStore()
+    task = task_store.create(_task("task_recursive_trace"))
+    store = PersonaInstanceStore()
+    parent = store.ensure_for_goal(_persona("neko_supervisor"), goal_id=task.id, spawned_by=None)
+    child = store.ensure_for_goal(_persona("dev"), goal_id=task.id, spawned_by=parent.id)
+    proof_store.attach(
+        Proof(
+            id="proof_observed_child",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="observed",
+            path_or_value="trace",
+            created_by="dev",
+            created_at=now(),
+            metadata={"status": "passed", "source": "agent_tool_trace", "authoritative": False},
+            redaction_status="safe",
+        )
+    )
+    emit_child_returned(child=child, summary="Done", proof_ids=["proof_observed_child"], artifact_refs=[], task_id=task.id, stage_id="implement")
+    config = RuntimeConfig(supervision=SupervisionConfig(child_events_enabled=True, recursive_enabled=True))
+
+    action = MissionStateMachine(config=config).next_action(task_store.get(task.id))
+
+    assert action.reason == "child return failed recursive gate; parent supervision turn required"
+    blocked_events = [event for event in EventLog().iter_all() if event.type == "child.blocked"]
+    assert blocked_events[-1].payload["reason"] == "recursive gate failed: child_proof_not_harness_owned"
+
+
+def test_recursive_child_return_accepts_harness_owned_stage_proof(isolate_agent_runtime_root):
+    task_store = TaskStore()
+    proof_store = ProofStore()
+    task = task_store.create(_task("task_recursive_harness"))
+    store = PersonaInstanceStore()
+    parent = store.ensure_for_goal(_persona("neko_supervisor"), goal_id=task.id, spawned_by=None)
+    child = store.ensure_for_goal(_persona("dev"), goal_id=task.id, spawned_by=parent.id)
+    proof_store.attach(
+        Proof(
+            id="proof_harness_child",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="harness",
+            path_or_value="artifact",
+            created_by="harness",
+            created_at=now(),
+            metadata={"status": "passed", "proof_intent": "authoritative_gate_after_hand_off"},
+            redaction_status="safe",
+        )
+    )
+    emit_child_returned(child=child, summary="Done", proof_ids=["proof_harness_child"], artifact_refs=[], task_id=task.id, stage_id="implement")
+    config = RuntimeConfig(supervision=SupervisionConfig(child_events_enabled=True, recursive_enabled=True))
+
+    action = MissionStateMachine(config=config).next_action(task_store.get(task.id))
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.reason == "child status event requires parent supervision turn"
+    assert not [event for event in EventLog().iter_all() if event.type == "child.blocked"]

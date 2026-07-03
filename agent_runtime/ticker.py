@@ -249,7 +249,11 @@ class TickEngine:
                 if not eligible:
                     result.skipped.append(task.id)
                     continue
-                result.actions_taken.extend(self._execute_eligible_actions(eligible, loaded_task=loaded_task))
+                action_results = self._execute_eligible_actions(eligible, loaded_task=loaded_task)
+                for action_result in action_results:
+                    if action_result.ok:
+                        _commit_child_event_offset(action_result.action)
+                result.actions_taken.extend(action_results)
             result.finished_at = now()
             self._apply_read_model_pending()
             return result
@@ -2648,6 +2652,26 @@ def _runtime_budget_block(task: Task, *, persona_id: str, run_store: RunStore, c
 def _deploy_verification_enabled(config: RuntimeConfig) -> bool:
     supervision = getattr(config, "supervision", None)
     return bool(getattr(supervision, "deploy_verification_enabled", False))
+
+
+def _commit_child_event_offset(action: HarnessAction, *, persona_store: PersonaInstanceStore | None = None) -> bool:
+    parent_node_id = str(getattr(action, "parent_node_id", "") or "").strip()
+    if not parent_node_id:
+        return False
+    try:
+        offset = int(getattr(action, "child_events_offset", None) or 0)
+    except (TypeError, ValueError):
+        return False
+    if offset <= 0:
+        return False
+    store = persona_store or PersonaInstanceStore()
+    try:
+        parent = store.get(parent_node_id)
+    except Exception:
+        return False
+    parent.child_events_offset = max(int(getattr(parent, "child_events_offset", 0) or 0), offset)
+    store.update(parent)
+    return True
 
 
 def _first_deploy_contention_warning(store: PersonaAssignmentStore, *, persona_id: str, goal_id: str, enabled: bool) -> dict[str, Any] | None:

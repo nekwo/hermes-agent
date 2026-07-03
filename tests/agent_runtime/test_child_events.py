@@ -12,6 +12,7 @@ from agent_runtime.runtime_config import RuntimeConfig, SupervisionConfig
 from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import TaskState
 from agent_runtime.store import RunStore, TaskStore
+from agent_runtime.ticker import _commit_child_event_offset
 from agent_runtime.persona_assignments import PersonaInstanceStore
 
 
@@ -83,7 +84,7 @@ def test_child_progress_is_throttled_and_does_not_wake_parent(isolate_agent_runt
     assert action.reason != "child status event requires parent supervision turn"
 
 
-def test_child_returned_wakes_parent_and_advances_offset(isolate_agent_runtime_root):
+def test_child_returned_wakes_parent_and_advances_offset_only_after_commit(isolate_agent_runtime_root):
     config = _enabled_config()
     tasks = TaskStore()
     instances = PersonaInstanceStore()
@@ -106,7 +107,11 @@ def test_child_returned_wakes_parent_and_advances_offset(isolate_agent_runtime_r
     assert result["ok"] is True
     assert action.type == HarnessActionType.RUN_SLOT
     assert action.slot_id == "neko_supervisor"
-    assert instances.get(parent.id).child_events_offset > 0
+    assert action.parent_node_id == parent.id
+    assert action.child_events_offset and action.child_events_offset > 0
+    assert instances.get(parent.id).child_events_offset == 0
+    assert _commit_child_event_offset(action, persona_store=instances) is True
+    assert instances.get(parent.id).child_events_offset == action.child_events_offset
     event_types = [event.type for event in EventLog().iter_all()]
     assert "steer.returned" in event_types
     assert "child.returned" in event_types

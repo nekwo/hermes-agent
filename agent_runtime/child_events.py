@@ -208,12 +208,13 @@ def parent_child_event_wake_action(mission: Task, *, config: RuntimeConfig | Non
                     )
                     reason = "child return failed recursive gate; parent supervision turn required"
                     break
-        _advance_parent_offset(persona_store, parent, latest_offset)
         return HarnessAction(
             HarnessActionType.RUN_SLOT,
             mission.id,
             reason=reason,
             slot_id=parent.persona_id,
+            parent_node_id=parent.id,
+            child_events_offset=latest_offset,
         )
     return None
 
