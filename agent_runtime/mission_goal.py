@@ -146,6 +146,7 @@ def create_mission_goal(
         requested_blueprint_id=requested_blueprint_id,
         selection_mode=blueprint_selection_mode,
         bindings=blueprint_bindings or {},
+        config=config,
     )
     if plan_error is not None:
         return plan_error
@@ -225,9 +226,34 @@ def _attach_requested_blueprint_plan(
     requested_blueprint_id: str | None,
     selection_mode: str,
     bindings: dict[str, str],
+    config: Any | None = None,
 ) -> dict[str, Any] | None:
     blueprint_id = str(requested_blueprint_id or "").strip()
     if not blueprint_id or selection_mode != "explicit":
+        if bool(getattr(config or load_agent_runtime_config(), "root_node_mode", False)):
+            try:
+                bp = BlueprintStore().get("neko_default_script")
+                plan = instantiate_blueprint(
+                    bp,
+                    goal=task.description or task.title,
+                    bindings={"root": "persona:neko_supervisor", "dev": "persona:dev", "qa": "persona:qa"},
+                    resolver=BindingResolver(allow_promote=False),
+                )
+            except Exception as exc:
+                return _create_error(
+                    "blueprint_invalid",
+                    "Root-node script blueprint could not instantiate.",
+                    retryable=False,
+                    safe_details={"requested_blueprint_id": "neko_default_script", "error_class": type(exc).__name__},
+                )
+            if plan.mission_intent is not None:
+                plan.mission_intent.title = task.title
+                plan.mission_intent.acceptance_criteria = list(task.acceptance_criteria or [])
+                plan.mission_intent.source_task_id = task.id
+            task.mission_plan = plan
+            task.current_stage_id = plan.current_stage_id
+            task.harness_self_heal["root_node_mode"] = True
+            return None
         ensure_default_mission_plan(task)
         return None
     try:

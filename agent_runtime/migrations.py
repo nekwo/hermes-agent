@@ -32,6 +32,8 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
     _positive(errors, "daemon_interval_seconds", cfg.daemon_interval_seconds)
     _positive(errors, "daemon_idle_interval_seconds", cfg.daemon_idle_interval_seconds)
     _positive(errors, "daemon_heartbeat_seconds", cfg.daemon_heartbeat_seconds)
+    if not isinstance(getattr(cfg, "root_node_mode", False), bool):
+        errors.append({"field": "root_node_mode", "reason": "must be boolean"})
     _positive(errors, "live_run_max_wall_seconds", cfg.live_run_max_wall_seconds)
     _positive(errors, "live_run_max_api_calls", cfg.live_run_max_api_calls)
     _positive(errors, "live_run_max_total_tokens", cfg.live_run_max_total_tokens)

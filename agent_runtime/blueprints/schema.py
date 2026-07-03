@@ -173,6 +173,8 @@ def validate_blueprint(bp: Blueprint) -> list[str]:
             if dep not in stage_ids:
                 errors.append(f"stage {stage.id} depends on unknown stage {dep!r}")
         errors.extend(_validate_proof_gate(stage))
+    if not bp.stages and bp.edges:
+        errors.append("edges require at least one stage")
     for edge in bp.edges:
         if edge.source not in stage_ids:
             errors.append(f"edge source {edge.source!r} is not a known stage")

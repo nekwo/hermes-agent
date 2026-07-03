@@ -5884,6 +5884,10 @@ def _cmd_daemon(args) -> int:
     os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
 
     def engine_factory():
+        if bool(getattr(cfg, "root_node_mode", False)):
+            from agent_runtime.root_node_engine import RootNodeEngine
+
+            return RootNodeEngine(config=cfg)
         return TickEngine(
             config=cfg,
             persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),

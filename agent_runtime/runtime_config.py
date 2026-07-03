@@ -142,6 +142,7 @@ class RuntimeConfig:
     daemon_retry_cooldown_seconds: int = 120
     daemon_max_retries_per_state: int = 3
     task_create_auto_start_daemon: bool = False
+    root_node_mode: bool = False
     preferred_goal_execution_mode: str = "in_process_controller"
     live_run_max_wall_seconds: float = 300.0
     live_run_max_api_calls: int = 20

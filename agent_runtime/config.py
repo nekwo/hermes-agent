@@ -62,6 +62,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         daemon_retry_cooldown_seconds=int((raw.get("daemon") or {}).get("retry_cooldown_seconds", raw.get("daemon_retry_cooldown_seconds", 120))),
         daemon_max_retries_per_state=int((raw.get("daemon") or {}).get("max_retries_per_state", raw.get("daemon_max_retries_per_state", 3))),
         task_create_auto_start_daemon=bool(raw.get("task_create_auto_start_daemon", False)),
+        root_node_mode=bool(raw.get("root_node_mode", False)),
         preferred_goal_execution_mode=str(raw.get("preferred_goal_execution_mode", "in_process_controller") or "in_process_controller"),
         live_run_max_wall_seconds=float(raw.get("live_run_max_wall_seconds", 300.0)),
         live_run_max_api_calls=int(raw.get("live_run_max_api_calls", 20)),
