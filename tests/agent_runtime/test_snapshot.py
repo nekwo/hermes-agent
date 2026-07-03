@@ -8,11 +8,44 @@ from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, M
 from agent_runtime.persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
-from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology_node, build_snapshot, write_snapshot
+from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, build_snapshot, write_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.events import EventLog
+
+
+def test_agent_topology_collapses_multi_turn_instances_to_one_node_per_persona(isolate_agent_runtime_root):
+    # A persona that runs N turns creates N persona_instances; the topology must
+    # render ONE node per agent, not one per turn, or the graph floods with
+    # duplicate "Backend Dev Agent" / "Launcher Dev Agent" nodes.
+    ts = now()
+    task = Task(
+        id="task_topo",
+        title="t",
+        description="t",
+        state=TaskState.RUNNING,
+        created_at=ts,
+        updated_at=ts,
+        requested_by="t",
+        affected_repos=["EterniaBackend", "EterniaLauncher"],
+        current_stage_id="backend_implementation",
+    )
+    task.goal_id = "task_topo"
+    instances = (
+        [SimpleNamespace(id=f"pi_bd_{n}", persona_id="backend_dev", goal_id="task_topo", task_id="task_topo", spawned_by="", state="completed") for n in range(30)]
+        + [SimpleNamespace(id=f"pi_dev_{n}", persona_id="dev", goal_id="task_topo", task_id="task_topo", spawned_by="", state="completed") for n in range(30)]
+        + [SimpleNamespace(id="pi_neko", persona_id="neko_supervisor", goal_id="task_topo", task_id="task_topo", spawned_by="", state="completed")]
+    )
+
+    topo = _agent_topology(task, active_runs=[], active_workers=[], runtime_instances=[], persona_instances=instances, role_streams=[])
+
+    personas = [str(node.get("persona_id") or "") for node in topo["nodes"]]
+    assert personas.count("backend_dev") == 1
+    assert personas.count("dev") == 1
+    assert personas.count("neko_supervisor") == 1
+    assert len(topo["nodes"]) == 3
+    assert topo["completeness"]["collapsed_multi_turn_instances"] == 58
 
 
 def test_snapshot_contains_task_summary_and_no_raw_logs(isolate_agent_runtime_root):

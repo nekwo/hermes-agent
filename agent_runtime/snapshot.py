@@ -1596,6 +1596,14 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
     stream_by_id = {stream.get("persona_id"): stream for stream in role_streams if isinstance(stream, dict)}
     nodes_by_id: dict[str, dict] = {}
     slot_node_ids: dict[str, str] = {}
+    # Canonical node per persona. A persona that runs N turns (N re-instantiated
+    # persona_instances) is ONE agent, not N nodes — without this the topology
+    # grows O(runs/spawns) and floods the graph with duplicate "Backend Dev Agent"
+    # / "Launcher Dev Agent" nodes. Multi-turn instances collapse onto the canonical
+    # node; only a genuinely distinct persona (a spawned sub-agent of a new role)
+    # gets its own node.
+    persona_node_id: dict[str, str] = {}
+    collapsed_instances = 0
 
     def add_node_for_slot(slot: str) -> str | None:
         slot = str(slot or "").strip()
@@ -1617,6 +1625,8 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
             fallback_display=_display_name_for_persona(persona_id or slot),
             fallback_role=_actor_role_for_persona(persona_id or slot),
         )
+        if persona_id:
+            persona_node_id.setdefault(persona_id, node_id)
         return node_id
 
     topology_slots: list[str] = []
@@ -1637,6 +1647,12 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
         if not instance_id or instance_id in nodes_by_id:
             continue
         persona_id = str(getattr(instance, "persona_id", "") or "").strip()
+        # Collapse a re-instantiated persona onto its canonical node instead of
+        # minting a duplicate node per turn. Only a persona that has no node yet
+        # (a genuinely distinct spawned sub-agent) earns its own node.
+        if persona_id and persona_id in persona_node_id:
+            collapsed_instances += 1
+            continue
         owned_stages = stages_by_persona.get(persona_id) or []
         nodes_by_id[instance_id] = _agent_topology_node(
             node_id=instance_id,
@@ -1649,21 +1665,41 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
             fallback_display=_display_name_for_persona(persona_id),
             fallback_role=_actor_role_for_persona(persona_id),
         )
+        if persona_id:
+            persona_node_id[persona_id] = instance_id
+
+    def _canonical_node_for(instance) -> str:
+        pid = str(getattr(instance, "persona_id", "") or "").strip()
+        if pid and pid in persona_node_id:
+            return persona_node_id[pid]
+        return str(getattr(instance, "id", "") or "").strip()
 
     edges: list[dict] = []
     targets_with_runtime_parent: set[str] = set()
+    seen_spawn_edges: set[tuple[str, str]] = set()
     for instance in related_instances:
-        instance_id = str(getattr(instance, "id", "") or "").strip()
         parent_ref = str(getattr(instance, "spawned_by", "") or "").strip()
         parent = _topology_parent_instance(parent_ref, related_instances)
-        parent_id = str(getattr(parent, "id", "") or "").strip() if parent is not None else ""
-        if not instance_id or not parent_id or instance_id not in nodes_by_id or parent_id not in nodes_by_id:
+        if parent is None:
             continue
-        targets_with_runtime_parent.add(instance_id)
+        # Map lineage onto canonical persona nodes so collapsed multi-turn instances
+        # don't drop the spawn edge; dedupe and skip self-edges (a persona spawning
+        # another turn of itself is not a distinct steer).
+        target_node = _canonical_node_for(instance)
+        parent_node = _canonical_node_for(parent)
+        if not target_node or not parent_node or parent_node == target_node:
+            continue
+        if target_node not in nodes_by_id or parent_node not in nodes_by_id:
+            continue
+        key = (parent_node, target_node)
+        if key in seen_spawn_edges:
+            continue
+        seen_spawn_edges.add(key)
+        targets_with_runtime_parent.add(target_node)
         edges.append(
             {
-                "source_node_id": parent_id,
-                "target_node_id": instance_id,
+                "source_node_id": parent_node,
+                "target_node_id": target_node,
                 "kind": "steers",
                 "source": "runtime_spawned_by",
             }
@@ -1707,6 +1743,7 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
         "completeness": {
             "node_count": len(nodes_by_id),
             "edge_count": len(edges),
+            "collapsed_multi_turn_instances": collapsed_instances,
             "stream_event_cap_per_node": 3,
             "id_cap_per_node": AGENT_TOPOLOGY_NODE_ID_CAP,
             "drops": drop_samples[:50],
