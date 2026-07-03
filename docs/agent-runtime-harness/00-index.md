@@ -35,6 +35,15 @@ these three are the live truth.
    (hand off · block · escalate · neko scope/route · qa verdict). Kills the
    `model_invalid_output` failure class. **What the decision contract simplifies to.**
 
+5. **[05 — Runtime Data: Enterprise-Grade Storage & Access](05-runtime-data-enterprise-storage.md)** —
+   *implementation-ready.* Staged spec (RD0–RD8) with exact modules, SQLite DDL, config
+   keys, test files, proof commands, rollback paths, and per-stage handoff prompts:
+   monolithic `snapshot.json` + poll → transactional `read_model.db` with an incremental
+   lease-holding projector, NDJSON change feed, per-lane consumer degradation,
+   deterministic fail-loud runtime-root resolution, event-log segmentation +
+   backup/restore drills, and hard CI perf/concurrency/crash gates. **How the runtime's
+   data layer becomes production-grade.**
+
 ## Product stance
 
 Build the smallest reliable core first:
