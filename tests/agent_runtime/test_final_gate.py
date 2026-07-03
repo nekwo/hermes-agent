@@ -129,3 +129,35 @@ def test_authoritative_gate_decision_uses_goal_named_command_for_no_edit_stage()
     assert decision is not None
     assert decision.payload["commands"] == ["python -m pytest tests/agent_runtime/test_liveness.py -q"]
     assert decision.payload["proof_intent"] == "authoritative_gate_after_hand_off"
+
+
+def test_no_required_gate_stage_advances_on_delivery_when_no_gate_command_derivable(isolate_agent_runtime_root):
+    """Live regression 2026-07-03 (task_49f8ee3b): a no-edit goal's
+    backend_implementation stage (proof_gate.required=false, empty test_plan,
+    no recipe, goal-named command scoped to another repo) produced a None gate
+    decision after hand_off and nothing ever marked the stage passed — the
+    owner was re-dispatched forever."""
+
+    from agent_runtime.blueprints.routing import apply_stage_outcome, stage_declares_required_gate
+    from agent_runtime.blueprints.schema import StageOutcome
+    from agent_runtime.default_plan import ensure_default_mission_plan
+    from agent_runtime.ticker import _build_authoritative_stage_gate_decision
+
+    task = _goal_task(
+        "Bounded no-edit investigation. In the hermes-agent repo, run `python -m pytest tests/agent_runtime/test_liveness.py -q` and report, with no product edits.",
+        repos=["hermes-agent"],
+    )
+    plan = ensure_default_mission_plan(task)
+    stage = next(s for s in plan.stages if s.id == "backend_implementation")
+    plan.current_stage_id = "backend_implementation"
+    task.current_stage_id = "backend_implementation"
+
+    # The gate has nothing safe to run for this stage...
+    gate_decision = _build_authoritative_stage_gate_decision(task, stage)
+    assert gate_decision is None
+    # ...and the blueprint declares no required proof gate for it...
+    assert stage_declares_required_gate(stage) is False
+    # ...so the accepted delivery completes the stage and the graph advances.
+    target = apply_stage_outcome(task, "backend_implementation", StageOutcome.PASSED, reason="delivery accepted; no required gate")
+    assert target == "implement"
+    assert task.current_stage_id == "implement"

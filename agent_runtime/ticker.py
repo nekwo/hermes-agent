@@ -17,7 +17,8 @@ from hermes_time import now
 
 from .actions import HarnessAction, HarnessActionResult, HarnessActionType
 from .autonomy import record_autonomy_packet
-from .blueprints.routing import apply_decision_outcome, is_blueprint_plan
+from .blueprints.routing import apply_decision_outcome, apply_stage_outcome, is_blueprint_plan, stage_declares_required_gate
+from .blueprints.schema import StageOutcome
 from .budget_approval import budget_incident_needs_scope_recovery, eligible_budget_approval_incidents
 from .child_events import emit_child_deploy_failed
 from .config import ensure_persisted_personas, get_persisted_persona, load_agent_runtime_config
@@ -1220,6 +1221,40 @@ class TickEngine:
                             if assignment is not None:
                                 for proof_id in proof_ids:
                                     self.persona_assignment_store.attach_proof(assignment.id, proof_id)
+                        elif source_stage is not None and not stage_declares_required_gate(source_stage):
+                            # The stage's own owner delivered (hand_off) and the
+                            # blueprint declares NO required proof gate for this
+                            # stage: the accepted delivery IS the completion
+                            # signal. Without this, no path ever marks the stage
+                            # passed and the owner is re-dispatched forever
+                            # (observed live 2026-07-03: task_49f8ee3b looped
+                            # backend_implementation 8x on 'no safe automatic
+                            # final gate command was available').
+                            apply_stage_outcome(
+                                task,
+                                source_stage_id,
+                                StageOutcome.PASSED,
+                                reason="delivery accepted; stage declares no required proof gate and no gate command was derivable",
+                            )
+                            task.updated_at = now()
+                            EventLog().append(
+                                Event(
+                                    ts=now(),
+                                    type="run.progress",
+                                    task_id=task.id,
+                                    run_id=run.id,
+                                    persona_id=persona.id,
+                                    payload={
+                                        "type": "run.progress",
+                                        "phase": "proof",
+                                        "step": "auto_final_gate_not_required",
+                                        "status": "passed",
+                                        "stage_id": source_stage_id,
+                                        "summary": "Delivery accepted; the stage declares no required proof gate, so the hand_off completes the stage.",
+                                        "next_expected": "next_blueprint_stage",
+                                    },
+                                )
+                            )
                         else:
                             EventLog().append(
                                 Event(

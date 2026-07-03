@@ -215,6 +215,12 @@ def _scope_stage_ready_without_proof(stage: MissionPlanStage) -> bool:
     )
 
 
+def stage_declares_required_gate(stage: MissionPlanStage) -> bool:
+    """Public alias: does this blueprint stage declare a required proof gate?"""
+
+    return _stage_has_required_gate(stage)
+
+
 def _stage_has_required_gate(stage: MissionPlanStage) -> bool:
     gate = getattr(stage, "proof_gate", {}) or {}
     return bool(
