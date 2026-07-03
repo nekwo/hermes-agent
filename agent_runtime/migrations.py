@@ -39,6 +39,12 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
     _positive(errors, "scope_wait_deadline_seconds", cfg.scope_wait_deadline_seconds)
     _positive(errors, "run_lease_seconds", cfg.run_lease_seconds)
     _positive(errors, "tool_wait_timeout_seconds", cfg.tool_wait_timeout_seconds)
+    _positive(errors, "liveness_poll_seconds", cfg.liveness_poll_seconds)
+    _positive(errors, "liveness_quiet_strikes", cfg.liveness_quiet_strikes)
+    _positive(errors, "liveness_hung_seconds", cfg.liveness_hung_seconds)
+    _positive(errors, "child_progress_min_interval_seconds", cfg.child_progress_min_interval_seconds)
+    _positive(errors, "deploy_timeout_seconds", cfg.deploy_timeout_seconds)
+    _positive(errors, "lock_acquire_timeout_seconds", cfg.lock_acquire_timeout_seconds)
     _positive(errors, "mission_max_total_tokens", cfg.mission_max_total_tokens)
     _positive(errors, "mission_wall_clock_deadline_seconds", cfg.mission_wall_clock_deadline_seconds)
     _positive(errors, "neko_recovery_attempt_cap", cfg.neko_recovery_attempt_cap)
@@ -100,6 +106,10 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
             "field": "mission_max_total_tokens",
             "reason": "mission token ceiling must be >= per-run token ceiling",
         })
+    if int(getattr(cfg, "liveness_poll_seconds", 0) or 0) < 30 or int(getattr(cfg, "liveness_poll_seconds", 0) or 0) > 120:
+        errors.append({"field": "liveness_poll_seconds", "reason": "must be between 30 and 120"})
+    if int(getattr(cfg, "liveness_hung_seconds", 0) or 0) >= int(getattr(cfg, "heartbeat_ttl_seconds", 0) or 0):
+        errors.append({"field": "liveness_hung_seconds", "reason": "must be less than heartbeat_ttl_seconds"})
     if not (
         cfg.artifact_storage_low_watermark_mb
         <= cfg.artifact_storage_high_watermark_mb

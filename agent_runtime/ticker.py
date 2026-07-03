@@ -20,6 +20,7 @@ from .blueprints.routing import apply_decision_outcome, is_blueprint_plan
 from .budget_approval import budget_incident_needs_scope_recovery, eligible_budget_approval_incidents
 from .config import ensure_persisted_personas, get_persisted_persona, load_agent_runtime_config
 from .locks import HarnessLockUnavailable, tick_lock
+from .liveness import LivenessProbe
 from .events import EventLog
 from .final_gate import build_final_gate_decision
 from .models import Event, Incident, Task
@@ -116,11 +117,20 @@ class TickEngine:
         self.proof_batch_store = ProofBatchStore()
         self.persona_assignment_store = PersonaAssignmentStore()
         self.repo_bundle_store = RepoBundleStore()
+        self.liveness_probe = LivenessProbe(
+            config=self.config,
+            run_store=self.run_store,
+            incident_store=self.incident_store,
+            task_store=self.task_store,
+            event_log=EventLog(),
+            worker_session_store=self.worker_session_store,
+        )
 
     def tick_once(self, *, task_id: str | None = None) -> TickResult:
         with tick_lock():
             result = TickResult(tick_id=f"tick_{uuid.uuid4().hex[:8]}", started_at=now())
             self._active_tick_id = result.tick_id
+            self._poll_liveness(result)
             result.incidents_opened.extend(mark_stale_runs(self.run_store, self.incident_store, heartbeat_ttl_seconds=self.config.heartbeat_ttl_seconds))
             closed_model_invalid_tasks = self._close_model_invalid_output_incidents(task_id=task_id)
             if task_id:
@@ -239,6 +249,7 @@ class TickEngine:
             max_seconds=max_seconds,
         )
 
+        self.liveness_probe.poll_once()
         mark_stale_runs(self.run_store, self.incident_store, heartbeat_ttl_seconds=self.config.heartbeat_ttl_seconds)
         boundary = self._settled_boundary(task_id=task_id)
         if boundary is not None:
@@ -260,6 +271,7 @@ class TickEngine:
                 self.config.max_actions_per_tick = original_tick_limit
             result.ticks += 1
             result.actions_taken.extend(tick.actions_taken)
+            self.liveness_probe.poll_once()
 
             if not tick.actions_taken:
                 result.stop_reason = "no_eligible_action"
@@ -282,6 +294,13 @@ class TickEngine:
         result.finished_at = now()
         self._apply_read_model_pending()
         return result
+
+    def _poll_liveness(self, result: TickResult | None = None) -> None:
+        before = {incident.id for incident in self.incident_store.list_open()}
+        self.liveness_probe.poll_once()
+        if result is not None:
+            after = {incident.id for incident in self.incident_store.list_open()}
+            result.incidents_opened.extend(sorted(after - before))
 
     def _apply_read_model_pending(self) -> None:
         read_model_cfg = getattr(self.config, "read_model", None)

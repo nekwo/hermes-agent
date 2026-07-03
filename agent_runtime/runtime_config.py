@@ -142,6 +142,13 @@ class RuntimeConfig:
     scope_wait_deadline_seconds: int = 900
     run_lease_seconds: int = 600
     tool_wait_timeout_seconds: int = 300
+    liveness_enabled: bool = True
+    liveness_poll_seconds: int = 60
+    liveness_quiet_strikes: int = 2
+    liveness_hung_seconds: int = 300
+    child_progress_min_interval_seconds: int = 30
+    deploy_timeout_seconds: int = 120
+    lock_acquire_timeout_seconds: int = 15
     mission_max_total_tokens: int = 1_000_000
     mission_wall_clock_deadline_seconds: int = 86_400
     neko_recovery_attempt_cap: int = 2

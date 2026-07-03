@@ -14,6 +14,8 @@ from typing import Callable
 from utils import atomic_json_write
 
 from . import paths
+from .config import load_agent_runtime_config
+from .liveness import LivenessProbe
 from .serde import to_jsonable
 from .ticker import TickEngine, TickResult
 
@@ -95,6 +97,9 @@ class MissionDaemon:
             heartbeat_stop = threading.Event()
             heartbeat_thread = threading.Thread(target=self._heartbeat_loop, args=(heartbeat_stop,), name="mission-daemon-heartbeat", daemon=True)
             heartbeat_thread.start()
+            liveness_stop = threading.Event()
+            liveness_thread = threading.Thread(target=self._liveness_loop, args=(liveness_stop,), name="mission-daemon-liveness", daemon=True)
+            liveness_thread.start()
             while not self._stop_requested:
                 if max_loops is not None and loops >= max_loops:
                     break
@@ -147,6 +152,10 @@ class MissionDaemon:
                 heartbeat_stop.set()
             if "heartbeat_thread" in locals():
                 heartbeat_thread.join(timeout=1)
+            if "liveness_stop" in locals():
+                liveness_stop.set()
+            if "liveness_thread" in locals():
+                liveness_thread.join(timeout=1)
             _clear_daemon_lease(os.getpid())
             if self._stop_requested:
                 _write_final_offline_status(os.getpid(), loops=loops, last_tick_id=last_tick_id)
@@ -208,6 +217,26 @@ class MissionDaemon:
             status["heartbeat_at"] = _utc_now()
             _write_daemon_status(status)
             _refresh_daemon_lease(os.getpid())
+
+    def _liveness_loop(self, stop_event: threading.Event) -> None:
+        try:
+            config = load_agent_runtime_config()
+            probe = LivenessProbe(config=config)
+            poll_seconds = max(30.0, min(120.0, float(getattr(config, "liveness_poll_seconds", 60) or 60)))
+        except Exception:
+            return
+        while not self._stop_requested and not stop_event.is_set():
+            if bool(getattr(config, "liveness_enabled", True)):
+                try:
+                    result = probe.poll_once()
+                    status = read_daemon_status()
+                    if status.get("pid") in {None, os.getpid()} and status.get("state") not in {"offline", "error"}:
+                        status["liveness"] = _liveness_status(result)
+                        _write_daemon_status(status)
+                except Exception:
+                    pass
+            if stop_event.wait(poll_seconds):
+                return
 
     def _sleep_with_stop(self, wait_seconds: float) -> None:
         self.sleep_fn(wait_seconds)
@@ -430,7 +459,23 @@ def _status_from_tick(tick: TickResult, *, loops: int, wait_seconds: float, next
     if stop_reason:
         status["settle_stop_reason"] = stop_reason
         status["settle_ticks"] = getattr(tick, "ticks", None)
+    previous_liveness = previous.get("liveness")
+    if isinstance(previous_liveness, dict):
+        status["liveness"] = previous_liveness
     return status
+
+
+def _liveness_status(result: dict) -> dict:
+    safe = {
+        "enabled": bool(result.get("enabled", True)),
+        "checked_runs": int(result.get("checked_runs") or 0),
+        "warnings": int(result.get("warnings") or 0),
+        "hung_runs": int(result.get("hung_runs") or 0),
+    }
+    last_poll = result.get("last_poll_at")
+    if last_poll is not None:
+        safe["last_poll_at"] = last_poll
+    return safe
 
 
 def _write_daemon_status(status: dict) -> None:

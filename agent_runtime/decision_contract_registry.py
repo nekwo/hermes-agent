@@ -1210,6 +1210,8 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "run.opened": EventContract("run.opened", "Run opened", ("run_id", "persona_id", "stage_id"), ("model", "provider")),
     "run.heartbeat": EventContract("run.heartbeat", "Run heartbeat", ("run_id", "state"), ("phase",)),
     "run.progress": EventContract("run.progress", "Run progress", ("phase", "step", "status", "summary"), ("next_expected", "proof_id")),
+    "run.liveness.warning": EventContract("run.liveness.warning", "Run liveness warning", ("run_id", "kind", "summary"), ("age_seconds", "quiet_strikes", "worker_session_id")),
+    "liveness.poll": EventContract("liveness.poll", "Liveness poll", ("run_id", "classification", "status", "summary"), ("age_seconds", "poll_count")),
     "persona.worklog": EventContract("persona.worklog", "Persona worklog", ("kind", "source", "message"), ("stage_id", "related_proof_ids")),
     "run.approval_required": EventContract("run.approval_required", "Approval required", ("reason",), ("run_id",)),
     "run.approved": EventContract("run.approved", "Run approved", ("run_id",), ("approval_type",)),

@@ -256,6 +256,16 @@ class WorkerSessionStore:
         self._event("worker_session.heartbeat", worker, {"state": worker.state.value})
         return self.get(worker.id)
 
+    def record_watchdog_warning(self, worker_session_id: str, *, kind: str, summary: str) -> WorkerSession:
+        with worker_session_lock(worker_session_id):
+            worker = self.get(worker_session_id)
+            if worker.state not in TERMINAL_WORKER_STATES:
+                worker.watchdog_warning_count += 1
+                worker.last_heartbeat_at = now()
+                self._write(worker)
+        self._event("worker_session.watchdog_warning", worker, {"kind": _safe_token(kind), "summary": _safe_text(summary)})
+        return self.get(worker.id)
+
     def close(self, worker_session_id: str, *, reason: str, state: WorkerSessionState = WorkerSessionState.CLOSED) -> WorkerSession:
         with worker_session_lock(worker_session_id):
             worker = self.get(worker_session_id)

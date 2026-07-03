@@ -69,6 +69,13 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         scope_wait_deadline_seconds=int(raw.get("scope_wait_deadline_seconds", 900)),
         run_lease_seconds=int(raw.get("run_lease_seconds", raw.get("daemon_stale_run_seconds", 600))),
         tool_wait_timeout_seconds=int(raw.get("tool_wait_timeout_seconds", 300)),
+        liveness_enabled=bool(raw.get("liveness_enabled", True)),
+        liveness_poll_seconds=_clamped_positive_int(raw.get("liveness_poll_seconds"), 60, minimum=30, maximum=120),
+        liveness_quiet_strikes=_positive_int(raw.get("liveness_quiet_strikes"), 2),
+        liveness_hung_seconds=_positive_int(raw.get("liveness_hung_seconds"), 300),
+        child_progress_min_interval_seconds=_positive_int(raw.get("child_progress_min_interval_seconds"), 30),
+        deploy_timeout_seconds=_positive_int(raw.get("deploy_timeout_seconds"), 120),
+        lock_acquire_timeout_seconds=_positive_int(raw.get("lock_acquire_timeout_seconds"), 15),
         mission_max_total_tokens=int(raw.get("mission_max_total_tokens", 1_000_000)),
         mission_wall_clock_deadline_seconds=int(raw.get("mission_wall_clock_deadline_seconds", 86_400)),
         neko_recovery_attempt_cap=int(raw.get("neko_recovery_attempt_cap", 2)),
@@ -445,6 +452,11 @@ def _positive_int(value: Any, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return number if number > 0 else default
+
+
+def _clamped_positive_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
+    number = _positive_int(value, default)
+    return max(minimum, min(maximum, number))
 
 
 
