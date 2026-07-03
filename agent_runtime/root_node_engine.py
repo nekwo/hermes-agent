@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from hermes_time import now
@@ -82,7 +83,7 @@ class RootNodeEngine:
             task.id,
             "root",
             iteration_budget=int(getattr(root, "iteration_budget", None) or self.config.live_run_iteration_budget),
-            max_wall_seconds=getattr(root, "max_wall_seconds", None) or self.config.live_run_max_wall_seconds,
+            max_wall_seconds=_root_wall_seconds(root, self.config),
             max_api_calls=getattr(root, "max_api_calls", None) or self.config.live_run_max_api_calls,
             max_total_tokens=getattr(root, "max_total_tokens", None) or self.config.live_run_max_total_tokens,
             session_id=session_id,
@@ -191,8 +192,8 @@ def _ensure_root_plan(task: Task) -> None:
         agent_topology={
             "root": "root",
             "edges": [
-                {"source": "root", "target": "dev", "kind": "runs"},
-                {"source": "root", "target": "qa", "kind": "runs"},
+                {"source": "root", "target": "dev", "kind": "steers"},
+                {"source": "root", "target": "qa", "kind": "steers"},
             ],
         },
     )
@@ -206,8 +207,14 @@ def _root_toolsets(persona) -> list[str]:
     return toolsets
 
 
+def _root_wall_seconds(persona, config) -> float:
+    configured = getattr(persona, "max_wall_seconds", None) or getattr(config, "live_run_max_wall_seconds", 300.0)
+    child_budget = float(getattr(config, "live_run_max_wall_seconds", 300.0) or 300.0)
+    return max(float(configured or 0.0), child_budget * 3.0, 900.0)
+
+
 def _root_system_prompt() -> str:
-    return (
+    prompt = (
         "You are the Root Node, Neko Mission Lead, running a Harness goal. "
         "Author the stages needed for this specific goal, then call run_node for each child stage. "
         "Judge only from the child summary and harness-returned evidence. If the child needs another turn, call steer_node with the same session_id. "
@@ -216,6 +223,8 @@ def _root_system_prompt() -> str:
         f"When it is genuinely stuck, end with {ROOT_NODE_BLOCKED_MARKER} and a compact reason. "
         "Keep all persisted text redaction-safe: no absolute paths, secrets, raw credentials, or copied long logs."
     )
+    skill = _root_skill_text()
+    return f"{prompt}\n\n{skill}" if skill else prompt
 
 
 def _root_user_message(task: Task) -> str:
@@ -237,3 +246,11 @@ def _safe_summary(value: Any) -> str:
     if any(marker in lowered for marker in ("secret", "password", "credential", "authorization", "bearer ")):
         return "Summary redacted."
     return text[:2000] or "No summary returned."
+
+
+def _root_skill_text() -> str:
+    path = Path(__file__).resolve().parents[1] / "docs" / "agent-runtime-harness" / "harness-skills" / "harness-mission-lead" / "SKILL.md"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""

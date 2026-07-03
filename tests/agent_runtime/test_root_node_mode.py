@@ -151,3 +151,4 @@ def test_root_node_engine_reports_task_terminal(monkeypatch, isolate_agent_runti
     assert result.stop_reason == "task_terminal"
     assert TaskStore().get(task.id).state == TaskState.DONE
     assert runner.requests[0].enabled_toolsets[-1] == "node_control"
+    assert RunStore().list_for_task(task.id)[0].max_wall_seconds >= 900.0

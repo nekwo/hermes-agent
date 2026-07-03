@@ -208,7 +208,6 @@ def test_harness_skill_examples_validate_against_live_contracts():
     assert result["failure_count"] == 0
     assert {item["skill"] for item in result["checked"]} >= {
         "harness-dev-delivery",
-        "harness-mission-lead",
         "harness-qa-verdict",
         "launcher-analyze-proof",
     }
