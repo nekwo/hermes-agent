@@ -1,8 +1,12 @@
 # 06 — Recursive Agent-Supervised Execution (implementation-ready)
 
-Status: **audited, implementation-ready** (2026-07-03, v2 — deep audit of the v1 proposal
-against the live tree at `ff4edffcc`; every code anchor below was verified file:line, stale
-claims corrected). The target execution model: the harness stops *ticking* worker turns and
+Status: **gaps closed, ready to hand off** (2026-07-03, v3 — v2 was the deep audit of the
+v1 proposal against the live tree at `ff4edffcc` with every code anchor verified file:line;
+v3 closes the remaining open items: the AS5 store-lock and worktree audits were *executed*
+and their results baked in as facts, and every design ambiguity a dev agent would have had
+to resolve — node identity, parent wake mechanism, flag map, event-bloat policy, lane
+concurrency model, timeout defaults — is decided in §2.5. The end-to-end implementation
+prompt lives at `06-implementation-prompt.md`.) The target execution model: the harness stops *ticking* worker turns and
 becomes the incorruptible **substrate**; agents become **recursive supervisors** — each node
 schedules and watches only its **direct** children and reports a distilled summary upward.
 This is how the scheduler gets smart: scheduling becomes a distributed judgment made locally
@@ -48,6 +52,10 @@ Verified anchors (exact, current):
 | Deploy-failure class | `agent_already_assigned` raised at `persona_assignments.py:841` (retryable:false); release-on-terminal fixed by `e7fba7c61` |
 | Certification plumbing exists | `burn_in.py:325` `swarm_certification_allows_production`; `production_envelope.py` per-area entries with real-controls copy (the H5 lesson) |
 | Suite size | **1262** collected (`python -m pytest tests/agent_runtime --collect-only -q`, 2026-07-03) — the no-regress floor below is ≥1262, not v1's ≥1257 |
+| Per-run worktree isolation is generic and LIVE | `repo_context.py:87` `isolated_repo_context_for_run` (worktree token = repo\|task\|run); called for every grounded persona run (`persona_runtime.py:111`) and for gate proof re-runs (`ticker.py:3788` `_proof` suffix); baseline capture + GC exist. Doc-04 H1/H2 are substantially landed |
+| Store write-lock coverage (AS5 audit, executed) | TaskStore writes under `task_lock` (`store.py:111,145`), RunStore under `run_lock` (`:639,683,737`), worker sessions under `worker_session_lock`, events single-appender under `events_lock`. **Lockless:** `ProofStore.attach` (`store.py:887`) and `IncidentStore.open` (`:1203`) — safe-by-uniqueness (each write is a fresh uuid-keyed path), but `IncidentStore.close` (`:1236`) mutates an existing file in place |
+| Windows lock semantics are FAIL-FAST | `locks.py:32` uses `msvcrt.locking(LK_NBLCK)` → contention raises `HarnessLockUnavailable` instead of waiting (POSIX `flock` blocks). Fine while one engine process serializes everything under `tick_lock`; **lethal under concurrent lanes** — a contended event append would crash a lane, not queue it |
+| `swarm.enabled` today gates ONLY the budget check | `ticker.py:2519-2534` — with the flag off, the global swarm token ceiling is not even evaluated (per-run + mission ceilings still are, `:2505`). It is a budget flag, not a concurrency flag; AS5 gives it its real meaning |
 
 Corrections from v1 (design-relevant, not cosmetic):
 
@@ -131,6 +139,74 @@ this model is a superset, shipped behind flags, with the tick loop as rollback.
 
 ---
 
+## 2.5 Resolved design decisions (v3 — no open questions left for the implementer)
+
+**D1 — Node identity.** A supervision node IS a persona instance (`persona_instance_id`).
+The root node of a mission is its `neko_supervisor` instance; stage-slot runs map to nodes
+through the existing assignment machinery (`persona_assignments.py`). The parent pointer is
+the existing `spawned_by` field; nothing new is persisted for identity. Canonicalize with
+`_canonical_persona_id`, never `safe_assignment_token` (the known identity-mangling trap).
+
+**D2 — Parent wake mechanism (AS1).** Every `child.*` event carries `parent_node_id`.
+Each persona instance gains one integer field, `child_events_offset` — the event-log byte
+offset up to which the parent has consumed its children's events. "Unconsumed
+`child.returned`/`child.blocked` events exist past a parent's offset" becomes a first-class
+dispatch reason in `MissionStateMachine`: the engine opens a parent turn for exactly that
+reason, injects the pending child events (distilled form) into the parent's context, and
+advances the offset when the turn commits. No new store, no busy-poll: the scheduler check
+is one `iter_from_offset(child_events_offset)` scan, and a healthy child (only throttled
+`child.progress`) never triggers a parent turn — progress feeds the AS0 probe, not the
+parent's model.
+
+**D3 — Flag map (all new behavior is opt-out-able; rollback = flags off = today's engine).**
+- `liveness_enabled: bool = True` — AS0. Default ON once shipped: it only observes,
+  incidents route through existing Neko adjudication, and the 900s TTL remains beneath it.
+- `supervision.child_events_enabled: bool = False` — AS1.
+- `supervision.recursive_enabled: bool = False` — AS2+AS3 (one flag: AS2 must never run
+  without AS3, so they share it).
+- `supervision.hierarchical_budget_enabled: bool = False` — AS4.
+- `swarm.enabled` (existing) — AS5 makes it mean real concurrency; it stays behind
+  `swarm.requires_certification` + `burn_in.swarm_certification_allows_production`.
+- `supervision.deploy_verification_enabled: bool = False` — AS6.
+All follow the 3-file config pattern; `production_envelope.py` copy must state gated-off
+status honestly (the H5 lesson).
+
+**D4 — Event-bloat policy.** `events.jsonl` is append-only and already tens of MB.
+`liveness.poll` is emitted **only on classification change** (advancing→quiet,
+quiet→hung, …) plus one heartbeat summary every 10th poll per run — never one event per
+poll per run. `child.progress` is throttled harness-side to at most one event per
+`child_progress_min_interval_seconds` (default 30) per child; excess updates fold into the
+next emission.
+
+**D5 — Lane concurrency model (AS5).** Lanes are **threads inside the single engine
+process** that already holds `tick_lock` — one process, N lane threads, each running one
+persona turn end-to-end. Cross-process exclusion stays exactly as today (`tick_lock`).
+Because per-entity file locks are then contended *between threads of one process*, and
+Windows `_file_lock` is fail-fast (audit row above), AS5 must first change lock
+acquisition to **bounded blocking retry** (spin on `HarnessLockUnavailable` with short
+sleep, `lock_acquire_timeout_seconds` default 15, then raise) — a one-function change in
+`locks.py:_file_lock` + tests. Two additional serialization points: (a) **land-on-handoff**
+— applying a lane's worktree diff back to the shared source root serializes under a new
+`repo_land_lock(source_root)`; (b) `IncidentStore.close` takes a per-incident lock (it
+mutates in place). Everything else is already per-run/per-task isolated (worktrees are
+per-run; store locks are per-entity).
+
+**D6 — Defaults for new knobs.** `liveness_poll_seconds=60` (clamp 30–120),
+`liveness_quiet_strikes=2`, `liveness_hung_seconds=300`, `child_progress_min_interval_seconds=30`,
+`deploy_timeout_seconds=120`, `lock_acquire_timeout_seconds=15`. All validated `_positive`
+in `migrations.py`; `liveness_hung_seconds` must validate `< heartbeat_ttl_seconds`.
+
+**D7 — What "cancel/re-dispatch" means for a hung run (AS0).** The probe calls
+`RunStore.cancel(run_id, reason="liveness_hung")`, closes the worker session via the
+existing `update_after_run` path (close_reason `liveness_hung`, `count_decision=False`),
+and opens the `run_hung` incident linked into `task.open_incident_ids` — which makes
+`MissionStateMachine.next_action` route Neko adjudication on the very next action
+(`state_machine.py:67-70`). The probe itself never re-dispatches; Neko (or operator
+`task unblock`) decides. One incident per `(kind, run_id)` — dedupe on open, like
+`recovery.py:18`.
+
+---
+
 ## 3. Stages (each independently shippable; flag-gated; do not half-build the gate/watchdog)
 
 Sequencing rationale: **AS0 (liveness watchdog) ships first and alone** — it fixes P2 (hangs)
@@ -189,11 +265,14 @@ guarantee.
   rendering and Neko adjudication work unchanged; add the `run_hung` finding kind alongside
   `run_stalled`. Do NOT fork a second threshold taxonomy — `NoFreezeThresholds` gains the
   new knobs.
-- Register `run.liveness.warning` + `liveness.poll` (debug, bounded) event contracts in
-  `decision_contract_registry.py`; `liveness.poll` carries the classification so the
-  cadence is auditable.
-- Config (3-file pattern): `liveness_poll_seconds=60`, `liveness_quiet_strikes=2`,
-  `liveness_hung_seconds=300`. Keep `heartbeat_ttl_seconds=900` + `mark_stale_runs` as the
+- Register `run.liveness.warning` + `liveness.poll` event contracts in
+  `decision_contract_registry.py`; `liveness.poll` carries the classification and is
+  emitted per the D4 bloat policy (classification change + every-10th-poll heartbeat only).
+- Remediation per D7: cancel run + close worker session + `run_hung` incident linked into
+  `task.open_incident_ids` → Neko adjudicates; the probe never re-dispatches itself.
+- Config (3-file pattern, D6): `liveness_enabled=True`, `liveness_poll_seconds=60`,
+  `liveness_quiet_strikes=2`, `liveness_hung_seconds=300` (validated
+  `< heartbeat_ttl_seconds`). Keep `heartbeat_ttl_seconds=900` + `mark_stale_runs` as the
   final coarse floor.
 - Wire: daemon watchdog thread (primary); a between-actions call in `run_until_settled`
   (secondary, for manual ticks); daemon `status` surfaces last-poll ts + open liveness
@@ -245,10 +324,15 @@ payload (`continuity.py:17` — `SUMMARY_LIMIT=1200`, `REF_LIMIT=8`; it already 
 parent SessionDB row and emits `steer.returned` — extend that emission rather than adding a
 parallel one). `child.progress` piggybacks the existing `run.progress` contract
 (`decision_contract_registry.py:1212`) with a `parent_node_id`; all three register in the
-contract registry and respect the 4096-byte payload cap. Parents subscribe to their direct
-children's events; AS0's probe treats a fresh `child.progress` as "advancing." "Check as often
-as it needs" becomes **wake-on-event**, not fixed-tick — a model turn is spent only when a
-child returns or blocks, never to poll a healthy child.
+contract registry and respect the 4096-byte payload cap; `child.progress` is throttled per
+D4 (`child_progress_min_interval_seconds=30`). Parent wake is the D2 inbox: every `child.*`
+event carries `parent_node_id`; each persona instance gains `child_events_offset`;
+unconsumed `child.returned`/`child.blocked` past that offset become a first-class
+`MissionStateMachine` dispatch reason that opens the parent's turn with the distilled
+events injected, advancing the offset on commit. AS0's probe treats a fresh
+`child.progress` as "advancing." "Check as often as it needs" becomes **wake-on-event**,
+not fixed-tick — a model turn is spent only when a child returns or blocks, never to poll
+a healthy child. Flag: `supervision.child_events_enabled` (D3, default off).
 
 **Tests** child events are bounded + redaction-safe + registry-valid; a parent wakes on
 `child.returned`, not on a timer; a healthy child costs the parent 0 model turns;
@@ -336,46 +420,57 @@ Tests per spec. Check your brain first."
 
 ### AS5 — Concurrent lanes (real parallelism)
 
-**Preconditions (updated by the v2 audit — doc-05 RD2/RD3 are shipped):**
+**Preconditions (v3 — the audits were executed; all three are now known-state, not homework):**
 1. ✅ Read path: transactional `read_model.db` + incremental projector exist (doc-05 v2).
-2. ✅ Store write locks exist per entity: `locks.py` — `task_lock(task_id)`, `run_lock(run_id)`,
-   `worker_session_lock`, single-appender `events_lock`. Verify lock coverage on every
-   write path two lanes can share (TaskStore/RunStore/ProofStore mutations) — that audit,
-   not new infrastructure, is the store precondition.
-3. ⬜ **Repo isolation between lanes (doc-04 H1) is the real remaining blocker** for two
-   lanes touching the same repo: per-lane git worktrees (backend worktree lane exists —
-   `repo_context.py`, `worktree_events.jsonl`, hardened by `b6823d46b`; launcher-side and
-   generic per-lane isolation must be verified/extended). Two lanes in *different* repos
-   can ship first.
+2. ✅ Store write locks per entity exist and are used on every hot mutation path (audit row
+   in §0): tasks, runs, worker sessions, events. `ProofStore.attach`/`IncidentStore.open`
+   are lockless but safe-by-uniqueness (fresh uuid-keyed paths).
+3. ✅ Repo isolation between lanes already exists: per-run worktrees are generic and live
+   for every grounded persona run (`persona_runtime.py:111`) and gate proof re-runs
+   (`ticker.py:3788`).
+
+**Deltas AS5 must ship (from the audit, per D5):**
+- `locks.py:_file_lock` bounded blocking retry (Windows is fail-fast today; a contended
+  lane must wait ≤ `lock_acquire_timeout_seconds=15`, then raise) + contention tests.
+- `repo_land_lock(source_root)` — serialize applying a lane's worktree diff back to the
+  shared source root on handoff.
+- Per-incident lock around `IncidentStore.close` (in-place mutation).
+- Lanes = threads inside the single `tick_lock`-holding engine process (D5); no second
+  engine process, ever.
 
 **Deliverables (hermes)** teach the scheduler to dispatch the **set** of ready-and-independent
 stages (all `depends_on` satisfied — strict dependency dispatch already exists,
 `_first_unpassed_blueprint_dependency`, `693ec7460`), capped by `max_active_lanes`:
 `MissionStateMachine.next_action` (state_machine.py:53) gains a `next_actions(mission) ->
-list[HarnessAction]` ready-set form; `run_until_settled` opens a lane per action;
+list[HarnessAction]` ready-set form; `run_until_settled` opens a lane thread per action;
 `daemon.py:121` consumes the same loop. `depends_on` still gates dependents (backend→frontend
-stays serial; frontendA ∥ frontendB overlap). `swarm.enabled` becomes real (and stays behind
-`burn_in.swarm_certification_allows_production`, burn_in.py:325).
+stays serial; frontendA ∥ frontendB overlap). `swarm.enabled` becomes real — today it only
+gates the global budget check (`ticker.py:2519`) — and stays behind
+`burn_in.swarm_certification_allows_production` (burn_in.py:325).
 
 **Tests** a fan-out blueprint (two independent stages sharing only `scope`) runs both lanes with
 **overlapping run windows** in the event log; dependent stages stay serial; concurrent
 writes hit no lock violations / lost updates (hammer TaskStore/RunStore/EventLog from two
-lanes); same-repo overlap is refused until the lane has worktree isolation.
+lane threads on Windows semantics); land-on-handoff serializes under `repo_land_lock`;
+lock-retry timeout raises cleanly.
 
-**Handoff prompt** "Implement 06 §AS5 (preconditions: store-lock audit + doc-04 H1 worktree
-isolation for same-repo overlap; read model already shipped): `next_actions` ready-set on
-MissionStateMachine capped by `max_active_lanes`; `run_until_settled`/daemon run them on
-concurrent lanes; `depends_on` still gates; `swarm.enabled` real but certification-gated.
-Prove with a two-independent-stage blueprint showing overlapping run windows in the event
-log, zero lock violations, same-repo overlap refused without isolation. Check your brain
-first."
+**Handoff prompt** "Implement 06 §AS5 per §2.5 D5 (preconditions all verified-met; read
+model, per-entity locks, per-run worktrees exist): FIRST the lock deltas —
+`locks.py:_file_lock` bounded blocking retry (`lock_acquire_timeout_seconds=15`),
+`repo_land_lock(source_root)` for handoff land, per-incident close lock. THEN `next_actions`
+ready-set on MissionStateMachine capped by `max_active_lanes`; `run_until_settled`/daemon
+run them on concurrent lane THREADS inside the one tick_lock process; `depends_on` still
+gates; `swarm.enabled` real but certification-gated. Prove with a two-independent-stage
+blueprint showing overlapping run windows in the event log, zero lock violations under a
+two-thread store hammer on Windows. Check your brain first."
 
 ---
 
 ### AS6 — Deploy reliability (kills silent "N agents fail to deploy")
 
 **Deliverables (hermes)** every spawn is *verified up*: a child that fails to acquire its
-slot/worktree/assignment within `deploy_timeout_seconds` (new config key, 3-file pattern)
+slot/worktree/assignment within `deploy_timeout_seconds` (default 120, 3-file pattern, D6;
+flag `supervision.deploy_verification_enabled`, D3)
 emits `child.deploy_failed{reason}` to its parent (not a silent `agent_already_assigned`
 swallow — `persona_assignments.py:841`; the `e7fba7c61` assignment release is the
 precondition; this is the *observability + retry* on top). The parent re-dispatches or
@@ -422,7 +517,11 @@ lesson; the envelope's existing swarm entries show the honest gated-off wording 
   stand up a parallel liveness vocabulary — two stall taxonomies means two half-trusted alarms.
 
 ## 5. Sequencing
-AS0 (alone, immediate — fixes hangs today) → AS1 → AS2 + AS3 together (never AS2 without AS3) →
-AS4 → AS5 (after the store-lock audit + doc-04 H1 worktree isolation; the doc-05 read-model
-dependency is already satisfied) → AS6 → AS7. AS0 and AS6 are the two that pay off even while
-the engine is still serial (hangs + deploy failures are orthogonal to concurrency).
+AS0 (alone, immediate — fixes hangs today) → AS1 → AS2 + AS3 together (never AS2 without AS3;
+one shared flag, D3) → AS4 → AS5 (preconditions verified-met; ship the D5 lock deltas first
+inside the stage) → AS6 → AS7. AS0 and AS6 are the two that pay off even while the engine is
+still serial (hangs + deploy failures are orthogonal to concurrency).
+
+The end-to-end handoff prompt (all stages, one implementer) is maintained at
+[`06-implementation-prompt.md`](06-implementation-prompt.md) — keep it in lockstep with this
+doc.
