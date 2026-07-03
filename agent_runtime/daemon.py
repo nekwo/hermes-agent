@@ -110,7 +110,7 @@ class MissionDaemon:
                     self._stop_requested = True
                     break
                 loops += 1
-                _write_daemon_status({
+                _write_daemon_status(_carry_liveness({
                     "state": "running",
                     "pid": os.getpid(),
                     "loops": loops,
@@ -118,7 +118,7 @@ class MissionDaemon:
                     "target_task_id": self.target_task_id,
                     "queue_mode": self._queue_mode(),
                     "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
-                })
+                }))
                 _refresh_daemon_lease(os.getpid())
                 if _daemon_status_owned_by_other_live_pid(os.getpid()):
                     self._stop_requested = True
@@ -133,7 +133,7 @@ class MissionDaemon:
                     else:
                         tick = engine.tick_once()
                 except Exception as exc:
-                    _write_daemon_status({
+                    _write_daemon_status(_carry_liveness({
                         "state": "error",
                         "pid": os.getpid(),
                         "loops": loops,
@@ -143,7 +143,7 @@ class MissionDaemon:
                         "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                         "error_class": type(exc).__name__,
                         "error_summary": "Mission Daemon tick failed",
-                    })
+                    }))
                     break
                 last_tick_id = getattr(tick, "tick_id", getattr(tick, "settle_id", None))
                 actions = len(tick.actions_taken)
@@ -547,6 +547,20 @@ def _liveness_status(result: dict) -> dict:
     if last_poll is not None:
         safe["last_poll_at"] = last_poll
     return safe
+
+
+def _carry_liveness(status: dict) -> dict:
+    """Preserve the liveness block across full status rewrites.
+
+    The liveness thread only refreshes its block every poll interval
+    (30-120s); a loop-top rewrite without carrying it left `liveness: None`
+    for most of each daemon loop.
+    """
+
+    previous = read_daemon_status().get("liveness")
+    if isinstance(previous, dict) and "liveness" not in status:
+        status["liveness"] = previous
+    return status
 
 
 def _write_daemon_status(status: dict) -> None:

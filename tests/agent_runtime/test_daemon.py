@@ -474,3 +474,15 @@ def test_waiting_on_approval_run_survives_daemon_reap(isolate_agent_runtime_root
 
     assert result["orphan_runs_cancelled"] == []
     assert runs.get(waiting.id).state == RunState.WAITING_ON_APPROVAL
+
+
+def test_loop_status_rewrite_preserves_liveness_block(isolate_agent_runtime_root):
+    from agent_runtime import daemon as daemon_mod
+
+    daemon_mod._write_daemon_status({"state": "idle", "liveness": {"enabled": True, "checked_runs": 3, "warnings": 0, "hung_runs": 0}})
+    engine = SettledEngine(stop_reason="no_eligible_action")
+
+    MissionDaemon(engine_factory=lambda: engine, interval_seconds=0, idle_interval_seconds=0).run_foreground(max_loops=1)
+    status = read_daemon_status()
+
+    assert status["liveness"] == {"enabled": True, "checked_runs": 3, "warnings": 0, "hung_runs": 0}
