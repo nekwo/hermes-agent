@@ -45,14 +45,16 @@ these three are the live truth.
    data layer becomes production-grade.**
 
 6. **[06 — Recursive Agent-Supervised Execution](06-recursive-agent-supervised-execution.md)** —
-   *proposed.* The target execution model: the harness stops *ticking* worker turns and becomes
-   the incorruptible substrate (gate every handoff, watchdog every level, hierarchical budget,
-   event-source everything); agents become recursive supervisors — each node schedules/watches
-   only its DIRECT children and reports a distilled summary up (builds on R2 steering + R3
-   continuity). Stages AS0–AS7: AS0 active liveness watchdog (kills indefinite hangs, ships
-   first) → honest child status events → recursive supervision → per-boundary gate →
-   hierarchical budget → real concurrent lanes (needs doc-05 RD2) → verified deploy → CI gates.
-   **How the scheduler becomes distributed AI judgment instead of a serial tick loop.**
+   *audited, implementation-ready (v2).* The target execution model: the harness stops *ticking*
+   worker turns and becomes the incorruptible substrate (gate every handoff, watchdog every
+   level, hierarchical budget, event-source everything); agents become recursive supervisors —
+   each node schedules/watches only its DIRECT children and reports a distilled summary up
+   (builds on doc-04 S2 steering + S3 continuity). Stages AS0–AS7: AS0 active liveness watchdog
+   (kills indefinite hangs, ships first; runs on a daemon thread and extends the burn-in-only
+   `no_freeze_monitor`) → honest child status events → recursive supervision → per-boundary
+   gate → hierarchical budget → real concurrent lanes (store-lock audit + doc-04 H1 worktree
+   isolation; the doc-05 read-model dependency is already shipped) → verified deploy → CI
+   gates. **How the scheduler becomes distributed AI judgment instead of a serial tick loop.**
 
 ## Product stance
 
