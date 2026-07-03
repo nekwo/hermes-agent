@@ -308,3 +308,97 @@ def test_delivery_packet_rejects_command_proof_id_from_different_task(isolate_ag
             run_id="run_current",
             stage_id="stage_1",
         )
+
+
+def test_status_unknown_when_no_status_no_exit_code_and_no_crash_signal():
+    """Observed-lane honesty (live 2026-07-03): a self-test with neither an
+    explicit status nor an exit code must NOT be recorded as passed. It defaults
+    to "unknown" so the HUD never claims success the harness did not observe."""
+    run = _run()
+    evidence = record_self_test_from_progress(
+        run,
+        "run.tool.finished",
+        {
+            "tool_name": "terminal",
+            "command": "python manage.py check",
+            "stdout": "",
+            "stderr": "",
+        },
+    )
+    assert evidence is not None
+    assert evidence.status == "unknown"
+    assert evidence.exit_code is None
+
+
+def test_status_failed_inferred_from_crash_signature_without_exit_code():
+    """The empty-.env / emptied-venv live failures reported no exit code but a
+    Django traceback; that must record as failed, not passed."""
+    run = _run()
+    evidence = record_self_test_from_progress(
+        run,
+        "run.tool.finished",
+        {
+            "tool_name": "terminal",
+            "command": "python manage.py check",
+            "stderr": (
+                "Traceback (most recent call last):\n"
+                "  File \"manage.py\", line 22, in <module>\n"
+                "RuntimeError: DJANGO_SECRET_KEY is required but not set in the environment."
+            ),
+        },
+    )
+    assert evidence is not None
+    assert evidence.status == "failed"
+
+
+def test_status_missing_interpreter_inferred_as_failed():
+    run = _run()
+    evidence = record_self_test_from_progress(
+        run,
+        "run.tool.finished",
+        {
+            "tool_name": "terminal",
+            "command": "python manage.py check",
+            "stderr": "python.exe is not recognized as an internal or external command, operable program or batch file.",
+        },
+    )
+    assert evidence is not None
+    assert evidence.status == "failed"
+
+
+def test_status_passing_pytest_summary_without_exit_code_is_not_false_failed():
+    """'0 failed' in a passing pytest summary must not be misread as a failure —
+    without an exit code it is honestly "unknown", never "failed"."""
+    run = _run()
+    evidence = record_self_test_from_progress(
+        run,
+        "run.tool.finished",
+        {
+            "tool_name": "terminal",
+            "command": "python -m pytest tests/ -q",
+            "stdout": "5 passed, 0 failed in 2.10s",
+        },
+    )
+    assert evidence is not None
+    assert evidence.status == "unknown"
+
+
+def test_observed_proof_still_recorded_for_unknown_status():
+    """Status honesty must not suppress the observed proof — the R1 lane is
+    presence-based, so an "unknown" self-test still attaches its agent_tool_trace
+    proof (the authoritative harness re-run enforces pass/fail)."""
+    run = _run()
+    evidence = record_self_test_from_progress(
+        run,
+        "run.tool.finished",
+        {"tool_name": "terminal", "command": "flutter analyze lib/main.dart"},
+    )
+    assert evidence is not None
+    assert evidence.status == "unknown"
+    observed = [
+        p
+        for p in ProofStore().list_for_task(run.task_id)
+        if (p.metadata or {}).get("source") == "agent_tool_trace"
+    ]
+    assert len(observed) == 1
+    assert observed[0].metadata["status"] == "unknown"

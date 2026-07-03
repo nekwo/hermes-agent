@@ -305,7 +305,47 @@ def _status_from_payload(payload: dict[str, Any]) -> str:
         return "failed"
     if exit_code is not None:
         return "passed" if exit_code == 0 else "failed"
-    return "passed"
+    # No explicit status and no exit code. The observed lane must stay HONEST:
+    # defaulting to "passed" here recorded failed self-tests as passing (live
+    # 2026-07-03 — the empty-.env DJANGO_SECRET_KEY tracebacks and the emptied
+    # backend venv both logged status=passed, exit_code=None). Infer failure
+    # from an actual crash signature in the captured output; otherwise mark it
+    # "unknown" rather than claim success. The R1 observed-lane gate is
+    # presence-based (any agent_tool_trace proof satisfies it) and the
+    # authoritative harness re-run is what enforces pass/fail, so "unknown"
+    # narrows only the HUD display — it never green-lights unproven work.
+    if _output_shows_failure(payload):
+        return "failed"
+    return "unknown"
+
+
+# Only UNAMBIGUOUS crash signatures. A false "failed" (marking a real pass as
+# failed) is worse than an honest "unknown", so generic tokens like " failed"
+# (matches pytest's "0 failed") or "error" (matches "No issues/errors found")
+# are deliberately excluded — they only reliably distinguish pass from fail
+# alongside an exit code, which is handled above.
+_FAILURE_SIGNATURES = (
+    "traceback (most recent call last)",
+    "modulenotfounderror",
+    "importerror",
+    "runtimeerror",
+    "assertionerror",
+    "syntaxerror",
+    "fatal error",
+    "command not found",
+    "is not recognized as an internal or external command",
+    "no module named",
+)
+
+
+def _output_shows_failure(payload: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        str(payload.get(key) or "")
+        for key in ("stderr", "stderr_excerpt", "stdout", "stdout_excerpt", "summary", "detail")
+    ).lower()
+    if not haystack.strip():
+        return False
+    return any(signature in haystack for signature in _FAILURE_SIGNATURES)
 
 
 def _write_artifact(task_id: str, evidence_id: str, stream: str, text: str | None) -> str | None:
