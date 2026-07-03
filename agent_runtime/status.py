@@ -102,6 +102,13 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
                 "required": bool(getattr(getattr(cfg, "swarm", None), "requires_certification", True)),
             },
         },
+        "recursive_supervision": {
+            "enabled": _recursive_supervision_enabled(cfg),
+            "certification": {
+                **cert,
+                "required": bool(getattr(getattr(cfg, "swarm", None), "requires_certification", True)),
+            },
+        },
         "foreground_runtime": runtime_instances_summary(runtime_instances),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=cfg.execution_mode, worker_sessions=workers),
         "next_actions": [
@@ -217,6 +224,20 @@ def _swarm_budget_summary(runs, cfg) -> dict:
         },
         "by_task": by_task,
     }
+
+
+def _recursive_supervision_enabled(cfg) -> bool:
+    supervision = getattr(cfg, "supervision", None)
+    swarm = getattr(cfg, "swarm", None)
+    return any(
+        [
+            bool(getattr(supervision, "child_events_enabled", False)),
+            bool(getattr(supervision, "recursive_enabled", False)),
+            bool(getattr(supervision, "hierarchical_budget_enabled", False)),
+            bool(getattr(supervision, "deploy_verification_enabled", False)),
+            bool(getattr(swarm, "enabled", False)),
+        ]
+    )
 
 
 def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunStore | None = None, proof_store: ProofStore | None = None, config=None):

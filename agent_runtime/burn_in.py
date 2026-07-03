@@ -336,6 +336,17 @@ def swarm_certification_allows_production(
     return summary.get("state") == "green", summary
 
 
+def recursive_supervision_certification_allows_production(
+    *,
+    allow_uncertified_recursive_supervision: bool = False,
+    requires_certification: bool = True,
+) -> tuple[bool, dict[str, Any]]:
+    summary = certification_summary()
+    if not requires_certification or allow_uncertified_recursive_supervision:
+        return True, {**summary, "override": bool(allow_uncertified_recursive_supervision)}
+    return summary.get("state") == "green", summary
+
+
 def burn_in_root() -> Path:
     return paths.store_root() / "burn_in"
 

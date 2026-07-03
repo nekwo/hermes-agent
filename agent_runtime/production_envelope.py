@@ -19,6 +19,7 @@ def production_envelope_status(cfg: Any) -> dict[str, Any]:
         _h8_durability(cfg),
         _h9_scheduling(cfg),
         _h10_observation_tests(cfg),
+        _recursive_supervision(cfg),
     ]
     blockers = [
         {
@@ -169,6 +170,61 @@ def _h10_observation_tests(cfg: Any) -> dict[str, Any]:
             "terminal safety and test-tampering fail-closed paths are unit-tested",
             "live blueprint smoke evidence is archived by task id for operator inspection",
         ],
+    )
+
+
+def _recursive_supervision(cfg: Any) -> dict[str, Any]:
+    supervision = getattr(cfg, "supervision", None)
+    swarm = getattr(cfg, "swarm", None)
+    enabled = any(
+        [
+            bool(getattr(supervision, "child_events_enabled", False)),
+            bool(getattr(supervision, "recursive_enabled", False)),
+            bool(getattr(supervision, "hierarchical_budget_enabled", False)),
+            bool(getattr(supervision, "deploy_verification_enabled", False)),
+            bool(getattr(swarm, "enabled", False)),
+        ]
+    )
+    try:
+        from .burn_in import recursive_supervision_certification_allows_production
+
+        certified, cert = recursive_supervision_certification_allows_production(
+            requires_certification=bool(getattr(swarm, "requires_certification", True)),
+            allow_uncertified_recursive_supervision=bool(getattr(swarm, "allow_uncertified_dev_swarm", False)),
+        )
+    except Exception:
+        certified, cert = False, {"state": "unknown", "consecutive_green": 0, "required_consecutive_green": 10}
+    blockers = []
+    status = "implemented"
+    if enabled and not certified:
+        status = "gated"
+        blockers.append(
+            "recursive_supervision requires 10 green unattended certification runs before production recursive lanes are advertised as ready"
+        )
+    return _item(
+        "recursive_supervision",
+        "recursive_agent_supervised_execution",
+        status,
+        controls=[
+            "liveness watchdog cancels hung active runs and opens run_hung incidents without model polling",
+            "child.progress/child.blocked/child.returned/child.deploy_failed events are redaction-bounded and wake only parent supervisors",
+            "recursive child returns are proof-gated before parent wake proceeds",
+            "hierarchical budgets enforce global and per-child token ceilings before opening another child run",
+            "ready independent blueprint stages can run as bounded in-process lanes behind swarm.enabled and certification",
+            "deploy verification emits child.deploy_failed for assignment-starvation and startup-evidence failures",
+            "production enablement is ledger-gated by the existing unattended burn-in certification target",
+        ],
+        flags={
+            "supervision.child_events_enabled": bool(getattr(supervision, "child_events_enabled", False)),
+            "supervision.recursive_enabled": bool(getattr(supervision, "recursive_enabled", False)),
+            "supervision.hierarchical_budget_enabled": bool(getattr(supervision, "hierarchical_budget_enabled", False)),
+            "supervision.deploy_verification_enabled": bool(getattr(supervision, "deploy_verification_enabled", False)),
+            "swarm.enabled": bool(getattr(swarm, "enabled", False)),
+            "certification_state": cert.get("state"),
+            "consecutive_green": int(cert.get("consecutive_green") or 0),
+            "required_consecutive_green": int(cert.get("required_consecutive_green") or 10),
+        },
+        blockers=blockers,
     )
 
 
