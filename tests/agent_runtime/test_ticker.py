@@ -2663,6 +2663,50 @@ def test_settled_boundary_allows_neko_scope_recovery_for_read_search_budget_loop
     assert engine._settled_boundary(task_id="task_1") is None
 
 
+def test_settled_boundary_untargeted_daemon_allows_neko_incident_recovery(isolate_agent_runtime_root):
+    """An UNTARGETED daemon (task_id=None) must apply the per-task
+    Neko-owns-recovery carve-out instead of hard-stopping on any open
+    incident (observed live: settle_stop_reason=incident_opened, actions=0
+    across daemon loops while a running task waited on adjudication)."""
+
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    task.current_stage_id = "backend_implementation"
+    task.open_incident_ids = ["inc_untargeted"]
+    ts.create(task)
+    waiting = runs.open_run("backend_dev", "task_1", stage_id="backend_implementation", session_id="session_budget")
+    waiting.progress = {
+        "loop_warning": "read_search_without_patch_threshold",
+        "read_search_count": 6,
+        "read_search_limit": 6,
+        "patch_count": 0,
+        "proof_count": 0,
+    }
+    waiting.state = RunState.WAITING_ON_APPROVAL
+    waiting.error = {"type": "run_budget_exceeded"}
+    runs.update(waiting)
+    incidents.open(
+        Incident(
+            id="inc_untargeted",
+            task_id="task_1",
+            run_id=waiting.id,
+            kind="run_budget_exceeded",
+            summary="budget",
+            detail_path=None,
+            opened_at=now(),
+        )
+    )
+    engine = TickEngine(task_store=ts, run_store=runs, incident_store=incidents, persona_runtime=CapturingFailureRuntime())
+
+    # The same fixture stops the tick when targeted at a task with a hard
+    # environment blocker; here the untargeted boundary must proceed so the
+    # incident reaches Neko adjudication.
+    assert engine._settled_boundary(task_id=None) is None
+
+
 def test_run_until_settled_honors_max_actions_without_runaway_loop():
     ts = TaskStore()
     ts.create(make_task())

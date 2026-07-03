@@ -352,27 +352,19 @@ class TickEngine:
     def _settled_boundary(self, *, task_id: str | None) -> str | None:
         open_incidents = self._open_incident_count(task_id=task_id)
         if open_incidents > 0:
-            if task_id:
-                try:
-                    task = self.task_store.get(task_id)
-                    incidents = [incident for incident in self.incident_store.list_open() if incident.task_id == task_id]
-                    if _hard_environment_blocker_incidents(incidents):
-                        return "incident_opened"
-                    budget_approval_incidents = _budget_approval_incidents_for_task(
-                        incidents,
-                        self.run_store,
-                        cap=getattr(self.config, "neko_extension_cap", 2),
-                    )
-                    budget_scope_recovery_incidents = _budget_scope_recovery_incidents_for_task(incidents, self.run_store)
-                    if budget_approval_incidents or budget_scope_recovery_incidents:
-                        return None
-                    action = self.state_machine.next_action(task)
-                    if _action_targets(action, "neko_supervisor") and (
-                        task.state == TaskState.BLOCKED or getattr(task, "open_incident_ids", None)
-                    ):
-                        return None
-                except Exception:
-                    pass
+            # An untargeted daemon (task_id=None) must apply the same
+            # Neko-owns-recovery carve-out per incident-owning task; hard-stopping
+            # on ANY open incident leaves every goal idle with no adjudication
+            # dispatch (observed live: settle_stop_reason=incident_opened,
+            # actions=0 across daemon loops while a running task waited on Neko).
+            candidate_task_ids = (
+                [task_id]
+                if task_id
+                else sorted({str(incident.task_id) for incident in self.incident_store.list_open() if incident.task_id})
+            )
+            for candidate_task_id in candidate_task_ids:
+                if self._incident_recovery_can_proceed(candidate_task_id):
+                    return None
             return "incident_opened"
         active_runs = self.run_store.find_active(task_id=task_id)
         if any(run.state == RunState.WAITING_ON_APPROVAL for run in active_runs):
@@ -390,6 +382,37 @@ class TickEngine:
                     return None
                 return "task_blocked"
         return None
+
+    def _incident_recovery_can_proceed(self, task_id: str) -> bool:
+        """True when this incident-owning task's next action is Neko recovery.
+
+        Mirrors the long-standing targeted-daemon carve-out: hard environment
+        blockers stop the tick; budget approval / scope-recovery incidents and a
+        state-machine route to neko_supervisor let it proceed so the incident is
+        adjudicated instead of idling.
+        """
+
+        try:
+            task = self.task_store.get(task_id)
+            incidents = [incident for incident in self.incident_store.list_open() if incident.task_id == task_id]
+            if not incidents:
+                return False
+            if _hard_environment_blocker_incidents(incidents):
+                return False
+            budget_approval_incidents = _budget_approval_incidents_for_task(
+                incidents,
+                self.run_store,
+                cap=getattr(self.config, "neko_extension_cap", 2),
+            )
+            budget_scope_recovery_incidents = _budget_scope_recovery_incidents_for_task(incidents, self.run_store)
+            if budget_approval_incidents or budget_scope_recovery_incidents:
+                return True
+            action = self.state_machine.next_action(task)
+            return _action_targets(action, "neko_supervisor") and (
+                task.state == TaskState.BLOCKED or bool(getattr(task, "open_incident_ids", None))
+            )
+        except Exception:
+            return False
 
     def _open_incident_count(self, *, task_id: str | None) -> int:
         incidents = self.incident_store.list_open()
