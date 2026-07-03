@@ -856,6 +856,7 @@ class TickEngine:
                             incident_store=self.incident_store,
                             proof_store=self.proof_store,
                             run_id=run.id,
+                            stage_id=str(decision.payload.get("stage_id") or run.stage_id or "").strip() or None,
                             normal_worker_flow=normal_flow_enabled,
                             mission_plan_flow=None,
                         )

@@ -630,3 +630,47 @@ def _task_with_plan(plan: MissionPlan) -> Task:
         mission_plan=plan,
         current_stage_id=plan.current_stage_id,
     )
+
+
+def test_scope_decision_outcome_attributes_to_deciding_stage_not_advanced_stage():
+    """Live 2026-07-03 (task_3e2ae539): Neko's scope release advanced the plan's
+    current stage to backend_implementation BEFORE the decision outcome was
+    applied, so the scope_route outcome (PASSED) landed on backend_implementation
+    with zero proof. The terminal proof gate clawed it back, but at the cost of
+    an extra Neko adjudication turn and a redundant dev re-dispatch. The outcome
+    must attribute to the stage the deciding run actually ran (stage_id)."""
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="attribution",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = _task_with_plan(plan)
+    # Simulate apply_planning_decision having already advanced the current stage
+    # (Neko's typed-plan release does this before the outcome is applied).
+    task.mission_plan.current_stage_id = "backend_implementation"
+    task.current_stage_id = "backend_implementation"
+    decision = AgentDecision(
+        type=DecisionType.PROPOSE_ACCEPTANCE,
+        summary="Route the first no-edit proof slice to Backend Dev",
+        rationale="scope",
+        payload={"objective": "route", "acceptance_criteria": ["backend proof attached"]},
+    )
+
+    MissionStateMachine().apply_decision(task, decision, actor="neko_supervisor", stage_id="scope")
+
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+    assert stages["scope"].status == StageStatus.PASSED
+    assert stages["backend_implementation"].status != StageStatus.PASSED, (
+        "a scope decision must never mark the downstream dev stage passed without proof"
+    )
+    assert task.mission_plan.current_stage_id == "backend_implementation"
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id in {"backend_builder", "backend_dev"}, (
+        f"next dispatch must be the backend stage owner, got {action.slot_id}"
+    )

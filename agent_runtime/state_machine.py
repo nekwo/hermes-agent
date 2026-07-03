@@ -112,7 +112,7 @@ class MissionStateMachine:
             return HarnessAction(HarnessActionType.NOOP, mission.id, reason=f"blueprint slot {slot_id} has no resolved binding")
         return HarnessAction(HarnessActionType.RUN_SLOT, mission.id, reason=f"blueprint stage {current.id} needs slot {slot_id}", slot_id=slot_id)
 
-    def apply_decision(self, mission: Task, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool | None = None) -> StateMachineResult:
+    def apply_decision(self, mission: Task, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, stage_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool | None = None) -> StateMachineResult:
         ensure_default_mission_plan(mission)
         before = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         blueprint_owned = is_blueprint_plan(getattr(mission, "mission_plan", None))
@@ -135,7 +135,15 @@ class MissionStateMachine:
         record_decision_packets(mission, decision, actor=actor, run_id=run_id, stage_id=getattr(mission, "current_stage_id", None))
         if blueprint_owned and decision.type != DecisionType.REQUEST_TEST_RUN and not incident_resolution_acceptance:
             proofs = proof_store.list_for_task(mission.id) if proof_store is not None else None
-            apply_decision_outcome(mission, decision, proofs=proofs, reason=decision.summary)
+            # Attribute the outcome to the stage the deciding run actually ran.
+            # apply_planning_decision above may have already advanced the plan's
+            # current stage (e.g. Neko's scope release moves it to the first dev
+            # stage), so falling back to current_stage_id here lands the outcome
+            # on the WRONG downstream stage — live-observed as Neko's scope_route
+            # marking backend_implementation PASSED with zero proof, which the
+            # terminal proof gate then had to claw back at the cost of an extra
+            # adjudication turn and re-dispatch.
+            apply_decision_outcome(mission, decision, stage_id=stage_id, proofs=proofs, reason=decision.summary)
         after = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         events: list[Event] = []
         if before != after:

@@ -588,13 +588,16 @@ def _normalize_backend_self_test_command(packet: dict[str, Any], proof_gate: dic
     """
     if str(packet.get("target_repo") or "") != "EterniaBackend":
         return
-    command = str(proof_gate.get("self_test_command") or "").strip()
-    if not command:
-        return
-    adapted = adapt_eternia_backend_manage_py_command(command)
-    if adapted != command:
-        proof_gate["self_test_command"] = adapted
-        _append_operator_note(packet, "proof_gate.self_test_command adapted to backend venv interpreter")
+    # Neko improvises the key name (live: `focused_self_test`); normalize every
+    # known self-test command key so the dev never sees the naked interpreter.
+    for key in ("self_test_command", "focused_self_test"):
+        command = str(proof_gate.get(key) or "").strip()
+        if not command:
+            continue
+        adapted = adapt_eternia_backend_manage_py_command(command)
+        if adapted != command:
+            proof_gate[key] = adapted
+            _append_operator_note(packet, f"proof_gate.{key} adapted to backend venv interpreter")
 
 
 def _normalize_handoff_repos(packet: dict[str, Any]) -> None:

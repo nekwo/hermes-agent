@@ -778,3 +778,19 @@ def test_persona_message_reply_contract_accepts_conversational_payload():
             },
         )
     )
+
+
+def test_handoff_backend_focused_self_test_alias_adapted():
+    """Live 2026-07-03: neko keyed the self-test as `focused_self_test`; every
+    known self-test key must get the venv-interpreter adaptation."""
+    packet = handoff_packet()
+    packet["proof_gate"]["focused_self_test"] = "python manage.py check"
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["focused_self_test"] == (
+        ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"
+    )
