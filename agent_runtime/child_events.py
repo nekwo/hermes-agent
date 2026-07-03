@@ -150,11 +150,27 @@ def parent_child_event_wake_action(mission: Task, *, config: RuntimeConfig | Non
         pending, latest_offset = pending_child_events(parent.id, mission.id, offset=offset, event_log=event_log)
         if not pending:
             continue
+        reason = "child status event requires parent supervision turn"
+        if getattr(getattr(config, "supervision", None), "recursive_enabled", False):
+            from .supervision import child_return_gate_passed
+
+            for event in pending:
+                ok, gate_reason = child_return_gate_passed(event)
+                if not ok:
+                    emit_child_blocked(
+                        child_instance_id=str((event.payload or {}).get("child_node_id") or ""),
+                        reason=f"recursive gate failed: {gate_reason}",
+                        task_id=mission.id,
+                        event_log=event_log,
+                        persona_store=persona_store,
+                    )
+                    reason = "child return failed recursive gate; parent supervision turn required"
+                    break
         _advance_parent_offset(persona_store, parent, latest_offset)
         return HarnessAction(
             HarnessActionType.RUN_SLOT,
             mission.id,
-            reason="child status event requires parent supervision turn",
+            reason=reason,
             slot_id=parent.persona_id,
         )
     return None
