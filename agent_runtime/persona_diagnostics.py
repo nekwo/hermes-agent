@@ -210,7 +210,30 @@ class PersonaDiagnosticController:
             message=f"Persona diagnostic stopped at {result.stop_reason}; latest decision is {result.latest_decision_type or 'none'}.",
             metadata={"operation_id": operation_id, "exit_code": result.exit_code, "run_ids": result.run_ids},
         )
+        if not options.preserve_open_task:
+            self._archive_diagnostic_task(task.id)
         return result
+
+    def _archive_diagnostic_task(self, task_id: str) -> None:
+        # A standalone diagnostic is a throwaway probe. Leaving its task open (or
+        # done-but-unarchived) accumulates in the runtime and gates the scheduler
+        # (open-task / graveyard pressure that stalls the next real goal). Cancel a
+        # non-terminal probe, then archive so evidence is preserved without
+        # polluting live state.
+        try:
+            task = self.task_store.get(task_id)
+        except Exception:
+            return
+        try:
+            state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
+        except Exception:
+            state = None
+        try:
+            if state not in {TaskState.DONE, TaskState.CANCELLED}:
+                self.task_store.cancel(task_id, reason="persona diagnostic complete; auto-archiving standalone probe")
+            self.task_store.archive(task_id, actor="harness", reason="persona diagnostic auto-archive")
+        except Exception:
+            return
 
     def _finalize_successful_diagnostic_task(self, task_id: str, *, persona_id: str) -> None:
         task = self.task_store.get(task_id)

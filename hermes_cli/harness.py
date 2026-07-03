@@ -647,6 +647,12 @@ def build_parser(parent_subparsers) -> None:
     persona_diagnose.add_argument("--affected-repo", action="append", default=[])
     persona_diagnose.add_argument("--acceptance", action="append", default=[])
     persona_diagnose.add_argument("--non-goal", action="append", default=[])
+    persona_diagnose.add_argument(
+        "--keep-task",
+        action="store_true",
+        help="Preserve the standalone diagnostic task in the live runtime instead of auto-archiving it. "
+        "By default a diagnostic auto-archives on completion so throwaway probes do not accumulate and gate the scheduler.",
+    )
     persona_diagnose.add_argument("--json", action="store_true")
     persona_diagnose.set_defaults(func=_cmd_persona_diagnose)
 
@@ -4783,6 +4789,7 @@ def _cmd_persona_diagnose(args) -> int:
                 affected_repos=list(args.affected_repo or []),
                 acceptance_criteria=list(args.acceptance or []),
                 non_goals=list(args.non_goal or []),
+                preserve_open_task=bool(getattr(args, "keep_task", False)),
             )
         )
     except ValueError as exc:
