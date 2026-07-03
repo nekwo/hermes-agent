@@ -734,6 +734,10 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_archive.add_argument("--requested-by", default="cli")
     persona_instance_archive.add_argument("--json", action="store_true")
     persona_instance_archive.set_defaults(func=_cmd_persona_instance_archive)
+    persona_instance_sweep = persona_instance_subs.add_parser("sweep-orphans", help="Reap stale task-bound persona instances with no live worker/run")
+    persona_instance_sweep.add_argument("--reason", default="operator persona instance janitor")
+    persona_instance_sweep.add_argument("--json", action="store_true")
+    persona_instance_sweep.set_defaults(func=_cmd_persona_instance_sweep_orphans)
     persona_instance_steer = persona_instance_subs.add_parser("steer", help="Re-route a persona instance's living-graph wiring (Stage 77 steering edge)")
     persona_instance_steer.add_argument("persona_instance_id")
     persona_instance_steer.add_argument("--parent", dest="parent_instance_id", default=None, help="Owner/coordinator instance id that steers this sub-agent")
@@ -3450,6 +3454,26 @@ def _cmd_persona_instance_close(args) -> int:
 
 def _cmd_persona_instance_archive(args) -> int:
     return _close_free_floating_assignments(args.persona_instance_id, reason=args.reason, json_output=args.json, terminal_state="completed")
+
+
+def _cmd_persona_instance_sweep_orphans(args) -> int:
+    result = PersonaInstanceStore().sweep_orphaned_task_bound_instances(
+        reason=str(getattr(args, "reason", "") or "operator persona instance janitor"),
+    )
+    data = {"ok": True, "persona_instance_cleanup": result}
+    if args.json:
+        print(emit_json(data))
+    else:
+        print(
+            "persona instances: "
+            f"task_bound {result['before_task_bound_count']} -> {result['after_task_bound_count']}; "
+            f"reaped {result['reaped_count']}; "
+            f"active preserved {result['skipped_active_count']}"
+        )
+        remaining = result.get("remaining_task_bound_persona_instance_ids") or []
+        if remaining:
+            print("remaining task-bound instances: " + ", ".join(remaining[:20]))
+    return 0
 
 
 def _cmd_persona_instance_steer(args) -> int:

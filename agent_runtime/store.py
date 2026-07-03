@@ -16,7 +16,7 @@ from .errors import AlreadyExists, NotFound
 from .events import EventLog
 from .locks import archive_lock, task_lock, run_lock
 from .models import AgentPersona, AgentRun, Event, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
-from .persona_assignments import PersonaAssignmentStore
+from .persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from .proof_rules import ProofType
 from .recovery_flags import mark_incident_closed_for_recovery
 from .serde import from_jsonable, to_jsonable
@@ -182,6 +182,11 @@ class TaskStore:
             PersonaAssignmentStore(event_log=self.event_log).close_for_task(
                 task.id,
                 state="completed" if task.state == TaskState.DONE else "cancelled",
+                reason=f"task reached {getattr(task.state, 'value', task.state)}",
+            )
+            PersonaInstanceStore(event_log=self.event_log).close_for_task(
+                task.id,
+                goal_id=getattr(task, "goal_id", None),
                 reason=f"task reached {getattr(task.state, 'value', task.state)}",
             )
 
@@ -352,6 +357,7 @@ class ArchiveStore:
 
         archived_workers = _archive_worker_evidence(task.id, archive_dir)
         archived_assignments = _archive_persona_assignment_evidence(task.id, archive_dir)
+        archived_persona_instances = _archive_persona_instance_evidence(task, archive_dir)
         archived_repo_bundles = _archive_repo_bundle_evidence(task.id, archive_dir)
         archived_runtime_instances = _archive_runtime_instance_evidence(task.id, archive_dir)
         archived_packet_artifacts = _archive_packet_artifacts(task.id, archive_dir)
@@ -369,6 +375,8 @@ class ArchiveStore:
             "worker_session_ids": archived_workers.get("worker_session_ids", []),
             "persona_assignment_ids": archived_assignments.get("persona_assignment_ids", []),
             "persona_assignments_archived": archived_assignments.get("persona_assignments_archived", False),
+            "persona_instance_ids": archived_persona_instances.get("persona_instance_ids", []),
+            "persona_instances_archived": archived_persona_instances.get("persona_instances_archived", False),
             "repo_bundle_ids": archived_repo_bundles.get("repo_bundle_ids", []),
             "repo_bundles_archived": archived_repo_bundles.get("repo_bundles_archived", False),
             "runtime_instance_ids": archived_runtime_instances.get("runtime_instance_ids", []),
@@ -402,6 +410,7 @@ class ArchiveStore:
                     "proof_count": len(item.get("proof_ids") or []),
                     "incident_count": len(item.get("incident_ids") or []),
                     "worker_session_count": len(item.get("worker_session_ids") or []),
+                    "persona_instance_count": len(item.get("persona_instance_ids") or []),
                     "runtime_instance_count": len(item.get("runtime_instance_ids") or []),
                     "self_test_evidence_count": len(item.get("self_test_evidence_ids") or []),
                 },
@@ -1075,6 +1084,26 @@ def _archive_persona_assignment_evidence(task_id: str, archive_dir: Path) -> dic
         if _move_if_exists(paths.persona_assignment_path(assignment.id), dest):
             result["persona_assignment_ids"].append(assignment.id)
     result["persona_assignments_archived"] = bool(result["persona_assignment_ids"])
+    return result
+
+
+def _archive_persona_instance_evidence(task: Task, archive_dir: Path) -> dict:
+    result = {
+        "persona_instance_ids": [],
+        "persona_instances_archived": False,
+    }
+    try:
+        instances = PersonaInstanceStore(event_log=EventLog()).list_for_task(
+            task.id,
+            goal_id=getattr(task, "goal_id", None),
+        )
+    except Exception:
+        instances = []
+    for instance in instances:
+        dest = archive_dir / "persona_instances" / f"{instance.id}.json"
+        if _move_if_exists(paths.persona_instance_path(instance.id), dest):
+            result["persona_instance_ids"].append(instance.id)
+    result["persona_instances_archived"] = bool(result["persona_instance_ids"])
     return result
 
 

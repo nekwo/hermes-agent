@@ -194,6 +194,75 @@ def test_persona_instance_derivation_does_not_mark_idle_worker_active(isolate_ag
     assert instance.active_run_id is None
 
 
+def test_task_terminal_reaps_task_bound_persona_instances(isolate_agent_runtime_root):
+    tasks = TaskStore()
+    store = PersonaInstanceStore()
+    task = tasks.create(_task("task_terminal_reap", state=TaskState.RUNNING))
+    instance = store.ensure_for_goal(
+        _persona("dev"),
+        goal_id=task.id,
+        spawned_by="personainst_neko_supervisor",
+    )
+
+    task.state = TaskState.DONE
+    tasks.update(task, actor="harness", reason="completed")
+
+    assert instance.id not in {item.id for item in store.list_all()}
+
+
+def test_persona_instance_sweep_reaps_orphans_but_preserves_live_workers(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    workers = WorkerSessionStore()
+    orphan = store.ensure_for_goal(
+        _persona("dev"),
+        goal_id="task_archived",
+        spawned_by="personainst_neko_supervisor",
+    )
+    live = store.ensure_for_goal(
+        _persona("backend_dev"),
+        goal_id="task_missing_but_worker_live",
+        spawned_by="personainst_neko_supervisor",
+    )
+    worker = workers.open(
+        task_id="task_missing_but_worker_live",
+        persona=_persona("backend_dev"),
+        stage_id="backend_implementation",
+        assignment_id="assign_live",
+    )
+    live.active_worker_session_id = worker.id
+    live.state = WorkerSessionState.RUNNING
+    store.update(live)
+    free = store.create_free_floating("profile:reviewer")
+
+    report = store.sweep_orphaned_task_bound_instances(reason="test janitor")
+    remaining = {item.id for item in store.list_all()}
+
+    assert orphan.id not in remaining
+    assert live.id in remaining
+    assert free.id in remaining
+    assert report["reaped_persona_instance_ids"] == [orphan.id]
+    assert report["skipped_active_persona_instance_ids"] == [live.id]
+    assert report["remaining_task_bound_persona_instance_ids"] == [live.id]
+
+
+def test_task_archive_moves_task_bound_persona_instance_evidence(isolate_agent_runtime_root):
+    tasks = TaskStore()
+    store = PersonaInstanceStore()
+    task = tasks.create(_task("task_archive_persona_instance", state=TaskState.DONE))
+    instance = store.ensure_for_goal(
+        _persona("qa"),
+        goal_id=task.id,
+        spawned_by="personainst_dev",
+    )
+
+    result = tasks.archive(task.id, actor="cli", reason="cleanup terminal task")
+
+    archived = result["archived_tasks"][0]
+    assert archived["persona_instance_ids"] == [instance.id]
+    assert archived["persona_instances_archived"] is True
+    assert instance.id not in {item.id for item in store.list_all()}
+
+
 def test_create_free_floating_instance_reuses_canonical_idle_placement(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     first = store.create_free_floating("profile:reviewer")

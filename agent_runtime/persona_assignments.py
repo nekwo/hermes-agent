@@ -39,6 +39,32 @@ def _owning_task_release_state(task_id: str) -> str | None:
     except Exception:
         return None
     return state if state in _RELEASABLE_OWNER_TASK_STATES else None
+
+
+def _persona_instance_owner_release_state(instance: PersonaInstance) -> str | None:
+    owners = {
+        owner
+        for owner in (
+            safe_optional_token(instance.current_task_id),
+            safe_optional_token(instance.goal_id),
+        )
+        if owner
+    }
+    if not owners:
+        return "taskless"
+    states: list[str] = []
+    for owner in owners:
+        state = _owning_task_release_state(owner)
+        if state is None:
+            return None
+        states.append(state)
+    if "done" in states:
+        return "done"
+    if "cancelled" in states:
+        return "cancelled"
+    if "failed" in states:
+        return "failed"
+    return "archived"
 ACTIVE_ASSIGNMENT_STATES = frozenset({"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"})
 ACTIVE_PERSONA_WORKER_STATES = frozenset(
     {
@@ -338,6 +364,110 @@ class PersonaInstanceStore:
         raw = json.loads(paths.persona_instance_path(persona_instance_id).read_text(encoding="utf-8"))
         return from_jsonable(PersonaInstance, raw)
 
+    def list_for_task(self, task_id: str, *, goal_id: str | None = None) -> list[PersonaInstance]:
+        normalized = safe_optional_token(task_id)
+        normalized_goal = safe_optional_token(goal_id)
+        wanted = {item for item in (normalized, normalized_goal) if item}
+        if not wanted:
+            return []
+        return [
+            instance
+            for instance in self.list_all()
+            if instance.mode == "task_bound"
+            and (
+                safe_optional_token(instance.current_task_id) in wanted
+                or safe_optional_token(instance.goal_id) in wanted
+            )
+        ]
+
+    def close_for_task(
+        self,
+        task_id: str,
+        *,
+        goal_id: str | None = None,
+        reason: str = "task terminal",
+    ) -> dict[str, Any]:
+        """Remove task-bound persona instances from the live graph.
+
+        Task-bound persona instances are a live projection of worker/goal
+        membership, not an archive of completed work. Leaving them in the live
+        store after terminal transition makes snapshots and the Launcher graph
+        render old workers as live agents. Never reap an instance while its
+        active run or worker still resolves to a live record.
+        """
+        reaped: list[str] = []
+        skipped_active: list[str] = []
+        for instance in self.list_for_task(task_id, goal_id=goal_id):
+            if self._has_live_binding(instance):
+                skipped_active.append(instance.id)
+                continue
+            if self._delete(instance):
+                reaped.append(instance.id)
+                self._event(
+                    "persona_instance.reaped",
+                    instance,
+                    {
+                        "task_id": safe_optional_token(task_id),
+                        "goal_id": safe_optional_token(goal_id),
+                        "reason": safe_assignment_text(reason, limit=240),
+                    },
+                )
+        remaining = self.list_for_task(task_id, goal_id=goal_id)
+        return {
+            "task_id": safe_optional_token(task_id),
+            "goal_id": safe_optional_token(goal_id),
+            "reaped_persona_instance_ids": reaped,
+            "skipped_active_persona_instance_ids": skipped_active,
+            "remaining_task_bound_persona_instance_ids": [instance.id for instance in remaining],
+            "reaped_count": len(reaped),
+            "skipped_active_count": len(skipped_active),
+            "remaining_count": len(remaining),
+        }
+
+    def sweep_orphaned_task_bound_instances(self, *, reason: str = "persona instance janitor") -> dict[str, Any]:
+        """Reap stale task-bound instances whose owner is terminal or gone.
+
+        Free-floating/profile chat instances are preserved. Instances with a
+        genuinely live active worker or run are reported but never touched.
+        """
+        before = [instance for instance in self.list_all() if instance.mode == "task_bound"]
+        reaped: list[str] = []
+        skipped_active: list[str] = []
+        preserved_live_owner: list[str] = []
+        for instance in before:
+            if self._has_live_binding(instance):
+                skipped_active.append(instance.id)
+                continue
+            owner_state = _persona_instance_owner_release_state(instance)
+            if owner_state is None:
+                preserved_live_owner.append(instance.id)
+                continue
+            if self._delete(instance):
+                reaped.append(instance.id)
+                self._event(
+                    "persona_instance.reaped",
+                    instance,
+                    {
+                        "task_id": safe_optional_token(instance.current_task_id),
+                        "goal_id": safe_optional_token(instance.goal_id),
+                        "reason": safe_assignment_text(reason, limit=240),
+                        "owner_state": owner_state,
+                    },
+                )
+        after = [instance for instance in self.list_all() if instance.mode == "task_bound"]
+        return {
+            "before_task_bound_count": len(before),
+            "after_task_bound_count": len(after),
+            "reaped_persona_instance_ids": reaped,
+            "skipped_active_persona_instance_ids": skipped_active,
+            "preserved_live_owner_persona_instance_ids": preserved_live_owner,
+            "remaining_task_bound_persona_instance_ids": [instance.id for instance in after],
+            "reaped_count": len(reaped),
+            "skipped_active_count": len(skipped_active),
+            "preserved_live_owner_count": len(preserved_live_owner),
+            "remaining_count": len(after),
+        }
+
     def update(self, instance: PersonaInstance) -> PersonaInstance:
         instance.updated_at = now()
         self._write(instance)
@@ -566,6 +696,36 @@ class PersonaInstanceStore:
                 instance.last_heartbeat_at = None
                 self.update(instance)
         return self.list_all()
+
+    def _delete(self, instance: PersonaInstance) -> bool:
+        path = paths.persona_instance_path(instance.id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    def _has_live_binding(self, instance: PersonaInstance) -> bool:
+        worker_id = safe_optional_token(instance.active_worker_session_id)
+        if worker_id:
+            try:
+                from .worker_sessions import ACTIVE_WORKER_STATES, WorkerSessionStore
+
+                worker = WorkerSessionStore(event_log=self.event_log).get(worker_id)
+                if worker.state in ACTIVE_WORKER_STATES:
+                    return True
+            except Exception:
+                pass
+        run_id = safe_optional_token(instance.active_run_id)
+        if run_id:
+            try:
+                from .store import ACTIVE_RUN_STATES, RunStore
+
+                run = RunStore(event_log=self.event_log).get(run_id)
+                if run.state in ACTIVE_RUN_STATES:
+                    return True
+            except Exception:
+                pass
+        return False
 
     def _write(self, instance: PersonaInstance) -> None:
         path = paths.persona_instance_path(instance.id)
