@@ -8,6 +8,8 @@ from hermes_time import now
 from .dev_discipline import update_progress_telemetry
 from .events import EventLog
 from .models import Event
+from .child_events import emit_child_progress
+from .config import load_agent_runtime_config
 from .self_test_evidence import record_self_test_from_progress
 from .states import RunState
 from .store import RunStore
@@ -44,10 +46,11 @@ _INTERNAL_RUN_PROGRESS_KEYS = {
 
 
 class RunProgressSink:
-    def __init__(self, *, run_store: RunStore, event_log: EventLog | None = None, run_id: str):
+    def __init__(self, *, run_store: RunStore, event_log: EventLog | None = None, run_id: str, config=None):
         self.run_store = run_store
         self.event_log = event_log or EventLog()
         self.run_id = run_id
+        self.config = config or load_agent_runtime_config()
 
     def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
         try:
@@ -79,6 +82,8 @@ class RunProgressSink:
                     payload=safe_payload,
                 )
             )
+            if event_type == "run.progress":
+                emit_child_progress(run=persisted, payload=safe_payload, config=self.config, event_log=self.event_log)
         except Exception:
             return None
 

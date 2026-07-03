@@ -7,6 +7,8 @@ from hermes_time import now
 
 from .events import EventLog
 from .models import Event
+from .child_events import emit_child_returned
+from .config import load_agent_runtime_config
 from .persona_assignments import PersonaInstanceStore, safe_assignment_text
 
 SUMMARY_LIMIT = 1200
@@ -24,6 +26,7 @@ def return_summary_to_parent_session(
     task_id: str | None = None,
     stage_id: str | None = None,
     event_log: EventLog | None = None,
+    child_events_enabled: bool | None = None,
 ) -> dict[str, Any]:
     """Post a bounded child summary into the parent's chat session.
 
@@ -83,6 +86,22 @@ def return_summary_to_parent_session(
             },
         )
     )
+    if child_events_enabled is None:
+        try:
+            supervision = getattr(load_agent_runtime_config(), "supervision", None)
+            child_events_enabled = bool(getattr(supervision, "child_events_enabled", False))
+        except Exception:
+            child_events_enabled = False
+    if child_events_enabled:
+        emit_child_returned(
+            child=instance,
+            summary=safe_summary,
+            proof_ids=proofs,
+            artifact_refs=artifacts,
+            task_id=task_id,
+            stage_id=stage_id,
+            event_log=log,
+        )
 
     return {
         "ok": True,

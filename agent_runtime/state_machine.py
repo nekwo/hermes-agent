@@ -7,6 +7,7 @@ from hermes_time import now
 from .actions import HarnessAction, HarnessActionType
 from .blueprints.routing import apply_decision_outcome, apply_stage_outcome, is_blueprint_plan
 from .blueprints.schema import StageOutcome
+from .child_events import parent_child_event_wake_action
 from .default_plan import ensure_default_mission_plan
 from .context_requests import has_unresolved_context_request
 from .decision_schema import AgentDecision, DecisionType
@@ -53,6 +54,9 @@ class MissionStateMachine:
     def next_action(self, mission: Task) -> HarnessAction:
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         ensure_default_mission_plan(mission)
+        child_wake = parent_child_event_wake_action(mission, config=self.config)
+        if child_wake is not None:
+            return child_wake
         typed = self._blueprint_next_action(mission, state=state)
         if typed is not None:
             return typed

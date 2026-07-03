@@ -111,6 +111,14 @@ class SwarmConfig:
 
 
 @dataclass(slots=True)
+class SupervisionConfig:
+    child_events_enabled: bool = False
+    recursive_enabled: bool = False
+    hierarchical_budget_enabled: bool = False
+    deploy_verification_enabled: bool = False
+
+
+@dataclass(slots=True)
 class CoordinatorPermissionConfig:
     max_spawns: int = 0
     may_kill_own: bool = True
@@ -165,5 +173,6 @@ class RuntimeConfig:
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)
     read_model: ReadModelConfig = field(default_factory=ReadModelConfig)
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
+    supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
 

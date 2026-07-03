@@ -11,7 +11,7 @@ from hermes_cli.profiles import profile_exists
 
 from .personas import DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
 
 @dataclass(slots=True)
 class AgentRuntimeConfig(RuntimeConfig):
@@ -37,6 +37,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
     read_model = _read_model_config(raw.get("read_model") or {})
     swarm = _swarm_config(raw.get("swarm") or {})
+    supervision = _supervision_config(raw.get("supervision") or {})
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
     continuous_role_sessions = _apply_enterprise_role_session_compat(
         continuous_role_sessions,
@@ -92,6 +93,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         simplified_agent_contract=simplified_agent_contract,
         read_model=read_model,
         swarm=swarm,
+        supervision=supervision,
         coordinator_permissions=coordinator_permissions,
         personas=raw.get("personas", {}) or {},
     )
@@ -400,6 +402,17 @@ def _swarm_config(raw: dict[str, Any]) -> SwarmConfig:
         global_api_call_hard_limit=_positive_int(raw.get("global_api_call_hard_limit"), defaults.global_api_call_hard_limit),
         per_lane_token_limit=_positive_int(raw.get("per_lane_token_limit"), defaults.per_lane_token_limit),
         per_lane_api_call_limit=_positive_int(raw.get("per_lane_api_call_limit"), defaults.per_lane_api_call_limit),
+    )
+
+
+def _supervision_config(raw: dict[str, Any]) -> SupervisionConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = SupervisionConfig()
+    return SupervisionConfig(
+        child_events_enabled=bool(raw.get("child_events_enabled", defaults.child_events_enabled)),
+        recursive_enabled=bool(raw.get("recursive_enabled", defaults.recursive_enabled)),
+        hierarchical_budget_enabled=bool(raw.get("hierarchical_budget_enabled", defaults.hierarchical_budget_enabled)),
+        deploy_verification_enabled=bool(raw.get("deploy_verification_enabled", defaults.deploy_verification_enabled)),
     )
 
 

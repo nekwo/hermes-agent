@@ -307,6 +307,7 @@ class PersonaInstance:
     token_budget_used: int = 0
     tool_budget_used: int = 0
     watchdog_warning_count: int = 0
+    child_events_offset: int = 0
     last_heartbeat_at: datetime | None = None
     updated_at: datetime | None = None
     schema_version: int = 1
