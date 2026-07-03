@@ -19,6 +19,7 @@ class HarnessAction:
     run_id: str | None = None
     reason: str = ""
     slot_id: str | None = None
+    stage_id: str | None = None
 
 
 @dataclass(slots=True)

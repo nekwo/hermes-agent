@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import inspect
 import json
 import re
@@ -130,6 +131,10 @@ class TickEngine:
         with tick_lock():
             result = TickResult(tick_id=f"tick_{uuid.uuid4().hex[:8]}", started_at=now())
             self._active_tick_id = result.tick_id
+            try:
+                ensure_persisted_personas(self.config)
+            except Exception:
+                pass
             self._poll_liveness(result)
             result.incidents_opened.extend(mark_stale_runs(self.run_store, self.incident_store, heartbeat_ttl_seconds=self.config.heartbeat_ttl_seconds))
             closed_model_invalid_tasks = self._close_model_invalid_output_incidents(task_id=task_id)
@@ -158,81 +163,92 @@ class TickEngine:
                     cap=getattr(self.config, "neko_extension_cap", 2),
                 )
                 if budget_approval_incidents:
-                    action = HarnessAction(
-                        HarnessActionType.RUN_SLOT,
-                        task.id,
-                        reason="needs Neko approval to continue budget-limited Dev run",
-                        slot_id="neko_supervisor",
-                    )
+                    actions = [
+                        HarnessAction(
+                            HarnessActionType.RUN_SLOT,
+                            task.id,
+                            reason="needs Neko approval to continue budget-limited Dev run",
+                            slot_id="neko_supervisor",
+                        )
+                    ]
                 else:
-                    action = self.state_machine.next_action(task)
+                    actions = self.state_machine.next_actions(task) if _swarm_lane_concurrency_enabled(self.config) else [self.state_machine.next_action(task)]
                 self.task_store.update(task, actor="harness", reason="sync mission plan routing state")
                 task = self.task_store.get(task.id)
                 if task.id in open_incidents_by_task and not (
-                    _action_targets(action, "neko_supervisor")
+                    any(_action_targets(action, "neko_supervisor") for action in actions)
                     and (task.state == TaskState.BLOCKED or budget_approval_incidents or getattr(task, "open_incident_ids", None))
                 ):
                     result.skipped.append(task.id)
                     continue
-                if len(result.actions_taken) >= self.config.max_actions_per_tick:
-                    result.skipped.append(task.id)
-                    continue
-                if action.type == HarnessActionType.NOOP:
-                    result.skipped.append(task.id)
-                    continue
-                persona_id = _persona_id_for_harness_action(action, task=task, config=self.config, run_store=self.run_store)
-                if persona_id and self.run_store.find_active(task_id=task.id, persona_id=persona_id):
-                    result.skipped.append(task.id)
-                    continue
-                if persona_id:
-                    budget_block = _runtime_budget_block(
-                        task,
-                        persona_id=persona_id,
-                        run_store=self.run_store,
-                        config=self.config,
-                    )
-                    if budget_block is not None:
-                        incident = self._open_runtime_budget_incident(task, budget_block)
-                        result.incidents_opened.append(incident.id)
-                        result.actions_taken.append(
-                            HarnessActionResult(
-                                action,
-                                False,
-                                budget_block["summary"],
-                                {
-                                    "incident_id": incident.id,
-                                    "budget_kind": budget_block["kind"],
-                                    "total_tokens": budget_block["total_tokens"],
-                                    "limit": budget_block["limit"],
-                                },
-                            )
-                        )
+                eligible: list[tuple[HarnessAction, Task]] = []
+                for action in actions:
+                    if len(result.actions_taken) + len(eligible) >= self.config.max_actions_per_tick:
+                        break
+                    action_task = _task_for_action(task, action)
+                    if action.type == HarnessActionType.NOOP:
                         continue
-                if action.type == HarnessActionType.COMPLETE_TASK:
-                    task.state = TaskState.DONE
-                    task.updated_at = now()
-                    self.task_store.update(task, actor="harness", reason=action.reason)
-                    closed_worker_ids = self._close_terminal_task_workers(task.id, reason="task completed")
-                    closed_assignment_ids = self.persona_assignment_store.close_for_task(task.id, state="completed", reason="task completed")
-                    payload = {"state": TaskState.DONE.value, "proof_ids": len(task.proof_ids)}
-                    if closed_worker_ids:
-                        payload["closed_worker_session_ids"] = closed_worker_ids
-                    if closed_assignment_ids:
-                        payload["closed_persona_assignment_ids"] = closed_assignment_ids
-                    result.actions_taken.append(HarnessActionResult(action, True, action.reason, payload))
+                    persona_id = _persona_id_for_harness_action(action, task=action_task, config=self.config, run_store=self.run_store)
+                    if persona_id:
+                        if getattr(action, "stage_id", None):
+                            active_runs = self.run_store.find_active(task_id=action_task.id, persona_id=persona_id, stage_id=action.stage_id)
+                        else:
+                            active_runs = self.run_store.find_active(task_id=action_task.id, persona_id=persona_id)
+                        if active_runs:
+                            continue
+                    if persona_id:
+                        budget_block = _runtime_budget_block(
+                            action_task,
+                            persona_id=persona_id,
+                            run_store=self.run_store,
+                            config=self.config,
+                        )
+                        if budget_block is not None:
+                            incident = self._open_runtime_budget_incident(action_task, budget_block)
+                            result.incidents_opened.append(incident.id)
+                            result.actions_taken.append(
+                                HarnessActionResult(
+                                    action,
+                                    False,
+                                    budget_block["summary"],
+                                    {
+                                        "incident_id": incident.id,
+                                        "budget_kind": budget_block["kind"],
+                                        "total_tokens": budget_block["total_tokens"],
+                                        "limit": budget_block["limit"],
+                                    },
+                                )
+                            )
+                            continue
+                    if action.type == HarnessActionType.COMPLETE_TASK:
+                        action_task.state = TaskState.DONE
+                        action_task.updated_at = now()
+                        self.task_store.update(action_task, actor="harness", reason=action.reason)
+                        closed_worker_ids = self._close_terminal_task_workers(action_task.id, reason="task completed")
+                        closed_assignment_ids = self.persona_assignment_store.close_for_task(action_task.id, state="completed", reason="task completed")
+                        payload = {"state": TaskState.DONE.value, "proof_ids": len(action_task.proof_ids)}
+                        if closed_worker_ids:
+                            payload["closed_worker_session_ids"] = closed_worker_ids
+                        if closed_assignment_ids:
+                            payload["closed_persona_assignment_ids"] = closed_assignment_ids
+                        result.actions_taken.append(HarnessActionResult(action, True, action.reason, payload))
+                        continue
+                    if (
+                        _action_targets(action, "neko_supervisor")
+                        and not getattr(action_task, "open_incident_ids", None)
+                        and (
+                            action_task.state == TaskState.BLOCKED
+                            or action.reason == "needs Neko Mission Lead to resolve post-scoping context request"
+                        )
+                    ):
+                        mark_block_recovery_attempt(action_task)
+                        action_task.updated_at = now()
+                        self.task_store.update(action_task, actor="harness", reason="route task to one bounded Neko recovery pass")
+                    eligible.append((action, action_task))
+                if not eligible:
+                    result.skipped.append(task.id)
                     continue
-                if (
-                    _action_targets(action, "neko_supervisor")
-                    and not getattr(task, "open_incident_ids", None)
-                    and (
-                        task.state == TaskState.BLOCKED
-                        or action.reason == "needs Neko Mission Lead to resolve post-scoping context request"
-                    )
-                ):
-                    mark_block_recovery_attempt(task)
-                    task.updated_at = now()
-                    self.task_store.update(task, actor="harness", reason="route task to one bounded Neko recovery pass")
-                result.actions_taken.append(self._execute_action(action, task, loaded_task=loaded_task))
+                result.actions_taken.extend(self._execute_eligible_actions(eligible, loaded_task=loaded_task))
             result.finished_at = now()
             self._apply_read_model_pending()
             return result
@@ -313,6 +329,20 @@ class TickEngine:
             Projector(ReadModel(), config=self.config).apply_pending()
         except Exception:
             return
+
+    def _execute_eligible_actions(self, actions: list[tuple[HarnessAction, Task]], *, loaded_task: Task) -> list[HarnessActionResult]:
+        if len(actions) <= 1 or not _swarm_lane_concurrency_enabled(self.config):
+            return [self._execute_action(action, task, loaded_task=copy.deepcopy(loaded_task)) for action, task in actions]
+        max_workers = min(len(actions), _max_active_lanes(self.config))
+        results: list[HarnessActionResult] = []
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="harness-lane") as executor:
+            futures = [
+                executor.submit(self._execute_action, action, task, loaded_task=copy.deepcopy(loaded_task))
+                for action, task in actions
+            ]
+            for future in as_completed(futures):
+                results.append(future.result())
+        return results
 
     def _settled_boundary(self, *, task_id: str | None) -> str | None:
         open_incidents = self._open_incident_count(task_id=task_id)
@@ -2569,6 +2599,44 @@ def _runtime_budget_block(task: Task, *, persona_id: str, run_store: RunStore, c
                     "limit": child_limit,
                 }
     return None
+
+
+def _task_for_action(task: Task, action: HarnessAction) -> Task:
+    action_task = copy.deepcopy(task)
+    stage_id = str(getattr(action, "stage_id", "") or "").strip()
+    if not stage_id:
+        return action_task
+    action_task.current_stage_id = stage_id
+    plan = getattr(action_task, "mission_plan", None)
+    if plan is not None:
+        known = {stage.id for stage in list(getattr(plan, "stages", None) or [])}
+        if stage_id in known:
+            plan.current_stage_id = stage_id
+    return action_task
+
+
+def _swarm_lane_concurrency_enabled(config: RuntimeConfig) -> bool:
+    swarm = getattr(config, "swarm", None)
+    if not bool(getattr(swarm, "enabled", False)):
+        return False
+    try:
+        from .burn_in import swarm_certification_allows_production
+
+        allowed, _summary = swarm_certification_allows_production(
+            allow_uncertified_dev_swarm=bool(getattr(swarm, "allow_uncertified_dev_swarm", False)),
+            requires_certification=bool(getattr(swarm, "requires_certification", True)),
+        )
+        return bool(allowed)
+    except Exception:
+        return not bool(getattr(swarm, "requires_certification", True))
+
+
+def _max_active_lanes(config: RuntimeConfig) -> int:
+    swarm = getattr(config, "swarm", None)
+    try:
+        return max(1, int(getattr(swarm, "max_active_lanes", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _run_token_total(runs) -> int:

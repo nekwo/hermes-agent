@@ -28,8 +28,8 @@ from .scope_control import needs_pm_triage_before_dev
 from .states import StageStatus, TaskState
 
 
-def _run_slot(mission: Task, slot_id: str, reason: str) -> HarnessAction:
-    return HarnessAction(HarnessActionType.RUN_SLOT, mission.id, reason=reason, slot_id=slot_id)
+def _run_slot(mission: Task, slot_id: str, reason: str, *, stage_id: str | None = None) -> HarnessAction:
+    return HarnessAction(HarnessActionType.RUN_SLOT, mission.id, reason=reason, slot_id=slot_id, stage_id=stage_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +61,55 @@ class MissionStateMachine:
         if typed is not None:
             return typed
         return HarnessAction(HarnessActionType.NOOP, mission.id, reason="no eligible mission action")
+
+    def next_actions(self, mission: Task) -> list[HarnessAction]:
+        state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
+        ensure_default_mission_plan(mission)
+        child_wake = parent_child_event_wake_action(mission, config=self.config)
+        if child_wake is not None:
+            return [child_wake]
+        typed = self._blueprint_ready_actions(mission, state=state)
+        if typed:
+            return typed
+        return [self.next_action(mission)]
+
+    def _blueprint_ready_actions(self, mission: Task, *, state: TaskState) -> list[HarnessAction]:
+        plan = getattr(mission, "mission_plan", None)
+        if plan is None or not getattr(plan, "blueprint_id", None):
+            return []
+        if state in {TaskState.DONE, TaskState.CANCELLED, TaskState.BLOCKED}:
+            return []
+        if getattr(mission, "open_incident_ids", None):
+            return []
+        if needs_pm_triage_before_dev(mission) or has_unresolved_context_request(mission) or needs_supervisor_slicing(mission):
+            return []
+        stages = list(getattr(plan, "stages", None) or [])
+        by_id = {stage.id: stage for stage in stages}
+        limit = _ready_action_limit(self.config)
+        actions: list[HarnessAction] = []
+        for stage in stages:
+            if stage.status not in {StageStatus.DRAFT, StageStatus.READY, StageStatus.REWORK, StageStatus.IMPLEMENTING}:
+                continue
+            if any((by_id.get(dep_id) is None or by_id[dep_id].status != StageStatus.PASSED) for dep_id in list(stage.depends_on or [])):
+                continue
+            slot_id = stage.owner_slot or stage.owner
+            if not slot_id:
+                continue
+            if plan.slots and slot_id not in plan.slots:
+                continue
+            if plan.bindings and not plan.bindings.get(slot_id):
+                continue
+            if stage.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.REWORK}:
+                stage.status = StageStatus.IMPLEMENTING
+                stage.updated_at = now()
+            actions.append(_run_slot(mission, slot_id, f"blueprint stage {stage.id} needs slot {slot_id}", stage_id=stage.id))
+            if len(actions) >= limit:
+                break
+        if actions:
+            first_stage_id = actions[0].stage_id
+            plan.current_stage_id = first_stage_id
+            mission.current_stage_id = first_stage_id
+        return actions
 
     def _blueprint_next_action(self, mission: Task, *, state: TaskState) -> HarnessAction | None:
         plan = getattr(mission, "mission_plan", None)
@@ -207,6 +256,14 @@ def _first_unpassed_blueprint_dependency(plan, stage: MissionPlanStage) -> Missi
 def _strict_blueprint_dependency_dispatch(plan) -> bool:
     limits = getattr(plan, "limits", None) or {}
     return bool(limits.get("strict_depends_on_dispatch"))
+
+
+def _ready_action_limit(config) -> int:
+    swarm = getattr(config, "swarm", None)
+    try:
+        return max(1, int(getattr(swarm, "max_active_lanes", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _blueprint_terminal_action(mission: Task, *, proof_store=None) -> HarnessAction:

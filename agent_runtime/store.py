@@ -1234,42 +1234,45 @@ class IncidentStore:
         return _read_model(Incident, paths.incident_path(incident_id))
 
     def close(self, incident_id: str, *, reason: str | None = None) -> Incident:
-        incident = self.get(incident_id)
-        was_open = incident.closed_at is None
-        incident.closed_at = now()
-        _write_model(paths.incident_path(incident_id), incident)
-        if incident.task_id:
-            try:
-                task_store = TaskStore()
-                task = task_store.get(incident.task_id)
-                changed = False
-                if incident.id in (task.open_incident_ids or []):
-                    task.open_incident_ids = [item for item in task.open_incident_ids if item != incident.id]
-                    changed = True
-                if was_open and task.state == TaskState.BLOCKED:
-                    mark_incident_closed_for_recovery(task, incident_id=incident.id)
-                    if not task.open_incident_ids:
-                        task.state = TaskState.RUNNING
-                    changed = True
-                if changed:
-                    task.updated_at = now()
-                    task_store.update(task, actor="harness", reason="incident closed")
-            except NotFound:
-                pass
-        payload = {"incident_id": incident.id}
-        if reason:
-            payload["reason"] = reason
-        self.event_log.append(
-            Event(
-                ts=now(),
-                type="incident.closed",
-                task_id=incident.task_id,
-                run_id=incident.run_id,
-                persona_id=None,
-                payload=payload,
+        from .locks import incident_lock
+
+        with incident_lock(incident_id):
+            incident = self.get(incident_id)
+            was_open = incident.closed_at is None
+            incident.closed_at = now()
+            _write_model(paths.incident_path(incident_id), incident)
+            if incident.task_id:
+                try:
+                    task_store = TaskStore()
+                    task = task_store.get(incident.task_id)
+                    changed = False
+                    if incident.id in (task.open_incident_ids or []):
+                        task.open_incident_ids = [item for item in task.open_incident_ids if item != incident.id]
+                        changed = True
+                    if was_open and task.state == TaskState.BLOCKED:
+                        mark_incident_closed_for_recovery(task, incident_id=incident.id)
+                        if not task.open_incident_ids:
+                            task.state = TaskState.RUNNING
+                        changed = True
+                    if changed:
+                        task.updated_at = now()
+                        task_store.update(task, actor="harness", reason="incident closed")
+                except NotFound:
+                    pass
+            payload = {"incident_id": incident.id}
+            if reason:
+                payload["reason"] = reason
+            self.event_log.append(
+                Event(
+                    ts=now(),
+                    type="incident.closed",
+                    task_id=incident.task_id,
+                    run_id=incident.run_id,
+                    persona_id=None,
+                    payload=payload,
+                )
             )
-        )
-        return incident
+            return incident
 
     def list_open(self) -> list[Incident]:
         return [incident for incident in self.list_all() if incident.closed_at is None]
