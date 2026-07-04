@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any, Iterable
 
+from hermes_time import now
+
 from .models import PersonaInstance
 from .mission_chat_turns import mission_chat_turn_elements
 from .parity import ProjectionAccountant
@@ -122,6 +124,41 @@ def persona_chat_history_summary(
                 accountant.drop("session_not_in_db", entity_id=session_id)
             continue
         rows.append(_history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail))
+        seen.add(session_id)
+        if accountant is not None:
+            accountant.consider(1)
+            accountant.include(1)
+        if len(rows) >= limit:
+            break
+
+    # Live mission sessions. A task-bound instance runs its mission turns in a
+    # session that lives in the run/event stream, not the operator SessionDB, so
+    # the loops above never surface it — leaving the console on a stale operator
+    # chat with nothing to switch to. Emit a minimal, live-marked row (no
+    # messages; the persona_chat_trace lane carries the actual mission activity)
+    # so the session is selectable and the console can switch to what is running.
+    # This is NOT resurrecting a deleted chat: it is an active mission, and the
+    # row only exists while the instance is bound to a task.
+    for instance in persona_instances:
+        if safe_assignment_token(getattr(instance, "mode", None)) != "task_bound":
+            continue
+        session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
+        task_id = safe_assignment_text(getattr(instance, "current_task_id", None), limit=160)
+        if not session_id or not task_id or session_id in seen:
+            continue
+        goal = safe_assignment_text(getattr(instance, "current_chat_goal", None), limit=120)
+        timestamp = now().isoformat()
+        synthetic = {
+            "id": session_id,
+            "title": goal or "Mission run",
+            "message_count": 0,
+            "started_at": getattr(instance, "assigned_at", None) or timestamp,
+            "last_active": timestamp,
+        }
+        row = _history_row(synthetic, instance, session_id=session_id, session_db=db, message_tail=message_tail)
+        row["live_mission"] = True
+        row["task_id"] = task_id
+        rows.append(row)
         seen.add(session_id)
         if accountant is not None:
             accountant.consider(1)
