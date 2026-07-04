@@ -206,6 +206,11 @@ def test_harness_skill_examples_validate_against_live_contracts():
 
     assert result["ok"] is True
     assert result["failure_count"] == 0
+    # Rationale (doc-08 v4 / N1): the root-node rewrite of harness-mission-lead no
+    # longer emits AgentDecision JSON examples (the skill's explicit contract is
+    # "Do not emit AgentDecision JSON"), so it is intentionally no longer part of
+    # the decision-contract example-validation set. Dropped here, not weakened
+    # elsewhere. See tests/agent_runtime/test_root_node_mode.py for the new coverage.
     assert {item["skill"] for item in result["checked"]} >= {
         "harness-dev-delivery",
         "harness-qa-verdict",

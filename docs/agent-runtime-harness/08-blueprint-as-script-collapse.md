@@ -1,5 +1,24 @@
 # 08 — Root Node + Self-Looped Sub-Agents (v4, implementation-ready)
 
+> **Verification status (2026-07-04, adversarial re-derivation — doc-09 Prompt 2):**
+> N0/N1/N2 implementation **VERIFIED**; N3 burn-in **PARTIAL / flip NOT approved.**
+> Suite honestly green (1343 passed, floor 1329 + 14 new). Independent live N1
+> gap-1-trap goal (`task_e13dc2f8`) reached `done` unattended: repo derived
+> correctly to `hermes-agent`, dev node's own green run the only test evidence
+> (proof `proof_observed_9c1a0fc0bb`, `source=agent_tool_trace`), targeted daemon
+> auto-archived (`20260704T000730975440Z_archive_ready`), final status clean. No
+> judgment-in-Python spirit violations on the new path; legacy decision tower
+> byte-for-byte untouched. **Blockers to the N3 flag-flip + tower deletion:**
+> (1) burn-in is not 10/10 unattended — the executor's own ledger admits rows 08
+> and 10 are not-unattended and rows 05–07 produced zero Proof rows; (2)
+> `run_node` returns `diff_weakens_tests` hardcoded `False` (the weaken-check the
+> doc calls for was never extracted from `ticker.py:2159`) — the root is blind to
+> a child weakening tests; (3) three additive changes ship on the shared/flag-off
+> path un-gated (`progress.py` screenshot hook, `personas.py` QA `launcher_qa`
+> toolset, `mission_plan.py` snapshot stage fields), so "flag off = zero change" is
+> not strictly true. Fix (2)+(3) and land a clean 10/10 unattended burn-in before
+> the flip. Full outcome in `09-root-node-execution-prompts.md`.
+
 > One idea: **every node is a standard self-looped Hermes agent; the root node runs the
 > goal by spawning and steering sub-agent nodes — the same shape as Hermes'
 > `delegate_task`.** A node is customizable but simple: prompt + HUD + toolset + workdir.

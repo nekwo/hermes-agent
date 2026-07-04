@@ -159,3 +159,115 @@ VERDICT (blunt)
   human-approved engagement.
 - Update doc-08's header with the verification result and this doc with the outcome,
   in the same commit as any fixes you make.
+
+---
+
+## VERIFICATION OUTCOME (2026-07-04, adversarial re-derivation by Claude)
+
+Base = `49cdcf4ad` (this doc). Engagement commits: `369fe4f34` (N0), `67acdc300`
+(N1), `a56fc0081` (N2), `a91693b2a` (N3 ledger). Every claim below was
+independently re-derived; the executor's report was treated as input only.
+
+### Per-step verdicts
+
+1. **Commits real & scoped — VERIFIED.** `run_node`/`steer_node`
+   (`node_tools.py`), `RootNodeEngine` (`root_node_engine.py`), `root_node_mode`
+   in all 3 config files (`runtime_config.py`/`config.py`/`migrations.py`), QA
+   trace recorder (`visual_trace_evidence.py`), rewritten `harness-mission-lead`
+   SKILL all present. Daemon seam flag-gated at `hermes_cli/harness.py:5886`.
+2. **Suite honestly green — VERIFIED.** `1343 passed in 300.36s` (floor 1329 + 14
+   new: `test_root_node_mode.py`×5, `test_root_authoring.py`×3, `test_qa_node.py`×6).
+   One modified test (`test_decision_contract_registry.py`) dropped
+   `harness-mission-lead` from the decision-contract example set — defensible (the
+   root-node skill emits no AgentDecision JSON) but shipped with **no rationale
+   comment and a generic commit message**. Rationale comment added in this commit.
+3. **Flag off = zero change — VERIFIED WITH EXCEPTION.** Legacy decision tower
+   (`ticker/planning/packets/final_gate/default_plan/decision_contract_registry/`
+   `budget_approval/simplified_contract`) is byte-for-byte untouched; goal-create,
+   daemon engine selection, and node-tool permission all gate on the flag. **But**
+   three additive changes are **not** flag-gated and alter the shared path:
+   `progress.py` screenshot-recorder hook, `personas.py` QA `launcher_qa` toolset +
+   `required_mcp_servers`, and `mission_plan.py` snapshot stage fields. Not "zero
+   change" in the strict sense. (Did not run a separate full legacy live goal;
+   basis = clean flag-gating + green suite + untouched tower.)
+4. **No judgment in Python — VERIFIED (spirit upheld), one substrate gap.** No
+   completion contract, retry ladder, incident open, or decision-JSON parse on the
+   new path; the sole mechanical check is repo-alias validation
+   (`_canonical_repo_or_raise`). Tools are root-only by toolset assignment (no
+   dev/qa persona carries `node_control`). **Gap:** `run_node` returns
+   `diff_weakens_tests` hardcoded `False` (`node_tools.py:439`) — the weaken-check
+   the doc mandates (extract from `ticker.py:2159`) was never wired, so the root
+   cannot see a child weakening tests. `check_fn` gates on the flag, not the
+   persona (defense-in-depth only; effective gate is toolset membership).
+5. **Own live N1 goal — VERIFIED.** `task_e13dc2f8`, gap-1 trap (repo named only
+   mid-sentence + backticked focused command), flag on, `--start-daemon`,
+   unattended. Root (`neko_supervisor`) authored one stage `n1_verify_smoke`
+   (repo=`hermes-agent`), ran dev child, judged, declared done. Stores:
+   `affected_repos=['hermes-agent']`; self-test `source=worker_tool status=passed`
+   command = the exact named test from the **dev** run; proof
+   `proof_observed_9c1a0fc0bb` `type=test_run created_by=dev source=agent_tool_trace
+   status=passed`; targeted daemon auto-archived
+   `20260704T000730975440Z_archive_ready`; final `harness status` clean. Note:
+   stage row stayed `status=ready` (no Python stage-completion on this path — by
+   design, minor Mission Control cosmetic).
+6. **N2 QA-in-graph — VERIFIED FROM STORES (not independently re-run live).**
+   Executor row 09 (`task_fc937bb8`): dev ran **twice in one session**
+   (`20260703_233114_ac2f0e` — steer landed in the dev's own session), QA ran in
+   its own session (`20260703_233211_7467f7`), screenshot proof `created_by=qa`
+   `run_id=`the QA run, `status=passed nonblank/fullscreen redaction=safe 2560×1400`.
+   **Caveat:** the screenshot came via `launcher_qa_terminal_wrapper_trace`, whose
+   recorder force-marks redaction `safe` and mtime-selects the PNG from a directory
+   — real QA-run provenance, weaker artifact binding than the direct-MCP path.
+7. **Chaos drill — VERIFIED FROM STORES (not independently re-run live).** Row 10
+   (`task_d75547fd`): `daemon stop` mid-turn cancelled `run_787754bdd093` and
+   `run_eba710c2ac01` (`state=cancelled err=operator_cancelled`); targeted restart
+   completed root+dev runs → `state=done`.
+8. **Burn-in ledger — PARTIAL (self-admitted, not doctored).** All 5 spot-checked
+   archive batches exist. The executor's own ledger states it is **not** 10/10
+   unattended: row 08 (`37070s`, manual restart) and row 10 (chaos) are
+   not-unattended; rows 05–07 produced zero Proof rows. No manual
+   tick/unblock/incident-close claimed on the unattended rows.
+9. **Mission Control compatibility — VERIFIED.** `snapshot --json` builds in
+   ~2.3s; no root-node parity warnings (`.parity.warnings` are pre-existing
+   `operator_channel` chat-trace items unrelated to this work). Archived root-node
+   task renders full mission_plan/stages/runs/proofs.
+10. **Substrate intact — VERIFIED (spot-check).** Targeting + auto-archive proven
+    by the live N1 run; orphan reap by row 10's `operator_cancelled` runs;
+    redaction by `redaction_status=safe` proofs and secret-marker stripping in
+    `_safe_prompt_text`; liveness watchdog thread is daemon-loop-level and
+    engine-agnostic (unchanged by the engine swap).
+
+### Findings, ranked
+
+1. **[BLOCKER] Burn-in is not 10/10 unattended.** Rows 08 + 10 not-unattended,
+   rows 05–07 no Proof rows (executor honest about this). Flip gate not met.
+2. **[MEDIUM] `diff_weakens_tests` is a hardcoded `False` stub** (`node_tools.py:439`).
+   The one evidence signal designed to catch "fake green via weakened tests" is
+   inert on the root-node path. Extract the helper from `ticker.py:2159` and wire
+   it into `_diff_summary` before the flip.
+3. **[MEDIUM] Three ungated changes on the flag-off path** (`progress.py`,
+   `personas.py`, `mission_plan.py`) violate the strict "flag off = zero change"
+   non-negotiable. Additive + test-green, but gate them (at least the screenshot
+   hook) or document the intentional shared-path change.
+4. **[LOW-MEDIUM] Wrapper screenshot recorder auto-marks redaction `safe` +
+   mtime-selects the artifact** (`visual_trace_evidence.py`
+   `_terminal_wrapper_screenshot`). Spoofable; harden to bind the artifact to the
+   tool call's returned path and actually scan.
+5. **[LOW] `check_fn` gates on flag, not persona.** Effective root-only-ness is
+   toolset membership; `NodeToolService` does not verify the caller is root.
+   Add a caller-identity assertion for defense-in-depth.
+6. **[LOW] Modified test shipped without rationale/commit note.** Fixed in this
+   commit (rationale comment added).
+
+### Readiness
+
+**The N3 flag-flip and legacy-tower deletion are NOT approved.** The approval gate
+("10/10 burn-in unattended AND steps 1–10 pass") is not met: burn-in is 8/10 at
+best (finding 1), and findings 2–3 are correctness/spec gaps that must land first.
+This aligns with the executor's own conclusion. The **implementation itself
+(N0–N2) is sound and live-proven** — the root-node path authors, runs, judges,
+steers, and completes a real goal unattended with honest server-side evidence.
+Required before a re-verification of the flip: fix findings 2 + 3, then land a
+clean 10/10 unattended burn-in sweep (including a QA-in-graph run whose screenshot
+uses the direct-MCP path, and the chaos drill counted honestly). The tower
+deletion remains a separate, human-approved engagement even after the flip.
