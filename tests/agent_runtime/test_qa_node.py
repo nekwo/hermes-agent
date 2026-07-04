@@ -79,14 +79,26 @@ class ScreenshotRunner:
         )
 
 
-def test_qa_persona_declares_launcher_qa_mcp_tooling():
+def test_qa_persona_does_not_statically_carry_launcher_qa():
+    # Flag-off zero change: launcher_qa is NOT baked into the static QA persona (that
+    # would widen the legacy QA capability + readiness surface). It is injected at
+    # dispatch for QA child nodes on the root-node path only (see below).
     qa = next(persona for persona in default_personas() if persona.id == "qa")
     visibility = resolve_tool_visibility(qa)
 
-    assert "launcher_qa" in qa.toolsets
-    assert "launcher_qa" in qa.required_mcp_servers
-    assert "launcher_qa" in visibility["role_allowed_toolsets"]
-    assert "launcher_qa" in visibility["effective_toolsets"]
+    assert "launcher_qa" not in qa.toolsets
+    assert "launcher_qa" not in (qa.required_mcp_servers or [])
+    assert "launcher_qa" not in visibility["effective_toolsets"]
+
+
+def test_qa_child_gets_launcher_qa_injected_at_dispatch():
+    from agent_runtime.node_tools import _child_enabled_toolsets
+
+    qa = next(persona for persona in default_personas() if persona.id == "qa")
+    dev = next(persona for persona in default_personas() if persona.id == "dev")
+
+    assert "launcher_qa" in _child_enabled_toolsets(qa)
+    assert "launcher_qa" not in _child_enabled_toolsets(dev)
 
 
 def test_qa_child_prompt_names_rerun_and_launcher_qa_screenshot():
@@ -98,7 +110,16 @@ def test_qa_child_prompt_names_rerun_and_launcher_qa_screenshot():
     assert "concrete steer for the dev child" in prompt
 
 
-def test_launcher_qa_screenshot_trace_records_proof(tmp_path, isolate_agent_runtime_root):
+def _enable_root_node_mode(monkeypatch):
+    # The screenshot trace recorder is gated on root_node_mode (flag-off = zero
+    # change); enable it for these root-node recorder tests.
+    import agent_runtime.progress as progress
+
+    monkeypatch.setattr(progress, "load_agent_runtime_config", lambda *a, **k: AgentRuntimeConfig(root_node_mode=True))
+
+
+def test_launcher_qa_screenshot_trace_records_proof(monkeypatch, tmp_path, isolate_agent_runtime_root):
+    _enable_root_node_mode(monkeypatch)
     image = tmp_path / "qa.png"
     image.write_bytes(_png_bytes())
     runs = RunStore()
@@ -129,7 +150,8 @@ def test_launcher_qa_screenshot_trace_records_proof(tmp_path, isolate_agent_runt
     assert proof.path_or_value.startswith("proofs/task_visual_trace/artifacts/")
 
 
-def test_launcher_qa_terminal_wrapper_screenshot_trace_records_proof(tmp_path, isolate_agent_runtime_root):
+def test_launcher_qa_terminal_wrapper_screenshot_trace_records_proof(monkeypatch, tmp_path, isolate_agent_runtime_root):
+    _enable_root_node_mode(monkeypatch)
     image = tmp_path / "qa_node_mission_control_20260703123623778.png"
     image.write_bytes(_png_bytes())
     runs = RunStore()
@@ -164,6 +186,7 @@ def test_launcher_qa_terminal_wrapper_screenshot_trace_records_proof(tmp_path, i
 def test_run_node_returns_qa_screenshot_evidence(monkeypatch, tmp_path, isolate_agent_runtime_root):
     import agent_runtime.node_tools as node_tools
 
+    _enable_root_node_mode(monkeypatch)  # recorder reads the global flag (on in a live root-node goal)
     monkeypatch.setattr(node_tools, "resolve_persona_profile", _ready_binding)
     monkeypatch.setattr(node_tools, "isolated_repo_context_for_run", lambda repo_ctx, **_kwargs: repo_ctx)
     image = tmp_path / "qa-node.png"

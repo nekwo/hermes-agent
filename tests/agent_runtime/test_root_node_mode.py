@@ -138,6 +138,60 @@ def test_run_node_rejects_unknown_repo_alias(isolate_agent_runtime_root):
         raise AssertionError("unknown repo alias should be rejected")
 
 
+def test_diff_weakens_tests_and_changed_files_helpers():
+    from agent_runtime.repo_context import changed_files_from_diff, diff_weakens_tests
+
+    weakening = (
+        "diff --git a/tests/test_x.py b/tests/test_x.py\n"
+        "--- a/tests/test_x.py\n+++ b/tests/test_x.py\n"
+        "@@\n-    assert result == 1\n+    pass\n"
+    )
+    assert diff_weakens_tests(weakening) is True
+    assert changed_files_from_diff(weakening) == ["tests/test_x.py"]
+
+    benign = "diff --git a/agent_runtime/foo.py b/agent_runtime/foo.py\n@@\n-    x = 1\n+    x = 2\n"
+    assert diff_weakens_tests(benign) is False
+    assert changed_files_from_diff(benign) == ["agent_runtime/foo.py"]
+    assert diff_weakens_tests("") is False
+
+
+def test_run_node_diff_evidence_flags_test_weakening(monkeypatch, isolate_agent_runtime_root):
+    import agent_runtime.node_tools as node_tools
+
+    monkeypatch.setattr(node_tools, "resolve_persona_profile", _ready_binding)
+    monkeypatch.setattr(node_tools, "isolated_repo_context_for_run", lambda repo_ctx, **_kwargs: repo_ctx)
+    weakening = "diff --git a/tests/test_x.py b/tests/test_x.py\n-    assert x\n+    pass\n"
+    monkeypatch.setattr(
+        node_tools,
+        "git_diff_since_baseline",
+        lambda *a, **k: {"diff": weakening, "truncated": False, "new_untracked_paths": []},
+    )
+    task = TaskStore().create(_task("task_weaken"))
+    service = NodeToolService(config=AgentRuntimeConfig(root_node_mode=True), runner=FakeRunner())
+
+    result = service.run_node(task_id=task.id, stage={"id": "impl", "objective": "x", "owner": "dev", "repo": "hermes-agent"})
+
+    diff_ev = [item for item in result.evidence if item.get("kind") == "diff"]
+    assert diff_ev, "diff evidence handle missing"
+    assert diff_ev[0]["diff_weakens_tests"] is True
+    assert "test_x.py" in diff_ev[0]["changed_files"]
+
+
+def test_node_control_tool_is_root_only():
+    # Defense-in-depth lock: run_node/steer_node live in the node_control toolset,
+    # which must never be baked into a persona. The root gets it injected at dispatch
+    # (_root_toolsets); no child persona may carry it, so a child node can never
+    # invoke run_node/steer_node.
+    from agent_runtime.personas import default_personas
+    from agent_runtime.root_node_engine import _root_toolsets
+
+    for persona in default_personas():
+        assert "node_control" not in (persona.toolsets or []), persona.id
+
+    root_like = SimpleNamespace(toolsets=["file", "skills"])
+    assert "node_control" in _root_toolsets(root_like)
+
+
 def test_root_node_engine_reports_task_terminal(monkeypatch, isolate_agent_runtime_root):
     import agent_runtime.root_node_engine as root_engine
 

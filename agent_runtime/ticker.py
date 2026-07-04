@@ -55,7 +55,7 @@ from .role_checklists import apply_decision_checklist_updates, sanitize_decision
 from .role_envelopes import RoleEnvelopeStore
 from .visual_proof import VisualProofRunner
 from .repo_bundles import RepoBundleStore, find_best_bundle_for_action, qa_waiting_on
-from .repo_context import RepoExecutionContext, command_workdir_for_task, git_diff_since_baseline, isolated_repo_context_for_run, safe_affected_repo_labels
+from .repo_context import RepoExecutionContext, command_workdir_for_task, diff_weakens_tests, git_diff_since_baseline, isolated_repo_context_for_run, safe_affected_repo_labels
 from .packets import latest_packet, make_packet, record_packet
 from .role_sessions import (
     RoleSessionEnvelope,
@@ -2161,22 +2161,9 @@ def _handoff_diff_weakens_tests(task: Task, stage_id: str | None) -> bool:
     observations = root.get("stage_observations") if isinstance(root.get("stage_observations"), dict) else {}
     item = observations.get(stage_id or "_task") if isinstance(observations, dict) else None
     diff = (item or {}).get("repo_diff", {}).get("diff") if isinstance(item, dict) else ""
-    if not isinstance(diff, str) or not diff.strip():
-        return False
-    in_test_file = False
-    for line in diff.splitlines():
-        if line.startswith("diff --git "):
-            lowered = line.lower()
-            in_test_file = bool(re.search(r"(^|[/\\])(test|tests)[/\\].*\.(py|dart|js|ts|tsx|jsx)$", lowered) or re.search(r"test_.*\.py|_test\.dart|\.spec\.", lowered))
-            continue
-        if not in_test_file:
-            continue
-        stripped = line.strip()
-        if stripped.startswith("-") and re.search(r"\b(assert|expect|self\.assert|pytest\.raises)\b", stripped):
-            return True
-        if stripped.startswith("+") and re.search(r"\b(skip|skipif|xfail|@pytest\.mark\.skip|Skip\()\b", stripped):
-            return True
-    return False
+    # Shared pure scanner (repo_context.diff_weakens_tests) so the legacy gate and
+    # the root-node evidence handle never drift.
+    return diff_weakens_tests(diff if isinstance(diff, str) else "")
 
 
 def _emit_run_budget_warning(run, *, task_id: str, actor: str) -> bool:

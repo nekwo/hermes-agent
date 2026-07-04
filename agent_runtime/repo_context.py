@@ -526,6 +526,59 @@ def git_diff_since_baseline(workdir: str | Path, baseline: dict[str, Any] | None
     }
 
 
+# A unified-diff line that starts a new file section names the post-image path as
+# ``b/<path>``. Reused by both the legacy handoff gate and the root-node evidence
+# stack so the two never drift.
+_DIFF_TEST_FILE_RE = re.compile(
+    r"(^|[/\\])(test|tests)[/\\].*\.(py|dart|js|ts|tsx|jsx)$|test_.*\.py|_test\.dart|\.spec\.",
+    re.IGNORECASE,
+)
+_DIFF_REMOVED_ASSERT_RE = re.compile(r"\b(assert|expect|self\.assert|pytest\.raises)\b")
+_DIFF_ADDED_SKIP_RE = re.compile(r"\b(skip|skipif|xfail|@pytest\.mark\.skip|Skip\()\b")
+
+
+def changed_files_from_diff(diff_text: str) -> list[str]:
+    """Post-image file paths named by a unified diff's ``diff --git`` headers."""
+
+    files: list[str] = []
+    for line in (diff_text or "").splitlines():
+        if not line.startswith("diff --git "):
+            continue
+        marker = line.find(" b/")
+        if marker == -1:
+            continue
+        path = line[marker + 3 :].strip()
+        if path and path not in files:
+            files.append(path)
+    return files
+
+
+def diff_weakens_tests(diff_text: str) -> bool:
+    """True if a unified diff removes test assertions or adds skips in test files.
+
+    Pure over the diff string so both ``ticker._handoff_diff_weakens_tests`` (legacy
+    gate) and ``node_tools`` (root-node evidence handle) share one definition. This
+    is NOT a gate on the root-node path — it is a warning flag the root's model reads
+    and judges; only the legacy ticker path uses it to fail closed.
+    """
+
+    if not isinstance(diff_text, str) or not diff_text.strip():
+        return False
+    in_test_file = False
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            in_test_file = bool(_DIFF_TEST_FILE_RE.search(line.lower()))
+            continue
+        if not in_test_file:
+            continue
+        stripped = line.strip()
+        if stripped.startswith("-") and _DIFF_REMOVED_ASSERT_RE.search(stripped):
+            return True
+        if stripped.startswith("+") and _DIFF_ADDED_SKIP_RE.search(stripped):
+            return True
+    return False
+
+
 def safe_affected_repo_labels(repos: list[str] | tuple[str, ...] | None) -> list[str]:
     labels: list[str] = []
     for repo in repos or []:

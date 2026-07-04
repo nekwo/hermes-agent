@@ -1,23 +1,26 @@
 # 08 — Root Node + Self-Looped Sub-Agents (v4, implementation-ready)
 
-> **Verification status (2026-07-04, adversarial re-derivation — doc-09 Prompt 2):**
-> N0/N1/N2 implementation **VERIFIED**; N3 burn-in **PARTIAL / flip NOT approved.**
-> Suite honestly green (1343 passed, floor 1329 + 14 new). Independent live N1
-> gap-1-trap goal (`task_e13dc2f8`) reached `done` unattended: repo derived
-> correctly to `hermes-agent`, dev node's own green run the only test evidence
-> (proof `proof_observed_9c1a0fc0bb`, `source=agent_tool_trace`), targeted daemon
-> auto-archived (`20260704T000730975440Z_archive_ready`), final status clean. No
-> judgment-in-Python spirit violations on the new path; legacy decision tower
-> byte-for-byte untouched. **Blockers to the N3 flag-flip + tower deletion:**
-> (1) burn-in is not 10/10 unattended — the executor's own ledger admits rows 08
-> and 10 are not-unattended and rows 05–07 produced zero Proof rows; (2)
-> `run_node` returns `diff_weakens_tests` hardcoded `False` (the weaken-check the
-> doc calls for was never extracted from `ticker.py:2159`) — the root is blind to
-> a child weakening tests; (3) three additive changes ship on the shared/flag-off
-> path un-gated (`progress.py` screenshot hook, `personas.py` QA `launcher_qa`
-> toolset, `mission_plan.py` snapshot stage fields), so "flag off = zero change" is
-> not strictly true. Fix (2)+(3) and land a clean 10/10 unattended burn-in before
-> the flip. Full outcome in `09-root-node-execution-prompts.md`.
+> **Verification status (2026-07-04, adversarial re-derivation + remediation —
+> doc-09 Prompt 2):** N0/N1/N2 implementation **VERIFIED**; N3 burn-in still
+> **PENDING / flip NOT approved.** Suite green (1347 passed after remediation).
+> Two independent live gap-1-trap goals (`task_e13dc2f8`, post-fix
+> `task_41f18ab8`) reached `done` unattended: repo derived correctly to
+> `hermes-agent`, dev node's own green run the only test evidence
+> (`source=agent_tool_trace`), targeted daemon auto-archived, final status clean.
+> No judgment-in-Python spirit violations; legacy decision tower byte-for-byte
+> untouched. **Findings 2–5 now CLOSED (this commit):** (2) `diff_weakens_tests`
+> is a real shared helper (`repo_context.diff_weakens_tests`, extracted from
+> `ticker.py:2159`) wired into `run_node`'s evidence, plus the always-empty
+> `changed_files` bug fixed; (3) the shared/flag-off path is clean again — the
+> `progress.py` screenshot recorder is gated on `root_node_mode`, and QA's
+> `launcher_qa` moved out of the static persona into flag-gated dispatch injection
+> (`node_tools._child_enabled_toolsets`), restoring scope-aware MCP requirement;
+> (4) the wrapper screenshot recorder now binds the artifact to the run's time
+> window instead of mtime-globbing an arbitrary PNG; (5) a regression test locks
+> `node_control` to root-only exposure. **Only remaining blocker to the flip:** a
+> clean **10/10 unattended** burn-in sweep (the prior ledger was 8/10 — rows 08/10
+> not-unattended, rows 05–07 no Proof rows). Deliberately deferred: "guarantee
+> smoothness before forcing." Full outcome in `09-root-node-execution-prompts.md`.
 
 > One idea: **every node is a standard self-looped Hermes agent; the root node runs the
 > goal by spawning and steering sub-agent nodes — the same shape as Hermes'

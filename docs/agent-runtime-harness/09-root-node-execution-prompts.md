@@ -271,3 +271,57 @@ Required before a re-verification of the flip: fix findings 2 + 3, then land a
 clean 10/10 unattended burn-in sweep (including a QA-in-graph run whose screenshot
 uses the direct-MCP path, and the chaos drill counted honestly). The tower
 deletion remains a separate, human-approved engagement even after the flip.
+
+---
+
+## REMEDIATION (2026-07-04, same verifier — findings 2–6 closed; burn-in deferred)
+
+Directive: "close all gaps except the burn-in sweep — we still need to guarantee
+smoothness before forcing something." Findings 2–6 fixed; the 10/10 burn-in sweep
+(finding 1) is intentionally left as the remaining flip gate. Suite after fixes:
+**1347 passed, 0 failed.** Re-verified live with a fresh gap-1-trap goal
+(`task_41f18ab8`) → `done` unattended, repo `hermes-agent`, dev's own green run the
+only evidence (`agent_tool_trace` proofs), auto-archived, final status clean.
+
+- **Finding 2 (weaken-check stub) — CLOSED.** Extracted `diff_weakens_tests` +
+  `changed_files_from_diff` as pure helpers in `repo_context.py`; refactored the
+  legacy `ticker._handoff_diff_weakens_tests` to delegate to the shared scanner
+  (identical behavior, 5 ticker weaken/tamper tests still green); wired the real
+  flag into `node_tools._diff_summary`. Also fixed the latent bug that
+  `changed_files` was always empty (`git_diff_since_baseline` has no
+  `changed_files` key — now derived from the diff text). Tests:
+  `test_diff_weakens_tests_and_changed_files_helpers`,
+  `test_run_node_diff_evidence_flags_test_weakening`.
+- **Finding 3 (ungated shared-path changes) — CLOSED.**
+  (a) `progress._maybe_record_visual_screenshot` now returns early unless
+  `root_node_mode` is on, so the flag-off path writes no new Proof rows.
+  (b) Reverted `personas.py` — QA no longer statically carries `launcher_qa` in its
+  toolset/allowlist/`required_mcp_servers`; instead `node_tools._child_enabled_toolsets`
+  injects `launcher_qa` for QA child nodes at dispatch (root-node path only,
+  symmetric with the root's `node_control`). This also restores the pre-existing
+  scope-aware behavior where `launcher_qa` is required only for visual-proof tasks
+  (`test_profile_readiness_injects_launcher_qa_only_for_visual_scope`), which the
+  executor's static `required_mcp_servers` had overridden to always-required.
+  (c) The `mission_plan_summary` stage fields (`acceptance_criteria`, `test_plan`,
+  `affected_paths`) are kept — read-only, additive snapshot projection needed for
+  root-node stage rendering and harmless for legacy goals; gating a read-model
+  schema on a runtime flag would hurt consumers. Tests:
+  `test_qa_persona_does_not_statically_carry_launcher_qa`,
+  `test_qa_child_gets_launcher_qa_injected_at_dispatch`.
+- **Finding 4 (wrapper screenshot spoofing surface) — CLOSED.**
+  `visual_trace_evidence._latest_wrapper_artifact` now rejects any candidate PNG
+  older than the run's `started_at` (minus a 120s skew tolerance), so a
+  stale/foreign artifact left in the output directory can't be mtime-globbed in as
+  fake evidence. Redaction-safe is asserted only for an in-window launcher_qa
+  artifact.
+- **Finding 5 (`check_fn` gates on flag not persona) — CLOSED via lock.** The
+  caller persona is not plumbed to tool handlers (`agent.run_conversation` passes
+  only `task_id`), so a runtime caller-identity guard would be fragile. Instead
+  `test_node_control_tool_is_root_only` locks the real guarantee: no default
+  persona carries `node_control`, and only `_root_toolsets` injects it — a child
+  node can never invoke `run_node`/`steer_node`.
+- **Finding 6 — CLOSED** (rationale comment added earlier).
+
+**Still open: finding 1 (burn-in).** Not attempted here by direction. The flip
+remains NOT approved until a clean 10/10 unattended burn-in sweep lands (direct-MCP
+QA screenshot, honest chaos drill). Everything else is closed and re-verified.

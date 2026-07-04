@@ -195,7 +195,12 @@ def _maybe_record_self_test(run, event_type: str, payload: dict[str, Any], *, ev
 
 
 def _maybe_record_visual_screenshot(run, event_type: str, payload: dict[str, Any], *, event_log: EventLog) -> None:
+    # Root-node substrate only: this recorder writes Proof rows as a side effect of
+    # the tool stream. Gated on root_node_mode so the flag-off legacy path is
+    # byte-for-byte unchanged (no new proofs from a shared progress sink).
     try:
+        if not bool(getattr(load_agent_runtime_config(), "root_node_mode", False)):
+            return
         record_screenshot_from_progress(run, event_type, payload, event_log=event_log)
     except Exception:
         return

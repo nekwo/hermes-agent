@@ -33,7 +33,7 @@ def record_screenshot_from_progress(
     if _is_launcher_qa_screenshot_tool(tool_name):
         pass
     else:
-        wrapper = _terminal_wrapper_screenshot(payload)
+        wrapper = _terminal_wrapper_screenshot(payload, run=run)
         if wrapper is None:
             return None
         tool_name, source_path = wrapper
@@ -99,7 +99,7 @@ def _is_launcher_qa_screenshot_tool(tool_name: str) -> bool:
     return lowered.startswith("mcp_launcher_qa_") and "screenshot" in lowered
 
 
-def _terminal_wrapper_screenshot(payload: dict[str, Any]) -> tuple[str, str] | None:
+def _terminal_wrapper_screenshot(payload: dict[str, Any], *, run: AgentRun | None = None) -> tuple[str, str] | None:
     if str(payload.get("tool_name") or payload.get("tool") or "").strip().lower() != "terminal":
         return None
     if str(payload.get("status") or "").strip().lower() not in {"passed", "ok", "success"}:
@@ -114,10 +114,25 @@ def _terminal_wrapper_screenshot(payload: dict[str, Any]) -> tuple[str, str] | N
     args = _wrapper_args(command)
     label = str(args.get("label") or _partial_json_string(command, "label") or "").strip()
     out_dir = str(args.get("out_dir") or _partial_json_string(command, "out_dir") or "").strip()
-    source = _latest_wrapper_artifact(label=label, out_dir=out_dir)
+    # Bind the artifact to THIS run's time window so a stale/foreign PNG left in the
+    # output directory by an earlier run can't be mtime-globbed in as fake evidence.
+    source = _latest_wrapper_artifact(label=label, out_dir=out_dir, min_mtime=_run_min_mtime(run))
     if source is None:
         return None
     return tool_name, str(source)
+
+
+def _run_min_mtime(run: AgentRun | None) -> float | None:
+    """Earliest artifact mtime accepted for a run: its start minus a skew tolerance."""
+
+    started = getattr(run, "started_at", None) if run is not None else None
+    if started is None:
+        return None
+    try:
+        epoch = started.timestamp() if hasattr(started, "timestamp") else float(started)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return epoch - 120.0
 
 
 def _wrapper_args(command: str) -> dict[str, Any]:
@@ -141,7 +156,7 @@ def _partial_json_string(command: str, key: str) -> str:
     return match.group(1).replace("...", "").strip()
 
 
-def _latest_wrapper_artifact(*, label: str, out_dir: str) -> Path | None:
+def _latest_wrapper_artifact(*, label: str, out_dir: str, min_mtime: float | None = None) -> Path | None:
     roots: list[Path] = []
     if out_dir:
         roots.append(Path(out_dir))
@@ -153,7 +168,13 @@ def _latest_wrapper_artifact(*, label: str, out_dir: str) -> Path | None:
         if not root.exists():
             continue
         for pattern in patterns:
-            candidates.extend(path for path in root.glob(pattern) if path.is_file())
+            for path in root.glob(pattern):
+                if not path.is_file():
+                    continue
+                if min_mtime is not None and path.stat().st_mtime < min_mtime:
+                    # Older than this run started — reject as stale/foreign.
+                    continue
+                candidates.append(path)
         if candidates:
             break
     if not candidates:

@@ -17,6 +17,8 @@ from .progress import RunProgressSink
 from .repo_context import (
     RepoExecutionContext,
     canonical_repo_scope_label,
+    changed_files_from_diff,
+    diff_weakens_tests,
     git_diff_since_baseline,
     isolated_repo_context_for_run,
     known_repo_scope_labels,
@@ -290,7 +292,7 @@ class NodeToolService:
                 provider=persona.provider or getattr(self.config, "default_provider", None),
                 model=persona.model or getattr(self.config, "default_model", None) or "",
                 api_mode=persona.api_mode or getattr(self.config, "default_api_mode", "codex_responses"),
-                enabled_toolsets=list(persona.toolsets or []),
+                enabled_toolsets=_child_enabled_toolsets(persona),
                 blocked_tool_names=[],
                 quiet_mode=True,
                 skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
@@ -351,6 +353,21 @@ def node_tools_available() -> bool:
         return bool(getattr(load_agent_runtime_config(), "root_node_mode", False))
     except Exception:
         return False
+
+
+def _child_enabled_toolsets(persona: AgentPersona) -> list[str]:
+    """Toolsets for a child node run.
+
+    ``launcher_qa`` is injected for QA nodes here — on the root-node path only —
+    rather than baked into the static QA persona, so the flag-off legacy path keeps
+    the pre-root-node QA capability set unchanged. Symmetric with how the root gets
+    ``node_control`` (see ``root_node_engine._root_toolsets``).
+    """
+
+    toolsets = list(persona.toolsets or [])
+    if str(getattr(persona, "role", "") or "") == "qa" and "launcher_qa" not in toolsets:
+        toolsets.append("launcher_qa")
+    return toolsets
 
 
 def _child_system_prompt(persona: AgentPersona, stage: MissionPlanStage | None) -> str:
@@ -428,15 +445,19 @@ def _diff_summary(repo_ctx: RepoExecutionContext | None) -> dict[str, Any] | Non
     if repo_ctx is None:
         return None
     try:
-        diff = git_diff_since_baseline(repo_ctx.workdir, None, max_chars=4000)
+        # Enough diff text to detect test-weakening; the root reads this handle and
+        # judges — the harness never gates on it.
+        diff = git_diff_since_baseline(repo_ctx.workdir, None, max_chars=20000)
     except Exception:
         return None
-    changed = diff.get("changed_files") if isinstance(diff, dict) else None
+    diff_text = diff.get("diff") if isinstance(diff, dict) else ""
+    changed = changed_files_from_diff(diff_text) or (diff.get("new_untracked_paths") if isinstance(diff, dict) else None) or []
     return {
         "kind": "diff",
         "repo_label": repo_ctx.repo_label,
-        "changed_files": [str(item).replace("\\", "/").rsplit("/", 1)[-1] for item in (changed or [])[:20]],
-        "diff_weakens_tests": False,
+        "changed_files": [str(item).replace("\\", "/").rsplit("/", 1)[-1] for item in changed[:20]],
+        "diff_weakens_tests": diff_weakens_tests(diff_text if isinstance(diff_text, str) else ""),
+        "diff_truncated": bool(diff.get("truncated")) if isinstance(diff, dict) else False,
     }
 
 
