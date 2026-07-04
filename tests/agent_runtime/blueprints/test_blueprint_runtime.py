@@ -712,12 +712,11 @@ def test_scope_decision_on_gated_dev_stage_yields_no_outcome():
     assert stages["implement"].status != StageStatus.PASSED
 
 
-def test_dependency_blocked_join_dispatches_dependencies_not_the_join():
-    """Graph-driven guard: integrate depends_on [backend_implementation, implement].
-    A stale/over-advanced current_stage_id pointing at the join must NOT dispatch it
-    before its dependencies pass — dispatch enforces depends_on itself, not
-    current_stage_id blindly. (Descendant of the 2026-07-03 task_3e2ae539 fix, now on
-    the fork-join graph where the join, not the launcher, is the dependent node.)"""
+def test_dependency_blocked_branch_waits_for_scope_not_current_stage_id():
+    """Graph-driven guard: the dev branches depend_on [scope]. A stale/over-advanced
+    current_stage_id pointing at a branch must NOT dispatch it before scope passes —
+    dispatch enforces depends_on itself, not current_stage_id blindly. (Descendant of
+    the 2026-07-03 task_3e2ae539 fix, on the fork graph.)"""
     bp = BlueprintStore().get("neko_two_dev_default")
     plan = instantiate_blueprint(
         bp,
@@ -731,25 +730,22 @@ def test_dependency_blocked_join_dispatches_dependencies_not_the_join():
     task = _task_with_plan(plan)
     assert task.mission_plan.limits["strict_depends_on_dispatch"] == 1
     stages = {stage.id: stage for stage in task.mission_plan.stages}
-    stages["scope"].status = StageStatus.PASSED
-    stages["backend_implementation"].status = StageStatus.READY
-    stages["implement"].status = StageStatus.READY
-    stages["integrate"].status = StageStatus.IMPLEMENTING
-    task.mission_plan.current_stage_id = "integrate"
-    task.current_stage_id = "integrate"
+    stages["scope"].status = StageStatus.READY  # scope NOT passed yet
+    stages["backend_implementation"].status = StageStatus.IMPLEMENTING  # stale over-advance
+    task.mission_plan.current_stage_id = "backend_implementation"
+    task.current_stage_id = "backend_implementation"
 
     action = MissionStateMachine().next_action(task)
 
-    # Must dispatch a dependency branch (backend or launcher), never the join.
+    # Scope (lead) must run first; the branch is blocked on its unmet depends_on.
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.slot_id in {"backend_builder", "builder"}
-    assert task.mission_plan.current_stage_id in {"backend_implementation", "implement"}
-    assert stages["integrate"].status != StageStatus.PASSED
+    assert action.slot_id == "lead"
+    assert stages["backend_implementation"].status != StageStatus.PASSED
 
 
-def test_neko_two_dev_default_fork_join_dispatches_both_devs_then_neko_join():
-    # Graph-driven fork-join: neko scopes, both dev branches fan out in parallel
-    # (both depend only on scope), then neko's integrate join runs once both pass.
+def test_neko_two_dev_default_fork_dispatches_both_devs_then_completes():
+    # Graph-driven fork: neko scopes, both dev branches fan out in parallel (both
+    # depend only on scope); the harness completes once BOTH pass — no join stage.
     bp = BlueprintStore().get("neko_two_dev_default")
     plan = instantiate_blueprint(
         bp,
@@ -777,19 +773,12 @@ def test_neko_two_dev_default_fork_join_dispatches_both_devs_then_neko_join():
     dev_actions = machine.next_actions(task)
     dev_slots = {a.slot_id for a in dev_actions if a.type == HarnessActionType.RUN_SLOT}
     assert dev_slots == {"backend_builder", "builder"}
-    # The neko join is NOT offered yet — it waits for both branches.
+    # No Neko join stage is offered — the fork joins implicitly at completion.
     assert "lead" not in dev_slots
 
-    # Both branches pass -> neko's integrate join becomes ready.
+    # Both branches pass -> the harness completes the task (it waited for both).
     stages["backend_implementation"].status = StageStatus.PASSED
     stages["implement"].status = StageStatus.PASSED
-    join_actions = machine.next_actions(task)
-    join_slots = {a.slot_id for a in join_actions if a.type == HarnessActionType.RUN_SLOT}
-    assert join_slots == {"lead"}
-    assert task.mission_plan.current_stage_id == "integrate"
-
-    # Join passes -> task completes.
-    stages["integrate"].status = StageStatus.PASSED
     final = machine.next_action(task)
     assert final.type == HarnessActionType.COMPLETE_TASK
 

@@ -47,16 +47,11 @@ stages:
       required: true
       minimum_status: passed
       required_proof_types: [test_run]
-  - id: integrate
-    title: Integrate
-    objective: Neko joins the backend and launcher branches once both have returned — confirm each branch passed its proof and the combined result satisfies the goal.
-    owner_slot: lead
-    repo: hermes-agent
-    kind: coordinate
-    depends_on: [backend_implementation, implement]
-    blocks_qa_until: false
-    proof_gate:
-      required: false
+# No explicit Neko "join" stage: in the harness-dispatched pipeline a Neko-owned
+# join loops (Neko re-judges the already-passed branches and routes back forever).
+# The harness already waits for BOTH branches — the task only reaches `done` when
+# every stage has passed — so the fork implicitly joins at completion. (A real Neko
+# join belongs in root-node mode, where Neko owns the control loop.)
 edges:
   - source: scope
     outcome: ready
@@ -66,7 +61,7 @@ edges:
     target: intervention
   - source: backend_implementation
     outcome: passed
-    target: integrate
+    target: done
   - source: backend_implementation
     outcome: needs_fixes
     target: backend_implementation
@@ -75,19 +70,13 @@ edges:
     target: scope
   - source: implement
     outcome: passed
-    target: integrate
+    target: done
   - source: implement
     outcome: needs_fixes
     target: implement
   - source: implement
     outcome: blocked
     target: scope
-  - source: integrate
-    outcome: passed
-    target: done
-  - source: integrate
-    outcome: blocked
-    target: intervention
 agent_topology:
   root: lead
   edges:

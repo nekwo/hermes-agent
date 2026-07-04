@@ -470,6 +470,18 @@ class TickEngine:
             )
         )
         self.role_envelope_store.close(task.id, envelope.envelope_id, reason="no_progress_guard", run_id=getattr(run, "id", None))
+        # The per-run role envelope resets its no_progress_count every dispatch, so
+        # the soft guard above can fire repeatedly while the daemon keeps
+        # re-dispatching the SAME stage with the SAME decision (a Neko re-judge/route
+        # loop). Persist a cumulative (stage, decision) counter across runs and hard-
+        # block once it exceeds a small cap so the loop stops in a few turns, not
+        # dozens — instead of an incident that Neko adjudication can just reopen.
+        heal = task.harness_self_heal if isinstance(task.harness_self_heal, dict) else {}
+        loops = heal.setdefault("no_progress_loops", {})
+        loop_key = f"{stage_id}:{decision_type}"
+        loops[loop_key] = int(loops.get(loop_key, 0) or 0) + 1
+        task.harness_self_heal = heal
+        hard_cap = max(3, threshold * 3)
         if persona_id == "neko_supervisor":
             incident = Incident(
                 id=f"inc_{uuid.uuid4().hex[:12]}",
@@ -479,11 +491,18 @@ class TickEngine:
                 summary="Neko repeated the same recovery/scoping decision without new progress.",
                 detail_path=None,
                 opened_at=now(),
-                metadata={"stage_id": stage_id, "decision_type": decision_type, "no_progress_count": getattr(envelope, "no_progress_count", 0)},
+                metadata={"stage_id": stage_id, "decision_type": decision_type, "no_progress_count": getattr(envelope, "no_progress_count", 0), "cumulative_no_progress": loops[loop_key]},
             )
             self.incident_store.open(incident)
             task.open_incident_ids = _dedupe(list(task.open_incident_ids or []), [incident.id])
-            task.state = TaskState.RUNNING
+            if loops[loop_key] >= hard_cap:
+                # Genuine loop: same stage, same decision, N times over. Block hard —
+                # a re-dispatch will not produce new evidence. Requires operator
+                # unblock or new evidence to resume (see `task unblock`).
+                task.state = TaskState.BLOCKED
+                task.risk_flags = _dedupe(list(task.risk_flags or []), ["no_progress_hard_block"])
+            else:
+                task.state = TaskState.RUNNING
         else:
             task.state = TaskState.RUNNING
             task.risk_flags = _dedupe(list(task.risk_flags or []), ["no_progress_escalated_to_neko"])

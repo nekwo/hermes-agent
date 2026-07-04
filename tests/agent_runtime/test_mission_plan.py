@@ -35,13 +35,12 @@ def make_task(**overrides):
 
 def assert_default_blueprint_plan(plan, task):
     assert plan.blueprint_id == "neko_two_dev_default"
-    # Graph-driven fork-join: scope, two parallel dev branches, neko integrate join.
-    assert [stage.id for stage in plan.stages] == ["scope", "backend_implementation", "implement", "integrate"]
-    # Both dev branches depend only on scope (parallel); integrate joins both.
+    # Graph-driven fork: scope, then two parallel dev branches. No Neko join stage —
+    # the harness waits for both branches (task done only when all stages pass).
+    assert [stage.id for stage in plan.stages] == ["scope", "backend_implementation", "implement"]
     by_id = {stage.id: stage for stage in plan.stages}
     assert by_id["backend_implementation"].depends_on == ["scope"]
     assert by_id["implement"].depends_on == ["scope"]
-    assert sorted(by_id["integrate"].depends_on) == ["backend_implementation", "implement"]
     assert plan.current_stage_id == "scope"
     assert task.current_stage_id == "scope"
     assert plan.bindings["neko_supervisor"] == "neko_supervisor"
