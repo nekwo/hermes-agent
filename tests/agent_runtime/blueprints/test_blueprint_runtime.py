@@ -122,11 +122,12 @@ def test_blueprint_agent_topology_instantiates_to_mission_plan_summary():
     )
 
     summary = mission_plan_summary(task)
+    # Fan-out: neko (lead) coordinates BOTH dev branches directly — no chain.
     assert summary["agent_topology"] == {
         "root": "lead",
         "edges": [
+            {"source": "lead", "target": "backend_builder", "kind": "steers"},
             {"source": "lead", "target": "builder", "kind": "steers"},
-            {"source": "builder", "target": "backend_builder", "kind": "steers"},
         ],
     }
 
@@ -711,11 +712,12 @@ def test_scope_decision_on_gated_dev_stage_yields_no_outcome():
     assert stages["implement"].status != StageStatus.PASSED
 
 
-def test_dependency_blocked_stage_dispatches_dependency_not_dependent():
-    """Live 2026-07-03 (task_3e2ae539): implement depends_on
-    backend_implementation, but a stale/over-advanced current_stage_id made the
-    scheduler offer the Launcher Dev RUN_SLOT before backend ran. Dispatch must
-    enforce depends_on itself, not trust current_stage_id blindly."""
+def test_dependency_blocked_join_dispatches_dependencies_not_the_join():
+    """Graph-driven guard: integrate depends_on [backend_implementation, implement].
+    A stale/over-advanced current_stage_id pointing at the join must NOT dispatch it
+    before its dependencies pass — dispatch enforces depends_on itself, not
+    current_stage_id blindly. (Descendant of the 2026-07-03 task_3e2ae539 fix, now on
+    the fork-join graph where the join, not the launcher, is the dependent node.)"""
     bp = BlueprintStore().get("neko_two_dev_default")
     plan = instantiate_blueprint(
         bp,
@@ -731,25 +733,76 @@ def test_dependency_blocked_stage_dispatches_dependency_not_dependent():
     stages = {stage.id: stage for stage in task.mission_plan.stages}
     stages["scope"].status = StageStatus.PASSED
     stages["backend_implementation"].status = StageStatus.READY
-    stages["implement"].status = StageStatus.IMPLEMENTING
-    task.mission_plan.current_stage_id = "implement"
-    task.current_stage_id = "implement"
+    stages["implement"].status = StageStatus.READY
+    stages["integrate"].status = StageStatus.IMPLEMENTING
+    task.mission_plan.current_stage_id = "integrate"
+    task.current_stage_id = "integrate"
 
     action = MissionStateMachine().next_action(task)
 
+    # Must dispatch a dependency branch (backend or launcher), never the join.
     assert action.type == HarnessActionType.RUN_SLOT
-    assert action.slot_id == "backend_builder"
-    assert "backend_implementation" in action.reason
-    assert task.mission_plan.current_stage_id == "backend_implementation"
-    assert stages["backend_implementation"].status == StageStatus.IMPLEMENTING
-    assert stages["implement"].status != StageStatus.PASSED
+    assert action.slot_id in {"backend_builder", "builder"}
+    assert task.mission_plan.current_stage_id in {"backend_implementation", "implement"}
+    assert stages["integrate"].status != StageStatus.PASSED
 
 
-def test_neko_two_dev_default_linear_chain_runs_lead_backend_then_launcher():
+def test_neko_two_dev_default_fork_join_dispatches_both_devs_then_neko_join():
+    # Graph-driven fork-join: neko scopes, both dev branches fan out in parallel
+    # (both depend only on scope), then neko's integrate join runs once both pass.
     bp = BlueprintStore().get("neko_two_dev_default")
     plan = instantiate_blueprint(
         bp,
-        goal="linear dispatch",
+        goal="fork-join dispatch",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    from agent_runtime.runtime_config import RuntimeConfig, SwarmConfig
+
+    task = _task_with_plan(plan)
+    # Graph-driven concurrent dispatch (the swarm-on path neko uses to deploy both).
+    machine = MissionStateMachine(config=RuntimeConfig(swarm=SwarmConfig(max_active_lanes=2)))
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+
+    # Neko scopes first (only the root is ready).
+    scope_actions = machine.next_actions(task)
+    scope_slots = {a.slot_id for a in scope_actions if a.type == HarnessActionType.RUN_SLOT}
+    assert scope_slots == {"lead"}
+    stages["scope"].status = StageStatus.PASSED
+
+    # Both dev branches fan out together (neither depends on the other).
+    dev_actions = machine.next_actions(task)
+    dev_slots = {a.slot_id for a in dev_actions if a.type == HarnessActionType.RUN_SLOT}
+    assert dev_slots == {"backend_builder", "builder"}
+    # The neko join is NOT offered yet — it waits for both branches.
+    assert "lead" not in dev_slots
+
+    # Both branches pass -> neko's integrate join becomes ready.
+    stages["backend_implementation"].status = StageStatus.PASSED
+    stages["implement"].status = StageStatus.PASSED
+    join_actions = machine.next_actions(task)
+    join_slots = {a.slot_id for a in join_actions if a.type == HarnessActionType.RUN_SLOT}
+    assert join_slots == {"lead"}
+    assert task.mission_plan.current_stage_id == "integrate"
+
+    # Join passes -> task completes.
+    stages["integrate"].status = StageStatus.PASSED
+    final = machine.next_action(task)
+    assert final.type == HarnessActionType.COMPLETE_TASK
+
+
+def test_neko_two_dev_default_fires_both_dev_lanes_concurrently_when_lanes_allow():
+    # With >1 active lane, scope passing releases BOTH dev branches in the same tick —
+    # this is what "neko deploys both sub-agents" looks like on the graph.
+    from agent_runtime.runtime_config import RuntimeConfig, SwarmConfig
+
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="concurrent fork",
         bindings={
             "lead": "persona:neko_supervisor",
             "backend_builder": "persona:backend_dev",
@@ -757,22 +810,10 @@ def test_neko_two_dev_default_linear_chain_runs_lead_backend_then_launcher():
         },
     )
     task = _task_with_plan(plan)
-    machine = MissionStateMachine()
+    machine = MissionStateMachine(config=RuntimeConfig(swarm=SwarmConfig(max_active_lanes=2)))
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+    stages["scope"].status = StageStatus.PASSED
 
-    first = machine.next_action(task)
-    assert first.type == HarnessActionType.RUN_SLOT
-    assert first.slot_id == "lead"
-
-    assert apply_stage_outcome(task, "scope", StageOutcome.READY, reason="scoped") == "backend_implementation"
-    second = machine.next_action(task)
-    assert second.type == HarnessActionType.RUN_SLOT
-    assert second.slot_id == "backend_builder"
-
-    assert apply_stage_outcome(task, "backend_implementation", StageOutcome.PASSED, reason="backend passed") == "implement"
-    third = machine.next_action(task)
-    assert third.type == HarnessActionType.RUN_SLOT
-    assert third.slot_id == "builder"
-
-    assert apply_stage_outcome(task, "implement", StageOutcome.PASSED, reason="launcher passed") == "done"
-    final = machine.next_action(task)
-    assert final.type == HarnessActionType.COMPLETE_TASK
+    ready = machine.next_actions(task)
+    ready_slots = {action.slot_id for action in ready if action.type == HarnessActionType.RUN_SLOT}
+    assert ready_slots == {"backend_builder", "builder"}

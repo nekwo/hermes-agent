@@ -99,72 +99,28 @@ def _alias_default_slots_to_personas(plan: MissionPlan) -> None:
 
 
 def _align_default_plan_to_task_state(task: Task, plan: MissionPlan) -> None:
+    # De-hardwired: dispatch is graph-driven. We no longer pre-pass stages by id
+    # (e.g. auto-passing scope/backend to jump to "implement") or hardcode a target
+    # stage — the dispatcher runs the blueprint root first and releases dependents
+    # as their `depends_on` pass. The only state-derived shortcut kept is the
+    # terminal collapse: an already-integrated/approved task has every stage passed.
     state_value = getattr(getattr(task, "state", None), "value", str(getattr(task, "state", "") or ""))
-    by_id = {stage.id: stage for stage in plan.stages}
-    if state_value in {
-        "pm_ready_for_dev",
-        "dev_audit",
-        "dev_stage_planning",
-        "dev_test_design",
-        "dev_implementing",
-        "qa_needs_fixes",
-        "running",
-    } and "implement" in by_id:
-        if "scope" in by_id:
-            by_id["scope"].status = StageStatus.PASSED
-        _mark_default_noop_dependencies_passed(by_id, by_id["implement"])
-        by_id["implement"].status = StageStatus.IMPLEMENTING
-        plan.current_stage_id = "implement"
-    elif state_value in {"dev_ready_for_qa", "qa_testing"} and "verify" in by_id:
-        if "scope" in by_id:
-            by_id["scope"].status = StageStatus.PASSED
-        if "implement" in by_id:
-            _mark_default_noop_dependencies_passed(by_id, by_id["implement"])
-        if "implement" in by_id:
-            by_id["implement"].status = StageStatus.READY_FOR_QA
-        plan.current_stage_id = "verify"
-    elif state_value in {"qa_approved", "pm_proof_review", "pm_ready_for_integration", "integrating"}:
+    if state_value in {"qa_approved", "pm_proof_review", "pm_ready_for_integration", "integrating"}:
         for stage in plan.stages:
             stage.status = StageStatus.PASSED
         plan.current_stage_id = None
+        return
+    if not plan.current_stage_id and plan.stages:
+        plan.current_stage_id = plan.stages[0].id
 
 
 def _specialize_default_implementation_stage(task: Task, plan: MissionPlan) -> None:
-    repos = {_repo_for_text(str(item)) for item in (getattr(task, "affected_repos", None) or [])}
-    flags = {str(item).strip().lower() for item in (getattr(task, "risk_flags", None) or [])}
-    text = " ".join(
-        [
-            str(getattr(task, "title", "") or ""),
-            str(getattr(task, "description", "") or ""),
-            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", None) or [])),
-            " ".join(flags),
-        ]
-    ).lower()
-    no_product_edit = any(
-        marker in text
-        for marker in (
-            "no-edit",
-            "no edit",
-            "no-product-edit",
-            "no product edit",
-            "no_product_edit",
-            "without product edits",
-            "no product changes",
-        )
-    )
-    if no_product_edit and "EterniaBackend" in repos and "EterniaLauncher" in repos:
-        _specialize_default_no_edit_cross_stack_plan(plan)
-        return
-    implement = next((stage for stage in plan.stages if stage.id == "implement"), None)
-    if implement is None:
-        return
-    if "EterniaBackend" in repos and ("EterniaLauncher" not in repos or "backend_contract_first" in flags):
-        implement.owner = "backend_dev"
-        implement.owner_slot = "backend_dev"
-        implement.repo = "EterniaBackend"
-        plan.slots.setdefault("backend_dev", {"role": "backend_dev", "required": True, "description": "Backend implementation specialist."})
-        plan.bindings.setdefault("backend_dev", "backend_dev")
-        plan.binding_sources.setdefault("backend_dev", "persona:backend_dev")
+    # De-hardwired: no stage-id/goal-text rewriting. The blueprint graph already
+    # carries both a backend node (EterniaBackend) and a launcher node
+    # (EterniaLauncher), each bound to its own agent; a goal that touches only one
+    # side simply lets the other node run and self-report "no change, pass". Owners
+    # and repos come from the graph's slot bindings, not from Python inferring them.
+    return
 
 
 def _mark_default_noop_dependencies_passed(

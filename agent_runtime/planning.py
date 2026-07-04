@@ -1643,7 +1643,12 @@ def _current_stage(task: Task) -> TaskStage | None:
 
 
 def _is_cross_stack_backend_first(task: Task) -> bool:
-    return _has_cross_stack_backend_first_flag(task) or _text_implies_backend_first_cross_stack(task)
+    # De-hardwired: ordering is graph-driven only. Backend-before-launcher (or any
+    # ordering) must come from the blueprint's stage `depends_on`, not from Python
+    # inferring it from flags/text. Neutralized to False so the whole backend-first
+    # choreography (launcher-completion gating, sequential-specialist join) is inert
+    # and dispatch falls entirely to strict depends_on.
+    return False
 
 
 def _has_cross_stack_backend_first_flag(task: Task) -> bool:

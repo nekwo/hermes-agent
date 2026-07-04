@@ -1,12 +1,12 @@
 id: neko_two_dev_default
 version: 1
 title: Neko Two Dev Default
-description: Neko scopes and coordinates; Backend Dev and Launcher Dev handle implementation slices. QA is not part of the default path.
+description: Neko scopes, then fans out to Backend Dev and Launcher Dev as parallel branches and waits for both to return before it joins and closes. QA is not part of the default path.
 slots:
   - id: lead
     role: neko
     required: true
-    description: Mission lead that clarifies scope and routes recovery.
+    description: Mission lead that scopes, deploys both dev branches in parallel, and joins their results.
   - id: backend_builder
     role: backend_dev
     required: true
@@ -18,7 +18,7 @@ slots:
 stages:
   - id: scope
     title: Scope
-    objective: Clarify scope, acceptance criteria, proof expectation, and which Dev specialist owns each slice.
+    objective: Clarify scope, acceptance criteria, proof expectation, and which Dev specialist owns each slice, then release both dev branches.
     owner_slot: lead
     repo: hermes-agent
     kind: scope
@@ -41,12 +41,22 @@ stages:
     owner_slot: builder
     repo: EterniaLauncher
     kind: implementation
-    depends_on: [backend_implementation]
+    depends_on: [scope]
     blocks_qa_until: false
     proof_gate:
       required: true
       minimum_status: passed
       required_proof_types: [test_run]
+  - id: integrate
+    title: Integrate
+    objective: Neko joins the backend and launcher branches once both have returned — confirm each branch passed its proof and the combined result satisfies the goal.
+    owner_slot: lead
+    repo: hermes-agent
+    kind: coordinate
+    depends_on: [backend_implementation, implement]
+    blocks_qa_until: false
+    proof_gate:
+      required: false
 edges:
   - source: scope
     outcome: ready
@@ -56,30 +66,36 @@ edges:
     target: intervention
   - source: backend_implementation
     outcome: passed
-    target: implement
-  - source: backend_implementation
-    outcome: blocked
-    target: scope
+    target: integrate
   - source: backend_implementation
     outcome: needs_fixes
     target: backend_implementation
-  - source: implement
-    outcome: passed
-    target: done
-  - source: implement
+  - source: backend_implementation
     outcome: blocked
     target: scope
   - source: implement
+    outcome: passed
+    target: integrate
+  - source: implement
     outcome: needs_fixes
     target: implement
+  - source: implement
+    outcome: blocked
+    target: scope
+  - source: integrate
+    outcome: passed
+    target: done
+  - source: integrate
+    outcome: blocked
+    target: intervention
 agent_topology:
   root: lead
   edges:
     - source: lead
-      target: builder
-      kind: steers
-    - source: builder
       target: backend_builder
+      kind: steers
+    - source: lead
+      target: builder
       kind: steers
 limits:
   max_attempts_per_stage: 3

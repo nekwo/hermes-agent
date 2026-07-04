@@ -35,7 +35,13 @@ def make_task(**overrides):
 
 def assert_default_blueprint_plan(plan, task):
     assert plan.blueprint_id == "neko_two_dev_default"
-    assert [stage.id for stage in plan.stages] == ["scope", "backend_implementation", "implement"]
+    # Graph-driven fork-join: scope, two parallel dev branches, neko integrate join.
+    assert [stage.id for stage in plan.stages] == ["scope", "backend_implementation", "implement", "integrate"]
+    # Both dev branches depend only on scope (parallel); integrate joins both.
+    by_id = {stage.id: stage for stage in plan.stages}
+    assert by_id["backend_implementation"].depends_on == ["scope"]
+    assert by_id["implement"].depends_on == ["scope"]
+    assert sorted(by_id["integrate"].depends_on) == ["backend_implementation", "implement"]
     assert plan.current_stage_id == "scope"
     assert task.current_stage_id == "scope"
     assert plan.bindings["neko_supervisor"] == "neko_supervisor"
@@ -43,16 +49,19 @@ def assert_default_blueprint_plan(plan, task):
     assert plan.bindings["dev"] == "dev"
 
 
-def test_running_default_plan_marks_noop_backend_dependency_satisfied():
+def test_running_default_plan_dispatches_from_graph_root_without_prepassing():
+    # De-hardwired: a RUNNING default goal is NOT pre-advanced by stage id. Dispatch
+    # starts at the graph root (scope); nothing is auto-passed, and the parallel dev
+    # branches are released by the dispatcher when scope passes.
     task = make_task(state=TaskState.RUNNING)
 
     plan = ensure_default_mission_plan(task)
 
     stages = {stage.id: stage for stage in plan.stages}
-    assert plan.current_stage_id == "implement"
-    assert stages["scope"].status == StageStatus.PASSED
-    assert stages["backend_implementation"].status == StageStatus.PASSED
-    assert stages["implement"].status == StageStatus.IMPLEMENTING
+    assert plan.current_stage_id == "scope"
+    assert stages["scope"].status != StageStatus.PASSED
+    assert stages["backend_implementation"].status != StageStatus.PASSED
+    assert stages["implement"].status != StageStatus.PASSED
 
 
 def test_mission_lead_actor_resolves_blueprint_slot_binding():
@@ -131,9 +140,11 @@ def test_handoff_payload_merges_observed_lane_requirement_into_existing_stage():
     )
 
     backend = next(stage for stage in plan.stages if stage.id == "backend_implementation")
+    # The explicit handoff packet's observed-lane requirement still merges onto the
+    # existing stage (generic packet merge). The proof_recipe_id assertion was dropped
+    # with the de-hardwiring: recipes are no longer injected by goal-text specialization.
     assert backend.proof_gate["observed_lane_required"] is True
     assert "agent_tool_trace" in backend.proof_gate["observed_lane_requirement"]
-    assert backend.proof_gate["proof_recipe_id"] == "backend_contract_smoke"
 
 
 def test_backend_no_product_edit_investigation_uses_default_blueprint_without_implicit_route():
@@ -167,26 +178,11 @@ def test_backend_no_product_edit_investigation_uses_default_blueprint_without_im
     assert not any(stage.id == "backend_investigation" for stage in plan.stages)
 
 
-def test_default_no_edit_cross_stack_plan_uses_harness_owned_proof_recipes():
-    task = make_task(
-        title="H1 H2 no-edit cross-stack proof",
-        description="Run a no-edit cross-stack goal against backend and launcher without product edits.",
-        affected_repos=["EterniaBackend", "EterniaLauncher"],
-        acceptance_criteria=["Backend and Launcher no-product-edit proofs pass."],
-    )
-
-    plan = ensure_default_mission_plan(task)
-    backend = next(stage for stage in plan.stages if stage.id == "backend_implementation")
-    launcher = next(stage for stage in plan.stages if stage.id == "implement")
-
-    assert backend.kind == "proof_only"
-    assert backend.proof_recipe_id == "backend_contract_smoke"
-    assert backend.proof_gate["proof_recipe_id"] == "backend_contract_smoke"
-    assert backend.requires_product_edit is False
-    assert launcher.kind == "proof_only"
-    assert launcher.proof_recipe_id == "launcher_contract_smoke"
-    assert launcher.proof_gate["proof_recipe_id"] == "launcher_contract_smoke"
-    assert launcher.requires_product_edit is False
+# Removed with the de-hardwiring: _specialize_default_no_edit_cross_stack_plan rewrote
+# the backend/launcher stages by id (kind=proof_only, harness-owned recipes) for
+# no-edit cross-stack goals. That stage-id specialization is gone — the graph carries
+# both dev nodes and each assigned agent runs and self-reports; proof recipes are not
+# injected by goal-text inference.
 
 
 def test_backend_product_hardening_nongoal_keeps_blueprint_authority():
