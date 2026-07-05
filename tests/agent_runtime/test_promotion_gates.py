@@ -7,7 +7,7 @@ import pytest
 from agent_runtime.decision_schema import DecisionPayloadInvalid
 from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
 from agent_runtime.planning import _apply_implementation_review
-from agent_runtime.promotion_gates import satisfied_promotion_lanes, validate_product_promotion_gate
+from agent_runtime.promotion_gates import product_promotion_required, satisfied_promotion_lanes, validate_product_promotion_gate
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import StageStatus, TaskState
 from agent_runtime.store import ProofStore, TaskStore
@@ -47,6 +47,41 @@ def make_product_task(task_id="task_promo"):
     return task
 
 
+def make_launcher_scratch_task(task_id="task_launcher_scratch"):
+    ts = now()
+    task = Task(
+        id=task_id,
+        title="Launcher scratch proof",
+        description="Create docs/scratch/e2e_trust_probe.md in EterniaLauncher.",
+        state=TaskState.RUNNING,
+        created_at=ts,
+        updated_at=ts,
+        requested_by="tony",
+        affected_repos=["EterniaLauncher"],
+        proof_ids=[],
+    )
+    task.mission_plan = MissionPlan(
+        enabled=True,
+        mission_intent=MissionIntent(title="Launcher scratch proof", objective=task.description, source_task_id=task_id),
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Launcher Implementation",
+                objective="Create the scratch proof file.",
+                owner="dev",
+                repo="EterniaLauncher",
+                kind="implementation",
+                status=StageStatus.READY_FOR_QA,
+                requires_product_edit=True,
+                affected_paths=["docs/scratch/e2e_trust_probe.md"],
+            )
+        ],
+    )
+    TaskStore().create(task)
+    return task
+
+
 def attach(task, proof_id, command, *, intent="", status="passed", created_at=None):
     proof = Proof(
         id=proof_id,
@@ -63,6 +98,14 @@ def attach(task, proof_id, command, *, intent="", status="passed", created_at=No
     ProofStore().attach(proof)
     task.proof_ids.append(proof.id)
     return proof
+
+
+def test_docs_scratch_launcher_probe_does_not_require_product_promotion(isolate_agent_runtime_root):
+    task = make_launcher_scratch_task()
+    proof = attach(task, "proof_exact_echo", "echo e2e-trust-probe", intent="auto_final_gate_after_delivery")
+
+    assert product_promotion_required(task) is False
+    validate_product_promotion_gate(task, [proof.id], proof_store=ProofStore())
 
 
 def test_product_promotion_gate_rejects_local_only(isolate_agent_runtime_root):
