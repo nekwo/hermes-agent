@@ -28,8 +28,11 @@ from .events import EventLog
 from .final_gate import (
     build_final_gate_decision,
     default_blueprint_placeholder_repo_override,
+    filter_forbidden_gate_commands,
     goal_demands_exact_proof,
     goal_named_gate_commands,
+    packet_forbidden_gate_commands,
+    packet_named_gate_commands,
     stage_repo_for_gate,
 )
 from .models import Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Task
@@ -1148,10 +1151,12 @@ class TickEngine:
                     elif _should_auto_run_final_gate(self.config, decision):
                         source_stage_id = str(before_task.current_stage_id or run.stage_id or "").strip()
                         source_stage = _stage_for_gate(before_task, source_stage_id)
+                        handoff_packet = latest_packet(before_task.id, "handoff_packet", stage_id=source_stage_id) or latest_packet(before_task.id, "handoff_packet")
                         final_gate_decision = _build_authoritative_stage_gate_decision(
                             before_task,
                             source_stage,
                             delivery_packet=latest_packet(before_task.id, "delivery", stage_id=source_stage_id),
+                            handoff_packet=handoff_packet,
                         )
                         if final_gate_decision is not None and final_gate_decision.type == DecisionType.REQUEST_TEST_RUN:
                             normalize_request_test_run_decision(task, final_gate_decision)
@@ -2002,14 +2007,25 @@ def _stage_for_gate(task: Task, stage_id: str | None):
     return next((stage for stage in getattr(task, "stages", []) or [] if str(getattr(stage, "id", "") or "") == wanted), None)
 
 
-def _build_authoritative_stage_gate_decision(task: Task, stage, *, delivery_packet: dict[str, Any] | None = None):
+def _build_authoritative_stage_gate_decision(
+    task: Task,
+    stage,
+    *,
+    delivery_packet: dict[str, Any] | None = None,
+    handoff_packet: dict[str, Any] | None = None,
+):
     if stage is None:
         return None
-    legacy_product_gate = build_final_gate_decision(task, stage, delivery_packet=delivery_packet)
-    if legacy_product_gate is not None and not str(getattr(stage, "proof_recipe_id", "") or "").strip():
+    repo = stage_repo_for_gate(task, stage)
+    packet_commands = packet_named_gate_commands(task, stage, repo, delivery_packet=delivery_packet, handoff_packet=handoff_packet)
+    legacy_product_gate = build_final_gate_decision(task, stage, delivery_packet=delivery_packet, handoff_packet=handoff_packet)
+    if legacy_product_gate is not None and (packet_commands or not str(getattr(stage, "proof_recipe_id", "") or "").strip()):
         return legacy_product_gate
+    if packet_commands:
+        return None
     stage_id = str(getattr(stage, "id", "") or getattr(task, "current_stage_id", "") or "").strip()
-    goal_named = goal_named_gate_commands(task, stage_repo_for_gate(task, stage))
+    forbidden = packet_forbidden_gate_commands(handoff_packet, delivery_packet)
+    goal_named = filter_forbidden_gate_commands(goal_named_gate_commands(task, repo), forbidden)
     if goal_named:
         # A focused proof command literally named by the goal outranks generic
         # proof recipes at the authoritative gate: the Harness re-runs THAT
@@ -2036,7 +2052,7 @@ def _build_authoritative_stage_gate_decision(task: Task, stage, *, delivery_pack
                 "proof_intent": "authoritative_gate_after_hand_off",
             },
         )
-    commands = _stage_gate_commands(stage)
+    commands = filter_forbidden_gate_commands(_stage_gate_commands(stage), forbidden)
     if commands:
         return AgentDecision(
             type=DecisionType.REQUEST_TEST_RUN,
@@ -2048,7 +2064,7 @@ def _build_authoritative_stage_gate_decision(task: Task, stage, *, delivery_pack
                 "proof_intent": "authoritative_gate_after_hand_off",
             },
         )
-    return build_final_gate_decision(task, stage, delivery_packet=delivery_packet)
+    return build_final_gate_decision(task, stage, delivery_packet=delivery_packet, handoff_packet=handoff_packet)
 
 
 def _stage_gate_commands(stage) -> list[str]:

@@ -2203,6 +2203,96 @@ def test_normal_worker_flow_auto_runs_repo_default_final_gate_when_stage_test_pl
     assert stored.proof_ids == ["proof_auto_task_1_backend_implementation"]
 
 
+def test_normal_worker_flow_auto_runs_handoff_exact_final_gate_before_launcher_default():
+    ts = TaskStore()
+    task = make_task()
+    task.title = "E2E trust probe exact-gate"
+    task.description = (
+        "Create docs/scratch/e2e_trust_probe.md in the Launcher repo. "
+        "Exact proof command: echo e2e-trust-probe. Do not run Flutter analyze/tests."
+    )
+    task.state = TaskState.RUNNING
+    task.affected_repos = ["EterniaLauncher"]
+    task.current_stage_id = "implement"
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title="E2E trust probe exact-gate", objective="Patch one Launcher scratch file."),
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Launcher Implementation",
+                objective="Create the requested scratch proof file and deliver with exact proof.",
+                owner="dev",
+                repo="EterniaLauncher",
+                kind="implementation",
+                status=StageStatus.IMPLEMENTING,
+                requires_product_edit=True,
+            )
+        ],
+    )
+    task.stages = [
+        TaskStage(
+            id="implement",
+            title="Launcher Implementation",
+            objective="Create docs/scratch/e2e_trust_probe.md.",
+            status=StageStatus.IMPLEMENTING,
+            affected_paths=["docs/scratch/e2e_trust_probe.md"],
+            acceptance_criteria=["Harness runs only echo e2e-trust-probe as the final command proof."],
+            test_plan=[],
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+        )
+    ]
+    ts.create(task)
+    EventLog().append(
+        Event(
+            ts=now(),
+            type="packet.recorded",
+            task_id=task.id,
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={
+                "packet_id": "packet_handoff_launcher_exact",
+                "packet_type": "handoff_packet",
+                "stage_id": "implement",
+                "body": {
+                    "packet_kind": "fresh_scope",
+                    "mission_phase": "scope_route",
+                    "handoff_mode": "single_specialist",
+                    "target_owner": "dev",
+                    "target_repo": "EterniaLauncher",
+                    "proof_gate": {
+                        "required": True,
+                        "commands": ["echo e2e-trust-probe"],
+                        "forbidden_commands": ["flutter analyze", "flutter test"],
+                        "required_proof_types": ["test_run"],
+                        "minimum_status": "passed",
+                        "visual_required": False,
+                    },
+                },
+            },
+        )
+    )
+    proofs = ProofStore()
+    runtime = NormalFlowPatchRuntime()
+    runner = CapturingAutoGateProofRunner(proofs)
+    cfg = AgentRuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=True))
+    engine = TickEngine(task_store=ts, proof_store=proofs, persona_runtime=runtime, proof_runner=runner, config=cfg)
+
+    res = engine.tick_once(task_id=task.id)
+
+    assert res.actions_taken[0].ok
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["stage_id"] == "implement"
+    assert runner.calls[0]["commands"] == ["echo e2e-trust-probe"]
+    assert all("flutter " not in command for command in runner.calls[0]["commands"])
+    assert runner.calls[0]["proof_intent"] == "auto_final_gate_after_delivery"
+    stored = ts.get(task.id)
+    assert stored.state == TaskState.RUNNING
+    assert stored.stages[0].status == StageStatus.READY_FOR_QA
+    assert stored.proof_ids == ["proof_auto_task_1_implement"]
+
+
 def test_normal_worker_flow_reuses_existing_passed_final_gate_after_handoff_repair():
     ts = TaskStore()
     task = make_task()

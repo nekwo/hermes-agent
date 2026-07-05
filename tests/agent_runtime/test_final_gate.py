@@ -103,6 +103,48 @@ def test_goal_named_exact_proof_outranks_stage_test_plan():
     assert commands == ["echo e2e-trust-probe"]
 
 
+def test_handoff_packet_exact_proof_outranks_stage_test_plan():
+    task = _goal_task(
+        "Write docs/scratch/e2e_trust_probe.md. Exact proof command: echo e2e-trust-probe. Do not run Flutter analyze/tests.",
+        repos=["EterniaLauncher"],
+    )
+    stage = _edit_stage(test_plan=["flutter analyze lib/features/mission_control", "flutter test test/features/mission_control"])
+    handoff_packet = {
+        "body": {
+            "target_repo": "EterniaLauncher",
+            "proof_gate": {
+                "required": True,
+                "commands": ["echo e2e-trust-probe"],
+                "forbidden_commands": ["flutter analyze", "flutter test"],
+            },
+        }
+    }
+
+    commands = final_gate_commands(task, stage, handoff_packet=handoff_packet)
+    assert commands == ["echo e2e-trust-probe"]
+
+
+def test_handoff_packet_forbidden_command_suppresses_repo_default():
+    task = _goal_task(
+        "Patch the Launcher widget; the handoff forbids generic Flutter proof.",
+        repos=["EterniaLauncher"],
+    )
+    stage = _edit_stage(test_plan=[])
+    handoff_packet = {
+        "body": {
+            "target_repo": "EterniaLauncher",
+            "proof_gate": {
+                "required": True,
+                "required_proof_types": ["test_run"],
+                "forbidden_commands": ["flutter analyze"],
+            },
+        }
+    }
+
+    commands = final_gate_commands(task, stage, handoff_packet=handoff_packet)
+    assert commands == []
+
+
 def test_goal_named_command_for_other_repo_is_excluded_from_stage_gate():
     task = _goal_task(
         "Polish the shop. Proof: `python -m pytest tests/agent_runtime/test_liveness.py -q` in hermes-agent.",

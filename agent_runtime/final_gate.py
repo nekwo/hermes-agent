@@ -16,18 +16,29 @@ _DEFAULT_FINAL_GATE_COMMANDS: dict[str, tuple[str, ...]] = {
 _GOAL_COMMAND_PREFIXES = ("python", "pytest", "flutter", "dart", "npm", "pnpm", "echo", ".eterniabackendvirtualenv")
 
 
-def final_gate_required(task: Task, stage: TaskStage | None, delivery_packet: dict[str, Any] | None = None) -> bool:
+def final_gate_required(
+    task: Task,
+    stage: TaskStage | None,
+    delivery_packet: dict[str, Any] | None = None,
+    handoff_packet: dict[str, Any] | None = None,
+) -> bool:
     if stage is None:
         return False
     if not _stage_requires_product_edit(task, stage):
         return False
-    return bool(final_gate_commands(task, stage))
+    return bool(final_gate_commands(task, stage, delivery_packet=delivery_packet, handoff_packet=handoff_packet))
 
 
-def build_final_gate_decision(task: Task, stage: TaskStage | None, *, delivery_packet: dict[str, Any] | None = None) -> AgentDecision | None:
+def build_final_gate_decision(
+    task: Task,
+    stage: TaskStage | None,
+    *,
+    delivery_packet: dict[str, Any] | None = None,
+    handoff_packet: dict[str, Any] | None = None,
+) -> AgentDecision | None:
     if stage is None:
         return None
-    commands = final_gate_commands(task, stage)
+    commands = final_gate_commands(task, stage, delivery_packet=delivery_packet, handoff_packet=handoff_packet)
     if not commands:
         return None
     return AgentDecision(
@@ -42,7 +53,13 @@ def build_final_gate_decision(task: Task, stage: TaskStage | None, *, delivery_p
     )
 
 
-def final_gate_commands(task: Task, stage: TaskStage | None) -> list[str]:
+def final_gate_commands(
+    task: Task,
+    stage: TaskStage | None,
+    *,
+    delivery_packet: dict[str, Any] | None = None,
+    handoff_packet: dict[str, Any] | None = None,
+) -> list[str]:
     if stage is None:
         return []
     if not _stage_requires_product_edit(task, stage):
@@ -50,15 +67,84 @@ def final_gate_commands(task: Task, stage: TaskStage | None) -> list[str]:
     if no_product_edit_recipe_id(stage.id):
         return []
     repo = stage_repo_for_gate(task, stage)
+    forbidden = packet_forbidden_gate_commands(handoff_packet, delivery_packet)
+    packet_named = packet_named_gate_commands(
+        task,
+        stage,
+        repo,
+        delivery_packet=delivery_packet,
+        handoff_packet=handoff_packet,
+    )
+    if packet_named:
+        return filter_forbidden_gate_commands(packet_named, forbidden)[:3]
     goal_named = goal_named_gate_commands(task, repo)
     if goal_named and goal_demands_exact_proof(task):
-        return goal_named
+        return filter_forbidden_gate_commands(goal_named, forbidden)[:3]
     commands = [_clean_command(item) for item in getattr(stage, "test_plan", []) or [] if _looks_like_command(item)]
     if commands:
-        return commands[:3]
+        return filter_forbidden_gate_commands(commands, forbidden)[:3]
     if goal_named:
-        return goal_named
-    return list(_DEFAULT_FINAL_GATE_COMMANDS.get(repo, ()))[:3]
+        return filter_forbidden_gate_commands(goal_named, forbidden)[:3]
+    return filter_forbidden_gate_commands(list(_DEFAULT_FINAL_GATE_COMMANDS.get(repo, ())), forbidden)[:3]
+
+
+def packet_named_gate_commands(
+    task: Task,
+    stage: TaskStage | None,
+    repo: str | None,
+    *,
+    delivery_packet: dict[str, Any] | None = None,
+    handoff_packet: dict[str, Any] | None = None,
+) -> list[str]:
+    """Exact proof commands declared by structured handoff/delivery packets.
+
+    Live Neko handoffs can carry exact proof expectations in
+    ``handoff_packet.proof_gate.commands`` even when the task prose is phrased
+    as "exact proof command: echo ..." rather than a backtick command. Those
+    packet commands are as authoritative as a goal-named exact command.
+    """
+
+    repo = str(repo or "").strip()
+    result: list[str] = []
+    for packet in (handoff_packet, delivery_packet):
+        body = _packet_body(packet)
+        if not body:
+            continue
+        packet_repo = str(body.get("target_repo") or body.get("next_repo") or body.get("final_repo") or "").strip()
+        if packet_repo and repo and packet_repo != repo:
+            continue
+        proof_gate = body.get("proof_gate") if isinstance(body.get("proof_gate"), dict) else {}
+        for command in _packet_command_values(proof_gate):
+            hint = _command_repo_hint(command)
+            if hint is not None and repo and hint != repo:
+                continue
+            if command not in result:
+                result.append(command)
+    return result[:3]
+
+
+def packet_forbidden_gate_commands(*packets: dict[str, Any] | None) -> list[str]:
+    forbidden: list[str] = []
+    for packet in packets:
+        body = _packet_body(packet)
+        if not body:
+            continue
+        proof_gate = body.get("proof_gate") if isinstance(body.get("proof_gate"), dict) else {}
+        raw_values = []
+        if isinstance(proof_gate, dict):
+            raw_values.extend(_string_or_list(proof_gate.get("forbidden_commands")))
+        raw_values.extend(_string_or_list(body.get("forbidden_commands")))
+        for item in raw_values:
+            command = _clean_command(item)
+            if command and command not in forbidden:
+                forbidden.append(command)
+    return forbidden[:12]
+
+
+def filter_forbidden_gate_commands(commands: list[str], forbidden: list[str]) -> list[str]:
+    if not forbidden:
+        return commands
+    return [command for command in commands if not _command_is_forbidden(command, forbidden)]
 
 
 def stage_repo_for_gate(task: Task, stage: TaskStage | None) -> str:
@@ -181,6 +267,47 @@ def goal_demands_exact_proof(task: Task) -> bool:
     return any(marker in text for marker in exact_markers) or any(marker in text for marker in forbid_generic_markers)
 
 
+def _packet_body(packet: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(packet, dict):
+        return {}
+    body = packet.get("body")
+    if isinstance(body, dict):
+        return body
+    return packet
+
+
+def _packet_command_values(proof_gate: Any) -> list[str]:
+    if not isinstance(proof_gate, dict):
+        return []
+    raw: list[Any] = []
+    commands = proof_gate.get("commands")
+    if isinstance(commands, list):
+        raw.extend(commands)
+    for key in ("command", "self_test_command", "focused_self_test"):
+        if proof_gate.get(key):
+            raw.append(proof_gate.get(key))
+    result: list[str] = []
+    for item in raw:
+        command = _clean_command(item)
+        if not command or not _looks_like_command(command):
+            continue
+        if re.search(r"[<>|;&$]", command):
+            continue
+        if re.search(r"(?i)(secret|token|password|credential)", command):
+            continue
+        if command not in result:
+            result.append(command)
+    return result
+
+
+def _string_or_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if value:
+        return [value]
+    return []
+
+
 def _extract_command_candidates(text: str) -> list[str]:
     candidates: list[str] = []
     for match in re.findall(r"`([^`\n]{4,200})`", text):
@@ -202,6 +329,23 @@ def _extract_command_candidates(text: str) -> list[str]:
             continue
         result.append(command)
     return result
+
+
+def _command_is_forbidden(command: str, forbidden: list[str]) -> bool:
+    normalized = _normalize_forbidden_compare(command)
+    if not normalized:
+        return False
+    for item in forbidden:
+        blocked = _normalize_forbidden_compare(item)
+        if not blocked:
+            continue
+        if normalized == blocked or normalized.startswith(f"{blocked} "):
+            return True
+    return False
+
+
+def _normalize_forbidden_compare(command: object) -> str:
+    return " ".join(str(command or "").strip().lower().split())
 
 
 def _command_repo_hint(command: str) -> str | None:

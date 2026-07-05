@@ -566,6 +566,11 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
         raise DecisionPayloadInvalid("handoff_packet proof_gate booleans are invalid")
     if not isinstance(proof_gate.get("required_proof_types"), list) or not proof_gate.get("required_proof_types"):
         raise DecisionPayloadInvalid("handoff_packet.proof_gate.required_proof_types must be non-empty")
+    for key in ("commands", "forbidden_commands", "required_proof_ids"):
+        if key in proof_gate:
+            value = proof_gate.get(key)
+            if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+                raise DecisionPayloadInvalid(f"handoff_packet.proof_gate.{key} must be a list of non-empty strings")
     proof_gate["minimum_status"] = _normalize_proof_status(proof_gate.get("minimum_status"))
     if proof_gate.get("required") is False and str(proof_gate.get("minimum_status")) not in PROOF_STATUSES:
         proof_gate["minimum_status"] = "passed"
@@ -604,6 +609,12 @@ def _normalize_backend_self_test_command(packet: dict[str, Any], proof_gate: dic
         return
     # Neko improvises the key name (live: `focused_self_test`); normalize every
     # known self-test command key so the dev never sees the naked interpreter.
+    commands = proof_gate.get("commands")
+    if isinstance(commands, list):
+        adapted_commands = [adapt_eternia_backend_manage_py_command(str(command).strip()) for command in commands]
+        if adapted_commands != commands:
+            proof_gate["commands"] = adapted_commands
+            _append_operator_note(packet, "proof_gate.commands adapted to backend venv interpreter")
     for key in ("self_test_command", "focused_self_test"):
         command = str(proof_gate.get(key) or "").strip()
         if not command:

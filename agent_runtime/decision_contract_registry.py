@@ -566,7 +566,17 @@ _OBJECT_CONTRACTS: dict[str, ObjectContract] = {
     "handoff_packet.proof_gate": ObjectContract(
         id="handoff_packet.proof_gate",
         required_keys=("required", "minimum_status"),
-        optional_keys=("required_proof_types", "required_proof_ids", "visual_required", "proof_recipe_id", "recipe_id"),
+        optional_keys=(
+            "required_proof_types",
+            "required_proof_ids",
+            "visual_required",
+            "proof_recipe_id",
+            "recipe_id",
+            "commands",
+            "forbidden_commands",
+            "self_test_command",
+            "focused_self_test",
+        ),
         enum_choices={"minimum_status": ("passed", "approved", "blocked")},
         normalization_policy="default_missing_minimum_status",
     ),
