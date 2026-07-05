@@ -742,6 +742,13 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "command": _safe_trace_operator_line(
             payload.get("command_full") or payload.get("command_label"), limit=500
         ),
+        # Per-step reasoning from the thinking callback. "_thinking" is the
+        # legacy placeholder some historical events recorded — never content.
+        "reasoning_summary": (
+            None
+            if payload.get("reasoning_summary") == "_thinking"
+            else _safe_trace_operator_line(payload.get("reasoning_summary"), limit=500)
+        ),
         "target": _safe_trace_operator_line(payload.get("target_label"), limit=300),
         "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
         "output": _safe_trace_operator_block(payload.get("output"), limit=1600),

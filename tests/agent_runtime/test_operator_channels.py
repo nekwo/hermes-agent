@@ -500,6 +500,92 @@ def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
     assert not any(warning["code"] == "trace_empty" for warning in channel["warnings"])
 
 
+def test_goal_conversation_projects_per_step_thinking_between_tool_calls():
+    """The streamed think→act loop: each progress row carrying real reasoning
+    becomes its own Thinking message in timeline order, and a per-step text
+    that repeats the per-run summary is deduped to a single bubble."""
+
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[
+            {
+                "session_id": "20260705_dev_session",
+                "persona_id": "dev",
+                "persona_instance_id": "personainst_dev",
+                "task_id": "task_goal",
+                "entries": [
+                    {
+                        "event": "progress",
+                        "summary": "Agent thinking process updated",
+                        "reasoning_summary": "Reading the probe doc before writing anything.",
+                        "status": "running",
+                        "run_id": "run_a",
+                        "ts": "2026-07-05T05:48:02Z",
+                    },
+                    {
+                        "event": "tool_finished",
+                        "tool_name": "read_file",
+                        "summary": "Finished tool read_file: passed",
+                        "status": "passed",
+                        "run_id": "run_a",
+                        "ts": "2026-07-05T05:48:05Z",
+                    },
+                    {
+                        "event": "progress",
+                        "summary": "Agent thinking process updated",
+                        "reasoning_summary": "File verified; now running the echo proof.",
+                        "status": "running",
+                        "run_id": "run_a",
+                        "ts": "2026-07-05T05:48:08Z",
+                    },
+                    {
+                        # Final step repeats the run-summary reasoning — must
+                        # collapse into a single Thinking bubble.
+                        "event": "progress",
+                        "summary": "Agent thinking process updated",
+                        "reasoning_summary": "Reviewed the Petdex widget tree before patching (run_a).",
+                        "status": "running",
+                        "run_id": "run_a",
+                        "ts": "2026-07-05T05:48:30Z",
+                    },
+                ],
+            }
+        ],
+        tasks=[_goal_task(ts)],
+        run_summaries=[
+            _dev_run_summary("run_a", started="2026-07-05T05:48:00Z", finished="2026-07-05T05:49:00Z")
+        ],
+    )
+
+    conversation = channels[0]["conversation"]
+    thinking = [m for m in conversation["messages"] if m["kind"] == "thinking_summary"]
+    texts = [m["display_text"] for m in thinking]
+    assert "Reading the probe doc before writing anything." in texts
+    assert "File verified; now running the echo proof." in texts
+    assert texts.count("Reviewed the Petdex widget tree before patching (run_a).") == 1
+    for message in thinking:
+        assert message["display_title"] == "Thinking"
+    # Timeline order: first per-step thinking precedes the tool call, the
+    # second follows it.
+    kinds_in_order = [
+        (m["kind"], m.get("display_text", "")) for m in conversation["messages"]
+    ]
+    first_thinking_index = next(
+        i for i, (kind, text) in enumerate(kinds_in_order)
+        if kind == "thinking_summary" and text.startswith("Reading the probe doc")
+    )
+    tool_index = next(
+        i for i, (kind, _) in enumerate(kinds_in_order) if kind == "tool_call"
+    )
+    second_thinking_index = next(
+        i for i, (kind, text) in enumerate(kinds_in_order)
+        if kind == "thinking_summary" and text.startswith("File verified")
+    )
+    assert first_thinking_index < tool_index < second_thinking_index
+
+
 def test_tool_call_messages_carry_operator_detail():
     ts = now()
     channels = operator_channel_summary(

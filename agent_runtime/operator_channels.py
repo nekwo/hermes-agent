@@ -631,8 +631,32 @@ def _conversation_trace_message(
         return None
     if entry.get("tool_name"):
         return None
+    # Per-step reasoning renders as a first-class Thinking message — this is
+    # the streamed think→act loop, one message per thinking callback, distinct
+    # from the per-run summary emitted by _conversation_turn_messages.
+    reasoning = _safe_conversation_text(entry.get("reasoning_summary"), limit=1200)
+    if reasoning:
+        refs: dict[str, Any] = {"source": "persona_chat_trace"}
+        for key in ("task_id", "run_id", "stage_id"):
+            value = safe_assignment_text(entry.get(key), limit=160)
+            if value:
+                refs[key] = value
+        return {
+            "id": f"{channel_id}:thinking:{refs.get('run_id', 'run')}:{index}",
+            "seq": 0,
+            "timestamp": entry.get("ts"),
+            "actor_persona_id": safe_assignment_token(entry.get("persona_id")) or persona_id,
+            "actor_instance_id": persona_instance_id,
+            "role": "agent",
+            "kind": "thinking_summary",
+            "status": safe_assignment_token(entry.get("status")) or "running",
+            "display_title": "Thinking",
+            "display_text": reasoning,
+            "redaction_status": "safe",
+            "refs": refs,
+        }
     summary = _safe_conversation_text(
-        entry.get("summary") or entry.get("reasoning_summary") or entry.get("rationale"),
+        entry.get("summary") or entry.get("rationale"),
         limit=1200,
     )
     if not summary or _TELEMETRY_SUMMARY_RE.search(summary):
@@ -1082,6 +1106,7 @@ def _conversation_message_sort_key(message: dict[str, Any]) -> tuple[int, str, s
 
 def _dedupe_conversation_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen_assignments: set[str] = set()
+    seen_thinking_texts: set[str] = set()
     # A run's reasoning often lands twice: once as the run-summary flow message
     # (thinking_summary/turn) and once as a trace progress row (agent_update).
     # The flow message wins; the duplicate progress row is curated out.
@@ -1108,6 +1133,15 @@ def _dedupe_conversation_messages(messages: list[dict[str, Any]]) -> list[dict[s
             seen_assignments.add(assignment_id)
         if message.get("kind") == "agent_update" and message.get("display_text") in flow_texts:
             continue
+        # Per-step trace thinking and the per-run summary can carry the same
+        # text (the final reasoning step often IS the decision rationale).
+        # Keep the first occurrence in timeline order; drop later repeats.
+        if message.get("kind") == "thinking_summary":
+            text = message.get("display_text")
+            if text and text in seen_thinking_texts:
+                continue
+            if text:
+                seen_thinking_texts.add(text)
         deduped.append(message)
     return deduped
 

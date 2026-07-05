@@ -512,6 +512,51 @@ def test_trace_entry_carries_operator_detail_fields():
     assert read["target"] == "lib/main.dart"
 
 
+def test_trace_entry_carries_reasoning_summary_but_never_the_placeholder():
+    events = EventLog()
+    ts = now()
+    events.append(
+        Event(
+            ts=ts,
+            type="run.progress",
+            task_id="task_detail",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={
+                "step": "reasoning_summary",
+                "status": "running",
+                "summary": "Agent thinking process updated",
+                "reasoning_summary": "Reading docs/scratch/goal_turn_probe.md before the echo proof.",
+            },
+        )
+    )
+    events.append(
+        Event(
+            ts=ts,
+            type="run.progress",
+            task_id="task_detail",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={
+                # Legacy events recorded the callback placeholder as content.
+                "step": "reasoning_summary",
+                "status": "running",
+                "summary": "Agent thinking process updated",
+                "reasoning_summary": "_thinking",
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[_persona_instance("personainst_dev", "dev", "task_detail")],
+        event_log=events,
+    )
+
+    reasoning = [entry.get("reasoning_summary") for entry in rows[0]["entries"]]
+    assert "Reading docs/scratch/goal_turn_probe.md before the echo proof." in reasoning
+    assert "_thinking" not in reasoning
+
+
 def test_incident_flood_does_not_starve_trace_window():
     # Live failure shape (task_bd98d444, 2026-07-05): the task's newest ~640
     # events were incident/budget rows, so a fetch window that counts raw rows
