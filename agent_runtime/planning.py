@@ -857,6 +857,9 @@ def _release_stage_affected_repos(task: Task, stage_repo: str | None) -> list[st
     cannot forget a sibling Launcher/Backend stage while a fork is live.
     """
 
+    pinned_repos = _canonical_affected_repos(_pinned_repo_scope(task))
+    if pinned_repos:
+        return pinned_repos
     plan_repos = _mission_plan_affected_repos(task)
     task_repos = _canonical_affected_repos(getattr(task, "affected_repos", []) or [])
     if len(task_repos) == 1:

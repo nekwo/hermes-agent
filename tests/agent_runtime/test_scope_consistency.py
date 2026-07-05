@@ -15,7 +15,7 @@ from agent_runtime.models import Task
 from agent_runtime.planning import apply_planning_decision
 from agent_runtime.repo_context import canonical_repo_scope_label, explicit_repo_mentions
 from agent_runtime.simplified_contract import _internal_execution_decision
-from agent_runtime.states import TaskState
+from agent_runtime.states import StageStatus, TaskState
 
 
 def make_task(description: str, *, title: str = "T") -> Task:
@@ -152,6 +152,26 @@ def test_operator_pinned_scope_match_passes(isolate_agent_runtime_root):
     t.harness_self_heal["mission_goal_create"] = {"repo_scope_pinned": ["hermes-agent"]}
     apply_planning_decision(t, acceptance({"affected_repos": ["hermes-agent"]}), actor="neko_supervisor")
     assert t.affected_repos == ["hermes-agent"]
+
+
+def test_operator_pinned_scope_wins_over_graph_release_union(isolate_agent_runtime_root):
+    from agent_runtime.models import MissionPlan, MissionPlanStage
+    from agent_runtime.planning import _release_stage_affected_repos
+
+    t = make_task("Launcher-only trust probe.")
+    t.affected_repos = ["hermes-agent", "EterniaBackend", "EterniaLauncher"]
+    t.harness_self_heal["mission_goal_create"] = {"repo_scope_pinned": ["EterniaLauncher"]}
+    t.mission_plan = MissionPlan(
+        enabled=True,
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(id="scope", title="Scope", objective="Scope", owner="neko_supervisor", kind="scope", repo="hermes-agent", status=StageStatus.PASSED),
+            MissionPlanStage(id="backend_implementation", title="Backend", objective="Backend", owner="backend_dev", kind="implementation", repo="EterniaBackend", status=StageStatus.PASSED),
+            MissionPlanStage(id="implement", title="Launcher", objective="Launcher", owner="dev", kind="implementation", repo="EterniaLauncher", status=StageStatus.READY),
+        ],
+    )
+
+    assert _release_stage_affected_repos(t, "EterniaLauncher") == ["EterniaLauncher"]
 
 
 def test_scope_route_projection_carries_override_reason():
