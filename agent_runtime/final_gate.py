@@ -313,10 +313,14 @@ def _extract_command_candidates(text: str) -> list[str]:
     for match in re.findall(r"`([^`\n]{4,200})`", text):
         candidates.append(match)
     for line in text.splitlines():
-        candidates.append(line.strip().lstrip("-*").strip())
+        stripped = line.strip().lstrip("-*").strip()
+        candidates.append(stripped)
+        exact_tail = _exact_command_tail(stripped)
+        if exact_tail:
+            candidates.append(exact_tail)
     result: list[str] = []
     for candidate in candidates:
-        command = " ".join(str(candidate or "").split())
+        command = _clean_goal_command_candidate(candidate)
         if not command or len(command) > 200:
             continue
         if not command.lower().startswith(_GOAL_COMMAND_PREFIXES):
@@ -329,6 +333,35 @@ def _extract_command_candidates(text: str) -> list[str]:
             continue
         result.append(command)
     return result
+
+
+def _exact_command_tail(line: str) -> str:
+    text = str(line or "").strip()
+    if not text:
+        return ""
+    match = re.search(
+        r"(?i)(?:"
+        r"exact\s+(?:focused\s+)?proof(?:\s+command)?"
+        r"|exact\s+command\s+proof"
+        r"|command\s+proof\s+must\s+run\s+exactly"
+        r"|must\s+run\s+exactly"
+        r"|run\s+exactly"
+        r"|demanded\s+exactly"
+        r")\s*(?:[:=-]\s*|\s+)(.+)$",
+        text,
+    )
+    if not match:
+        return ""
+    return match.group(1)
+
+
+def _clean_goal_command_candidate(value: object) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return ""
+    text = re.split(r"(?i)\s+(?:do\s+not|don't|without|forbid|forbidden)\b", text, maxsplit=1)[0]
+    text = re.split(r"(?i)\s+no\s+flutter\b", text, maxsplit=1)[0]
+    return text.rstrip(".,;")
 
 
 def _command_is_forbidden(command: str, forbidden: list[str]) -> bool:

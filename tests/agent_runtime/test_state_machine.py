@@ -4,6 +4,7 @@ from hermes_time import now
 
 from agent_runtime.actions import HarnessActionType
 from agent_runtime.decision_schema import AgentDecision, DecisionType
+from agent_runtime.default_plan import ensure_default_mission_plan
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event
 from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Task, TaskStage
@@ -131,6 +132,23 @@ def test_open_incident_routes_neko_even_when_task_not_blocked():
 
     assert action.type == HarnessActionType.RUN_SLOT
     assert "open incidents" in action.reason
+
+
+def test_launcher_only_default_plan_dispatches_launcher_not_backend_after_scope():
+    mission = make_mission(TaskState.RUNNING)
+    mission.title = "Launcher-only trust probe"
+    mission.description = "Write the Launcher-side proof note only."
+    mission.affected_repos = ["EterniaLauncher"]
+    plan = ensure_default_mission_plan(mission)
+    stages = {stage.id: stage for stage in plan.stages}
+    stages["scope"].status = StageStatus.PASSED
+    mission.current_stage_id = None
+    plan.current_stage_id = None
+
+    actions = MissionStateMachine(config=typed_config()).next_actions(mission)
+
+    run_slots = [(action.slot_id, action.stage_id) for action in actions if action.type == HarnessActionType.RUN_SLOT]
+    assert run_slots == [("dev", "implement")]
 
 
 def test_running_open_incident_adjudication_is_one_pass_per_signal(isolate_agent_runtime_root):

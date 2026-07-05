@@ -72,6 +72,7 @@ def specialize_default_plan_for_task(task: Task, plan: MissionPlan) -> None:
     _specialize_default_implementation_stage(task, plan)
     if _default_task_is_no_edit_cross_stack(task):
         _specialize_default_no_edit_cross_stack_plan(plan)
+    _ensure_default_qa_stage_when_required(task, plan)
     _ensure_default_retry_edges(plan)
 
 
@@ -117,12 +118,155 @@ def _align_default_plan_to_task_state(task: Task, plan: MissionPlan) -> None:
 
 
 def _specialize_default_implementation_stage(task: Task, plan: MissionPlan) -> None:
-    # De-hardwired: no stage-id/goal-text rewriting. The blueprint graph already
-    # carries both a backend node (EterniaBackend) and a launcher node
-    # (EterniaLauncher), each bound to its own agent; a goal that touches only one
-    # side simply lets the other node run and self-report "no change, pass". Owners
-    # and repos come from the graph's slot bindings, not from Python inferring them.
-    return
+    if plan.blueprint_id != DEFAULT_TASK_BLUEPRINT_ID:
+        return
+    repo = _single_product_repo_scope(task)
+    if repo is None:
+        return
+    if repo == "EterniaLauncher":
+        stage = next((item for item in plan.stages if item.id == "backend_implementation"), None)
+        if stage is not None:
+            _mark_default_stage_out_of_scope(stage, "Task affected_repos is EterniaLauncher only; Backend Dev is out of scope.")
+    elif repo == "EterniaBackend":
+        stage = next((item for item in plan.stages if item.id == "implement"), None)
+        if stage is not None:
+            _mark_default_stage_out_of_scope(stage, "Task affected_repos is EterniaBackend only; Launcher Dev is out of scope.")
+
+
+def _single_product_repo_scope(task: Task) -> str | None:
+    repos = {_canonical_product_repo(str(item)) for item in (getattr(task, "affected_repos", []) or []) if str(item or "").strip()}
+    repos.discard(None)
+    if len(repos) != 1:
+        return None
+    repo = next(iter(repos))
+    return repo if repo in {"EterniaBackend", "EterniaLauncher"} else None
+
+
+def _canonical_product_repo(value: str) -> str | None:
+    lowered = str(value or "").strip().lower()
+    if "backend" in lowered:
+        return "EterniaBackend"
+    if "launcher" in lowered or "frontend" in lowered:
+        return "EterniaLauncher"
+    if "hermes" in lowered:
+        return "hermes-agent"
+    return None
+
+
+def _mark_default_stage_out_of_scope(stage: MissionPlanStage, reason: str) -> None:
+    stage.status = StageStatus.PASSED
+    stage.kind = "proof_only"
+    stage.requires_product_edit = False
+    stage.requires_visual_proof = False
+    stage.blocks_qa_until = False
+    stage.proof_gate = {"required": False}
+    stage.proof_recipe_id = None
+    stage.test_plan = []
+    stage.affected_paths = []
+    if reason not in stage.audit_notes:
+        stage.audit_notes.append(reason)
+
+
+def _ensure_default_qa_stage_when_required(task: Task, plan: MissionPlan) -> None:
+    if plan.blueprint_id != DEFAULT_TASK_BLUEPRINT_ID:
+        return
+    if any(stage.owner == "qa" or stage.kind == "qa_verdict" for stage in plan.stages):
+        return
+    if not _default_task_requires_qa(task):
+        return
+    dependencies = [
+        stage.id
+        for stage in plan.stages
+        if stage.owner in {"dev", "backend_dev"} and stage.kind in {"implementation", "proof_only"}
+    ]
+    if not dependencies:
+        return
+    for stage in plan.stages:
+        if stage.id in dependencies and stage.status != StageStatus.PASSED:
+            stage.blocks_qa_until = True
+    plan.slots.setdefault("qa", {"role": "qa", "required": True, "description": "QA verifier for explicitly requested final approval."})
+    plan.bindings.setdefault("qa", "qa")
+    plan.binding_sources.setdefault("qa", "persona:qa")
+    plan.stages.append(
+        MissionPlanStage(
+            id="qa_release",
+            title="QA Release",
+            objective="Verify the completed implementation stages and attached proof.",
+            owner="qa",
+            owner_slot="qa",
+            repo=_qa_repo_for_default_plan(task, plan),
+            kind="qa_verdict",
+            status=StageStatus.READY,
+            depends_on=dependencies,
+            blocks_qa_until=False,
+            proof_gate={
+                "required": True,
+                "minimum_status": "approved",
+                "required_proof_types": ["qa_verdict"],
+            },
+            created_at=now(),
+            updated_at=now(),
+        )
+    )
+    for edge in plan.edges:
+        if str(edge.get("source") or "") in dependencies and str(edge.get("outcome") or "") in {"ready", "passed"}:
+            edge["target"] = "qa_release"
+    plan.edges.extend(
+        [
+            {"source": "qa_release", "outcome": "passed", "target": "done"},
+            {"source": "qa_release", "outcome": "failed", "target": "scope"},
+            {"source": "qa_release", "outcome": "needs_fixes", "target": _default_qa_rework_target(plan, dependencies)},
+            {"source": "qa_release", "outcome": "blocked", "target": "intervention"},
+        ]
+    )
+    plan.limits["strict_depends_on_dispatch"] = int(plan.limits.get("strict_depends_on_dispatch", 1) or 1)
+
+
+def _default_task_requires_qa(task: Task) -> bool:
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "non_goals", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "risk_flags", []) or [])),
+        ]
+    ).lower()
+    if any(marker in text for marker in ("no qa", "without qa", "default_no_qa")):
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "qa must approve",
+            "qa approval required",
+            "final qa approval",
+            "qa verdict required",
+            "requires qa approval",
+            "require qa approval",
+            "qa must verify",
+        )
+    )
+
+
+def _qa_repo_for_default_plan(task: Task, plan: MissionPlan) -> str:
+    scoped = _single_product_repo_scope(task)
+    if scoped:
+        return scoped
+    for stage in reversed(plan.stages):
+        if stage.owner in {"dev", "backend_dev"} and stage.status != StageStatus.PASSED and stage.repo in {"EterniaBackend", "EterniaLauncher"}:
+            return stage.repo
+    for stage in reversed(plan.stages):
+        if stage.owner in {"dev", "backend_dev"} and stage.repo in {"EterniaBackend", "EterniaLauncher"}:
+            return stage.repo
+    return "hermes-agent"
+
+
+def _default_qa_rework_target(plan: MissionPlan, dependencies: list[str]) -> str:
+    for stage_id in reversed(dependencies):
+        stage = next((item for item in plan.stages if item.id == stage_id), None)
+        if stage is not None and stage.status != StageStatus.PASSED:
+            return stage.id
+    return dependencies[-1] if dependencies else "scope"
 
 
 def _default_task_is_no_edit_cross_stack(task: Task) -> bool:

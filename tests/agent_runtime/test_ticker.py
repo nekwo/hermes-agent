@@ -702,6 +702,37 @@ def test_assignment_spec_exact_goal_proof_targets_outrank_stage_plan():
     assert spec.proof_targets == ["echo e2e-trust-probe"]
 
 
+def test_assignment_spec_exact_prose_goal_proof_targets_outrank_stage_plan():
+    from agent_runtime.ticker import _assignment_spec_for_action
+
+    task = make_task_with_id("task_exact_prose_proof_assignment")
+    task.state = TaskState.RUNNING
+    task.description = (
+        "Write docs/scratch/e2e_trust_probe.md. "
+        "The final Harness-owned command proof must run exactly: echo e2e-trust-probe. "
+        "Do not run Flutter analyze/tests."
+    )
+    task.affected_repos = ["EterniaLauncher"]
+    task.current_stage_id = "implement"
+    task.stages = [
+        TaskStage(
+            id="implement",
+            title="Launcher Implementation",
+            objective="Patch launcher docs.",
+            status=StageStatus.IMPLEMENTING,
+            test_plan=["flutter analyze lib/features/mission_control", "flutter test test/features/mission_control"],
+        )
+    ]
+
+    spec = _assignment_spec_for_action(
+        HarnessAction(HarnessActionType.RUN_SLOT, task.id, slot_id="dev"),
+        task,
+        persona_id="dev",
+    )
+
+    assert spec.proof_targets == ["echo e2e-trust-probe"]
+
+
 def attach_blueprint(task: Task, blueprint_id: str, bindings: dict[str, str]) -> Task:
     bp = BlueprintStore().get(blueprint_id)
     task.mission_plan = instantiate_blueprint(bp, goal=task.description or task.title, bindings=bindings)

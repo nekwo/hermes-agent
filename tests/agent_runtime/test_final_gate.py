@@ -103,6 +103,20 @@ def test_goal_named_exact_proof_outranks_stage_test_plan():
     assert commands == ["echo e2e-trust-probe"]
 
 
+def test_goal_named_exact_proof_parses_prose_without_backticks():
+    from agent_runtime.final_gate import goal_named_proof_commands
+
+    task = _goal_task(
+        "Write docs/scratch/e2e_trust_probe.md. The final Harness-owned command proof must run exactly: echo e2e-trust-probe. Do not run Flutter analyze/tests.",
+        repos=["EterniaLauncher"],
+    )
+    stage = _edit_stage(test_plan=["flutter analyze lib/features/mission_control", "flutter test test/features/mission_control"])
+
+    assert goal_named_proof_commands(task) == ["echo e2e-trust-probe"]
+    commands = final_gate_commands(task, stage)
+    assert commands == ["echo e2e-trust-probe"]
+
+
 def test_handoff_packet_exact_proof_outranks_stage_test_plan():
     task = _goal_task(
         "Write docs/scratch/e2e_trust_probe.md. Exact proof command: echo e2e-trust-probe. Do not run Flutter analyze/tests.",

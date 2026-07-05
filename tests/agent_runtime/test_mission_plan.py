@@ -63,6 +63,48 @@ def test_running_default_plan_dispatches_from_graph_root_without_prepassing():
     assert stages["implement"].status != StageStatus.PASSED
 
 
+def test_default_plan_skips_backend_branch_for_launcher_only_scope():
+    task = make_task(
+        title="Launcher-only trust probe",
+        description="Write the Launcher-side proof note only.",
+        affected_repos=["EterniaLauncher"],
+    )
+
+    plan = ensure_default_mission_plan(task)
+
+    stages = {stage.id: stage for stage in plan.stages}
+    assert stages["backend_implementation"].status == StageStatus.PASSED
+    assert stages["backend_implementation"].requires_product_edit is False
+    assert stages["backend_implementation"].proof_gate == {"required": False}
+    assert "out of scope" in " ".join(stages["backend_implementation"].audit_notes)
+    assert stages["implement"].status != StageStatus.PASSED
+
+
+def test_default_plan_adds_qa_stage_when_goal_requires_qa_approval():
+    task = make_task(
+        title="Launcher trust probe with QA",
+        description="Write the Launcher-side proof note only. QA must approve the final evidence.",
+        acceptance_criteria=["QA must approve the exact command proof before closeout."],
+        affected_repos=["EterniaLauncher"],
+    )
+
+    plan = ensure_default_mission_plan(task)
+
+    stages = {stage.id: stage for stage in plan.stages}
+    assert [stage.id for stage in plan.stages] == ["scope", "backend_implementation", "implement", "qa_release"]
+    assert stages["backend_implementation"].status == StageStatus.PASSED
+    assert stages["implement"].blocks_qa_until is True
+    assert stages["qa_release"].owner == "qa"
+    assert stages["qa_release"].repo == "EterniaLauncher"
+    assert stages["qa_release"].depends_on == ["backend_implementation", "implement"]
+    assert stages["qa_release"].proof_gate == {
+        "required": True,
+        "minimum_status": "approved",
+        "required_proof_types": ["qa_verdict"],
+    }
+    assert plan.bindings["qa"] == "qa"
+
+
 def test_mission_lead_actor_resolves_blueprint_slot_binding():
     task = make_task()
     task.mission_plan = MissionPlan(
@@ -326,6 +368,44 @@ def test_mission_control_launcher_plan_projects_focused_worker_hud_defaults():
         "flutter analyze lib/features/mission_control test/features/mission_control",
         "flutter test test/features/mission_control",
     ]
+
+
+def test_exact_proof_goal_projects_exact_stage_defaults_not_mission_control_flutter():
+    task = make_task(
+        title="Mission Control Harness exact proof trust probe",
+        description=(
+            "Write docs/scratch/e2e_trust_probe.md. "
+            "The final Harness-owned command proof must run exactly: echo e2e-trust-probe."
+        ),
+        acceptance_criteria=["Preserve Mission Control/Harness snapshots and archive evidence."],
+        non_goals=["Do not run Flutter analyze/tests."],
+        affected_repos=["EterniaLauncher"],
+    )
+
+    ensure_mission_plan(
+        task,
+        {
+            "mission_plan": {
+                "current_stage_id": "launcher_implementation",
+                "stages": [
+                    {
+                        "id": "launcher_implementation",
+                        "title": "Launcher Implementation",
+                        "objective": "Implement the narrow Mission Control trust probe file.",
+                        "owner": "dev",
+                        "repo": "EterniaLauncher",
+                        "kind": "implementation",
+                        "requires_product_edit": True,
+                    }
+                ],
+            }
+        },
+        actor="neko_supervisor",
+    )
+
+    stage = task.stages[0]
+    assert stage.affected_paths == ["docs/scratch/e2e_trust_probe.md"]
+    assert stage.test_plan == ["echo e2e-trust-probe"]
 
 
 def test_launcher_post_media_plan_projects_focused_worker_hud_defaults():

@@ -7,6 +7,7 @@ from typing import Any, Iterable
 from hermes_time import now
 
 from .decision_schema import DecisionPayloadInvalid, DecisionType
+from .final_gate import goal_demands_exact_proof, goal_named_gate_commands
 from .models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
 from .proof_recipes import resolve_proof_recipe
 from .proof_rules import ProofType
@@ -761,6 +762,9 @@ def _default_launcher_and_qa_stages(task: Task, intent: MissionIntent, *, depend
 
 
 def _legacy_stage_defaults(task: Task, typed: MissionPlanStage, plan: MissionPlan) -> dict[str, list[str]]:
+    exact = _exact_goal_proof_stage_defaults(task, typed)
+    if exact is not None:
+        return exact
     if _is_hermes_agent_no_edit_proof_stage(task, typed, plan):
         return _hermes_agent_no_edit_proof_defaults(task, typed, plan)
     if _is_hermes_agent_implementation(task, typed, plan):
@@ -779,6 +783,63 @@ def _legacy_stage_defaults(task: Task, typed: MissionPlanStage, plan: MissionPla
             "flutter test test/features/mission_control",
         ],
     }
+
+
+def _exact_goal_proof_stage_defaults(task: Task, typed: MissionPlanStage) -> dict[str, list[str]] | None:
+    if typed.owner not in {"dev", "backend_dev"} or typed.kind not in {"implementation", "proof_only"}:
+        return None
+    if not goal_demands_exact_proof(task):
+        return None
+    if not _exact_goal_proof_applies_to_repo(task, typed.repo):
+        return None
+    commands = goal_named_gate_commands(task, typed.repo)
+    if not commands:
+        return None
+    return {
+        "affected_paths": _extract_goal_repo_relative_paths(task),
+        "test_plan": commands,
+    }
+
+
+def _exact_goal_proof_applies_to_repo(task: Task, repo: str) -> bool:
+    stage_repo = _canonical_repo(repo)
+    if stage_repo not in {"EterniaLauncher", "EterniaBackend", "hermes-agent"}:
+        return False
+    repos = [
+        _canonical_repo(str(item))
+        for item in (getattr(task, "affected_repos", []) or [])
+        if str(item or "").strip()
+    ]
+    repos = [item for item in repos if item != "none"]
+    if repos and stage_repo not in repos:
+        return False
+    if len(set(repos)) > 1:
+        return False
+    return True
+
+
+def _extract_goal_repo_relative_paths(task: Task) -> list[str]:
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "non_goals", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "operator_notes", []) or [])),
+        ]
+    )
+    found: list[str] = []
+    for match in re.findall(r"(?<![\w:/\\.-])(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+", text):
+        path = match.replace("\\", "/").rstrip(".,;:)]}")
+        first = path.split("/", 1)[0].lower()
+        if first in {"http", "https", "python", "pytest", "flutter", "dart", "npm", "pnpm"}:
+            continue
+        leaf = path.rsplit("/", 1)[-1]
+        if "." not in leaf and first not in {"agent_runtime", "assets", "docs", "integration_test", "lib", "scripts", "src", "test", "tests"}:
+            continue
+        if path and path not in found:
+            found.append(path)
+    return found[:8]
 
 
 def _is_mission_control_launcher_implementation(task: Task, typed: MissionPlanStage, plan: MissionPlan) -> bool:
