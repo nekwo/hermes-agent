@@ -930,11 +930,10 @@ def _pinned_repo_scope(task: Task) -> list[str]:
 def _validate_affected_repo_scope(task: Task, decision: AgentDecision, *, actor: str, log: EventLog, run_id: str | None) -> None:
     """Reject affected_repos that silently contradict the goal's named repo scope.
 
-    A goal that literally names a repo (in its title/description, or via an
-    operator-pinned repo scope at create time) must not be scoped to a
-    different repo without a recorded justification. A mismatch raises
-    ``DecisionPayloadInvalid`` so the ticker's repair-feedback lane sends the
-    contradiction back to Neko instead of silently accepting it.
+    A goal that literally names a repo in its title/description must not be
+    scoped to a different repo without a recorded justification. An
+    operator-pinned repo scope from task creation is stricter: it is an
+    explicit runtime boundary and cannot be overridden by a Neko packet.
     """
 
     from .persona_assignments import safe_assignment_text
@@ -958,7 +957,11 @@ def _validate_affected_repo_scope(task: Task, decision: AgentDecision, *, actor:
     mentions = list(explicit_repo_mentions(f"{task.title or ''} {task.description or ''}"))
     conflicts: list[str] = []
     if pinned and set(canonical) != set(pinned):
-        conflicts.append(f"operator pinned repo scope {pinned}")
+        raise DecisionPayloadInvalid(
+            f"affected_repos/target_repo {canonical} contradicts the operator pinned repo scope "
+            f"{pinned}. Operator-pinned scope cannot be overridden by Neko; create a new goal "
+            "or use an operator rescope before widening the runtime boundary."
+        )
     if mentions and not (set(canonical) & set(mentions)):
         conflicts.append(f"goal title/description literally names {mentions}")
     if not conflicts:

@@ -128,6 +128,25 @@ def test_operator_pinned_scope_expansion_is_rejected(isolate_agent_runtime_root)
     assert "pinned" in str(exc.value)
 
 
+def test_operator_pinned_scope_expansion_with_override_is_rejected(isolate_agent_runtime_root):
+    t = make_task("generic description without repo names")
+    t.harness_self_heal["mission_goal_create"] = {"repo_scope_pinned": ["EterniaLauncher"]}
+    with pytest.raises(DecisionPayloadInvalid) as exc:
+        apply_planning_decision(
+            t,
+            acceptance(
+                {
+                    "affected_repos": ["hermes-agent", "EterniaBackend", "EterniaLauncher"],
+                    "scope_override_reason": "Neko thinks this should be cross-stack",
+                }
+            ),
+            actor="neko_supervisor",
+        )
+    message = str(exc.value)
+    assert "pinned" in message
+    assert "cannot be overridden" in message
+
+
 def test_operator_pinned_scope_match_passes(isolate_agent_runtime_root):
     t = make_task("generic description without repo names")
     t.harness_self_heal["mission_goal_create"] = {"repo_scope_pinned": ["hermes-agent"]}
