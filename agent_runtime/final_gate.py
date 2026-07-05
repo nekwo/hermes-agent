@@ -91,7 +91,21 @@ def default_blueprint_placeholder_repo_override(task: Task, stage_repo: str | No
         return None
     task_repos = [str(item).strip() for item in (getattr(task, "affected_repos", []) or []) if str(item).strip()]
     if len(task_repos) == 1 and task_repos[0] != stage_repo:
-        return task_repos[0]
+        task_repo = task_repos[0]
+        if task_repo == "hermes-agent":
+            return task_repo
+        plan_repos = {
+            str(getattr(stage, "repo", "") or "").strip()
+            for stage in (getattr(plan, "stages", None) or [])
+            if str(getattr(stage, "repo", "") or "").strip()
+        }
+        task_and_stage_are_product_repos = (
+            task_repo in {"EterniaBackend", "EterniaLauncher"}
+            and stage_repo in {"EterniaBackend", "EterniaLauncher"}
+        )
+        if task_and_stage_are_product_repos and {task_repo, stage_repo}.issubset(plan_repos):
+            return None
+        return task_repo
     return None
 
 

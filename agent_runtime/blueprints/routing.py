@@ -134,6 +134,24 @@ def apply_stage_outcome(task: Task, stage_id: str, outcome: StageOutcome, *, rea
         return _route_intervention(task, plan, stage, reason=f"{reason}; blueprint retry limit exceeded")
     if target == "done":
         stage.status = StageStatus.PASSED
+        unfinished = _first_unfinished_stage(plan, after_stage_id=stage.id)
+        if unfinished is not None:
+            plan.current_stage_id = unfinished.id
+            task.current_stage_id = unfinished.id
+            if unfinished.owner == "qa":
+                task.state = TaskState.RUNNING
+            elif unfinished.owner in {"dev", "backend_dev"}:
+                task.state = TaskState.RUNNING
+            if unfinished.status in {StageStatus.PASSED, StageStatus.READY_FOR_QA, StageStatus.BLOCKED, StageStatus.REWORK}:
+                unfinished.status = StageStatus.READY
+            elif unfinished.status == StageStatus.DRAFT:
+                unfinished.status = StageStatus.READY
+            if unfinished.owner in {"dev", "backend_dev"} and unfinished.status == StageStatus.READY:
+                unfinished.status = StageStatus.IMPLEMENTING
+            unfinished.updated_at = now()
+            plan.revision = int(plan.revision or 0) + 1
+            task.updated_at = now()
+            return unfinished.id
         plan.current_stage_id = None
         task.current_stage_id = None
         if stage.owner == "qa":
@@ -167,6 +185,18 @@ def apply_stage_outcome(task: Task, stage_id: str, outcome: StageOutcome, *, rea
     plan.revision = int(plan.revision or 0) + 1
     task.updated_at = now()
     return next_stage.id
+
+
+def _first_unfinished_stage(plan: MissionPlan, *, after_stage_id: str | None = None) -> MissionPlanStage | None:
+    stages = list(getattr(plan, "stages", None) or [])
+    if after_stage_id:
+        index = next((idx for idx, candidate in enumerate(stages) if candidate.id == after_stage_id), -1)
+        if index >= 0:
+            stages = stages[index + 1 :] + stages[:index]
+    for candidate in stages:
+        if candidate.status != StageStatus.PASSED:
+            return candidate
+    return None
 
 
 def apply_decision_outcome(

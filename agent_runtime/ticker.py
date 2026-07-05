@@ -31,8 +31,8 @@ from .final_gate import (
     goal_named_gate_commands,
     stage_repo_for_gate,
 )
-from .models import Event, Incident, Task
-from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage
+from .models import Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Task
+from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage, _sync_task_stage_compat_from_plan
 from .persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
@@ -998,6 +998,10 @@ class TickEngine:
                             run=self.run_store.get(run.id),
                             proof_store=self.proof_store,
                         )
+                        if _backend_first_burn_in_orchestration_plan(task, decision, persona_id=persona.id):
+                            raise DecisionPayloadInvalid(
+                                "Dev stage plan loop guard failed: the plan contained only Neko/Launcher/QA orchestration stages; Dev must provide an executable proof stage or request_test_run."
+                            )
                         normal_flow_enabled = bool(getattr(getattr(self.config, "normal_worker_flow", None), "enabled", False)) or simplified_contract_enabled(self.config)
                         self.state_machine.apply_decision(
                             task,
@@ -1021,6 +1025,8 @@ class TickEngine:
                             task_store=self.task_store,
                         )
                         _record_failed_proof_block_after_reuse(task, decision, actor=persona.id, run_id=run.id)
+                        if decision.type == DecisionType.REQUEST_TEST_RUN:
+                            _ensure_legacy_command_proof_plan(task, decision, before_task=before_task)
                         _record_timing_span(self.run_store, run.id, "decision_apply", decision_apply_started)
                     except DecisionPayloadInvalid as exc:
                         _record_timing_span(self.run_store, run.id, "decision_apply", decision_apply_started, status="invalid")
@@ -1478,6 +1484,45 @@ class TickEngine:
                     actor="harness",
                     reason="incremental command proof recovery during runtime error",
                 )
+                if _is_dev_stage_plan_loop_guard(exc):
+                    current_task.state = TaskState.RUNNING
+                    current_task.updated_at = now()
+                    self.task_store.update(current_task, actor="harness", reason="dev orchestration-only stage plan ignored")
+                    run = _refresh_run_for_update(self.run_store, run)
+                    progress = {
+                        "type": "run.progress",
+                        "source": "dev_stage_plan_loop_guard",
+                        "phase": "planning",
+                        "step": "orchestration_only_plan_ignored",
+                        "status": "ignored",
+                        "summary": _safe_repair_error(str(exc)) or "Dev returned an orchestration-only stage plan; keeping the bounded owner lane active.",
+                        "next_expected": "dev_executable_proof_or_bounded_retry",
+                    }
+                    run.progress = {**(run.progress or {}), **progress}
+                    run.llm = {
+                        **(run.llm or {}),
+                        "validation_status": "guarded_no_progress",
+                        "decision_type": getattr(getattr(decision, "type", None), "value", None) or str(getattr(decision, "type", "")),
+                    }
+                    self.run_store.update(run)
+                    EventLog().append(Event(now(), "run.progress", task.id, run.id, persona.id, progress))
+                    self.run_store.close_run(
+                        run.id,
+                        state=RunState.COMPLETED,
+                        final_decision={
+                            "type": getattr(getattr(decision, "type", None), "value", None) or "propose_stage_plan",
+                            "summary": progress["summary"],
+                        },
+                    )
+                    _close_role_session(envelope, run=self.run_store.get(run.id), close_reason="dev_stage_plan_loop_guard", next_action_after="run_slot")
+                    if worker_store is not None and worker is not None:
+                        worker_store.update_after_run(worker.id, self.run_store.get(run.id), close_reason="dev_stage_plan_loop_guard", count_decision=False)
+                    if assignment is not None:
+                        self.persona_assignment_store.complete(assignment.id, state="completed")
+                    payload = {"run_id": run.id, "decision": getattr(getattr(decision, "type", None), "value", None) or "propose_stage_plan"}
+                    if recovered_proof_ids:
+                        payload["recovered_proof_ids"] = recovered_proof_ids
+                    return HarnessActionResult(action, True, progress["summary"], payload)
                 if current_run.state in {RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED}:
                     if worker_store is not None and worker is not None:
                         worker_store.update_after_run(worker.id, current_run, close_reason=f"run_{current_run.state.value}", count_decision=False)
@@ -2294,6 +2339,125 @@ def _runtime_stage_records(task: Task) -> list:
     if plan is not None and getattr(plan, "enabled", False):
         return list(getattr(plan, "stages", None) or [])
     return list(getattr(task, "stages", None) or [])
+
+
+def _ensure_legacy_command_proof_plan(task: Task, decision, *, before_task: Task) -> bool:
+    if getattr(task, "mission_plan", None) is not None:
+        return False
+    if getattr(before_task, "stages", None):
+        return False
+    payload = decision.payload if isinstance(getattr(decision, "payload", None), dict) else {}
+    stage_id = str(payload.get("stage_id") or getattr(task, "current_stage_id", "") or "").strip()
+    if stage_id != "implement":
+        return False
+    commands = [str(command).strip() for command in (payload.get("commands") or []) if str(command).strip()]
+    repo = _legacy_command_proof_repo(task)
+    stamp = now()
+    task.mission_plan = MissionPlan(
+        enabled=True,
+        blueprint_id="legacy_command_proof",
+        mission_intent=MissionIntent(
+            title=task.title,
+            objective=task.description or task.title,
+            acceptance_criteria=list(getattr(task, "acceptance_criteria", None) or ["Deterministic command proof is attached."]),
+            non_goals=list(getattr(task, "non_goals", None) or []),
+            source_task_id=task.id,
+        ),
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Implement",
+                objective=f"Collect deterministic command proof for {task.title}.",
+                owner="dev",
+                owner_slot="dev",
+                repo=repo,
+                kind="implementation",
+                status=StageStatus.READY,
+                affected_paths=[],
+                acceptance_criteria=list(getattr(task, "acceptance_criteria", None) or ["Deterministic command proof is attached."]),
+                test_plan=commands,
+                created_at=stamp,
+                updated_at=stamp,
+            ),
+            MissionPlanStage(
+                id="verify",
+                title="Verify",
+                objective="QA verifies the attached command proof and task acceptance.",
+                owner="qa",
+                owner_slot="qa",
+                repo=repo,
+                kind="qa_verdict",
+                status=StageStatus.READY,
+                depends_on=["implement"],
+                blocks_qa_until=False,
+                created_at=stamp,
+                updated_at=stamp,
+            ),
+        ],
+        current_stage_id="implement",
+        revision=1,
+        slots={
+            "dev": {"role": "builder", "required": True},
+            "qa": {"role": "qa", "required": True},
+        },
+        bindings={"dev": "dev", "qa": "qa"},
+        binding_sources={"dev": "persona:dev", "qa": "persona:qa"},
+        edges=[
+            {"source": "implement", "outcome": "ready", "target": "verify"},
+            {"source": "implement", "outcome": "passed", "target": "verify"},
+            {"source": "implement", "outcome": "failed", "target": "implement"},
+            {"source": "implement", "outcome": "needs_fixes", "target": "implement"},
+            {"source": "implement", "outcome": "missing_input", "target": "implement"},
+            {"source": "implement", "outcome": "blocked", "target": "intervention"},
+            {"source": "verify", "outcome": "passed", "target": "done"},
+            {"source": "verify", "outcome": "failed", "target": "implement"},
+            {"source": "verify", "outcome": "needs_fixes", "target": "implement"},
+            {"source": "verify", "outcome": "blocked", "target": "intervention"},
+            {"source": "verify", "outcome": "missing_input", "target": "intervention"},
+        ],
+        limits={"max_attempts_per_stage": 2, "max_total_stages": 16},
+    )
+    task.current_stage_id = "implement"
+    _sync_task_stage_compat_from_plan(task)
+    return True
+
+
+def _legacy_command_proof_repo(task: Task) -> str:
+    labels = {str(label).strip() for label in safe_affected_repo_labels(list(getattr(task, "affected_repos", []) or []))}
+    if "EterniaBackend" in labels:
+        return "EterniaBackend"
+    if "EterniaLauncher" in labels:
+        return "EterniaLauncher"
+    if "hermes-agent" in labels:
+        return "hermes-agent"
+    return "hermes-agent"
+
+
+def _backend_first_burn_in_orchestration_plan(task: Task, decision, *, persona_id: str) -> bool:
+    if persona_id != "backend_dev" or decision.type != DecisionType.PROPOSE_STAGE_PLAN:
+        return False
+    flags = {str(flag).strip().lower() for flag in (getattr(task, "risk_flags", None) or [])}
+    if not {"backend_contract_first", "bounded_complex_burn_in"} <= flags:
+        return False
+    payload = decision.payload if isinstance(getattr(decision, "payload", None), dict) else {}
+    stages = payload.get("stages") if isinstance(payload.get("stages"), list) else []
+    if not stages:
+        return False
+    return not any(_raw_stage_is_backend_executable_proof(stage) for stage in stages if isinstance(stage, dict))
+
+
+def _raw_stage_is_backend_executable_proof(stage: dict[str, Any]) -> bool:
+    text = " ".join(
+        [
+            str(stage.get("id") or ""),
+            str(stage.get("title") or ""),
+            str(stage.get("objective") or ""),
+            " ".join(str(item) for item in (stage.get("affected_paths") or [])),
+            " ".join(str(item) for item in (stage.get("test_plan") or [])),
+        ]
+    ).lower()
+    has_test_plan = any(str(item).strip() for item in (stage.get("test_plan") or []))
+    return has_test_plan and "backend" in text and not any(marker in text for marker in ("launcher", "qa", "neko", "join gate"))
 
 
 def _set_current_stage_id(task: Task, stage_id: str | None) -> None:
@@ -3462,6 +3626,12 @@ def _should_retry_invalid_decision(exc: DecisionPayloadInvalid, *, repair_attemp
     return True
 
 
+def _is_dev_stage_plan_loop_guard(exc: Exception) -> bool:
+    if not isinstance(exc, DecisionPayloadInvalid):
+        return False
+    return "dev stage plan loop guard failed" in str(exc).strip().lower()
+
+
 def _decision_repair_feedback(
     exc: DecisionPayloadInvalid,
     *,
@@ -4180,8 +4350,18 @@ def _command_proof_stage_repo(task: Task, *, stage_id: str | None) -> str | None
     stage = _stage_for_command_proof(task, stage_id)
     repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
     if repo in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
+        if _is_typed_plan_stage(task, stage_id=stage_id):
+            return repo
         return default_blueprint_placeholder_repo_override(task, repo) or repo
     return None
+
+
+def _is_typed_plan_stage(task: Task, *, stage_id: str | None) -> bool:
+    target = str(stage_id or getattr(task, "current_stage_id", "") or "").strip()
+    if not target:
+        return False
+    plan = getattr(task, "mission_plan", None)
+    return any(str(getattr(stage, "id", "") or "") == target for stage in (getattr(plan, "stages", None) or []))
 
 
 def _has_legacy_command_stage(task: Task, *, stage_id: str | None) -> bool:

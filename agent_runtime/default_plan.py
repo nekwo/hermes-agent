@@ -70,6 +70,8 @@ def specialize_default_plan_for_task(task: Task, plan: MissionPlan) -> None:
     """
 
     _specialize_default_implementation_stage(task, plan)
+    if _default_task_is_no_edit_cross_stack(task):
+        _specialize_default_no_edit_cross_stack_plan(plan)
     _ensure_default_retry_edges(plan)
 
 
@@ -121,6 +123,23 @@ def _specialize_default_implementation_stage(task: Task, plan: MissionPlan) -> N
     # side simply lets the other node run and self-report "no change, pass". Owners
     # and repos come from the graph's slot bindings, not from Python inferring them.
     return
+
+
+def _default_task_is_no_edit_cross_stack(task: Task) -> bool:
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "non_goals", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "risk_flags", []) or [])),
+        ]
+    ).lower()
+    repos = " ".join(str(item).lower() for item in (getattr(task, "affected_repos", []) or []))
+    no_edit = any(marker in text for marker in ("no-edit", "no edit", "no-product-edit", "no product edit", "without product edits", "do not modify product"))
+    mentions_backend = "backend" in text or "eterniabackend" in text or "backend" in repos or "eterniabackend" in repos
+    mentions_launcher = "launcher" in text or "eternialauncher" in text or "launcher" in repos or "eternialauncher" in repos
+    return no_edit and mentions_backend and mentions_launcher
 
 
 def _mark_default_noop_dependencies_passed(

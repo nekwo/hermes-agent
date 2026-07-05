@@ -19,6 +19,25 @@ def test_prompt_observability_preserves_profile_persona_identity():
     assert context["profile"] == "alice"
 
 
+def test_prompt_observability_names_live_task_bound_chat_without_session_row():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev",
+            hermes_profile="dev",
+            display_name="Launcher Dev",
+            role="dev",
+        ),
+        persona_instance_id="personainst_dev",
+        session_id="persona_chat_personainst_dev_live",
+        task_id="task_live",
+        session_db=None,
+    )
+
+    assert context["chat_id"] == "persona_chat_personainst_dev_live"
+    assert context["chat_title"] == "Mission run"
+    assert context["chat"]["source"] == "task_bound"
+
+
 def test_accessible_skills_hash_check_uses_persona_profile_home(monkeypatch, tmp_path):
     # Regression: skill hash/missing checks in the HUD must run against the persona's
     # OWN profile home (mirroring profile_readiness), not the active HERMES_HOME.

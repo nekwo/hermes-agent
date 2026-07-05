@@ -59,7 +59,7 @@ def mission_chat_prompt_observability(
     ).hexdigest()[:16]
     surface = safe_assignment_text(surface_prompt, limit=4000) or ""
     history = _chat_history_context(session_db=session_db, session_id=session_id)
-    chat = _chat_metadata(session_db=session_db, session_id=session_id)
+    chat = _chat_metadata(session_db=session_db, session_id=session_id, task_id=task_id)
     accessible_skills = _accessible_skills_context(persona, profile)
     available_skills = available_skills_context(accessible_skills=accessible_skills)
     used_skills = used_skills_context(
@@ -327,6 +327,7 @@ def _backfill_derived_fields(
         chat = _chat_metadata(
             session_db=session_db,
             session_id=safe_assignment_text(item.get("session_id"), limit=200),
+            task_id=safe_assignment_text(item.get("task_id"), limit=160),
         )
         if chat:
             item["chat_id"] = chat.get("id")
@@ -792,7 +793,12 @@ def _extract_skill_name(entry: Any) -> str | None:
     return None
 
 
-def _chat_metadata(*, session_db: Any | None, session_id: str | None) -> dict[str, Any]:
+def _chat_metadata(
+    *,
+    session_db: Any | None,
+    session_id: str | None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
     safe_id = safe_assignment_text(session_id, limit=200)
     if not safe_id:
         return {}
@@ -811,6 +817,9 @@ def _chat_metadata(*, session_db: Any | None, session_id: str | None) -> dict[st
             if not title:
                 title = safe_assignment_text(raw.get("title"), limit=160)
             source = safe_assignment_token(raw.get("source"))
+    if not title and safe_assignment_text(task_id, limit=160):
+        title = "Mission run"
+        source = source or "task_bound"
     data: dict[str, Any] = {
         "id": safe_id,
         "title": title,

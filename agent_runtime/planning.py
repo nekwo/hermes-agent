@@ -849,14 +849,20 @@ def _apply_acceptance(task: Task, payload: dict[str, Any]) -> None:
 def _release_stage_affected_repos(task: Task, stage_repo: str | None) -> list[str]:
     """Repo scope to apply when a typed-plan stage is released.
 
-    The released stage's repo normally wins, but the bundled default
-    blueprint's stages carry placeholder repos regardless of the goal's
-    resolved scope — leaking them here overwrote the scope Neko's validated
-    acceptance payload just set (observed live 2026-07-03, task_0cf230b7:
-    a hermes-agent goal became affected_repos=['EterniaBackend'] at release
-    and the downstream gate ran in the wrong repo).
+    The task-level scope describes the whole mission, not just the first
+    runnable stage. Keep explicit single-repo goals pinned, otherwise surface
+    the typed mission graph's repo union so observability and fallback routing
+    cannot forget a sibling Launcher/Backend stage while a fork is live.
     """
 
+    plan_repos = _mission_plan_affected_repos(task)
+    task_repos = _canonical_affected_repos(getattr(task, "affected_repos", []) or [])
+    if len(task_repos) == 1:
+        if len(plan_repos) > 1 and _mission_text_mentions_cross_stack(task):
+            return plan_repos
+        return task_repos
+    if plan_repos:
+        return plan_repos
     repo = str(stage_repo or "").strip()
     if not repo or repo == "none":
         return []
@@ -864,6 +870,38 @@ def _release_stage_affected_repos(task: Task, stage_repo: str | None) -> list[st
 
     override = default_blueprint_placeholder_repo_override(task, repo)
     return [override or repo]
+
+
+def _mission_plan_affected_repos(task: Task) -> list[str]:
+    plan = getattr(task, "mission_plan", None)
+    repos: list[str] = []
+    for stage in getattr(plan, "stages", []) or []:
+        repo = str(getattr(stage, "repo", "") or "").strip()
+        if not repo or repo == "none":
+            continue
+        for canonical in _canonical_affected_repos([repo]):
+            if canonical not in repos:
+                repos.append(canonical)
+    return repos
+
+
+def _mission_text_mentions_cross_stack(task: Task) -> bool:
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "risk_flags", []) or [])),
+        ]
+    ).lower()
+    mentions_backend = "backend" in text or "eterniabackend" in text
+    mentions_launcher = "launcher" in text or "eternialauncher" in text
+    if mentions_backend and mentions_launcher:
+        return True
+    return any(
+        marker in text
+        for marker in ("cross-stack", "cross_stack", "parallel", "fork-join", "fork join")
+    )
 
 
 def _canonical_affected_repos(repos: Iterable[str]) -> list[str]:
@@ -1643,12 +1681,7 @@ def _current_stage(task: Task) -> TaskStage | None:
 
 
 def _is_cross_stack_backend_first(task: Task) -> bool:
-    # De-hardwired: ordering is graph-driven only. Backend-before-launcher (or any
-    # ordering) must come from the blueprint's stage `depends_on`, not from Python
-    # inferring it from flags/text. Neutralized to False so the whole backend-first
-    # choreography (launcher-completion gating, sequential-specialist join) is inert
-    # and dispatch falls entirely to strict depends_on.
-    return False
+    return _has_cross_stack_backend_first_flag(task) or _text_implies_backend_first_cross_stack(task)
 
 
 def _has_cross_stack_backend_first_flag(task: Task) -> bool:

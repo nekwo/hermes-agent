@@ -10,7 +10,6 @@ from typing import Any
 from hermes_time import now
 
 from .events import EventLog
-from .default_plan import ensure_default_mission_plan
 from .parity import events_watermark
 from .read_model import ReadModel
 from .snapshot import (
@@ -133,7 +132,6 @@ class Projector:
                             task = task_store.get(task_id)
                         except Exception:
                             continue
-                        ensure_default_mission_plan(task)
                         goals.append(
                             _goal_projection_from_task(
                                 task,

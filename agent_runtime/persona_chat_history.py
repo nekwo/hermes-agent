@@ -17,7 +17,14 @@ DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
 MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
 PERSONA_CHAT_MESSAGE_TEXT_LIMIT = 20000
 _CHAT_MODEL_OVERRIDE_CONFIG_KEY = "mission_control_chat_model_override"
-_TRACE_EVENT_TYPES = {"run.tool.started", "run.tool.finished", "run.progress"}
+_TRACE_EVENT_TYPES = {
+    "run.tool.started",
+    "run.tool.finished",
+    "run.progress",
+    "task.transition",
+    "persona_assignment.created",
+    "persona_assignment.closed",
+}
 # Per-task trace fetch sizing: headroom over tail*agents to survive dilution by
 # non-trace event rows, and a hard ceiling on the reverse log scan.
 _TRACE_FETCH_HEADROOM = 6
@@ -248,7 +255,7 @@ def persona_chat_trace_summary(
     for task_id, members in members_by_task.items():
         fetch_limit = _trace_fetch_limit(tail, len(members))
         trace_by_persona: dict[str, list[Any]] = {}
-        for event in log.for_task(task_id, limit=fetch_limit):
+        for event in _fetch_trace_events(log.for_task, task_id, limit=fetch_limit):
             if getattr(event, "type", None) not in _TRACE_EVENT_TYPES:
                 continue
             event_persona = _canonical_persona_id(getattr(event, "persona_id", None))
@@ -267,7 +274,7 @@ def persona_chat_trace_summary(
             break
         fetch_limit = _trace_fetch_limit(tail, 1)
         chat_events: list[Any] = []
-        for event in log.for_session(session_id, limit=fetch_limit):
+        for event in _fetch_trace_events(log.for_session, session_id, limit=fetch_limit):
             if getattr(event, "type", None) not in _TRACE_EVENT_TYPES:
                 continue
             event_persona = _canonical_persona_id(getattr(event, "persona_id", None))
@@ -301,6 +308,22 @@ def _supports_for_session(log: Any) -> bool:
     return callable(getattr(log, "for_session", None))
 
 
+def _fetch_trace_events(fetch: Any, key: str, *, limit: int) -> list[Any]:
+    """Fetch trace-lane events with a type-aware limit when the log supports it.
+
+    ``types=_TRACE_EVENT_TYPES`` makes ``limit`` count matched trace rows, so a
+    task whose recent event tail is flooded with non-trace rows (e.g. a
+    budget-incident loop) cannot starve the window. Test fakes (and any legacy
+    log) without the ``types`` keyword fall back to the untyped fetch — same
+    tolerance pattern as ``_list_sessions``.
+    """
+
+    try:
+        return list(fetch(key, limit=limit, types=_TRACE_EVENT_TYPES))
+    except TypeError:
+        return list(fetch(key, limit=limit))
+
+
 class _TraceAccumulator:
     """Collects a persona instance's trace events across lanes, then renders
     them chronologically into a bounded list of redaction-safe entry dicts."""
@@ -327,7 +350,7 @@ class _TraceAccumulator:
                 unrenderable += 1
                 continue
             rendered.append(entry)
-        kept = rendered[-tail:]
+        kept = _retain_trace_tail(rendered, tail=tail)
         if accountant is not None:
             accountant.consider(len(self._events))
             accountant.include(len(kept))
@@ -338,6 +361,33 @@ class _TraceAccumulator:
                 accountant.drop("tail_truncated", count=truncated, entity_id=self.instance_id)
                 accountant.mark_truncated()
         return kept
+
+
+def _retain_trace_tail(rendered: list[dict[str, Any]], *, tail: int) -> list[dict[str, Any]]:
+    if len(rendered) <= tail:
+        return rendered
+    latest_start = max(0, len(rendered) - tail)
+    keep = {index for index in range(latest_start, len(rendered))}
+    keep.update(
+        index
+        for index, entry in enumerate(rendered)
+        if _priority_trace_entry(entry)
+    )
+    while len(keep) > tail:
+        removable = [index for index in sorted(keep) if not _priority_trace_entry(rendered[index])]
+        if not removable:
+            break
+        keep.remove(removable[0])
+    if len(keep) > tail:
+        keep = set(sorted(keep)[-tail:])
+    return [entry for index, entry in enumerate(rendered) if index in keep]
+
+
+def _priority_trace_entry(entry: dict[str, Any]) -> bool:
+    return safe_assignment_token(entry.get("event")) in {
+        "assignment_created",
+        "assignment_closed",
+    }
 
 
 def _trace_event_sort_key(event: Any) -> tuple[int, float, str]:
@@ -654,12 +704,16 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "run.tool.started": "tool_started",
         "run.tool.finished": "tool_finished",
         "run.progress": "progress",
+        "task.transition": "progress",
+        "persona_assignment.created": "assignment_created",
+        "persona_assignment.closed": "assignment_closed",
     }.get(event_type)
     if trace_event is None:
         return None
 
     tool_name = _safe_trace_text(payload.get("tool_name") or payload.get("tool"), limit=120)
     summary = _first_safe_trace_text(
+        payload.get("reason") if event_type == "task.transition" else None,
         payload.get("summary"),
         payload.get("patch_summary"),
         payload.get("code_summary"),
@@ -667,7 +721,7 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         payload.get("file_summary"),
         limit=500,
     )
-    status = _safe_trace_text(payload.get("status") or payload.get("exit_code"), limit=80)
+    status = _safe_trace_text(payload.get("status") or payload.get("to") or payload.get("exit_code"), limit=80)
     files = _safe_trace_file_labels(payload.get("changed_files") or payload.get("files_touched"))
     return {
         "kind": "harness_trace",
@@ -681,6 +735,16 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "files": files,
         "status": status,
         "ts": getattr(event, "ts", None),
+        "assignment_id": _safe_trace_text(payload.get("assignment_id"), limit=160),
+        "persona_instance_id": _safe_trace_text(payload.get("persona_instance_id"), limit=160),
+        "title": _safe_trace_text(payload.get("title"), limit=240),
+        "message": _safe_trace_text(payload.get("message"), limit=1200),
+        "repo": _safe_trace_text(payload.get("repo"), limit=160),
+        "affected_paths": _safe_trace_file_labels(payload.get("affected_paths")),
+        "proof_targets": _safe_trace_list_text(payload.get("proof_targets"), limit=240),
+        "acceptance": _safe_trace_list_text(payload.get("acceptance"), limit=500),
+        "non_goals": _safe_trace_list_text(payload.get("non_goals"), limit=500),
+        "allowed_decisions": _safe_trace_list_text(payload.get("allowed_decisions"), limit=80),
     }
 
 
@@ -718,6 +782,18 @@ def _safe_trace_file_labels(value: Any) -> list[str]:
             continue
         labels.append(label)
     return labels[:12]
+
+
+def _safe_trace_list_text(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = safe_assignment_text(item, limit=limit)
+        if not text or _SECRET_RE.search(text):
+            continue
+        items.append(text)
+    return items[:12]
 
 
 def _looks_pathish(value: str) -> bool:

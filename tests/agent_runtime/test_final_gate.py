@@ -198,3 +198,19 @@ def test_explicit_graph_blueprint_stage_repo_is_not_overridden(isolate_agent_run
     stage = next(s for s in plan.stages if s.id == "implement")
 
     assert stage_repo_for_gate(task, stage) == "EterniaLauncher"
+
+
+def test_default_blueprint_cross_stack_product_stage_repo_survives_stale_task_scope(isolate_agent_runtime_root):
+    from agent_runtime.default_plan import ensure_default_mission_plan
+    from agent_runtime.final_gate import stage_repo_for_gate
+
+    task = _goal_task(
+        "Fork check: parallel Backend plus Launcher health; Launcher consumes the backend contract.",
+        repos=["EterniaBackend"],
+    )
+    plan = ensure_default_mission_plan(task)
+    stage = next(s for s in plan.stages if s.id == "implement")
+    plan.current_stage_id = "implement"
+    task.current_stage_id = "implement"
+
+    assert stage_repo_for_gate(task, stage) == "EterniaLauncher"

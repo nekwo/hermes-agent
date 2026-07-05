@@ -438,6 +438,40 @@ def test_busy_task_does_not_starve_a_quiet_personas_trace():
     assert len(by_persona["dev"]["entries"]) == 2
 
 
+def test_incident_flood_does_not_starve_trace_window():
+    # Live failure shape (task_bd98d444, 2026-07-05): the task's newest ~640
+    # events were incident/budget rows, so a fetch window that counts raw rows
+    # found zero trace events → channel trace null → trace_empty warning.
+    events = EventLog()
+    ts = now()
+    for index in range(8):
+        events.append(
+            Event(
+                ts=ts,
+                type="run.tool.finished",
+                task_id="task_flooded",
+                run_id=f"run_dev_{index}",
+                persona_id="dev",
+                payload={"tool_name": "read_file", "summary": f"dev tool {index}"},
+            )
+        )
+    # Newest tail: a runaway incident loop far larger than the fetch window.
+    for _ in range(600):
+        events.append(Event(ts=ts, type="incident.opened", task_id="task_flooded", run_id=None, persona_id="dev"))
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[_persona_instance("personainst_dev", "dev", "task_flooded")],
+        event_log=events,
+        message_tail=4,
+    )
+
+    assert len(rows) == 1
+    entries = rows[0]["entries"]
+    # The newest trace rows survive the flood, bounded to message_tail.
+    assert len(entries) == 4
+    assert [entry["run_id"] for entry in entries] == [f"run_dev_{index}" for index in range(4, 8)]
+
+
 def test_persona_chat_trace_projects_session_keyed_chat_tool_calls():
     events = EventLog()
     ts = now()

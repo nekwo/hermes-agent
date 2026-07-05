@@ -23,7 +23,11 @@ from .events import CachedEventLog, EventLog
 from .migrations import effective_config_summary, migration_status
 from .mission_plan import mission_plan_summary, task_stage_records
 from .observability import build_observability
-from .operator_channels import operator_channel_summary
+from .operator_channels import (
+    OPERATOR_CHANNELS_SCHEMA_VERSION,
+    OPERATOR_CONVERSATION_SCHEMA_VERSION,
+    operator_channel_summary,
+)
 from .persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
     PersonaAssignmentStore,
@@ -66,6 +70,9 @@ AGENT_TOPOLOGY_NODE_ID_CAP = 20
 STAGE_VERIFICATION_STAGE_CAP = 12
 STAGE_VERIFICATION_PROOF_ID_CAP = 8
 STAGE_VERIFICATION_PATH_CAP = 6
+_ARCHIVED_CONVERSATION_SECRET_RE = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
+)
 
 
 def _runtime_paths_diagnostic(available_personas: list) -> dict:
@@ -128,6 +135,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     proof_batches = proof_batch_store.list_all()
     repo_bundles = repo_bundle_store.list_all()
     runtime_instances = runtime_instance_store.list_all()
+    archived_tasks = _archived_task_summaries()
     workspace_store = WorkspaceStore()
     realm_store = RealmStore()
     workspaces = workspace_store.list_all(include_archived=True)
@@ -237,7 +245,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
-        "archived_tasks": _archived_task_summaries(),
+        "archived_tasks": archived_tasks,
         "agents": agent_summaries,
         "available_personas": available_personas,
         "blueprints": [blueprint_summary(bp) for bp in BlueprintStore().list()],
@@ -279,11 +287,27 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=trace_accountant,
         )
-        data["operator_channels"] = operator_channel_summary(
+        conversation_accountant = ProjectionAccountant("operator_conversation")
+        live_operator_channels = operator_channel_summary(
             persona_instances=persona_instances,
             persona_chat_history=data["persona_chat_history"],
             persona_chat_trace=data["persona_chat_trace"],
+            tasks=tasks,
+            run_summaries=data["runs"],
+            accountant=conversation_accountant,
         )
+        live_channel_task_ids = {
+            str(channel.get("task_id") or "")
+            for channel in live_operator_channels
+            if channel.get("task_id")
+        }
+        data["operator_channels"] = [
+            *live_operator_channels,
+            *_archived_operator_channels(
+                archived_tasks,
+                live_task_ids=live_channel_task_ids,
+            ),
+        ]
         data["persona_assignments"] = {
             "active": [persona_assignment_summary(item) for item in persona_assignments if item.state in ACTIVE_ASSIGNMENT_STATES],
             "recent": [persona_assignment_summary(item) for item in persona_assignments[-50:]],
@@ -291,8 +315,13 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         completeness = {
             "persona_chat_history": history_accountant.summary(),
             "persona_chat_trace": trace_accountant.summary(),
+            "operator_conversation": conversation_accountant.summary(),
         }
-        drop_samples = history_accountant.drop_samples() + trace_accountant.drop_samples()
+        drop_samples = (
+            history_accountant.drop_samples()
+            + trace_accountant.drop_samples()
+            + conversation_accountant.drop_samples()
+        )
     else:
         data["persona_instance_runtime"] = {"enabled": False}
         completeness = {}
@@ -575,12 +604,21 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
     persona_timing_summaries = _persona_timing_summaries(runs)
     return {
         "task_id": task_id,
+        "goal_id": str(raw.get("goal_id") or raw.get("mission_goal_id") or "").strip() or None,
         "title": str(raw.get("title") or "Archived mission"),
+        "description": str(raw.get("description") or "").strip() or None,
+        "acceptance_criteria": [
+            str(item)
+            for item in (raw.get("acceptance_criteria") or [])
+            if isinstance(item, str) and item.strip()
+        ][:20],
         "state": "archived",
         "original_state": original_state,
         "archive_batch": archive_batch,
         "archive_reason": reason,
         "archived_at": archived_at,
+        "created_at": raw.get("created_at"),
+        "updated_at": raw.get("updated_at"),
         "runs": runs,
         "persona_timing_summaries": persona_timing_summaries,
         "proof_summaries": proofs,
@@ -611,6 +649,269 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
             proof_batches=proof_batches,
         ),
     }
+
+
+def _archived_operator_channels(archived_tasks: list[dict], *, live_task_ids: set[str] | None = None, limit: int = 25) -> list[dict]:
+    live_task_ids = live_task_ids or set()
+    channels: list[dict] = []
+    for archived in archived_tasks[:limit]:
+        task_id = str(archived.get("task_id") or "").strip()
+        if not task_id or task_id in live_task_ids:
+            continue
+        channel = _archived_operator_channel(archived)
+        if channel is not None:
+            channels.append(channel)
+    return channels
+
+
+def _archived_operator_channel(archived: dict) -> dict | None:
+    task_id = str(archived.get("task_id") or "").strip()
+    if not task_id:
+        return None
+    goal_id = str(archived.get("goal_id") or "").strip() or None
+    channel_id = f"neko_supervisor::archived:{task_id}"
+    messages: list[dict] = []
+    goal_message = _archived_goal_input_message(archived, channel_id=channel_id)
+    if goal_message is not None:
+        messages.append(goal_message)
+    for index, assignment in enumerate(archived.get("persona_assignments") or []):
+        if isinstance(assignment, dict):
+            message = _archived_assignment_message(assignment, channel_id=channel_id, index=index)
+            if message is not None:
+                messages.append(message)
+    for index, event in enumerate(archived.get("recent_events") or []):
+        if isinstance(event, dict):
+            message = _archived_event_message(event, channel_id=channel_id, index=index)
+            if message is not None:
+                messages.append(message)
+    messages.sort(key=_archived_conversation_message_sort_key)
+    messages = _dedupe_archived_conversation_messages(messages)
+    for seq, message in enumerate(messages, start=1):
+        message["seq"] = seq
+    updated_at = _latest_archived_message_timestamp(messages) or archived.get("updated_at") or archived.get("archived_at")
+    conversation_status = "complete" if messages else "incomplete"
+    incomplete_reason = None if messages else "Archived task did not contain projectable conversation messages."
+    conversation = {
+        "schema_version": OPERATOR_CONVERSATION_SCHEMA_VERSION,
+        "thread_id": channel_id,
+        "goal_id": goal_id,
+        "task_id": task_id,
+        "owner_persona_id": "neko_supervisor",
+        "persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "session_id": None,
+        "root_thread_id": channel_id,
+        "parent_thread_id": None,
+        "title": _archived_conversation_text(archived.get("title"), limit=240) or "Archived mission",
+        "state": "archived",
+        "updated_at": updated_at,
+        "status": conversation_status,
+        "incomplete_reason": incomplete_reason,
+        "messages": messages,
+    }
+    return {
+        "schema_version": OPERATOR_CHANNELS_SCHEMA_VERSION,
+        "channel_id": channel_id,
+        "persona_id": "neko_supervisor",
+        "persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "session_id": None,
+        "task_id": task_id,
+        "goal_id": goal_id,
+        "display_name": "Neko Supervisor",
+        "state": "archived",
+        "mode": "archived_goal",
+        "source_instance_ids": [],
+        "history": None,
+        "trace": None,
+        "conversation": conversation,
+        "conversation_status": conversation_status,
+        "message_count": len(messages),
+        "trace_count": 0,
+        "tool_trace_count": 0,
+        "warnings": [],
+        "archived": True,
+        "archive_batch": archived.get("archive_batch"),
+        "archive_reason": archived.get("archive_reason"),
+        "archived_at": archived.get("archived_at"),
+        "updated_at": updated_at,
+    }
+
+
+def _archived_goal_input_message(archived: dict, *, channel_id: str) -> dict | None:
+    task_id = str(archived.get("task_id") or "").strip()
+    title = _archived_conversation_text(archived.get("title"), limit=500) or "Archived mission"
+    parts = [f"Goal: {title}"]
+    description = _archived_conversation_text(archived.get("description"), limit=4000)
+    if description:
+        parts.append(f"Objective: {description}")
+    acceptance = [
+        item
+        for item in (
+            _archived_conversation_text(value, limit=500)
+            for value in (archived.get("acceptance_criteria") or [])
+        )
+        if item
+    ]
+    if acceptance:
+        parts.append("Acceptance:\n" + "\n".join(f"- {item}" for item in acceptance))
+    return {
+        "id": f"{channel_id}:goal_input:{task_id}",
+        "seq": 0,
+        "timestamp": archived.get("created_at") or archived.get("archived_at"),
+        "actor_persona_id": "operator",
+        "actor_instance_id": None,
+        "target_persona_id": "neko_supervisor",
+        "target_persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "role": "operator",
+        "kind": "goal_input",
+        "status": "delivered",
+        "display_title": "",
+        "display_text": "\n\n".join(parts),
+        "redaction_status": "safe",
+        "refs": {"task_id": task_id, "goal_id": archived.get("goal_id"), "source": "deleted_archive"},
+    }
+
+
+def _archived_assignment_message(assignment: dict, *, channel_id: str, index: int) -> dict | None:
+    target_persona_id = str(assignment.get("persona_id") or "agent").strip() or "agent"
+    title = _archived_conversation_text(assignment.get("title"), limit=240)
+    prompt = _archived_conversation_text(assignment.get("message"), limit=1200)
+    if not title and not prompt:
+        return None
+    parts = [f"Prompted {target_persona_id}."]
+    if title:
+        parts.append(f"Stage: {title}")
+    if prompt:
+        parts.append(f"Prompt: {prompt}")
+    proof_targets = _archived_conversation_list(assignment.get("proof_targets"), limit=160)
+    if proof_targets:
+        parts.append("Proof expected: " + "; ".join(proof_targets))
+    allowed_decisions = _archived_conversation_list(assignment.get("allowed_decisions"), limit=80)
+    if allowed_decisions:
+        parts.append("Allowed decisions: " + ", ".join(allowed_decisions))
+    refs = {"source": "persona_assignment"}
+    for key in ("id", "assignment_id", "task_id", "goal_id", "stage_id", "persona_instance_id"):
+        value = str(assignment.get(key) or "").strip()
+        if value:
+            refs["assignment_id" if key == "id" else key] = value
+    return {
+        "id": f"{channel_id}:assignment:{refs.get('assignment_id', index)}",
+        "seq": 0,
+        "timestamp": assignment.get("created_at") or assignment.get("updated_at"),
+        "actor_persona_id": "neko_supervisor",
+        "actor_instance_id": f"archived:{refs.get('task_id', 'task')}:neko_supervisor",
+        "target_persona_id": target_persona_id,
+        "target_persona_instance_id": assignment.get("persona_instance_id"),
+        "role": "agent",
+        "kind": "handoff",
+        "status": str(assignment.get("state") or "delivered"),
+        "display_title": "Subagent prompt",
+        "display_text": "\n".join(parts),
+        "redaction_status": "safe",
+        "refs": refs,
+    }
+
+
+def _archived_event_message(event: dict, *, channel_id: str, index: int) -> dict | None:
+    event_type = str(event.get("type") or "").strip()
+    if event_type == "proof.attached":
+        text = _archived_conversation_text(event.get("summary"), limit=1200)
+        kind = "proof"
+        title = "Proof update"
+        role = "proof"
+    elif event_type in {"run.progress", "run.decision"}:
+        text = _archived_conversation_text(
+            event.get("reasoning_summary") or event.get("rationale") or event.get("summary"),
+            limit=1200,
+        )
+        kind = "final" if event_type == "run.decision" or str(event.get("status") or "") in {"completed", "passed", "approved"} else "agent_update"
+        title = "Final update" if kind == "final" else "Neko update"
+        role = "agent"
+    else:
+        return None
+    if not text:
+        return None
+    persona_id = str(event.get("persona_id") or "neko_supervisor").strip() or "neko_supervisor"
+    refs = {"source": "deleted_archive", "event_type": event_type}
+    for key in ("task_id", "run_id", "proof_id", "stage_id"):
+        value = str(event.get(key) or "").strip()
+        if value:
+            refs[key] = value
+    return {
+        "id": f"{channel_id}:event:{event_type}:{refs.get('run_id') or refs.get('proof_id') or index}",
+        "seq": 0,
+        "timestamp": event.get("ts"),
+        "actor_persona_id": persona_id,
+        "actor_instance_id": None,
+        "role": role,
+        "kind": kind,
+        "status": str(event.get("status") or "recorded"),
+        "display_title": title,
+        "display_text": text,
+        "redaction_status": "safe",
+        "refs": refs,
+    }
+
+
+def _archived_conversation_text(value, *, limit: int) -> str | None:
+    text = str(value or "").replace("\x00", " ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [" ".join(line.split()) for line in text.split("\n")]
+    normalized = "\n".join(lines).strip()
+    normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
+    if not normalized or _ARCHIVED_CONVERSATION_SECRET_RE.search(normalized):
+        return None
+    return normalized[:limit].rstrip()
+
+
+def _archived_conversation_list(value, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = [_archived_conversation_text(item, limit=limit) for item in value]
+    return [item for item in items if item][:8]
+
+
+def _archived_conversation_message_sort_key(message: dict) -> tuple[int, str, str]:
+    if message.get("kind") == "goal_input":
+        return (0, "", str(message.get("id") or ""))
+    parsed = _parse_archived_time(message.get("timestamp"))
+    if parsed is not None:
+        return (1, parsed.isoformat(), str(message.get("id") or ""))
+    return (2, str(message.get("timestamp") or ""), str(message.get("id") or ""))
+
+
+def _dedupe_archived_conversation_messages(messages: list[dict]) -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    seen_updates: set[str] = set()
+    deduped: list[dict] = []
+    for message in messages:
+        text = str(message.get("display_text") or "")
+        if message.get("kind") in {"agent_update", "final"}:
+            if text in seen_updates:
+                continue
+            seen_updates.add(text)
+        key = (str(message.get("kind") or ""), str(message.get("display_text") or ""))
+        if key in seen and message.get("kind") in {"agent_update", "final"}:
+            continue
+        seen.add(key)
+        deduped.append(message)
+    return deduped
+
+
+def _latest_archived_message_timestamp(messages: list[dict]):
+    dated = [message.get("timestamp") for message in messages if message.get("timestamp")]
+    return dated[-1] if dated else None
+
+
+def _parse_archived_time(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _archived_run_summaries(batch_dir, task_id: str) -> list[dict]:
@@ -703,8 +1004,14 @@ def _archived_persona_assignment_summaries(batch_dir, task_id: str) -> list[dict
                 "kind": raw.get("kind"),
                 "state": raw.get("state"),
                 "title": raw.get("title"),
+                "message": raw.get("message"),
                 "task_id": raw.get("task_id"),
+                "goal_id": raw.get("goal_id"),
                 "stage_id": raw.get("stage_id"),
+                "created_at": raw.get("created_at"),
+                "updated_at": raw.get("updated_at"),
+                "proof_targets": raw.get("proof_targets") if isinstance(raw.get("proof_targets"), list) else [],
+                "allowed_decisions": raw.get("allowed_decisions") if isinstance(raw.get("allowed_decisions"), list) else [],
                 "run_ids": raw.get("run_ids") if isinstance(raw.get("run_ids"), list) else [],
                 "proof_ids": raw.get("proof_ids") if isinstance(raw.get("proof_ids"), list) else [],
             }

@@ -179,3 +179,24 @@ def test_default_plan_stage_release_does_not_leak_placeholder_repo(isolate_agent
     )
 
     assert t.affected_repos == ["hermes-agent"]
+
+
+def test_default_plan_cross_stack_release_preserves_graph_repo_union(isolate_agent_runtime_root):
+    from agent_runtime.default_plan import ensure_default_mission_plan
+
+    t = make_task("Fork check: parallel Backend and Launcher health.")
+    ensure_default_mission_plan(t)
+    apply_planning_decision(
+        t,
+        acceptance(
+            {
+                "objective": "Fork check: parallel Backend and Launcher health.",
+                "acceptance_criteria": ["Backend and Launcher lanes both finish with proof."],
+                "affected_repos": ["EterniaBackend"],
+            }
+        ),
+        actor="neko_supervisor",
+        mission_plan_flow=True,
+    )
+
+    assert t.affected_repos == ["hermes-agent", "EterniaBackend", "EterniaLauncher"]

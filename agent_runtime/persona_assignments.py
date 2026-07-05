@@ -627,7 +627,7 @@ class PersonaInstanceStore:
         instance.mode = "task_bound"
         instance.current_assignment_id = worker.current_assignment_id
         instance.current_task_id = worker.task_id
-        instance.goal_id = instance.goal_id or worker.task_id
+        instance.goal_id = self._goal_id_for_worker(worker) or worker.task_id
         instance.active_worker_session_id = worker.id if worker.state in ACTIVE_PERSONA_WORKER_STATES else None
         instance.active_run_id = worker.active_run_id
         instance.session_id = worker.session_id
@@ -640,6 +640,16 @@ class PersonaInstanceStore:
         instance.watchdog_warning_count = worker.watchdog_warning_count
         instance.last_heartbeat_at = worker.last_heartbeat_at
         return self.update(instance)
+
+    def _goal_id_for_worker(self, worker: WorkerSession) -> str | None:
+        assignment_id = safe_optional_token(worker.current_assignment_id)
+        if not assignment_id:
+            return None
+        try:
+            assignment = PersonaAssignmentStore().get(assignment_id)
+        except Exception:
+            return None
+        return safe_optional_token(assignment.goal_id or assignment.task_id)
 
     def list_all(self) -> list[PersonaInstance]:
         directory = paths.persona_instances_dir()
@@ -1006,6 +1016,16 @@ class PersonaAssignmentStore:
                     "persona_instance_id": assignment.persona_instance_id,
                     "kind": assignment.kind,
                     "client_message_id": assignment.client_message_id,
+                    "title": assignment.title,
+                    "message": assignment.message,
+                    "stage_id": assignment.stage_id,
+                    "goal_id": assignment.goal_id,
+                    "repo": assignment.repo,
+                    "affected_paths": list(assignment.affected_paths or []),
+                    "proof_targets": list(assignment.proof_targets or []),
+                    "acceptance": list(assignment.acceptance or []),
+                    "non_goals": list(assignment.non_goals or []),
+                    "allowed_decisions": list(assignment.allowed_decisions or []),
                 },
             )
         )

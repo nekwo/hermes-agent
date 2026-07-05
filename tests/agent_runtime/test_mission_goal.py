@@ -74,6 +74,8 @@ def test_create_mission_goal_accepts_canonical_stage38_request(tmp_path, monkeyp
         proof_expectations=["snapshot projection"],
         requested_blueprint_id="neko_dev_qa_basic",
         blueprint_selection_mode="explicit",
+        graph_owner_persona_id="neko_supervisor",
+        graph_owner_label="Neko Mission Lead",
         repo_scope=["hermes-agent"],
     )
 
@@ -88,6 +90,9 @@ def test_create_mission_goal_accepts_canonical_stage38_request(tmp_path, monkeyp
         "dev",
         "qa",
     ]
+    meta = task.harness_self_heal["mission_goal_create"]
+    assert meta["graph_owner_persona_id"] == "neko_supervisor"
+    assert meta["graph_owner_label"] == "Neko Mission Lead"
 
     duplicate = create_mission_goal(
         title="Stage 38 contract",
@@ -101,11 +106,34 @@ def test_create_mission_goal_accepts_canonical_stage38_request(tmp_path, monkeyp
         proof_expectations=["snapshot projection"],
         requested_blueprint_id="neko_dev_qa_basic",
         blueprint_selection_mode="explicit",
+        graph_owner_persona_id="neko_supervisor",
+        graph_owner_label="Neko Mission Lead",
         repo_scope=["hermes-agent"],
     )
 
     assert duplicate["state"] == "already_created"
     assert duplicate["task_id"] == data["task_id"]
+
+
+def test_create_mission_goal_from_request_binds_graph_owner_to_lead_slot(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    data = create_mission_goal_from_request(
+        _canonical_request(
+            graph={
+                "owner_slot": "lead",
+                "owner_persona_id": "backend_dev",
+                "owner_label": "Backend Dev Agent",
+            }
+        )
+    )
+
+    task = TaskStore().get(data["task_id"])
+    assert task.mission_plan.bindings["lead"] == "backend_dev"
+    assert task.mission_plan.stages[0].owner == "backend_dev"
+    meta = task.harness_self_heal["mission_goal_create"]
+    assert meta["graph_owner_persona_id"] == "backend_dev"
+    assert meta["graph_owner_label"] == "Backend Dev Agent"
 
 
 def test_create_mission_goal_explicit_no_edit_cross_stack_blueprint_uses_recipe_gates(tmp_path, monkeypatch):

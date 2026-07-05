@@ -151,6 +151,41 @@ def test_persona_instance_store_derives_singleton_from_worker_session(isolate_ag
     assert by_id["qa"].id == "personainst_qa"
 
 
+def test_worker_projection_replaces_stale_goal_id_with_assignment_goal(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    assignments = PersonaAssignmentStore()
+    workers = WorkerSessionStore()
+    stale = store.ensure_for_persona(_persona("dev"))
+    stale.mode = "task_bound"
+    stale.current_task_id = "task_stale"
+    stale.goal_id = "task_stale"
+    stale.spawned_by = "personainst_neko_supervisor"
+    stale = store.update(stale)
+    assignment = assignments.create_or_resume(
+        PersonaAssignmentSpec(
+            persona_id="dev",
+            kind="task_stage",
+            title="Implement",
+            message="Run the active task.",
+            task_id="task_live",
+            goal_id="goal_live",
+            stage_id="implement",
+        )
+    )
+    worker = workers.open(
+        task_id="task_live",
+        persona=_persona("dev"),
+        stage_id="implement",
+        assignment_id=assignment.id,
+    )
+
+    updated = store.update_from_worker(worker)
+
+    assert updated.id == stale.id == "personainst_dev"
+    assert updated.current_task_id == "task_live"
+    assert updated.goal_id == "goal_live"
+
+
 def test_persona_instance_derivation_clears_stale_worker_projection(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     workers = WorkerSessionStore()

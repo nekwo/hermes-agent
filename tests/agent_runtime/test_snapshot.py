@@ -1193,6 +1193,97 @@ def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isola
     assert archived["recent_events"][1]["reasoning_summary"] == "Tests are required before QA handoff."
 
 
+def test_snapshot_projects_archived_goal_as_operator_channel(monkeypatch, isolate_agent_runtime_root):
+    import agent_runtime.snapshot as snapshot_mod
+
+    cfg = AgentRuntimeConfig(
+        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
+            enabled=True,
+            worker_session_store=True,
+            persona_instance_runtime=True,
+            persona_assignment_store=True,
+        )
+    )
+    monkeypatch.setattr(snapshot_mod, "load_agent_runtime_config", lambda: cfg)
+    archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
+    (archive / "tasks").mkdir(parents=True)
+    (archive / "runs").mkdir(parents=True)
+    (archive / "persona_assignments").mkdir(parents=True)
+    atomic_json_write(
+        archive / "manifest.json",
+        {"reason": "daemon archived terminal goal", "created_at_utc": "2026-06-01T01:10:00Z"},
+    )
+    atomic_json_write(
+        archive / "tasks" / "task_archived.json",
+        {
+            "id": "task_archived",
+            "goal_id": "goal_archived",
+            "title": "Archived Neko default graph token flow",
+            "description": "Verify the terminal Neko chat still recalls.",
+            "acceptance_criteria": ["Agent Console shows this goal input."],
+            "state": "done",
+            "created_at": "2026-06-01T01:00:00Z",
+            "updated_at": "2026-06-01T01:05:00Z",
+        },
+    )
+    atomic_json_write(
+        archive / "persona_assignments" / "assign_dev.json",
+        {
+            "id": "assign_dev",
+            "persona_id": "dev",
+            "persona_instance_id": "personainst_goal_archived_dev",
+            "task_id": "task_archived",
+            "goal_id": "goal_archived",
+            "stage_id": "implement",
+            "title": "Launcher Implementation",
+            "message": "Implement the scoped work and attach proof.",
+            "state": "completed",
+            "created_at": "2026-06-01T01:01:00Z",
+            "allowed_decisions": ["deliver", "report_blocker"],
+        },
+    )
+    atomic_json_write(
+        archive / "runs" / "run_neko.json",
+        {
+            "id": "run_neko",
+            "persona_id": "neko_supervisor",
+            "task_id": "task_archived",
+            "stage_id": "scope",
+            "state": "completed",
+            "started_at": "2026-06-01T01:00:30Z",
+            "finished_at": "2026-06-01T01:02:00Z",
+            "final_decision": {
+                "type": "scope_route",
+                "summary": "Neko routed the archived goal to Launcher Dev.",
+                "rationale": "The archived operator channel should remain recallable after daemon cleanup.",
+            },
+        },
+    )
+
+    snap = build_snapshot()
+
+    channel = next(
+        item
+        for item in snap["operator_channels"]
+        if item["task_id"] == "task_archived"
+    )
+    conversation = channel["conversation"]
+    assert channel["archived"] is True
+    assert channel["persona_id"] == "neko_supervisor"
+    assert conversation["status"] == "complete"
+    assert conversation["goal_id"] == "goal_archived"
+    assert [message["kind"] for message in conversation["messages"]] == [
+        "goal_input",
+        "handoff",
+        "final",
+    ]
+    transcript = "\n".join(message["display_text"] for message in conversation["messages"])
+    assert "Goal: Archived Neko default graph token flow" in transcript
+    assert "Prompted dev." in transcript
+    assert "Implement the scoped work and attach proof." in transcript
+    assert "archived operator channel should remain recallable" in transcript
+
+
 def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root):
     archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
     (archive / "tasks").mkdir(parents=True)

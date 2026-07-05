@@ -12,7 +12,7 @@ from .default_plan import ensure_default_mission_plan
 from .context_requests import has_unresolved_context_request
 from .decision_schema import AgentDecision, DecisionType
 from .dev_discipline import needs_supervisor_slicing
-from .models import Event, MissionPlanStage, Task
+from .models import Event, MissionPlanStage, Task, TaskStage
 from .mission_plan import (
     current_plan_stage,
     is_mission_lead_actor,
@@ -20,7 +20,7 @@ from .mission_plan import (
 )
 from .packets import record_decision_packets
 from .packets import latest_packet
-from .planning import _all_stages_dev_complete, _all_stages_passed, _advance_to_next_dev_stage, _has_backend_contract_proof, _is_cross_stack_backend_first, _needs_cross_stack_launcher_completion, _stage_mentions_launcher, apply_planning_decision
+from .planning import _all_stages_dev_complete, _all_stages_passed, _advance_to_next_dev_stage, _has_backend_contract_proof, _is_cross_stack_backend_first, _needs_cross_stack_launcher_completion, _needs_sequential_specialist_join, _stage_mentions_launcher, apply_planning_decision
 from .proof_gates import stage_proof_satisfied
 from .reconciler import reconcile_task
 from .recovery_flags import block_recovery_attempted_for_current_signal
@@ -86,7 +86,8 @@ class MissionStateMachine:
 
     def next_action(self, mission: Task) -> HarnessAction:
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
-        ensure_default_mission_plan(mission)
+        if _mission_plan_routing_enabled(mission, self.config):
+            ensure_default_mission_plan(mission)
         _prune_closed_incident_links(mission)
         child_wake = parent_child_event_wake_action(mission, config=self.config)
         if child_wake is not None:
@@ -94,11 +95,12 @@ class MissionStateMachine:
         typed = self._blueprint_next_action(mission, state=state)
         if typed is not None:
             return typed
-        return HarnessAction(HarnessActionType.NOOP, mission.id, reason="no eligible mission action")
+        return _legacy_next_action(mission, state=state, proof_store=self.proof_store)
 
     def next_actions(self, mission: Task) -> list[HarnessAction]:
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
-        ensure_default_mission_plan(mission)
+        if _mission_plan_routing_enabled(mission, self.config):
+            ensure_default_mission_plan(mission)
         _prune_closed_incident_links(mission)
         child_wake = parent_child_event_wake_action(mission, config=self.config)
         if child_wake is not None:
@@ -222,7 +224,8 @@ class MissionStateMachine:
         return HarnessAction(HarnessActionType.RUN_SLOT, mission.id, reason=f"blueprint stage {current.id} needs slot {slot_id}", slot_id=slot_id)
 
     def apply_decision(self, mission: Task, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, stage_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool | None = None) -> StateMachineResult:
-        ensure_default_mission_plan(mission)
+        if _mission_plan_routing_enabled(mission, self.config):
+            ensure_default_mission_plan(mission)
         before = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         blueprint_owned = is_blueprint_plan(getattr(mission, "mission_plan", None))
         has_open_incident = bool(getattr(mission, "open_incident_ids", None))
@@ -238,7 +241,7 @@ class MissionStateMachine:
             and has_open_incident
         )
         if mission_plan_flow is None:
-            mission_plan_flow = True
+            mission_plan_flow = bool(blueprint_owned)
         mission_plan_flow = bool(mission_plan_flow or blueprint_owned)
         apply_planning_decision(mission, decision, actor=actor, task_store=task_store, incident_store=incident_store, proof_store=proof_store, run_id=run_id, normal_worker_flow=normal_worker_flow, mission_plan_flow=mission_plan_flow)
         record_decision_packets(mission, decision, actor=actor, run_id=run_id, stage_id=getattr(mission, "current_stage_id", None))
@@ -305,6 +308,111 @@ def _ready_action_limit(config) -> int:
         return max(1, int(getattr(swarm, "max_active_lanes", 1) or 1))
     except (TypeError, ValueError):
         return 1
+
+
+def _mission_plan_routing_enabled(mission: Task, config) -> bool:
+    if getattr(mission, "mission_plan", None) is not None:
+        return True
+    if getattr(mission, "stages", None):
+        return True
+    mission_plan_config = getattr(config, "mission_plan", None)
+    return bool(getattr(mission_plan_config, "enabled", False))
+
+
+def _legacy_next_action(mission: Task, *, state: TaskState, proof_store=None) -> HarnessAction:
+    if state in {TaskState.DONE, TaskState.CANCELLED}:
+        return HarnessAction(HarnessActionType.NOOP, mission.id, reason="legacy task is terminal")
+    if getattr(mission, "open_incident_ids", None):
+        if block_recovery_attempted_for_current_signal(mission):
+            return HarnessAction(HarnessActionType.NOOP, mission.id, reason="legacy task has open incidents waiting on intervention")
+        return _run_slot(mission, "neko_supervisor", "legacy task has open incidents; Neko must adjudicate")
+    if state == TaskState.CREATED:
+        return _run_slot(mission, "neko_supervisor", "blueprint stage scope needs slot neko_supervisor")
+    if state == TaskState.BLOCKED:
+        if _has_blocked_qa_verdict(mission, proof_store=proof_store):
+            return _run_slot(mission, "dev", "blueprint needs delivery recovery from QA blocked verdict", stage_id=mission.current_stage_id)
+        if _has_resolved_incident_only_qa_block(mission, proof_store=proof_store):
+            return _run_slot(mission, "dev", "blueprint needs delivery recovery from QA blocked verdict")
+        if _latest_handoff_body(mission):
+            return _run_slot(mission, "neko_supervisor", "blueprint intervention needs Neko goal-owner adjudication", stage_id=mission.current_stage_id)
+        if block_recovery_attempted_for_current_signal(mission):
+            return HarnessAction(HarnessActionType.NOOP, mission.id, reason="legacy task blocked waiting on intervention")
+        return _run_slot(mission, "neko_supervisor", "blueprint intervention needs Neko goal-owner adjudication")
+
+    reconciliation = reconcile_task(mission)
+    if reconciliation.needs_supervisor:
+        return _run_slot(mission, "neko_supervisor", f"blueprint needs Neko transition reconciliation: {reconciliation.findings[0].kind}")
+    if needs_pm_triage_before_dev(mission):
+        return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead issue discovery triage")
+    if has_unresolved_context_request(mission) or _has_unsupported_context_requests(mission):
+        return _run_slot(mission, "neko_supervisor", "legacy task needs Neko Mission Lead to resolve context request")
+    if needs_supervisor_slicing(mission):
+        return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to slice broad specialist mission before delivery")
+
+    current = _current_stage(mission)
+    if current is not None:
+        if _current_launcher_stage_waits_for_cross_stack_release(mission, proof_store=proof_store):
+            return _run_slot(mission, "neko_supervisor", "legacy Launcher stage waits for backend join release", stage_id=current.id)
+        if current.status == StageStatus.BLOCKED:
+            if _has_failed_current_stage_test_proof(mission, proof_store=proof_store):
+                return _run_slot(mission, "dev", f"legacy stage {current.id} needs Dev retry after failed proof", stage_id=current.id)
+            return _run_slot(mission, "neko_supervisor", f"legacy stage {current.id} is blocked", stage_id=current.id)
+        if current.status == StageStatus.READY_FOR_QA:
+            mission.current_stage_id = "verify"
+            return _run_slot(mission, "qa", f"blueprint stage {current.id} needs slot qa", stage_id=current.id)
+        if current.status in {StageStatus.READY, StageStatus.DRAFT, StageStatus.REWORK, StageStatus.IMPLEMENTING}:
+            if current.status in {StageStatus.READY, StageStatus.DRAFT, StageStatus.REWORK}:
+                current.status = StageStatus.IMPLEMENTING
+                current.updated_at = now()
+            return _run_slot(mission, _legacy_dev_slot_for_task(mission, current), f"legacy stage {current.id} needs Dev", stage_id=current.id)
+
+    if _has_resolved_qa_output_incident(mission) or (_all_stages_dev_complete(mission) and getattr(mission, "proof_ids", None)):
+        return _run_slot(mission, "qa", "blueprint stage qa_release needs slot qa")
+    if _legacy_backend_first_burn_in(mission):
+        return _run_slot(mission, "dev", "legacy backend-first burn-in needs Backend Dev proof lane")
+    if _needs_sequential_specialist_join(mission) or _needs_cross_stack_launcher_completion(mission, proof_store=proof_store):
+        return _run_slot(mission, "neko_supervisor", "legacy cross-stack handoff needs Neko join")
+    if _all_stages_passed(mission):
+        return HarnessAction(HarnessActionType.COMPLETE_TASK, mission.id, reason="legacy task stages passed")
+    _advance_to_next_dev_stage(mission)
+    next_stage = _current_stage(mission)
+    if next_stage is not None:
+        return _run_slot(mission, _legacy_dev_slot_for_task(mission, next_stage), f"legacy stage {next_stage.id} needs Dev", stage_id=next_stage.id)
+    return _run_slot(mission, "dev", "blueprint stage implement needs slot dev")
+
+
+def _legacy_dev_slot_for_task(mission: Task, stage) -> str:
+    if _stage_mentions_backend(stage):
+        return "backend_dev"
+    if _stage_mentions_launcher(stage):
+        return "dev"
+    repos = " ".join(str(repo).lower() for repo in (getattr(mission, "affected_repos", None) or []))
+    if "backend" in repos or "eterniabackend" in repos or "eternia-backend" in repos:
+        return "dev"
+    return "dev"
+
+
+def _has_unsupported_context_requests(mission: Task) -> bool:
+    requests = getattr(mission, "context_requests", None) or []
+    if not isinstance(requests, list):
+        return False
+    unsupported = 0
+    for item in requests:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        failure = str(item.get("failure_reason") or "").strip().lower()
+        if status == "unsupported" or failure:
+            unsupported += 1
+    return unsupported >= 3
+
+
+def _legacy_backend_first_burn_in(mission: Task) -> bool:
+    flags = {str(flag).strip().lower() for flag in (getattr(mission, "risk_flags", None) or [])}
+    if not {"backend_contract_first", "bounded_complex_burn_in"} <= flags:
+        return False
+    repos = " ".join(str(repo).strip().lower() for repo in (getattr(mission, "affected_repos", None) or []))
+    return "backend" in repos or "eterniabackend" in repos
 
 
 def _blueprint_terminal_action(mission: Task, *, proof_store=None) -> HarnessAction:

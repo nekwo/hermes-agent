@@ -58,6 +58,8 @@ def create_mission_goal(
     requested_blueprint_id: str | None = None,
     blueprint_selection_mode: str = "default",
     blueprint_bindings: dict[str, str] | None = None,
+    graph_owner_persona_id: str | None = None,
+    graph_owner_label: str | None = None,
     repo_scope: list[str] | None = None,
 ) -> dict[str, Any]:
     """Create a real Mission Control goal and (optionally) start the daemon.
@@ -83,6 +85,10 @@ def create_mission_goal(
     if validation_error is not None:
         return validation_error
     idempotency_key = _safe_idempotency_key(idempotency_key)
+    safe_graph_owner = _safe_persona_id(graph_owner_persona_id)
+    effective_blueprint_bindings = dict(blueprint_bindings or {})
+    if safe_graph_owner:
+        effective_blueprint_bindings.setdefault("lead", f"persona:{safe_graph_owner}")
     request_fingerprint = _create_request_fingerprint(
         title=title,
         description=description,
@@ -91,7 +97,8 @@ def create_mission_goal(
         proof_expectations=proof_expectations or [],
         requested_blueprint_id=requested_blueprint_id,
         blueprint_selection_mode=blueprint_selection_mode,
-        blueprint_bindings=blueprint_bindings or {},
+        blueprint_bindings=effective_blueprint_bindings,
+        graph_owner_persona_id=safe_graph_owner,
         repo_scope=repo_scope or [],
     )
     if idempotency_key:
@@ -145,7 +152,7 @@ def create_mission_goal(
         task,
         requested_blueprint_id=requested_blueprint_id,
         selection_mode=blueprint_selection_mode,
-        bindings=blueprint_bindings or {},
+        bindings=effective_blueprint_bindings,
         config=config,
     )
     if plan_error is not None:
@@ -163,6 +170,8 @@ def create_mission_goal(
         "fingerprint": request_fingerprint,
         "requested_blueprint_id": requested_blueprint_id,
         "repo_scope_pinned": list(repo_scope or []),
+        "graph_owner_persona_id": safe_graph_owner,
+        "graph_owner_label": _safe_note(graph_owner_label),
         "created_at": ts,
     }
     task.harness_self_heal["repo_clean_baseline"] = repo_clean_baseline_from_hygiene(hygiene)
@@ -197,11 +206,17 @@ def create_mission_goal_from_request(request: dict[str, Any], *, config: Any | N
 
     goal = request.get("goal") if isinstance(request.get("goal"), dict) else {}
     blueprint = request.get("blueprint") if isinstance(request.get("blueprint"), dict) else {}
+    graph = request.get("graph") if isinstance(request.get("graph"), dict) else {}
     operator = request.get("operator") if isinstance(request.get("operator"), dict) else {}
     source_surface = str(request.get("source_surface") or "")
     permission_error = _authorize_create_request(source_surface=source_surface, operator=operator)
     if permission_error is not None:
         return permission_error
+    bindings = _string_dict(blueprint.get("bindings"))
+    graph_owner = _safe_persona_id(graph.get("owner_persona_id"))
+    if graph_owner:
+        owner_slot = str(graph.get("owner_slot") or "lead").strip() or "lead"
+        bindings.setdefault(owner_slot, f"persona:{graph_owner}")
     return create_mission_goal(
         title=str(goal.get("title") or ""),
         description=str(goal.get("description") or ""),
@@ -215,7 +230,9 @@ def create_mission_goal_from_request(request: dict[str, Any], *, config: Any | N
         proof_expectations=_string_list(goal.get("proof_expectations")),
         requested_blueprint_id=str(blueprint.get("requested_blueprint_id") or ""),
         blueprint_selection_mode=str(blueprint.get("selection_mode") or "default"),
-        blueprint_bindings=_string_dict(blueprint.get("bindings")),
+        blueprint_bindings=bindings,
+        graph_owner_persona_id=graph_owner,
+        graph_owner_label=str(graph.get("owner_label") or ""),
         repo_scope=_string_list(request.get("repo_scope")),
     )
 
@@ -405,6 +422,13 @@ def _safe_idempotency_key(value: str | None) -> str | None:
     if not text:
         return None
     return text if re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", text) else None
+
+
+def _safe_persona_id(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text if re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", text) else None
 
 
 def _safe_note(value: Any) -> str:
