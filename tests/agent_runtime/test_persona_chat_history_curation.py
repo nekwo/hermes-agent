@@ -438,6 +438,80 @@ def test_busy_task_does_not_starve_a_quiet_personas_trace():
     assert len(by_persona["dev"]["entries"]) == 2
 
 
+def test_trace_entry_carries_operator_detail_fields():
+    events = EventLog()
+    ts = now()
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.finished",
+            task_id="task_detail",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={
+                "tool_name": "terminal",
+                "status": "passed",
+                "summary": "Finished tool terminal: passed",
+                "command_full": "flutter test test/features/library/petdex_menu_test.dart",
+                "output": "00:05 +12: All tests passed!",
+                "exit_code": 0,
+                "duration_ms": 5300,
+            },
+        )
+    )
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.finished",
+            task_id="task_detail",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={
+                "tool_name": "patch",
+                "status": "passed",
+                "summary": "Patched 2 files: a.dart, b.dart",
+                "changed_files": ["a.dart", "b.dart"],
+                "changed_paths": ["lib/features/library/a.dart", "lib/features/library/b.dart"],
+            },
+        )
+    )
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.started",
+            task_id="task_detail",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={
+                "tool_name": "read_file",
+                "status": "started",
+                "summary": "Started tool read_file: lib/main.dart",
+                "target_label": "lib/main.dart",
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[_persona_instance("personainst_dev", "dev", "task_detail")],
+        event_log=events,
+    )
+
+    entries = rows[0]["entries"]
+    by_tool = {entry["tool_name"]: entry for entry in entries}
+    terminal = by_tool["terminal"]
+    assert terminal["command"] == "flutter test test/features/library/petdex_menu_test.dart"
+    assert terminal["output"] == "00:05 +12: All tests passed!"
+    assert terminal["exit_code"] == 0
+    assert terminal["duration_ms"] == 5300
+    patch = by_tool["patch"]
+    assert patch["paths"] == [
+        "lib/features/library/a.dart",
+        "lib/features/library/b.dart",
+    ]
+    read = by_tool["read_file"]
+    assert read["target"] == "lib/main.dart"
+
+
 def test_incident_flood_does_not_starve_trace_window():
     # Live failure shape (task_bd98d444, 2026-07-05): the task's newest ~640
     # events were incident/budget rows, so a fetch window that counts raw rows

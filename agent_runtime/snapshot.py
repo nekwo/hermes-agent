@@ -37,7 +37,7 @@ from .persona_assignments import (
     persona_instance_runtime_enabled,
     persona_instance_summary,
 )
-from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
+from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _SECRET_RE, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
@@ -855,10 +855,17 @@ def _archived_event_message(event: dict, *, channel_id: str, index: int) -> dict
 def _archived_conversation_text(value, *, limit: int) -> str | None:
     text = str(value or "").replace("\x00", " ")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [" ".join(line.split()) for line in text.split("\n")]
+    # Mask secret-bearing lines in place instead of dropping the whole message —
+    # archived transcripts stay legible; only the offending line is withheld.
+    lines = [
+        "[redacted line — contained a secret]"
+        if _ARCHIVED_CONVERSATION_SECRET_RE.search(line)
+        else " ".join(line.split())
+        for line in text.split("\n")
+    ]
     normalized = "\n".join(lines).strip()
     normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
-    if not normalized or _ARCHIVED_CONVERSATION_SECRET_RE.search(normalized):
+    if not normalized:
         return None
     return normalized[:limit].rstrip()
 
@@ -3026,25 +3033,24 @@ def _safe_llm(value):
 
 
 def _safe_text(value):
+    """Operator-console text: paths allowed, secret assignments masked in place.
+
+    This used to drop the ENTIRE string when it looked path-ish, which silently
+    nulled dev decision rationales/summaries (any real dev rationale names a
+    file) and starved the conversation projection of thinking/turn detail.
+    Mission Control is an operator surface: repo paths are the content, not a
+    leak. Only secret-shaped assignments are redacted, and in place.
+    """
+
     if not isinstance(value, str):
         return None
     text = " ".join(value.strip().split())
-    if not text or _looks_sensitive_or_pathish(text):
+    if not text:
         return None
+    text = _SECRET_RE.sub("[redacted secret]", text)
     if len(text) > 500:
         return f"{text[:497]}…"
     return text
-
-
-def _looks_sensitive_or_pathish(value: str) -> bool:
-    lowered = value.lower()
-    if any(marker in lowered for marker in ("secret", "token", "password", "api_key", "apikey", "authorization", "bearer", "credential", "cookie", "private_key", "sk-")):
-        return True
-    if ":/" in value or "\\" in value or value.startswith(("/", "~")):
-        return True
-    if re.search(r"(^|\s)([A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", value):
-        return True
-    return False
 
 
 def _incident_summary(incident):

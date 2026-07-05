@@ -855,6 +855,7 @@ def _conversation_tool_call_messages(
                 files=files,
                 stage_id=safe_assignment_text(entry.get("stage_id"), limit=160),
                 task_id=safe_assignment_text(entry.get("task_id"), limit=160),
+                entry=entry,
             )
             message["_started_ts"] = entry.get("ts")
             open_by_key.setdefault(key, []).append(message)
@@ -870,9 +871,10 @@ def _conversation_tool_call_messages(
                 message["display_text"] = summary
             if files:
                 message["tool"]["files"] = files
+            _merge_tool_detail(message["tool"], entry)
             started = _parse_time(message.pop("_started_ts", None))
             finished = _parse_time(entry.get("ts"))
-            if started is not None and finished is not None and finished >= started:
+            if "duration_ms" not in message["tool"] and started is not None and finished is not None and finished >= started:
                 message["tool"]["duration_ms"] = int((finished - started).total_seconds() * 1000)
             continue
         if accountant is not None:
@@ -893,6 +895,7 @@ def _conversation_tool_call_messages(
                 files=files,
                 stage_id=safe_assignment_text(entry.get("stage_id"), limit=160),
                 task_id=safe_assignment_text(entry.get("task_id"), limit=160),
+                entry=entry,
             )
         )
     for message in messages:
@@ -916,6 +919,7 @@ def _tool_call_message(
     files: list[str],
     stage_id: str | None,
     task_id: str | None,
+    entry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     refs: dict[str, Any] = {"source": "persona_chat_trace", "run_id": run_id, "tool_name": tool_name}
     if stage_id:
@@ -925,6 +929,8 @@ def _tool_call_message(
     tool: dict[str, Any] = {"tool_name": tool_name, "status": status}
     if files:
         tool["files"] = files
+    if entry is not None:
+        _merge_tool_detail(tool, entry)
     return {
         "id": f"{channel_id}:tool:{run_id}:{ordinal}",
         "seq": 0,
@@ -940,6 +946,30 @@ def _tool_call_message(
         "refs": refs,
         "tool": tool,
     }
+
+
+# Operator-detail fields carried from a trace entry onto the tool_call payload.
+# The values were already operator-sanitized (secret-scrubbed, bounded) when the
+# trace entry was rendered; this is a straight, newest-wins merge.
+_TOOL_DETAIL_STR_FIELDS = ("command", "target", "detail", "output")
+_TOOL_DETAIL_INT_FIELDS = ("duration_ms", "exit_code")
+
+
+def _merge_tool_detail(tool: dict[str, Any], entry: dict[str, Any]) -> None:
+    for field in _TOOL_DETAIL_STR_FIELDS:
+        value = entry.get(field)
+        if isinstance(value, str) and value.strip():
+            tool[field] = value
+    for field in _TOOL_DETAIL_INT_FIELDS:
+        value = entry.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            tool[field] = value
+    paths = entry.get("paths")
+    if isinstance(paths, list) and paths:
+        tool["paths"] = [str(item) for item in paths if str(item or "").strip()][:12]
+    skill_id = entry.get("skill_id")
+    if isinstance(skill_id, str) and skill_id.strip():
+        tool["skill_id"] = skill_id.strip()
 
 
 def _tool_status_token(value: Any) -> str:
@@ -1015,10 +1045,17 @@ def _conversation_title_for_kind(kind: str) -> str:
 def _safe_conversation_text(value: Any, *, limit: int) -> str | None:
     text = str(value or "").replace("\x00", " ")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [" ".join(line.split()) for line in text.split("\n")]
+    # Mask secret-bearing lines in place instead of dropping the whole message —
+    # a dev rationale that quotes one env assignment must not vanish wholesale.
+    lines = [
+        "[redacted line — contained a secret]"
+        if _SECRET_RE.search(line)
+        else " ".join(line.split())
+        for line in text.split("\n")
+    ]
     normalized = "\n".join(lines).strip()
     normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
-    if not normalized or _SECRET_RE.search(normalized):
+    if not normalized:
         return None
     return normalized[:limit].rstrip()
 

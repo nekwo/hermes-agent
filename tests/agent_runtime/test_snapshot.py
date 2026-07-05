@@ -1341,7 +1341,12 @@ def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(i
     assert roles["qa"]["events"][0]["payload"]["display_title"] == "QA Agent archived"
 
 
-def test_snapshot_drops_unsafe_archived_decision_process_text(isolate_agent_runtime_root):
+def test_snapshot_masks_secret_assignments_but_keeps_pathful_decision_text(isolate_agent_runtime_root):
+    """Decision text is operator-grade: paths survive verbatim; only
+    secret-shaped assignments are masked, in place, without nulling the rest
+    of the rationale (the old behavior dropped the whole text and starved the
+    conversation projection of thinking/turn detail)."""
+
     archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
     (archive / "tasks").mkdir(parents=True)
     (archive / "runs").mkdir(parents=True)
@@ -1356,21 +1361,20 @@ def test_snapshot_drops_unsafe_archived_decision_process_text(isolate_agent_runt
             "state": "completed",
             "final_decision": {
                 "type": "request_test_run",
-                "summary": "C:/Users/beast/private_token.txt",
-                "rationale": "SECRET hidden chain-of-thought must be dropped",
-                "reasoning_summary": "~/private/plan.md",
+                "summary": "Edited docs/scratch/goal_turn_probe.md and reran the proof.",
+                "rationale": "Wrote docs/scratch/goal_turn_probe.md then exported api_key=sk-live-12345 for the check.",
+                "reasoning_summary": "Compared lib/features/mission_control widgets before patching.",
             },
         },
     )
 
     archived = build_snapshot()["archived_tasks"][0]
+    run = archived["runs"][0]
 
-    encoded = repr(archived)
-    assert "C:/Users" not in encoded
-    assert "private_token" not in encoded
-    assert "SECRET" not in encoded
-    assert "~/private" not in encoded
-    assert archived["runs"][0]["decision_summary"] is None
-    assert archived["runs"][0]["decision_rationale"] is None
-    assert archived["runs"][0]["reasoning_summary"] is None
-    assert archived["recent_events"] == []
+    # Paths are content on the operator surface — they must survive.
+    assert run["decision_summary"] == "Edited docs/scratch/goal_turn_probe.md and reran the proof."
+    assert run["reasoning_summary"] == "Compared lib/features/mission_control widgets before patching."
+    # Secret assignments are masked in place; the surrounding rationale stays.
+    assert "docs/scratch/goal_turn_probe.md" in run["decision_rationale"]
+    assert "[redacted secret]" in run["decision_rationale"]
+    assert "sk-live-12345" not in repr(archived)

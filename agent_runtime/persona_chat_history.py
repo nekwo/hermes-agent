@@ -735,6 +735,20 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "files": files,
         "status": status,
         "ts": getattr(event, "ts", None),
+        # Operator-console detail lane (Mission Control only): real command,
+        # tool target, bounded output tail, and full changed paths — the
+        # per-line secret scrub already ran at the progress sink. Key names
+        # mirror what the launcher's trace item parser already reads.
+        "command": _safe_trace_operator_line(
+            payload.get("command_full") or payload.get("command_label"), limit=500
+        ),
+        "target": _safe_trace_operator_line(payload.get("target_label"), limit=300),
+        "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
+        "output": _safe_trace_operator_block(payload.get("output"), limit=1600),
+        "paths": _safe_trace_operator_paths(payload.get("changed_paths")),
+        "duration_ms": _safe_trace_int(payload.get("duration_ms")),
+        "exit_code": _safe_trace_int(payload.get("exit_code")),
+        "skill_id": _safe_trace_text(payload.get("skill_name"), limit=120),
         "assignment_id": _safe_trace_text(payload.get("assignment_id"), limit=160),
         "persona_instance_id": _safe_trace_text(payload.get("persona_instance_id"), limit=160),
         "title": _safe_trace_text(payload.get("title"), limit=240),
@@ -763,6 +777,58 @@ def _safe_trace_text(value: Any, *, limit: int) -> str | None:
     if _SECRET_RE.search(text) or _looks_pathish(text):
         return None
     return text
+
+
+def _safe_trace_operator_line(value: Any, *, limit: int) -> str | None:
+    """Operator-console single line: paths allowed, secrets blocked, bounded."""
+
+    text = " ".join(str(value or "").strip().split())
+    if not text or _SECRET_RE.search(text):
+        return None
+    return f"{text[: limit - 1]}…" if len(text) > limit else text
+
+
+def _safe_trace_operator_block(value: Any, *, limit: int) -> str | None:
+    """Operator-console multi-line block (command output): keeps line structure,
+    redacts secret-bearing lines, tail-bounded."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    lines = [
+        "[redacted line — contained a secret]" if _SECRET_RE.search(line) else line
+        for line in text.split("\n")
+    ]
+    text = "\n".join(lines)
+    if len(text) > limit:
+        text = f"…(earlier output truncated)…\n{text[-limit:]}"
+    return text
+
+
+def _safe_trace_operator_paths(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    paths: list[str] = []
+    for item in value:
+        text = " ".join(str(item or "").strip().split()).replace("\\", "/")
+        if not text or _SECRET_RE.search(text):
+            continue
+        if len(text) > 200:
+            text = f"…{text[-199:]}"
+        if text not in paths:
+            paths.append(text)
+        if len(paths) >= 12:
+            break
+    return paths
+
+
+def _safe_trace_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_trace_file_labels(value: Any) -> list[str]:

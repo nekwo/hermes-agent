@@ -6,6 +6,7 @@ import re
 from hermes_time import now
 
 from .dev_discipline import update_progress_telemetry
+from .errors import EventPayloadTooLarge
 from .events import EventLog
 from .models import Event
 from .child_events import emit_child_progress
@@ -38,7 +39,19 @@ _SAFE_PROGRESS_KEYS = {
     "last_failed_proof_ids", "self_heal_applied", "failed_proof_reused",
     "failed_proof_ignored", "dev_read_search_after_failed_proof", "timing_key",
     "command_label",
+    # Operator-console detail lane (Mission Control only — the Telegram-safe
+    # field stays the path-stripped command_label). These carry real commands,
+    # tool targets, changed paths, and bounded output tails so a goal run reads
+    # as streamed work, not turn overviews. Secrets are scrubbed per-line;
+    # sizes are bounded below to respect the 4KB event payload cap.
+    "command_full", "output", "target_label", "changed_paths", "skill_name",
 }
+
+# Bounds for the operator-detail fields (event payload cap is 4096 bytes).
+_OPERATOR_COMMAND_FULL_MAX = 500
+_OPERATOR_TARGET_MAX = 300
+_OPERATOR_OUTPUT_TAIL_MAX = 1200
+_OPERATOR_PATHS_MAX = 12
 
 _INTERNAL_RUN_PROGRESS_KEYS = {
     "repo_baseline",
@@ -74,7 +87,8 @@ class RunProgressSink:
             persisted = self.run_store.get(self.run_id)
             if persisted.state in {RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED}:
                 return None
-            self.event_log.append(
+            _append_bounded_event(
+                self.event_log,
                 Event(
                     ts=now(),
                     type=event_type,
@@ -82,7 +96,7 @@ class RunProgressSink:
                     run_id=run.id,
                     persona_id=run.persona_id,
                     payload=safe_payload,
-                )
+                ),
             )
             if event_type == "run.progress":
                 emit_child_progress(run=persisted, payload=safe_payload, config=self.config, event_log=self.event_log)
@@ -152,7 +166,8 @@ class ChatProgressSink:
                     self.before_first_trace(safe_payload)
             if self.on_trace is not None:
                 self.on_trace(safe_payload)
-            self.event_log.append(
+            _append_bounded_event(
+                self.event_log,
                 Event(
                     ts=now(),
                     type=event_type,
@@ -161,7 +176,7 @@ class ChatProgressSink:
                     persona_id=self.persona_id,
                     payload=safe_payload,
                     session_id=self.session_id,
-                )
+                ),
             )
         except Exception:
             return None
@@ -177,6 +192,34 @@ class ChatProgressSink:
 
 def _chat_progress_has_signal(payload: dict[str, Any]) -> bool:
     return any(payload.get(key) for key in _CHAT_PROGRESS_SIGNAL_KEYS)
+
+
+def _append_bounded_event(event_log: EventLog, event: Event) -> None:
+    """Append, degrading oversized payloads instead of silently dropping them.
+
+    The operator ``output`` tail is the one variable-size field that can push a
+    payload past the 4KB event cap; a too-large event previously vanished into
+    the sink's bare except. Retry without ``output`` so the tool row itself
+    (command, target, status, files) always survives.
+    """
+
+    try:
+        event_log.append(event)
+    except EventPayloadTooLarge:
+        payload = dict(event.payload or {})
+        payload.pop("output", None)
+        payload["output_truncated"] = True
+        event_log.append(
+            Event(
+                ts=event.ts,
+                type=event.type,
+                task_id=event.task_id,
+                run_id=event.run_id,
+                persona_id=event.persona_id,
+                payload=payload,
+                session_id=event.session_id,
+            )
+        )
 
 
 def _maybe_record_self_test(run, event_type: str, payload: dict[str, Any], *, event_log: EventLog) -> None:
@@ -216,6 +259,31 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
             if labels:
                 safe[key] = labels
             continue
+        if isinstance(value, list) and key == "changed_paths":
+            paths = _safe_operator_path_list(value)
+            if paths:
+                safe[key] = paths
+            continue
+        if isinstance(value, str) and key == "command_full":
+            text = _safe_operator_line(value, limit=_OPERATOR_COMMAND_FULL_MAX)
+            if text:
+                safe[key] = text
+            continue
+        if isinstance(value, str) and key == "target_label":
+            text = _safe_operator_line(value, limit=_OPERATOR_TARGET_MAX)
+            if text:
+                safe[key] = text
+            continue
+        if isinstance(value, str) and key == "output":
+            text = _safe_operator_output_tail(value)
+            if text:
+                safe[key] = text
+            continue
+        if isinstance(value, str) and key == "skill_name":
+            text = " ".join(value.strip().split())
+            if text and not _looks_sensitive(text) and len(text) <= 120:
+                safe[key] = text
+            continue
         if isinstance(value, list) and key == "last_failed_proof_ids":
             labels = _safe_token_labels(value)
             if labels:
@@ -239,6 +307,54 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
                 continue
             safe[key] = text
     return safe
+
+
+def _safe_operator_line(value: str, *, limit: int) -> str | None:
+    """One-line operator-console text: paths allowed, secrets blocked, bounded."""
+
+    text = " ".join(value.strip().split())
+    if not text or _looks_sensitive(text):
+        return None
+    return f"{text[: limit - 1]}…" if len(text) > limit else text
+
+
+def _safe_operator_output_tail(value: str) -> str | None:
+    """Bounded output tail with line structure kept and secret lines redacted.
+
+    The 4KB event payload cap is the hard ceiling; this keeps the newest
+    ~1.2KB, which is the part of a command's output the operator acts on.
+    """
+
+    text = value.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    lines = [
+        "[redacted line — contained a secret]" if _looks_sensitive(line) else line
+        for line in text.split("\n")
+    ]
+    text = "\n".join(lines)
+    if len(text) > _OPERATOR_OUTPUT_TAIL_MAX:
+        text = f"…(earlier output truncated)…\n{text[-_OPERATOR_OUTPUT_TAIL_MAX:]}"
+    return text
+
+
+def _safe_operator_path_list(value: list[Any]) -> list[str]:
+    """Operator-grade changed-path list: RELATIVE paths only, bounded."""
+
+    paths: list[str] = []
+    for item in value:
+        text = " ".join(str(item or "").strip().split()).replace("\\", "/")
+        if not text or _looks_sensitive(text):
+            continue
+        if re.match(r"^([A-Za-z]:/|//|/|~)", text):
+            continue
+        if len(text) > 200:
+            text = f"…{text[-199:]}"
+        if text not in paths:
+            paths.append(text)
+        if len(paths) >= _OPERATOR_PATHS_MAX:
+            break
+    return paths
 
 
 def _safe_file_labels(value: list[Any]) -> list[str]:

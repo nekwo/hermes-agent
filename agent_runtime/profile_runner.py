@@ -708,6 +708,11 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
     command_full = _safe_operator_command(invocation)
     if command_full:
         payload["command_full"] = command_full
+    target_label = _safe_operator_target(invocation)
+    if target_label:
+        payload["target_label"] = target_label
+        if tool_name and not command_label:
+            payload["summary"] = f"Started tool {tool_name}: {target_label}"
     skill_name = _safe_skill_tool_name(tool_name, invocation)
     if skill_name:
         payload["skill_name"] = skill_name
@@ -730,8 +735,13 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
         payload["skill_name"] = skill_name
     dev_work_payload = _dev_work_payload(tool_name, status=status, result=result, invocation=invocation)
     if dev_work_payload:
+        # No target echo for dev-work tools: changed_paths/changed_files ARE
+        # the target, and the raw invocation path may be machine-absolute.
         payload.update(dev_work_payload)
         return payload
+    target_label = _safe_operator_target(invocation)
+    if target_label:
+        payload["target_label"] = target_label
     subject = f"tool {tool_name}" if tool_name else "tool"
     if duration_ms is not None:
         payload["summary"] = f"Finished {subject}: {status} in {duration_ms}ms"
@@ -755,8 +765,14 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
 def _dev_work_payload(tool_name: str | None, *, status: str, result: Any, invocation: Any) -> dict[str, Any] | None:
     normalized_tool = (tool_name or "").lower()
     if normalized_tool in {"patch", "apply_patch"}:
-        labels = _safe_file_labels(_candidate_file_values(result, None))
+        # The tool RESULT often returns no file list; the diff headers in the
+        # INVOCATION are the reliable record of what an edit call touched.
+        candidates = _candidate_file_values(result, None) or _patch_paths_from_invocation(invocation)
+        labels = _safe_file_labels(candidates)
+        operator_paths = _safe_operator_paths(candidates)
         payload: dict[str, Any] = {"phase": "dev_work", "step": "patch"}
+        if operator_paths:
+            payload["changed_paths"] = operator_paths
         if labels:
             joined = ", ".join(labels[:4]) + ("…" if len(labels) > 4 else "")
             payload["changed_files"] = labels
@@ -772,8 +788,12 @@ def _dev_work_payload(tool_name: str | None, *, status: str, result: Any, invoca
             payload["patch_summary"] = "Patch failed"
         return payload
     if normalized_tool in {"write_file", "edit_file", "file.write", "file.edit"}:
-        labels = _safe_file_labels(_candidate_file_values(result, invocation))
+        candidates = _candidate_file_values(result, invocation)
+        labels = _safe_file_labels(candidates)
+        operator_paths = _safe_operator_paths(candidates)
         payload = {"phase": "dev_work", "step": "write_file" if normalized_tool == "write_file" else "code_edit"}
+        if operator_paths:
+            payload["changed_paths"] = operator_paths
         if labels:
             joined = ", ".join(labels[:4]) + ("…" if len(labels) > 4 else "")
             payload["changed_files"] = labels
@@ -944,6 +964,143 @@ def _safe_operator_output(tool_name: str | None, result: Any) -> str | None:
     return text
 
 
+_OPERATOR_TARGET_MAX = 300
+_OPERATOR_TARGET_PATH_KEYS = ("path", "file_path", "target_path", "file", "filename", "directory", "dir")
+_OPERATOR_TARGET_QUERY_KEYS = ("pattern", "query", "glob", "regex", "search", "name")
+# Diff/patch header forms the runner sees in the wild: the OpenAI apply_patch
+# envelope (*** Update|Add|Delete File: path), unified diff (+++ b/path), and
+# git headers (diff --git a/p b/p).
+_PATCH_HEADER_RE = re.compile(
+    r"^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$"
+    r"|^\+\+\+ b/(.+?)\s*$"
+    r"|^diff --git a/\S+ b/(\S+)\s*$",
+    re.MULTILINE,
+)
+
+
+# Bare-word markers for operator path/target scrubbing: stricter than
+# _OPERATOR_SECRET_MARKERS (bare "token", not just " token=") because a path
+# named private_token.dart must never surface, even relative.
+_OPERATOR_PATH_SENSITIVE_MARKERS = (
+    "secret", "token", "password", "passwd", "api_key", "apikey",
+    "authorization", "bearer", "credential", "cookie", "private_key", "sk-",
+)
+_ABSOLUTE_PATHISH_RE = re.compile(r"^([A-Za-z]:/|//|/|~)")
+
+
+def _operator_path_sensitive(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _OPERATOR_PATH_SENSITIVE_MARKERS)
+
+
+def _safe_operator_target(invocation: Any) -> str | None:
+    """Operator-console label for what a read/search/list tool acted on.
+
+    Operator-grade but path-disciplined: repo-relative paths surface verbatim;
+    absolute paths are trimmed to their trailing segments; anything carrying a
+    secret-looking token is dropped. Do NOT route into untrusted surfaces; the
+    Telegram-safe lane stays ``command_label``.
+    """
+
+    if not isinstance(invocation, dict):
+        return None
+
+    def _clean(value: Any) -> str | None:
+        text = " ".join(str(value).strip().split()).replace("\\", "/")
+        if not text or _line_has_secret(text) or _operator_path_sensitive(text):
+            return None
+        if _ABSOLUTE_PATHISH_RE.match(text):
+            segments = [segment for segment in text.split("/") if segment]
+            if len(segments) < 2:
+                return None
+            text = "…/" + "/".join(segments[-3:])
+        return text
+
+    path = next(
+        (
+            cleaned
+            for key in _OPERATOR_TARGET_PATH_KEYS
+            if isinstance(invocation.get(key), str) and invocation.get(key).strip()
+            if (cleaned := _clean(invocation.get(key))) is not None
+        ),
+        None,
+    )
+    query = next(
+        (
+            cleaned
+            for key in _OPERATOR_TARGET_QUERY_KEYS
+            if isinstance(invocation.get(key), str) and invocation.get(key).strip()
+            if (cleaned := _clean(invocation.get(key))) is not None
+        ),
+        None,
+    )
+    if query and path:
+        label = f"{query} in {path}"
+    else:
+        label = query or path
+    if not label:
+        return None
+    return f"{label[: _OPERATOR_TARGET_MAX - 1]}…" if len(label) > _OPERATOR_TARGET_MAX else label
+
+
+def _patch_paths_from_invocation(invocation: Any) -> list[str]:
+    """Changed-file paths recovered from the patch text itself.
+
+    The patch tool's RESULT frequently returns no file list ("changed-file
+    list unavailable"), but the file paths are right there in the diff headers
+    of the INVOCATION. Parsing them makes edit calls legible to the operator.
+    """
+
+    if not isinstance(invocation, dict):
+        return []
+    text = next(
+        (
+            invocation.get(key)
+            for key in ("patch", "diff", "patch_text", "input", "content")
+            if isinstance(invocation.get(key), str) and invocation.get(key).strip()
+        ),
+        None,
+    )
+    if not text:
+        return []
+    paths: list[str] = []
+    for match in _PATCH_HEADER_RE.finditer(text):
+        raw = next((group for group in match.groups() if group), None)
+        if not raw:
+            continue
+        cleaned = raw.strip().replace("\\", "/")
+        if not cleaned or cleaned == "/dev/null" or _line_has_secret(cleaned):
+            continue
+        if cleaned not in paths:
+            paths.append(cleaned)
+        if len(paths) >= 20:
+            break
+    return paths
+
+
+def _safe_operator_paths(values: list[Any]) -> list[str]:
+    """Operator-grade changed-path list: RELATIVE paths only, bounded.
+
+    Absolute paths never surface (machine-identifying); their basenames still
+    reach the operator through ``changed_files``. Secret-looking names drop.
+    """
+
+    paths: list[str] = []
+    for item in values:
+        text = " ".join(str(item or "").strip().split()).replace("\\", "/")
+        if not text or _line_has_secret(text) or _operator_path_sensitive(text):
+            continue
+        if _ABSOLUTE_PATHISH_RE.match(text):
+            continue
+        if len(text) > 200:
+            text = f"…{text[-199:]}"
+        if text not in paths:
+            paths.append(text)
+        if len(paths) >= 12:
+            break
+    return paths
+
+
 def _safe_tool_result_detail(tool_name: str | None, result: Any) -> str | None:
     if not isinstance(result, dict):
         return None
@@ -1017,18 +1174,30 @@ def _safe_label(value: Any) -> str | None:
 
 
 def _safe_reasoning_summary(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
-    candidates = [
+    """Reasoning text from a thinking callback, operator-grade.
+
+    Two positional shapes reach this: the subagent relay
+    ``("_thinking", first_line)`` and the structured emission
+    ``("reasoning.available", "_thinking", text, None)`` — ``"_thinking"`` is
+    the channel placeholder in both, never content. Paths are allowed
+    (operator console); secret-bearing lines are masked in place.
+    """
+
+    candidates: list[Any] = [
         kwargs.get("reasoning_summary"),
         kwargs.get("summary"),
         kwargs.get("reasoning"),
     ]
-    if len(args) > 1:
-        candidates.append(args[1])
+    candidates.extend(arg for arg in args[1:4] if arg != "_thinking")
     for value in candidates:
         if not isinstance(value, str):
             continue
-        text = " ".join(value.strip().split())
-        if not text or _looks_sensitive_or_pathish(text):
+        masked = " ".join(
+            "[redacted line — contained a secret]" if _line_has_secret(line) else line
+            for line in value.strip().splitlines()
+        )
+        text = " ".join(masked.split())
+        if not text:
             continue
         if len(text) > 500:
             text = f"{text[:497]}…"

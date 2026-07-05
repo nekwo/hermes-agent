@@ -500,6 +500,73 @@ def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
     assert not any(warning["code"] == "trace_empty" for warning in channel["warnings"])
 
 
+def test_tool_call_messages_carry_operator_detail():
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[
+            {
+                "session_id": "20260705_dev_session",
+                "persona_id": "dev",
+                "persona_instance_id": "personainst_dev",
+                "task_id": "task_goal",
+                "entries": [
+                    {
+                        "event": "tool_started",
+                        "tool_name": "terminal",
+                        "summary": "Started tool terminal: flutter test",
+                        "status": "started",
+                        "run_id": "run_a",
+                        "command": "flutter test test/features/library/petdex_menu_test.dart",
+                        "ts": "2026-07-05T05:48:03Z",
+                    },
+                    {
+                        "event": "tool_finished",
+                        "tool_name": "terminal",
+                        "summary": "Finished tool terminal: passed",
+                        "status": "passed",
+                        "run_id": "run_a",
+                        "output": "00:05 +12: All tests passed!",
+                        "exit_code": 0,
+                        "duration_ms": 5300,
+                        "ts": "2026-07-05T05:48:09Z",
+                    },
+                    {
+                        "event": "tool_finished",
+                        "tool_name": "patch",
+                        "summary": "Patched 2 files: a.dart, b.dart",
+                        "status": "passed",
+                        "run_id": "run_a",
+                        "paths": ["lib/features/library/a.dart", "lib/features/library/b.dart"],
+                        "files": ["a.dart", "b.dart"],
+                        "ts": "2026-07-05T05:49:00Z",
+                    },
+                ],
+            }
+        ],
+        tasks=[_goal_task(ts)],
+        run_summaries=[],
+    )
+
+    tool_calls = [
+        message
+        for message in channels[0]["conversation"]["messages"]
+        if message["kind"] == "tool_call"
+    ]
+    terminal = next(m for m in tool_calls if m["tool"]["tool_name"] == "terminal")
+    assert terminal["tool"]["command"] == "flutter test test/features/library/petdex_menu_test.dart"
+    assert terminal["tool"]["output"] == "00:05 +12: All tests passed!"
+    assert terminal["tool"]["exit_code"] == 0
+    # Entry-reported duration wins over the ts delta.
+    assert terminal["tool"]["duration_ms"] == 5300
+    patch = next(m for m in tool_calls if m["tool"]["tool_name"] == "patch")
+    assert patch["tool"]["paths"] == [
+        "lib/features/library/a.dart",
+        "lib/features/library/b.dart",
+    ]
+
+
 def test_trace_empty_warning_suppressed_when_flow_messages_exist_without_trace():
     ts = now()
     channels = operator_channel_summary(
