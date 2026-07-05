@@ -80,6 +80,41 @@ def test_default_plan_skips_backend_branch_for_launcher_only_scope():
     assert stages["implement"].status != StageStatus.PASSED
 
 
+def test_launcher_only_default_scope_pass_releases_launcher_without_resurrecting_backend():
+    from agent_runtime.blueprints.routing import apply_stage_outcome
+    from agent_runtime.blueprints.schema import StageOutcome
+
+    task = make_task(
+        title="Launcher-only trust probe",
+        description="Write the Launcher-side proof note only.",
+        affected_repos=["EterniaLauncher"],
+    )
+    plan = ensure_default_mission_plan(task)
+
+    target = apply_stage_outcome(task, "scope", StageOutcome.READY, reason="scope accepted")
+
+    stages = {stage.id: stage for stage in plan.stages}
+    assert target == "implement"
+    assert task.current_stage_id == "implement"
+    assert stages["backend_implementation"].status == StageStatus.PASSED
+    assert stages["implement"].status == StageStatus.IMPLEMENTING
+
+
+def test_launcher_only_default_plan_does_not_create_backend_repo_bundle():
+    from agent_runtime.repo_bundles import desired_bundles_for_task
+
+    task = make_task(
+        title="Launcher-only trust probe",
+        description="Write the Launcher-side proof note only.",
+        affected_repos=["EterniaLauncher"],
+    )
+    ensure_default_mission_plan(task)
+
+    bundles = desired_bundles_for_task(task)
+
+    assert [bundle.repo for bundle in bundles] == ["EterniaLauncher"]
+
+
 def test_default_plan_adds_qa_stage_when_goal_requires_qa_approval():
     task = make_task(
         title="Launcher trust probe with QA",
@@ -406,6 +441,47 @@ def test_exact_proof_goal_projects_exact_stage_defaults_not_mission_control_flut
     stage = task.stages[0]
     assert stage.affected_paths == ["docs/scratch/e2e_trust_probe.md"]
     assert stage.test_plan == ["echo e2e-trust-probe"]
+
+
+def test_exact_proof_projection_reads_locked_mission_intent_after_description_rewrite():
+    task = make_task(
+        title="Mission Control Harness exact proof trust probe",
+        description="Create the concise Launcher trust-probe artifact.",
+        acceptance_criteria=["Launcher Dev attaches focused evidence and QA reviews it."],
+        affected_repos=["EterniaLauncher"],
+    )
+    task.mission_plan = MissionPlan(
+        enabled=True,
+        mission_intent=MissionIntent(
+            title="Mission Control Harness exact proof trust probe",
+            objective=(
+                "Write docs/scratch/e2e_trust_probe_qa.md. "
+                "The final Harness-owned command proof must run exactly: echo e2e-trust-probe-qa. "
+                "Do not run Flutter analyze/tests."
+            ),
+            acceptance_criteria=[],
+            source_task_id=task.id,
+        ),
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Launcher Implementation",
+                objective="Implement the Launcher trust probe.",
+                owner="dev",
+                owner_slot="dev",
+                repo="EterniaLauncher",
+                kind="implementation",
+                requires_product_edit=True,
+            )
+        ],
+    )
+
+    ensure_mission_plan(task, {}, actor="neko_supervisor")
+
+    stage = task.stages[0]
+    assert stage.affected_paths == ["docs/scratch/e2e_trust_probe_qa.md"]
+    assert stage.test_plan == ["echo e2e-trust-probe-qa"]
 
 
 def test_launcher_post_media_plan_projects_focused_worker_hud_defaults():

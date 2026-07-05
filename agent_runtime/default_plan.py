@@ -127,6 +127,7 @@ def _specialize_default_implementation_stage(task: Task, plan: MissionPlan) -> N
         stage = next((item for item in plan.stages if item.id == "backend_implementation"), None)
         if stage is not None:
             _mark_default_stage_out_of_scope(stage, "Task affected_repos is EterniaLauncher only; Backend Dev is out of scope.")
+            _retarget_default_edge(plan, source="scope", outcome="ready", old_target="backend_implementation", new_target="implement")
     elif repo == "EterniaBackend":
         stage = next((item for item in plan.stages if item.id == "implement"), None)
         if stage is not None:
@@ -165,6 +166,16 @@ def _mark_default_stage_out_of_scope(stage: MissionPlanStage, reason: str) -> No
     stage.affected_paths = []
     if reason not in stage.audit_notes:
         stage.audit_notes.append(reason)
+
+
+def _retarget_default_edge(plan: MissionPlan, *, source: str, outcome: str, old_target: str, new_target: str) -> None:
+    for edge in plan.edges:
+        if (
+            str(edge.get("source") or "") == source
+            and str(edge.get("outcome") or "") == outcome
+            and str(edge.get("target") or "") == old_target
+        ):
+            edge["target"] = new_target
 
 
 def _ensure_default_qa_stage_when_required(task: Task, plan: MissionPlan) -> None:

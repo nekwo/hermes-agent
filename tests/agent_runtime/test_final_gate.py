@@ -1,7 +1,7 @@
 from hermes_time import now
 
 from agent_runtime.final_gate import final_gate_commands
-from agent_runtime.models import Task, TaskStage
+from agent_runtime.models import MissionIntent, MissionPlan, Task, TaskStage
 from agent_runtime.states import StageStatus, TaskState
 
 
@@ -115,6 +115,30 @@ def test_goal_named_exact_proof_parses_prose_without_backticks():
     assert goal_named_proof_commands(task) == ["echo e2e-trust-probe"]
     commands = final_gate_commands(task, stage)
     assert commands == ["echo e2e-trust-probe"]
+
+
+def test_goal_named_exact_proof_reads_locked_mission_intent():
+    from agent_runtime.final_gate import goal_named_proof_commands
+
+    task = _goal_task(
+        "Create the concise Launcher trust-probe document artifact.",
+        repos=["EterniaLauncher"],
+    )
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(
+            title="Launcher exact proof QA trust probe",
+            objective=(
+                "Write docs/scratch/e2e_trust_probe_qa.md. "
+                "The final Harness-owned command proof must run exactly: echo e2e-trust-probe-qa. "
+                "Do not run Flutter analyze/tests."
+            ),
+        )
+    )
+    stage = _edit_stage(test_plan=["flutter analyze lib/features/mission_control", "flutter test test/features/mission_control"])
+
+    assert goal_named_proof_commands(task) == ["echo e2e-trust-probe-qa"]
+    commands = final_gate_commands(task, stage)
+    assert commands == ["echo e2e-trust-probe-qa"]
 
 
 def test_handoff_packet_exact_proof_outranks_stage_test_plan():

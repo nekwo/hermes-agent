@@ -332,6 +332,8 @@ def _bundles_from_mission_plan(task: Task, stages: list[MissionPlanStage]) -> li
         owner = safe_token(getattr(stage, "owner", None))
         if owner not in REPO_BUNDLE_OWNER_PERSONAS:
             continue
+        if _stage_is_out_of_scope_noop(stage):
+            continue
         repo = safe_text(getattr(stage, "repo", None) or _fallback_repo_for_stage(task, stage), limit=160)
         if not repo:
             continue
@@ -384,6 +386,24 @@ def _bundles_from_mission_plan(task: Task, stages: list[MissionPlanStage]) -> li
         if bundle.id not in by_id:
             continue
     return sorted(bundles, key=lambda item: (item.repo.lower(), item.id))
+
+
+def _stage_is_out_of_scope_noop(stage: MissionPlanStage) -> bool:
+    if getattr(stage, "status", None) != "passed" and getattr(getattr(stage, "status", None), "value", None) != "passed":
+        return False
+    notes = " ".join(str(item) for item in (getattr(stage, "audit_notes", None) or [])).lower()
+    if "out of scope" not in notes:
+        return False
+    gate = getattr(stage, "proof_gate", None) or {}
+    return not (
+        gate.get("required")
+        or gate.get("required_proof_types")
+        or gate.get("proof_recipe_id")
+        or gate.get("commands")
+        or getattr(stage, "proof_recipe_id", None)
+        or getattr(stage, "requires_product_edit", False)
+        or getattr(stage, "requires_visual_proof", False)
+    )
 
 
 def merge_desired_bundle(existing: RepoBundle, desired: RepoBundle) -> RepoBundle:

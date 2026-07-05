@@ -840,7 +840,9 @@ def _apply_acceptance(task: Task, payload: dict[str, Any]) -> None:
     task.acceptance_criteria = list(payload.get("acceptance_criteria", []))
     task.non_goals = list(payload.get("non_goals", []))
     affected_repos = _canonical_affected_repos(payload.get("affected_repos", []) or [])
-    task.affected_repos = affected_repos or _affected_repos_from_handoff(payload)
+    fallback_repos = _affected_repos_from_handoff(payload) or _canonical_affected_repos(_pinned_repo_scope(task))
+    if affected_repos or fallback_repos:
+        task.affected_repos = affected_repos or fallback_repos
     task.suggested_roles = list(payload.get("suggested_roles", []))
     task.requires_visual_proof = bool(payload.get("requires_visual_proof", task.requires_visual_proof))
     task.risk_flags = list(payload.get("risk_flags", []))
@@ -955,7 +957,7 @@ def _validate_affected_repo_scope(task: Task, decision: AgentDecision, *, actor:
     pinned = _pinned_repo_scope(task)
     mentions = list(explicit_repo_mentions(f"{task.title or ''} {task.description or ''}"))
     conflicts: list[str] = []
-    if pinned and not (set(canonical) & set(pinned)):
+    if pinned and set(canonical) != set(pinned):
         conflicts.append(f"operator pinned repo scope {pinned}")
     if mentions and not (set(canonical) & set(mentions)):
         conflicts.append(f"goal title/description literally names {mentions}")

@@ -224,12 +224,21 @@ def goal_named_proof_commands(task: Task) -> list[str]:
     text are rejected outright.
     """
 
+    intent = getattr(getattr(task, "mission_plan", None), "mission_intent", None)
     texts = [
         str(getattr(task, "title", "") or ""),
         str(getattr(task, "description", "") or ""),
         *[str(item) for item in (getattr(task, "acceptance_criteria", []) or [])],
         *[str(item) for item in (getattr(task, "operator_notes", []) or [])],
     ]
+    if intent is not None:
+        texts.extend(
+            [
+                str(getattr(intent, "title", "") or ""),
+                str(getattr(intent, "objective", "") or ""),
+                *[str(item) for item in (getattr(intent, "acceptance_criteria", []) or [])],
+            ]
+        )
     found: list[str] = []
     for text in texts:
         for command in _extract_command_candidates(text):
@@ -239,6 +248,7 @@ def goal_named_proof_commands(task: Task) -> list[str]:
 
 
 def goal_demands_exact_proof(task: Task) -> bool:
+    intent = getattr(getattr(task, "mission_plan", None), "mission_intent", None)
     text = " ".join(
         [
             str(getattr(task, "title", "") or ""),
@@ -246,6 +256,10 @@ def goal_demands_exact_proof(task: Task) -> bool:
             *[str(item) for item in (getattr(task, "acceptance_criteria", []) or [])],
             *[str(item) for item in (getattr(task, "non_goals", []) or [])],
             *[str(item) for item in (getattr(task, "operator_notes", []) or [])],
+            str(getattr(intent, "title", "") or "") if intent is not None else "",
+            str(getattr(intent, "objective", "") or "") if intent is not None else "",
+            *([str(item) for item in (getattr(intent, "acceptance_criteria", []) or [])] if intent is not None else []),
+            *([str(item) for item in (getattr(intent, "non_goals", []) or [])] if intent is not None else []),
         ]
     ).lower()
     exact_markers = (
