@@ -190,8 +190,8 @@ def test_scope_route_projection_carries_override_reason():
         },
     )
     projected = _internal_execution_decision(t, decision)
-    assert projected.type == DecisionType.PROPOSE_ACCEPTANCE
-    assert projected.payload["affected_repos"] == ["EterniaLauncher"]
+    assert projected.type == DecisionType.SCOPE_ROUTE
+    assert projected.payload["target_repo"] == "EterniaLauncher"
     assert projected.payload["scope_override_reason"] == "goal text is stale"
 
 

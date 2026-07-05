@@ -70,10 +70,12 @@ def triage_decision(**overrides):
     )
 
 
-def test_dev_and_qa_can_report_discovery_but_pm_cannot():
+def test_legacy_discovery_is_archive_only_for_live_roles():
     decision = discovery_decision()
-    validate_decision_for_role(decision, "dev")
-    validate_decision_for_role(decision, "qa")
+    with pytest.raises(DecisionPayloadInvalid):
+        validate_decision_for_role(decision, "dev")
+    with pytest.raises(DecisionPayloadInvalid):
+        validate_decision_for_role(decision, "qa")
     with pytest.raises(DecisionPayloadInvalid):
         validate_decision_for_role(decision, "pm")
 

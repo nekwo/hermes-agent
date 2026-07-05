@@ -104,7 +104,7 @@ def test_command_proof_runner_attaches_redacted_test_run_proof(tmp_path):
     assert event.payload["exit_code"] == 0
     assert event.payload["duration_ms"] >= 0
     assert event.payload["proof_id"] == proof.id
-    assert event.payload["next_expected"] == "request_qa_review"
+    assert event.payload["next_expected"] == "hand_off"
     assert "Command proof passed" in event.payload["summary"]
 
 
@@ -206,7 +206,7 @@ def test_proof_store_attach_sanitizes_metadata_promoted_to_event():
     assert event.persona_id == "dev"
     assert event.payload["status"] == "passed"
     assert event.payload["severity"] == "info"
-    assert event.payload["next_expected"] == "request_qa_review"
+    assert event.payload["next_expected"] == "hand_off"
     assert event.payload["exit_code"] == -9
     assert "duration_ms" not in event.payload
     assert "C:/Users" not in str(event)

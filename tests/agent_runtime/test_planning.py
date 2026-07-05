@@ -1018,7 +1018,7 @@ def test_propose_patch_rejects_failed_command_proof_when_store_available():
         payload={"proof_ids": ["failed_test"]},
     )
 
-    with pytest.raises(DecisionPayloadInvalid, match="propose_patch requires passing command proof_ids"):
+    with pytest.raises(DecisionPayloadInvalid, match="hand_off requires passing command proof_ids"):
         apply_planning_decision(t, decision, actor="dev", proof_store=store)
 
     assert t.state == TaskState.RUNNING

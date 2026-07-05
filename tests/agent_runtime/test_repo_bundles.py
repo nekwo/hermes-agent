@@ -96,13 +96,13 @@ def _bundle_config() -> AgentRuntimeConfig:
 class CompleteDevRuntime:
     def run_tick(self, persona, ctx, *, run):
         return AgentDecision(
-            type=DecisionType.REQUEST_QA_REVIEW,
+            type=DecisionType.HAND_OFF,
             summary="Delivered repo bundle.",
             rationale="The fake runtime completed the assigned repo bundle.",
             payload={
                 "stage_id": "backend_contract",
-                "proof_ids": ["proof_backend"],
-                "handoff": {"to": "qa", "stage_complete": True, "summary": "Backend bundle ready."},
+                "summary": "Backend bundle ready.",
+                "known_gaps": ["Launcher implementation remains queued on this backend contract proof."],
             },
         )
 
@@ -120,13 +120,24 @@ class RequestTestRunRuntime:
 class ApproveQaRuntime:
     def run_tick(self, persona, ctx, *, run):
         return AgentDecision(
-            type=DecisionType.REPORT_QA_VERDICT,
+            type=DecisionType.QA_VERDICT,
             summary="Approve focused proof.",
             rationale="The proof ID covers the requested bundle.",
             payload={
-                "review_scope": "implementation",
                 "verdict": "approved",
-                "proof_ids": ["proof_requested_ok"],
+                "coverage": {
+                    "backend_contract": "reviewed",
+                    "launcher_integration": "reviewed",
+                    "visual_or_mcp": "reviewed",
+                    "cross_stack_join": "reviewed",
+                },
+                "proof_ids": [
+                    "proof_requested_ok",
+                    "proof_launcher",
+                    "proof_backend_docker_postgres",
+                    "proof_staging_k8",
+                    "proof_prod_rollout",
+                ],
                 "findings": [],
             },
         )
@@ -472,11 +483,25 @@ def test_qa_review_does_not_regress_delivered_bundle_to_running(isolate_agent_ru
     )
     assert dev_result.ok is True
     bundle_store = RepoBundleStore()
-    for bundle in bundle_store.list_for_task(task.id):
-        if bundle.repo != "EterniaBackend":
-            bundle_store.mark_delivered(bundle, proof_ids=["proof_launcher"])
     task = task_store.get(task.id)
     local_proof = proof_store.get("proof_requested_ok")
+    for bundle in bundle_store.list_for_task(task.id):
+        if bundle.repo != "EterniaBackend":
+            proof_store.attach(
+                Proof(
+                    id="proof_launcher",
+                    task_id=task.id,
+                    stage_id="launcher_impl",
+                    type=ProofType.SCREENSHOT,
+                    title="Launcher visual proof",
+                    path_or_value="launcher.png",
+                    created_by="harness",
+                    created_at=local_proof.created_at + timedelta(seconds=15),
+                    metadata={"status": "passed"},
+                    redaction_status="safe",
+                )
+            )
+            bundle_store.mark_delivered(bundle, proof_ids=["proof_launcher"])
     _attach_product_promotion_proofs(task, proof_store, after=local_proof.created_at)
     task.current_stage_id = "qa_release"
     task.mission_plan.current_stage_id = "qa_release"

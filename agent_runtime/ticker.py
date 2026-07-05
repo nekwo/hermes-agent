@@ -1159,7 +1159,7 @@ class TickEngine:
                             handoff_packet=handoff_packet,
                         )
                         if final_gate_decision is not None and final_gate_decision.type == DecisionType.REQUEST_TEST_RUN:
-                            normalize_request_test_run_decision(task, final_gate_decision)
+                            normalize_request_test_run_decision(before_task, final_gate_decision)
                         if final_gate_decision is not None:
                             if worker_store is not None and worker is not None:
                                 worker_store.update_after_run(worker.id, self.run_store.get(run.id), close_reason="auto_final_gate_after_delivery", count_decision=False)
@@ -3599,7 +3599,16 @@ def _workdir_label_conflicts_intent(label: str, intent: str) -> bool:
 def _proof_command_stage_mismatch_labels(task: Task, proofs: list, *, stage_id: str) -> list[str]:
     incomplete_product_stage = first_incomplete_product_edit_stage(task, excluding_stage_id=stage_id)
     current_stage = _stage_for_command_proof(task, stage_id)
-    if incomplete_product_stage is not None or (current_stage is not None and stage_requires_product_edit(task, current_stage)):
+    current_stage_id = str(getattr(current_stage, "id", "") or "").strip()
+    downstream_depends_on_current = bool(
+        current_stage_id
+        and incomplete_product_stage is not None
+        and current_stage_id in [str(item).strip() for item in (getattr(incomplete_product_stage, "depends_on", None) or [])]
+    )
+    if (
+        (current_stage is not None and stage_requires_product_edit(task, current_stage))
+        or (incomplete_product_stage is not None and not downstream_depends_on_current)
+    ):
         mismatches = []
         for proof in proofs:
             if _proof_is_no_product_edit_smoke(proof):

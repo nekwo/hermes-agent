@@ -732,9 +732,9 @@ def test_harness_qa_skill_documents_exact_packet_keys():
 
     text = Path("docs/agent-runtime-harness/harness-skills/harness-qa-verdict/SKILL.md").read_text(encoding="utf-8")
 
-    assert "Allowed `qa_review` keys only" in text
+    assert "Allowed `qa_verdict` payload keys only" in text
     assert "Do not add `notes`" in text
-    assert '"type": "report_qa_verdict"' in text
+    assert '"type": "qa_verdict"' in text
 
 
 def test_visual_proof_requests_require_safe_launch_pins():

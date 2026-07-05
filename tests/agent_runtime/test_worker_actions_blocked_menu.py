@@ -67,7 +67,7 @@ def test_blocked_without_open_incident_offers_rescope_not_resolve_incident():
     shape_ids = [action.shape_id for action in actions]
     assert "neko.resolve_incident" not in shape_ids
     primary = next(action for action in actions if action.primary)
-    assert primary.shape_id == "neko.scoped_handoff"
+    assert primary.shape_id == "neko.scope_route"
 
 
 def test_running_default_graph_neko_menu_does_not_offer_qa_release():
@@ -77,7 +77,7 @@ def test_running_default_graph_neko_menu_does_not_offer_qa_release():
     actions = worker_actions_for_role("neko_supervisor", task, make_neko_run(), config=normal_flow_config())
 
     primary = next(action for action in actions if action.primary)
-    assert primary.shape_id == "neko.scoped_handoff"
+    assert primary.shape_id == "neko.scope_route"
     assert primary.label == "Release Stage"
 
 
@@ -95,4 +95,4 @@ def test_running_graph_with_qa_stage_neko_menu_can_offer_qa_release():
     actions = worker_actions_for_role("neko_supervisor", task, make_neko_run(), config=normal_flow_config())
 
     primary = next(action for action in actions if action.primary)
-    assert primary.shape_id == "neko.qa_coordination_release"
+    assert primary.shape_id == "neko.scope_route"
