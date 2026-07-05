@@ -34,6 +34,21 @@ LEGACY_SIGNAL_ALIASES = {
 }
 
 
+def public_decision_type(decision_type: DecisionType | str | None) -> DecisionType | None:
+    if decision_type is None:
+        return None
+    try:
+        resolved = decision_type if isinstance(decision_type, DecisionType) else DecisionType(str(decision_type))
+    except Exception:
+        return None
+    return LEGACY_SIGNAL_ALIASES.get(resolved, resolved)
+
+
+def public_decision_type_value(decision_type: DecisionType | str | None) -> str | None:
+    resolved = public_decision_type(decision_type)
+    return resolved.value if resolved is not None else None
+
+
 @dataclass(frozen=True, slots=True)
 class DecisionProjection:
     public_decision: AgentDecision
@@ -43,6 +58,7 @@ class DecisionProjection:
     mode: str
     shimmed: bool = False
     blocked_reason: str | None = None
+    source_type: DecisionType | None = None
 
 
 def simplified_contract_enabled(config: RuntimeConfig | None) -> bool:
@@ -77,6 +93,7 @@ def project_decision_for_execution(task: Task, decision: AgentDecision, *, confi
             public_type=decision.type,
             execution_type=decision.type,
             mode="legacy",
+            source_type=decision.type,
         )
         _record_parity(task, projection, actor=actor, run_id=run_id, event_log=event_log)
         return projection
@@ -90,6 +107,7 @@ def project_decision_for_execution(task: Task, decision: AgentDecision, *, confi
             execution_type=decision.type,
             mode="simplified_rejected",
             blocked_reason=f"decision {decision.type.value} is not in the collapsed signal set",
+            source_type=decision.type,
         )
         _record_parity(task, projection, actor=actor, run_id=run_id, event_log=event_log)
         return projection
@@ -101,16 +119,20 @@ def project_decision_for_execution(task: Task, decision: AgentDecision, *, confi
             execution_type=decision.type,
             mode="simplified_legacy_rejected",
             blocked_reason=f"legacy decision {decision.type.value} is disabled by simplified_agent_contract.allow_legacy_decision_aliases=false",
+            source_type=decision.type,
         )
         _record_parity(task, projection, actor=actor, run_id=run_id, event_log=event_log)
         return projection
 
+    public_decision = decision
     execution = decision
     mode = "simplified"
     shimmed = False
     if decision.type in LEGACY_SIGNAL_ALIASES:
         mode = "simplified_legacy_alias"
         shimmed = True
+        public_decision = _public_decision_from_legacy_alias(task, decision, public_type)
+        execution = public_decision
     elif keep_internal_state_machine(config):
         execution = _internal_execution_decision(task, decision)
         if execution.type != decision.type:
@@ -118,12 +140,13 @@ def project_decision_for_execution(task: Task, decision: AgentDecision, *, confi
             shimmed = True
 
     projection = DecisionProjection(
-        public_decision=decision,
+        public_decision=public_decision,
         execution_decision=execution,
         public_type=public_type,
         execution_type=execution.type,
         mode=mode,
         shimmed=shimmed,
+        source_type=decision.type,
     )
     _record_parity(task, projection, actor=actor, run_id=run_id, event_log=event_log)
     return projection
@@ -131,99 +154,188 @@ def project_decision_for_execution(task: Task, decision: AgentDecision, *, confi
 
 def _internal_execution_decision(task: Task, decision: AgentDecision) -> AgentDecision:
     if decision.type == DecisionType.HAND_OFF:
-        payload = dict(decision.payload or {})
-        payload.setdefault("stage_id", getattr(task, "current_stage_id", None))
+        return decision
+    if decision.type == DecisionType.SCOPE_ROUTE:
+        return decision
+    if decision.type == DecisionType.QA_VERDICT:
+        return decision
+    if decision.type == DecisionType.ESCALATE:
+        return decision
+    return decision
+
+
+def _public_decision_from_legacy_alias(task: Task, decision: AgentDecision, public_type: DecisionType) -> AgentDecision:
+    payload = dict(decision.payload or {})
+    if public_type == DecisionType.HAND_OFF:
         return AgentDecision(
-            type=DecisionType.PROPOSE_PATCH,
-            summary=decision.summary or "Collapsed hand_off signal.",
-            rationale=decision.rationale or "Projected hand_off onto the retained internal delivery transition.",
+            type=DecisionType.HAND_OFF,
+            summary=decision.summary,
+            rationale=decision.rationale,
             payload={
-                "stage_id": payload.get("stage_id"),
-                "summary": payload.get("summary") or decision.summary or "Hand off for Harness-observed diff and authoritative gate.",
+                "stage_id": payload.get("stage_id") or getattr(task, "current_stage_id", None),
+                "summary": payload.get("summary") or decision.summary,
                 "known_gaps": payload.get("known_gaps", []),
             },
             requires_approval=decision.requires_approval,
             schema_version=decision.schema_version,
         )
-    if decision.type == DecisionType.SCOPE_ROUTE:
-        payload = dict(decision.payload or {})
-        proof_gate = payload.get("proof_gate") if isinstance(payload.get("proof_gate"), dict) else {"required": False, "required_proof_types": [], "minimum_status": "passed", "visual_required": False}
-        target_owner = str(payload.get("target_owner") or "dev").strip()
-        target_repo = str(payload.get("target_repo") or "none").strip()
-        handoff_packet = {
-            "packet_kind": "fresh_scope",
-            "mission_phase": "scope_route",
-            "handoff_mode": "single_specialist",
-            "target_owner": target_owner,
-            "target_repo": target_repo,
-            "proof_gate": proof_gate,
-        }
-        if target_owner in {"dev", "backend_dev", "qa"}:
-            handoff_packet["join_gate"] = {"release_condition": "Target owner completes the current typed stage with Harness-verified proof."}
-        execution_payload = {
-            "objective": payload.get("objective") or decision.summary,
-            "acceptance_criteria": payload.get("acceptance_criteria") or list(getattr(task, "acceptance_criteria", []) or ["Routed owner completes the stage."]),
-            "non_goals": payload.get("non_goals", []),
-            "affected_repos": [target_repo] if target_repo and target_repo != "none" else [],
-            "suggested_roles": [target_owner] if target_owner else [],
-            "requires_visual_proof": bool(payload.get("requires_visual_proof", False)),
-            "risk_flags": payload.get("risk_flags", []),
-            "release_stage_id": payload.get("release_stage_id"),
-            "handoff_packet": handoff_packet,
-        }
-        if str(payload.get("scope_override_reason") or "").strip():
-            execution_payload["scope_override_reason"] = str(payload.get("scope_override_reason")).strip()
+    if public_type == DecisionType.SCOPE_ROUTE:
+        handoff_packet = payload.get("handoff_packet") if isinstance(payload.get("handoff_packet"), dict) else {}
+        proof_gate = payload.get("proof_gate") if isinstance(payload.get("proof_gate"), dict) else handoff_packet.get("proof_gate")
+        proof_gate = proof_gate if isinstance(proof_gate, dict) else {"required": False, "required_proof_types": [], "minimum_status": "passed", "visual_required": False}
+        target_owner = str(payload.get("target_owner") or handoff_packet.get("target_owner") or _first_string(payload.get("suggested_roles"), "dev")).strip()
+        target_repo = str(payload.get("target_repo") or handoff_packet.get("target_repo") or _first_string(payload.get("affected_repos"), "none")).strip()
         return AgentDecision(
-            type=DecisionType.PROPOSE_ACCEPTANCE,
-            summary=decision.summary or "Collapsed scope_route signal.",
-            rationale=decision.rationale or "Projected scope_route onto the retained internal Neko handoff transition.",
-            payload=execution_payload,
-            requires_approval=decision.requires_approval,
-            schema_version=decision.schema_version,
-        )
-    if decision.type == DecisionType.QA_VERDICT:
-        payload = dict(decision.payload or {})
-        return AgentDecision(
-            type=DecisionType.REPORT_QA_VERDICT,
-            summary=decision.summary or "Collapsed qa_verdict signal.",
-            rationale=decision.rationale or "Projected qa_verdict onto the retained internal QA verdict transition.",
+            type=DecisionType.SCOPE_ROUTE,
+            summary=decision.summary,
+            rationale=decision.rationale,
             payload={
-                "review_scope": "implementation",
-                "verdict": payload.get("verdict") or "blocked",
-                "proof_ids": payload.get("proof_ids", []),
-                "findings": payload.get("findings", []),
-                "qa_review": {
-                    "coverage": payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {
-                        "backend_contract": "not_required",
-                        "launcher_integration": "not_required",
-                        "visual_or_mcp": "not_required",
-                        "cross_stack_join": "not_required",
-                    },
-                    "decision_basis": "harness_verified_proof",
-                    "remaining_gaps": payload.get("findings", []),
-                    "next_owner": "harness",
-                },
+                "objective": payload.get("objective") or decision.summary,
+                "acceptance_criteria": payload.get("acceptance_criteria") or list(getattr(task, "acceptance_criteria", []) or ["Routed owner completes the stage."]),
+                "target_owner": target_owner,
+                "target_repo": target_repo,
+                "proof_gate": proof_gate,
+                "non_goals": payload.get("non_goals", []),
+                "suggested_roles": payload.get("suggested_roles", []),
+                "requires_visual_proof": bool(payload.get("requires_visual_proof", False)),
+                "risk_flags": payload.get("risk_flags", []),
+                "release_stage_id": payload.get("release_stage_id"),
+                "scope_override_reason": payload.get("scope_override_reason"),
             },
             requires_approval=decision.requires_approval,
             schema_version=decision.schema_version,
         )
-    if decision.type == DecisionType.ESCALATE:
-        payload = dict(decision.payload or {})
+    if public_type == DecisionType.QA_VERDICT:
+        verdict = payload.get("verdict") or ("approved" if decision.type == DecisionType.APPROVE else "blocked")
         return AgentDecision(
-            type=DecisionType.REPORT_ISSUE_DISCOVERY,
-            summary=decision.summary or "Collapsed escalate signal.",
-            rationale=decision.rationale or "Projected escalate onto issue discovery for the retained internal state machine.",
+            type=DecisionType.QA_VERDICT,
+            summary=decision.summary,
+            rationale=decision.rationale,
             payload={
-                "title": payload.get("title") or "Escalated issue",
+                "verdict": verdict,
+                "coverage": payload.get("coverage", {}),
+                "findings": payload.get("findings", []),
+                "proof_ids": payload.get("proof_ids", []),
+            },
+            requires_approval=decision.requires_approval,
+            schema_version=decision.schema_version,
+        )
+    if public_type == DecisionType.ESCALATE:
+        return AgentDecision(
+            type=DecisionType.ESCALATE,
+            summary=decision.summary,
+            rationale=decision.rationale,
+            payload={
+                "title": payload.get("title") or decision.summary,
                 "summary": payload.get("summary") or decision.summary,
                 "severity": payload.get("severity", "medium"),
-                "relationship_hint": "escalate",
                 "evidence": payload.get("evidence", []),
             },
             requires_approval=decision.requires_approval,
             schema_version=decision.schema_version,
         )
     return decision
+
+
+def _first_string(value: Any, default: str) -> str:
+    if isinstance(value, str):
+        return value.strip() or default
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = str(item).strip()
+            if text:
+                return text
+    return default
+
+
+def legacy_acceptance_decision_from_scope_route(task: Task, decision: AgentDecision) -> AgentDecision:
+    if decision.type != DecisionType.SCOPE_ROUTE:
+        return decision
+    payload = dict(decision.payload or {})
+    proof_gate = payload.get("proof_gate") if isinstance(payload.get("proof_gate"), dict) else {"required": False, "required_proof_types": [], "minimum_status": "passed", "visual_required": False}
+    target_owner = str(payload.get("target_owner") or "dev").strip()
+    target_repo = str(payload.get("target_repo") or "none").strip()
+    handoff_packet = {
+        "packet_kind": "fresh_scope",
+        "mission_phase": "scope_route",
+        "handoff_mode": "single_specialist",
+        "target_owner": target_owner,
+        "target_repo": target_repo,
+        "proof_gate": proof_gate,
+    }
+    if target_owner in {"dev", "backend_dev", "qa"}:
+        handoff_packet["join_gate"] = {"release_condition": "Target owner completes the current typed stage with Harness-verified proof."}
+    execution_payload = {
+        "objective": payload.get("objective") or decision.summary,
+        "acceptance_criteria": payload.get("acceptance_criteria") or list(getattr(task, "acceptance_criteria", []) or ["Routed owner completes the stage."]),
+        "non_goals": payload.get("non_goals", []),
+        "affected_repos": [target_repo] if target_repo and target_repo != "none" else [],
+        "suggested_roles": [target_owner] if target_owner else [],
+        "requires_visual_proof": bool(payload.get("requires_visual_proof", False)),
+        "risk_flags": payload.get("risk_flags", []),
+        "release_stage_id": payload.get("release_stage_id"),
+        "handoff_packet": handoff_packet,
+    }
+    if str(payload.get("scope_override_reason") or "").strip():
+        execution_payload["scope_override_reason"] = str(payload.get("scope_override_reason")).strip()
+    return AgentDecision(
+        type=DecisionType.PROPOSE_ACCEPTANCE,
+        summary=decision.summary or "Collapsed scope_route signal.",
+        rationale=decision.rationale or "Apply scope_route through the retained typed-plan routing mechanics.",
+        payload=execution_payload,
+        requires_approval=decision.requires_approval,
+        schema_version=decision.schema_version,
+    )
+
+
+def legacy_qa_review_decision_from_qa_verdict(decision: AgentDecision) -> AgentDecision:
+    if decision.type != DecisionType.QA_VERDICT:
+        return decision
+    payload = dict(decision.payload or {})
+    return AgentDecision(
+        type=DecisionType.REPORT_QA_VERDICT,
+        summary=decision.summary or "Collapsed qa_verdict signal.",
+        rationale=decision.rationale or "Apply qa_verdict through the retained QA review mechanics.",
+        payload={
+            "review_scope": "implementation",
+            "verdict": payload.get("verdict") or "blocked",
+            "proof_ids": payload.get("proof_ids", []),
+            "findings": payload.get("findings", []),
+            "qa_review": {
+                "coverage": payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {
+                    "backend_contract": "not_required",
+                    "launcher_integration": "not_required",
+                    "visual_or_mcp": "not_required",
+                    "cross_stack_join": "not_required",
+                },
+                "decision_basis": "harness_verified_proof",
+                "remaining_gaps": payload.get("findings", []),
+                "next_owner": "harness",
+            },
+        },
+        requires_approval=decision.requires_approval,
+        schema_version=decision.schema_version,
+    )
+
+
+def legacy_issue_decision_from_escalate(decision: AgentDecision) -> AgentDecision:
+    if decision.type != DecisionType.ESCALATE:
+        return decision
+    payload = dict(decision.payload or {})
+    return AgentDecision(
+        type=DecisionType.REPORT_ISSUE_DISCOVERY,
+        summary=decision.summary or "Collapsed escalate signal.",
+        rationale=decision.rationale or "Apply escalate through the retained issue-discovery mechanics.",
+        payload={
+            "title": payload.get("title") or "Escalated issue",
+            "summary": payload.get("summary") or decision.summary,
+            "severity": payload.get("severity", "medium"),
+            "relationship_hint": "escalate",
+            "evidence": payload.get("evidence", []),
+        },
+        requires_approval=decision.requires_approval,
+        schema_version=decision.schema_version,
+    )
 
 
 def _record_parity(task: Task, projection: DecisionProjection, *, actor: str, run_id: str | None, event_log: EventLog | None) -> None:
@@ -241,7 +353,7 @@ def _record_parity(task: Task, projection: DecisionProjection, *, actor: str, ru
                 "status": status,
                 "public_decision_type": projection.public_type.value,
                 "execution_decision_type": projection.execution_type.value,
-                "legacy_decision_type": projection.public_decision.type.value,
+                "legacy_decision_type": (projection.source_type or projection.public_decision.type).value,
                 "shimmed": projection.shimmed,
                 "blocked_reason": projection.blocked_reason,
             },

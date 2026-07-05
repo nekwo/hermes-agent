@@ -469,7 +469,7 @@ def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_sto
     stage = current_plan_stage(task)
     if stage is None:
         return
-    if decision.type == DecisionType.PROPOSE_PATCH and actor in {"dev", "backend_dev"}:
+    if decision.type in {DecisionType.HAND_OFF, DecisionType.PROPOSE_PATCH} and actor in {"dev", "backend_dev"}:
         if stage.kind == "implementation" and stage.status in {StageStatus.READY, StageStatus.DRAFT, StageStatus.BLOCKED, StageStatus.REWORK}:
             stage.status = StageStatus.IMPLEMENTING
             stage.updated_at = now()
@@ -482,7 +482,7 @@ def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_sto
         if target.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.BLOCKED, StageStatus.REWORK}:
             target.status = StageStatus.IMPLEMENTING
             target.updated_at = now()
-    elif decision.type == DecisionType.REPORT_QA_VERDICT:
+    elif decision.type in {DecisionType.QA_VERDICT, DecisionType.REPORT_QA_VERDICT}:
         verdict = str(decision.payload.get("verdict") or "").strip()
         if verdict == "approved":
             ready, missing = blocking_stages_ready_for_qa(task, proof_store=proof_store)

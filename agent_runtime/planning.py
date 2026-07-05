@@ -13,6 +13,11 @@ from .gates import can_enter_dev_implementing
 from .context_requests import add_context_request
 from .incidents import RUN_BUDGET_EXCEEDED
 from .scope_control import apply_issue_triage, record_issue_discovery
+from .simplified_contract import (
+    legacy_acceptance_decision_from_scope_route,
+    legacy_issue_decision_from_escalate,
+    legacy_qa_review_decision_from_qa_verdict,
+)
 from .models import Event, Task, TaskStage
 from .mission_plan import (
     append_task_stage_record,
@@ -103,8 +108,8 @@ def _coerce_neko_budget_acceptance_to_continuation(
 ) -> bool:
     """Treat Neko's bounded re-scope as approval for a waiting budget run.
 
-    Live Neko may correctly shrink/scope the continuation but still use the
-    fresh-mission `propose_acceptance` decision type. For an open
+    Live Neko may correctly shrink/scope the continuation using `scope_route`
+    or its legacy `propose_acceptance` alias. For an open
     `run_budget_exceeded` incident linked to a waiting same-session Dev run,
     that otherwise loops Neko forever. The deterministic Harness owns the
     approval side effect: preserve Neko's tightened scope, approve the linked
@@ -186,6 +191,12 @@ def _coerce_neko_budget_acceptance_to_continuation(
 def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, event_log: EventLog | None = None, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool = False) -> Task:
     validate_planning_decision(decision)
     log = event_log or EventLog()
+    source_decision = decision
+    decision = legacy_acceptance_decision_from_scope_route(task, decision)
+    decision = legacy_qa_review_decision_from_qa_verdict(decision)
+    decision = legacy_issue_decision_from_escalate(decision)
+    if decision is not source_decision:
+        validate_planning_decision(decision)
     if decision.type == DecisionType.PROPOSE_ACCEPTANCE:
         _validate_affected_repo_scope(task, decision, actor=actor, log=log, run_id=run_id)
     if _coerce_neko_budget_acceptance_to_continuation(task, decision, actor=actor, incident_store=incident_store, log=log, run_id=run_id):
@@ -535,7 +546,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             elif not gate.allowed and task.state == TaskState.RUNNING:
                 task.state = TaskState.RUNNING
         task.updated_at = now()
-    elif decision.type == DecisionType.PROPOSE_PATCH:
+    elif decision.type in {DecisionType.HAND_OFF, DecisionType.PROPOSE_PATCH}:
         if proof_store is not None and not decision.payload.get("proof_ids") and not normal_worker_flow:
             raise DecisionPayloadInvalid("proof_ids are required before handing implementation to QA")
         if proof_store is not None and decision.payload.get("proof_ids"):
@@ -544,7 +555,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                 task,
                 proof_ids,
                 proof_store=proof_store,
-                action_label="propose_patch",
+                action_label="hand_off",
                 stage_id=task.current_stage_id,
             )
             _validate_commit_deploy_gate(task, decision, proof_store=proof_store, stage_id=task.current_stage_id)
@@ -1273,7 +1284,7 @@ def _validate_no_edit_recipe_stage_target(
         and stage_requires_product_edit(task, current_stage)
     ):
         raise DecisionPayloadInvalid(
-            f"request_test_run recipe_id {recipe_id!r} cannot bypass incomplete product-edit stage {current_stage_id!r}; return propose_patch/correct_stage for that stage or request focused Flutter/widget proof after edits."
+            f"request_test_run recipe_id {recipe_id!r} cannot bypass incomplete product-edit stage {current_stage_id!r}; return hand_off/correct_stage for that stage or request focused Flutter/widget proof after edits."
         )
     incomplete_product_stage = first_incomplete_product_edit_stage(task, excluding_stage_id=requested_stage_id)
     if requested_stage is None and incomplete_product_stage is not None:
@@ -1449,7 +1460,7 @@ def _validate_qa_handoff_proof_readiness(
     proof_ids: Iterable[str],
     *,
     proof_store=None,
-    action_label: str = "request_qa_review",
+    action_label: str = "hand_off",
     stage_id: str | None = None,
 ) -> None:
     if proof_store is None:

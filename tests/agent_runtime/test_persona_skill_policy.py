@@ -74,9 +74,9 @@ def test_harness_install_uses_persona_declared_skills_not_role_map():
 def test_stage59_hud_skill_sections_exist_in_role_skills():
     root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
     expected = {
-        "harness-mission-lead": {"Scoped Handoff", "Bounded Recovery", "QA Release", "Incident Resolution"},
+        "harness-mission-lead": {"Scope Route", "Bounded Recovery", "QA Release", "Incident Resolution"},
         "harness-continuity": {"Spawn And Resume", "Return Command", "Progress Peek", "Never Slurp"},
-        "harness-dev-delivery": {"Deliver Patch", "Request Proof Recipe", "Request Context", "Stage Plan", "Report Blocker"},
+        "harness-dev-delivery": {"Hand Off", "Request Proof Recipe", "Request Context", "Stage Plan", "Report Blocker"},
         "harness-qa-verdict": {"QA Verdict", "Request Missing Proof", "Report Blocker"},
     }
 

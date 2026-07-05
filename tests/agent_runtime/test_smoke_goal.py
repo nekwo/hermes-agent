@@ -15,9 +15,9 @@ def test_no_model_smoke_runs_in_temp_root_and_finishes_done(monkeypatch):
     assert result["final_action"] == "complete_task"
     assert result["final_state"] == "done"
     assert result["transitions"] == [
-        "neko_supervisor:propose_acceptance",
-        "backend_dev:propose_patch",
-        "dev:propose_patch",
+        "neko_supervisor:scope_route",
+        "backend_dev:hand_off",
+        "dev:hand_off",
     ]
     assert result["proof_ids"] == ["proof_smoke_backend", "proof_smoke_launcher"]
 

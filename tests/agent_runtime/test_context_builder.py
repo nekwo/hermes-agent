@@ -76,8 +76,8 @@ def test_neko_closed_choice_hud_does_not_release_qa_for_default_graph():
 
     hud = build_context(task, run, config=cfg).mission_hud
 
-    assert hud["agent_hud"]["recommended_action"]["shape_id"] == "neko.scoped_handoff"
-    assert hud["next_required_move"]["shape_id"] == "neko.scoped_handoff"
+    assert hud["agent_hud"]["recommended_action"]["shape_id"] == "neko.scope_route"
+    assert hud["next_required_move"]["shape_id"] == "neko.scope_route"
 
 
 def test_rendered_context_uses_stage_output_template_instead_of_raw_description():
@@ -307,15 +307,15 @@ def test_neko_diagnostic_hud_recommends_valid_ack_packet():
     next_move = hud["next_required_move"]
     payload = next_move["recommended_payload"]
 
-    assert next_move["shape_id"] == "neko.scoped_handoff"
-    assert payload["handoff_packet"]["target_owner"] == "neko_supervisor"
-    assert payload["handoff_packet"]["proof_gate"] == {
+    assert next_move["shape_id"] == "neko.scope_route"
+    assert payload["target_owner"] == "neko_supervisor"
+    assert payload["proof_gate"] == {
         "required": False,
         "required_proof_types": ["harness_observation"],
         "minimum_status": "passed",
         "visual_required": False,
     }
-    assert hud["decision_menu"][0]["recommended_payload"] == payload
+    assert hud["agent_hud"]["recommended_action"]["shape_id"] == "neko.scope_route"
 
 
 def test_simplified_agent_hud_actor_contracts_are_closed_choice():
@@ -870,8 +870,8 @@ def test_dev_mission_hud_prefers_patch_before_proof_for_product_edit_stage():
     ctx = build_context(task, run, config=cfg)
 
     hud = ctx.mission_hud
-    assert hud["next_required_move"]["shape_id"] == "dev.propose_patch"
-    assert hud["decision_menu"][0]["shape_id"] == "dev.propose_patch"
+    assert hud["next_required_move"]["shape_id"] == "dev.hand_off"
+    assert hud["decision_menu"][0]["shape_id"] == "dev.hand_off"
 
 
 def test_normal_worker_flow_hides_request_gate_until_product_edit_delivery():
@@ -898,17 +898,21 @@ def test_normal_worker_flow_hides_request_gate_until_product_edit_delivery():
 
     hud = ctx.mission_hud
     assert hud["decision_contract_mode"] == "normal_worker_flow"
-    assert hud["primary_worker_action"]["action_id"] == "deliver_patch"
-    assert hud["next_required_move"]["worker_action_id"] == "deliver_patch"
+    assert hud["primary_worker_action"]["action_id"] == "hand_off"
+    assert hud["next_required_move"]["worker_action_id"] == "hand_off"
     assert [item["shape_id"] for item in hud["decision_menu"]] == [
-        "dev.propose_patch",
+        "dev.hand_off",
         "common.request_file_reads",
         "common.block",
         "dev.correct_stage",
     ]
     assert "dev.request_test_run" not in hud["decision_shape_index"]
     assert hud["not_allowed_yet"][0]["action_id"] == "request_gate"
-    assert "self_test_evidence_ids" in hud["decision_menu"][0]["recommended_payload"]["delivery"]
+    assert hud["decision_menu"][0]["recommended_payload"] == {
+        "stage_id": "mc_terminal_dm_bubble_rows",
+        "summary": "<short completion signal>",
+        "known_gaps": [],
+    }
 
 
 def test_normal_worker_flow_committed_verification_stage_prefers_request_gate():
@@ -1234,12 +1238,13 @@ def test_typed_plan_backend_investigation_hud_delivers_after_repeated_context():
 
     hud = build_context(task, run, config=cfg).mission_hud
 
-    assert hud["primary_worker_action"]["action_id"] == "deliver_findings"
-    assert hud["next_required_move"]["shape_id"] == "dev.propose_patch"
-    delivery = hud["decision_menu"][0]["recommended_payload"]["delivery"]
+    assert hud["primary_worker_action"]["action_id"] == "hand_off"
+    assert hud["next_required_move"]["shape_id"] == "dev.hand_off"
+    delivery = hud["decision_menu"][0]["recommended_payload"]
+    assert delivery["stage_id"] == "backend_investigation"
     assert "work_status" not in delivery
-    assert "findings" in delivery
-    assert "recommendations" in delivery
+    assert "summary" in delivery
+    assert "known_gaps" in delivery
     assert "common.request_file_reads" not in [item["shape_id"] for item in hud["decision_menu"]]
 
 
@@ -1397,10 +1402,10 @@ def test_neko_mission_hud_exposes_visual_recovery_choice_without_patch_options()
     ctx = build_context(task, run)
 
     hud = ctx.mission_hud
-    assert hud["next_required_move"]["shape_id"] == "neko.bounded_visual_proof_recovery"
-    assert hud["decision_menu"][0]["decision_type"] == "propose_acceptance"
-    assert "handoff_packet" in hud["decision_shape_index"]["neko.bounded_visual_proof_recovery"]["allowed_payload_keys"]
-    assert "request_test_run" in hud["forbidden_decisions"]
+    assert hud["next_required_move"]["shape_id"] == "neko.scope_route"
+    assert hud["decision_menu"][0]["decision_type"] == "scope_route"
+    assert "proof_gate" in hud["decision_shape_index"]["neko.scope_route"]["allowed_payload_keys"]
+    assert "request_test_run" not in hud.get("forbidden_decisions", [])
     assert all(item["forbid_unknown_payload_keys"] is True for item in hud["decision_menu"])
 
 
@@ -1418,7 +1423,7 @@ def test_qa_mission_hud_exposes_screenshot_and_verdict_choices():
     assert hud["next_required_move"]["shape_id"] == "qa.request_screenshot"
     shape_ids = [item["shape_id"] for item in hud["decision_menu"]]
     assert "qa.request_screenshot" in shape_ids
-    assert "qa.report_qa_verdict" in shape_ids
+    assert "qa.verdict" in shape_ids
     assert hud["decision_shape_index"]["qa.request_screenshot"]["allowed_payload_keys"][:6] == [
         "stage_id",
         "target",

@@ -83,9 +83,9 @@ child keeps its context and prompt cache. If steering fails because the old sess
 not reusable, report the cache-loss risk and run a fresh child only when that is still
 the smallest safe path.
 
-## Scoped Handoff
+## Scope Route
 
-Historical compatibility anchor: in root-node mode, a scoped handoff is a stage object
+Historical compatibility anchor: in root-node mode, a scope route is a stage object
 passed to `run_node`, not an AgentDecision payload.
 
 Keep scope compact:

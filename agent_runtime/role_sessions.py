@@ -21,6 +21,7 @@ CLOSE_INVALID = "close_invalid"
 _BOUNDARY_DECISIONS = {
     DecisionType.BLOCK.value,
     DecisionType.REQUEST_HUMAN.value,
+    DecisionType.QA_VERDICT.value,
     DecisionType.REPORT_QA_VERDICT.value,
     DecisionType.APPROVE.value,
     DecisionType.COMPLETE.value,
@@ -102,7 +103,7 @@ def should_continue_role_session(
     if config.close_on_open_incident and open_incident_count:
         return _close(CLOSE_BLOCKED, "open_incident")
     if decision_type in _BOUNDARY_DECISIONS:
-        if decision_type == DecisionType.REPORT_QA_VERDICT.value:
+        if decision_type in {DecisionType.QA_VERDICT.value, DecisionType.REPORT_QA_VERDICT.value}:
             return _close(CLOSE_COMPLETED, "qa_verdict")
         if decision_type in {DecisionType.BLOCK.value, DecisionType.REQUEST_HUMAN.value}:
             return _close(CLOSE_BLOCKED, decision_type)

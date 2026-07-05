@@ -208,7 +208,7 @@ def validate_dev_progress_gate(persona: AgentPersona, run: AgentRun, decision: A
         if decision.type == DecisionType.REQUEST_QA_REVIEW and _decision_has_proof_ids(decision):
             return
         raise DecisionPayloadInvalid(
-            "Dev budget pressure gate failed: run is approaching budget without a proof-oriented handoff; stop exploration and request_test_run, request_qa_review with proof_ids, or block with exact evidence so Neko can steer."
+            "Dev budget pressure gate failed: run is approaching budget without a proof-oriented handoff; stop exploration and emit hand_off, or block with exact evidence so Neko can steer."
         )
     if decision.type in _PROGRESS_OK_DECISIONS:
         return

@@ -201,11 +201,12 @@ def payload_contract(decision_type: DecisionType | str) -> dict[str, Any]:
 
 def allowed_decisions_for_role(role: AgentRole | str) -> frozenset[DecisionType]:
     resolved = role if isinstance(role, AgentRole) else AgentRole(str(role))
-    return frozenset(
-        decision_type
-        for decision_type, contract in _DECISION_CONTRACTS.items()
-        if resolved in contract.allowed_roles
-    )
+    decisions: set[DecisionType] = set()
+    for shape_id in (*_ROLE_SHAPE_IDS.get(resolved, _ROLE_SHAPE_IDS[AgentRole.DEV]), *_COMMON_SHAPE_IDS, *tuple(context_expansion_shape_ids(resolved))):
+        shape = _HUD_SHAPES.get(shape_id)
+        if shape is not None and resolved in shape.roles:
+            decisions.add(shape.decision_type)
+    return frozenset(decisions)
 
 
 def allowed_decisions_by_role() -> dict[AgentRole, frozenset[DecisionType]]:
@@ -894,7 +895,6 @@ _COMMON_SHAPE_IDS = (
     "common.request_file_reads",
     "common.needs_context",
     "common.request_human",
-    "common.report_issue_discovery",
 )
 
 
@@ -944,18 +944,18 @@ _HUD_SHAPES: dict[str, HudShape] = {
     "common.report_issue_discovery": HudShape(
         "common.report_issue_discovery",
         DecisionType.REPORT_ISSUE_DISCOVERY,
-        "Report Issue Discovery",
+        "Legacy Issue Discovery Alias",
         (AgentRole.DEV, AgentRole.QA),
-        "Use for unrelated or out-of-scope discoveries without expanding the current mission.",
+        "Archive compatibility only; live role menus use common.escalate.",
         payload_template={"title": "<short issue title>", "summary": "<redaction-safe summary>", "severity": "low|medium|high|critical", "relationship_hint": "blocks_current|same_scope|fork_child|defer|escalate|unknown", "evidence": ["<safe evidence handle>"], "affected_paths": ["<relative path>"]},
         enum_choices={"severity": ("low", "medium", "high", "critical"), "relationship_hint": ("blocks_current", "same_scope", "fork_child", "defer", "escalate", "unknown")},
     ),
     "neko.scoped_handoff": HudShape(
         "neko.scoped_handoff",
         DecisionType.PROPOSE_ACCEPTANCE,
-        "Scoped Handoff",
+        "Legacy Scope Route Alias",
         _NEKO_ONLY,
-        "Scope one bounded owner using canonical owner/repo values only.",
+        "Archive compatibility only; live role menus use neko.scope_route.",
         payload_template={"objective": "<bounded next objective>", "acceptance_criteria": ["<proof-backed completion criterion>"], "affected_repos": ["EterniaLauncher|EterniaBackend|hermes-agent"], "handoff_packet": {"packet_kind": "fresh_scope|contract_join|bounded_dev_recovery", "mission_phase": "<bounded phase>", "handoff_mode": "single_specialist|sequential_specialists|backend_first_cross_stack", "target_owner": "dev|backend_dev|qa|neko_supervisor|human", "target_repo": "EterniaLauncher|EterniaBackend|hermes-agent", "proof_gate": {"required": True, "required_proof_types": ["test_run"], "minimum_status": "passed", "visual_required": False}, "join_gate": {"release_condition": "<what proof releases the next owner>"}}},
         nested_required={"handoff_packet": ("packet_kind", "mission_phase", "handoff_mode", "target_owner", "target_repo", "proof_gate")},
         enum_choices={"handoff_mode": ("single_specialist", "sequential_specialists", "backend_first_cross_stack"), "target_owner": ("dev", "backend_dev", "qa", "neko_supervisor", "human")},
@@ -1050,17 +1050,17 @@ _HUD_SHAPES: dict[str, HudShape] = {
     "dev.propose_patch": HudShape(
         "dev.propose_patch",
         DecisionType.PROPOSE_PATCH,
-        "Propose Patch",
+        "Legacy Hand Off Alias",
         _DEV_ONLY,
-        "Use only after actual code edits or a concrete patch plan; follow with request_test_run proof.",
+        "Archive compatibility only; live role menus use dev.hand_off.",
         payload_template={"summary": "<patch summary>", "changed_files": ["<relative path>"], "tests": ["<test/proof command or not run reason>"]},
     ),
     "dev.request_qa_review": HudShape(
         "dev.request_qa_review",
         DecisionType.REQUEST_QA_REVIEW,
-        "Request QA Review",
+        "Legacy QA Handoff Alias",
         _DEV_ONLY,
-        "Use only with existing passed proof IDs for all current-stage gates.",
+        "Archive compatibility only; Harness routes QA from hand_off plus proof state.",
         payload_template={"stage_id": "<current stage>", "proof_ids": ["<existing passed proof id>"], "handoff": {"to": "qa", "stage_complete": True, "known_gaps": []}},
         nested_required={"handoff": ("to", "stage_complete")},
         extras={"handoff_shape": {"to": "qa", "stage_complete": True, "known_gaps": []}},
@@ -1088,9 +1088,9 @@ _HUD_SHAPES: dict[str, HudShape] = {
     "qa.report_qa_verdict": HudShape(
         "qa.report_qa_verdict",
         DecisionType.REPORT_QA_VERDICT,
-        "Report QA Verdict",
+        "Legacy QA Verdict Alias",
         _QA_ONLY,
-        "Use after reviewing attached proof IDs and artifacts.",
+        "Archive compatibility only; live role menus use qa.verdict.",
         payload_template={"review_scope": "implementation", "verdict": "approved|blocked|needs_fixes", "proof_ids": ["<existing proof id>"], "findings": [], "qa_review": {"coverage": {"backend_contract": "not_required|missing|reviewed|blocked|failed", "launcher_integration": "not_required|missing|reviewed|blocked|failed", "visual_or_mcp": "not_required|missing|reviewed|blocked|failed", "cross_stack_join": "not_required|missing|reviewed|blocked|failed"}, "decision_basis": "proof_packet", "remaining_gaps": [], "next_owner": "harness|neko_supervisor|dev|human"}},
         nested_required={"qa_review": ("coverage", "decision_basis", "remaining_gaps", "next_owner")},
         enum_choices={"verdict": ("approved", "needs_fixes", "blocked"), "review_scope": ("plan", "implementation")},
@@ -1126,7 +1126,7 @@ _HUD_SHAPES: dict[str, HudShape] = {
         DecisionType.APPROVE,
         "Approve",
         _QA_ONLY,
-        "Use only when approval is evidence-backed and report_qa_verdict is not required by the current route.",
+        "Archive compatibility only; live role menus use qa.verdict.",
         payload_template={"review_scope": "implementation", "verdict": "approved", "proof_ids": ["<existing proof id>"], "findings": []},
     ),
 }
@@ -1135,10 +1135,6 @@ _HUD_SHAPES: dict[str, HudShape] = {
 _ROLE_SHAPE_IDS: dict[AgentRole, tuple[str, ...]] = {
     AgentRole.ALICE_SUPERVISOR: (
         "neko.scope_route",
-        "neko.scoped_handoff",
-        "neko.bounded_visual_proof_recovery",
-        "neko.bounded_dev_recovery",
-        "neko.qa_coordination_release",
         "neko.resolve_incident",
         "neko.triage_issue_discovery",
         "common.needs_context",
@@ -1150,28 +1146,23 @@ _ROLE_SHAPE_IDS: dict[AgentRole, tuple[str, ...]] = {
         "common.escalate",
         "dev.request_test_run",
         "dev.correct_stage",
-        "dev.propose_patch",
-        "dev.request_qa_review",
         "dev.propose_stage_plan",
         "common.request_file_reads",
         "common.needs_context",
         "common.block",
-        "common.report_issue_discovery",
     ),
     AgentRole.QA: (
         "qa.verdict",
         "common.escalate",
-        "qa.report_qa_verdict",
         "qa.request_screenshot",
         "qa.request_video",
         "qa.request_test_run",
         "qa.correct_stage",
-        "qa.approve",
         "common.request_file_reads",
         "common.block",
-        "common.report_issue_discovery",
     ),
     AgentRole.PM: (
+        "neko.scope_route",
         "common.needs_context",
         "common.block",
         "common.request_human",

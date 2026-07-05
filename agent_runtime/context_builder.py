@@ -510,12 +510,12 @@ def _repair_hint_for_message(message: str) -> dict[str, Any]:
         return {
             "invalid_field": "delivery.work_status",
             "allowed_values": ["proof_requested", "ready_for_qa"],
-            "shape_hint": "Use proof_requested with request_test_run. Use ready_for_qa/request_qa_review only when the active graph includes a QA/verifier node.",
+            "shape_hint": "Harness derives delivery status from hand_off and the authoritative proof gate; do not declare work_status in public decisions.",
         }
     if "proof_ids" in text:
         return {
             "invalid_field": "payload.proof_ids",
-            "shape_hint": "Attach only existing passed proof IDs when handing implementation to QA, and do that only when the active graph includes QA; if proof is missing, request_test_run instead of request_qa_review or propose_patch.",
+            "shape_hint": "Use hand_off for Dev completion and qa_verdict for QA findings; Harness derives delivery and proof gate state.",
         }
     if "recipe_id" in text:
         return {
@@ -969,6 +969,7 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str, simplified_co
     repo_bundles = RepoBundleStore().list_for_task(task.id)
     active_bundle_id = str((run.progress or {}).get("repo_bundle_id") or "").strip() if isinstance(run.progress, dict) else ""
     active_bundle = next((bundle for bundle in repo_bundles if bundle.id == active_bundle_id), None)
+    active_assignment = _active_assignment_for_run(run)
     stage = _context_objective_stage(task, run)
     proof_gate = _stage_proof_gate(stage)
     output_type = _stage_output_type(stage)
@@ -993,6 +994,8 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str, simplified_co
             "affected_repos": safe_affected_repo_labels(getattr(task, "affected_repos", []) or []),
             "requires_visual_proof": bool(getattr(task, "requires_visual_proof", False)),
             "active_assignment_id": (run.progress or {}).get("assignment_id") if isinstance(run.progress, dict) else None,
+            "assignment_title": getattr(active_assignment, "title", None) if active_assignment is not None else None,
+            "assignment_message": getattr(active_assignment, "message", None) if active_assignment is not None else None,
             "repo_bundle_id": active_bundle_id or None,
             "repo_bundle": repo_bundle_summary(active_bundle) if active_bundle is not None else None,
         },
@@ -1010,6 +1013,19 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str, simplified_co
     if verification_status:
         hud["verification_status"] = verification_status
     return hud
+
+
+def _active_assignment_for_run(run: AgentRun):
+    progress = run.progress if isinstance(getattr(run, "progress", None), dict) else {}
+    assignment_id = str(progress.get("assignment_id") or "").strip()
+    if not assignment_id:
+        return None
+    try:
+        from .persona_assignments import PersonaAssignmentStore
+
+        return PersonaAssignmentStore().get(assignment_id)
+    except Exception:
+        return None
 
 
 def _task_evidence_stack(task: Task) -> list[dict[str, Any]]:
@@ -1115,7 +1131,7 @@ def _recommended_action(menu: list[dict[str, Any]], *, next_move: dict[str, Any]
 
 def _skill_reference_for_action(role: str, *, shape_id: str, action_id: str) -> dict[str, str]:
     if role == "alice_supervisor":
-        section = "Scoped Handoff"
+        section = "Scope Route"
         if "recovery" in shape_id:
             section = "Bounded Recovery"
         elif "qa_coordination" in shape_id:
@@ -1138,7 +1154,7 @@ def _skill_reference_for_action(role: str, *, shape_id: str, action_id: str) -> 
             "skill_section": section,
             "skill_reason": "Open only when proof strength, visual proof, or rejection wording is non-trivial.",
         }
-    section = "Deliver Patch"
+    section = "Hand Off"
     if "request_test_run" in shape_id:
         section = "Request Proof Recipe"
     elif "request_file_reads" in shape_id or "needs_context" in shape_id:
@@ -1195,8 +1211,8 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
         diagnostic_persona = _diagnostic_persona(task)
         if state in {"created", "pm_triage"} and diagnostic_persona == "neko_supervisor":
             return {
-                "decision_type": "propose_acceptance",
-                "shape_id": "neko.scoped_handoff",
+                "decision_type": "scope_route",
+                "shape_id": "neko.scope_route",
                 "reason": "This is a bounded Neko-only diagnostic; acknowledge with the canonical diagnostic packet and do not route Dev or QA.",
                 "stage_id": stage_id,
                 "recommended_payload": _neko_diagnostic_ack_payload(task),
@@ -1216,39 +1232,39 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
         if failed_proof_ids:
             if _task_or_stage_mentions_visual(task, stage_id):
                 return {
-                    "decision_type": "propose_acceptance",
-                    "shape_id": "neko.bounded_visual_proof_recovery",
+                    "decision_type": "scope_route",
+                    "shape_id": "neko.scope_route",
                     "reason": "A current-stage visual proof failed; release one bounded Dev recovery with failed proof IDs and a precise proof gate.",
                     "must_reference_failed_proof_ids": failed_proof_ids[:5],
                     "stage_id": stage_id,
-                    "recommended_payload_keys": payload_contract("propose_acceptance")["allowed_payload_keys"],
+                    "recommended_payload_keys": payload_contract("scope_route")["allowed_payload_keys"],
                 }
             return {
-                "decision_type": "propose_acceptance",
-                "shape_id": "neko.bounded_dev_recovery",
+                "decision_type": "scope_route",
+                "shape_id": "neko.scope_route",
                 "reason": "A current-stage proof failed; choose bounded retry, route to Dev, or block if the signal is unchanged.",
                 "must_reference_failed_proof_ids": failed_proof_ids[:5],
                 "stage_id": stage_id,
-                "recommended_payload_keys": payload_contract("propose_acceptance")["allowed_payload_keys"],
+                "recommended_payload_keys": payload_contract("scope_route")["allowed_payload_keys"],
             }
         if state == "dev_ready_for_qa" and _task_has_qa_stage(task):
             return {
-                "decision_type": "propose_acceptance",
-                "shape_id": "neko.qa_coordination_release",
+                "decision_type": "scope_route",
+                "shape_id": "neko.scope_route",
                 "reason": "Dev is ready; join proof IDs and release QA only if required proof is attached.",
                 "stage_id": stage_id,
             }
         if state == "dev_ready_for_qa":
             return {
-                "decision_type": "propose_acceptance",
-                "shape_id": "neko.scoped_handoff",
+                "decision_type": "scope_route",
+                "shape_id": "neko.scope_route",
                 "reason": "Dev is ready, but the active graph has no QA/verifier node; release the next graph stage or let the Harness close.",
                 "stage_id": stage_id,
             }
         if state in {"created", "pm_triage", "pm_ready_for_dev", "blocked"}:
             return {
-                "decision_type": "propose_acceptance",
-                "shape_id": "neko.scoped_handoff",
+                "decision_type": "scope_route",
+                "shape_id": "neko.scope_route",
                 "reason": "Scope or rescope the next bounded owner handoff; do not patch code.",
                 "stage_id": stage_id,
             }
@@ -1278,9 +1294,9 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
             }
         if state == "dev_implementing":
             return {
-                "decision_type": "propose_patch",
-                "shape_id": "dev.propose_patch",
-                "reason": "Patch or return a smaller stage correction, then request proof.",
+                "decision_type": "hand_off",
+                "shape_id": "dev.hand_off",
+                "reason": "Patch/test inside the resolved repo, then hand off so Harness captures diff and runs the authoritative gate.",
                 "stage_id": stage_id,
             }
         return {
@@ -1305,8 +1321,8 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
                 },
             }
         return {
-            "decision_type": "report_qa_verdict",
-            "shape_id": "qa.report_qa_verdict",
+            "decision_type": "qa_verdict",
+            "shape_id": "qa.verdict",
             "reason": "Review attached proof IDs and emit evidence-backed approval or blocker findings.",
             "stage_id": stage_id,
         }
@@ -1547,11 +1563,11 @@ def _proof_gate_status(handoff: dict[str, Any]) -> str:
 def _required_next_decision(task: Task, run: AgentRun) -> str:
     state = str(task.state.value if hasattr(task.state, "value") else task.state)
     if state in {"created", "pm_triage"}:
-        return "propose_acceptance"
+        return "scope_route"
     if state == "blocked":
         if getattr(task, "open_incident_ids", None):
             return "resolve_incident_or_block"
-        return "propose_acceptance"
+        return "scope_route"
     return "handoff_or_recovery_packet"
 
 
@@ -1584,29 +1600,18 @@ def _neko_diagnostic_ack_payload(task: Task) -> dict[str, Any]:
         "objective": objective,
         "acceptance_criteria": acceptance or ["The Harness records one valid Neko diagnostic decision and stops without launching Dev or QA."],
         "non_goals": non_goals,
-        "affected_repos": affected_repos,
-        "handoff_packet": {
-            "packet_kind": "fresh_scope",
-            "mission_phase": "neko_only_contract_diagnostic",
-            "handoff_mode": "single_specialist",
-            "target_owner": "neko_supervisor",
-            "target_repo": affected_repos[0],
-            "proof_gate": {
-                "required": False,
-                "required_proof_types": ["harness_observation"],
-                "minimum_status": "passed",
-                "visual_required": False,
-            },
-            "join_gate": {
-                "release_condition": "Harness observes this single valid Neko decision packet and stops without launching Dev or QA.",
-            },
+        "target_owner": "neko_supervisor",
+        "target_repo": affected_repos[0] if affected_repos[0] in {"EterniaLauncher", "EterniaBackend", "hermes-agent"} else "hermes-agent",
+        "proof_gate": {
+            "required": False,
+            "required_proof_types": ["harness_observation"],
+            "minimum_status": "passed",
+            "visual_required": False,
         },
     }
 
 
 def _forbidden_decisions(run: AgentRun) -> list[str]:
-    if run.persona_id == "neko_supervisor":
-        return ["propose_patch", "request_test_run", "request_qa_review", "report_qa_verdict", "approve"]
     return []
 
 

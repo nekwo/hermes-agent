@@ -47,7 +47,7 @@ def _h5_migration_rollback(cfg: Any) -> dict[str, Any]:
         "implemented",
         controls=[
             "simplified_agent_contract.enabled activates the collapsed hand_off/block/escalate/scope_route/qa_verdict agent-facing contract",
-            "expose_only_simplified_actions removes legacy delivery/request_test_run/propose_patch payload fill surfaces from the HUD",
+            "expose_only_simplified_actions removes legacy delivery and proof-request payload fill surfaces from the HUD",
             "proof-from-trace records agent terminal self-tests as observed ProofStore records; authoritative gates still rerun harness-side",
             "hand_off captures the grounded isolated-worktree diff and then runs the stage proof recipe/test plan as the authoritative gate",
             "allow_legacy_decision_aliases keeps the compatibility shim available during migration and logs decision_contract.parity",

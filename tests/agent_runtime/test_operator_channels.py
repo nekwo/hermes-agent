@@ -194,7 +194,7 @@ def test_operator_channel_projects_canonical_goal_conversation_and_filters_telem
                         "title": "Implement",
                         "message": "Inspect the canonical conversation and attach proof without product edits.",
                         "proof_targets": ["python -m pytest tests/agent_runtime -q"],
-                        "allowed_decisions": ["propose_acceptance", "request_qa_review"],
+                        "allowed_decisions": ["scope_route", "hand_off"],
                         "ts": ts.isoformat(),
                     },
                     {
@@ -412,8 +412,8 @@ def _dev_run_summary(run_id: str, *, started: str, finished: str, **overrides):
         "started_at": started,
         "finished_at": finished,
         "duration_ms": 1000,
-        "decision_type": "propose_patch",
-        "decision_summary": f"Patched the Petdex menu ({run_id}).",
+        "decision_type": "hand_off",
+        "decision_summary": f"Handed off the Petdex menu ({run_id}).",
         "decision_rationale": None,
         "reasoning_summary": f"Reviewed the Petdex widget tree before patching ({run_id}).",
         "llm": {"model": "gpt-5.5", "input_tokens": 1000, "output_tokens": 200, "latency_ms": 900},
@@ -483,8 +483,9 @@ def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
     assert thinking["display_title"] == "Thinking"
     assert "Reviewed the Petdex widget tree" in thinking["display_text"]
     turn = by_kind["turn"]
-    assert turn["display_title"] == "Turn · Propose patch"
+    assert turn["display_title"] == "Turn"
     assert turn["llm"]["model"] == "gpt-5.5"
+    assert turn["refs"]["decision_type"] == "hand_off"
     assert turn["refs"]["run_id"] == "run_a"
 
     tool_calls = [message for message in conversation["messages"] if message["kind"] == "tool_call"]

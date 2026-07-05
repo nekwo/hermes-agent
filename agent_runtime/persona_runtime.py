@@ -919,28 +919,28 @@ def _simplified_contract_guidance(persona: AgentPersona, *, cfg) -> str:
         "# Simplified Agent Contract Active\n"
         "Mission HUD mode is `simplified_agent_contract`. The visible ACTION menu is authoritative. "
         "Ignore older bundled-prompt mentions of legacy decision names unless terminal feedback explicitly asks for a one-turn repair. "
-        "Do not emit `propose_patch`, `request_test_run`, `request_qa_review`, `propose_acceptance`, `report_issue_discovery`, `report_qa_verdict`, or `approve` while this mode is active. "
-        "The Harness keeps those names only as an internal compatibility state machine and logs parity events when it projects a collapsed signal."
+        "Do not emit legacy micro-decisions while this mode is active. "
+        "The Harness keeps legacy aliases only for archive/backcompat normalization and logs parity events when it maps one forward."
     )
     if role == "dev":
         return (
             common
             + "\n\nFor Dev and Backend Dev, allowed public decisions are `hand_off`, `block`, and `escalate`. "
             "For product-edit stages, no-edit proof stages, exact proof recipes, failed-gate repairs, and contract joins, emit `hand_off` when your slice is ready for Harness attribution/proof. "
-            "`hand_off` replaces both `propose_patch` and `request_test_run`: the Harness captures the isolated-worktree diff and runs the authoritative gate/recipe. "
+            "`hand_off` is the only Dev completion signal: the Harness captures the isolated-worktree diff and runs the authoritative gate/recipe. "
             "Use `block` only for exact missing prerequisites, and `escalate` only for a discovered issue too large or unsafe to fold into this stage."
         )
     if role == "qa":
         return (
             common
             + "\n\nFor QA, allowed public decisions are `qa_verdict`, `block`, and `escalate`. "
-            "`qa_verdict` replaces `report_qa_verdict` and `approve`; cite existing Harness proof IDs and findings. "
+            "`qa_verdict` is the QA completion signal; cite existing Harness proof IDs and findings. "
             "Use `block` for missing proof and `escalate` for out-of-scope or systemic issues."
         )
     if role == "alice_supervisor":
         return (
             common
-            + "\n\nFor Neko Mission Lead, the normal public routing decision is `scope_route`; it replaces `propose_acceptance`. "
+            + "\n\nFor Neko Mission Lead, the normal public routing decision is `scope_route`. "
             "Use `scope_route` for kickoff, rescope, graph-faithful owner/repo routing, and proof-gate release. "
             "Open incidents are yours to adjudicate: when an incident's underlying run is already terminal "
             "(cancelled/failed/hung-reaped), close it with `resolve_incident` and a redaction-safe reason — "
@@ -990,22 +990,22 @@ def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
     if role == "dev":
         return (
             "# Normal Worker Flow\n"
-            "For product-edit stages, do the work like one uninterrupted competent developer: inspect narrowly, edit files, run focused self-tests in-session with terminal/code tools, then deliver with `propose_patch`. "
-            "Include changed files and concise self-test results in `tests`; include `delivery.self_test_evidence_ids` when the Harness HUD lists recorded self-test evidence. Do not set `delivery.work_status`; Harness derives it from the decision type for compatibility. "
+            "For product-edit stages, do the work like one uninterrupted competent developer: inspect narrowly, edit files, run focused self-tests in-session with terminal/code tools, then emit `hand_off`. "
+            "Do not declare changed files, proof IDs, delivery packets, or `delivery.work_status`; Harness derives diff, delivery, and final-gate state. "
             "Do not use `request_test_run` as your normal inner loop. Use Harness proof only when the Mission HUD exposes `request_gate`, the stage is no-edit/certification, QA requests a missing gate, or you are repairing a failed final gate. "
-            "After delivery, the Harness owns the final deterministic gate and will return failed proof IDs to this same worker if repair is needed."
+            "After hand_off, the Harness owns the final deterministic gate and will return failed proof IDs to this same worker if repair is needed."
         )
     if role == "qa":
         return (
             "# Normal Worker Flow QA\n"
             "Self-test evidence helps triage but is not release proof. Base implementation approval on Harness final gate proof IDs and required visual/MCP artifacts. "
-            "Request exactly one missing command or visual gate when proof is absent or stale; otherwise emit `report_qa_verdict` with cited proof IDs."
+            "Request exactly one missing command or visual gate when proof is absent or stale; otherwise emit `qa_verdict` with cited proof IDs."
         )
     if role == "alice_supervisor":
         return (
             "# Normal Worker Flow Neko\n"
             "Prefer same-worker repair over spawning new work. Wait/request-human only at kickoff or for true human/safety blockers. "
-            "Route by attached evidence, failed proof IDs, and worker HUD state; release QA only when the active graph includes QA and final gate proof is attached. "
+            "Route with `scope_route` by attached evidence, failed proof IDs, and worker HUD state; release QA only when the active graph includes QA and final gate proof is attached. "
             "For heavy investigation, spawn/steer instead of absorbing transcripts: sample only bounded progress_peek/topology status, pass pointers and repo handles, and leave child bytes in their artifacts."
         )
     return ""

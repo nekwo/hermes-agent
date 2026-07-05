@@ -20,6 +20,7 @@ from .persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from .proof_rules import ProofType
 from .recovery_flags import mark_incident_closed_for_recovery
 from .serde import from_jsonable, to_jsonable
+from .simplified_contract import public_decision_type_value
 from .states import RunState, TaskState
 
 T = TypeVar("T")
@@ -693,11 +694,23 @@ class RunStore:
                 return run
             run.state = state if isinstance(state, RunState) else RunState(state)
             run.finished_at = now()
+            if final_decision and isinstance(final_decision, dict):
+                public_type = public_decision_type_value(final_decision.get("type"))
+                if public_type and public_type != final_decision.get("type"):
+                    raw_decision_type = final_decision.get("type")
+                    final_decision = {**final_decision, "type": public_type}
+                    final_decision.setdefault("execution_type", raw_decision_type)
             run.final_decision = final_decision
             run.error = error
             if isinstance(run.llm, dict):
                 if final_decision and isinstance(final_decision, dict):
-                    run.llm.setdefault("decision_type", final_decision.get("type"))
+                    public_decision_type = public_decision_type_value(final_decision.get("type")) or final_decision.get("type")
+                    prior_decision_type = run.llm.get("decision_type")
+                    if prior_decision_type and public_decision_type and prior_decision_type != public_decision_type:
+                        run.llm.setdefault("raw_decision_type", prior_decision_type)
+                    if public_decision_type:
+                        run.llm["decision_type"] = public_decision_type
+                        run.llm.setdefault("public_decision_type", public_decision_type)
                     run.llm.setdefault("validation_status", "valid")
                 elif error:
                     run.llm.setdefault("validation_status", "invalid")
@@ -902,7 +915,7 @@ class ProofStore:
             "step": "command_proof" if proof.type == ProofType.TEST_RUN else "proof_attached",
             "status": status,
             "summary": _proof_event_summary(safe_proof_id, proof.type, status=status, exit_code=exit_code, duration_ms=duration_ms),
-            "next_expected": "request_qa_review" if proof.type == ProofType.TEST_RUN and status == "passed" else "inspect_proof",
+            "next_expected": "hand_off" if proof.type == ProofType.TEST_RUN and status == "passed" else "inspect_proof",
         }
         if safe_stage_id is not None:
             payload["stage_id"] = safe_stage_id

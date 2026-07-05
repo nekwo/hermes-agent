@@ -941,7 +941,7 @@ class TickEngine:
                         )
                         if projection.blocked_reason:
                             raise DecisionPayloadInvalid(projection.blocked_reason)
-                        public_decision = decision
+                        public_decision = projection.public_decision
                         decision = projection.execution_decision
                         if decision is not public_decision:
                             validate_planning_decision(decision)
@@ -1349,7 +1349,7 @@ class TickEngine:
                     execution_type = getattr(getattr(projection, "execution_type", None), "value", None)
                     run.llm = {
                         **(run.llm or {}),
-                        "decision_type": decision.type.value,
+                        "decision_type": public_type or decision.type.value,
                         "public_decision_type": public_type or decision.type.value,
                         "execution_decision_type": execution_type or decision.type.value,
                         "decision_contract_mode": getattr(projection, "mode", "legacy"),
@@ -1357,6 +1357,8 @@ class TickEngine:
                         "retry_attempt": attempt,
                         "retry_max_attempts": max_attempts,
                     }
+                    if execution_type and public_type and execution_type != public_type:
+                        run.llm["raw_decision_type"] = execution_type
                     budget_warning = _emit_run_budget_warning(run, task_id=task.id, actor=persona.id)
                     if envelope is not None:
                         update_envelope_after_invocation(envelope, run, proof_ids_added=proof_ids)
@@ -1833,11 +1835,18 @@ def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id
             proof_targets.append(f"proof_recipe:{stage.proof_recipe_id}")
         if not proof_targets and goal_named:
             proof_targets.extend(goal_named)
+    assignment_message = _assignment_message_for_action(
+        task,
+        action,
+        persona_id=persona_id,
+        stage_id=getattr(getattr(task, "mission_plan", None), "current_stage_id", None) or task.current_stage_id,
+        base_message=str(objective or action.reason),
+    )
     return PersonaAssignmentSpec(
         persona_id=persona_id,
         kind="task_stage",
         title=str(title),
-        message=str(objective or action.reason),
+        message=assignment_message,
         created_by="harness",
         persona_instance_id=persona_instance_id_for_placement(f"{getattr(task, 'goal_id', None) or task.id}:{persona_id}"),
         task_id=task.id,
@@ -1851,6 +1860,103 @@ def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id
         non_goals=list(getattr(task, "non_goals", None) or []),
         allowed_decisions=_allowed_decisions_for_action(action),
     )
+
+
+def _assignment_message_for_action(task: Task, action: HarnessAction, *, persona_id: str, stage_id: str | None, base_message: str) -> str:
+    base = _safe_assignment_message_line(base_message) or _safe_assignment_message_line(action.reason) or "Run the assigned stage."
+    steer = _latest_upstream_handoff_steer(task, target_persona_id=persona_id, target_stage_id=stage_id)
+    if not steer:
+        return base
+    return _truncate_assignment_message(f"{base} {steer}")
+
+
+def _latest_upstream_handoff_steer(task: Task, *, target_persona_id: str, target_stage_id: str | None) -> str | None:
+    try:
+        runs = RunStore().list_for_task(task.id)
+    except Exception:
+        return None
+    target_stage = str(target_stage_id or "").strip()
+    for run in sorted(runs, key=_run_finished_sort_key, reverse=True):
+        decision = run.final_decision if isinstance(getattr(run, "final_decision", None), dict) else {}
+        decision_type = str(decision.get("type") or "").strip()
+        if decision_type not in {"hand_off", "scope_route", "qa_verdict"}:
+            continue
+        source_persona = str(getattr(run, "persona_id", "") or "").strip()
+        source_stage = str(getattr(run, "stage_id", "") or "").strip()
+        if source_persona == target_persona_id and source_stage == target_stage:
+            continue
+        summary = _safe_assignment_message_line(decision.get("summary") or decision.get("execution_summary") or "Upstream stage completed.")
+        proof_refs = _handoff_proof_refs(task, source_stage=source_stage, decision=decision)
+        next_instruction = _handoff_next_instruction(target_persona_id=target_persona_id, decision_type=decision_type, source_persona=source_persona)
+        source = f"{source_persona or 'harness'}" + (f" / stage {source_stage}" if source_stage else "") + f" / decision {decision_type}"
+        proof_text = ", ".join(proof_refs) if proof_refs else "(none attached yet; inspect Proof Records and Mission HUD)"
+        return f"Upstream handoff steer: from: {source}; summary: {summary}; proof_refs: {proof_text}; next: {next_instruction}"
+    return None
+
+
+def _run_finished_sort_key(run) -> tuple[str, str]:
+    finished = getattr(run, "finished_at", None) or getattr(run, "last_heartbeat_at", None) or getattr(run, "started_at", None)
+    return (finished.isoformat() if hasattr(finished, "isoformat") else str(finished or ""), str(getattr(run, "id", "") or ""))
+
+
+def _handoff_proof_refs(task: Task, *, source_stage: str, decision: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    payload = decision.get("payload") if isinstance(decision.get("payload"), dict) else {}
+    refs.extend(str(item).strip() for item in (payload.get("proof_ids") or []) if str(item).strip())
+    plan = getattr(task, "mission_plan", None)
+    if source_stage and plan is not None:
+        for stage in getattr(plan, "stages", None) or []:
+            if str(getattr(stage, "id", "") or "") == source_stage:
+                refs.extend(str(item).strip() for item in (getattr(stage, "proof_ids", None) or []) if str(item).strip())
+                break
+    if source_stage:
+        try:
+            refs.extend(
+                str(proof.id).strip()
+                for proof in ProofStore().list_for_task(task.id)
+                if str(getattr(proof, "stage_id", "") or "") == source_stage and str(getattr(proof, "id", "") or "").strip()
+            )
+        except Exception:
+            pass
+    if not refs:
+        refs.extend(str(item).strip() for item in (getattr(task, "proof_ids", None) or []) if str(item).strip())
+    return _dedupe_strings(refs)[:8]
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _handoff_next_instruction(*, target_persona_id: str, decision_type: str, source_persona: str) -> str:
+    if target_persona_id == "qa":
+        return "Review Harness proof records for the current stage, then emit qa_verdict; request exactly one missing proof lane only if required proof is absent or stale."
+    if target_persona_id in {"dev", "backend_dev"}:
+        if decision_type == "scope_route":
+            return "Execute the current assigned stage, run a focused in-session self-test when work changes, then hand_off."
+        if source_persona in {"dev", "backend_dev"}:
+            return "Consume the upstream stage proof/context, work only the current assigned stage, run a focused self-test, then hand_off."
+        return "Work only the current assigned stage, use visible HUD actions, and hand_off when complete."
+    if target_persona_id == "neko_supervisor":
+        return "Adjudicate the upstream result and route the next bounded owner with scope_route, or block with exact evidence."
+    return "Use the current Mission HUD action and preserve this upstream context in the next decision."
+
+
+def _safe_assignment_message_line(value: Any, *, limit: int = 700) -> str:
+    text = str(value or "").replace("\r", " ").strip()
+    text = re.sub(r"[ \t]+", " ", text)
+    return text[:limit]
+
+
+def _truncate_assignment_message(value: str, *, limit: int = 4000) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 32].rstrip() + "\n[assignment steer truncated]"
 
 
 def _repo_for_task(task: Task) -> str | None:
@@ -1900,7 +2006,7 @@ def _mark_repo_bundle_after_decision(config: RuntimeConfig, store: RepoBundleSto
     if bundle is None:
         return
     decision_type = getattr(decision, "type", None)
-    if decision_type in {DecisionType.PROPOSE_PATCH, DecisionType.COMPLETE, DecisionType.REQUEST_QA_REVIEW}:
+    if decision_type in {DecisionType.HAND_OFF, DecisionType.PROPOSE_PATCH, DecisionType.COMPLETE, DecisionType.REQUEST_QA_REVIEW}:
         store.mark_delivered(bundle, proof_ids=proof_ids)
         store.wake_ready_dependencies(bundle.task_id)
         return
@@ -1912,7 +2018,7 @@ def _mark_repo_bundle_after_decision(config: RuntimeConfig, store: RepoBundleSto
         elif statuses:
             store.mark_rejected(bundle, reason="Requested proof did not pass")
         return
-    if decision_type == DecisionType.REPORT_QA_VERDICT:
+    if decision_type in {DecisionType.QA_VERDICT, DecisionType.REPORT_QA_VERDICT}:
         payload = getattr(decision, "payload", None) if isinstance(getattr(decision, "payload", None), dict) else {}
         verdict = str(payload.get("validation_status") or payload.get("verdict") or payload.get("status") or "").lower()
         if verdict in {"valid", "approved", "pass", "passed"}:
@@ -1928,11 +2034,11 @@ def _mark_repo_bundle_after_decision(config: RuntimeConfig, store: RepoBundleSto
 
 def _allowed_decisions_for_action(action: HarnessAction) -> list[str]:
     if _action_targets(action, "neko_supervisor"):
-        return ["propose_acceptance", "handoff_to_dev", "request_context", "block"]
+        return ["scope_route", "request_context", "block", "escalate"]
     if _action_targets(action, "dev", "backend_dev"):
-        return ["deliver", "request_test_run", "request_screenshot", "request_video", "report_blocker", "handoff"]
+        return ["hand_off", "request_screenshot", "request_video", "block", "escalate"]
     if _action_targets(action, "qa"):
-        return ["report_qa_verdict", "request_test_run", "request_screenshot", "request_video", "block"]
+        return ["qa_verdict", "request_screenshot", "request_video", "block", "escalate"]
     return []
 
 
@@ -1989,7 +2095,7 @@ def _sync_run_proofs_to_task(task: Task, run_id: str, *, proof_store: ProofStore
 
 
 def _should_auto_run_final_gate(config: RuntimeConfig, decision) -> bool:
-    if decision.type != DecisionType.PROPOSE_PATCH:
+    if decision.type not in {DecisionType.HAND_OFF, DecisionType.PROPOSE_PATCH}:
         return False
     flow = getattr(config, "normal_worker_flow", None)
     if bool(getattr(flow, "enabled", False)) and bool(getattr(flow, "auto_final_gate_after_delivery", False)):
@@ -2087,12 +2193,9 @@ def _record_handoff_observation(
     command_workdir,
     task_store,
 ) -> None:
-    # Fire the observe-the-work lane on every delivery/gate-request signal so the
-    # HUD diff+trace surface has parity across the simplified and legacy contracts:
-    # under the simplified flag a collapsed hand_off projects onto PROPOSE_PATCH,
-    # but on the legacy/rollback path a no-edit dev delivers via REQUEST_TEST_RUN
-    # (and REQUEST_QA_REVIEW), which previously produced no observed-handoff record.
-    if decision.type not in {DecisionType.PROPOSE_PATCH, DecisionType.REQUEST_QA_REVIEW, DecisionType.REQUEST_TEST_RUN}:
+    # Fire the observe-the-work lane on every handoff/gate-request signal so the
+    # HUD diff+trace surface has parity across modern and legacy contracts.
+    if decision.type not in {DecisionType.HAND_OFF, DecisionType.PROPOSE_PATCH, DecisionType.REQUEST_QA_REVIEW, DecisionType.REQUEST_TEST_RUN}:
         return
     stage_id = str((decision.payload or {}).get("stage_id") or task.current_stage_id or getattr(run, "stage_id", "") or "").strip() or None
     baseline = (getattr(run, "progress", None) or {}).get("repo_baseline") if run is not None else None
@@ -2158,7 +2261,7 @@ def _record_handoff_observation(
 
 
 def _validate_observed_trace_requirement(task: Task, decision, *, run, proof_store) -> None:
-    if decision.type not in {DecisionType.PROPOSE_PATCH, DecisionType.REQUEST_QA_REVIEW, DecisionType.REQUEST_TEST_RUN}:
+    if decision.type not in {DecisionType.HAND_OFF, DecisionType.PROPOSE_PATCH, DecisionType.REQUEST_QA_REVIEW, DecisionType.REQUEST_TEST_RUN}:
         return
     stage_id = str((decision.payload or {}).get("stage_id") or task.current_stage_id or getattr(run, "stage_id", "") or "").strip() or None
     if not _stage_requires_observed_agent_trace(task, stage_id):
@@ -2523,7 +2626,7 @@ def _validate_visual_request_not_redundant(task: Task, decision, *, proof_store:
     raise DecisionPayloadInvalid(
         "matching visual proof already exists for this stage/target: "
         f"{existing.id}. Do not request another {requested_type}; inspect the existing proof metadata/artifact "
-        "and return report_qa_verdict with review_scope='implementation', verdict, proof_ids including that visual proof, "
+        "and return qa_verdict with verdict, findings, and proof_ids including that visual proof, "
         "and findings, or return block with the exact remaining gap."
     )
 
@@ -2564,7 +2667,7 @@ def _validate_request_test_run_targets_current_stage(task: Task, decision) -> No
         return
     if no_product_edit_recipe_id(recipe_id) and stage_requires_product_edit(task, current_stage):
         raise DecisionPayloadInvalid(
-            f"request_test_run recipe_id {recipe_id!r} cannot bypass incomplete product-edit stage {current_stage_id!r}; return propose_patch/correct_stage for that stage or request focused Flutter/widget proof after edits."
+            f"request_test_run recipe_id {recipe_id!r} cannot bypass incomplete product-edit stage {current_stage_id!r}; return hand_off/correct_stage for that stage or request focused Flutter/widget proof after edits."
         )
     current_commands = _unambiguous_stage_proof_commands(current_stage)
     if len(current_commands) == 1:

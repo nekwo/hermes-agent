@@ -7,6 +7,7 @@ from typing import Any, Iterable
 from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .persona_chat_history import _canonical_persona_id
+from .simplified_contract import public_decision_type_value
 
 OPERATOR_CHANNELS_SCHEMA_VERSION = 1
 # v2: goal-run turn flow — thinking_summary / turn / tool_call / turns_collapsed
@@ -787,7 +788,7 @@ def _conversation_turn_messages(
                 }
             )
             emitted += 1
-        decision_type = safe_assignment_token(run.get("decision_type"))
+        decision_type = _public_turn_decision_type(run.get("decision_type"), persona_id=persona_id)
         if decision_summary or decision_type or has_error:
             turn_message: dict[str, Any] = {
                 "id": f"{channel_id}:turn:{run_id}",
@@ -826,8 +827,22 @@ def _turn_title(decision_type: str | None, *, has_error: bool) -> str:
         return "Turn failed"
     if not decision_type:
         return "Turn"
+    if decision_type == "hand_off":
+        return "Turn"
     label = decision_type.replace("_", " ").strip()
     return f"Turn · {label[:1].upper()}{label[1:]}" if label else "Turn"
+
+
+def _public_turn_decision_type(decision_type: Any, *, persona_id: str) -> str | None:
+    value = safe_assignment_token(decision_type)
+    public_value = public_decision_type_value(value)
+    if persona_id in {"dev", "backend_dev"} and public_value == "hand_off":
+        return "hand_off"
+    if persona_id == "qa" and public_value == "qa_verdict":
+        return "qa_verdict"
+    if persona_id == "neko_supervisor" and public_value == "scope_route":
+        return "scope_route"
+    return public_value or value
 
 
 def _conversation_tool_call_messages(

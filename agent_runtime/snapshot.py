@@ -52,6 +52,7 @@ from .role_checklists import RoleChecklist, RoleChecklistStore, checklist_summar
 from .role_envelopes import RoleEnvelope, RoleEnvelopeStore, role_envelope_summary
 from .proof_batches import ProofBatch, ProofBatchStore, proof_batch_summary
 from .scope_control import issue_discovery_counts, untriaged_issue_discoveries
+from .simplified_contract import public_decision_type_value
 from .state_machine import MissionStateMachine
 from .serde import from_jsonable, to_jsonable
 from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
@@ -1090,7 +1091,7 @@ def _run_summary_from_mapping(raw: dict) -> dict:
         "started_at": raw.get("started_at"),
         "finished_at": raw.get("finished_at"),
         "duration_ms": _duration_ms(raw.get("started_at"), raw.get("finished_at")),
-        "decision_type": llm.get("decision_type") or final_decision.get("type"),
+        "decision_type": _public_decision_value(final_decision.get("type"), llm.get("public_decision_type"), llm.get("decision_type")),
         "decision_summary": decision_summary,
         "decision_rationale": decision_rationale,
         "reasoning_summary": reasoning_summary,
@@ -2994,7 +2995,7 @@ def _run_summary(run):
         "last_heartbeat_at": run.last_heartbeat_at,
         "finished_at": run.finished_at,
         "duration_ms": _duration_ms(run.started_at, run.finished_at),
-        "decision_type": llm.get("decision_type") or decision_type,
+        "decision_type": _public_decision_value(decision_type, llm.get("public_decision_type"), llm.get("decision_type")),
         "decision_summary": decision_summary,
         "decision_rationale": decision_rationale,
         "reasoning_summary": decision_rationale,
@@ -3010,7 +3011,8 @@ def _safe_llm(value):
     allowed = {
         "provider", "model", "base_url_host", "session_id", "api_calls", "tool_turns",
         "input_tokens", "output_tokens", "total_tokens", "latency_ms", "finish_reason",
-        "response_len", "validation_status", "decision_type",
+        "response_len", "validation_status", "decision_type", "public_decision_type",
+        "execution_decision_type", "raw_decision_type", "decision_contract_mode",
     }
     safe = {key: value.get(key) for key in allowed if value.get(key) is not None}
     timing = value.get("timing")
@@ -3031,6 +3033,15 @@ def _safe_llm(value):
         if safe_timing:
             safe["timing"] = safe_timing
     return safe
+
+
+def _public_decision_value(*candidates):
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        return public_decision_type_value(text) or text
+    return None
 
 
 def _safe_text(value):

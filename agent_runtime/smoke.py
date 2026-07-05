@@ -75,46 +75,52 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
         if first_action.type != HarnessActionType.RUN_SLOT or first_action.slot_id != "neko_supervisor":
             raise RuntimeError(f"expected Neko Mission Lead first action, got {first_action.type.value}")
         neko_decision = AgentDecision(
-            type=DecisionType.PROPOSE_ACCEPTANCE,
+            type=DecisionType.SCOPE_ROUTE,
             summary="smoke Neko scoped mission",
             rationale="deterministic no-model smoke exercises Neko Mission Lead scoping",
-            payload={"objective": task.description, "acceptance_criteria": list(task.acceptance_criteria)},
+            payload={
+                "objective": task.description,
+                "acceptance_criteria": list(task.acceptance_criteria),
+                "target_owner": "backend_dev",
+                "target_repo": "EterniaBackend",
+                "proof_gate": {"required": True, "required_proof_types": ["test_run"], "minimum_status": "passed"},
+            },
         )
         validate_decision_for_role(neko_decision, AgentRole.ALICE_SUPERVISOR)
         run = run_store.open_run("neko_supervisor", task.id, None, tick_id="tick_smoke")
         machine.apply_decision(task, neko_decision, actor="neko_supervisor", proof_store=proof_store, run_id=run.id)
         run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": neko_decision.type.value, "summary": neko_decision.summary})
-        transitions.append("neko_supervisor:propose_acceptance")
+        transitions.append("neko_supervisor:scope_route")
 
         if task.current_stage_id != "backend_implementation":
             raise RuntimeError(f"expected backend implementation stage after Neko, got {task.current_stage_id!r}")
         proof_store.attach(Proof(id="proof_smoke_backend", task_id=task.id, stage_id=task.current_stage_id, type=ProofType.TEST_RUN, title="Smoke backend no-model test", path_or_value="no-model backend smoke", created_by="smoke", created_at=now(), metadata={"status": "passed", "exit_code": 0}, redaction_status="safe"))
         backend_decision = AgentDecision(
-            type=DecisionType.PROPOSE_PATCH,
+            type=DecisionType.HAND_OFF,
             summary="smoke Backend Dev attached proof",
             rationale="deterministic no-model smoke has a safe backend proof artifact",
-            payload={"proof_ids": ["proof_smoke_backend"]},
+            payload={"stage_id": task.current_stage_id},
         )
         validate_decision_for_role(backend_decision, AgentRole.DEV)
         run = run_store.open_run("backend_dev", task.id, task.current_stage_id, tick_id="tick_smoke")
-        machine.apply_decision(task, backend_decision, actor="backend_dev", proof_store=proof_store, run_id=run.id)
+        machine.apply_decision(task, backend_decision, actor="backend_dev", proof_store=proof_store, run_id=run.id, normal_worker_flow=True)
         run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": backend_decision.type.value, "summary": backend_decision.summary})
-        transitions.append("backend_dev:propose_patch")
+        transitions.append("backend_dev:hand_off")
 
         if task.current_stage_id != "implement":
             raise RuntimeError(f"expected launcher implementation stage after Backend Dev, got {task.current_stage_id!r}")
         proof_store.attach(Proof(id="proof_smoke_launcher", task_id=task.id, stage_id=task.current_stage_id, type=ProofType.TEST_RUN, title="Smoke launcher no-model test", path_or_value="no-model launcher smoke", created_by="smoke", created_at=now(), metadata={"status": "passed", "exit_code": 0}, redaction_status="safe"))
         dev_decision = AgentDecision(
-            type=DecisionType.PROPOSE_PATCH,
+            type=DecisionType.HAND_OFF,
             summary="smoke Launcher Dev attached proof",
             rationale="deterministic no-model smoke has a safe launcher proof artifact",
-            payload={"proof_ids": ["proof_smoke_launcher"]},
+            payload={"stage_id": task.current_stage_id},
         )
         validate_decision_for_role(dev_decision, AgentRole.DEV)
         run = run_store.open_run("dev", task.id, task.current_stage_id, tick_id="tick_smoke")
-        machine.apply_decision(task, dev_decision, actor="dev", proof_store=proof_store, run_id=run.id)
+        machine.apply_decision(task, dev_decision, actor="dev", proof_store=proof_store, run_id=run.id, normal_worker_flow=True)
         run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": dev_decision.type.value, "summary": dev_decision.summary})
-        transitions.append("dev:propose_patch")
+        transitions.append("dev:hand_off")
 
         task.proof_ids = ["proof_smoke_backend", "proof_smoke_launcher"]
         close_action = machine.next_action(task)

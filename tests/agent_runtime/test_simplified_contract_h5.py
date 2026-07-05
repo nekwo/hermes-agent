@@ -133,8 +133,8 @@ def test_simplified_projection_maps_hand_off_and_can_reject_legacy_aliases(isola
     projection = project_decision_for_execution(task, hand_off, config=enabled, actor="dev", run_id="run_1")
 
     assert projection.public_type == DecisionType.HAND_OFF
-    assert projection.execution_type == DecisionType.PROPOSE_PATCH
-    assert projection.mode == "simplified_internal_projection"
+    assert projection.execution_type == DecisionType.HAND_OFF
+    assert projection.mode == "simplified"
 
     legacy_disabled = RuntimeConfig(
         simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True, allow_legacy_decision_aliases=False)
@@ -285,4 +285,4 @@ def test_hand_off_captures_isolated_diff_and_reruns_authoritative_gate(isolate_a
     assert observation["authoritative_gate_status"] == "passed"
     parity = [event for event in EventLog().for_task(task.id, limit=0) if event.type == "decision_contract.parity"]
     assert parity[-1].payload["public_decision_type"] == "hand_off"
-    assert parity[-1].payload["execution_decision_type"] == "propose_patch"
+    assert parity[-1].payload["execution_decision_type"] == "hand_off"

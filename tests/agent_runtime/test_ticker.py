@@ -733,6 +733,71 @@ def test_assignment_spec_exact_prose_goal_proof_targets_outrank_stage_plan():
     assert spec.proof_targets == ["echo e2e-trust-probe"]
 
 
+def test_assignment_spec_carries_upstream_handoff_steer_to_receiver_chat(isolate_agent_runtime_root):
+    from agent_runtime.context_builder import build_context
+    from agent_runtime.persona_assignments import PersonaAssignmentStore
+    from agent_runtime.ticker import _assignment_spec_for_action
+
+    task = make_task_with_id("task_handoff_steer_assignment")
+    task.state = TaskState.RUNNING
+    task.current_stage_id = "qa_release"
+    task.proof_ids = ["proof_impl_gate"]
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title="Handoff steer", objective="Verify the receiver gets upstream context."),
+        current_stage_id="qa_release",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Implementation",
+                objective="Patch the scoped file.",
+                owner="dev",
+                repo="hermes-agent",
+                kind="implementation",
+                status=StageStatus.PASSED,
+                proof_ids=["proof_impl_gate"],
+            ),
+            MissionPlanStage(
+                id="qa_release",
+                title="QA Release",
+                objective="Verify the implementation proof.",
+                owner="qa",
+                owner_slot="qa",
+                repo="hermes-agent",
+                kind="qa_verdict",
+                status=StageStatus.READY,
+            ),
+        ],
+    )
+    runs = RunStore()
+    dev_run = runs.open_run("dev", task.id, stage_id="implement")
+    runs.close_run(
+        dev_run.id,
+        state=RunState.COMPLETED,
+        final_decision={"type": "hand_off", "summary": "Changed the scoped file and ran focused proof."},
+    )
+
+    spec = _assignment_spec_for_action(
+        HarnessAction(HarnessActionType.RUN_SLOT, task.id, slot_id="qa", stage_id="qa_release"),
+        task,
+        persona_id="qa",
+    )
+
+    assert "Upstream handoff steer:" in spec.message
+    assert "from: dev / stage implement / decision hand_off" in spec.message
+    assert "proof_refs: proof_impl_gate" in spec.message
+    assert "emit qa_verdict" in spec.message
+
+    assignment = PersonaAssignmentStore().create_or_resume(spec)
+    qa_run = runs.open_run("qa", task.id, stage_id="qa_release")
+    qa_run.progress = {"assignment_id": assignment.id}
+    runs.update(qa_run)
+    hud = build_context(task, qa_run).mission_hud
+
+    current_assignment = hud["agent_hud"]["current_assignment"]
+    assert current_assignment["assignment_message"] == spec.message
+    assert "Upstream handoff steer:" in current_assignment["assignment_message"]
+
+
 def attach_blueprint(task: Task, blueprint_id: str, bindings: dict[str, str]) -> Task:
     bp = BlueprintStore().get(blueprint_id)
     task.mission_plan = instantiate_blueprint(bp, goal=task.description or task.title, bindings=bindings)
@@ -1255,7 +1320,7 @@ def test_duplicate_visual_request_repairs_to_verdict_instead_of_recapturing():
     run = runs.list_for_task(task.id)[0]
     assert run.state == RunState.COMPLETED
     assert run.llm["schema_repair_attempts"] == 1
-    assert run.final_decision["type"] == "report_qa_verdict"
+    assert run.final_decision["type"] == "qa_verdict"
     saved = ts.get(task.id)
     assert saved.state == TaskState.RUNNING
     assert saved.stages[0].status == StageStatus.PASSED
@@ -2159,7 +2224,7 @@ def test_normal_worker_flow_auto_runs_final_gate_after_patch_delivery():
 
     assert res.actions_taken[0].ok
     assert runtime.contexts[0].mission_hud["decision_contract_mode"] == "normal_worker_flow"
-    assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "deliver_patch"
+    assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "hand_off"
     assert "dev.request_test_run" not in runtime.contexts[0].mission_hud["decision_shape_index"]
     assert len(runner.calls) == 1
     assert runner.calls[0]["stage_id"] == "mc_terminal_dm_bubble_rows"
@@ -2522,7 +2587,7 @@ def test_normal_worker_flow_no_edit_investigation_delivery_advances_to_qa_withou
     assert stored.state == TaskState.RUNNING
     assert stored.mission_plan.stages[0].status == StageStatus.PASSED
     assert engine.state_machine.next_action(stored).type == HarnessActionType.RUN_SLOT
-    assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "deliver_findings"
+    assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "hand_off"
 
 
 def test_run_until_settled_drives_neko_dev_qa_and_deterministic_complete():

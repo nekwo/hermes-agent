@@ -34,7 +34,7 @@ def derive_stage_outcome(
     stage: MissionPlanStage,
     proofs: Iterable[Proof] | None = None,
 ) -> StageOutcome | None:
-    if decision.type == DecisionType.REPORT_QA_VERDICT:
+    if decision.type in {DecisionType.QA_VERDICT, DecisionType.REPORT_QA_VERDICT}:
         verdict = str(decision.payload.get("verdict") or "").strip().lower()
         if verdict in {"approved", "passed", "pass"}:
             return StageOutcome.PASSED
@@ -52,6 +52,7 @@ def derive_stage_outcome(
         DecisionType.REQUEST_QA_REVIEW,
         DecisionType.COMPLETE,
         DecisionType.APPROVE,
+        DecisionType.HAND_OFF,
         DecisionType.PROPOSE_PATCH,
     }:
         gate = stage_proof_satisfied(stage, list(proofs or []))
@@ -60,11 +61,11 @@ def derive_stage_outcome(
         return StageOutcome.MISSING_INPUT
     if decision.type == DecisionType.REQUEST_TEST_RUN:
         return _outcome_from_proofs(proofs or [])
-    if decision.type in {DecisionType.PROPOSE_ACCEPTANCE, DecisionType.REQUEST_QA_REVIEW, DecisionType.COMPLETE, DecisionType.APPROVE}:
+    if decision.type in {DecisionType.SCOPE_ROUTE, DecisionType.PROPOSE_ACCEPTANCE, DecisionType.REQUEST_QA_REVIEW, DecisionType.COMPLETE, DecisionType.APPROVE}:
         if _scope_stage_ready_without_proof(stage):
             return StageOutcome.READY
-        if decision.type == DecisionType.PROPOSE_ACCEPTANCE:
-            # propose_acceptance is a PLANNING/routing decision. Attributed to
+        if decision.type in {DecisionType.SCOPE_ROUTE, DecisionType.PROPOSE_ACCEPTANCE}:
+            # scope_route (or its legacy propose_acceptance alias) is a PLANNING/routing decision. Attributed to
             # anything but a proof-free scope stage (e.g. Neko's recovery
             # re-scope while the blocked dev stage is current), it must never
             # mark that stage passed — the typed-plan release inside
@@ -75,10 +76,13 @@ def derive_stage_outcome(
             # phantom pass back every cycle).
             return None
         return StageOutcome.PASSED
-    if decision.type == DecisionType.PROPOSE_PATCH:
+    if decision.type in {DecisionType.HAND_OFF, DecisionType.PROPOSE_PATCH}:
         proof_ids = decision.payload.get("proof_ids")
         if isinstance(proof_ids, list) and proof_ids:
             return StageOutcome.PASSED
+        proof_outcome = _outcome_from_proofs(_stage_scoped_proofs(stage, proofs or []))
+        if proof_outcome is not None:
+            return proof_outcome
         if _scope_stage_ready_without_proof(stage):
             return StageOutcome.READY
         return None
@@ -237,6 +241,20 @@ def _outcome_from_proofs(proofs: Iterable[Proof]) -> StageOutcome | None:
     if all(status in {"passed", "approved", "safe"} for status in statuses):
         return StageOutcome.PASSED
     return StageOutcome.FAILED
+
+
+def _stage_scoped_proofs(stage: MissionPlanStage, proofs: Iterable[Proof]) -> list[Proof]:
+    stage_id = str(getattr(stage, "id", "") or "").strip()
+    if not stage_id:
+        return list(proofs)
+    attached_ids = {str(proof_id) for proof_id in (getattr(stage, "proof_ids", None) or []) if str(proof_id)}
+    return [
+        proof
+        for proof in proofs
+        if not getattr(proof, "stage_id", None)
+        or str(getattr(proof, "stage_id", "") or "") == stage_id
+        or str(getattr(proof, "id", "") or "") in attached_ids
+    ]
 
 
 def _scope_stage_ready_without_proof(stage: MissionPlanStage) -> bool:
