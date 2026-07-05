@@ -17,7 +17,7 @@ from . import paths
 from .config import load_agent_runtime_config
 from .liveness import LivenessProbe
 from .serde import to_jsonable
-from .ticker import TickEngine, TickResult
+from .ticker import RunUntilSettledResult, TickEngine, TickResult
 
 
 DAEMON_LEASE_TTL_SECONDS = 15.0
@@ -117,6 +117,7 @@ class MissionDaemon:
                     "heartbeat_at": _utc_now(),
                     "target_task_id": self.target_task_id,
                     "queue_mode": self._queue_mode(),
+                    "services_open_tasks": True,
                     "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                 }))
                 _refresh_daemon_lease(os.getpid())
@@ -126,10 +127,7 @@ class MissionDaemon:
                 try:
                     engine = self.engine_factory()
                     if hasattr(engine, "run_until_settled"):
-                        if self.target_task_id:
-                            tick = engine.run_until_settled(task_id=self.target_task_id, max_actions=10)
-                        else:
-                            tick = engine.run_until_settled(max_actions=10)
+                        tick = self._run_settled_cycle(engine)
                     else:
                         tick = engine.tick_once()
                 except Exception as exc:
@@ -140,6 +138,7 @@ class MissionDaemon:
                         "heartbeat_at": _utc_now(),
                         "target_task_id": self.target_task_id,
                         "queue_mode": self._queue_mode(),
+                        "services_open_tasks": True,
                         "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                         "error_class": type(exc).__name__,
                         "error_summary": "Mission Daemon tick failed",
@@ -176,6 +175,24 @@ class MissionDaemon:
 
     def _queue_mode(self) -> str:
         return "foreground" if self.target_task_id else "lane"
+
+    def _run_settled_cycle(self, engine) -> RunUntilSettledResult:
+        if not self.target_task_id:
+            return engine.run_until_settled(max_actions=10)
+        tick = engine.run_until_settled(task_id=self.target_task_id, max_actions=10)
+        if getattr(tick, "stop_reason", None) == "task_terminal":
+            return tick
+        if not hasattr(engine, "tick_once"):
+            return tick
+        queue_tick = engine.tick_once()
+        if not queue_tick.actions_taken:
+            return tick
+        tick.actions_taken.extend(queue_tick.actions_taken)
+        tick.open_incidents = max(int(getattr(tick, "open_incidents", 0) or 0), len(getattr(queue_tick, "incidents_opened", []) or []))
+        tick.finished_at = queue_tick.finished_at or tick.finished_at
+        if getattr(tick, "stop_reason", None) in {"no_eligible_action", "incident_opened", "task_blocked"}:
+            tick.stop_reason = "background_progress"
+        return tick
 
     def _archive_terminal_target(self) -> None:
         if not self.target_task_id:
@@ -321,6 +338,17 @@ def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: 
     if isinstance(pid, int) and _pid_is_alive(pid):
         existing_target = _safe_task_id(status.get("target_task_id"))
         if task_id and existing_target != task_id:
+            if status.get("services_open_tasks") is True:
+                return {
+                    "started": False,
+                    "pid": pid,
+                    "state": status.get("state", "running"),
+                    "target_task_id": existing_target,
+                    "requested_task_id": task_id,
+                    "queue_mode": status.get("queue_mode") or ("foreground" if existing_target else "lane"),
+                    "services_open_tasks": True,
+                    "will_service_open_tasks": True,
+                }
             return {
                 "started": False,
                 "pid": pid,
@@ -352,9 +380,10 @@ def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: 
         "heartbeat_at": _utc_now(),
         "target_task_id": task_id,
         "queue_mode": queue_mode,
+        "services_open_tasks": True,
         "foreground_runtime_instance_id": foreground_runtime_instance_id,
     })
-    return {"started": True, "pid": proc.pid, "state": "starting", "target_task_id": task_id, "queue_mode": queue_mode}
+    return {"started": True, "pid": proc.pid, "state": "starting", "target_task_id": task_id, "queue_mode": queue_mode, "services_open_tasks": True}
 
 
 def stop_daemon() -> dict:
@@ -515,6 +544,7 @@ def _status_from_tick(tick: TickResult, *, loops: int, wait_seconds: float, next
         "actions_last_tick": actions,
         "next_wake_at": next_wake_at,
         "wait_seconds": wait_seconds,
+        "services_open_tasks": True,
     }
     previous = read_daemon_status()
     if previous.get("target_task_id"):

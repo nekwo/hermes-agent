@@ -68,6 +68,43 @@ class TargetRecordingEngine:
         )
 
 
+class TargetAndQueueEngine:
+    def __init__(self):
+        self.calls = []
+
+    def run_until_settled(self, *, task_id=None, max_actions=None):
+        self.calls.append({"kind": "target", "task_id": task_id, "max_actions": max_actions})
+        from agent_runtime.ticker import RunUntilSettledResult
+
+        return RunUntilSettledResult(
+            settle_id="settle_target",
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+            ticks=1,
+            actions_taken=[],
+            stop_reason="no_eligible_action",
+            task_id=task_id,
+        )
+
+    def tick_once(self):
+        self.calls.append({"kind": "queue", "task_id": None, "max_actions": None})
+        from agent_runtime.actions import HarnessAction, HarnessActionResult, HarnessActionType
+
+        return TickResult(
+            tick_id="tick_queue",
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+            tasks_seen=2,
+            actions_taken=[
+                HarnessActionResult(
+                    HarnessAction(HarnessActionType.RUN_SLOT, "task_new", slot_id="neko_supervisor"),
+                    True,
+                    "queued task scoped",
+                )
+            ],
+        )
+
+
 def test_daemon_uses_settled_loop_and_records_compact_stop_reason(isolate_agent_runtime_root):
     engine = SettledEngine()
     daemon = MissionDaemon(engine_factory=lambda: engine, interval_seconds=0, idle_interval_seconds=0)
@@ -92,6 +129,22 @@ def test_daemon_foreground_uses_target_task_id(isolate_agent_runtime_root):
     assert engine.calls == [{"task_id": "task_new", "max_actions": 10}]
     assert status["target_task_id"] == "task_new"
     assert status["queue_mode"] == "foreground"
+
+
+def test_targeted_daemon_services_open_queue_after_target_pass(isolate_agent_runtime_root):
+    engine = TargetAndQueueEngine()
+    daemon = MissionDaemon(engine_factory=lambda: engine, target_task_id="task_existing", interval_seconds=0, idle_interval_seconds=0)
+
+    daemon.run_foreground(max_loops=1)
+    status = read_daemon_status()
+
+    assert engine.calls == [
+        {"kind": "target", "task_id": "task_existing", "max_actions": 10},
+        {"kind": "queue", "task_id": None, "max_actions": None},
+    ]
+    assert status["actions_last_tick"] == 1
+    assert status["settle_stop_reason"] == "background_progress"
+    assert status["services_open_tasks"] is True
 
 
 def test_targeted_daemon_exits_when_target_reaches_terminal_boundary(isolate_agent_runtime_root):
@@ -193,6 +246,22 @@ def test_daemon_start_reports_target_conflict_when_existing_daemon_is_untargeted
     assert result["requested_task_id"] == "task_new"
 
 
+def test_daemon_start_reuses_live_daemon_that_services_open_tasks(monkeypatch, isolate_agent_runtime_root):
+    from agent_runtime import daemon as daemon_mod
+
+    daemon_mod._write_daemon_status({"state": "running", "pid": 1234, "target_task_id": "task_existing", "queue_mode": "foreground", "services_open_tasks": True})
+    monkeypatch.setattr(daemon_mod, "_pid_is_alive", lambda pid: pid == 1234)
+
+    result = daemon_mod.start_daemon(task_id="task_new")
+
+    assert result["started"] is False
+    assert result["pid"] == 1234
+    assert result["target_task_id"] == "task_existing"
+    assert result["requested_task_id"] == "task_new"
+    assert result["will_service_open_tasks"] is True
+    assert "error" not in result
+
+
 def test_daemon_start_records_spawned_pid(monkeypatch, isolate_agent_runtime_root):
     from agent_runtime import daemon as daemon_mod
 
@@ -213,6 +282,7 @@ def test_daemon_start_records_spawned_pid(monkeypatch, isolate_agent_runtime_roo
     assert status["pid"] == 5678
     assert status["target_task_id"] == "task_new"
     assert status["queue_mode"] == "foreground"
+    assert status["services_open_tasks"] is True
 
 
 def test_daemon_start_spawns_process_with_task_argument(monkeypatch, isolate_agent_runtime_root):
