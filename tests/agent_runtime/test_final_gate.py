@@ -89,6 +89,20 @@ def test_stage_test_plan_still_outranks_goal_named_command():
     assert commands == ["flutter analyze lib/features/shop"]
 
 
+def test_goal_named_exact_proof_outranks_stage_test_plan():
+    from agent_runtime.final_gate import goal_named_proof_commands
+
+    task = _goal_task(
+        "Write docs. Exact proof: `echo e2e-trust-probe`; no Flutter tests.",
+        repos=["EterniaLauncher"],
+    )
+    stage = _edit_stage(test_plan=["flutter analyze lib/features/mission_control", "flutter test test/features/mission_control"])
+
+    assert goal_named_proof_commands(task) == ["echo e2e-trust-probe"]
+    commands = final_gate_commands(task, stage)
+    assert commands == ["echo e2e-trust-probe"]
+
+
 def test_goal_named_command_for_other_repo_is_excluded_from_stage_gate():
     task = _goal_task(
         "Polish the shop. Proof: `python -m pytest tests/agent_runtime/test_liveness.py -q` in hermes-agent.",

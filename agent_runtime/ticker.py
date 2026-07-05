@@ -28,6 +28,7 @@ from .events import EventLog
 from .final_gate import (
     build_final_gate_decision,
     default_blueprint_placeholder_repo_override,
+    goal_demands_exact_proof,
     goal_named_gate_commands,
     stage_repo_for_gate,
 )
@@ -1815,12 +1816,18 @@ def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id
     repo = getattr(stage, "repo", None) or _repo_for_task(task)
     affected_paths = list(getattr(stage, "affected_paths", None) or [])
     proof_targets = []
-    for item in list(getattr(stage, "test_plan", None) or []):
-        text = str(item or "").strip()
-        if text:
-            proof_targets.append(text)
-    if getattr(stage, "proof_recipe_id", None):
-        proof_targets.append(f"proof_recipe:{stage.proof_recipe_id}")
+    goal_named = goal_named_gate_commands(task, stage_repo_for_gate(task, stage)) if stage is not None else []
+    if goal_named and goal_demands_exact_proof(task):
+        proof_targets.extend(goal_named)
+    else:
+        for item in list(getattr(stage, "test_plan", None) or []):
+            text = str(item or "").strip()
+            if text:
+                proof_targets.append(text)
+        if getattr(stage, "proof_recipe_id", None):
+            proof_targets.append(f"proof_recipe:{stage.proof_recipe_id}")
+        if not proof_targets and goal_named:
+            proof_targets.extend(goal_named)
     return PersonaAssignmentSpec(
         persona_id=persona_id,
         kind="task_stage",

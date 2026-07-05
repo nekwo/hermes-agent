@@ -13,7 +13,7 @@ _DEFAULT_FINAL_GATE_COMMANDS: dict[str, tuple[str, ...]] = {
     "hermes-agent": ("python -m pytest tests/agent_runtime -q -o addopts=\"\"",),
 }
 
-_GOAL_COMMAND_PREFIXES = ("python", "pytest", "flutter", "dart", "npm", "pnpm", ".eterniabackendvirtualenv")
+_GOAL_COMMAND_PREFIXES = ("python", "pytest", "flutter", "dart", "npm", "pnpm", "echo", ".eterniabackendvirtualenv")
 
 
 def final_gate_required(task: Task, stage: TaskStage | None, delivery_packet: dict[str, Any] | None = None) -> bool:
@@ -49,11 +49,13 @@ def final_gate_commands(task: Task, stage: TaskStage | None) -> list[str]:
         return []
     if no_product_edit_recipe_id(stage.id):
         return []
+    repo = stage_repo_for_gate(task, stage)
+    goal_named = goal_named_gate_commands(task, repo)
+    if goal_named and goal_demands_exact_proof(task):
+        return goal_named
     commands = [_clean_command(item) for item in getattr(stage, "test_plan", []) or [] if _looks_like_command(item)]
     if commands:
         return commands[:3]
-    repo = stage_repo_for_gate(task, stage)
-    goal_named = goal_named_gate_commands(task, repo)
     if goal_named:
         return goal_named
     return list(_DEFAULT_FINAL_GATE_COMMANDS.get(repo, ()))[:3]
@@ -150,6 +152,35 @@ def goal_named_proof_commands(task: Task) -> list[str]:
     return found[:3]
 
 
+def goal_demands_exact_proof(task: Task) -> bool:
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            *[str(item) for item in (getattr(task, "acceptance_criteria", []) or [])],
+            *[str(item) for item in (getattr(task, "non_goals", []) or [])],
+            *[str(item) for item in (getattr(task, "operator_notes", []) or [])],
+        ]
+    ).lower()
+    exact_markers = (
+        "exact proof",
+        "exact command proof",
+        "exact focused proof",
+        "must run exactly",
+        "run exactly",
+        "demanded exactly",
+    )
+    forbid_generic_markers = (
+        "no flutter test",
+        "no flutter tests",
+        "no generic proof",
+        "forbid flutter",
+        "forbade flutter",
+        "do not run flutter",
+    )
+    return any(marker in text for marker in exact_markers) or any(marker in text for marker in forbid_generic_markers)
+
+
 def _extract_command_candidates(text: str) -> list[str]:
     candidates: list[str] = []
     for match in re.findall(r"`([^`\n]{4,200})`", text):
@@ -207,7 +238,7 @@ def _looks_like_command(value: object) -> bool:
         return False
     if any(marker in text for marker in ("--version", " doctor", " where ", " which ")):
         return False
-    return any(marker in text for marker in ("pytest", "flutter ", "dart ", "python ", "manage.py", "npm ", "pnpm "))
+    return any(marker in text for marker in ("pytest", "flutter ", "dart ", "python ", "manage.py", "npm ", "pnpm ", "echo "))
 
 
 def _clean_command(value: object) -> str:

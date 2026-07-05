@@ -21,6 +21,7 @@ from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, P
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import StageStatus, TaskState
+from agent_runtime.store import ProofStore
 
 
 def test_schema_rejects_undeclared_owner_slot():
@@ -329,6 +330,92 @@ def test_blueprint_verify_passed_routes_to_done():
     assert result == "done"
     assert task.mission_plan.current_stage_id is None
     assert MissionStateMachine().next_action(task).type == HarnessActionType.COMPLETE_TASK
+
+
+def test_blueprint_terminal_close_blocks_latest_failed_stage_proof(isolate_agent_runtime_root):
+    task = _blueprint_task("two_agent_build_verify")
+    plan = task.mission_plan
+    for stage in plan.stages:
+        stage.status = StageStatus.PASSED
+    plan.current_stage_id = None
+    task.current_stage_id = None
+    task.state = TaskState.RUNNING
+
+    store = ProofStore()
+    passed = store.attach(
+        Proof(
+            id="proof_implement_passed",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="passed implement proof",
+            path_or_value="proof-pass.log",
+            created_by="dev",
+            created_at=now(),
+            metadata={"status": "passed", "exit_code": 0},
+            redaction_status="safe",
+        )
+    )
+    failed = store.attach(
+        Proof(
+            id="proof_implement_failed",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="failed implement proof",
+            path_or_value="proof-fail.log",
+            created_by="dev",
+            created_at=now(),
+            metadata={"status": "failed", "exit_code": 1},
+            redaction_status="safe",
+        )
+    )
+    task.proof_ids = [passed.id, failed.id]
+
+    action = MissionStateMachine(proof_store=store).next_action(task)
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
+    assert plan.current_stage_id == "implement"
+    implement = next(stage for stage in plan.stages if stage.id == "implement")
+    assert implement.status == StageStatus.BLOCKED
+    assert "latest proof proof_implement_failed" in action.reason
+
+
+def test_blueprint_terminal_close_requires_declared_qa_verdict(isolate_agent_runtime_root):
+    task = _blueprint_task("two_agent_build_verify")
+    plan = task.mission_plan
+    for stage in plan.stages:
+        stage.status = StageStatus.PASSED
+    plan.current_stage_id = None
+    task.current_stage_id = None
+    task.state = TaskState.RUNNING
+
+    store = ProofStore()
+    proof = store.attach(
+        Proof(
+            id="proof_implement_only",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="passed implement proof",
+            path_or_value="proof-pass.log",
+            created_by="dev",
+            created_at=now(),
+            metadata={"status": "passed", "exit_code": 0},
+            redaction_status="safe",
+        )
+    )
+    task.proof_ids = [proof.id]
+
+    action = MissionStateMachine(proof_store=store).next_action(task)
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
+    assert plan.current_stage_id == "verify"
+    verify = next(stage for stage in plan.stages if stage.id == "verify")
+    assert verify.status == StageStatus.BLOCKED
+    assert "missing qa_verdict proof" in action.reason
 
 
 def test_blueprint_terminal_run_writes_versioned_record(tmp_path, monkeypatch):

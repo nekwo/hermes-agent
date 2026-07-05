@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_time import now
-from agent_runtime.actions import HarnessActionType
+from agent_runtime.actions import HarnessAction, HarnessActionType
 from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.events import EventLog
 from agent_runtime.recovery_flags import NEKO_BLOCK_RECOVERY_ATTEMPTED_FLAG
@@ -673,6 +673,33 @@ def make_task_with_id(task_id: str):
     task = make_task()
     task.id = task_id
     return task
+
+
+def test_assignment_spec_exact_goal_proof_targets_outrank_stage_plan():
+    from agent_runtime.ticker import _assignment_spec_for_action
+
+    task = make_task_with_id("task_exact_proof_assignment")
+    task.state = TaskState.RUNNING
+    task.description = "Write docs. Exact proof: `echo e2e-trust-probe`; no Flutter tests."
+    task.affected_repos = ["EterniaLauncher"]
+    task.current_stage_id = "implement"
+    task.stages = [
+        TaskStage(
+            id="implement",
+            title="Launcher Implementation",
+            objective="Patch launcher docs.",
+            status=StageStatus.IMPLEMENTING,
+            test_plan=["flutter analyze lib/features/mission_control", "flutter test test/features/mission_control"],
+        )
+    ]
+
+    spec = _assignment_spec_for_action(
+        HarnessAction(HarnessActionType.RUN_SLOT, task.id, slot_id="dev"),
+        task,
+        persona_id="dev",
+    )
+
+    assert spec.proof_targets == ["echo e2e-trust-probe"]
 
 
 def attach_blueprint(task: Task, blueprint_id: str, bindings: dict[str, str]) -> Task:

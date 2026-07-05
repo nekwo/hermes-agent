@@ -452,11 +452,49 @@ def _first_incomplete_or_unproven_blueprint_stage(mission: Task, *, proof_store=
             status = stage.status.value if hasattr(stage.status, "value") else str(stage.status)
             return stage, f"blueprint terminal close blocked: stage {stage.id} is {status}, not passed", False
         if proofs is not None:
+            failed = _latest_failed_proof_for_stage(stage, proofs)
+            if failed is not None:
+                return stage, f"blueprint terminal close blocked: latest proof {failed.id} for stage {stage.id} failed", True
             gate = stage_proof_satisfied(stage, proofs)
             if not gate.allowed:
                 missing = ", ".join(gate.missing or ["missing required proof"])
                 return stage, f"blueprint terminal close blocked: stage {stage.id} proof gate unsatisfied ({missing})", True
     return None
+
+
+def _latest_failed_proof_for_stage(stage: MissionPlanStage, proofs: list[Proof]) -> Proof | None:
+    scoped = [proof for proof in list(proofs or []) if _proof_stage_id(proof) == stage.id]
+    if not scoped:
+        return None
+    newest = max(scoped, key=lambda proof: getattr(proof, "created_at", None) or "")
+    if _proof_status(newest) in {"failed", "error", "blocked"}:
+        return newest
+    return None
+
+
+def _proof_stage_id(proof: Proof) -> str:
+    direct = str(getattr(proof, "stage_id", "") or "").strip()
+    if direct:
+        return direct
+    metadata = getattr(proof, "metadata", None) or {}
+    if isinstance(metadata, dict):
+        return str(metadata.get("stage_id") or "").strip()
+    return ""
+
+
+def _proof_status(proof: Proof) -> str:
+    metadata = getattr(proof, "metadata", None) or {}
+    if not isinstance(metadata, dict):
+        return ""
+    status = str(metadata.get("status") or metadata.get("verdict") or "").strip().lower()
+    if status:
+        return status
+    if "exit_code" in metadata:
+        try:
+            return "passed" if int(metadata.get("exit_code")) == 0 else "failed"
+        except (TypeError, ValueError, OverflowError):
+            return "failed"
+    return ""
 
 
 def _has_visual_proof(mission: Task, *, proof_store=None) -> bool:
