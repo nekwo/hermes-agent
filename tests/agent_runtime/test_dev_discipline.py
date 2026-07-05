@@ -127,6 +127,45 @@ def test_recorded_backend_first_handoff_packet_routes_broad_task_to_dev():
     assert MissionStateMachine().next_action(task).type == HarnessActionType.RUN_SLOT
 
 
+def test_recorded_single_specialist_handoff_packet_stops_repeat_slicing():
+    task = make_task(risk_flags=["cross_stack_routing"])
+    EventLog().append(
+        Event(
+            ts=now(),
+            type="packet.recorded",
+            task_id=task.id,
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={
+                "packet_id": "packet_handoff_launcher_exact",
+                "packet_type": "handoff_packet",
+                "body": {
+                    "packet_kind": "fresh_scope",
+                    "mission_phase": "scope_route",
+                    "handoff_mode": "single_specialist",
+                    "target_owner": "dev",
+                    "target_repo": "EterniaLauncher",
+                    "proof_gate": {
+                        "required": True,
+                        "commands": ["echo e2e-trust-probe"],
+                        "required_proof_types": ["test_run"],
+                        "minimum_status": "passed",
+                        "visual_required": False,
+                    },
+                    "join_gate": {
+                        "release_condition": "Launcher Dev completes the typed stage with exact proof.",
+                    },
+                },
+            },
+        )
+    )
+
+    assert needs_supervisor_slicing(task) is False
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert "slice" not in action.reason.lower()
+
+
 def test_progress_sink_aggregates_tool_loop_patch_test_and_proof_telemetry():
     runs = RunStore()
     run = runs.open_run("dev", "task_progress")

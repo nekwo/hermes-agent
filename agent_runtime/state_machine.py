@@ -221,7 +221,7 @@ class MissionStateMachine:
             return HarnessAction(HarnessActionType.NOOP, mission.id, reason=f"blueprint stage {current.id} owner slot {slot_id} is not declared")
         if plan.bindings and not plan.bindings.get(slot_id):
             return HarnessAction(HarnessActionType.NOOP, mission.id, reason=f"blueprint slot {slot_id} has no resolved binding")
-        return HarnessAction(HarnessActionType.RUN_SLOT, mission.id, reason=f"blueprint stage {current.id} needs slot {slot_id}", slot_id=slot_id)
+        return _run_slot(mission, slot_id, f"blueprint stage {current.id} needs slot {slot_id}", stage_id=current.id)
 
     def apply_decision(self, mission: Task, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, stage_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool | None = None) -> StateMachineResult:
         if _mission_plan_routing_enabled(mission, self.config):

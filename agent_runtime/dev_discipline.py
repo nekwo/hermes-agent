@@ -77,7 +77,7 @@ def needs_supervisor_slicing(task: Task) -> bool:
             " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
         ]
     ).lower()
-    if _has_backend_first_handoff_packet(task):
+    if _has_bounded_specialist_handoff_packet(task):
         return False
     if _is_backend_first_slice(task, repos=repos, text=text):
         return False
@@ -101,7 +101,7 @@ def _is_harness_support_repo(repo: str) -> bool:
     return any(marker in normalized for marker in _HARNESS_SUPPORT_REPO_MARKERS)
 
 
-def _has_backend_first_handoff_packet(task: Task) -> bool:
+def _has_bounded_specialist_handoff_packet(task: Task) -> bool:
     try:
         packet = latest_packet(task.id, "handoff_packet")
     except Exception:
@@ -113,6 +113,13 @@ def _has_backend_first_handoff_packet(task: Task) -> bool:
     target_owner = str(body.get("target_owner") or "")
     target_repo = str(body.get("target_repo") or "")
     proof_gate = body.get("proof_gate") if isinstance(body.get("proof_gate"), dict) else {}
+    if (
+        mode in {"single_specialist", "sequential_specialists"}
+        and target_owner in {"dev", "backend_dev", "launcher_dev"}
+        and target_repo
+        and proof_gate.get("required") is True
+    ):
+        return True
     return (
         mode in {"backend_first_cross_stack", "sequential_specialists"}
         and target_owner == "backend_dev"
