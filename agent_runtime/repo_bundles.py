@@ -32,6 +32,8 @@ TERMINAL_REPO_BUNDLE_STATES = frozenset({"verified", "blocked", "cancelled", "ar
 DELIVERED_REPO_BUNDLE_STATES = frozenset({"delivered_waiting_for_qa", "delivered", "verified"})
 REPO_BUNDLE_OWNER_PERSONAS = frozenset({"dev", "backend_dev"})
 REPO_LOCK_MODES = frozenset({"read", "write", "exclusive_maintenance"})
+REPO_BUNDLE_DELIVERY_CONTRACT = "staged_bundle_not_applied"
+REPO_BUNDLE_CHECKOUT_STATUS = "not_applied"
 
 SIMPLIFIED_PHASES = frozenset({"created", "planning", "working", "verifying", "repair", "blocked", "done"})
 
@@ -490,6 +492,10 @@ def repo_bundle_summary(bundle: RepoBundle) -> dict[str, Any]:
         "assignment_id": bundle.assignment_id,
         "active_run_id": bundle.active_run_id,
         "proof_ids": list(bundle.proof_ids or []),
+        "delivery_contract": REPO_BUNDLE_DELIVERY_CONTRACT,
+        "checkout_applied": False,
+        "checkout_status": REPO_BUNDLE_CHECKOUT_STATUS,
+        "closeout_label": _repo_bundle_closeout_label(bundle),
         "queue_reason": bundle.queue_reason,
         "wake_condition": bundle.wake_condition,
         "delivered_at": bundle.delivered_at,
@@ -499,6 +505,43 @@ def repo_bundle_summary(bundle: RepoBundle) -> dict[str, Any]:
         "created_at": bundle.created_at,
         "updated_at": bundle.updated_at,
     }
+
+
+def repo_bundle_delivery_summary(bundles: list[RepoBundle]) -> dict[str, Any]:
+    bundle_list = list(bundles or [])
+    states = {bundle.state for bundle in bundle_list}
+    delivered_ids = [
+        bundle.id
+        for bundle in bundle_list
+        if bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"}
+    ]
+    return {
+        "delivery_contract": REPO_BUNDLE_DELIVERY_CONTRACT,
+        "checkout_applied": False,
+        "checkout_status": REPO_BUNDLE_CHECKOUT_STATUS,
+        "repo_bundle_ids": [bundle.id for bundle in bundle_list],
+        "delivered_repo_bundle_ids": delivered_ids,
+        "state_counts": {state: len([bundle for bundle in bundle_list if bundle.state == state]) for state in sorted(states)},
+        "closeout_label": _repo_bundle_task_closeout_label(bundle_list),
+    }
+
+
+def _repo_bundle_closeout_label(bundle: RepoBundle) -> str:
+    if bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"}:
+        return "Staged repo bundle delivered; checkout not modified by bundle delivery."
+    if bundle.state in {"blocked", "rejected", "cancelled"}:
+        return "Repo bundle remained staged; checkout not modified by bundle delivery."
+    return "Repo bundle is staged; checkout not modified by bundle delivery."
+
+
+def _repo_bundle_task_closeout_label(bundles: list[RepoBundle]) -> str:
+    if not bundles:
+        return "No repo bundles are attached to this task."
+    if all(bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"} for bundle in bundles):
+        return "Task repo bundles are staged/delivered only; checkout not modified by bundle delivery."
+    if any(bundle.state in {"blocked", "rejected"} for bundle in bundles):
+        return "One or more repo bundles need repair; checkout not modified by bundle delivery."
+    return "Task repo bundles are staged only; checkout not modified by bundle delivery."
 
 
 def bundle_id_for(task_id: str, repo: str, *, stage_ids: list[str]) -> str:

@@ -307,9 +307,34 @@ def test_snapshot_projects_repo_bundles_and_qa_waiting_on(isolate_agent_runtime_
 
     assert task_summary["simplified_phase"] == "working"
     assert sorted(task_summary["repo_bundle_ids"]) == sorted(bundle.id for bundle in bundles)
+    assert task_summary["repo_bundle_closeout"]["delivery_contract"] == "staged_bundle_not_applied"
+    assert task_summary["repo_bundle_closeout"]["checkout_applied"] is False
+    assert "checkout not modified" in task_summary["repo_bundle_closeout"]["closeout_label"]
     assert task_summary["bundle_queue"][0]["state"] == "queued_waiting_dependency"
     assert task_summary["qa_waiting_on"]
     assert snapshot["repo_bundles"]
+    assert snapshot["repo_bundles"][0]["delivery_contract"] == "staged_bundle_not_applied"
+    assert snapshot["repo_bundles"][0]["checkout_applied"] is False
+    assert "checkout not modified" in snapshot["repo_bundles"][0]["closeout_label"]
+
+
+def test_done_task_repo_bundle_closeout_labels_staged_not_applied(isolate_agent_runtime_root):
+    task_store = TaskStore()
+    task = task_store.create(_task_with_plan("task_done_bundle_label"))
+    bundle_store = RepoBundleStore()
+    bundles = bundle_store.create_or_update_from_task(task)
+    for bundle in bundles:
+        bundle_store.mark_delivered(bundle, proof_ids=["proof_done"])
+    task.state = TaskState.DONE
+    task_store.update(task, actor="test", reason="done with staged bundles")
+
+    snapshot = build_snapshot(task_store=task_store)
+    task_summary = snapshot["tasks"][0]
+
+    assert task_summary["state"] == "done"
+    assert task_summary["repo_bundle_closeout"]["checkout_status"] == "not_applied"
+    assert task_summary["repo_bundle_closeout"]["delivered_repo_bundle_ids"]
+    assert "staged/delivered only" in task_summary["repo_bundle_closeout"]["closeout_label"]
 
 
 def test_archive_preserves_repo_bundle_evidence(isolate_agent_runtime_root):

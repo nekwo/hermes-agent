@@ -45,7 +45,7 @@ from .prompt_observability import snapshot_prompt_observability
 from .profile_readiness import profile_readiness_for_persona
 from .proof_gates import task_verdict_proof_satisfied
 from .realm_sync import read_realm_sync_sidecar
-from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_summary, simplified_phase_for_task
+from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary, runtime_instances_summary
 from .repo_context import resolve_affected_repo_workdir
 from .role_checklists import RoleChecklist, RoleChecklistStore, checklist_summary
@@ -1452,6 +1452,7 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "active_assignment_id": next((assignment.id for assignment in assignments if assignment.state in ACTIVE_ASSIGNMENT_STATES), None),
         "repo_bundle_ids": [bundle.id for bundle in bundles],
         "repo_bundles": [repo_bundle_summary(bundle) for bundle in bundles],
+        "repo_bundle_closeout": repo_bundle_delivery_summary(bundles) if bundles else None,
         "bundle_queue": bundle_queue_summary(bundles),
         "runtime_lane": runtime_lane,
         "qa_waiting_on": qa_waiting_on(bundles),

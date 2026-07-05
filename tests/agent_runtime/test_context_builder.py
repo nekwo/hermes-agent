@@ -367,6 +367,9 @@ def test_context_renders_repo_bundle_hud_with_datetime_fields(isolate_agent_runt
     rendered = render_context(ctx)
 
     assert "repo_bundles" in rendered
+    assert "staged_bundle_not_applied" in rendered
+    assert "checkout_applied" in rendered
+    assert "checkout not modified" in rendered
     assert "created_at" in rendered
     assert "Object of type datetime" not in rendered
 

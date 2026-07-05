@@ -25,7 +25,7 @@ from .provider_health import provider_health_for_personas
 from .incidents import RUN_BUDGET_EXCEEDED
 from .migrations import effective_config_summary
 from .production_envelope import production_envelope_status
-from .repo_bundles import RepoBundleStore, bundle_queue_summary, repo_bundle_summary, repo_lock_summary
+from .repo_bundles import RepoBundleStore, bundle_queue_summary, repo_bundle_delivery_summary, repo_bundle_summary, repo_lock_summary
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
 from .state_machine import MissionStateMachine
 from .states import RunState, TaskState
@@ -126,6 +126,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "agents": [_agent_status(a) for a in agents],
         "worker_sessions": [worker_session_summary(worker) for worker in workers],
         "repo_bundles": [repo_bundle_summary(bundle) for bundle in repo_bundles],
+        "repo_bundle_closeout": repo_bundle_delivery_summary(repo_bundles) if repo_bundles else None,
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "repo_locks": repo_lock_summary(),
         "runtime_instances": runtime_instances_summary(runtime_instances),

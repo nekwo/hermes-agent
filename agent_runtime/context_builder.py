@@ -20,7 +20,7 @@ from .mission_plan import task_stage_records
 from .objective_templates import render_objective
 from .packets import HANDOFF_MODES, HANDOFF_OWNERS, HANDOFF_REPOS, QA_NEXT_OWNERS, latest_packet, latest_packets_for_task
 from .profile_context import active_profile_name
-from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_summary, simplified_phase_for_task
+from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
 from .repo_context import repo_execution_context_for_task, safe_affected_repo_labels
 from .role_checklists import stage_checklist_hud
 from .role_contracts import contract_for_persona
@@ -997,6 +997,7 @@ def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str, simplified_co
             "repo_bundle": repo_bundle_summary(active_bundle) if active_bundle is not None else None,
         },
         "repo_bundles": [repo_bundle_summary(bundle) for bundle in repo_bundles],
+        "repo_bundle_closeout": repo_bundle_delivery_summary(repo_bundles) if repo_bundles else None,
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "qa_waiting_on": qa_waiting_on(repo_bundles),
         "contract": contract_for_persona(run.persona_id, role=role, simplified=simplified_contract),
