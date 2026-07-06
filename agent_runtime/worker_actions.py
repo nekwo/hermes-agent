@@ -229,6 +229,27 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
     if role == "dev" and stage_owner_role == "dev":
         inferred_no_edit_recipe_id = _typed_no_edit_recipe_id(stage)
         no_edit_context_stage = _is_no_edit_context_stage(task, stage)
+        stage_explicitly_product_edit = getattr(stage, "requires_product_edit", None) is True
+        if (not stage_explicitly_product_edit and (not stage_requires_product_edit(task, stage) or _visual_no_edit_intent(task, stage))) and _typed_visual_missing(task, proof_store=proof_store):
+            return [
+                WorkerAction(
+                    "request_visual_gate",
+                    DecisionType.REQUEST_SCREENSHOT,
+                    "dev.request_screenshot",
+                    "Request Visual Proof",
+                    primary=True,
+                    reason=f"Typed stage {stage.id} requires visual proof; ask Harness to collect launcher_qa screenshot proof.",
+                    payload_template={
+                        "stage_id": stage.id,
+                        "target": "mission_control",
+                        "proof_requirement": "fullscreen visual proof for the typed mission stage",
+                        "mcp_server": "launcher_qa",
+                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    },
+                ),
+                WorkerAction("request_context", DecisionType.REQUEST_FILE_READS, "common.request_file_reads", "Request Context"),
+                _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
+            ]
         if no_edit_context_stage and not _context_stage_should_request_gate(stage):
             if _fulfilled_context_request_count(task, actor=stage.owner, stage_id=stage.id) >= 2:
                 return [
@@ -437,6 +458,31 @@ def _dev_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerA
             ),
             _block_action(reason="Use when the committed verification proof cannot run with current environment evidence."),
         ]
+    stage_explicitly_product_edit = getattr(stage, "requires_product_edit", None) is True
+    if (
+        (not stage_explicitly_product_edit and (not product_edit or _visual_no_edit_intent(task, stage)))
+        and _explicit_visual_required(task, stage)
+        and not _has_visual_proof(task, proof_store=proof_store)
+    ):
+        return [
+            WorkerAction(
+                "request_visual_gate",
+                DecisionType.REQUEST_SCREENSHOT,
+                "dev.request_screenshot",
+                "Request Visual Proof",
+                primary=True,
+                reason="Visual proof is required for this no-product-edit stage; ask Harness for launcher_qa screenshot proof.",
+                payload_template={
+                    "stage_id": stage_id,
+                    "target": "mission_control",
+                    "proof_requirement": "fullscreen visual proof for the current stage",
+                    "mcp_server": "launcher_qa",
+                    "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                },
+            ),
+            WorkerAction("request_context", DecisionType.REQUEST_FILE_READS, "common.request_file_reads", "Request Context"),
+            _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
+        ]
     if product_edit:
         actions = [
             WorkerAction(
@@ -558,6 +604,7 @@ def _qa_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerAc
 
 def _neko_actions(task: Task, run: AgentRun) -> list[WorkerAction]:
     state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
+    diagnostic_owner = "neko_supervisor" if _diagnostic_persona(task) == "neko_supervisor" else None
     if state == TaskState.RUNNING:
         if _task_has_qa_stage(task):
             return [
@@ -606,7 +653,11 @@ def _neko_actions(task: Task, run: AgentRun) -> list[WorkerAction]:
             "Assign Scope",
             primary=True,
             reason="Scope the next bounded owner and proof gate.",
-            payload_template=_scope_route_payload_for_stage(task, _current_stage(task, run)),
+            payload_template=(
+                _diagnostic_scope_payload(task)
+                if diagnostic_owner == "neko_supervisor"
+                else _scope_route_payload_for_stage(task, _current_stage(task, run), target_owner=diagnostic_owner)
+            ),
         ),
         WorkerAction("route_repair", DecisionType.TRIAGE_ISSUE_DISCOVERY, "neko.triage_issue_discovery", "Route Repair"),
         _block_action(reason="Use only for true human/safety/environment blockers."),
@@ -644,6 +695,24 @@ def _scope_route_payload_for_stage(task: Task, stage, *, target_owner: str | Non
     return payload
 
 
+def _diagnostic_scope_payload(task: Task) -> dict[str, Any]:
+    affected_repos = [str(item).strip() for item in (getattr(task, "affected_repos", []) or []) if str(item).strip()]
+    repo = affected_repos[0] if affected_repos and affected_repos[0] in {"EterniaLauncher", "EterniaBackend", "hermes-agent"} else "hermes-agent"
+    return {
+        "objective": str(getattr(task, "description", "") or getattr(task, "title", "") or "Run one Neko diagnostic turn.").strip(),
+        "acceptance_criteria": list(getattr(task, "acceptance_criteria", None) or ["The Harness records one valid Neko diagnostic decision and stops without launching Dev or QA."]),
+        "non_goals": list(getattr(task, "non_goals", None) or ["No Dev or QA handoff."]),
+        "target_owner": "neko_supervisor",
+        "target_repo": repo,
+        "proof_gate": {
+            "required": False,
+            "required_proof_types": ["harness_observation"],
+            "minimum_status": "passed",
+            "visual_required": False,
+        },
+    }
+
+
 def _diagnostic_persona(task: Task) -> str | None:
     for flag in getattr(task, "risk_flags", None) or []:
         text = str(flag or "").strip()
@@ -679,7 +748,10 @@ def _typed_visual_missing(task: Task, *, proof_store=None) -> bool:
     stage = current_plan_stage(task)
     if stage is None:
         return False
-    if not any(getattr(item, "requires_visual_proof", False) for item in (getattr(getattr(task, "mission_plan", None), "stages", []) or [])):
+    if not (
+        bool(getattr(task, "requires_visual_proof", False))
+        or any(getattr(item, "requires_visual_proof", False) for item in (getattr(getattr(task, "mission_plan", None), "stages", []) or []))
+    ):
         return False
     if proof_store is None:
         return True
@@ -790,6 +862,40 @@ def _visual_required(task: Task, stage: TaskStage | None) -> bool:
         ]
     ).lower()
     return any(marker in text for marker in ("ui", "visual", "screenshot", "mission control", "launcher", "widget"))
+
+
+def _explicit_visual_required(task: Task, stage: TaskStage | None) -> bool:
+    return bool(getattr(task, "requires_visual_proof", False)) or (
+        stage is not None and getattr(stage, "requires_visual_proof", None) is True
+    )
+
+
+def _visual_no_edit_intent(task: Task, stage: TaskStage | None) -> bool:
+    text = " ".join(
+        [
+            str(getattr(task, "title", "")),
+            str(getattr(task, "description", "")),
+            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "non_goals", []) or [])),
+            str(getattr(stage, "title", "")),
+            str(getattr(stage, "objective", "")),
+            " ".join(str(item) for item in (getattr(stage, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(stage, "audit_notes", []) or [])),
+        ]
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "no product edit",
+            "no product edits",
+            "no-product-edit",
+            "no-product-edits",
+            "without product edits",
+            "without product edit",
+            "no product files are edited",
+            "do not edit product",
+        )
+    )
 
 
 def _has_visual_proof(task: Task, *, proof_store=None) -> bool:

@@ -226,6 +226,13 @@ class StageCLauncherMcpVisualCaptureProvider:
         }
         if self.config.profile_home is not None:
             args["hermes_home"] = str(self.config.profile_home)
+        launch_pins = _launcher_qa_launch_pins(metadata, self.config)
+        if launch_pins.get("repoRoot"):
+            args["repoRoot"] = launch_pins["repoRoot"]
+        if launch_pins.get("launchHelperPath"):
+            args["launchHelperPath"] = launch_pins["launchHelperPath"]
+        if launch_pins.get("screenshotHelperPath"):
+            args["screenshotHelperPath"] = launch_pins["screenshotHelperPath"]
 
         try:
             envelope = self._open_app_tab(args)
@@ -261,7 +268,8 @@ class StageCLauncherMcpVisualCaptureProvider:
         raise StageCMcpError("launcher_qa MCP video capture is not implemented; request screenshot proof")
 
     def _open_app_tab(self, args: dict[str, Any]) -> dict[str, Any]:
-        with StageCMcpJsonRpcClient(self.config) as client:
+        config = _config_with_launcher_qa_launch_pins(self.config, args)
+        with StageCMcpJsonRpcClient(config) as client:
             client.initialize()
             return client.call_tool("mcp_launcher_qa_open_app_tab", args)
 
@@ -356,6 +364,84 @@ def _marionette_preflight_enabled_for_config(metadata: dict[str, Any], config: S
         return True
     command_text = " ".join([str(config.command or ""), *[str(item) for item in config.args or []]]).lower().replace("\\", "/")
     return "stagec_qa_mcp_server" in command_text or "invoke-launcherqamcptool" in command_text
+
+
+def _launcher_qa_launch_pins(metadata: dict[str, Any], config: StageCMcpServerConfig) -> dict[str, str]:
+    repo_root = _first_nonempty(
+        metadata.get("repoRoot"),
+        metadata.get("repo_root"),
+        metadata.get("launcher_repo"),
+        metadata.get("launcher_repo_root"),
+        config.env.get("STAGEC_QA_REPO_ROOT"),
+        os.getenv("STAGEC_QA_REPO_ROOT"),
+        os.getenv("HERMES_STAGEC_LAUNCHER_REPO"),
+        os.getenv("HERMES_LAUNCHER_REPO"),
+        os.getenv("ETERNIA_LAUNCHER_ROOT"),
+    )
+    launch_helper = _first_nonempty(
+        metadata.get("launchHelperPath"),
+        metadata.get("launch_helper_path"),
+        config.env.get("STAGEC_LAUNCH_HELPER"),
+        os.getenv("STAGEC_LAUNCH_HELPER"),
+    )
+    screenshot_helper = _first_nonempty(
+        metadata.get("screenshotHelperPath"),
+        metadata.get("screenshot_helper_path"),
+        config.env.get("STAGEC_SCREENSHOT_HELPER"),
+        os.getenv("STAGEC_SCREENSHOT_HELPER"),
+    )
+    if repo_root:
+        launch_helper = launch_helper or _default_launch_helper(repo_root)
+        screenshot_helper = screenshot_helper or _default_screenshot_helper(repo_root)
+    pins: dict[str, str] = {}
+    if repo_root:
+        pins["repoRoot"] = repo_root
+    if launch_helper:
+        pins["launchHelperPath"] = launch_helper
+    if screenshot_helper:
+        pins["screenshotHelperPath"] = screenshot_helper
+    return pins
+
+
+def _config_with_launcher_qa_launch_pins(config: StageCMcpServerConfig, args: dict[str, Any]) -> StageCMcpServerConfig:
+    env = dict(config.env)
+    for arg_key, env_key in (
+        ("repoRoot", "STAGEC_QA_REPO_ROOT"),
+        ("launchHelperPath", "STAGEC_LAUNCH_HELPER"),
+        ("screenshotHelperPath", "STAGEC_SCREENSHOT_HELPER"),
+    ):
+        value = str(args.get(arg_key) or "").strip()
+        if value and not env.get(env_key):
+            env[env_key] = value
+    if env == config.env:
+        return config
+    return StageCMcpServerConfig(
+        name=config.name,
+        command=config.command,
+        args=list(config.args),
+        env=env,
+        timeout_seconds=config.timeout_seconds,
+        connect_timeout_seconds=config.connect_timeout_seconds,
+        profile_home=config.profile_home,
+    )
+
+
+def _default_launch_helper(repo_root: str) -> str | None:
+    candidate = Path(repo_root) / "docs" / "stages" / "qa-reboot" / "scripts" / "Start-StageCDirectExe.ps1"
+    return str(candidate) if candidate.exists() else None
+
+
+def _default_screenshot_helper(repo_root: str) -> str | None:
+    candidate = Path(repo_root) / "docs" / "stages" / "qa-reboot" / "scripts" / "Capture-StageCWindowScreenshot.ps1"
+    return str(candidate) if candidate.exists() else None
+
+
+def _first_nonempty(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
 
 
 def _launcher_repo_from_metadata(metadata: dict[str, Any]) -> Path | None:

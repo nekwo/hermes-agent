@@ -194,7 +194,8 @@ def test_agent_hud_current_assignment_is_stage_shaped_from_proof_gate():
     run = make_run()
     run.stage_id = "design_socket"
 
-    hud = build_context(task, run).mission_hud
+    cfg = RuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=True))
+    hud = build_context(task, run, config=cfg).mission_hud
     assignment = hud["agent_hud"]["current_assignment"]
 
     assert assignment["stage_id"] == "design_socket"
@@ -303,7 +304,8 @@ def test_neko_diagnostic_hud_recommends_valid_ack_packet():
         last_heartbeat_at=now(),
     )
 
-    hud = build_context(task, run).mission_hud
+    cfg = RuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=True))
+    hud = build_context(task, run, config=cfg).mission_hud
     next_move = hud["next_required_move"]
     payload = next_move["recommended_payload"]
 
@@ -1432,6 +1434,33 @@ def test_qa_mission_hud_exposes_screenshot_and_verdict_choices():
         "required_launch_pins",
         "qa_review",
     ]
+
+
+def test_dev_no_edit_visual_stage_prefers_screenshot_over_command_gate():
+    task = make_task()
+    task.title = "Stage 46 visual proof certification"
+    task.description = "Capture fullscreen Mission Control screenshot proof without product edits."
+    task.acceptance_criteria = ["Screenshot proof is attached."]
+    task.requires_visual_proof = True
+    task.stages[0] = TaskStage(
+        id="implement",
+        title="Visual proof certification",
+        objective="Capture fullscreen Mission Control screenshot proof without product edits.",
+        status=StageStatus.READY,
+        test_plan=["python -m pytest tests/agent_runtime -q"],
+        requires_visual_proof=False,
+    )
+    task.current_stage_id = "implement"
+    run = make_run()
+    run.stage_id = "implement"
+
+    cfg = RuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=True))
+    hud = build_context(task, run, config=cfg).mission_hud
+
+    assert hud["primary_worker_action"]["action_id"] == "request_visual_gate"
+    assert hud["decision_menu"][0]["shape_id"] == "dev.request_screenshot"
+    assert hud["decision_menu"][0]["recommended_payload"]["mcp_server"] == "launcher_qa"
+    assert hud["decision_shape_index"]["dev.request_screenshot"]["enum_choices"]["mcp_server"] == ["launcher_qa"]
 
 
 def test_render_context_includes_all_stages_and_proof_metadata_for_qa_review():
