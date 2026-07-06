@@ -287,7 +287,7 @@ def _activate_stage(task: Task, stage_id: str, action: dict, *, actor: str, reas
             repo=stage.repo,
             affected_paths=list(getattr(stage, "affected_paths", []) or []),
             acceptance=list(getattr(stage, "acceptance_criteria", []) or []),
-            proof_targets=list(getattr(stage, "test_plan", []) or []),
+            proof_targets=_proof_targets_for_stage(stage),
             allowed_decisions=["hand_off", "block", "escalate"],
         )
     )
@@ -328,11 +328,26 @@ def _spawn_target_helper(task: Task, action: dict, *, actor: str, reason: str, e
             repo=getattr(stage, "repo", None),
             affected_paths=list(getattr(stage, "affected_paths", []) or []) if stage else [],
             acceptance=list(getattr(stage, "acceptance_criteria", []) or []) if stage else [],
-            proof_targets=list(getattr(stage, "test_plan", []) or []) if stage else [],
+            proof_targets=_proof_targets_for_stage(stage) if stage else [],
             allowed_decisions=["hand_off", "block", "escalate"],
         )
     )
     return {"result": "helper_spawned", "persona_instance_id": child.id, "assignment_id": assignment.id, "stage_id": target_stage_id}
+
+
+def _proof_targets_for_stage(stage) -> list[str]:
+    if _stage_has_visual_gate(stage):
+        return ["launcher_qa screenshot proof"]
+    return list(getattr(stage, "test_plan", []) or [])
+
+
+def _stage_has_visual_gate(stage) -> bool:
+    gate = getattr(stage, "proof_gate", {}) or {}
+    required = {str(item).strip().lower() for item in (gate.get("required_proof_types") or []) if str(item).strip()}
+    return bool(
+        getattr(stage, "requires_product_edit", None) is not True
+        and (getattr(stage, "requires_visual_proof", False) or gate.get("visual_required") is True or required & {"screenshot", "video"})
+    )
 
 
 def _resolve_task_incidents(task: Task, action: dict, *, actor: str) -> dict:

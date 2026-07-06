@@ -1825,7 +1825,9 @@ def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id
     proof_targets = []
     bundle_proof_targets = _repo_bundle_proof_targets(task.id, repo_bundle_id)
     goal_named = goal_named_gate_commands(task, stage_repo_for_gate(task, stage)) if stage is not None else []
-    if bundle_proof_targets:
+    if stage is not None and _stage_has_visual_gate(stage):
+        proof_targets.append("launcher_qa screenshot proof")
+    elif bundle_proof_targets:
         proof_targets.extend(bundle_proof_targets)
     elif goal_named and goal_demands_exact_proof(task):
         proof_targets.extend(goal_named)
@@ -1862,6 +1864,15 @@ def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id
         acceptance=list(getattr(stage, "acceptance_criteria", None) or getattr(task, "acceptance_criteria", None) or []),
         non_goals=list(getattr(task, "non_goals", None) or []),
         allowed_decisions=_allowed_decisions_for_action(action),
+    )
+
+
+def _stage_has_visual_gate(stage) -> bool:
+    gate = getattr(stage, "proof_gate", {}) or {}
+    required = {str(item).strip().lower() for item in (gate.get("required_proof_types") or []) if str(item).strip()}
+    return bool(
+        getattr(stage, "requires_product_edit", None) is not True
+        and (getattr(stage, "requires_visual_proof", False) or gate.get("visual_required") is True or required & {"screenshot", "video"})
     )
 
 

@@ -770,6 +770,8 @@ def _stage_proof_gate(stage) -> dict[str, Any]:
     gate = getattr(stage, "proof_gate", None)
     if isinstance(gate, dict):
         return dict(gate)
+    if bool(getattr(stage, "requires_visual_proof", False)) and getattr(stage, "requires_product_edit", None) is not True:
+        return {"required": True, "minimum_status": "passed", "required_proof_types": ["screenshot"], "visual_required": True}
     test_plan = list(getattr(stage, "test_plan", []) or []) if stage is not None else []
     if test_plan:
         return {"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"], "commands": test_plan}

@@ -129,6 +129,7 @@ def _plan_stage_from_task_stage(task: Task, stage: MissionPlanStage | TaskStage)
 
 
 def _task_stage_from_plan_stage(task: Task, stage: MissionPlanStage) -> TaskStage:
+    visual_gate = _plan_stage_has_visual_gate(stage)
     return TaskStage(
         id=stage.id,
         title=stage.title,
@@ -136,7 +137,7 @@ def _task_stage_from_plan_stage(task: Task, stage: MissionPlanStage) -> TaskStag
         status=stage.status,
         affected_paths=list(getattr(stage, "affected_paths", []) or []),
         acceptance_criteria=list(getattr(stage, "acceptance_criteria", []) or []),
-        test_plan=list(getattr(stage, "test_plan", []) or []),
+        test_plan=[] if visual_gate else list(getattr(stage, "test_plan", []) or []),
         audit_notes=list(getattr(stage, "audit_notes", []) or []),
         corrections=list(getattr(stage, "corrections", []) or []),
         requires_visual_proof=stage.requires_visual_proof,
@@ -307,8 +308,9 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
     projected: list[TaskStage] = []
     for typed in plan.stages:
         existing = by_id.get(typed.id)
+        visual_gate = _plan_stage_has_visual_gate(typed)
         test_plan = []
-        if typed.proof_recipe_id:
+        if typed.proof_recipe_id and not visual_gate:
             test_plan.append(f"proof_recipe:{typed.proof_recipe_id}")
         defaults = _legacy_stage_defaults(task, typed, plan)
         if existing is None:
@@ -319,7 +321,7 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
                 status=typed.status,
                 affected_paths=list(defaults.get("affected_paths") or []),
                 acceptance_criteria=list((plan.mission_intent.acceptance_criteria if plan.mission_intent else []) or []),
-                test_plan=test_plan or list(defaults.get("test_plan") or []),
+                test_plan=[] if visual_gate else test_plan or list(defaults.get("test_plan") or []),
                 requires_visual_proof=typed.requires_visual_proof,
                 created_at=typed.created_at or now(),
                 updated_at=typed.updated_at or now(),
@@ -333,7 +335,10 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
             existing.objective = typed.objective
             existing.status = typed.status
             existing.requires_visual_proof = typed.requires_visual_proof
-            if test_plan:
+            if visual_gate:
+                existing.test_plan = []
+                typed.test_plan = []
+            elif test_plan:
                 existing.test_plan = list(test_plan)
             elif defaults.get("test_plan") and not existing.test_plan:
                 existing.test_plan = list(defaults["test_plan"])
@@ -341,6 +346,10 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
                 existing.affected_paths = list(defaults["affected_paths"])
             existing.updated_at = typed.updated_at or existing.updated_at or now()
             for field in ("affected_paths", "acceptance_criteria", "test_plan", "audit_notes", "corrections"):
+                if field == "test_plan" and visual_gate:
+                    existing.test_plan = []
+                    typed.test_plan = []
+                    continue
                 typed_value = list(getattr(typed, field, []) or [])
                 if typed_value:
                     setattr(existing, field, typed_value)
@@ -351,6 +360,15 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
     task.current_stage_id = plan.current_stage_id
     if plan.mission_intent:
         task.requires_visual_proof = bool(task.requires_visual_proof or any(stage.requires_visual_proof for stage in plan.stages))
+
+
+def _plan_stage_has_visual_gate(stage: MissionPlanStage) -> bool:
+    gate = getattr(stage, "proof_gate", {}) or {}
+    required = {str(item).strip().lower() for item in (gate.get("required_proof_types") or []) if str(item).strip()}
+    return bool(
+        getattr(stage, "requires_product_edit", None) is not True
+        and (getattr(stage, "requires_visual_proof", False) or gate.get("visual_required") is True or required & {"screenshot", "video"})
+    )
 
 
 def current_plan_stage(task: Task) -> MissionPlanStage | None:
