@@ -141,6 +141,27 @@ def test_goal_named_exact_proof_reads_locked_mission_intent():
     assert commands == ["echo e2e-trust-probe-qa"]
 
 
+def test_proof_expectation_command_outranks_broad_stage_plan_for_authoritative_gate():
+    from agent_runtime.final_gate import goal_named_proof_commands
+    from agent_runtime.ticker import _build_authoritative_stage_gate_decision
+
+    task = _goal_task(
+        "Create docs/agent-runtime-harness/mission-control-stream.md.",
+        repos=["hermes-agent"],
+    )
+    task.proof_expectations = [
+        "python -m pytest tests/agent_runtime/test_stream.py -q passes (stream contract unchanged)",
+        "A focused command shows the doc exists and contains the strings: hydrate, delta, heartbeat, schema_version",
+    ]
+    stage = _edit_stage(test_plan=["python -m pytest tests/agent_runtime -q"])
+
+    assert goal_named_proof_commands(task) == ["python -m pytest tests/agent_runtime/test_stream.py -q"]
+    assert final_gate_commands(task, stage) == ["python -m pytest tests/agent_runtime/test_stream.py -q"]
+    decision = _build_authoritative_stage_gate_decision(task, stage)
+    assert decision is not None
+    assert decision.payload["commands"] == ["python -m pytest tests/agent_runtime/test_stream.py -q"]
+
+
 def test_handoff_packet_exact_proof_outranks_stage_test_plan():
     task = _goal_task(
         "Write docs/scratch/e2e_trust_probe.md. Exact proof command: echo e2e-trust-probe. Do not run Flutter analyze/tests.",
@@ -243,6 +264,7 @@ def test_no_required_gate_stage_advances_on_delivery_when_no_gate_command_deriva
     )
     plan = ensure_default_mission_plan(task)
     stage = next(s for s in plan.stages if s.id == "backend_implementation")
+    next(s for s in plan.stages if s.id == "scope").status = StageStatus.PASSED
     plan.current_stage_id = "backend_implementation"
     task.current_stage_id = "backend_implementation"
 
@@ -251,10 +273,11 @@ def test_no_required_gate_stage_advances_on_delivery_when_no_gate_command_deriva
     assert gate_decision is None
     # ...and the blueprint declares no required proof gate for it...
     assert stage_declares_required_gate(stage) is False
-    # ...so the accepted delivery completes the stage and the graph advances.
+    # ...so the accepted delivery completes the no-gate branch and the graph
+    # reaches the implicit terminal join.
     target = apply_stage_outcome(task, "backend_implementation", StageOutcome.PASSED, reason="delivery accepted; no required gate")
-    assert target == "implement"
-    assert task.current_stage_id == "implement"
+    assert target == "done"
+    assert task.current_stage_id is None
 
 
 def test_default_blueprint_placeholder_repo_yields_to_task_scope(isolate_agent_runtime_root):

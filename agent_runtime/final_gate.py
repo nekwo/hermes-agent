@@ -229,6 +229,7 @@ def goal_named_proof_commands(task: Task) -> list[str]:
         str(getattr(task, "title", "") or ""),
         str(getattr(task, "description", "") or ""),
         *[str(item) for item in (getattr(task, "acceptance_criteria", []) or [])],
+        *[str(item) for item in (getattr(task, "proof_expectations", []) or [])],
         *[str(item) for item in (getattr(task, "operator_notes", []) or [])],
     ]
     if intent is not None:
@@ -254,6 +255,7 @@ def goal_demands_exact_proof(task: Task) -> bool:
             str(getattr(task, "title", "") or ""),
             str(getattr(task, "description", "") or ""),
             *[str(item) for item in (getattr(task, "acceptance_criteria", []) or [])],
+            *[str(item) for item in (getattr(task, "proof_expectations", []) or [])],
             *[str(item) for item in (getattr(task, "non_goals", []) or [])],
             *[str(item) for item in (getattr(task, "operator_notes", []) or [])],
             str(getattr(intent, "title", "") or "") if intent is not None else "",
@@ -278,7 +280,12 @@ def goal_demands_exact_proof(task: Task) -> bool:
         "forbade flutter",
         "do not run flutter",
     )
-    return any(marker in text for marker in exact_markers) or any(marker in text for marker in forbid_generic_markers)
+    has_proof_expectation_command = bool(getattr(task, "proof_expectations", None)) and bool(goal_named_proof_commands(task))
+    return (
+        any(marker in text for marker in exact_markers)
+        or any(marker in text for marker in forbid_generic_markers)
+        or has_proof_expectation_command
+    )
 
 
 def _packet_body(packet: dict[str, Any] | None) -> dict[str, Any]:
@@ -373,6 +380,7 @@ def _clean_goal_command_candidate(value: object) -> str:
     text = " ".join(str(value or "").split())
     if not text:
         return ""
+    text = re.split(r"(?i)\s+passes(?:\s|\(|$)", text, maxsplit=1)[0]
     text = re.split(r"(?i)\s+(?:do\s+not|don't|without|forbid|forbidden)\b", text, maxsplit=1)[0]
     text = re.split(r"(?i)\s+no\s+flutter\b", text, maxsplit=1)[0]
     return text.rstrip(".,;")
