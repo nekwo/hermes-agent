@@ -6,8 +6,8 @@ CAPABILITY_SCHEMA_VERSION = 1
 
 _CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
-        "id": "task.create",
-        "target_kind": "task_collection",
+        "id": "goal.create",
+        "target_kind": "goal_collection",
         "label": "Create Goal",
         "group": "queue",
         "execution_semantics": "queues_only",
@@ -154,16 +154,16 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "destructive",
     },
     {
-        "id": "task.tick",
-        "target_kind": "task",
+        "id": "goal.tick",
+        "target_kind": "goal",
         "label": "Run Tick",
         "group": "run",
         "execution_semantics": "bounded_execution",
         "danger": "normal",
     },
     {
-        "id": "task.run_until_settled",
-        "target_kind": "task",
+        "id": "goal.run_until_settled",
+        "target_kind": "goal",
         "label": "Run Until Settled",
         "group": "run",
         "execution_semantics": "bounded_execution",
@@ -302,9 +302,9 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "normal",
     },
     {
-        "id": "task.unblock",
-        "target_kind": "task",
-        "label": "Unblock Task",
+        "id": "goal.unblock",
+        "target_kind": "goal",
+        "label": "Unblock Goal",
         "group": "steer",
         "execution_semantics": "control_state_change",
         "required_args": ["reason"],
@@ -312,12 +312,12 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "warning",
     },
     {
-        "id": "task.steer",
-        "target_kind": "task",
+        "id": "goal.steer",
+        "target_kind": "goal",
         "label": "Execute Steer",
         "group": "steer",
         "execution_semantics": "control_state_change",
-        "required_args": ["task_id"],
+        "required_args": ["goal_id"],
         "allowed_args": ["action_id", "reason", "requested_by", "source_node_id", "target_node_id", "verb"],
         "danger": "warning",
     },
@@ -395,17 +395,17 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "normal",
     },
     {
-        "id": "task.archive",
-        "target_kind": "task",
-        "label": "Archive Task",
+        "id": "goal.archive",
+        "target_kind": "goal",
+        "label": "Archive Goal",
         "group": "archive",
         "execution_semantics": "archive_or_close",
         "danger": "warning",
     },
     {
-        "id": "task.archive_ready",
-        "target_kind": "task_collection",
-        "label": "Archive Ready Tasks",
+        "id": "goal.archive_ready",
+        "target_kind": "goal_collection",
+        "label": "Archive Ready Goals",
         "group": "archive",
         "execution_semantics": "archive_or_close",
         "danger": "warning",
@@ -465,8 +465,8 @@ def _readback_for(item: dict[str, Any]) -> list[str]:
         return ["snapshot", "run.show"]
     if capability_id.startswith("daemon."):
         return ["snapshot", "status"]
-    if capability_id.startswith("task.archive"):
-        return ["snapshot", "task.history"]
+    if capability_id.startswith("goal.archive"):
+        return ["snapshot", "goal.history"]
     return ["snapshot"]
 
 

@@ -284,6 +284,9 @@ def build_parser(parent_subparsers) -> None:
     goal_archive.add_argument("goal_id")
     _add_stage42_global_args(goal_archive, mutation=True)
     goal_archive.set_defaults(func=_cmd_goal_archive)
+    goal_archive_ready = goal_subs.add_parser("archive-ready", help="Archive terminal ready/done Harness goals while preserving evidence")
+    _add_stage42_global_args(goal_archive_ready, mutation=True)
+    goal_archive_ready.set_defaults(func=_cmd_task_archive_ready)
 
     blueprint = subs.add_parser("blueprint", help="Validate and run Agent Runtime blueprints headlessly")
     blueprint_subs = blueprint.add_subparsers(dest="blueprint_command", required=True)

@@ -34,6 +34,9 @@ def test_task_store_create_update_round_trip_and_records_events():
     store = TaskStore()
     task = store.create(make_task())
 
+    assert paths.goal_path("task_abc").exists()
+    assert not paths.legacy_task_path("task_abc").exists()
+
     apply_transition(task, TaskState.RUNNING, actor="pm", reason="triage")
     store.update(task, actor="pm", reason="triage")
 
@@ -41,6 +44,23 @@ def test_task_store_create_update_round_trip_and_records_events():
     events = EventLog().tail(10)
     assert [evt.type for evt in events] == ["task.created", "task.transition"]
     assert events[-1].payload == {"from": "created", "to": "running", "actor": "pm", "reason": "triage"}
+
+
+def test_task_store_dual_reads_legacy_tasks_directory(isolate_agent_runtime_root):
+    legacy = make_task("task_legacy", TaskState.BLOCKED)
+    store_module._write_model(paths.legacy_task_path(legacy.id), legacy)
+
+    store = TaskStore()
+
+    assert store.get("task_legacy").state == TaskState.BLOCKED
+    assert [task.id for task in store.list_all()] == ["task_legacy"]
+
+    legacy.state = TaskState.RUNNING
+    store.update(legacy, actor="test", reason="legacy compatibility")
+
+    assert paths.legacy_task_path("task_legacy").exists()
+    assert not paths.goal_path("task_legacy").exists()
+    assert store.get("task_legacy").state == TaskState.RUNNING
 
 
 def test_task_store_invalid_get_raises_not_found():

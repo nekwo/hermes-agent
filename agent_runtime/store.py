@@ -15,7 +15,7 @@ from . import paths
 from .errors import AlreadyExists, NotFound
 from .events import EventLog
 from .locks import archive_lock, task_lock, run_lock
-from .models import AgentPersona, AgentRun, Event, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
+from .models import AgentPersona, AgentRun, Event, Goal, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
 from .persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from .proof_rules import ProofType
 from .recovery_flags import mark_incident_closed_for_recovery
@@ -108,9 +108,9 @@ class TaskStore:
         self.event_log = event_log or EventLog()
 
     def create(self, task: Task) -> Task:
-        path = paths.task_path(task.id)
+        path = paths.goal_path(task.id)
         with task_lock(task.id):
-            if path.exists():
+            if any(candidate.exists() for candidate in paths.task_storage_candidates(task.id)):
                 raise AlreadyExists(task.id)
             _write_model(path, task)
             self.event_log.append(
@@ -126,7 +126,7 @@ class TaskStore:
         return self.get(task.id)
 
     def get(self, task_id: str) -> Task:
-        task = _read_model(Task, paths.task_path(task_id))
+        task = _read_model(Goal, paths.existing_task_path(task_id))
         return self._canonicalize_current_stage(task)
 
     def get_goal(self, goal_or_task_id: str) -> Task:
@@ -141,7 +141,7 @@ class TaskStore:
         raise NotFound(value)
 
     def update(self, task: Task, *, actor: str = "harness", reason: str = "") -> None:
-        path = paths.task_path(task.id)
+        path = paths.existing_task_path(task.id)
         reached_terminal = False
         with task_lock(task.id):
             previous = self.get(task.id)
@@ -211,7 +211,12 @@ class TaskStore:
         return [task for task in self.list_all() if task.state in wanted]
 
     def list_all(self) -> list[Task]:
-        return [self._canonicalize_current_stage(task) for task in _list_models(Task, paths.tasks_dir())]
+        by_id: dict[str, Task] = {}
+        for task in _list_models(Goal, paths.tasks_dir()):
+            by_id.setdefault(task.id, task)
+        for task in _list_models(Goal, paths.goals_dir()):
+            by_id[task.id] = task
+        return [self._canonicalize_current_stage(task) for task in sorted(by_id.values(), key=lambda item: item.id)]
 
     def list_for_workspace(self, workspace_id: str | None) -> list[Task]:
         normalized = _safe_model_id(workspace_id)
@@ -379,7 +384,7 @@ class ArchiveStore:
     def _archive_one(self, task: Task, archive_dir: Path, run_store: "RunStore") -> dict:
         task_dest = archive_dir / "tasks" / f"{task.id}.json"
         task_dest.parent.mkdir(parents=True, exist_ok=True)
-        _move_if_exists(paths.task_path(task.id), task_dest)
+        _move_if_exists(paths.existing_task_path(task.id), task_dest)
 
         archived_runs: list[str] = []
         for run in run_store.list_for_task(task.id):

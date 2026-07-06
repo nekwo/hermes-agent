@@ -30,8 +30,9 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert "persona.permission_preview" in ids
     assert "persona.permission_override" in ids
     assert "persona.elevate_tools_once" in ids
-    assert "task.run_until_settled" in ids
-    assert "task.steer" in ids
+    assert "goal.run_until_settled" in ids
+    assert "goal.steer" in ids
+    assert "task.run_until_settled" not in ids
     assert "daemon.start" in ids
     assert "shell.anything" not in ids
     assert all("command" not in item for item in descriptors)
@@ -65,11 +66,11 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
         "skill",
     ]
     assert by_id["mission.chat.queue_skill_for_next_turn"]["execution_semantics"] == "control_state_change"
-    assert by_id["task.steer"]["group"] == "steer"
-    assert by_id["task.steer"]["execution_semantics"] == "control_state_change"
-    assert by_id["task.steer"]["args_schema"]["required"] == ["task_id"]
+    assert by_id["goal.steer"]["group"] == "steer"
+    assert by_id["goal.steer"]["execution_semantics"] == "control_state_change"
+    assert by_id["goal.steer"]["args_schema"]["required"] == ["goal_id"]
     assert {"action_id", "verb", "source_node_id", "target_node_id", "reason", "requested_by"}.issubset(
-        set(by_id["task.steer"]["allowed_args"])
+        set(by_id["goal.steer"]["allowed_args"])
     )
     assert by_id["persona.instance.return_summary"]["group"] == "steer"
     assert by_id["persona.instance.return_summary"]["execution_semantics"] == "control_state_change"
@@ -148,5 +149,6 @@ def test_observability_emits_same_capability_descriptors(isolate_agent_runtime_r
 
     assert envelope["capabilities"]["schema_version"] == 1
     assert capability_ids().issubset(ids)
-    assert "task.archive" in ids
+    assert "goal.archive" in ids
+    assert "task.archive" not in ids
     assert "run.cancel" in ids

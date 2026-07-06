@@ -134,7 +134,7 @@ def execute_steer_action(
 
     returned_payload = {**payload, "result": result.get("result"), "stage_id": result.get("stage_id"), "persona_instance_id": result.get("persona_instance_id")}
     event_log.append(Event(ts=now(), type="steer.returned", task_id=task.id, run_id=None, persona_id=None, payload=returned_payload))
-    return {"ok": True, "capability_id": "task.steer", "task_id": task.id, "action": action, **result}
+    return {"ok": True, "capability_id": "goal.steer", "task_id": task.id, "goal_id": getattr(task, "goal_id", None) or task.id, "action": action, **result}
 
 
 def _verbs_for_edge(source_node: dict, target_node: dict, *, has_open_incidents: bool, task_blocked: bool) -> list[str]:
@@ -171,7 +171,7 @@ def _action_payload(
         "target_stage_id": target_node.get("current_stage_id"),
         "available_now": available_now,
         "disabled_reason": None if available_now else "source node does not currently hold control",
-        "capability_id": "task.steer",
+        "capability_id": "goal.steer",
         "capability_args": capability_args,
         "execution_semantics": "control_state_change",
         "fanout_limits": {
@@ -454,7 +454,7 @@ def _steer_failed(task: Task, ref: SteerActionRef | None, error_kind: str, error
     IncidentStore(event_log=event_log).open(incident)
     return {
         "ok": False,
-        "capability_id": "task.steer",
+        "capability_id": "goal.steer",
         "task_id": task.id,
         "error_kind": error_kind,
         "error": error,

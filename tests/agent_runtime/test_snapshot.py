@@ -262,7 +262,7 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     assert topology["control_node_id"] == "slot_lead"
     route_action = next(action for action in topology["steer_actions"] if action["verb"] == "route" and action["target_node_id"] == "slot_builder")
     assert route_action["available_now"] is True
-    assert route_action["capability_id"] == "task.steer"
+    assert route_action["capability_id"] == "goal.steer"
     assert route_action["capability_args"] == {
         "task_id": "stage38",
         "verb": "route",

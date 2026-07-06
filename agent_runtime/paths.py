@@ -13,6 +13,10 @@ def tasks_dir() -> Path:
     return store_root() / "tasks"
 
 
+def goals_dir() -> Path:
+    return store_root() / "goals"
+
+
 def runs_dir() -> Path:
     return store_root() / "runs"
 
@@ -187,7 +191,27 @@ def worker_context_dir(task_id: str, persona_id: str) -> Path:
 
 
 def task_path(task_id: str) -> Path:
+    return goal_path(task_id)
+
+
+def legacy_task_path(task_id: str) -> Path:
     return tasks_dir() / f"{task_id}.json"
+
+
+def goal_path(goal_id: str) -> Path:
+    return goals_dir() / f"{_safe_path_token(goal_id)}.json"
+
+
+def task_storage_candidates(task_id: str) -> list[Path]:
+    return [goal_path(task_id), legacy_task_path(task_id)]
+
+
+def existing_task_path(task_id: str) -> Path:
+    for path in task_storage_candidates(task_id):
+        if path.exists():
+            return path
+    return goal_path(task_id)
+
 
 
 def worker_session_path(worker_session_id: str) -> Path:
