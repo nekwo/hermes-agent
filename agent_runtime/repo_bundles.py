@@ -15,7 +15,7 @@ from .events import EventLog
 from .models import Event, Incident, MissionPlanStage, RepoBundle, Task
 from .serde import from_jsonable, to_jsonable
 from .states import TaskState
-from .store import IncidentStore, TaskStore
+from .store import IncidentStore, ProofStore, TaskStore
 
 REPO_BUNDLE_STATES = frozenset(
     {
@@ -207,9 +207,12 @@ class RepoBundleStore:
         ):
             return
 
-        incident_store = IncidentStore(event_log=self.event_log)
         task_store = TaskStore()
         stage_id = _bundle_stage_key(bundle)
+        if _empty_delivery_is_proof_only_no_product_edit(bundle, task_store=task_store, stage_id=stage_id):
+            return
+
+        incident_store = IncidentStore(event_log=self.event_log)
         patch_incident = _open_delivery_incident_once(
             incident_store,
             task_id=bundle.task_id,
@@ -810,6 +813,58 @@ def _patch_was_proposed_for_delivery(
             continue
         return True
     return False
+
+
+def _empty_delivery_is_proof_only_no_product_edit(bundle: RepoBundle, *, task_store: TaskStore, stage_id: str) -> bool:
+    if not bundle.proof_ids:
+        return False
+    try:
+        task = task_store.get(bundle.task_id)
+    except Exception:
+        return False
+    stage = _stage_for_bundle(task, stage_id)
+    if stage is not None and getattr(stage, "requires_product_edit", False):
+        return False
+    if stage is None and not _task_declares_no_product_edits(task):
+        return False
+    proof_store = ProofStore()
+    for proof_id in bundle.proof_ids:
+        try:
+            proof = proof_store.get(str(proof_id))
+        except Exception:
+            continue
+        metadata = getattr(proof, "metadata", None) or {}
+        if str(metadata.get("status") or "").strip().lower() not in {"passed", "approved", "safe"}:
+            continue
+        if str(metadata.get("proof_recipe_mode") or "").strip() == "no_product_edit":
+            return True
+        recipe = metadata.get("proof_recipe") if isinstance(metadata.get("proof_recipe"), dict) else {}
+        if str(recipe.get("mode") or "").strip() == "no_product_edit":
+            return True
+    return False
+
+
+def _stage_for_bundle(task: Task, stage_id: str) -> MissionPlanStage | None:
+    plan = getattr(task, "mission_plan", None)
+    for stage in list(getattr(plan, "stages", None) or []):
+        if str(getattr(stage, "id", "") or "") == stage_id:
+            return stage
+    return None
+
+
+def _task_declares_no_product_edits(task: Task) -> bool:
+    flags = {str(flag or "").strip().lower() for flag in list(getattr(task, "risk_flags", None) or [])}
+    if "no_product_edits" in flags:
+        return True
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(item) for item in list(getattr(task, "acceptance_criteria", None) or [])),
+            " ".join(str(item) for item in list(getattr(task, "non_goals", None) or [])),
+        ]
+    ).lower()
+    return "no product edit" in text or "without product edits" in text
 
 
 def _open_delivery_incident_once(

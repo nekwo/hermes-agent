@@ -61,19 +61,28 @@ def _task_with_plan(task_id: str = "task_bundle") -> Task:
     )
 
 
-def _simple_bundle(*, task_id: str, bundle_id: str = "bundle_empty", run_id: str = "run_empty_1") -> RepoBundle:
+def _simple_bundle(
+    *,
+    task_id: str,
+    bundle_id: str = "bundle_empty",
+    run_id: str = "run_empty_1",
+    repo: str = "hermes-agent",
+    owner_persona_id: str = "dev",
+    stage_ids: list[str] | None = None,
+    proof_ids: list[str] | None = None,
+) -> RepoBundle:
     ts = now()
     return RepoBundle(
         id=bundle_id,
         task_id=task_id,
-        repo="hermes-agent",
-        owner_persona_id="dev",
+        repo=repo,
+        owner_persona_id=owner_persona_id,
         state="running",
         title="Harness bundle",
         objective="Update docs.",
-        stage_ids=["implement"],
+        stage_ids=stage_ids or ["implement"],
         active_run_id=run_id,
-        proof_ids=["proof_same"],
+        proof_ids=proof_ids or ["proof_same"],
         created_at=ts,
         updated_at=ts,
     )
@@ -101,6 +110,70 @@ def test_empty_delivery_capture_opens_patch_landed_nowhere_incident(isolate_agen
     guard = saved.harness_self_heal["delivery_no_progress_guard"]["implement"]
     assert guard["empty_capture_count"] == 1
     assert guard["cited_evidence_ids"] == ["proof_same", "delivery_capture:bundle_empty:worktree_missing_or_clean"]
+
+
+def test_no_product_edit_proof_delivery_skips_patch_landed_nowhere_incident(isolate_agent_runtime_root, monkeypatch):
+    task = _task_with_plan("task_no_edit_empty_capture")
+    task.affected_repos = ["EterniaBackend"]
+    task.current_stage_id = "backend_implementation"
+    task.risk_flags = ["no_product_edits"]
+    task.mission_plan.current_stage_id = "backend_implementation"
+    task.mission_plan.stages = [
+        MissionPlanStage(
+            id="backend_implementation",
+            title="Backend contract smoke",
+            objective="Attach no-product-edit backend proof.",
+            owner="backend_dev",
+            repo="EterniaBackend",
+            kind="implementation",
+            status=StageStatus.IMPLEMENTING,
+            proof_recipe_id="backend_contract_smoke",
+            requires_product_edit=False,
+        )
+    ]
+    TaskStore().create(task)
+    ProofStore().attach(
+        Proof(
+            id="proof_no_edit_backend",
+            task_id=task.id,
+            stage_id="backend_implementation",
+            type=ProofType.TEST_RUN,
+            title="Backend contract smoke",
+            path_or_value="proof.log",
+            created_by="harness",
+            created_at=now(),
+            metadata={
+                "status": "passed",
+                "proof_recipe_mode": "no_product_edit",
+                "proof_recipe_recipe_id": "backend_contract_smoke",
+            },
+            redaction_status="safe",
+        )
+    )
+
+    def _empty_capture(_bundle, *, event_log):
+        return {"captured": False, "reason": "worktree_clean"}
+
+    monkeypatch.setattr("agent_runtime.delivery_directive.capture_bundle_patch", _empty_capture)
+    log = EventLog()
+    log.append(Event(now(), "patch.proposed", task.id, "run_no_edit_1", "backend_dev", {"summary": "Proof-only handoff"}))
+
+    delivered = RepoBundleStore(event_log=log).mark_delivered(
+        _simple_bundle(
+            task_id=task.id,
+            bundle_id="bundle_no_edit",
+            run_id="run_no_edit_1",
+            repo="EterniaBackend",
+            owner_persona_id="backend_dev",
+            stage_ids=["backend_implementation"],
+            proof_ids=["proof_no_edit_backend"],
+        )
+    )
+
+    assert delivered.delivery_capture["captured"] is False
+    assert IncidentStore().list_open() == []
+    saved = TaskStore().get(task.id)
+    assert "delivery_no_progress_guard" not in saved.harness_self_heal
 
 
 def test_repeated_empty_delivery_without_new_proof_waits_for_operator(isolate_agent_runtime_root, monkeypatch):
