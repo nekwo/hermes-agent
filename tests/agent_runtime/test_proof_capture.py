@@ -269,9 +269,9 @@ for line in sys.stdin:
 
     args = json.loads(args_capture.read_text(encoding="utf-8"))
     assert args["force_relaunch"] is True
-    assert args["repoRoot"] == "C:/stagec/repo"
-    assert args["launchHelperPath"].endswith("Start-StageCDirectExe.ps1")
-    assert args["screenshotHelperPath"].endswith("Capture-StageCWindowScreenshot.ps1")
+    assert "repoRoot" not in args
+    assert "launchHelperPath" not in args
+    assert "screenshotHelperPath" not in args
 
 
 def test_stagec_provider_derives_launcher_helpers_from_configured_repo(tmp_path, monkeypatch, isolate_agent_runtime_root):
@@ -325,9 +325,9 @@ def test_stagec_provider_derives_launcher_helpers_from_configured_repo(tmp_path,
     )
 
     assert capture.path == str(artifact)
-    assert seen["args"]["repoRoot"] == str(repo)
-    assert seen["args"]["launchHelperPath"] == str(launch_helper)
-    assert seen["args"]["screenshotHelperPath"] == str(screenshot_helper)
+    assert "repoRoot" not in seen["args"]
+    assert "launchHelperPath" not in seen["args"]
+    assert "screenshotHelperPath" not in seen["args"]
     assert seen["env"]["STAGEC_QA_REPO_ROOT"] == str(repo)
     assert seen["env"]["STAGEC_LAUNCH_HELPER"] == str(launch_helper)
     assert seen["env"]["STAGEC_SCREENSHOT_HELPER"] == str(screenshot_helper)

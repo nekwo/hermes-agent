@@ -227,22 +227,16 @@ class StageCLauncherMcpVisualCaptureProvider:
         if self.config.profile_home is not None:
             args["hermes_home"] = str(self.config.profile_home)
         launch_pins = _launcher_qa_launch_pins(metadata, self.config)
-        if launch_pins.get("repoRoot"):
-            args["repoRoot"] = launch_pins["repoRoot"]
-        if launch_pins.get("launchHelperPath"):
-            args["launchHelperPath"] = launch_pins["launchHelperPath"]
-        if launch_pins.get("screenshotHelperPath"):
-            args["screenshotHelperPath"] = launch_pins["screenshotHelperPath"]
 
         try:
-            envelope = self._open_app_tab(args)
+            envelope = self._open_app_tab(args, launch_pins=launch_pins)
         except StageCMcpError as exc:
             if not provider_metadata and _is_wrong_marionette_target_error(exc) and _auto_rebuild_enabled(metadata):
                 rebuild = _run_launcher_marionette_rebuild(request.task_id, reason="wrong_debug_target_retry")
                 provider_metadata["stagec_marionette_preflight"] = rebuild
                 if rebuild.get("status") != "applied":
                     raise StageCMcpError(f"{exc}; marionette rebuild failed: {_safe_summary(rebuild.get('summary'))}") from exc
-                envelope = self._open_app_tab(args)
+                envelope = self._open_app_tab(args, launch_pins=launch_pins)
             else:
                 raise
         if envelope.get("ok") is not True:
@@ -267,8 +261,8 @@ class StageCLauncherMcpVisualCaptureProvider:
     def capture_video(self, request: VideoRequest) -> CapturedArtifact:
         raise StageCMcpError("launcher_qa MCP video capture is not implemented; request screenshot proof")
 
-    def _open_app_tab(self, args: dict[str, Any]) -> dict[str, Any]:
-        config = _config_with_launcher_qa_launch_pins(self.config, args)
+    def _open_app_tab(self, args: dict[str, Any], *, launch_pins: dict[str, str]) -> dict[str, Any]:
+        config = _config_with_launcher_qa_launch_pins(self.config, launch_pins)
         with StageCMcpJsonRpcClient(config) as client:
             client.initialize()
             return client.call_tool("mcp_launcher_qa_open_app_tab", args)
@@ -403,14 +397,14 @@ def _launcher_qa_launch_pins(metadata: dict[str, Any], config: StageCMcpServerCo
     return pins
 
 
-def _config_with_launcher_qa_launch_pins(config: StageCMcpServerConfig, args: dict[str, Any]) -> StageCMcpServerConfig:
+def _config_with_launcher_qa_launch_pins(config: StageCMcpServerConfig, launch_pins: dict[str, str]) -> StageCMcpServerConfig:
     env = dict(config.env)
     for arg_key, env_key in (
         ("repoRoot", "STAGEC_QA_REPO_ROOT"),
         ("launchHelperPath", "STAGEC_LAUNCH_HELPER"),
         ("screenshotHelperPath", "STAGEC_SCREENSHOT_HELPER"),
     ):
-        value = str(args.get(arg_key) or "").strip()
+        value = str(launch_pins.get(arg_key) or "").strip()
         if value and not env.get(env_key):
             env[env_key] = value
     if env == config.env:
