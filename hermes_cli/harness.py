@@ -967,6 +967,11 @@ def build_parser(parent_subparsers) -> None:
     snap = subs.add_parser("snapshot", help="Write redaction-safe snapshot.json")
     snap.add_argument("--json", action="store_true")
     snap.set_defaults(func=_cmd_snapshot)
+    stream = subs.add_parser("stream", help="Emit Mission Control hydrate/delta frames as NDJSON")
+    stream.add_argument("--poll-interval", type=float, default=0.25)
+    stream.add_argument("--heartbeat-interval", type=float, default=5.0)
+    stream.add_argument("--max-frames", type=int, default=None, help=argparse.SUPPRESS)
+    stream.set_defaults(func=_cmd_stream)
     rebuild_read_model = subs.add_parser("rebuild-read-model", help="Rebuild read_model.db from the current event-sourced store")
     rebuild_read_model.add_argument("--json", action="store_true")
     rebuild_read_model.set_defaults(func=_cmd_rebuild_read_model)
@@ -6040,6 +6045,23 @@ def _cmd_snapshot(args) -> int:
 
         snap = ReadModel().render_snapshot()
     print(emit_json(snap) if args.json else "snapshot written")
+    return 0
+
+
+def _cmd_stream(args) -> int:
+    from agent_runtime.stream import stream_frames
+    from agent_runtime.serde import to_jsonable
+
+    try:
+        for frame in stream_frames(
+            poll_interval_seconds=float(getattr(args, "poll_interval", 0.25) or 0.25),
+            heartbeat_interval_seconds=float(getattr(args, "heartbeat_interval", 5.0) or 5.0),
+            max_frames=getattr(args, "max_frames", None),
+        ):
+            sys.stdout.write(json.dumps(to_jsonable(frame), ensure_ascii=False, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+    except KeyboardInterrupt:
+        return 0
     return 0
 
 
