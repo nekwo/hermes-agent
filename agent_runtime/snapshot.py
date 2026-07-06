@@ -144,7 +144,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     workspaces = workspace_store.list_all(include_archived=True)
     realms = realm_store.list_all(include_archived=True)
     blueprint_runs = blueprint_run_store.list_all()
-    agent_summaries = [_agent_summary(a) for a in agents]
+    agent_summaries = [_agent_summary(a, include_tool_details=True) for a in agents]
     available_personas = _available_persona_summary(agents)
     proofs = []
     self_tests = []
@@ -2939,10 +2939,10 @@ def _event_display_title(event_type: str, payload: dict, kind: str) -> str:
     return event_type
 
 
-def _agent_summary(agent):
+def _agent_summary(agent, *, include_tool_details: bool = False):
     readiness = profile_readiness_for_persona(agent)
     tool_resolution = resolve_tool_visibility(agent)
-    return {
+    summary = {
         "persona_id": agent.id,
         "display_name": agent.display_name,
         "role": agent.role,
@@ -2956,12 +2956,6 @@ def _agent_summary(agent):
         "missing_mcp_servers": readiness.get("missing_mcp_servers", []),
         "skill_hash_mismatches": readiness.get("skill_hash_mismatches", []),
         "toolsets": effective_toolsets(agent),
-        "blocked_tools_count": len(tool_resolution["blocked_tools"]),
-        "blocked_tools": tool_resolution["blocked_tools"],
-        "tool_resolution": tool_resolution,
-        "turn_tool_context": turn_tool_context_for_persona(agent),
-        "permission_state": permission_state_for_persona(agent),
-        "agent_hud_state": agent_hud_state_for_persona(agent),
         "model_configured": bool(agent.model),
         "provider_configured": bool(agent.provider),
         "default_model": _safe_model_label(getattr(agent, "model", None)),
@@ -2970,6 +2964,18 @@ def _agent_summary(agent):
         "core_context_files": "enabled" if getattr(agent, "include_core_context_files", False) else "isolated",
         "repo_scope_label": _safe_text(getattr(agent, "repo_scope_label", None)) or _safe_repo_scope_label(getattr(agent, "repo_scope", None)),
     }
+    if include_tool_details:
+        summary.update(
+            {
+                "blocked_tools_count": len(tool_resolution["blocked_tools"]),
+                "blocked_tools": tool_resolution["blocked_tools"],
+                "tool_resolution": tool_resolution,
+                "turn_tool_context": turn_tool_context_for_persona(agent),
+                "permission_state": permission_state_for_persona(agent),
+                "agent_hud_state": agent_hud_state_for_persona(agent),
+            }
+        )
+    return summary
 
 
 def _available_persona_summary(agents) -> list[dict]:
