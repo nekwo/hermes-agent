@@ -2,7 +2,13 @@ import os
 import subprocess
 import time
 
-from agent_runtime.repo_context import RepoExecutionContext, capture_repo_baseline, git_diff_since_baseline, isolated_repo_context_for_run
+from agent_runtime.repo_context import (
+    HARNESS_WORKTREE_ADD_TIMEOUT_SECONDS,
+    RepoExecutionContext,
+    capture_repo_baseline,
+    git_diff_since_baseline,
+    isolated_repo_context_for_run,
+)
 
 
 def _git(repo, *args):
@@ -292,6 +298,33 @@ def test_isolated_repo_context_fails_closed_when_worktree_create_fails(tmp_path,
         assert "could not create isolated git worktree" in str(exc)
     else:
         raise AssertionError("worktree creation failure must fail closed")
+
+
+def test_isolated_repo_context_uses_large_checkout_timeout(tmp_path, monkeypatch):
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.invalid")
+    _git(repo, "config", "user.name", "Harness Test")
+    (repo / "shared.txt").write_text("clean\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+    source = RepoExecutionContext(workdir=repo, repo_label="repo", source="test")
+    observed: list[int | None] = []
+    real_run = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[:3] == ["git", "worktree", "add"]:
+            observed.append(kwargs.get("timeout"))
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    isolated_repo_context_for_run(source, task_id="task_1", run_id="run_timeout")
+
+    assert observed == [HARNESS_WORKTREE_ADD_TIMEOUT_SECONDS]
 
 
 def test_isolated_repo_context_materializes_ignored_env_placeholder(tmp_path, monkeypatch):

@@ -24,6 +24,9 @@ HARNESS_WORKTREE_GC_MAX_PER_REPO = 12
 # Never count-cap a worktree younger than this — a freshly created worktree is
 # almost certainly an in-flight run, so age it out before it becomes eligible.
 HARNESS_WORKTREE_GC_MIN_AGE_SECONDS = 15 * 60
+# Launcher worktrees are large on Windows; a healthy checkout can spend more
+# than a minute in Git's "Updating files" phase before the agent turn starts.
+HARNESS_WORKTREE_ADD_TIMEOUT_SECONDS = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +147,7 @@ def _ensure_isolated_worktree(source_root: Path, base: Path) -> Path:
             errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=60,
+            timeout=HARNESS_WORKTREE_ADD_TIMEOUT_SECONDS,
             check=False,
         )
         if result.returncode == 0:
