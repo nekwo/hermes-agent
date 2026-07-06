@@ -13,7 +13,7 @@ from utils import atomic_json_write
 
 from . import paths
 from .errors import AlreadyExists, NotFound
-from .events import EventLog
+from .events import EventLog, archive_task_events
 from .locks import archive_lock, task_lock, run_lock
 from .models import AgentPersona, AgentRun, Event, Goal, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
 from .persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
@@ -428,12 +428,17 @@ class ArchiveStore:
         archived_packet_artifacts = _archive_packet_artifacts(task.id, archive_dir)
         archived_self_tests = _archive_self_test_evidence(task.id, archive_dir)
         archived_role_state = _archive_role_envelope_evidence(task.id, archive_dir)
+        archived_events = archive_task_events(task.id, archive_dir)
 
         return {
             "task_id": task.id,
             "title": task.title,
             "state": str(task.state),
             "task_path": str(task_dest.relative_to(archive_dir)),
+            "events_path": archived_events["events_path"],
+            "event_count": archived_events["event_count"],
+            "event_bytes": archived_events["event_bytes"],
+            "event_compaction_eligible": archived_events["compaction_eligible"],
             "run_ids": archived_runs,
             "proof_ids": archived_proofs,
             "incident_ids": archived_incidents,
@@ -478,6 +483,7 @@ class ArchiveStore:
                     "persona_instance_count": len(item.get("persona_instance_ids") or []),
                     "runtime_instance_count": len(item.get("runtime_instance_ids") or []),
                     "self_test_evidence_count": len(item.get("self_test_evidence_ids") or []),
+                    "event_count": int(item.get("event_count") or 0),
                 },
             )
         )

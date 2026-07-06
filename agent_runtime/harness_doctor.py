@@ -8,7 +8,7 @@ from hermes_time import now
 
 from .delivery_directive import reap_orphan_worktrees
 from .errors import NotFound
-from .events import EventLog
+from .events import EventLog, compact_archived_task_events, event_log_health
 from .models import Event, Incident, Task
 from .snapshot import build_snapshot
 from .states import RunState, TaskState, WorkerSessionState
@@ -36,6 +36,7 @@ def run_harness_doctor(
     stale_incident_days: int | None = None,
     worktree_min_age_seconds: int = DEFAULT_WORKTREE_MIN_AGE_SECONDS,
     include_worktrees: bool = True,
+    compact_events: bool = False,
     task_store: TaskStore | None = None,
     run_store: RunStore | None = None,
     worker_store: WorkerSessionStore | None = None,
@@ -72,6 +73,8 @@ def run_harness_doctor(
     else:
         worktrees = {"reaped": [], "kept": [], "dry_run": True, "skipped": "worktree_scan_disabled"}
     snapshot_defects = _snapshot_null_id_defects(snapshot_builder)
+    event_health = event_log_health()
+    event_compaction = _skipped_event_compaction(event_health)
 
     repairs = {
         "stale_run_ids": [],
@@ -86,6 +89,7 @@ def run_harness_doctor(
         "closed_incident_count_by_kind": {},
         "incident_sweep_reason": STALE_BULK_CLOSE_REASON,
         "worktrees_reaped": [] if not fix or dry_run else [item.get("worktree") for item in worktrees.get("reaped", []) if item.get("worktree")],
+        "event_log_compaction": event_compaction,
         "dry_run": bool(dry_run),
     }
     if fix:
@@ -111,6 +115,11 @@ def run_harness_doctor(
             )
             _emit_doctor_fix_event(event_log, repairs)
 
+    if compact_events:
+        event_compaction = compact_archived_task_events(dry_run=not fix or dry_run)
+        repairs["event_log_compaction"] = event_compaction
+        event_health = event_compaction.get("after") if isinstance(event_compaction.get("after"), dict) else event_log_health()
+
     finding_counts = {
         "stale_runs": len(stale_runs),
         "stale_workers": len(stale_workers),
@@ -118,6 +127,7 @@ def run_harness_doctor(
         "stale_incidents": len(stale_incidents),
         "orphan_worktrees": len(worktrees.get("reaped") or []),
         "snapshot_null_id_rows": len(snapshot_defects),
+        "event_log_compactable_rows": int(event_compaction.get("removed_event_count") or 0),
     }
     return {
         "schema_version": 1,
@@ -132,6 +142,7 @@ def run_harness_doctor(
             "stale_incident_days": round(float(stale_incident_hours) / 24, 3),
             "worktree_min_age_seconds": int(worktree_min_age_seconds),
             "include_worktrees": bool(include_worktrees),
+            "compact_events": bool(compact_events),
         },
         "summary": {
             "finding_counts": finding_counts,
@@ -147,8 +158,22 @@ def run_harness_doctor(
             "stale_incidents": stale_incidents,
             "orphan_worktrees": worktrees,
             "snapshot_null_id_rows": snapshot_defects,
+            "event_log": event_health,
+            "event_log_compaction": event_compaction,
         },
         "repairs": repairs,
+    }
+
+
+def _skipped_event_compaction(event_health: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "dry_run": True,
+        "skipped": "event_compaction_not_requested",
+        "removed_event_count": 0,
+        "removed_bytes": 0,
+        "before": event_health,
+        "after": event_health,
+        "watermark_reset": False,
     }
 
 

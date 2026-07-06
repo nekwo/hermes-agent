@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Collection, Iterator
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from . import paths
 from .decision_contract_registry import allowed_event_types
@@ -174,6 +177,113 @@ class EventLog:
                     yield evt
 
 
+def archive_task_events(task_id: str, archive_dir: Path) -> dict[str, Any]:
+    """Copy a task's live event rows into its archive batch."""
+
+    event_path = paths.events_path()
+    dest = archive_dir / f"events_{_safe_event_task_filename(task_id)}.jsonl"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not event_path.exists():
+        dest.write_text("", encoding="utf-8", newline="\n")
+        return {
+            "events_path": dest.name,
+            "event_count": 0,
+            "event_bytes": 0,
+            "compaction_eligible": True,
+        }
+    token = _task_id_json_token(task_id)
+    selected: list[str] = []
+    with events_lock():
+        with open(event_path, encoding="utf-8") as handle:
+            for line in handle:
+                if token not in line:
+                    continue
+                if not line.strip():
+                    continue
+                try:
+                    event = from_jsonable(Event, json.loads(line))
+                except Exception:
+                    continue
+                if event.task_id == task_id:
+                    selected.append(line if line.endswith("\n") else f"{line}\n")
+        with open(dest, "w", encoding="utf-8", newline="\n") as handle:
+            handle.writelines(selected)
+    return {
+        "events_path": dest.name,
+        "event_count": len(selected),
+        "event_bytes": sum(len(line.encode("utf-8")) for line in selected),
+        "compaction_eligible": True,
+    }
+
+
+def event_log_health() -> dict[str, Any]:
+    path = paths.events_path()
+    exists = path.exists()
+    size_bytes = path.stat().st_size if exists else 0
+    line_count = 0
+    if exists:
+        with open(path, "rb") as handle:
+            line_count = sum(1 for line in handle if line.strip())
+    archive = _archived_event_slices()
+    return {
+        "exists": exists,
+        "size_bytes": size_bytes,
+        "line_count": line_count,
+        "archived_event_slices": len(archive["slices"]),
+        "archived_event_rows": archive["row_count"],
+        "index_health": "ok" if exists or archive["row_count"] == 0 else "archive_only",
+    }
+
+
+def compact_archived_task_events(*, dry_run: bool = True) -> dict[str, Any]:
+    """Rewrite events.jsonl without rows already copied into archive slices."""
+
+    path = paths.events_path()
+    before = event_log_health()
+    archive = _archived_event_slices()
+    task_ids = sorted(archive["task_ids"])
+    if not path.exists() or not task_ids:
+        return {
+            "dry_run": bool(dry_run),
+            "eligible_task_ids": task_ids,
+            "removed_event_count": 0,
+            "removed_bytes": 0,
+            "before": before,
+            "after": before,
+            "watermark_reset": False,
+        }
+
+    archived_lines: Counter[str] = archive["line_counts"]
+    retained: list[str] = []
+    removed_count = 0
+    removed_bytes = 0
+    with events_lock():
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                normalized = line if line.endswith("\n") else f"{line}\n"
+                if _line_is_compacted_event(normalized, archived_lines, archive["task_ids"]):
+                    removed_count += 1
+                    removed_bytes += len(normalized.encode("utf-8"))
+                    continue
+                retained.append(normalized)
+        if not dry_run and removed_count:
+            tmp = path.with_suffix(".jsonl.compact_tmp")
+            with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+                handle.writelines(retained)
+            tmp.replace(path)
+
+    after = event_log_health() if not dry_run and removed_count else before
+    return {
+        "dry_run": bool(dry_run),
+        "eligible_task_ids": task_ids,
+        "removed_event_count": removed_count,
+        "removed_bytes": removed_bytes,
+        "before": before,
+        "after": after,
+        "watermark_reset": bool(not dry_run and removed_count),
+    }
+
+
 class CachedEventLog(EventLog):
     """Build-scoped EventLog that reads ``events.jsonl`` ONCE and serves every
     read from the cached raw lines.
@@ -310,6 +420,68 @@ def _type_json_tokens(types: Collection[str] | None) -> tuple[str, ...] | None:
         f'"type":{json.dumps(str(event_type), ensure_ascii=False, separators=(",", ":"))}'
         for event_type in sorted(types)
     )
+
+
+def _safe_event_task_filename(task_id: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id).strip())
+    return text[:80] or "task"
+
+
+def _archived_event_slices() -> dict[str, Any]:
+    archive_root = paths.deleted_archive_dir()
+    line_counts: Counter[str] = Counter()
+    task_ids: set[str] = set()
+    slices: list[dict[str, Any]] = []
+    row_count = 0
+    if not archive_root.exists():
+        return {"line_counts": line_counts, "task_ids": task_ids, "slices": slices, "row_count": row_count}
+    for manifest_path in sorted(archive_root.glob("*/manifest.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        batch_dir = manifest_path.parent
+        for item in manifest.get("archived_tasks") or []:
+            if not isinstance(item, dict):
+                continue
+            task_id = str(item.get("task_id") or "").strip()
+            event_rel = str(item.get("events_path") or "").strip()
+            if not task_id or not event_rel:
+                continue
+            event_path = batch_dir / event_rel
+            if not event_path.exists():
+                continue
+            task_ids.add(task_id)
+            count = 0
+            with open(event_path, encoding="utf-8") as handle:
+                for line in handle:
+                    normalized = line if line.endswith("\n") else f"{line}\n"
+                    if normalized.strip():
+                        line_counts[normalized] += 1
+                        count += 1
+            row_count += count
+            slices.append(
+                {
+                    "archive_batch": batch_dir.name,
+                    "task_id": task_id,
+                    "events_path": event_rel,
+                    "event_count": count,
+                }
+            )
+    return {"line_counts": line_counts, "task_ids": task_ids, "slices": slices, "row_count": row_count}
+
+
+def _line_is_compacted_event(line: str, archived_lines: Counter[str], archived_task_ids: set[str]) -> bool:
+    if archived_lines[line] <= 0:
+        return False
+    try:
+        event = from_jsonable(Event, json.loads(line))
+    except Exception:
+        return False
+    if event.task_id not in archived_task_ids:
+        return False
+    archived_lines[line] -= 1
+    return True
 
 
 def event_with_operator_summary(evt: Event) -> Event:

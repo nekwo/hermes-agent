@@ -839,6 +839,7 @@ def build_parser(parent_subparsers) -> None:
     doctor.add_argument("--stale-incident-days", type=int, default=DEFAULT_STALE_INCIDENT_DAYS)
     doctor.add_argument("--stale-incident-hours", type=int, default=None, help="Compatibility override for sub-day incident sweeps")
     doctor.add_argument("--worktree-min-age-seconds", type=int, default=DEFAULT_WORKTREE_MIN_AGE_SECONDS)
+    doctor.add_argument("--compact-events", action="store_true", help="Compact archived task rows out of events.jsonl; use with --fix --dry-run to preview")
     doctor.set_defaults(func=_cmd_doctor)
 
     health = subs.add_parser("health", help="Check Harness runtime/provider dependencies before live ticks")
@@ -2296,6 +2297,7 @@ def _cmd_doctor(args) -> int:
             getattr(args, "worktree_min_age_seconds", DEFAULT_WORKTREE_MIN_AGE_SECONDS)
             or DEFAULT_WORKTREE_MIN_AGE_SECONDS
         ),
+        compact_events=bool(getattr(args, "compact_events", False)),
     )
     data = {
         "ok": True,
@@ -2321,13 +2323,21 @@ def _cmd_doctor(args) -> int:
                 f"exists={row['exists']} tasks={row['tasks']}"
             )
         counts = hygiene["summary"]["finding_counts"]
+        event_log = hygiene["findings"]["event_log"]
         print("Harness doctor")
         print(
             "findings: "
             f"runs={counts['stale_runs']} workers={counts['stale_workers']} "
             f"tasks={counts['stale_open_tasks']} incidents={counts['stale_incidents']} "
             f"worktrees={counts['orphan_worktrees']} "
-            f"snapshot_null_ids={counts['snapshot_null_id_rows']}"
+            f"snapshot_null_ids={counts['snapshot_null_id_rows']} "
+            f"event_compactable_rows={counts['event_log_compactable_rows']}"
+        )
+        print(
+            "event log: "
+            f"size={event_log['size_bytes']} bytes lines={event_log['line_count']} "
+            f"archive_slices={event_log['archived_event_slices']} "
+            f"index={event_log['index_health']}"
         )
         if getattr(args, "fix", False):
             mode = "dry run" if getattr(args, "dry_run", False) else "applied"

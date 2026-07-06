@@ -4,8 +4,9 @@ from datetime import timedelta
 
 from hermes_time import now
 
+from agent_runtime.events import EventLog
 from agent_runtime.harness_doctor import run_harness_doctor
-from agent_runtime.models import AgentPersona, Incident, Task
+from agent_runtime.models import AgentPersona, Event, Incident, Task
 from agent_runtime.errors import NotFound
 from agent_runtime.states import RunState, TaskState, WorkerSessionState
 from agent_runtime.store import IncidentStore, RunStore, TaskStore
@@ -231,3 +232,43 @@ def test_harness_doctor_accepts_stale_incident_days(isolate_agent_runtime_root):
     assert dry["thresholds"]["stale_incident_days"] == 7
     assert dry["summary"]["finding_counts"]["stale_incidents"] == 1
     assert dry["repairs"]["closed_incident_ids"] == ["inc_terminal_old"]
+
+
+def test_harness_doctor_reports_and_compacts_archived_event_rows(isolate_agent_runtime_root):
+    stamp = now() - timedelta(days=8)
+    task = TaskStore().create(
+        Task(
+            id="task_doctor_compact",
+            title="Compact",
+            description="d",
+            state=TaskState.DONE,
+            created_at=stamp,
+            updated_at=stamp,
+            requested_by="test",
+        )
+    )
+    EventLog().append(Event(now(), "run.progress", task.id, "run_compact", "dev", {"phase": "proof", "step": "test", "status": "passed"}))
+    archive = TaskStore().archive(task.id, actor="test", reason="archive compact fixture")
+
+    dry = run_harness_doctor(
+        fix=True,
+        dry_run=True,
+        compact_events=True,
+        include_worktrees=False,
+        snapshot_builder=lambda: {},
+    )
+
+    archived_count = archive["archived_tasks"][0]["event_count"]
+    assert dry["findings"]["event_log"]["archived_event_slices"] == 1
+    assert dry["summary"]["finding_counts"]["event_log_compactable_rows"] == archived_count
+    assert dry["repairs"]["event_log_compaction"]["watermark_reset"] is False
+
+    fixed = run_harness_doctor(
+        fix=True,
+        compact_events=True,
+        include_worktrees=False,
+        snapshot_builder=lambda: {},
+    )
+
+    assert fixed["repairs"]["event_log_compaction"]["removed_event_count"] == archived_count
+    assert fixed["repairs"]["event_log_compaction"]["watermark_reset"] is True
