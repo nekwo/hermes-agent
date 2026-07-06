@@ -269,6 +269,7 @@ for line in sys.stdin:
 
     args = json.loads(args_capture.read_text(encoding="utf-8"))
     assert args["force_relaunch"] is True
+    assert args["browser_login"] is True
     assert "repoRoot" not in args
     assert "launchHelperPath" not in args
     assert "screenshotHelperPath" not in args

@@ -217,7 +217,7 @@ class StageCLauncherMcpVisualCaptureProvider:
             "scenario_label": scenario_label,
             "reap_stale": bool(metadata.get("reap_stale", True)),
             "force_relaunch": bool(metadata.get("force_relaunch", True)),
-            "browser_login": bool(metadata.get("browser_login", False)),
+            "browser_login": _metadata_bool(metadata, "browser_login", default=True),
             "screenshot_stabilize_ms": int(metadata.get("screenshot_stabilize_ms") or 750),
             "screenshot_max_retries": int(metadata.get("screenshot_max_retries") or 8),
             "screenshot_retry_delay_ms": int(metadata.get("screenshot_retry_delay_ms") or 750),
@@ -436,6 +436,22 @@ def _first_nonempty(*values: Any) -> str | None:
         if text:
             return text
     return None
+
+
+def _metadata_bool(metadata: dict[str, Any], key: str, *, default: bool) -> bool:
+    if key not in metadata:
+        return default
+    raw = metadata.get(key)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    text = str(raw or "").strip().lower()
+    if text in {"0", "false", "no", "off"}:
+        return False
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    return default
 
 
 def _launcher_repo_from_metadata(metadata: dict[str, Any]) -> Path | None:
