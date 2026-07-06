@@ -4,13 +4,14 @@ import pytest
 
 from hermes_time import now
 from agent_runtime.actions import HarnessActionType
+from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.dev_discipline import needs_supervisor_slicing, validate_dev_progress_gate
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, Event, Task
 from agent_runtime.progress import RunProgressSink
 from agent_runtime.state_machine import MissionStateMachine
-from agent_runtime.states import RunState, TaskState
+from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import RunStore
 
 
@@ -163,6 +164,39 @@ def test_recorded_single_specialist_handoff_packet_stops_repeat_slicing():
     assert needs_supervisor_slicing(task) is False
     action = MissionStateMachine().next_action(task)
     assert action.type == HarnessActionType.RUN_SLOT
+    assert "slice" not in action.reason.lower()
+
+
+def test_released_default_blueprint_specialist_stage_does_not_repeat_slicing():
+    blueprint = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        blueprint,
+        goal="Prove Neko Mission Lead, Backend Dev, and Launcher Dev default routing without product edits.",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = make_task(
+        id="task_blueprint_slice_released",
+        title="Stage 47 no-op orchestration burn-in",
+        description="Prove Neko Mission Lead, Backend Dev, and Launcher Dev default routing without product edits.",
+        affected_repos=["hermes-agent", "EterniaBackend", "EterniaLauncher"],
+        mission_plan=plan,
+        current_stage_id="backend_implementation",
+    )
+    plan.current_stage_id = "backend_implementation"
+    for stage in plan.stages:
+        if stage.id == "scope":
+            stage.status = StageStatus.PASSED
+        elif stage.id == "backend_implementation":
+            stage.status = StageStatus.IMPLEMENTING
+
+    assert needs_supervisor_slicing(task) is False
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id in {"backend_builder", "backend_dev"}
     assert "slice" not in action.reason.lower()
 
 
