@@ -1358,6 +1358,12 @@ def _apply_implementation_review(task: Task, payload: dict[str, Any], *, actor: 
     if proof_store is not None:
         qa_proof = record_qa_verdict(task, verdict=verdict, proof_ids=proof_ids, findings=safe_findings, store=proof_store)
         _dedupe_extend(task.proof_ids, [qa_proof.id])
+        attach_proofs_to_plan_stage(
+            task,
+            qa_proof.stage_id or task.current_stage_id,
+            [qa_proof.id],
+            proof_store=proof_store,
+        )
     if verdict == "approved":
         if not _all_stages_dev_complete(task):
             task.state = TaskState.RUNNING

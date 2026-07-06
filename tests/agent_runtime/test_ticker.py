@@ -3088,6 +3088,29 @@ class RequestTestThenHandoffRuntime:
         )
 
 
+class RequestTestThenQaVerdictRuntime:
+    def run_tick(self, persona, ctx, *, run):
+        from agent_runtime.decision_schema import AgentDecision, DecisionType
+
+        if persona.id == "qa":
+            return AgentDecision(
+                type=DecisionType.QA_VERDICT,
+                summary="QA approved attached proof",
+                rationale="Implementation proof is attached and passed.",
+                payload={
+                    "verdict": "approved",
+                    "proof_ids": list(ctx.proof_ids),
+                    "findings": ["command proof passed"],
+                },
+            )
+        return AgentDecision(
+            type=DecisionType.REQUEST_TEST_RUN,
+            summary="collect smoke proof",
+            rationale="Need deterministic proof before QA.",
+            payload={"stage_id": "implement", "commands": ["printf 'smoke-ok\\n'"]},
+        )
+
+
 def test_tick_collects_command_proof_for_request_test_run(tmp_path):
     ts = TaskStore()
     task = attach_blueprint(
@@ -3115,6 +3138,42 @@ def test_tick_collects_command_proof_for_request_test_run(tmp_path):
     assert proof.type.value == "test_run"
     assert proof.metadata["exit_code"] == 0
     assert proof.metadata["commands_requested"] == 1
+
+
+def test_tick_attaches_qa_verdict_proof_and_closes_blueprint(tmp_path):
+    ts = TaskStore()
+    task = attach_blueprint(
+        make_task(),
+        "two_agent_build_verify",
+        {
+            "builder": "persona:dev",
+            "verifier": "persona:qa",
+        },
+    )
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    engine = TickEngine(
+        task_store=ts,
+        persona_runtime=RequestTestThenQaVerdictRuntime(),
+    )
+    engine.command_workdir = tmp_path
+
+    result = engine.run_until_settled(task_id="task_1", max_actions=4)
+
+    assert result.stop_reason == "task_terminal"
+    assert [action.payload.get("decision") for action in result.actions_taken[:2]] == [
+        "request_test_run",
+        "qa_verdict",
+    ]
+    saved = ts.get("task_1")
+    assert saved.state == TaskState.DONE
+    assert saved.current_stage_id is None
+    assert graph_stage_status(saved, "implement") == StageStatus.PASSED
+    assert graph_stage_status(saved, "verify") == StageStatus.PASSED
+    proof_types = [engine.proof_store.get(proof_id).type for proof_id in saved.proof_ids]
+    assert proof_types == [ProofType.TEST_RUN, ProofType.QA_VERDICT]
+    verify_stage = next(stage for stage in saved.mission_plan.stages if stage.id == "verify")
+    assert verify_stage.proof_ids == [saved.proof_ids[-1]]
 
 
 def test_tick_injects_autonomy_packet_before_persona_runtime():
