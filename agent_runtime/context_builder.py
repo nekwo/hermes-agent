@@ -1295,6 +1295,20 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
                 "reason": "No executable current stage exists; create one bounded stage with proof gates before requesting proof.",
                 "stage_id": stage_id,
             }
+        if _task_or_stage_requires_visual(task, stage_id) and not _has_visual_proof_id(task):
+            return {
+                "decision_type": "request_screenshot",
+                "shape_id": "dev.request_screenshot",
+                "reason": "Visual proof is explicitly required; request launcher_qa screenshot proof before any command gate.",
+                "stage_id": stage_id,
+                "recommended_payload": {
+                    "stage_id": stage_id,
+                    "target": "mission_control",
+                    "proof_requirement": "fullscreen Mission Control visual proof for the current stage",
+                    "mcp_server": "launcher_qa",
+                    "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                },
+            }
         commands = _current_stage_command_hints(task, run, role=role)
         if commands:
             return {
@@ -1529,7 +1543,7 @@ def _truncate_command_hint(command: str) -> str:
 
 def _task_or_stage_mentions_visual(task: Task, stage_id: str | None) -> bool:
     stage = next((item for item in task_stage_records(task) or [] if item.id == stage_id), None)
-    if bool(getattr(task, "requires_visual_proof", False)) or bool(getattr(stage, "requires_visual_proof", False)):
+    if _task_or_stage_requires_visual(task, stage_id):
         return True
     values = [
         str(getattr(task, "title", "") or ""),
@@ -1550,6 +1564,11 @@ def _task_or_stage_mentions_visual(task: Task, stage_id: str | None) -> bool:
         )
     text = " ".join(values).lower()
     return any(marker in text for marker in ("screenshot", "visual proof", "stage c", "stagec", "mcp", "fullscreen", "marionette"))
+
+
+def _task_or_stage_requires_visual(task: Task, stage_id: str | None) -> bool:
+    stage = next((item for item in task_stage_records(task) or [] if item.id == stage_id), None)
+    return bool(getattr(task, "requires_visual_proof", False)) or bool(getattr(stage, "requires_visual_proof", False))
 
 
 def _has_visual_proof_id(task: Task) -> bool:

@@ -1458,6 +1458,7 @@ def test_dev_no_edit_visual_stage_prefers_screenshot_over_command_gate():
     hud = build_context(task, run, config=cfg).mission_hud
 
     assert hud["primary_worker_action"]["action_id"] == "request_visual_gate"
+    assert hud["next_required_move"]["shape_id"] == "dev.request_screenshot"
     assert hud["decision_menu"][0]["shape_id"] == "dev.request_screenshot"
     assert hud["decision_menu"][0]["recommended_payload"]["mcp_server"] == "launcher_qa"
     assert hud["decision_shape_index"]["dev.request_screenshot"]["enum_choices"]["mcp_server"] == ["launcher_qa"]
