@@ -241,8 +241,8 @@ def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(
     assert (archive_dir / "tasks" / "task_done.json").exists()
     assert (archive_dir / "runs" / "run_done.json").exists()
     assert (archive_dir / "proofs" / "task_done" / "proof_proof_done.json").exists()
-    assert not (tmp_path / "runtime" / "tasks" / "task_done.json").exists()
-    assert (tmp_path / "runtime" / "tasks" / "task_active.json").exists()
+    assert not paths.existing_task_path("task_done").exists()
+    assert paths.existing_task_path("task_active").exists()
     assert [task.id for task in ts.list_open()] == ["task_active"]
 
 
@@ -259,7 +259,7 @@ def test_harness_task_archive_refuses_active_task_id(tmp_path, monkeypatch, caps
     assert data["skipped_task_ids"] == ["task_active"]
     assert data["archive_batch"] is None
     assert data["skipped_tasks"][0]["reason"] == "not_terminal"
-    assert (tmp_path / "runtime" / "tasks" / "task_active.json").exists()
+    assert paths.existing_task_path("task_active").exists()
     assert not (tmp_path / "runtime" / "deleted_archive").exists()
 
 
@@ -396,6 +396,17 @@ def test_harness_parser_exposes_doctor_fix_flags():
     assert args.harness_command == "doctor"
     assert args.fix is True
     assert args.dry_run is True
+    assert args.stale_incident_days == 7
+    assert args.stale_incident_hours is None
+
+
+def test_harness_parser_accepts_doctor_stale_incident_overrides():
+    days = parser().parse_args(["harness", "doctor", "--stale-incident-days", "3", "--json"])
+    hours = parser().parse_args(["harness", "doctor", "--stale-incident-hours", "12", "--json"])
+
+    assert days.stale_incident_days == 3
+    assert days.stale_incident_hours is None
+    assert hours.stale_incident_hours == 12
 
 
 def test_harness_doctor_fix_requires_confirmation(capsys):

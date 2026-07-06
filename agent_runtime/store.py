@@ -382,6 +382,11 @@ class ArchiveStore:
         return outcomes
 
     def _archive_one(self, task: Task, archive_dir: Path, run_store: "RunStore") -> dict:
+        incident_store = IncidentStore(event_log=self.event_log)
+        for incident in incident_store.list_open():
+            if incident.task_id == task.id:
+                incident_store.close(incident.id, reason="task_archived")
+
         task_dest = archive_dir / "tasks" / f"{task.id}.json"
         task_dest.parent.mkdir(parents=True, exist_ok=True)
         _move_if_exists(paths.existing_task_path(task.id), task_dest)
@@ -404,7 +409,7 @@ class ArchiveStore:
             archived_proofs = [path.stem.removeprefix("proof_") for path in sorted(proof_dest.glob("proof_*.json"))]
 
         archived_incidents: list[str] = []
-        for incident in IncidentStore(event_log=self.event_log).list_all():
+        for incident in incident_store.list_all():
             if incident.task_id != task.id:
                 continue
             incident_dest = archive_dir / "incidents" / f"{incident.id}.json"

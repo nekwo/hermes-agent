@@ -191,3 +191,43 @@ def test_harness_doctor_sweeps_stale_duplicate_budget_incidents(isolate_agent_ru
     open_budget_ids = [incident.id for incident in IncidentStore().list_open()]
     assert open_budget_ids == [ids[-1]]
     assert TaskStore().get(task.id).open_incident_ids == [ids[-1]]
+
+
+def test_harness_doctor_accepts_stale_incident_days(isolate_agent_runtime_root):
+    stamp = now() - timedelta(days=8)
+    TaskStore().create(
+        Task(
+            id="task_terminal_incident",
+            title="Terminal incident",
+            description="d",
+            state=TaskState.DONE,
+            created_at=stamp,
+            updated_at=stamp,
+            requested_by="test",
+        )
+    )
+    IncidentStore().open(
+        Incident(
+            id="inc_terminal_old",
+            task_id="task_terminal_incident",
+            run_id=None,
+            kind="runtime_freeze",
+            summary="old terminal incident",
+            detail_path=None,
+            opened_at=stamp,
+            metadata={"source": "test"},
+        )
+    )
+
+    dry = run_harness_doctor(
+        fix=True,
+        dry_run=True,
+        stale_incident_days=7,
+        include_worktrees=False,
+        snapshot_builder=lambda: {},
+    )
+
+    assert dry["thresholds"]["stale_incident_hours"] == 168
+    assert dry["thresholds"]["stale_incident_days"] == 7
+    assert dry["summary"]["finding_counts"]["stale_incidents"] == 1
+    assert dry["repairs"]["closed_incident_ids"] == ["inc_terminal_old"]

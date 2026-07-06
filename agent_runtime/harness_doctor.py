@@ -19,9 +19,10 @@ from .worker_sessions import ACTIVE_WORKER_STATES, WorkerSessionStore
 DEFAULT_STALE_RUN_HOURS = 6
 DEFAULT_STALE_WORKER_HOURS = 6
 DEFAULT_STALE_TASK_DAYS = 2
-DEFAULT_STALE_INCIDENT_HOURS = 24
+DEFAULT_STALE_INCIDENT_DAYS = 7
+DEFAULT_STALE_INCIDENT_HOURS = DEFAULT_STALE_INCIDENT_DAYS * 24
 DEFAULT_WORKTREE_MIN_AGE_SECONDS = 3600
-STALE_BULK_CLOSE_REASON = "stale_bulk_close"
+STALE_BULK_CLOSE_REASON = "ttl_expired"
 
 
 def run_harness_doctor(
@@ -32,6 +33,7 @@ def run_harness_doctor(
     stale_worker_hours: int = DEFAULT_STALE_WORKER_HOURS,
     stale_task_days: int = DEFAULT_STALE_TASK_DAYS,
     stale_incident_hours: int = DEFAULT_STALE_INCIDENT_HOURS,
+    stale_incident_days: int | None = None,
     worktree_min_age_seconds: int = DEFAULT_WORKTREE_MIN_AGE_SECONDS,
     include_worktrees: bool = True,
     task_store: TaskStore | None = None,
@@ -59,6 +61,7 @@ def run_harness_doctor(
     stale_runs = _stale_runs(run_store, ref=ref, stale_hours=stale_run_hours)
     stale_workers = _stale_workers(worker_store, ref=ref, stale_hours=stale_worker_hours)
     stale_tasks = _stale_open_tasks(task_store, run_store, ref=ref, stale_days=stale_task_days)
+    stale_incident_hours = _stale_incident_hours(stale_incident_hours, stale_incident_days)
     stale_incidents = _stale_incidents(incident_store, task_store, ref=ref, stale_hours=stale_incident_hours)
     if include_worktrees:
         worktrees = reap_orphan_worktrees(
@@ -126,6 +129,7 @@ def run_harness_doctor(
             "stale_worker_hours": int(stale_worker_hours),
             "stale_task_days": int(stale_task_days),
             "stale_incident_hours": int(stale_incident_hours),
+            "stale_incident_days": round(float(stale_incident_hours) / 24, 3),
             "worktree_min_age_seconds": int(worktree_min_age_seconds),
             "include_worktrees": bool(include_worktrees),
         },
@@ -146,6 +150,12 @@ def run_harness_doctor(
         },
         "repairs": repairs,
     }
+
+
+def _stale_incident_hours(stale_incident_hours: int, stale_incident_days: int | None) -> int:
+    if stale_incident_days is not None:
+        return max(1, int(stale_incident_days or 1) * 24)
+    return max(1, int(stale_incident_hours or DEFAULT_STALE_INCIDENT_HOURS))
 
 
 def _stale_runs(run_store: RunStore, *, ref: datetime, stale_hours: int) -> list[dict[str, Any]]:

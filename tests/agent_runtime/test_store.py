@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 
 import pytest
@@ -230,10 +231,15 @@ def test_archive_preserves_incidents_and_removes_live_blocker(tmp_path, monkeypa
 
     archive_dir = tmp_path / "runtime" / "deleted_archive" / result["archive_batch"]
     assert result["archived_tasks"][0]["incident_ids"] == ["inc_archive"]
-    assert (archive_dir / "incidents" / "inc_archive.json").exists()
+    archived_incident = archive_dir / "incidents" / "inc_archive.json"
+    assert archived_incident.exists()
+    archived_incident_data = json.loads(archived_incident.read_text(encoding="utf-8"))
+    assert archived_incident_data["closed_at"]
     assert (archive_dir / "incident_details" / "inc_archive.txt").exists()
     assert not paths.incident_path("inc_archive").exists()
     assert incident_store.list_open() == []
+    closed_event = [event for event in EventLog().tail(10) if event.type == "incident.closed"][-1]
+    assert closed_event.payload["reason"] == "task_archived"
     event = EventLog().tail(1)[0]
     assert event.type == "task.archived"
     assert event.payload["incident_count"] == 1
