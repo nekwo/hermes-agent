@@ -57,16 +57,6 @@ class GoalRuntimeInstanceStore:
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
 
-    def create_foreground(self, *, task_id: str, started_by: str = "cli") -> GoalRuntimeInstance:
-        # Deprecated compatibility path: every goal is now a lane, so activating
-        # a goal must not park any other open goal.
-        existing = self.active_for_task(task_id)
-        if existing:
-            instance = replace(existing, state="running", updated_at=now(), parked_reason=None, state_reason="lane reactivated")
-            self.save(instance, event_type="lane.activated", reason="reactivated existing lane")
-            return instance
-        return self.create_lane(task_id=task_id, started_by=started_by, state="running")
-
     def create_lane(
         self,
         *,

@@ -1,3 +1,4 @@
+from agent_runtime.models import AgentPersona
 from agent_runtime.personas import default_personas
 from agent_runtime.tool_visibility import (
     ToolVisibilityOptions,
@@ -148,6 +149,27 @@ def test_chat_permission_store_can_expand_chat_to_unbounded(tmp_path):
     assert "write_file" in visibility["final_model_tools"]
     assert "patch" in visibility["final_model_tools"]
     assert "terminal" in visibility["final_model_tools"]
+
+
+def test_profile_chat_keeps_persona_safety_blocks():
+    persona = AgentPersona(
+        id="profile:alice",
+        display_name="Alice",
+        role="profile",
+        model=None,
+        provider=None,
+        api_mode="codex_responses",
+        toolsets=["file", "search", "terminal", "todo", "mission_goal"],
+        system_prompt_path="",
+    )
+
+    visibility = resolve_tool_visibility(persona)
+
+    assert "delegate_task" in visibility["blocked_tool_names"]
+    assert "send_message" in visibility["blocked_tool_names"]
+    assert "kanban_create" in visibility["blocked_tool_names"]
+    assert "delegate_task" not in visibility["final_model_tools"]
+    assert "send_message" not in visibility["final_model_tools"]
 
 
 def test_expired_unbounded_permission_falls_back_to_profile_default(tmp_path):

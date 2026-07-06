@@ -100,10 +100,10 @@ def test_goal_id_current_stage_and_assignment_grouping(isolate_agent_runtime_roo
     assert assignment.persona_instance_id.startswith("personainst_goal_1_neko_supervisor")
 
 
-def test_lane_only_create_foreground_compat_does_not_park(isolate_agent_runtime_root):
+def test_lane_only_create_lane_does_not_park(isolate_agent_runtime_root):
     store = GoalRuntimeInstanceStore()
-    first = store.create_foreground(task_id="task_one", started_by="test")
-    second = store.create_foreground(task_id="task_two", started_by="test")
+    first = store.create_lane(task_id="task_one", started_by="test", state="running")
+    second = store.create_lane(task_id="task_two", started_by="test", state="running")
 
     assert first.lane == first.id
     assert second.lane == second.id

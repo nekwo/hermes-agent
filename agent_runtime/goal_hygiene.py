@@ -168,7 +168,11 @@ def activate_foreground_runtime(
     runtime_store: GoalRuntimeInstanceStore | None = None,
 ) -> dict[str, Any]:
     runtime_store = runtime_store or GoalRuntimeInstanceStore()
-    instance = runtime_store.create_foreground(task_id=task_id, started_by=started_by)
+    existing = runtime_store.active_for_task(task_id)
+    if existing:
+        instance = runtime_store.transition(existing.id, "running", reason="reactivated existing lane", parked_reason=None)
+    else:
+        instance = runtime_store.create_lane(task_id=task_id, started_by=started_by, state="running")
     return {
         "instance_id": instance.id,
         "target_task_id": instance.task_id,

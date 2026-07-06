@@ -373,7 +373,7 @@ def test_create_from_request_threads_start_daemon_mode(tmp_path, monkeypatch):
 
     def fake_start_daemon(**kwargs):
         calls.append(kwargs)
-        return {"started": True, "pid": 1, "state": "starting", "target_task_id": kwargs.get("task_id"), "queue_mode": "foreground"}
+        return {"started": True, "pid": 1, "state": "starting", "target_task_id": kwargs.get("task_id"), "queue_mode": "lane"}
 
     monkeypatch.setattr(mission_goal_mod, "start_daemon", fake_start_daemon)
     result = create_mission_goal_from_request(_canonical_request(), start_daemon_mode=True)

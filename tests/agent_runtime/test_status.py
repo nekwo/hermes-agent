@@ -36,7 +36,7 @@ def test_status_lane_only_does_not_report_background_task_ids(isolate_agent_runt
     ts.create(Task(id="task_foreground", title="F", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
     ts.create(Task(id="task_background", title="B", description="d", state=TaskState.BLOCKED, created_at=n, updated_at=n, requested_by="tony"))
     runtimes = GoalRuntimeInstanceStore()
-    runtimes.create_foreground(task_id="task_foreground", started_by="test")
+    runtimes.create_lane(task_id="task_foreground", started_by="test", state="running")
     runtimes.park_open_task("task_background", reason="test parked")
 
     s = build_status(task_store=ts)

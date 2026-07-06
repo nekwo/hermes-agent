@@ -139,7 +139,7 @@ def test_daemon_foreground_uses_target_task_id(isolate_agent_runtime_root):
 
     assert engine.calls == [{"task_id": "task_new", "max_actions": 10}]
     assert status["target_task_id"] == "task_new"
-    assert status["queue_mode"] == "foreground"
+    assert status["queue_mode"] == "lane"
 
 
 def test_targeted_daemon_services_open_queue_after_target_pass(isolate_agent_runtime_root):
@@ -260,7 +260,7 @@ def test_daemon_start_reports_target_conflict_when_existing_daemon_is_untargeted
 def test_daemon_start_reuses_live_daemon_that_services_open_tasks(monkeypatch, isolate_agent_runtime_root):
     from agent_runtime import daemon as daemon_mod
 
-    daemon_mod._write_daemon_status({"state": "running", "pid": 1234, "target_task_id": "task_existing", "queue_mode": "foreground", "services_open_tasks": True})
+    daemon_mod._write_daemon_status({"state": "running", "pid": 1234, "target_task_id": "task_existing", "queue_mode": "lane", "services_open_tasks": True})
     monkeypatch.setattr(daemon_mod, "_pid_is_alive", lambda pid: pid == 1234)
 
     result = daemon_mod.start_daemon(task_id="task_new")
@@ -288,11 +288,11 @@ def test_daemon_start_records_spawned_pid(monkeypatch, isolate_agent_runtime_roo
     assert result["started"] is True
     assert result["pid"] == 5678
     assert result["target_task_id"] == "task_new"
-    assert result["queue_mode"] == "foreground"
+    assert result["queue_mode"] == "lane"
     assert status["state"] == "starting"
     assert status["pid"] == 5678
     assert status["target_task_id"] == "task_new"
-    assert status["queue_mode"] == "foreground"
+    assert status["queue_mode"] == "lane"
     assert status["services_open_tasks"] is True
 
 
@@ -623,7 +623,7 @@ def test_untargeted_daemon_start_adopts_active_foreground_lane(monkeypatch, isol
     task_store = TaskStore()
     task_store.create(Task(id="task_stale", title="Stale backlog", description="d", state=TaskState.CREATED, created_at=ts, updated_at=ts, requested_by="human"))
     task_store.create(Task(id="task_fresh", title="Fresh goal", description="d", state=TaskState.CREATED, created_at=ts, updated_at=ts, requested_by="human"))
-    lane = GoalRuntimeInstanceStore().create_foreground(task_id="task_fresh", started_by="test")
+    lane = GoalRuntimeInstanceStore().create_lane(task_id="task_fresh", started_by="test", state="running")
 
     class _Proc:
         pid = 4321
@@ -644,7 +644,7 @@ def test_untargeted_daemon_start_adopts_active_foreground_lane(monkeypatch, isol
     assert result["started"] is True
     assert result["target_task_id"] == "task_fresh"
     assert result["target_source"] == "foreground_lane"
-    assert result["queue_mode"] == "foreground"
+    assert result["queue_mode"] == "lane"
     assert any("--task" in cmd and "task_fresh" in cmd for cmd in spawned)
     status = daemon_mod.read_daemon_status()
     assert status["target_task_id"] == "task_fresh"
@@ -675,6 +675,6 @@ def test_active_foreground_skips_lanes_for_terminal_tasks(isolate_agent_runtime_
     task_store = TaskStore()
     task_store.create(Task(id="task_done", title="Done goal", description="d", state=TaskState.DONE, created_at=ts, updated_at=ts, requested_by="human"))
     store = GoalRuntimeInstanceStore()
-    store.create_foreground(task_id="task_done", started_by="test")
+    store.create_lane(task_id="task_done", started_by="test", state="running")
 
     assert store.active_foreground() is None

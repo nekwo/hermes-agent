@@ -14,7 +14,7 @@ def test_task_create_start_daemon_passes_target_task(monkeypatch, capsys, isolat
             "pid": 123,
             "state": "starting",
             "target_task_id": kwargs.get("task_id"),
-            "queue_mode": "foreground",
+            "queue_mode": "lane",
         }
 
     # task create delegates to agent_runtime.mission_goal.create_mission_goal,

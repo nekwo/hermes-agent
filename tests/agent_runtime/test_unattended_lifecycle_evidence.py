@@ -87,7 +87,7 @@ def test_mission_daemon_emits_global_lane_lifecycle_events(isolate_agent_runtime
 
 def test_proof_attach_defaults_lane_attribution(isolate_agent_runtime_root):
     task = make_task("task_proofattr")
-    instance = GoalRuntimeInstanceStore().create_foreground(task_id=task.id, started_by="test")
+    instance = GoalRuntimeInstanceStore().create_lane(task_id=task.id, started_by="test", state="running")
     ts = now()
     proof = Proof(
         id="proof_lane_1",
@@ -108,7 +108,7 @@ def test_proof_attach_defaults_lane_attribution(isolate_agent_runtime_root):
 
 def test_proof_attach_keeps_caller_lane_attribution(isolate_agent_runtime_root):
     task = make_task("task_proofattr2")
-    GoalRuntimeInstanceStore().create_foreground(task_id=task.id, started_by="test")
+    GoalRuntimeInstanceStore().create_lane(task_id=task.id, started_by="test", state="running")
     ts = now()
     proof = Proof(
         id="proof_lane_2",

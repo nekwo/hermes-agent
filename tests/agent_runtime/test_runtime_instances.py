@@ -40,9 +40,9 @@ def test_new_goal_hygiene_preserves_open_tasks_without_parking(isolate_agent_run
     assert GoalRuntimeInstanceStore().latest_for_task("task_old") is None
 
 
-def test_activate_foreground_runtime_is_lane_compat_without_parking(isolate_agent_runtime_root):
+def test_activate_runtime_uses_lanes_without_parking(isolate_agent_runtime_root):
     store = GoalRuntimeInstanceStore()
-    first = store.create_foreground(task_id="task_old", started_by="test")
+    first = store.create_lane(task_id="task_old", started_by="test", state="running")
 
     activated = activate_foreground_runtime("task_new", started_by="test", runtime_store=store)
 
@@ -98,7 +98,7 @@ def test_new_goal_hygiene_reports_fresh_foreign_active_run(isolate_agent_runtime
 def test_archive_preserves_runtime_instance_manifest(isolate_agent_runtime_root):
     task_store = TaskStore()
     task_store.create(_task("task_done", state=TaskState.DONE))
-    instance = GoalRuntimeInstanceStore().create_foreground(task_id="task_done", started_by="test")
+    instance = GoalRuntimeInstanceStore().create_lane(task_id="task_done", started_by="test", state="running")
 
     result = task_store.archive("task_done", actor="test", reason="test archive")
 

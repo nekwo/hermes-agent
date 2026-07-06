@@ -194,7 +194,7 @@ class MissionDaemon:
         return DaemonLoopResult(loops=loops, last_tick_id=last_tick_id, stopped=self._stop_requested).to_json()
 
     def _queue_mode(self) -> str:
-        return "foreground" if self.target_task_id else "lane"
+        return "lane"
 
     def _run_settled_cycle(self, engine) -> RunUntilSettledResult:
         if not self.target_task_id:
@@ -493,7 +493,7 @@ def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: 
                     "state": status.get("state", "running"),
                     "target_task_id": existing_target,
                     "requested_task_id": task_id,
-                    "queue_mode": status.get("queue_mode") or ("foreground" if existing_target else "lane"),
+                    "queue_mode": status.get("queue_mode") or "lane",
                     "services_open_tasks": True,
                     "will_service_open_tasks": True,
                 }
@@ -521,7 +521,7 @@ def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: 
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if _is_windows() else 0
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=creationflags)
     _write_daemon_lease(proc.pid)
-    queue_mode = "foreground" if task_id else "lane"
+    queue_mode = "lane"
     _write_daemon_status({
         "state": "starting",
         "pid": proc.pid,

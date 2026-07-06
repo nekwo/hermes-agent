@@ -23,6 +23,7 @@ COLLAPSED_SIGNAL_TYPES = frozenset(
     }
 )
 
+# Removal target: Stage 45 / 2026-07-20 after one release of alias telemetry.
 LEGACY_SIGNAL_ALIASES = {
     DecisionType.PROPOSE_PATCH: DecisionType.HAND_OFF,
     DecisionType.REQUEST_TEST_RUN: DecisionType.HAND_OFF,

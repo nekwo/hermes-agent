@@ -55,6 +55,7 @@ class CommandDef:
     cli_only: bool = False             # only available in CLI
     gateway_only: bool = False         # only available in gateway/messaging
     gateway_config_gate: str | None = None  # config dotpath; when truthy, overrides cli_only for gateway
+    deprecated_aliases: tuple[str, ...] = ()  # aliases retained with a user-visible removal warning
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +103,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("background", "Run a prompt in the background", "Session",
                aliases=("bg", "btw"), args_hint="<prompt>"),
     CommandDef("agents", "Show active agents and running tasks", "Session",
-               aliases=("tasks",)),
+               aliases=("tasks",), deprecated_aliases=("tasks",)),
     CommandDef("queue", "Queue a prompt for the next turn (doesn't interrupt)", "Session",
                aliases=("q",), args_hint="<prompt>"),
     CommandDef("queue-status", "Show gateway active-run and queue visibility", "Session",
@@ -277,6 +278,15 @@ def resolve_command(name: str) -> CommandDef | None:
     return _COMMAND_LOOKUP.get(name.lower().lstrip("/"))
 
 
+def alias_deprecation_warning(name: str) -> str | None:
+    """Return the operator-facing warning for a deprecated slash alias."""
+    key = name.lower().lstrip("/")
+    cmd = resolve_command(key)
+    if cmd is not None and key in cmd.deprecated_aliases:
+        return f"/{key} is deprecated and will be removed after Stage 44; use /{cmd.name}."
+    return None
+
+
 def _build_description(cmd: CommandDef) -> str:
     """Build a CLI-facing description string including usage hint."""
     if cmd.args_hint:
@@ -290,7 +300,10 @@ for _cmd in COMMAND_REGISTRY:
     if not _cmd.gateway_only:
         COMMANDS[f"/{_cmd.name}"] = _build_description(_cmd)
         for _alias in _cmd.aliases:
-            COMMANDS[f"/{_alias}"] = f"{_cmd.description} (alias for /{_cmd.name})"
+            if _alias in _cmd.deprecated_aliases:
+                COMMANDS[f"/{_alias}"] = f"{_cmd.description} (deprecated alias for /{_cmd.name}; use /{_cmd.name})"
+            else:
+                COMMANDS[f"/{_alias}"] = f"{_cmd.description} (alias for /{_cmd.name})"
 
 # Backwards-compatible categorized dict
 COMMANDS_BY_CATEGORY: dict[str, dict[str, str]] = {}
@@ -469,7 +482,10 @@ def gateway_help_lines() -> list[str]:
             # Skip internal aliases like reload_mcp (underscore variant)
             if a.replace("-", "_") == cmd.name.replace("-", "_") and a != cmd.name:
                 continue
-            alias_parts.append(f"`/{a}`")
+            if a in cmd.deprecated_aliases:
+                alias_parts.append(f"`/{a}` deprecated")
+            else:
+                alias_parts.append(f"`/{a}`")
         alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
         lines.append(f"`/{cmd.name}{args}` -- {cmd.description}{alias_note}")
     return lines
