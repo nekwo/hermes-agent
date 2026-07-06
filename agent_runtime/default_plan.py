@@ -29,7 +29,8 @@ def build_default_mission_plan(
     bindings: Mapping[str, str] | None = None,
 ) -> MissionPlan:
     bp = BlueprintStore().get(blueprint_id)
-    merged_bindings = {**DEFAULT_TASK_BLUEPRINT_BINDINGS, **dict(bindings or {})}
+    default_bindings = DEFAULT_TASK_BLUEPRINT_BINDINGS if blueprint_id == DEFAULT_TASK_BLUEPRINT_ID else {}
+    merged_bindings = {**default_bindings, **dict(bindings or {})}
     plan = instantiate_blueprint(bp, goal=task.description or task.title, bindings=merged_bindings)
     _alias_default_slots_to_personas(plan)
     specialize_default_plan_for_task(task, plan)
@@ -69,6 +70,7 @@ def specialize_default_plan_for_task(task: Task, plan: MissionPlan) -> None:
     proof recipe specialization.
     """
 
+    _specialize_no_edit_visual_proof_stage(task, plan)
     _specialize_default_implementation_stage(task, plan)
     _mark_out_of_scope_repo_lanes(task, plan)
     if _default_task_is_no_edit_cross_stack(task):
@@ -80,6 +82,58 @@ def specialize_default_plan_for_task(task: Task, plan: MissionPlan) -> None:
 def _has_plan(task: Task) -> bool:
     plan = getattr(task, "mission_plan", None)
     return bool(plan and plan.enabled and plan.stages)
+
+
+def _specialize_no_edit_visual_proof_stage(task: Task, plan: MissionPlan) -> None:
+    if not bool(getattr(task, "requires_visual_proof", False)):
+        return
+    if not _task_is_no_edit_visual_proof(task):
+        return
+    stage = next((item for item in plan.stages if item.owner in {"dev", "launcher_dev"} and item.kind in {"implementation", "proof_only"}), None)
+    if stage is None:
+        return
+    stage.kind = "proof_only"
+    stage.requires_product_edit = False
+    stage.requires_visual_proof = True
+    stage.proof_recipe_id = None
+    stage.test_plan = []
+    stage.proof_gate = {
+        "required": True,
+        "minimum_status": "passed",
+        "required_proof_types": ["screenshot"],
+        "visual_required": True,
+    }
+    stage.affected_paths = []
+    if not stage.acceptance_criteria:
+        stage.acceptance_criteria = list(getattr(task, "acceptance_criteria", []) or [])
+    note = "Task requires no-product-edit launcher_qa visual proof; command proof targets are out of scope."
+    if note not in stage.audit_notes:
+        stage.audit_notes.append(note)
+
+
+def _task_is_no_edit_visual_proof(task: Task) -> bool:
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "non_goals", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "risk_flags", []) or [])),
+        ]
+    ).lower()
+    return any(marker in text for marker in ("screenshot", "visual proof", "fullscreen", "launcher_qa")) and any(
+        marker in text
+        for marker in (
+            "no product edit",
+            "no product edits",
+            "no-product-edit",
+            "no-product-edits",
+            "without product edits",
+            "without product edit",
+            "no product files are edited",
+            "do not modify product",
+        )
+    )
 
 
 def _alias_default_slots_to_personas(plan: MissionPlan) -> None:

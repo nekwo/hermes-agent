@@ -3,7 +3,7 @@ import pytest
 from hermes_time import now
 
 from agent_runtime.decision_schema import DecisionPayloadInvalid
-from agent_runtime.default_plan import ensure_default_mission_plan
+from agent_runtime.default_plan import build_default_mission_plan, ensure_default_mission_plan
 from agent_runtime.mission_plan import (
     attach_proofs_to_plan_stage,
     blocking_stages_ready_for_qa,
@@ -138,6 +138,30 @@ def test_default_plan_adds_qa_stage_when_goal_requires_qa_approval():
         "required_proof_types": ["qa_verdict"],
     }
     assert plan.bindings["qa"] == "qa"
+
+
+def test_explicit_basic_blueprint_visual_no_edit_task_uses_screenshot_gate():
+    task = make_task(
+        title="Stage 46 visual proof certification",
+        description="Capture a fullscreen Mission Control screenshot proof through the launcher_qa MCP provider without product edits.",
+        acceptance_criteria=["A screenshot proof with type=screenshot is attached to the visual stage."],
+        non_goals=["Do not invoke an operator-side PowerShell proof script."],
+        requires_visual_proof=True,
+    )
+
+    plan = build_default_mission_plan(
+        task,
+        blueprint_id="neko_dev_qa_basic",
+        bindings={"lead": "persona:neko_supervisor", "builder": "persona:dev", "verifier": "persona:qa"},
+    )
+
+    stages = {stage.id: stage for stage in plan.stages}
+    implement = stages["implement"]
+    assert implement.kind == "proof_only"
+    assert implement.requires_visual_proof is True
+    assert implement.test_plan == []
+    assert implement.proof_gate["required_proof_types"] == ["screenshot"]
+    assert implement.proof_gate["visual_required"] is True
 
 
 def test_mission_lead_actor_resolves_blueprint_slot_binding():
