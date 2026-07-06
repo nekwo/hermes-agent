@@ -15,17 +15,6 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "normal",
     },
     {
-        "id": "persona.message_task",
-        "target_kind": "task",
-        "label": "Queue Message",
-        "group": "queue",
-        "execution_semantics": "queues_only",
-        "required_args": ["persona_id", "message"],
-        "allowed_args": ["attachments"],
-        "default_args": {"title": "Operator message"},
-        "danger": "normal",
-    },
-    {
         "id": "mission.chat.message",
         "target_kind": "persona",
         "label": "Send Message",

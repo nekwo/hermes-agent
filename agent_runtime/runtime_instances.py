@@ -12,7 +12,6 @@ from .events import EventLog
 from .models import Event, GoalRuntimeInstance
 from .serde import from_jsonable, to_jsonable
 
-FOREGROUND_LANE = "foreground"
 BACKGROUND_LANE = "background"
 ACTIVE_STATE = "active"
 PARKED_STATE = "parked"

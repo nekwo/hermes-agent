@@ -95,7 +95,6 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
         set(by_id["run.cancel"]["allowed_args"])
     )
     for capability_id in (
-        "persona.message_task",
         "mission.chat.message",
         "persona.diagnose",
     ):
