@@ -1019,6 +1019,41 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
     ]
 
 
+def test_persona_chat_history_accounting_ignores_unrelated_session_sources(isolate_agent_runtime_root):
+    from agent_runtime.parity import ProjectionAccountant
+
+    store = PersonaInstanceStore()
+    instance = store.open_chat(persona_id="dev", session_id="chat_bound_1")
+
+    accountant = ProjectionAccountant("persona_chat_history")
+    rows = persona_chat_history_summary(
+        persona_instances=[instance],
+        session_db=_FakeSessionDB(
+            [
+                {"id": "chat_bound_1", "title": "bound", "message_count": 1},
+                # Unrelated SessionDB sources (cron/telegram/cli) can never
+                # render as persona chat rows: out of scope, NOT drops.
+                {"id": "cron_20260618", "source": "cron", "title": "cron run"},
+                {"id": "tg_20260620", "source": "telegram", "title": "tg chat"},
+                # A genuine persona-chat orphan stays a visible drop.
+                {
+                    "id": "chat_orphan_1",
+                    "source": "agent_runtime_persona_chat",
+                    "title": "orphan",
+                },
+            ]
+        ),
+        accountant=accountant,
+    )
+
+    assert [row["session_id"] for row in rows] == ["chat_bound_1"]
+    summary = accountant.summary()
+    assert summary["considered"] == 2
+    assert summary["included"] == 1
+    assert summary["dropped"] == 1
+    assert summary["reasons"] == {"no_instance_match": 1}
+
+
 def test_persona_chat_history_summary_empty_bound_chat_is_safe_placeholder(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     instance = store.open_chat(persona_id="dev", session_id="chat_empty_123")

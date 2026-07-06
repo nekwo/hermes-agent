@@ -96,9 +96,16 @@ def persona_chat_history_summary(
         session_id = safe_assignment_text(raw.get("id"), limit=200)
         if not session_id or session_id in seen:
             continue
+        is_source_chat = safe_assignment_token(raw.get("source")) == PERSONA_CHAT_SESSION_SOURCE
+        # Only persona-chat sessions and sessions bound to a live instance are
+        # candidates for this projection. Unrelated SessionDB sources (cron,
+        # telegram, cli, scratch) can never render as chat rows — counting them
+        # as no_instance_match drops floods parity with by-design noise.
+        if not is_source_chat and session_id not in bound_by_session:
+            seen.add(session_id)
+            continue
         if accountant is not None:
             accountant.consider(1)
-        is_source_chat = safe_assignment_token(raw.get("source")) == PERSONA_CHAT_SESSION_SOURCE
         inferred_persona = _infer_persona_id(raw, session_id=session_id)
         instance = bound_by_session.get(session_id) or (
             instances_by_persona.get(inferred_persona) if is_source_chat and inferred_persona else None
@@ -106,6 +113,9 @@ def persona_chat_history_summary(
         if instance is None:
             if accountant is not None:
                 accountant.drop("no_instance_match", entity_id=session_id)
+            # A session id can appear in both the source and broad pools;
+            # mark it seen so a drop is only accounted once.
+            seen.add(session_id)
             continue
         row = _history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail)
         rows.append(row)
