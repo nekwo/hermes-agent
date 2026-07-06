@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from hermes_cli.profiles import profile_exists
 
 from .personas import DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
+from .redaction_mode import normalize_redaction_mode
 from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
 
 @dataclass(slots=True)
@@ -51,6 +53,8 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         default_provider=raw.get("default_provider"),
         default_model=raw.get("default_model"),
         default_api_mode=raw.get("default_api_mode", "codex_responses"),
+        redaction_mode=normalize_redaction_mode(raw.get("redaction_mode") or os.environ.get("HERMES_REDACTION_MODE", "strict")),
+        open_incident_warning_threshold=_positive_int(raw.get("open_incident_warning_threshold"), 100),
         heartbeat_ttl_seconds=int(raw.get("heartbeat_ttl_seconds", 900)),
         max_actions_per_tick=int(raw.get("max_actions_per_tick", 1)),
         daemon_enabled=bool((raw.get("daemon") or {}).get("enabled", raw.get("daemon_enabled", False))),

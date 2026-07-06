@@ -133,6 +133,8 @@ class RuntimeConfig:
     default_provider: str | None = None
     default_model: str | None = None
     default_api_mode: str = "codex_responses"
+    redaction_mode: str = "strict"
+    open_incident_warning_threshold: int = 100
     daemon_enabled: bool = False
     execution_mode: str = "manual"
     daemon_interval_seconds: int = 10

@@ -10,6 +10,7 @@ from .models import PersonaInstance
 from .mission_chat_turns import mission_chat_turn_elements
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
+from .redaction_mode import redaction_observe_enabled
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
@@ -476,8 +477,21 @@ def _history_row(
     )
     messages, messages_status = _safe_recent_messages(session_db, session_id=session_id, limit=message_tail)
     redaction_status = (
-        "redacted" if "redacted" in {title_status, preview_status, messages_status} else "safe"
+        "would_redact"
+        if "would_redact" in {title_status, preview_status, messages_status}
+        else "redacted"
+        if "redacted" in {title_status, preview_status, messages_status}
+        else "safe"
     )
+    would_redact = {
+        label: status
+        for label, status in {
+            "title": title_status,
+            "preview": preview_status,
+            "messages": messages_status,
+        }.items()
+        if status in {"redacted", "would_redact"}
+    }
     return {
         "session_id": session_id,
         "persona_id": persona_id,
@@ -492,6 +506,7 @@ def _history_row(
         "updated_at": raw.get("last_active") or raw.get("ended_at") or raw.get("started_at"),
         "state": "archived" if bool(raw.get("archived")) else "open",
         "redaction_status": redaction_status,
+        **({"would_redact": would_redact} if would_redact else {}),
         **_token_usage_fields(raw),
         **_chat_model_fields(raw),
         "messages": messages,
@@ -994,6 +1009,8 @@ def _safe_display_text(
     if not text:
         return fallback, "safe"
     if _SECRET_RE.search(text):
+        if redaction_observe_enabled():
+            return _mask_secret_lines(text, limit=limit), "would_redact"
         return redacted_fallback or fallback, "redacted"
     return text, "safe"
 
@@ -1009,8 +1026,19 @@ def _safe_display_body_text(
     if not text:
         return fallback, "safe"
     if _SECRET_RE.search(text):
+        if redaction_observe_enabled():
+            return _mask_secret_lines(text, limit=limit), "would_redact"
         return redacted_fallback or fallback, "redacted"
     return text, "safe"
+
+
+def _mask_secret_lines(value: str, *, limit: int) -> str:
+    lines = [
+        "[redacted line — contained a secret]" if _SECRET_RE.search(line) else line
+        for line in str(value or "").split("\n")
+    ]
+    text = "\n".join(lines).strip()
+    return text[:limit].rstrip()
 
 
 def _safe_chat_body_text(value: Any, *, limit: int) -> str:

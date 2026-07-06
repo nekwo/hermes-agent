@@ -357,6 +357,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
     last_ts = getattr(last_event, "ts", None) if last_event is not None else None
     watermark = events_watermark(last_event_ts=last_ts)
     resolution = resolve_runtime()
+    cfg = load_agent_runtime_config()
     warnings = _parity_warnings(data)
     warnings.extend(_event_summary_warnings(recent_events or []))
     if suspect_default_root(resolution):
@@ -370,6 +371,8 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         "envelope_version": PARITY_ENVELOPE_VERSION,
         "contract_version": 38,
         "generated_at": data.get("generated_at"),
+        "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
+        "redaction_observed": _redaction_observed(data),
         "build_ms": int(max(0.0, (time.perf_counter() - build_started)) * 1000),
         "snapshot_bytes": _snapshot_payload_size(data),
         "event_log_bytes": int(watermark.get("event_offset") or 0),
@@ -518,7 +521,47 @@ def _parity_warnings(data) -> list[dict]:
                 "detail": "summary reports open tasks but no task rows were mapped",
             }
         )
+    try:
+        threshold = int(getattr(load_agent_runtime_config(), "open_incident_warning_threshold", 100))
+    except Exception:
+        threshold = 100
+    try:
+        open_incidents = int(summary.get("open_incidents") or 0)
+    except Exception:
+        open_incidents = 0
+    if threshold > 0 and open_incidents > threshold:
+        warnings.append(
+            {
+                "code": "open_incident_budget_exceeded",
+                "detail": f"summary reports {open_incidents} open incidents, above the configured budget of {threshold}",
+                "count": open_incidents,
+                "threshold": threshold,
+            }
+        )
     return warnings
+
+
+def _redaction_observed(value) -> dict[str, int]:
+    counts: dict[str, int] = {}
+
+    def visit(item) -> None:
+        if isinstance(item, dict):
+            marker = item.get("would_redact")
+            if isinstance(marker, dict):
+                for reason in marker.values():
+                    key = str(reason or "unknown").strip() or "unknown"
+                    counts[key] = counts.get(key, 0) + 1
+            elif isinstance(marker, str) and marker.strip():
+                key = marker.strip()
+                counts[key] = counts.get(key, 0) + 1
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return counts
 
 
 def _event_summary_warnings(events) -> list[dict]:

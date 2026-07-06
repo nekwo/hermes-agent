@@ -14,6 +14,7 @@ from .config import load_agent_runtime_config
 from .self_test_evidence import record_self_test_from_progress
 from .states import RunState
 from .store import RunStore
+from .redaction_mode import redaction_observe_enabled
 from .visual_trace_evidence import record_screenshot_from_progress
 
 _SAFE_PROGRESS_KEYS = {
@@ -251,8 +252,12 @@ def _maybe_record_visual_screenshot(run, event_type: str, payload: dict[str, Any
 
 def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     safe: dict[str, Any] = {"type": event_type}
+    observe = redaction_observe_enabled()
     for key, value in payload.items():
         if key not in _SAFE_PROGRESS_KEYS:
+            if observe:
+                safe[key] = _observe_value(value)
+                _mark_would_redact(safe, key, "unsupported_progress_key")
             continue
         if isinstance(value, list) and key == "changed_files":
             labels = _safe_file_labels(value)
@@ -268,11 +273,17 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
             text = _safe_operator_line(value, limit=_OPERATOR_COMMAND_FULL_MAX)
             if text:
                 safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_COMMAND_FULL_MAX)
+                _mark_would_redact(safe, key, "operator_command")
             continue
         if isinstance(value, str) and key == "target_label":
             text = _safe_operator_line(value, limit=_OPERATOR_TARGET_MAX)
             if text:
                 safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_TARGET_MAX)
+                _mark_would_redact(safe, key, "operator_target")
             continue
         if isinstance(value, str) and key == "output":
             text = _safe_operator_output_tail(value)
@@ -283,6 +294,9 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
             text = " ".join(value.strip().split())
             if text and not _looks_sensitive(text) and len(text) <= 120:
                 safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=120)
+                _mark_would_redact(safe, key, "skill_name")
             continue
         if isinstance(value, list) and key == "last_failed_proof_ids":
             labels = _safe_token_labels(value)
@@ -292,21 +306,61 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
         if isinstance(value, str) and key == "reasoning_summary":
             text = " ".join(value.strip().split())
             if not text or _looks_sensitive_or_pathish(text):
+                if observe and text:
+                    safe[key] = _observe_text(text, limit=500)
+                    _mark_would_redact(safe, key, "reasoning_summary")
                 continue
             safe[key] = f"{text[:497]}…" if len(text) > 500 else text
             continue
         if isinstance(value, str) and key == "command_label":
             text = " ".join(value.strip().replace("\\", "/").split())
             if not text or _looks_sensitive(text):
+                if observe and text:
+                    safe[key] = _observe_text(text, limit=240)
+                    _mark_would_redact(safe, key, "command_label")
                 continue
             safe[key] = f"{text[:237]}..." if len(text) > 240 else text
             continue
         if isinstance(value, (str, int, float, bool)) or value is None:
             text = str(value) if isinstance(value, str) else value
             if isinstance(text, str) and _looks_sensitive_or_pathish(text):
+                if observe:
+                    safe[key] = _observe_text(text, limit=500)
+                    _mark_would_redact(safe, key, "scalar_progress_value")
                 continue
             safe[key] = text
     return safe
+
+
+def _mark_would_redact(payload: dict[str, Any], key: str, reason: str) -> None:
+    markers = payload.setdefault("would_redact", {})
+    if isinstance(markers, dict):
+        markers[str(key)] = reason
+
+
+def _observe_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _observe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_observe_value(item) for item in value[:200]]
+    if isinstance(value, tuple):
+        return [_observe_value(item) for item in value[:200]]
+    if isinstance(value, str):
+        return _observe_text(value, limit=1600)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _observe_text(str(value), limit=500)
+
+
+def _observe_text(value: str, *, limit: int) -> str:
+    lines = [
+        "[redacted line — contained a secret]" if _looks_sensitive(line) else line
+        for line in str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    ]
+    text = "\n".join(lines).strip()
+    if len(text) > limit:
+        return f"{text[: max(0, limit - 1)]}…"
+    return text
 
 
 def _safe_operator_line(value: str, *, limit: int) -> str | None:
