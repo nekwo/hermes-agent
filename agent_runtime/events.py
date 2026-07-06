@@ -487,4 +487,6 @@ def _looks_sensitive_or_pathish(value: str) -> bool:
         return True
     if ":/" in value or "\\" in value or value.startswith(("/", "~")):
         return True
-    return bool(re.search(r"(^|\s)([A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", value))
+    if re.search(r"(^|\s)([A-Za-z]:)?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value):
+        return True
+    return bool(re.search(r"(^|\s)[A-Za-z0-9_.-]+\.(dart|py|js|ts|json|yaml|yml|md|txt)/", value, re.IGNORECASE))
