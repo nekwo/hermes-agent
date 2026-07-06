@@ -115,6 +115,45 @@ def test_observability_flags_stale_daemon_stalled_run_and_repeated_context_reque
     assert "sensitive/path" not in encoded
 
 
+def test_delivery_evidence_incidents_project_structured_operator_actions():
+    ts = now()
+    task = Task(
+        id="task_stage_no_progress",
+        title="Mission",
+        description="d",
+        state=TaskState.BLOCKED,
+        created_at=ts,
+        updated_at=ts,
+        requested_by="human",
+        open_incident_ids=["inc_stage_no_progress"],
+    )
+    incident = Incident(
+        id="inc_stage_no_progress",
+        task_id=task.id,
+        run_id="run_empty",
+        kind="stage_no_progress",
+        summary="Stage repeated an empty delivery with no new proof evidence.",
+        detail_path=None,
+        opened_at=ts,
+    )
+
+    obs = build_observability(
+        tasks=[task],
+        runs=[],
+        incidents=[incident],
+        proofs=[],
+        daemon_status={"state": "idle"},
+        events=[],
+        reference_time=ts,
+    )
+
+    intervention = obs["interventions"][0]
+    assert intervention["kind"] == "stage_no_progress"
+    assert intervention["severity"] == "high"
+    assert intervention["allowed_actions"] == ["answer_intervention", "cancel_run", "rescope"]
+    assert intervention["safe_refs"]["incident_id"] == incident.id
+
+
 def test_recent_events_include_redaction_safe_progress_summary():
     ts = now()
     event = Event(

@@ -7,14 +7,15 @@ from hermes_time import now
 from agent_runtime.actions import HarnessAction, HarnessActionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
+from agent_runtime.events import EventLog
+from agent_runtime.models import Event, MissionIntent, MissionPlan, MissionPlanStage, Proof, RepoBundle, Task
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore
 from agent_runtime.repo_bundles import RepoBundleStore, acquire_repo_bundle_locks, desired_bundles_for_task, qa_waiting_on, release_repo_bundle_locks, repo_lock_summary
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig, RepoBundleRoutingConfig, SimplifiedAgentContractConfig
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import StageStatus, TaskState
-from agent_runtime.store import ProofStore, TaskStore
+from agent_runtime.store import IncidentStore, ProofStore, TaskStore
 from agent_runtime.ticker import TickEngine
 
 
@@ -58,6 +59,77 @@ def _task_with_plan(task_id: str = "task_bundle") -> Task:
             ],
         ),
     )
+
+
+def _simple_bundle(*, task_id: str, bundle_id: str = "bundle_empty", run_id: str = "run_empty_1") -> RepoBundle:
+    ts = now()
+    return RepoBundle(
+        id=bundle_id,
+        task_id=task_id,
+        repo="hermes-agent",
+        owner_persona_id="dev",
+        state="running",
+        title="Harness bundle",
+        objective="Update docs.",
+        stage_ids=["implement"],
+        active_run_id=run_id,
+        proof_ids=["proof_same"],
+        created_at=ts,
+        updated_at=ts,
+    )
+
+
+def test_empty_delivery_capture_opens_patch_landed_nowhere_incident(isolate_agent_runtime_root, monkeypatch):
+    task = _task_with_plan("task_empty_capture")
+    task.affected_repos = ["hermes-agent"]
+    TaskStore().create(task)
+
+    def _empty_capture(_bundle, *, event_log):
+        return {"captured": False, "reason": "worktree_missing_or_clean"}
+
+    monkeypatch.setattr("agent_runtime.delivery_directive.capture_bundle_patch", _empty_capture)
+    log = EventLog()
+    log.append(Event(now(), "patch.proposed", task.id, "run_empty_1", "dev", {"summary": "Proposed patch to hermes-agent: 1 file"}))
+
+    delivered = RepoBundleStore(event_log=log).mark_delivered(_simple_bundle(task_id=task.id))
+
+    assert delivered.delivery_capture["captured"] is False
+    incidents = IncidentStore().list_open()
+    assert [incident.kind for incident in incidents] == ["patch_landed_nowhere"]
+    saved = TaskStore().get(task.id)
+    assert saved.state == TaskState.RUNNING
+    guard = saved.harness_self_heal["delivery_no_progress_guard"]["implement"]
+    assert guard["empty_capture_count"] == 1
+    assert guard["cited_evidence_ids"] == ["proof_same", "delivery_capture:bundle_empty:worktree_missing_or_clean"]
+
+
+def test_repeated_empty_delivery_without_new_proof_waits_for_operator(isolate_agent_runtime_root, monkeypatch):
+    task = _task_with_plan("task_stage_no_progress")
+    task.affected_repos = ["hermes-agent"]
+    TaskStore().create(task)
+
+    def _empty_capture(_bundle, *, event_log):
+        return {"captured": False, "reason": "worktree_missing_or_clean"}
+
+    monkeypatch.setattr("agent_runtime.delivery_directive.capture_bundle_patch", _empty_capture)
+    log = EventLog()
+    store = RepoBundleStore(event_log=log)
+    log.append(Event(now(), "patch.proposed", task.id, "run_empty_1", "dev", {"summary": "Proposed patch to hermes-agent: 1 file"}))
+    store.mark_delivered(_simple_bundle(task_id=task.id, run_id="run_empty_1"))
+    log.append(Event(now(), "patch.proposed", task.id, "run_empty_2", "dev", {"summary": "Proposed patch to hermes-agent: 1 file"}))
+
+    store.mark_delivered(_simple_bundle(task_id=task.id, run_id="run_empty_2"))
+
+    saved = TaskStore().get(task.id)
+    assert saved.state == TaskState.BLOCKED
+    incidents = IncidentStore().list_open()
+    assert {incident.kind for incident in incidents} == {"patch_landed_nowhere", "stage_no_progress"}
+    stage_incident = next(incident for incident in incidents if incident.kind == "stage_no_progress")
+    assert saved.open_incident_ids == [stage_incident.id]
+    assert saved.harness_self_heal["delivery_no_progress_guard"]["implement"]["empty_capture_count"] == 2
+    progress = EventLog().for_task(task.id, types={"run.progress"})
+    assert progress[-1].payload["step"] == "stage_no_progress"
+    assert progress[-1].payload["status"] == "waiting_for_operator"
 
 
 def test_repo_bundle_write_lock_conflict_parks_second_lane(isolate_agent_runtime_root):

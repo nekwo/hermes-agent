@@ -16,6 +16,7 @@ from .worker_sessions import ACTIVE_WORKER_STATES, worker_session_summary
 DEFAULT_DAEMON_STALE_AFTER_SECONDS = 120
 DEFAULT_RUN_STALLED_AFTER_SECONDS = 900
 DEFAULT_REPEATED_CONTEXT_REQUESTS_THRESHOLD = 2
+DELIVERY_EVIDENCE_INCIDENT_KINDS = frozenset({"patch_landed_nowhere", "stage_no_progress"})
 
 
 def build_observability(
@@ -88,9 +89,10 @@ def build_observability(
         interventions.append(_intervention("daemon_stale", "critical", "mission_daemon", None, None, "Mission Daemon heartbeat is stale"))
 
     for incident in open_incidents:
+        intervention_kind = incident.kind if incident.kind in DELIVERY_EVIDENCE_INCIDENT_KINDS else "open_incident"
         interventions.append(
             _intervention(
-                "open_incident",
+                intervention_kind,
                 _severity_for_incident(incident),
                 "incident",
                 incident.task_id,
@@ -279,6 +281,8 @@ def _risk_if_ignored(kind: str, severity: str) -> str:
 
 
 def _allowed_actions(kind: str, subject: str) -> list[str]:
+    if kind in DELIVERY_EVIDENCE_INCIDENT_KINDS:
+        return ["answer_intervention", "cancel_run", "rescope"]
     if kind == "open_incident":
         return ["answer_intervention", "retry_stage"]
     if kind in {"daemon_offline", "daemon_error", "daemon_stale"}:
@@ -297,6 +301,8 @@ def _allowed_actions(kind: str, subject: str) -> list[str]:
 def _severity_for_incident(incident: Incident) -> str:
     if incident.kind in CRITICAL_INCIDENT_KINDS:
         return "critical"
+    if incident.kind in DELIVERY_EVIDENCE_INCIDENT_KINDS:
+        return "high"
     if incident.kind in {"model_invalid_output"}:
         return "high"
     return "medium"

@@ -41,6 +41,7 @@ HANDOFF_PACKET_KEYS = frozenset(
         "self_heal",
         "joined_proof_ids",
         "joined_contract_packet_ids",
+        "cited_evidence_ids",
         "assumptions_made",
         "alternatives_considered",
         "operator_note",
@@ -74,6 +75,7 @@ DELIVERY_KEYS = frozenset(
         "wd_tagger_assessment",
         "questions",
         "proof_ids",
+        "cited_evidence_ids",
         "proof_summary",
         "command_summary",
         "known_gaps",
@@ -252,11 +254,51 @@ def iter_packet_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, A
             packets.append(("delivery", _require_object(stage.get("delivery"), f"stages[{idx}].delivery")))
     handoff = payload.get("handoff")
     if isinstance(handoff, dict) and handoff.get("delivery") is not None:
-        packets.append(("delivery", _require_object(handoff.get("delivery"), "handoff.delivery")))
+            packets.append(("delivery", _require_object(handoff.get("delivery"), "handoff.delivery")))
     return packets
 
 
+def _body_with_harness_citations(
+    task: Task,
+    *,
+    packet_type: str,
+    body: dict[str, Any],
+    stage_id: str | None,
+) -> dict[str, Any]:
+    if packet_type not in {"handoff_packet", "delivery"}:
+        return body
+    citations = _packet_cited_evidence_ids(task, body, stage_id=stage_id)
+    if not citations:
+        return body
+    enriched = dict(body)
+    enriched["cited_evidence_ids"] = _dedupe_strings(
+        [*_string_list(enriched.get("cited_evidence_ids")), *citations]
+    )[:25]
+    return enriched
+
+
+def _packet_cited_evidence_ids(task: Task, body: dict[str, Any], *, stage_id: str | None) -> list[str]:
+    cited: list[str] = []
+    for key in ("proof_ids", "self_test_evidence_ids", "consumed_proof_ids", "joined_proof_ids"):
+        cited.extend(_string_list(body.get(key)))
+    proof_gate = body.get("proof_gate") if isinstance(body.get("proof_gate"), dict) else {}
+    cited.extend(_string_list(proof_gate.get("required_proof_ids")))
+    heal = task.harness_self_heal if isinstance(getattr(task, "harness_self_heal", None), dict) else {}
+    observations = heal.get("stage_observations") if isinstance(heal.get("stage_observations"), dict) else {}
+    stage_key = str(stage_id or getattr(task, "current_stage_id", "") or "").strip()
+    observed = observations.get(stage_key) if stage_key else None
+    if isinstance(observed, dict):
+        cited.extend(_string_list(observed.get("observed_proof_ids")))
+        cited.extend(_string_list(observed.get("authoritative_gate_proof_ids")))
+    guard = heal.get("delivery_no_progress_guard") if isinstance(heal.get("delivery_no_progress_guard"), dict) else {}
+    guarded = guard.get(stage_key) if stage_key else None
+    if isinstance(guarded, dict):
+        cited.extend(_string_list(guarded.get("cited_evidence_ids")))
+    return _dedupe_strings(cited)
+
+
 def make_packet(*, task: Task, decision: AgentDecision, packet_type: str, body: dict[str, Any], actor: str, run_id: str | None, stage_id: str | None) -> Packet:
+    body = _body_with_harness_citations(task, packet_type=packet_type, body=body, stage_id=stage_id)
     raw_body = _raw_packet_body_with_dropped_values(body)
     core = compact_packet_body(packet_type, body)
     normalization = _pop_normalization(core)
@@ -585,6 +627,7 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
             raise DecisionPayloadInvalid("handoff_packet.join_gate.release_condition is required")
     _optional_string_list(packet, "joined_proof_ids")
     _optional_string_list(packet, "joined_contract_packet_ids")
+    _optional_string_list(packet, "cited_evidence_ids")
     if packet.get("harness_rules") is not None:
         _validate_harness_rules(packet.get("harness_rules"))
     if isinstance(packet.get("self_heal"), dict):
@@ -740,6 +783,7 @@ def _validate_delivery(packet: dict[str, Any], *, decision_type: DecisionType) -
         raise DecisionPayloadInvalid("delivery.wd_tagger_assessment must be a string")
     _optional_string_list(packet, "questions")
     _optional_string_list(packet, "proof_ids")
+    _optional_string_list(packet, "cited_evidence_ids")
     _optional_string_list(packet, "known_gaps")
     _optional_string_list(packet, "commit_refs")
     if "deploy_verification" in packet:
@@ -1008,6 +1052,10 @@ def _dedupe_strings(items: list[Any]) -> list[str]:
         seen.add(text)
         result.append(text[:120])
     return result
+
+
+def _string_list(value: Any) -> list[str]:
+    return _dedupe_strings(value) if isinstance(value, list) else []
 
 
 def _scan_packet_redaction(value: Any, *, path: str = "packet", allow_bare_secret_terms: bool = True) -> Any:

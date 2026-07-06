@@ -1831,7 +1831,7 @@ def _mission_lifecycle_state(task, active_runs, open_incidents, gate) -> str:
     if task.state == TaskState.DONE:
         return "ready_for_tony" if not gate.missing else "blocked"
     if open_incidents:
-        return "waiting_for_operator" if any(getattr(item, "kind", "") in {"qa_intervention_required", "operator_intervention", "run_budget_exceeded"} for item in open_incidents) else "blocked"
+        return "waiting_for_operator" if any(getattr(item, "kind", "") in {"qa_intervention_required", "operator_intervention", "run_budget_exceeded", "patch_landed_nowhere", "stage_no_progress"} for item in open_incidents) else "blocked"
     if active_runs:
         return "running"
     if task.state == TaskState.BLOCKED:

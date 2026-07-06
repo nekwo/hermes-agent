@@ -80,3 +80,44 @@ def test_delivery_handoff_repair_fields_survive_packet_projection(isolate_agent_
     assert "unknown_sidecar" in ctx.latest_delivery["dropped_fields"]
     assert "proof_reuse_basis" in rendered
     assert "known_non_coverage" in rendered
+
+
+def test_delivery_packet_carries_harness_cited_evidence_ids(isolate_agent_runtime_root):
+    task = _task()
+    task.harness_self_heal["delivery_no_progress_guard"] = {
+        "stage_1": {
+            "cited_evidence_ids": [
+                "proof_observed",
+                "delivery_capture:bundle_empty:worktree_missing_or_clean",
+            ],
+        }
+    }
+    run = _run()
+    decision = AgentDecision(
+        type=DecisionType.REQUEST_QA_REVIEW,
+        summary="handoff repair",
+        rationale="QA needs preserved delivery metadata.",
+        payload={
+            "stage_id": "stage_1",
+            "proof_ids": ["proof_passed"],
+            "handoff": {"to": "qa", "stage_complete": True},
+            "delivery": {"proof_ids": ["proof_passed"], "summary": "Ready for QA."},
+        },
+    )
+
+    validate_decision_packets(decision)
+    packet = make_packet(
+        task=task,
+        decision=decision,
+        packet_type="delivery",
+        body=decision.payload["delivery"],
+        actor="dev",
+        run_id=run.id,
+        stage_id=run.stage_id,
+    )
+
+    assert packet.body["cited_evidence_ids"] == [
+        "proof_passed",
+        "proof_observed",
+        "delivery_capture:bundle_empty:worktree_missing_or_clean",
+    ]
