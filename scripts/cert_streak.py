@@ -79,6 +79,7 @@ def case_metadata(case_id: str | None) -> dict[str, Any]:
 
 
 def append_row(doc: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    validate_manifest_shape(manifest)
     doc.parent.mkdir(parents=True, exist_ok=True)
     rows = existing_rows(doc)
     number = len(rows) + 1
@@ -114,6 +115,17 @@ def append_row(doc: Path, manifest: dict[str, Any]) -> dict[str, Any]:
             )
         )
     return row
+
+
+def validate_manifest_shape(manifest: dict[str, Any]) -> None:
+    missing = [
+        key
+        for key in ("case_id", "task_id", "status", "unattended")
+        if not manifest.get(key)
+    ]
+    if missing:
+        detail = manifest.get("error") or manifest.get("kind") or manifest.get("failure_class") or "unknown"
+        raise ValueError(f"burn-in manifest is incomplete; missing={missing}; detail={detail}")
 
 
 def existing_rows(doc: Path) -> list[str]:
@@ -174,24 +186,31 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["ok"] else 1
 
-    manifests: list[dict[str, Any]] = []
     for burn_id in args.record_burn_id:
-        manifests.append(read_manifest(burn_id))
+        if not process_manifest(args.doc, read_manifest(burn_id)):
+            return 1
     cases = DEFAULT_CASE_POOL if args.pool else list(args.case or [])
     for case_id in cases:
-        manifests.append(run_cli(["burn-in", "run", case_id, "--max-actions", str(args.max_actions), "--json"]))
-
-    if not manifests:
-        parser.error("provide --pool, --case, --record-burn-id, or --check")
-
-    for manifest in manifests:
-        row = append_row(args.doc, manifest)
-        print(json.dumps(row, indent=2, sort_keys=True))
-        unattended = manifest.get("unattended") if isinstance(manifest.get("unattended"), dict) else {}
-        if not unattended.get("green"):
-            print(json.dumps({"streak_broken": True, "failure": row.get("failure"), "case_id": row.get("case_id")}, indent=2), file=sys.stderr)
+        if not process_manifest(args.doc, run_cli(["burn-in", "run", case_id, "--max-actions", str(args.max_actions), "--json"])):
             return 1
+
+    if not args.record_burn_id and not cases:
+        parser.error("provide --pool, --case, --record-burn-id, or --check")
     return 0
+
+
+def process_manifest(doc: Path, manifest: dict[str, Any]) -> bool:
+    try:
+        row = append_row(doc, manifest)
+    except ValueError as exc:
+        print(json.dumps({"streak_broken": True, "failure": "incomplete_manifest", "error": str(exc)}, indent=2), file=sys.stderr)
+        return False
+    print(json.dumps(row, indent=2, sort_keys=True))
+    unattended = manifest.get("unattended") if isinstance(manifest.get("unattended"), dict) else {}
+    if not unattended.get("green"):
+        print(json.dumps({"streak_broken": True, "failure": row.get("failure"), "case_id": row.get("case_id")}, indent=2), file=sys.stderr)
+        return False
+    return True
 
 
 if __name__ == "__main__":

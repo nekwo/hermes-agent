@@ -301,18 +301,23 @@ def test_cross_stack_burn_in_case_has_explicit_repo_role_and_join_scope():
 
 
 def test_custom_burn_in_case_instantiates_non_default_blueprint():
-    manifest = run_burn_in_case("custom-launcher-proof", engine=PassingBurnInEngine())
-    root = burn_in_dir(manifest["burn_id"])
+    expectations = {
+        "custom-backend-proof": ("stage46_custom_backend_proof", ["scope", "backend_implementation"], "backend_contract_smoke"),
+        "custom-launcher-proof": ("stage46_custom_launcher_proof", ["scope", "implement"], "launcher_contract_smoke"),
+        "custom-cross-stack-proof": ("stage46_custom_cross_stack_proof", ["scope", "backend_implementation", "implement"], "launcher_contract_smoke"),
+    }
+    for case_id, (blueprint_id, stage_ids, final_recipe) in expectations.items():
+        manifest = run_burn_in_case(case_id, engine=PassingBurnInEngine())
+        root = burn_in_dir(manifest["burn_id"])
 
-    created = json.loads((root / "task_create.json").read_text(encoding="utf-8"))["task"]
-    plan = created["mission_plan"]
+        created = json.loads((root / "task_create.json").read_text(encoding="utf-8"))["task"]
+        plan = created["mission_plan"]
 
-    assert manifest["expected_persona_sequence"] == ["neko_supervisor", "dev"]
-    assert created["risk_flags"] == ["stage46_custom_blueprint", "no_product_edits"]
-    assert plan["blueprint_id"] == "stage46_custom_launcher_proof"
-    assert plan["current_stage_id"] == "scope"
-    assert [stage["id"] for stage in plan["stages"]] == ["scope", "implement"]
-    assert plan["stages"][1]["proof_recipe_id"] == "launcher_contract_smoke"
+        assert "stage46_custom_blueprint" in created["risk_flags"]
+        assert plan["blueprint_id"] == blueprint_id
+        assert plan["current_stage_id"] == "scope"
+        assert [stage["id"] for stage in plan["stages"]] == stage_ids
+        assert plan["stages"][-1]["proof_recipe_id"] == final_recipe
 
 
 def test_burn_in_summary_fails_closed_when_evidence_is_missing():

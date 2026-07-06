@@ -699,7 +699,7 @@ def _stage46_custom_blueprint_raw(blueprint_id: str) -> dict[str, Any]:
                 "root": "lead",
                 "edges": [
                     {"source": "lead", "target": "backend_builder", "kind": "steers"},
-                    {"source": "backend_builder", "target": "builder", "kind": "unblocks"},
+                    {"source": "lead", "target": "builder", "kind": "steers"},
                 ],
             },
             "limits": {"max_attempts_per_stage": 3, "max_total_stages": 12},
