@@ -300,6 +300,21 @@ def test_cross_stack_burn_in_case_has_explicit_repo_role_and_join_scope():
     assert any("Do not add QA" in item for item in created["non_goals"])
 
 
+def test_custom_burn_in_case_instantiates_non_default_blueprint():
+    manifest = run_burn_in_case("custom-launcher-proof", engine=PassingBurnInEngine())
+    root = burn_in_dir(manifest["burn_id"])
+
+    created = json.loads((root / "task_create.json").read_text(encoding="utf-8"))["task"]
+    plan = created["mission_plan"]
+
+    assert manifest["expected_persona_sequence"] == ["neko_supervisor", "dev"]
+    assert created["risk_flags"] == ["stage46_custom_blueprint", "no_product_edits"]
+    assert plan["blueprint_id"] == "stage46_custom_launcher_proof"
+    assert plan["current_stage_id"] == "scope"
+    assert [stage["id"] for stage in plan["stages"]] == ["scope", "implement"]
+    assert plan["stages"][1]["proof_recipe_id"] == "launcher_contract_smoke"
+
+
 def test_burn_in_summary_fails_closed_when_evidence_is_missing():
     manifest = create_burn_in(case_id="noop-orchestration")
 
