@@ -490,7 +490,7 @@ def _history_row(
             "preview": preview_status,
             "messages": messages_status,
         }.items()
-        if status in {"redacted", "would_redact"}
+        if status == "would_redact"
     }
     return {
         "session_id": session_id,
