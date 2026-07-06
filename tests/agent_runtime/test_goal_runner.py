@@ -197,6 +197,31 @@ def test_goal_runner_creates_graph_routed_task_from_birth(tmp_path, monkeypatch)
     assert action.slot_id == "lead"
 
 
+def test_goal_runner_filters_default_bindings_for_explicit_blueprint(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    task_store = TaskStore()
+
+    result = MissionRuntimeController(
+        config=RuntimeConfig(),
+        task_store=task_store,
+        engine_factory=MaxActionsEngine,
+    ).run_goal(
+        GoalRunOptions(
+            title="Visual proof",
+            description="Capture and verify visual proof.",
+            blueprint_id="visual_ui_qa",
+            bindings={"builder": "persona:dev", "verifier": "persona:qa"},
+            max_actions=1,
+        )
+    )
+
+    task = task_store.get(result.task_id)
+    assert task.mission_plan is not None
+    assert task.mission_plan.blueprint_id == "visual_ui_qa"
+    assert task.mission_plan.bindings == {"builder": "dev", "verifier": "qa"}
+    assert task.current_stage_id == "implement_ui"
+
+
 def test_goal_runner_explicit_no_edit_cross_stack_blueprint_uses_recipe_gates(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     task_store = TaskStore()

@@ -24,6 +24,19 @@ DEFAULT_GOAL_BLUEPRINT_ID = DEFAULT_TASK_BLUEPRINT_ID
 DEFAULT_GOAL_BINDINGS = DEFAULT_TASK_BLUEPRINT_BINDINGS
 
 
+def _default_goal_bindings_for_blueprint(bp: Any) -> dict[str, str]:
+    slot_ids = {
+        str(getattr(slot, "id", "") or "").strip()
+        for slot in getattr(bp, "slots", []) or []
+        if str(getattr(slot, "id", "") or "").strip()
+    }
+    return {
+        slot_id: binding
+        for slot_id, binding in DEFAULT_GOAL_BINDINGS.items()
+        if slot_id in slot_ids
+    }
+
+
 @dataclass(slots=True)
 class GoalRunOptions:
     title: str
@@ -184,7 +197,10 @@ class MissionRuntimeController:
         blueprint_id = (options.blueprint_id or DEFAULT_GOAL_BLUEPRINT_ID).strip()
         if blueprint_id:
             bp = BlueprintStore().get(blueprint_id)
-            bindings = {**DEFAULT_GOAL_BINDINGS, **dict(options.bindings or {})}
+            bindings = {
+                **_default_goal_bindings_for_blueprint(bp),
+                **dict(options.bindings or {}),
+            }
             mission_plan = instantiate_blueprint(bp, goal=options.description, bindings=bindings)
             if mission_plan.mission_intent is not None:
                 mission_plan.mission_intent.title = options.title
