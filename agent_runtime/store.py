@@ -336,7 +336,7 @@ class ArchiveStore:
         ran — never a bundle stranded in a disposable worktree.
         """
 
-        from .delivery_directive import execute_task_delivery_directives, reap_task_run_worktrees
+        from .delivery_directive import execute_task_delivery_directives, execute_task_worktree_delivery_directives
         from .repo_bundles import RepoBundleStore
 
         outcomes: dict[str, list[dict]] = {}
@@ -356,18 +356,20 @@ class ArchiveStore:
                     incident_store=IncidentStore(event_log=self.event_log),
                 )
             # A terminal task owns nothing anymore: capture-then-reap every
-            # remaining run worktree (non-delivered bundles, failed runs)
-            # so litter never outlives the goal.
+            # remaining run worktree (non-delivered bundles, failed runs).
+            # Dirty worktrees still obey the delivery directive before any
+            # cleanup, so ``apply_to_repo`` cannot be bypassed by a bundleless
+            # run.
             try:
                 repos = list(dict.fromkeys(list(task.affected_repos or []) + [b.repo for b in bundles]))
-                reap = reap_task_run_worktrees(
-                    task.id,
+                worktree_results = execute_task_worktree_delivery_directives(
+                    task,
                     run_ids=[run.id for run in run_store.list_for_task(task.id)],
                     repos=repos,
                     event_log=self.event_log,
+                    incident_store=IncidentStore(event_log=self.event_log),
                 )
-                if reap:
-                    results.append({"task_worktree_reap": reap})
+                results.extend(worktree_results)
             except Exception:
                 pass
             if results:
@@ -1183,7 +1185,11 @@ def _archive_repo_bundle_evidence(task_id: str, archive_dir: Path) -> dict:
     dest = archive_dir / "repo_bundles" / task_id
     if _move_if_exists(source, dest):
         result["repo_bundles_archived"] = True
-        result["repo_bundle_ids"] = [path.stem for path in sorted(dest.glob("*.json"))]
+        result["repo_bundle_ids"] = [
+            path.stem
+            for path in sorted(dest.glob("*.json"))
+            if not path.name.endswith(".promotion.json")
+        ]
     return result
 
 

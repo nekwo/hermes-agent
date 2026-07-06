@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import subprocess
 import uuid
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -265,6 +266,81 @@ def execute_task_delivery_directives(
     return outcomes
 
 
+def execute_task_worktree_delivery_directives(
+    task: Task,
+    *,
+    run_ids: list[str],
+    repos: list[str],
+    event_log: EventLog | None = None,
+    incident_store: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Apply the task delivery directive to dirty run worktrees with no bundle.
+
+    Repo bundles are the primary delivery surface, but a terminal task can still
+    own a dirty run worktree when bundle routing was disabled or unavailable.
+    That fallback must obey the same promote/preserve/reap contract; otherwise
+    archive settlement can report ``done`` while the actual patch only survives
+    as a disposable worktree diff.
+    """
+
+    deliveries: list[dict[str, Any]] = []
+    clean_reaps: list[dict[str, Any]] = []
+    seen_worktrees: set[str] = set()
+    for run_id in [str(item or "").strip() for item in run_ids if str(item or "").strip()]:
+        for repo in [str(item or "").strip() for item in repos if str(item or "").strip()]:
+            for worktree in existing_run_worktrees(repo, task_id=task.id, run_id=run_id):
+                try:
+                    resolved = str(worktree.resolve())
+                except OSError:
+                    resolved = str(worktree)
+                if resolved in seen_worktrees:
+                    continue
+                seen_worktrees.add(resolved)
+                patch = worktree_patch_text(worktree)
+                if patch.strip():
+                    bundle = _synthetic_worktree_bundle(task, repo=repo, run_id=run_id, worktree=worktree)
+                    try:
+                        outcome = execute_delivery_directive(
+                            task,
+                            bundle,
+                            event_log=event_log,
+                            incident_store=incident_store,
+                        )
+                    except Exception as exc:  # keep evidence/worktree for operator recovery
+                        outcome = {
+                            "bundle_id": bundle.id,
+                            "directive": task_delivery_directive(task),
+                            "promote": {"status": "failed", "reason": type(exc).__name__, "commit": None},
+                            "worktree": {"status": "kept", "reason": "executor_error"},
+                            "patch_path": None,
+                        }
+                    deliveries.append(
+                        {
+                            "source": "task_run_worktree",
+                            "repo": repo,
+                            "run_id": run_id,
+                            "worktree": str(worktree),
+                            **outcome,
+                        }
+                    )
+                    continue
+
+                entry: dict[str, Any] = {"worktree": worktree.name, "run_id": run_id, "repo": repo}
+                if remove_harness_worktree_for_repo(repo, worktree, reason="task_archived"):
+                    entry["removed"] = True
+                else:
+                    entry["removed"] = False
+                clean_reaps.append(entry)
+
+    results: list[dict[str, Any]] = []
+    if deliveries:
+        results.append({"task_worktree_delivery": deliveries})
+    if clean_reaps:
+        _emit_task_reap_event(task.id, clean_reaps, event_log=event_log)
+        results.append({"task_worktree_reap": clean_reaps})
+    return results
+
+
 def reap_task_run_worktrees(
     task_id: str,
     *,
@@ -303,22 +379,7 @@ def reap_task_run_worktrees(
                     entry["removed"] = False
                 reaped.append(entry)
     if reaped:
-        try:
-            (event_log or EventLog()).append(
-                Event(
-                    ts=now(),
-                    type="worktree.task_reaped",
-                    task_id=task_id,
-                    run_id=None,
-                    persona_id=None,
-                    payload={
-                        "count": len(reaped),
-                        "removed": len([item for item in reaped if item.get("removed")]),
-                    },
-                )
-            )
-        except Exception:
-            pass
+        _emit_task_reap_event(task_id, reaped, event_log=event_log)
     return reaped
 
 
@@ -547,6 +608,25 @@ def _bundle_run_id(bundle: RepoBundle) -> str:
     return str(capture.get("run_id") or "").strip()
 
 
+def _synthetic_worktree_bundle(task: Task, *, repo: str, run_id: str, worktree: Path) -> RepoBundle:
+    digest = hashlib.sha256(
+        f"{task.id}|{repo}|{run_id}|{worktree.name}".encode("utf-8", errors="ignore")
+    ).hexdigest()[:12]
+    return RepoBundle(
+        id=f"runwt_{digest}",
+        task_id=task.id,
+        repo=repo,
+        owner_persona_id=None,
+        state="delivered",
+        title=task.title or "Task run worktree delivery",
+        objective=task.description or task.title or "Promote terminal task worktree patch.",
+        active_run_id=run_id,
+        proof_ids=list(getattr(task, "proof_ids", None) or []),
+        created_at=now(),
+        updated_at=now(),
+    )
+
+
 def _reap_bundle_worktrees(bundle: RepoBundle, *, event_log: EventLog | None) -> dict[str, Any]:
     run_id = _bundle_run_id(bundle)
     if not run_id:
@@ -633,6 +713,25 @@ def _run_git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess:
         timeout=120,
         check=False,
     )
+
+
+def _emit_task_reap_event(task_id: str, reaped: list[dict[str, Any]], *, event_log: EventLog | None) -> None:
+    try:
+        (event_log or EventLog()).append(
+            Event(
+                ts=now(),
+                type="worktree.task_reaped",
+                task_id=task_id,
+                run_id=None,
+                persona_id=None,
+                payload={
+                    "count": len(reaped),
+                    "removed": len([item for item in reaped if item.get("removed")]),
+                },
+            )
+        )
+    except Exception:
+        pass
 
 
 def _emit(event_log: EventLog | None, event_type: str, bundle: RepoBundle, payload: dict[str, Any]) -> None:

@@ -18,8 +18,8 @@ from agent_runtime.delivery_directive import (
 from agent_runtime.models import RepoBundle, Task
 from agent_runtime.repo_context import RepoExecutionContext, isolated_repo_context_for_run
 from agent_runtime.repo_bundles import RepoBundleStore, repo_bundle_summary
-from agent_runtime.states import TaskState
-from agent_runtime.store import IncidentStore, TaskStore
+from agent_runtime.states import RunState, TaskState
+from agent_runtime.store import IncidentStore, RunStore, TaskStore
 
 import pytest
 
@@ -248,6 +248,38 @@ def test_archive_runs_directive_and_preserves_patch(source_repo, isolate_agent_r
     assert archived_patch.is_file() and archived_patch.stat().st_size > 0
     archived_promotion = archive_dir / "repo_bundles" / task.id / f"{bundle.id}.promotion.json"
     assert archived_promotion.is_file()
+
+
+def test_archive_promotes_dirty_bundleless_run_worktree(source_repo, isolate_agent_runtime_root):
+    task = _task(task_id="task_bundleless")
+    task.affected_repos = [str(source_repo)]
+    TaskStore().create(task)
+    run_store = RunStore()
+    run = run_store.open_run("dev", task.id)
+    worktree = _worktree_with_changes(source_repo, task_id=task.id, run_id=run.id)
+    (worktree / "docs").mkdir()
+    (worktree / "docs" / "stream.md").write_text("hydrate delta heartbeat schema_version\n", encoding="utf-8")
+    run_store.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "complete"})
+
+    from agent_runtime.store import ArchiveStore
+
+    result = ArchiveStore().archive_tasks([task.id], actor="test", reason="bundleless directive test")
+
+    assert result["archived_task_ids"] == [task.id]
+    archived_entry = result["archived_tasks"][0]
+    deliveries = archived_entry["delivery_directive_outcomes"][0]["task_worktree_delivery"]
+    assert deliveries[0]["promote"]["status"] == "promoted"
+    assert deliveries[0]["worktree"]["status"] == "reaped"
+    assert not worktree.exists()
+    assert (source_repo / "feature.py").read_text(encoding="utf-8") == "FEATURE = True\n"
+    assert (source_repo / "docs" / "stream.md").is_file()
+    archive_dir = Path(result["archive_dir"])
+    bundle_id = deliveries[0]["bundle_id"]
+    archived_patch = archive_dir / "repo_bundles" / task.id / f"{bundle_id}.patch"
+    archived_promotion = archive_dir / "repo_bundles" / task.id / f"{bundle_id}.promotion.json"
+    assert archived_patch.is_file() and archived_patch.stat().st_size > 0
+    assert archived_promotion.is_file()
+    assert f"{bundle_id}.promotion" not in archived_entry["repo_bundle_ids"]
 
 
 def test_reap_orphan_worktrees_capture_age_and_ownership(source_repo, tmp_path, monkeypatch):
