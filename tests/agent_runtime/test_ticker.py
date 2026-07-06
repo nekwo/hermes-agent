@@ -4565,6 +4565,89 @@ def test_mission_token_ceiling_blocks_new_run_and_logs_event(isolate_agent_runti
     assert any(event.type == "mission_budget_exceeded" and event.payload["limit"] == 100 for event in events)
 
 
+def test_mission_budget_incident_dedupes_across_ticks(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    prior = runs.open_run("dev", "task_1", stage_id=None)
+    prior.llm = {"total_tokens": 101}
+    runs.update(prior)
+    runs.close_run(prior.id, state=RunState.COMPLETED, final_decision={"type": "hand_off"})
+    engine = TickEngine(
+        task_store=ts,
+        run_store=runs,
+        incident_store=incidents,
+        persona_runtime=RuntimeMustNotRun(),
+        config=AgentRuntimeConfig(mission_max_total_tokens=100),
+    )
+
+    first = engine.tick_once(task_id="task_1")
+    assert len(first.incidents_opened) == 1
+
+    # Re-arm the task the way live re-entry does and tick again: the open
+    # incident must be reused, never re-minted.
+    rearmed = ts.get("task_1")
+    rearmed.state = TaskState.RUNNING
+    ts.update(rearmed, actor="test", reason="re-arm")
+    second = engine.tick_once(task_id="task_1")
+    assert second.incidents_opened == []
+
+    block = {
+        "kind": "mission",
+        "event_type": "mission_budget_exceeded",
+        "summary": "Mission token budget exceeded: total_tokens=101/100",
+        "task_id": "task_1",
+        "persona_id": "dev",
+        "stage_id": None,
+        "total_tokens": 101,
+        "limit": 100,
+    }
+    incident, newly_opened = engine._open_runtime_budget_incident(ts.get("task_1"), block)
+    assert newly_opened is False
+
+    open_budget = [item for item in incidents.list_open() if item.kind == "mission_budget_exceeded"]
+    assert len(open_budget) == 1
+    assert open_budget[0].id == incident.id
+    events = [event for event in EventLog().for_task("task_1", limit=50) if event.type == "mission_budget_exceeded"]
+    assert len(events) == 1
+
+
+def test_mission_budget_does_not_starve_neko_budget_adjudication(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    runtime = BudgetThenNekoApprovalRuntime()
+    engine = TickEngine(
+        task_store=ts,
+        run_store=runs,
+        incident_store=incidents,
+        persona_runtime=runtime,
+        config=AgentRuntimeConfig(mission_max_total_tokens=100),
+    )
+
+    engine.tick_once(task_id="task_1")
+    waiting = next(run for run in runs.list_for_task("task_1") if run.persona_id in {"dev", "backend_dev"})
+    assert waiting.state == RunState.WAITING_ON_APPROVAL
+    assert any(item.kind == "run_budget_exceeded" for item in incidents.list_open())
+    # Push the mission total over its ceiling: the adjudication slot must still
+    # run instead of deadlocking behind a mission_budget_exceeded incident.
+    waiting.llm = {"total_tokens": 500}
+    runs.update(waiting)
+
+    engine.tick_once(task_id="task_1")
+
+    assert "neko_supervisor" in runtime.seen
+    assert not [item for item in incidents.list_open() if item.kind == "mission_budget_exceeded"]
+    approved = runs.get(waiting.id)
+    assert approved.progress.get("approved_for_continuation") is True
+
+
 def test_swarm_token_hard_limit_blocks_new_run_and_logs_event(isolate_agent_runtime_root):
     ts = TaskStore()
     runs = RunStore()

@@ -207,7 +207,14 @@ class TickEngine:
                             active_runs = self.run_store.find_active(task_id=action_task.id, persona_id=persona_id)
                         if active_runs:
                             continue
-                    if persona_id:
+                    # The budget-approval adjudication slot must stay runnable even
+                    # when the mission-scoped budget is exhausted, otherwise the
+                    # continuation lane deadlocks: Neko can never adjudicate the very
+                    # incident that blocks the task.
+                    budget_adjudication_slot = bool(budget_approval_incidents) and _action_targets(
+                        action, "neko_supervisor"
+                    )
+                    if persona_id and not budget_adjudication_slot:
                         budget_block = _runtime_budget_block(
                             action_task,
                             persona_id=persona_id,
@@ -215,21 +222,24 @@ class TickEngine:
                             config=self.config,
                         )
                         if budget_block is not None:
-                            incident = self._open_runtime_budget_incident(action_task, budget_block)
-                            result.incidents_opened.append(incident.id)
-                            result.actions_taken.append(
-                                HarnessActionResult(
-                                    action,
-                                    False,
-                                    budget_block["summary"],
-                                    {
-                                        "incident_id": incident.id,
-                                        "budget_kind": budget_block["kind"],
-                                        "total_tokens": budget_block["total_tokens"],
-                                        "limit": budget_block["limit"],
-                                    },
+                            incident, newly_opened = self._open_runtime_budget_incident(action_task, budget_block)
+                            if newly_opened:
+                                result.incidents_opened.append(incident.id)
+                                result.actions_taken.append(
+                                    HarnessActionResult(
+                                        action,
+                                        False,
+                                        budget_block["summary"],
+                                        {
+                                            "incident_id": incident.id,
+                                            "budget_kind": budget_block["kind"],
+                                            "total_tokens": budget_block["total_tokens"],
+                                            "limit": budget_block["limit"],
+                                        },
+                                    )
                                 )
-                            )
+                            elif action_task.id not in result.skipped:
+                                result.skipped.append(action_task.id)
                             continue
                     if action.type == HarnessActionType.COMPLETE_TASK:
                         action_task.state = TaskState.DONE
@@ -521,8 +531,13 @@ class TickEngine:
             )
         )
 
-    def _open_runtime_budget_incident(self, task: Task, budget_block: dict[str, Any]) -> Incident:
+    def _open_runtime_budget_incident(self, task: Task, budget_block: dict[str, Any]) -> tuple[Incident, bool]:
         event_type = str(budget_block["event_type"])
+        # One open incident per (task, kind): re-raising on every tick floods
+        # the incident store and event log without adding operator signal.
+        for existing in self.incident_store.list_open():
+            if existing.task_id == task.id and existing.kind == event_type:
+                return existing, False
         payload = {
             "task_id": task.id,
             "persona_id": budget_block.get("persona_id"),
@@ -567,7 +582,7 @@ class TickEngine:
             task.state = TaskState.BLOCKED
         task.updated_at = now()
         self.task_store.update(task, actor="harness", reason=event_type)
-        return incident
+        return incident, True
 
     def _record_preflight_started(self, task: Task, persona_id: str) -> None:
         try:
