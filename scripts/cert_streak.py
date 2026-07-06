@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Any
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 DEFAULT_LAUNCHER_ROOT = Path(r"X:\Unreal Engine\Engine\Launcher\EterniaLauncher")
 DEFAULT_CERT_DOC = DEFAULT_LAUNCHER_ROOT / "docs" / "mission_control" / "cert_streak.md"
 DEFAULT_CASE_POOL = [
