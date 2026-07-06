@@ -105,6 +105,18 @@ def test_explicit_full_suite_gate_allows_full_suite_command():
     validate_request_test_run_policy(t, decision("python manage.py test --noinput"))
 
 
+def test_non_goal_path_rejects_matching_proof_command():
+    t = task(
+        description="Harness docs only.",
+        non_goals=["Do not rerun the broad tests/agent_runtime suite."],
+    )
+
+    with pytest.raises(DecisionPayloadInvalid, match="bundle non-goal"):
+        validate_request_test_run_policy(t, decision("python -m pytest tests/agent_runtime -q"))
+
+    validate_request_test_run_policy(t, decision("python -m pytest tests/agent_runtime/test_stream.py -q"))
+
+
 def test_launcher_contract_policy_rejects_generic_flutter_readiness_proof():
     t = task(
         title="Stage 47 Launcher contract smoke",

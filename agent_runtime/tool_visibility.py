@@ -97,6 +97,7 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
         "profile_candidate_tools": candidate_tools,
         "final_model_tools": final_tools,
         "final_tool_count": len(final_tools),
+        "model_tool_tokens": _estimate_model_tool_tokens(final_tools),
         "blocked_tool_names": [entry["name"] for entry in blocked_entries],
         "blocked_tools": blocked_entries,
         "requirement_failures": [],
@@ -160,6 +161,7 @@ def agent_hud_state_for_persona(persona: AgentPersona, options: ToolVisibilityOp
         "task_id": visibility.get("task_id"),
         "goal_id": visibility.get("goal_id"),
         "tool_count": visibility["final_tool_count"],
+        "model_tool_tokens": visibility["model_tool_tokens"],
         "toolsets": visibility["effective_toolsets"],
         "blocked_tools": visibility["blocked_tools"],
         "mutation_boundary": visibility["mutation_boundary"],
@@ -168,6 +170,12 @@ def agent_hud_state_for_persona(persona: AgentPersona, options: ToolVisibilityOp
 
 def _tool_names_for_toolsets(toolsets: list[str], *, blocked_tool_names: list[str]) -> list[str]:
     return list(_cached_tool_names_for_toolsets(tuple(toolsets), tuple(blocked_tool_names)))
+
+
+def _estimate_model_tool_tokens(tool_names: list[str]) -> int:
+    # Cheap HUD estimate: each name implies a schema envelope even when we do
+    # not materialize the full provider payload on this path.
+    return sum(max(8, (len(name) + 96) // 4) for name in tool_names)
 
 
 def _profile_readiness_for_visibility(persona: AgentPersona) -> dict[str, Any]:

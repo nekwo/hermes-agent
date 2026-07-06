@@ -83,11 +83,7 @@ PROFILE_CHAT_FALLBACK_TOOLSETS = (
     "search",
     "terminal",
     "code_execution",
-    "web",
-    "browser",
-    "vision",
     "session_search",
-    "todo",
     "skills",
     "mission_goal",
 )

@@ -15,8 +15,9 @@ from agent_runtime.ticker import TickEngine, _emit_decision_process_summary, _ha
 from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.errors import NotFound
-from agent_runtime.models import Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
+from agent_runtime.models import Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, RepoBundle, Task, TaskStage
 from agent_runtime.proof_rules import ProofType
+from agent_runtime.repo_bundles import RepoBundleStore
 from agent_runtime.runtime_config import ContinuousRoleSessionConfig, MissionPlanConfig, NormalWorkerFlowConfig, RuntimeConfig, SwarmConfig
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
@@ -731,6 +732,46 @@ def test_assignment_spec_exact_prose_goal_proof_targets_outrank_stage_plan():
     )
 
     assert spec.proof_targets == ["echo e2e-trust-probe"]
+
+
+def test_assignment_spec_bundle_proof_targets_outrank_stage_plan(isolate_agent_runtime_root):
+    from agent_runtime.ticker import _assignment_spec_for_action
+
+    task = make_task_with_id("task_bundle_proof_assignment")
+    task.state = TaskState.RUNNING
+    task.current_stage_id = "implement"
+    task.stages = [
+        TaskStage(
+            id="implement",
+            title="Harness Implementation",
+            objective="Patch harness docs.",
+            status=StageStatus.IMPLEMENTING,
+            test_plan=["python -m pytest tests/agent_runtime -q"],
+        )
+    ]
+    bundle = RepoBundle(
+        id="bundle_harness",
+        task_id=task.id,
+        repo="hermes-agent",
+        owner_persona_id="dev",
+        state="assigned",
+        title="Harness bundle",
+        objective="Patch harness docs.",
+        stage_ids=["implement"],
+        proof_targets=["python -m pytest tests/agent_runtime/test_stream.py -q"],
+        created_at=now(),
+        updated_at=now(),
+    )
+    RepoBundleStore().update(bundle)
+
+    spec = _assignment_spec_for_action(
+        HarnessAction(HarnessActionType.RUN_SLOT, task.id, slot_id="dev"),
+        task,
+        persona_id="dev",
+        repo_bundle_id=bundle.id,
+    )
+
+    assert spec.proof_targets == ["python -m pytest tests/agent_runtime/test_stream.py -q"]
 
 
 def test_assignment_spec_carries_upstream_handoff_steer_to_receiver_chat(isolate_agent_runtime_root):

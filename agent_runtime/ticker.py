@@ -1823,8 +1823,11 @@ def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id
     repo = getattr(stage, "repo", None) or _repo_for_task(task)
     affected_paths = list(getattr(stage, "affected_paths", None) or [])
     proof_targets = []
+    bundle_proof_targets = _repo_bundle_proof_targets(task.id, repo_bundle_id)
     goal_named = goal_named_gate_commands(task, stage_repo_for_gate(task, stage)) if stage is not None else []
-    if goal_named and goal_demands_exact_proof(task):
+    if bundle_proof_targets:
+        proof_targets.extend(bundle_proof_targets)
+    elif goal_named and goal_demands_exact_proof(task):
         proof_targets.extend(goal_named)
     else:
         for item in list(getattr(stage, "test_plan", None) or []):
@@ -1860,6 +1863,16 @@ def _assignment_spec_for_action(action: HarnessAction, task: Task, *, persona_id
         non_goals=list(getattr(task, "non_goals", None) or []),
         allowed_decisions=_allowed_decisions_for_action(action),
     )
+
+
+def _repo_bundle_proof_targets(task_id: str, repo_bundle_id: str | None) -> list[str]:
+    if not repo_bundle_id:
+        return []
+    try:
+        bundle = RepoBundleStore().get(task_id, repo_bundle_id)
+    except Exception:
+        return []
+    return [str(item).strip() for item in (getattr(bundle, "proof_targets", None) or []) if str(item).strip()]
 
 
 def _assignment_message_for_action(task: Task, action: HarnessAction, *, persona_id: str, stage_id: str | None, base_message: str) -> str:

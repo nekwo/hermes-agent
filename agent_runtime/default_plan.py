@@ -70,6 +70,7 @@ def specialize_default_plan_for_task(task: Task, plan: MissionPlan) -> None:
     """
 
     _specialize_default_implementation_stage(task, plan)
+    _mark_out_of_scope_repo_lanes(task, plan)
     if _default_task_is_no_edit_cross_stack(task):
         _specialize_default_no_edit_cross_stack_plan(plan)
     _ensure_default_qa_stage_when_required(task, plan)
@@ -141,6 +142,32 @@ def _single_product_repo_scope(task: Task) -> str | None:
         return None
     repo = next(iter(repos))
     return repo if repo in {"EterniaBackend", "EterniaLauncher"} else None
+
+
+def _pinned_repo_scope(task: Task) -> set[str]:
+    repos = {
+        repo
+        for repo in (_canonical_product_repo(str(item)) for item in (getattr(task, "affected_repos", []) or []))
+        if repo
+    }
+    return repos
+
+
+def _mark_out_of_scope_repo_lanes(task: Task, plan: MissionPlan) -> None:
+    scoped_repos = _pinned_repo_scope(task)
+    if not scoped_repos:
+        return
+    for stage in plan.stages:
+        owner = str(getattr(stage, "owner", "") or "").strip()
+        if owner not in {"dev", "backend_dev", "qa"}:
+            continue
+        repo = _canonical_product_repo(str(getattr(stage, "repo", "") or ""))
+        if not repo or repo in scoped_repos:
+            continue
+        _mark_default_stage_out_of_scope(
+            stage,
+            f"Task repo_scope is {', '.join(sorted(scoped_repos))}; {stage.title} is not_applicable for {repo}.",
+        )
 
 
 def _canonical_product_repo(value: str) -> str | None:

@@ -93,10 +93,12 @@ def test_turn_context_permission_state_and_hud_share_the_same_resolution():
     assert turn_context["preview"]["permission_mode"] == "operator_one_turn"
     assert turn_context["preview"]["session_id"] == "session_35"
     assert "terminal" not in turn_context["preview"]["final_model_tools"]
+    assert turn_context["preview"]["model_tool_tokens"] > 0
     assert permission_state["mode"] == "operator_one_turn"
     assert permission_state["turns_remaining"] == 1
     assert permission_state["can_run_terminal"] is False
     assert hud_state["tool_count"] == len(turn_context["preview"]["final_model_tools"])
+    assert hud_state["model_tool_tokens"] == turn_context["preview"]["model_tool_tokens"]
 
 
 def test_chat_permission_store_can_narrow_dev_chat_to_read_only(tmp_path):

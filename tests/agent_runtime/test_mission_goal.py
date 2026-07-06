@@ -256,6 +256,31 @@ def test_create_mission_goal_explicit_no_edit_cross_stack_blueprint_uses_recipe_
     assert launcher.proof_gate["proof_recipe_id"] == "launcher_contract_smoke"
 
 
+def test_create_mission_goal_marks_out_of_scope_repo_lanes_not_applicable(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    data = create_mission_goal(
+        title="Launcher-only Mission Control proof",
+        description="Patch Launcher only.",
+        requested_by="tony",
+        start_daemon_mode=False,
+        requested_blueprint_id="neko_two_dev_default",
+        blueprint_selection_mode="explicit",
+        repo_scope=["EterniaLauncher"],
+    )
+
+    task = TaskStore().get(data["task_id"])
+    backend = next(stage for stage in task.mission_plan.stages if stage.id == "backend_implementation")
+    launcher = next(stage for stage in task.mission_plan.stages if stage.id == "implement")
+    assert backend.status.value == "passed"
+    assert backend.proof_gate["required"] is False
+    assert any("not_applicable" in note for note in backend.audit_notes)
+    assert launcher.status.value == "ready"
+
+    bundles = RepoBundleStore().create_or_update_from_task(task)
+    assert [bundle.repo for bundle in bundles] == ["EterniaLauncher"]
+
+
 def test_create_mission_goal_rejects_idempotency_conflict(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
 
@@ -323,7 +348,9 @@ def test_supervisor_chat_toolset_gains_mission_goal_even_if_persona_list_omits_i
         toolsets=["file", "search", "terminal", "code_execution"],
         system_prompt_path="",
     )
-    assert "mission_goal" in _enabled_toolsets_for_chat(supervisor, session_id="sess_x")
+    supervisor_toolsets = _enabled_toolsets_for_chat(supervisor, session_id="sess_x")
+    assert "mission_goal" in supervisor_toolsets
+    assert not {"web", "browser", "vision", "todo"} & set(supervisor_toolsets)
 
     # A non-supervisor role is not granted the supervisor-only capability.
     dev = AgentPersona(

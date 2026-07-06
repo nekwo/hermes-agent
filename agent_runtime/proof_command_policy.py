@@ -18,6 +18,7 @@ def validate_request_test_run_policy(task: Task, decision: AgentDecision) -> Non
     stage_id = str(payload.get("stage_id") or "")
     proof_intent = str(payload.get("proof_intent") or payload.get("intent") or "")
     _reject_invalid_stagec_screenshot_window_args(commands)
+    _reject_non_goal_commands(task, commands)
     if _task_requires_mission_control_stagec_env_pins(
         task,
         stage_id=stage_id,
@@ -45,6 +46,49 @@ def validate_request_test_run_policy(task: Task, decision: AgentDecision) -> Non
             raise DecisionPayloadInvalid(
                 "Smoke/no-edit proof command policy failed: request a targeted smoke/readiness command, not an unbounded full-suite command."
             )
+
+
+def _reject_non_goal_commands(task: Task, commands: list[str]) -> None:
+    non_goals = [str(item or "").strip() for item in (getattr(task, "non_goals", []) or []) if str(item or "").strip()]
+    if not non_goals:
+        return
+    for command in commands:
+        for non_goal in non_goals:
+            if _command_matches_non_goal(command, non_goal):
+                raise DecisionPayloadInvalid(
+                    f"Proof command rejected by bundle non-goal: {non_goal[:180]}"
+                )
+
+
+def _command_matches_non_goal(command: str, non_goal: str) -> bool:
+    command_text = _normalize_for_non_goal_match(command)
+    non_goal_text = _normalize_for_non_goal_match(non_goal)
+    if not command_text or not non_goal_text:
+        return False
+    broad_only = any(marker in non_goal_text for marker in ("broad", "suite", "full suite", "full-suite"))
+    for marker in _non_goal_path_markers(non_goal_text):
+        if _command_targets_non_goal_marker(command_text, marker, broad_only=broad_only):
+            return True
+    return False
+
+
+def _command_targets_non_goal_marker(command_text: str, marker: str, *, broad_only: bool) -> bool:
+    if not broad_only:
+        return marker in command_text
+    pattern = rf"(?<![a-z0-9_./-]){re.escape(marker)}(?!/[a-z0-9_.-])"
+    return re.search(pattern, command_text) is not None
+
+
+def _non_goal_path_markers(text: str) -> list[str]:
+    markers = []
+    for marker in re.findall(r"[a-z0-9_.-]+/[a-z0-9_./-]+", text):
+        if marker not in markers:
+            markers.append(marker)
+    return markers
+
+
+def _normalize_for_non_goal_match(value: str) -> str:
+    return " ".join(str(value or "").replace("\\", "/").lower().split())
 
 
 def narrow_launcher_contract_analyze_command(
