@@ -44,6 +44,7 @@ from agent_runtime.errors import (
 from agent_runtime.events import EventLog
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
 from agent_runtime.harness_doctor import (
+    DEFAULT_STALE_INCIDENT_HOURS,
     DEFAULT_STALE_RUN_HOURS,
     DEFAULT_STALE_TASK_DAYS,
     DEFAULT_STALE_WORKER_HOURS,
@@ -834,6 +835,7 @@ def build_parser(parent_subparsers) -> None:
     doctor.add_argument("--stale-run-hours", type=int, default=DEFAULT_STALE_RUN_HOURS)
     doctor.add_argument("--stale-worker-hours", type=int, default=DEFAULT_STALE_WORKER_HOURS)
     doctor.add_argument("--stale-task-days", type=int, default=DEFAULT_STALE_TASK_DAYS)
+    doctor.add_argument("--stale-incident-hours", type=int, default=DEFAULT_STALE_INCIDENT_HOURS)
     doctor.add_argument("--worktree-min-age-seconds", type=int, default=DEFAULT_WORKTREE_MIN_AGE_SECONDS)
     doctor.set_defaults(func=_cmd_doctor)
 
@@ -2282,6 +2284,10 @@ def _cmd_doctor(args) -> int:
         stale_run_hours=int(getattr(args, "stale_run_hours", DEFAULT_STALE_RUN_HOURS) or DEFAULT_STALE_RUN_HOURS),
         stale_worker_hours=int(getattr(args, "stale_worker_hours", DEFAULT_STALE_WORKER_HOURS) or DEFAULT_STALE_WORKER_HOURS),
         stale_task_days=int(getattr(args, "stale_task_days", DEFAULT_STALE_TASK_DAYS) or DEFAULT_STALE_TASK_DAYS),
+        stale_incident_hours=int(
+            getattr(args, "stale_incident_hours", DEFAULT_STALE_INCIDENT_HOURS)
+            or DEFAULT_STALE_INCIDENT_HOURS
+        ),
         worktree_min_age_seconds=int(
             getattr(args, "worktree_min_age_seconds", DEFAULT_WORKTREE_MIN_AGE_SECONDS)
             or DEFAULT_WORKTREE_MIN_AGE_SECONDS
@@ -2315,7 +2321,8 @@ def _cmd_doctor(args) -> int:
         print(
             "findings: "
             f"runs={counts['stale_runs']} workers={counts['stale_workers']} "
-            f"tasks={counts['stale_open_tasks']} worktrees={counts['orphan_worktrees']} "
+            f"tasks={counts['stale_open_tasks']} incidents={counts['stale_incidents']} "
+            f"worktrees={counts['orphan_worktrees']} "
             f"snapshot_null_ids={counts['snapshot_null_id_rows']}"
         )
         if getattr(args, "fix", False):

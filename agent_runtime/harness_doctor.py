@@ -7,6 +7,7 @@ from typing import Any, Callable
 from hermes_time import now
 
 from .delivery_directive import reap_orphan_worktrees
+from .errors import NotFound
 from .events import EventLog
 from .models import Event, Incident, Task
 from .snapshot import build_snapshot
@@ -18,7 +19,9 @@ from .worker_sessions import ACTIVE_WORKER_STATES, WorkerSessionStore
 DEFAULT_STALE_RUN_HOURS = 6
 DEFAULT_STALE_WORKER_HOURS = 6
 DEFAULT_STALE_TASK_DAYS = 2
+DEFAULT_STALE_INCIDENT_HOURS = 24
 DEFAULT_WORKTREE_MIN_AGE_SECONDS = 3600
+STALE_BULK_CLOSE_REASON = "stale_bulk_close"
 
 
 def run_harness_doctor(
@@ -28,6 +31,7 @@ def run_harness_doctor(
     stale_run_hours: int = DEFAULT_STALE_RUN_HOURS,
     stale_worker_hours: int = DEFAULT_STALE_WORKER_HOURS,
     stale_task_days: int = DEFAULT_STALE_TASK_DAYS,
+    stale_incident_hours: int = DEFAULT_STALE_INCIDENT_HOURS,
     worktree_min_age_seconds: int = DEFAULT_WORKTREE_MIN_AGE_SECONDS,
     include_worktrees: bool = True,
     task_store: TaskStore | None = None,
@@ -55,6 +59,7 @@ def run_harness_doctor(
     stale_runs = _stale_runs(run_store, ref=ref, stale_hours=stale_run_hours)
     stale_workers = _stale_workers(worker_store, ref=ref, stale_hours=stale_worker_hours)
     stale_tasks = _stale_open_tasks(task_store, run_store, ref=ref, stale_days=stale_task_days)
+    stale_incidents = _stale_incidents(incident_store, task_store, ref=ref, stale_hours=stale_incident_hours)
     if include_worktrees:
         worktrees = reap_orphan_worktrees(
             min_age_seconds=max(0, int(worktree_min_age_seconds or 0)),
@@ -71,6 +76,12 @@ def run_harness_doctor(
         "closed_worker_session_ids": [],
         "blocked_task_ids": [],
         "blocked_task_incident_ids": [],
+        "archived_task_ids": [],
+        "waiting_for_operator_task_ids": [],
+        "waiting_for_operator_incident_ids": [],
+        "closed_incident_ids": [],
+        "closed_incident_count_by_kind": {},
+        "incident_sweep_reason": STALE_BULK_CLOSE_REASON,
         "worktrees_reaped": [] if not fix or dry_run else [item.get("worktree") for item in worktrees.get("reaped", []) if item.get("worktree")],
         "dry_run": bool(dry_run),
     }
@@ -79,12 +90,16 @@ def run_harness_doctor(
             repairs["stale_run_ids"] = [item["run_id"] for item in stale_runs]
             repairs["closed_worker_session_ids"] = [item["worker_session_id"] for item in stale_workers]
             repairs["blocked_task_ids"] = [item["task_id"] for item in stale_tasks]
+            repairs["archived_task_ids"] = [item["task_id"] for item in stale_tasks]
+            repairs["closed_incident_ids"] = [item["incident_id"] for item in stale_incidents]
+            repairs["closed_incident_count_by_kind"] = _count_by_key(stale_incidents, "kind")
         else:
             repairs.update(
                 _repair_stale_runtime(
                     stale_runs=stale_runs,
                     stale_workers=stale_workers,
                     stale_tasks=stale_tasks,
+                    stale_incidents=stale_incidents,
                     run_store=run_store,
                     worker_store=worker_store,
                     task_store=task_store,
@@ -97,6 +112,7 @@ def run_harness_doctor(
         "stale_runs": len(stale_runs),
         "stale_workers": len(stale_workers),
         "stale_open_tasks": len(stale_tasks),
+        "stale_incidents": len(stale_incidents),
         "orphan_worktrees": len(worktrees.get("reaped") or []),
         "snapshot_null_id_rows": len(snapshot_defects),
     }
@@ -109,6 +125,7 @@ def run_harness_doctor(
             "stale_run_hours": int(stale_run_hours),
             "stale_worker_hours": int(stale_worker_hours),
             "stale_task_days": int(stale_task_days),
+            "stale_incident_hours": int(stale_incident_hours),
             "worktree_min_age_seconds": int(worktree_min_age_seconds),
             "include_worktrees": bool(include_worktrees),
         },
@@ -123,6 +140,7 @@ def run_harness_doctor(
             "stale_runs": stale_runs,
             "stale_workers": stale_workers,
             "stale_open_tasks": stale_tasks,
+            "stale_incidents": stale_incidents,
             "orphan_worktrees": worktrees,
             "snapshot_null_id_rows": snapshot_defects,
         },
@@ -199,11 +217,70 @@ def _stale_open_tasks(
     return findings
 
 
+def _stale_incidents(
+    incident_store: IncidentStore,
+    task_store: TaskStore,
+    *,
+    ref: datetime,
+    stale_hours: int,
+) -> list[dict[str, Any]]:
+    cutoff = ref - timedelta(hours=max(1, int(stale_hours or 1)))
+    open_incidents = incident_store.list_open()
+    findings: list[dict[str, Any]] = []
+
+    newest_budget_incident_by_group: dict[tuple[str | None, str | None, str, str], str] = {}
+    budget_incidents = [incident for incident in open_incidents if incident.kind == "mission_budget_exceeded"]
+    for incident in budget_incidents:
+        group = (incident.task_id, incident.run_id, incident.kind, incident.summary)
+        current_id = newest_budget_incident_by_group.get(group)
+        if current_id is None:
+            newest_budget_incident_by_group[group] = incident.id
+            continue
+        current = next((item for item in budget_incidents if item.id == current_id), None)
+        if current is None or _aware(incident.opened_at) > _aware(current.opened_at):
+            newest_budget_incident_by_group[group] = incident.id
+
+    for incident in open_incidents:
+        opened_at = _aware(getattr(incident, "opened_at", None))
+        if opened_at is None or opened_at >= cutoff:
+            continue
+        reason: str | None = None
+        task_state: str | None = None
+        if incident.task_id:
+            try:
+                task = task_store.get(incident.task_id)
+                task_state = task.state.value
+                if task.state in {TaskState.DONE, TaskState.CANCELLED}:
+                    reason = "terminal_task"
+            except NotFound:
+                reason = "missing_task"
+        if reason is None and incident.kind == "mission_budget_exceeded":
+            group = (incident.task_id, incident.run_id, incident.kind, incident.summary)
+            if newest_budget_incident_by_group.get(group) != incident.id:
+                reason = "duplicate_budget_incident"
+        if reason is None:
+            continue
+        findings.append(
+            {
+                "incident_id": incident.id,
+                "task_id": incident.task_id,
+                "run_id": incident.run_id,
+                "kind": incident.kind,
+                "opened_age_seconds": _age_seconds(ref, opened_at),
+                "reason": reason,
+                "task_state": task_state,
+                "close_reason": STALE_BULK_CLOSE_REASON,
+            }
+        )
+    return findings
+
+
 def _repair_stale_runtime(
     *,
     stale_runs: list[dict[str, Any]],
     stale_workers: list[dict[str, Any]],
     stale_tasks: list[dict[str, Any]],
+    stale_incidents: list[dict[str, Any]],
     run_store: RunStore,
     worker_store: WorkerSessionStore,
     task_store: TaskStore,
@@ -215,7 +292,22 @@ def _repair_stale_runtime(
         "closed_worker_session_ids": [],
         "blocked_task_ids": [],
         "blocked_task_incident_ids": [],
+        "archived_task_ids": [],
+        "archive_results": [],
+        "waiting_for_operator_task_ids": [],
+        "waiting_for_operator_incident_ids": [],
+        "closed_incident_ids": [],
+        "closed_incident_count_by_kind": {},
+        "incident_sweep_reason": STALE_BULK_CLOSE_REASON,
     }
+    for item in stale_incidents:
+        incident_id = item["incident_id"]
+        try:
+            incident = incident_store.close(incident_id, reason=STALE_BULK_CLOSE_REASON)
+        except Exception:
+            continue
+        repairs["closed_incident_ids"].append(incident.id)
+    repairs["closed_incident_count_by_kind"] = _count_by_incident_kind(repairs["closed_incident_ids"], incident_store)
     for item in stale_runs:
         run_id = item["run_id"]
         try:
@@ -251,14 +343,43 @@ def _repair_stale_runtime(
         repairs["closed_worker_session_ids"].append(worker.id)
     for item in stale_tasks:
         task_id = item["task_id"]
+        try:
+            task = task_store.get(task_id)
+        except Exception:
+            continue
+        try:
+            if task.state not in {TaskState.DONE, TaskState.CANCELLED}:
+                task = task_store.cancel(
+                    task_id,
+                    actor="doctor",
+                    reason="stale open task archived by Harness doctor",
+                )
+            archive_result = task_store.archive(
+                task.id,
+                actor="doctor",
+                reason="stale open task archived by Harness doctor",
+            )
+            archived_ids = list(archive_result.get("archived_task_ids") or [])
+            if task.id in archived_ids:
+                repairs["archived_task_ids"].append(task.id)
+                repairs["archive_results"].append(archive_result)
+                continue
+        except Exception:
+            pass
         incident = _open_or_get_incident(
             incident_store,
             task_id=task_id,
             run_id=None,
-            kind="stale_open_task",
-            summary="Open task idled past Harness doctor threshold.",
+            kind="operator_intervention",
+            summary="Open task idled past Harness doctor threshold; operator disposition required.",
+            metadata={
+                "source": "harness_doctor",
+                "intervention": "waiting_for_operator",
+                "stale_reason": "open task idle exceeded Harness doctor threshold",
+            },
         )
         repairs["blocked_task_incident_ids"].append(incident.id)
+        repairs["waiting_for_operator_incident_ids"].append(incident.id)
         try:
             task = task_store.get(task_id)
             if incident.id not in (task.open_incident_ids or []):
@@ -266,14 +387,13 @@ def _repair_stale_runtime(
             if task.state != TaskState.BLOCKED:
                 task.state = TaskState.BLOCKED
                 task.updated_at = now()
-                task_store.update(
-                    task,
-                    actor="doctor",
-                    reason="open task idle exceeded Harness doctor threshold",
-                )
-            else:
-                task_store.update(task, actor="doctor", reason="doctor linked stale task incident")
+            task_store.update(
+                task,
+                actor="doctor",
+                reason="stale open task moved to waiting_for_operator intervention",
+            )
             repairs["blocked_task_ids"].append(task.id)
+            repairs["waiting_for_operator_task_ids"].append(task.id)
         except Exception:
             continue
     return repairs
@@ -286,6 +406,7 @@ def _open_or_get_incident(
     run_id: str | None,
     kind: str,
     summary: str,
+    metadata: dict[str, Any] | None = None,
 ) -> Incident:
     for incident in incident_store.list_open():
         if incident.task_id == task_id and incident.run_id == run_id and incident.kind == kind:
@@ -299,7 +420,7 @@ def _open_or_get_incident(
             summary=summary,
             detail_path=None,
             opened_at=now(),
-            metadata={"source": "harness_doctor"},
+            metadata=metadata or {"source": "harness_doctor"},
         )
     )
 
@@ -323,13 +444,13 @@ def _snapshot_null_id_defects(snapshot_builder: Callable[[], dict[str, Any]]) ->
     except Exception as exc:
         return [{"collection": "snapshot", "index": None, "id_key": None, "reason": type(exc).__name__}]
     expected = {
-        "tasks": "id",
+        "tasks": "task_id",
         "goals": "id",
         "agents": "persona_id",
-        "runs": "id",
+        "runs": "run_id",
         "worker_sessions": "worker_session_id",
         "persona_instances": "persona_instance_id",
-        "repo_bundles": "id",
+        "repo_bundles": "repo_bundle_id",
         "runtime_instances": "id",
     }
     defects: list[dict[str, Any]] = []
@@ -359,6 +480,8 @@ def _emit_doctor_fix_event(event_log: EventLog, repairs: dict[str, Any]) -> None
                     "stale_runs": len(repairs.get("stale_run_ids") or []),
                     "stale_workers": len(repairs.get("closed_worker_session_ids") or []),
                     "stale_tasks": len(repairs.get("blocked_task_ids") or []),
+                    "archived_tasks": len(repairs.get("archived_task_ids") or []),
+                    "closed_incidents": len(repairs.get("closed_incident_ids") or []),
                     "worktrees": len(repairs.get("worktrees_reaped") or []),
                 },
             )
@@ -377,3 +500,22 @@ def _aware(value: datetime | None) -> datetime | None:
 
 def _age_seconds(ref: datetime, then: datetime) -> int:
     return int(max(0.0, (_aware(ref) - _aware(then)).total_seconds()))
+
+
+def _count_by_key(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(row.get(key) or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _count_by_incident_kind(incident_ids: list[str], incident_store: IncidentStore) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for incident_id in incident_ids:
+        try:
+            incident = incident_store.get(incident_id)
+        except Exception:
+            continue
+        counts[incident.kind] = counts.get(incident.kind, 0) + 1
+    return counts
