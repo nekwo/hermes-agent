@@ -712,15 +712,7 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         return None
 
     tool_name = _safe_trace_text(payload.get("tool_name") or payload.get("tool"), limit=120)
-    summary = _first_safe_trace_text(
-        payload.get("reason") if event_type == "task.transition" else None,
-        payload.get("summary"),
-        payload.get("patch_summary"),
-        payload.get("code_summary"),
-        payload.get("command_label"),
-        payload.get("file_summary"),
-        limit=500,
-    )
+    summary = _trace_summary(event_type, payload)
     status = _safe_trace_text(payload.get("status") or payload.get("to") or payload.get("exit_code"), limit=80)
     files = _safe_trace_file_labels(payload.get("changed_files") or payload.get("files_touched"))
     return {
@@ -775,6 +767,32 @@ def _first_safe_trace_text(*values: Any, limit: int) -> str | None:
         if safe:
             return safe
     return None
+
+
+def _trace_summary(event_type: str, payload: dict[str, Any]) -> str | None:
+    if event_type.startswith("run.tool."):
+        return _first_safe_trace_text(
+            payload.get("command_label"),
+            payload.get("file_summary"),
+            payload.get("patch_summary"),
+            payload.get("code_summary"),
+            payload.get("summary"),
+            limit=500,
+        )
+    if event_type == "run.progress":
+        summary = _safe_trace_text(payload.get("summary"), limit=500)
+        if summary in {"Run progress update.", "Run progress update"}:
+            return None
+        return summary
+    return _first_safe_trace_text(
+        payload.get("reason") if event_type == "task.transition" else None,
+        payload.get("summary"),
+        payload.get("patch_summary"),
+        payload.get("code_summary"),
+        payload.get("command_label"),
+        payload.get("file_summary"),
+        limit=500,
+    )
 
 
 def _safe_trace_text(value: Any, *, limit: int) -> str | None:
