@@ -16,11 +16,11 @@ from .blueprints.store import BlueprintStore, blueprint_summary
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .capabilities import capability_descriptors
 from .config import ensure_persisted_personas, load_agent_runtime_config
-from .daemon import read_daemon_status
+from .daemon import daemon_status_schema
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash, event_catalog
 from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
-from .events import CachedEventLog, EventLog
+from .events import CachedEventLog, EventLog, event_summary_missing, operator_event_summary
 from .migrations import effective_config_summary, migration_status
 from .mission_plan import mission_plan_summary, task_stage_records
 from .observability import build_observability
@@ -33,6 +33,7 @@ from .persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    active_persona_instance_agent_summaries,
     persona_assignment_store_enabled,
     persona_assignment_summary,
     persona_instance_runtime_enabled,
@@ -150,7 +151,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
         self_tests.extend(SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id))
-    daemon_status = read_daemon_status()
+    daemon_status = daemon_status_schema()
     recent_events = event_log.tail(20)
     active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
     active_workers = worker_session_store.find_active()
@@ -167,6 +168,10 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         instance_store = PersonaInstanceStore(event_log=event_log)
         persona_instances = instance_store.derive_from_workers(agents, workers)
         topology_persona_instances = persona_instances
+        agent_summaries = [
+            *agent_summaries,
+            *active_persona_instance_agent_summaries(persona_instances, personas_by_id),
+        ]
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     session_db = _default_persona_session_db()
@@ -334,13 +339,14 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         data,
         build_started=_build_started,
         last_event=recent_events[-1] if recent_events else None,
+        recent_events=recent_events,
         completeness=completeness,
         drop_samples=drop_samples,
     )
     return data
 
 
-def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples):
+def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples, recent_events=None):
     """The S0 observability envelope: provenance + completeness + parity warnings.
 
     Additive and self-describing — turns the snapshot's silent drops into reported
@@ -352,6 +358,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
     watermark = events_watermark(last_event_ts=last_ts)
     resolution = resolve_runtime()
     warnings = _parity_warnings(data)
+    warnings.extend(_event_summary_warnings(recent_events or []))
     if suspect_default_root(resolution):
         warnings.append(
             {
@@ -509,6 +516,27 @@ def _parity_warnings(data) -> list[dict]:
             {
                 "code": "open_tasks_without_task_rows",
                 "detail": "summary reports open tasks but no task rows were mapped",
+            }
+        )
+    return warnings
+
+
+def _event_summary_warnings(events) -> list[dict]:
+    warnings: list[dict] = []
+    for event in events:
+        try:
+            missing = event_summary_missing(event)
+        except Exception:
+            missing = False
+        if not missing:
+            continue
+        warnings.append(
+            {
+                "code": "event_summary_missing",
+                "event_type": getattr(event, "type", None),
+                "task_id": getattr(event, "task_id", None),
+                "run_id": getattr(event, "run_id", None),
+                "detail": "operator-visible event is missing a redaction-safe summary",
             }
         )
     return warnings
@@ -1207,6 +1235,7 @@ def _archived_transcript_events(task_id: str, runs: list[dict], proofs: list[dic
                     "run_id": run.get("run_id"),
                     "persona_id": run.get("persona_id"),
                     "summary": "Agent decision process summarized",
+                    "event_id": f"progress:{run.get('run_id') or 'archived'}:thinking_process:decision_summary",
                     "phase": "thinking_process",
                     "step": "decision_summary",
                     "status": "completed",
@@ -1292,7 +1321,7 @@ def _archived_role_streams(
         if not role_id or role_id in seen:
             continue
         seen.add(role_id)
-        role_events = [event for event in events if str(event.get("persona_id") or "") == role_id]
+        role_events = _coalesced_archived_progress_events([event for event in events if str(event.get("persona_id") or "") == role_id])
         stream_events = [_archived_event_stream_item(event) for event in role_events][-20:]
         stream_envelopes = [item for item in role_envelopes if str(item.get("role_id") or "") == role_id]
         stream_checklists = [item for item in role_checklists if str(item.get("role_id") or "") == role_id]
@@ -1323,7 +1352,13 @@ def _archived_role_streams(
 
 def _archived_event_stream_item(event: dict) -> dict:
     event_type = str(event.get("type") or "event")
-    summary = _safe_text(event.get("summary"))
+    summary = _safe_text(
+        event.get("summary")
+        or event.get("display_summary")
+        or event.get("status")
+        or event.get("reasoning_summary")
+        or _archived_event_display_title(event_type, event)
+    )
     payload = {
         "display_kind": event.get("display_kind") or _archived_event_display_kind(event_type),
         "display_title": event.get("display_title") or _archived_event_display_title(event_type, event),
@@ -1348,6 +1383,7 @@ def _archived_event_stream_item(event: dict) -> dict:
         "rationale",
         "reasoning_summary",
         "artifact_refs",
+        "event_id",
     ):
         if event.get(key) is not None:
             payload[key] = event.get(key)
@@ -1360,6 +1396,21 @@ def _archived_event_stream_item(event: dict) -> dict:
         "persona_id": event.get("persona_id"),
         "payload": payload,
     }
+
+
+def _coalesced_archived_progress_events(events: list[dict]) -> list[dict]:
+    items: list[dict] = []
+    index_by_progress_id: dict[str, int] = {}
+    for event in events:
+        event_id = str(event.get("event_id") or "").strip()
+        if str(event.get("type") or "") == "run.progress" and event_id:
+            existing = index_by_progress_id.get(event_id)
+            if existing is not None:
+                items[existing] = event
+                continue
+            index_by_progress_id[event_id] = len(items)
+        items.append(event)
+    return items
 
 
 def _empty_archived_role_stream_item(raw: dict, persona_id: str) -> dict:
@@ -2248,7 +2299,7 @@ def _mission_flow_timeline(task, events) -> dict:
                 "depends_on": list(getattr(stage, "depends_on", []) or []),
             }
         )
-    for event in [event for event in events if event.task_id == task.id][-20:]:
+    for event in [event for event in _coalesced_progress_events(events) if event.task_id == task.id][-20:]:
         display = _event_display_projection(event)
         items.append(
             {
@@ -2653,9 +2704,25 @@ def _task_timeline(task_id, events):
             "persona_id": event.persona_id,
             **_event_display_projection(event),
         }
-        for event in events
+        for event in _coalesced_progress_events(events)
         if event.task_id == task_id
     ][-20:]
+
+
+def _coalesced_progress_events(events):
+    items = []
+    index_by_progress_id: dict[str, int] = {}
+    for event in events or []:
+        payload = event.payload if isinstance(getattr(event, "payload", None), dict) else {}
+        event_id = str(payload.get("event_id") or "").strip()
+        if event.type == "run.progress" and event_id:
+            existing = index_by_progress_id.get(event_id)
+            if existing is not None:
+                items[existing] = event
+                continue
+            index_by_progress_id[event_id] = len(items)
+        items.append(event)
+    return items
 
 
 def _role_streams(task, events, runs, workers, *, persona_assignments=None, role_envelopes=None, role_checklists=None, proof_batches=None) -> list[dict]:
@@ -2683,7 +2750,7 @@ def _role_streams(task, events, runs, workers, *, persona_assignments=None, role
         if not role_id or role_id in seen:
             continue
         seen.add(role_id)
-        role_events = [event for event in events if event.task_id == task.id and event.persona_id == role_id]
+        role_events = _coalesced_progress_events([event for event in events if event.task_id == task.id and event.persona_id == role_id])
         role_runs = [run for run in runs if getattr(run, "task_id", None) == task.id and getattr(run, "persona_id", None) == role_id]
         role_workers = [worker for worker in workers if getattr(worker, "task_id", None) == task.id and getattr(worker, "persona_id", None) == role_id]
         role_assignments = [assignment for assignment in (persona_assignments or []) if assignment.task_id == task.id and assignment.persona_id == role_id]
@@ -2735,11 +2802,11 @@ def _stage_streams(task, events) -> list[dict]:
         stage_id = getattr(stage, "id", None)
         if not stage_id:
             continue
-        stage_events = [
+        stage_events = _coalesced_progress_events([
             event
             for event in events
             if event.task_id == task.id and (event.payload or {}).get("stage_id") == stage_id
-        ]
+        ])
         streams.append(
             {
                 "stage_id": stage_id,
@@ -2810,6 +2877,8 @@ def _event_display_projection(event) -> dict:
     kind = _event_display_kind(event.type, payload)
     title = _event_display_title(event.type, payload, kind)
     summary = _safe_text(str(payload.get("summary") or payload.get("status") or payload.get("reason") or ""))
+    if not summary:
+        summary = _safe_text(operator_event_summary(event) or "")
     refs = []
     for key in ("proof_id", "evidence_id", "packet_id"):
         value = payload.get(key)
@@ -2822,7 +2891,7 @@ def _event_display_projection(event) -> dict:
         "artifact_refs": refs,
         "redaction_status": payload.get("redaction_status"),
     }
-    for key in ("phase", "step", "status", "decision_type", "reasoning_summary"):
+    for key in ("event_id", "phase", "step", "status", "decision_type", "reasoning_summary"):
         value = payload.get(key)
         if isinstance(value, str):
             safe = _safe_text(value)

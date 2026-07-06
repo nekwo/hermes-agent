@@ -7,6 +7,7 @@ from pathlib import Path
 
 from hermes_time import now
 from hermes_cli.harness import build_parser
+from agent_runtime import paths
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.goal_runner import GoalRunResult
 from agent_runtime.models import AgentRun, Incident, Proof, Task
@@ -348,6 +349,45 @@ def test_harness_parser_exposes_daemon_start_status_stop():
     assert p.parse_args(["harness", "daemon", "status", "--json"]).daemon_command == "status"
     assert p.parse_args(["harness", "daemon", "stop", "--json"]).daemon_command == "stop"
     assert p.parse_args(["harness", "daemon", "run-once", "--json"]).daemon_command == "run-once"
+
+
+def test_harness_status_and_daemon_status_share_daemon_schema(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    status_path = paths.daemon_status_path()
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "state": "idle",
+                "pid": None,
+                "heartbeat_at": "2026-07-06T12:00:00Z",
+                "target_task_id": "task_1",
+                "settle_stop_reason": "idle",
+                "loops": 7,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    daemon_args = parser().parse_args(["harness", "daemon", "status", "--json"])
+    assert daemon_args.func(daemon_args) == 0
+    daemon_data = json.loads(capsys.readouterr().out)
+
+    status_args = parser().parse_args(["harness", "status", "--json"])
+    assert status_args.func(status_args) == 0
+    status_data = json.loads(capsys.readouterr().out)
+
+    assert status_data["daemon"] == daemon_data
+    assert set(daemon_data) >= {
+        "schema_version",
+        "field_set_version",
+        "state",
+        "pid",
+        "heartbeat_at",
+        "target_task_id",
+        "settle_stop_reason",
+        "loops",
+    }
 
 
 def test_harness_parser_exposes_doctor_fix_flags():

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from hermes_time import now
@@ -13,6 +14,7 @@ from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.events import EventLog
+from agent_runtime.serde import to_jsonable
 
 
 def test_agent_topology_collapses_multi_turn_instances_to_one_node_per_persona(isolate_agent_runtime_root):
@@ -57,6 +59,64 @@ def test_snapshot_contains_task_summary_and_no_raw_logs(isolate_agent_runtime_ro
     assert snap["dirty_state"]["runtime"]["open_task_ids"] == ["t"]
     write_snapshot(snap)
     assert (isolate_agent_runtime_root / "snapshot.json").exists()
+
+
+def test_snapshot_parity_warns_on_legacy_operator_event_without_summary(isolate_agent_runtime_root):
+    raw_event = Event(now(), "run.opened", "task_legacy", "run_legacy", "dev", {"stage_id": "impl"})
+    payload = to_jsonable(raw_event)
+    payload["payload"].pop("summary", None)
+    events_path = isolate_agent_runtime_root / "events.jsonl"
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    snap = build_snapshot()
+
+    assert any(
+        warning.get("code") == "event_summary_missing" and warning.get("event_type") == "run.opened"
+        for warning in snap["parity"]["warnings"]
+    )
+
+
+def test_snapshot_coalesces_progress_events_by_event_id(isolate_agent_runtime_root):
+    n = now()
+    TaskStore().create(
+        Task(
+            id="task_progress_coalesce",
+            title="Progress coalesce",
+            description="collapse repeated proof progress",
+            state=TaskState.RUNNING,
+            created_at=n,
+            updated_at=n,
+            requested_by="tony",
+        )
+    )
+    log = EventLog()
+    for status in ("running", "still_running"):
+        log.append(
+            Event(
+                n,
+                "run.progress",
+                "task_progress_coalesce",
+                "run_progress",
+                "dev",
+                {
+                    "event_id": "progress:run_progress:proof:proof_command_running:1",
+                    "phase": "proof",
+                    "step": "proof_command_running",
+                    "status": status,
+                    "summary": f"proof is {status}",
+                },
+            )
+        )
+
+    snap = build_snapshot()
+    timeline = [item for item in snap["tasks"][0]["timeline"] if item["type"] == "run.progress"]
+
+    assert len(timeline) == 1
+    assert timeline[0]["display_summary"] == "proof is still_running"
 
 
 def test_snapshot_projects_blueprint_run_records(isolate_agent_runtime_root):

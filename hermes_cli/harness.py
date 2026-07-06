@@ -29,7 +29,7 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.default_plan import ensure_default_mission_plan
-from agent_runtime.daemon import MissionDaemon, read_daemon_status, start_daemon, stop_daemon
+from agent_runtime.daemon import MissionDaemon, daemon_status_schema, read_daemon_status, start_daemon, stop_daemon
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
@@ -5963,7 +5963,7 @@ def _cmd_daemon(args) -> int:
         print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')}")
         return 0
     if command == "status" or (not command and not args.foreground):
-        data = read_daemon_status()
+        data = daemon_status_schema()
         print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')}")
         return 0
     os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))

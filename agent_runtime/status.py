@@ -4,7 +4,7 @@ import time
 
 from .config import ensure_persisted_personas, load_agent_runtime_config
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
-from .daemon import read_daemon_status
+from .daemon import daemon_status_schema
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .dirty_state import build_dirty_state
 from .events import EventLog
@@ -14,6 +14,7 @@ from .parity import ProjectionAccountant
 from .persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    active_persona_instance_agent_summaries,
     persona_assignment_store_enabled,
     persona_assignment_summary,
     persona_instance_runtime_enabled,
@@ -52,7 +53,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     proofs = []
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
-    daemon_status = read_daemon_status()
+    daemon_status = daemon_status_schema()
     from .burn_in import certification_summary
 
     cert = certification_summary()
@@ -136,6 +137,11 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         instances = instance_store.derive_from_workers(agents, workers)
+        personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
+        data["agents"] = [
+            *data["agents"],
+            *active_persona_instance_agent_summaries(instances, personas_by_id),
+        ]
         data["persona_instance_runtime"] = {
             "enabled": True,
             "assignment_store_enabled": persona_assignment_store_enabled(cfg),
@@ -182,6 +188,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         data,
         build_started=_build_started,
         last_event=recent_events[-1] if recent_events else None,
+        recent_events=recent_events,
         completeness=completeness,
         drop_samples=drop_samples,
     )

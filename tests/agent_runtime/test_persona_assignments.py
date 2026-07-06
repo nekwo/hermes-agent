@@ -558,8 +558,18 @@ def test_status_and_snapshot_expose_persona_instances_when_enabled(monkeypatch, 
 
     assert status["persona_instance_runtime"]["enabled"] is True
     assert {item["persona_id"] for item in status["persona_instances"]} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
+    status_lane_agents = {item["persona_id"]: item for item in status["agents"]}
+    assert "personainst_dev" in status_lane_agents
+    assert status_lane_agents["personainst_dev"]["source_persona_id"] == "dev"
+    assert isinstance(status_lane_agents["personainst_dev"]["agent_hud_state"], dict)
+    assert isinstance(status_lane_agents["personainst_dev"]["tool_resolution"], dict)
     assert snapshot["persona_instance_runtime"]["enabled"] is True
     assert {item["persona_id"] for item in snapshot["persona_instances"]} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
+    snapshot_lane_agents = {item["persona_id"]: item for item in snapshot["agents"]}
+    assert "personainst_dev" in snapshot_lane_agents
+    assert snapshot_lane_agents["personainst_dev"]["source_persona_id"] == "dev"
+    assert isinstance(snapshot_lane_agents["personainst_dev"]["agent_hud_state"], dict)
+    assert isinstance(snapshot_lane_agents["personainst_dev"]["tool_resolution"], dict)
 
 
 def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, isolate_agent_runtime_root):

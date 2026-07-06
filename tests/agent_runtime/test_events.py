@@ -247,6 +247,46 @@ def test_event_log_for_session_type_filter_counts_matches_not_raw_rows(isolate_a
     assert [event.payload["summary"] for event in typed] == [f"turn {index}" for index in range(4)]
 
 
+def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_root):
+    log = EventLog()
+    samples = [
+        Event(now(), "patch.proposed", "task_1", "run_1", "dev", {"changed_files": ["a.py"]}),
+        Event(now(), "repo_bundle.assigned", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "assigned"}),
+        Event(now(), "repo_bundle.updated", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "running"}),
+        Event(now(), "repo_bundle.delivered", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "delivered_waiting_for_qa", "proof_count": 0, "diff_captured": False}),
+        Event(now(), "role_session.closed", "task_1", "run_1", "qa", {"close_reason": "proof_passed"}),
+        Event(now(), "run.opened", "task_1", "run_1", "dev", {"stage_id": "impl"}),
+        Event(now(), "run.closed", "task_1", "run_1", "dev", {"state": "completed", "decision_type": "deliver"}),
+    ]
+
+    for event in samples:
+        log.append(event)
+
+    events = list(log.iter_all())
+    assert all(str(event.payload.get("summary") or "").strip() for event in events)
+    delivered = next(event for event in events if event.type == "repo_bundle.delivered")
+    assert "captured:false" in delivered.payload["summary"]
+
+
+def test_run_progress_receives_stable_event_id(isolate_agent_runtime_root):
+    log = EventLog()
+
+    log.append(
+        Event(
+            now(),
+            "run.progress",
+            "task_1",
+            "run_1",
+            "dev",
+            {"phase": "proof", "step": "proof_command_running", "status": "running", "command_index": 1},
+        )
+    )
+
+    event = list(log.iter_all())[0]
+    assert event.payload["event_id"] == "progress:run_1:proof:proof_command_running:1"
+    assert event.payload["summary"] == "Progress: proof proof_command_running running."
+
+
 def test_cached_event_log_type_filter_matches_base(isolate_agent_runtime_root):
     from agent_runtime.events import CachedEventLog
 

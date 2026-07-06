@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Collection, Iterator
 from datetime import datetime
 
@@ -15,11 +16,28 @@ EVENT_PAYLOAD_LIMIT_BYTES = 4096
 
 ALLOWED_EVENT_TYPES = allowed_event_types()
 
+OPERATOR_SUMMARY_EVENT_TYPES = frozenset(
+    {
+        "patch.proposed",
+        "repo_bundle.delivered",
+        "repo_bundle.updated",
+        "repo_bundle.assigned",
+        "role_session.closed",
+        "run.opened",
+        "run.closed",
+        "run.progress",
+        "run.tool.started",
+        "run.tool.finished",
+        "run.approval_required",
+    }
+)
+
 
 class EventLog:
     def append(self, evt: Event) -> None:
         if evt.type not in ALLOWED_EVENT_TYPES:
             raise ValueError(f"unknown event type: {evt.type}")
+        evt = event_with_operator_summary(evt)
         payload_bytes = json.dumps(to_jsonable(evt.payload), ensure_ascii=False).encode("utf-8")
         if len(payload_bytes) > EVENT_PAYLOAD_LIMIT_BYTES:
             raise EventPayloadTooLarge(
@@ -292,3 +310,181 @@ def _type_json_tokens(types: Collection[str] | None) -> tuple[str, ...] | None:
         f'"type":{json.dumps(str(event_type), ensure_ascii=False, separators=(",", ":"))}'
         for event_type in sorted(types)
     )
+
+
+def event_with_operator_summary(evt: Event) -> Event:
+    """Ensure operator-visible events always carry a redaction-safe summary."""
+
+    payload = evt.payload if isinstance(evt.payload, dict) else {}
+    summary = operator_event_summary(evt)
+    changed = payload is not evt.payload
+    if evt.type == "run.progress" and not _safe_text(payload.get("event_id")):
+        event_id = _progress_event_id(evt, payload)
+        if event_id:
+            payload = dict(payload)
+            payload["event_id"] = event_id
+            changed = True
+    if summary and _safe_text(payload.get("summary")) != summary:
+        payload = dict(payload)
+        payload["summary"] = summary
+        changed = True
+    if not changed:
+        return evt
+    return Event(
+        ts=evt.ts,
+        type=evt.type,
+        task_id=evt.task_id,
+        run_id=evt.run_id,
+        persona_id=evt.persona_id,
+        payload=payload,
+        session_id=evt.session_id,
+    )
+
+
+def operator_event_summary(evt: Event) -> str | None:
+    if evt.type not in OPERATOR_SUMMARY_EVENT_TYPES:
+        return None
+    payload = evt.payload if isinstance(evt.payload, dict) else {}
+    existing = _safe_text(payload.get("summary"))
+    if existing:
+        return existing
+    event_type = evt.type
+    if event_type == "run.opened":
+        actor = _label(evt.persona_id, "agent")
+        stage = _safe_text(payload.get("stage_id"))
+        return f"Opened {actor} run" + (f" for {stage}." if stage else ".")
+    if event_type == "run.closed":
+        actor = _label(evt.persona_id, "agent")
+        state = _safe_text(payload.get("state")) or "closed"
+        decision = _safe_text(payload.get("decision_type"))
+        return f"Closed {actor} run as {state}" + (f" after {decision}." if decision else ".")
+    if event_type == "role_session.closed":
+        role = _label(evt.persona_id or payload.get("role_id"), "role")
+        reason = _safe_text(payload.get("close_reason")) or "closed"
+        return f"Closed {role} role session: {reason}."
+    if event_type == "patch.proposed":
+        changed = (
+            _safe_int(payload.get("changed_file_count"))
+            or _safe_count(payload.get("changed_files"))
+            or _safe_count(payload.get("files_touched"))
+        )
+        prefix = "Proposed patch"
+        if payload.get("no_edit_findings_delivery"):
+            prefix = "Proposed no-edit findings delivery"
+        if changed:
+            return f"{prefix}: {changed} file{'s' if changed != 1 else ''} touched."
+        return f"{prefix}."
+    if event_type in {"repo_bundle.assigned", "repo_bundle.updated", "repo_bundle.delivered"}:
+        repo = _safe_text(payload.get("repo")) or _safe_text(payload.get("repo_bundle_id")) or "repo bundle"
+        state = _safe_text(payload.get("state"))
+        if event_type == "repo_bundle.assigned":
+            return f"Assigned {repo} bundle" + (f" ({state})." if state else ".")
+        if event_type == "repo_bundle.updated":
+            reason = _safe_text(payload.get("reason"))
+            return f"Updated {repo} bundle" + (f" to {state}" if state else "") + (f": {reason}." if reason else ".")
+        captured = payload.get("captured")
+        if captured is None:
+            captured = payload.get("diff_captured")
+        capture_label = f"captured:{str(bool(captured)).lower()}" if captured is not None else "capture unknown"
+        proof_count = _safe_int(payload.get("proof_count"))
+        suffix = f", {proof_count} proof{'s' if proof_count != 1 else ''}" if proof_count is not None else ""
+        return f"Delivered {repo} bundle ({capture_label}{suffix})."
+    if event_type == "run.progress":
+        parts = [
+            _safe_text(payload.get("phase")),
+            _safe_text(payload.get("step")),
+            _safe_text(payload.get("status")),
+        ]
+        text = " ".join(part for part in parts if part)
+        return f"Progress: {text}." if text else "Run progress update."
+    if event_type.startswith("run.tool."):
+        tool = _safe_text(payload.get("tool_name")) or _safe_text(payload.get("tool")) or "tool"
+        status = _safe_text(payload.get("status")) or ("started" if event_type.endswith(".started") else "finished")
+        return f"{tool} {status}."
+    if event_type == "run.approval_required":
+        return "Run is waiting on approval."
+    return event_type.replace(".", " ").title() + "."
+
+
+def event_summary_missing(evt: Event) -> bool:
+    if evt.type not in OPERATOR_SUMMARY_EVENT_TYPES:
+        return False
+    payload = evt.payload if isinstance(evt.payload, dict) else {}
+    return not bool(_safe_text(payload.get("summary")))
+
+
+def _progress_event_id(evt: Event, payload: dict) -> str | None:
+    run_id = _safe_token(evt.run_id) or _safe_token(payload.get("run_id"))
+    if not run_id:
+        return None
+    phase = _safe_token(payload.get("phase"))
+    if not phase:
+        return None
+    step = _safe_token(payload.get("step")) or "update"
+    command_index = _safe_token(payload.get("command_index"))
+    timing_key = _safe_token(payload.get("timing_key"))
+    proof_id = _safe_token(payload.get("proof_id"))
+    parts = ["progress", run_id, phase, step]
+    for value in (command_index, timing_key, proof_id):
+        if value:
+            parts.append(value)
+    return ":".join(parts)
+
+
+def _safe_text(value, *, limit: int = 240) -> str | None:
+    if value is None:
+        return None
+    text = " ".join(str(value).strip().split())
+    if not text or _looks_sensitive_or_pathish(text):
+        return None
+    return f"{text[: limit - 3]}..." if len(text) > limit else text
+
+
+def _label(value, fallback: str) -> str:
+    return (_safe_text(value, limit=80) or fallback).replace("_", " ")
+
+
+def _safe_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_count(value) -> int | None:
+    if isinstance(value, list):
+        return len(value)
+    return _safe_int(value)
+
+
+def _safe_token(value) -> str | None:
+    text = str(value or "").strip()
+    if not text or _looks_sensitive_or_pathish(text):
+        return None
+    safe = re.sub(r"[^A-Za-z0-9_.:-]+", "_", text)[:120].strip("_")
+    return safe or None
+
+
+def _looks_sensitive_or_pathish(value: str) -> bool:
+    lowered = value.lower()
+    sensitive_markers = (
+        "secret",
+        "token",
+        "password",
+        "api_key",
+        "apikey",
+        "authorization",
+        "bearer",
+        "credential",
+        "cookie",
+        "private_key",
+        "sk-",
+        "passwd",
+    )
+    if any(marker in lowered for marker in sensitive_markers):
+        return True
+    if ":/" in value or "\\" in value or value.startswith(("/", "~")):
+        return True
+    return bool(re.search(r"(^|\s)([A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", value))

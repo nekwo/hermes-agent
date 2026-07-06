@@ -1199,6 +1199,46 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
     return summary
 
 
+def active_persona_instance_agent_summaries(
+    instances: list[PersonaInstance],
+    personas_by_id: dict[str, AgentPersona] | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    personas_by_id = personas_by_id or {}
+    for instance in instances:
+        instance_id = safe_assignment_token(getattr(instance, "id", None))
+        if not instance_id or instance_id in seen:
+            continue
+        if not _persona_instance_is_active_lane(instance):
+            continue
+        persona_id = safe_assignment_token(getattr(instance, "persona_id", None)) or instance_id
+        row = persona_instance_summary(instance, personas_by_id.get(persona_id))
+        row["runtime_agent_kind"] = "persona_instance"
+        row["source_persona_id"] = persona_id
+        row["persona_id"] = instance_id
+        row["agent_profile_id"] = instance_id
+        row["persona_instance_id"] = instance_id
+        row["base_persona_id"] = persona_id
+        row["display_name"] = row.get("display_name") or instance_id
+        row["agent_hud_state"] = row.get("agent_hud_state") or {}
+        row["tool_resolution"] = row.get("tool_resolution") or {}
+        seen.add(instance_id)
+        rows.append(row)
+    return rows
+
+
+def _persona_instance_is_active_lane(instance: PersonaInstance) -> bool:
+    state = getattr(instance, "state", None)
+    state_text = state.value if hasattr(state, "value") else str(state or "")
+    if state_text in {"running", "assigned", "waiting_on_tool", "waiting_on_proof", "self_healing", "waiting_on_human", "possessed"}:
+        return True
+    return any(
+        bool(getattr(instance, attr, None))
+        for attr in ("current_task_id", "goal_id", "current_assignment_id", "active_worker_session_id", "active_run_id")
+    )
+
+
 def _profile_visibility_persona(instance: PersonaInstance) -> AgentPersona | None:
     profile_id = (instance.profile_id or "").strip()
     persona_id = (instance.persona_id or "").strip()

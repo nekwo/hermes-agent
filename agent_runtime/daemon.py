@@ -21,6 +21,7 @@ from .ticker import RunUntilSettledResult, TickEngine, TickResult
 
 
 DAEMON_LEASE_TTL_SECONDS = 15.0
+DAEMON_STATUS_SCHEMA_VERSION = 1
 
 
 def _is_windows() -> bool:
@@ -621,6 +622,49 @@ def read_daemon_status() -> dict:
     if isinstance(pid, int) and data.get("state") not in {"offline", "error"} and not _pid_is_alive(pid):
         return {"state": "offline", "last_pid": pid, "cleared_reason": "dead_pid"}
     return data
+
+
+def daemon_status_schema(status: dict | None = None) -> dict:
+    """Public, versioned daemon status shape shared by every CLI/status surface."""
+
+    raw = dict(status or read_daemon_status() or {})
+    state = str(raw.get("state") or "offline")
+    loops = raw.get("loops")
+    try:
+        loops = int(loops)
+    except (TypeError, ValueError):
+        loops = 0
+    normalized = {
+        "schema_version": DAEMON_STATUS_SCHEMA_VERSION,
+        "field_set_version": DAEMON_STATUS_SCHEMA_VERSION,
+        "state": state,
+        "pid": raw.get("pid") if isinstance(raw.get("pid"), int) else None,
+        "heartbeat_at": raw.get("heartbeat_at"),
+        "target_task_id": raw.get("target_task_id"),
+        "settle_stop_reason": raw.get("settle_stop_reason"),
+        "loops": loops,
+    }
+    for key in (
+        "last_pid",
+        "last_tick_id",
+        "last_tick_started_at",
+        "last_tick_finished_at",
+        "tasks_seen_last_tick",
+        "actions_last_tick",
+        "next_wake_at",
+        "wait_seconds",
+        "services_open_tasks",
+        "queue_mode",
+        "foreground_runtime_instance_id",
+        "settle_ticks",
+        "liveness",
+        "cleared_by",
+        "cleared_reason",
+        "error",
+    ):
+        if key in raw and key not in normalized:
+            normalized[key] = raw.get(key)
+    return normalized
 
 
 def _read_daemon_lease() -> dict:

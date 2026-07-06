@@ -17,7 +17,7 @@ from .store import RunStore
 from .visual_trace_evidence import record_screenshot_from_progress
 
 _SAFE_PROGRESS_KEYS = {
-    "type", "phase", "severity", "step", "state", "tool", "tool_name", "status",
+    "type", "event_id", "phase", "severity", "step", "state", "tool", "tool_name", "status",
     "summary", "detail", "elapsed_seconds", "duration_ms", "api_calls", "iteration",
     "max_iterations", "compact_count", "exit_code", "total_tokens", "proof_id", "stage_id",
     "proof_count", "decision_type", "validation_status", "error_class", "next_expected",
