@@ -182,10 +182,14 @@ class CompleteDevRuntime:
 class RequestTestRunRuntime:
     def run_tick(self, persona, ctx, *, run):
         return AgentDecision(
-            type=DecisionType.REQUEST_TEST_RUN,
-            summary="Request focused proof.",
-            rationale="Use Harness proof for the current proof-only bundle.",
-            payload={"stage_id": "backend_contract", "commands": ["python -c \"print('ok')\""]},
+            type=DecisionType.HAND_OFF,
+            summary="Deliver focused proof-only bundle.",
+            rationale="Collapsed hand_off lets the Harness run the authoritative proof gate.",
+            payload={
+                "stage_id": "backend_contract",
+                "summary": "Backend contract proof lane is ready for the Harness gate.",
+                "known_gaps": [],
+            },
         )
 
 

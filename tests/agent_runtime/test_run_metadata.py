@@ -54,7 +54,7 @@ def test_tick_persists_session_id_and_llm_metadata():
     stored = runs.get(run_id)
     assert stored.session_id == "session_test_123"
     assert stored.llm["provider"] == "openai-codex"
-    assert stored.llm["decision_type"] == "scope_route"
+    assert stored.llm["decision_type"] == "propose_acceptance"
     assert stored.llm["validation_status"] == "valid"
     timing = stored.llm["timing"]
     assert timing["context_build_ms"] >= 0
@@ -79,7 +79,7 @@ def test_run_events_include_correlation_fields_and_safe_llm_counts():
     assert opened.task_id == "task_meta"
     assert opened.persona_id == "neko_supervisor"
     assert closed.payload["session_id"] == "session_test_123"
-    assert closed.payload["decision_type"] == "scope_route"
+    assert closed.payload["decision_type"] == "propose_acceptance"
     assert closed.payload["validation_status"] == "valid"
     assert closed.payload["total_tokens"] == 15
 

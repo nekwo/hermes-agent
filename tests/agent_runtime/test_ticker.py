@@ -906,7 +906,7 @@ def test_tick_persists_active_run_provider_model_metadata_before_runtime_call():
     assert runtime.llm_seen["provider"] == "openai-codex"
     assert runtime.llm_seen["model"] == "gpt-5.5"
     assert runtime.llm_seen["retry_attempt"] == 1
-    assert runtime.llm_seen["retry_max_attempts"] == 3
+    assert runtime.llm_seen["retry_max_attempts"] == 1
 
 
 def test_tick_uses_persona_specific_live_budget_for_dev_runs():
@@ -1263,11 +1263,10 @@ class DuplicateScreenshotThenVerdictRuntime:
                 },
             )
         return AgentDecision(
-            type=DecisionType.REPORT_QA_VERDICT,
+            type=DecisionType.QA_VERDICT,
             summary="QA approved existing visual proof",
             rationale="The existing command and screenshot proof IDs cover the implementation claim.",
             payload={
-                "review_scope": "implementation",
                 "verdict": "approved",
                 "proof_ids": list(ctx.proof_ids),
                 "findings": [],
@@ -1550,22 +1549,24 @@ def test_missing_provider_dependency_opens_runtime_dependency_incident():
     assert ts.get("task_1").state == TaskState.CREATED
 
 
-def test_transient_provider_ttfb_retries_once_and_records_attempt_visibility():
+def test_transient_provider_ttfb_records_single_attempt_incident():
     ts = TaskStore(); ts.create(make_task())
     runtime = TransientProviderRuntime()
     engine = TickEngine(task_store=ts, persona_runtime=runtime)
 
     res = engine.tick_once()
 
-    assert res.actions_taken[0].ok
-    assert runtime.calls == 2
-    assert engine.incident_store.list_open() == []
-    assert ts.get("task_1").state == TaskState.RUNNING
+    assert not res.actions_taken[0].ok
+    assert runtime.calls == 1
+    incidents = engine.incident_store.list_open()
+    assert len(incidents) == 1
+    assert incidents[0].kind == "provider_failure"
+    assert ts.get("task_1").state == TaskState.CREATED
     runs = sorted(engine.run_store.list_for_task("task_1"), key=lambda run: run.started_at)
-    assert [run.state.value for run in runs] == ["failed", "completed"]
-    assert runs[0].error["retryable"] is True
-    assert runs[1].llm["retry_attempt"] == 2
-    assert res.actions_taken[0].payload["attempts"] == 2
+    assert [run.state.value for run in runs] == ["failed"]
+    assert runs[0].error["retryable"] is False
+    assert runs[0].llm["retry_attempt"] == 1
+    assert res.actions_taken[0].payload["attempts"] == 1
 
 
 def test_tick_skips_mission_with_open_incident():
