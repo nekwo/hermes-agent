@@ -27,6 +27,9 @@ HARNESS_WORKTREE_GC_MIN_AGE_SECONDS = 15 * 60
 # Launcher worktrees are large on Windows; a healthy checkout can spend more
 # than a minute in Git's "Updating files" phase before the agent turn starts.
 HARNESS_WORKTREE_ADD_TIMEOUT_SECONDS = 300
+# Keep the base short enough that large repos with deep generated paths do not
+# fail halfway through worktree materialization on Windows path limits.
+HARNESS_WORKTREE_BASE_MAX_CHARS = 55
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +119,7 @@ def _worktree_token(source_root: Path, *, task_id: str, run_id: str, repo_label:
 
 def _worktree_base_dir() -> Path:
     candidate = paths.store_root() / "wt"
-    if len(str(candidate)) <= 90:
+    if len(str(candidate)) <= HARNESS_WORKTREE_BASE_MAX_CHARS:
         return candidate
     return Path(tempfile.gettempdir()) / "hermes-agent-wt"
 

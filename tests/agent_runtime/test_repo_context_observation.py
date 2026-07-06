@@ -1,8 +1,10 @@
 import os
 import subprocess
 import time
+from pathlib import Path
 
 from agent_runtime.repo_context import (
+    HARNESS_WORKTREE_BASE_MAX_CHARS,
     HARNESS_WORKTREE_ADD_TIMEOUT_SECONDS,
     RepoExecutionContext,
     capture_repo_baseline,
@@ -325,6 +327,16 @@ def test_isolated_repo_context_uses_large_checkout_timeout(tmp_path, monkeypatch
     isolated_repo_context_for_run(source, task_id="task_1", run_id="run_timeout")
 
     assert observed == [HARNESS_WORKTREE_ADD_TIMEOUT_SECONDS]
+
+
+def test_long_runtime_root_uses_short_temp_worktree_base(tmp_path, monkeypatch):
+    import tempfile
+    import agent_runtime.repo_context as rc
+
+    long_root = tmp_path / ("runtime_" + ("x" * HARNESS_WORKTREE_BASE_MAX_CHARS))
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(long_root))
+
+    assert rc._worktree_base_dir() == Path(tempfile.gettempdir()) / "hermes-agent-wt"
 
 
 def test_isolated_repo_context_materializes_ignored_env_placeholder(tmp_path, monkeypatch):
