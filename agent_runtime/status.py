@@ -49,6 +49,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     workers = worker_session_store.list_all()
     incidents = incident_store.list_all()
     cfg = load_agent_runtime_config()
+    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
     agents = agent_store.list_all() or ensure_persisted_personas(cfg)
     proofs = []
     for task in tasks:
@@ -111,7 +112,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             },
         },
         "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=cfg.execution_mode, worker_sessions=workers),
+        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "next_actions": [
             _next_action(
                 t,

@@ -882,6 +882,8 @@ def _cmd_observe(args) -> int:
     proof_store = ProofStore()
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
+    cfg = load_agent_runtime_config()
+    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
     data = build_observability(
         tasks=tasks,
         runs=runs,
@@ -889,7 +891,7 @@ def _cmd_observe(args) -> int:
         proofs=proofs,
         daemon_status=read_daemon_status(),
         events=EventLog().tail(20),
-        execution_mode=load_agent_runtime_config().execution_mode,
+        execution_mode=execution_mode,
         worker_sessions=workers,
     )
     print(emit_json(data) if args.json else f"observability={data['health']['status']} interventions={len(data['interventions'])}")

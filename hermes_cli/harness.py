@@ -524,12 +524,12 @@ def build_parser(parent_subparsers) -> None:
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=_cmd_lane_control)
 
-    tick = subs.add_parser("tick", help="Run one harness tick")
+    tick = subs.add_parser("tick", help="Diagnostic only: run one harness tick")
     tick.add_argument("--task", dest="task_id", default=None, help="Run one tick for a specific task id")
     tick.add_argument("--json", action="store_true")
     tick.set_defaults(func=_cmd_tick)
 
-    settle = subs.add_parser("run-until-settled", help="Run bounded mission ticks until done, blocked, waiting, or incident")
+    settle = subs.add_parser("run-until-settled", help="Diagnostic only: run bounded mission ticks until done, blocked, waiting, or incident")
     settle.add_argument("--task", dest="task_id", default=None, help="Settle a specific task id")
     settle.add_argument("--max-actions", type=int, default=10)
     settle.add_argument("--max-seconds", type=float, default=None)

@@ -121,6 +121,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     cfg = load_agent_runtime_config()
+    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
     # Base-profile foundation: Mission Control shows the seeded store (base only). On a
     # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
     # also returns the dormant typed catalog for resolution and would surface mothballed
@@ -196,7 +197,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         "dirty_state": dirty_state,
         "daemon": daemon_status,
         "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "execution_mode": cfg.execution_mode,
+        "execution_mode": execution_mode,
         "runtime_config": effective_config_summary(cfg),
         "migration": migration_status(),
         "capabilities": capability_descriptors(),
@@ -205,7 +206,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             persona_instances=persona_instances,
             session_db=session_db,
         ),
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=cfg.execution_mode, worker_sessions=workers),
+        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
         "tasks": [
             _task_summary(

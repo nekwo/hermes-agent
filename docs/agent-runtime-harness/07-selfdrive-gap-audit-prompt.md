@@ -75,7 +75,7 @@ THE FIVE GAPS — audit + fix in this order
    HARDCODED at daemon.py:63 — the constructor ignores its own parameter; that line
    is almost certainly the bug). Fix: thread the created task id through to the
    spawned daemon process and verify `daemon status` shows it; terminal auto-archive
-   must fire (`_archive_terminal_target`). Test: create-with-daemon → daemon status
+   must fire through `_settle_terminal_target_if_needed`. Test: create-with-daemon → daemon status
    carries target_task_id; on done, the archive batch appears without operator action.
 
 3. AUTHORITATIVE GATE IGNORES GOAL-NAMED FOCUSED PROOF COMMANDS.
@@ -112,7 +112,7 @@ THE FIVE GAPS — audit + fix in this order
    backstop, not the contract. Audit `daemon.py` stop path (`_terminate`, taskkill)
    and startup. Fix both ends, cheap and deterministic: on graceful stop, cancel
    in-flight runs owned by this daemon's engine before exiting; on daemon START, reap
-   active runs whose owning daemon pid is dead (`RunStore.cancel(reason="daemon_restart_orphan")`
+   active runs whose owning daemon pid is dead (`RunStore.cancel(reason="daemon_orphan_reap_restart")`
    + worker close, same pattern as liveness.py `_remediate_hung`). Test: stop-with-
    active-run cancels it; start-after-kill reaps the orphan immediately (not in 300s).
 

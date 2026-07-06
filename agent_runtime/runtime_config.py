@@ -135,13 +135,9 @@ class RuntimeConfig:
     redaction_mode: str = "strict"
     open_incident_warning_threshold: int = 100
     daemon_enabled: bool = False
-    execution_mode: str = "manual"
     daemon_interval_seconds: int = 10
     daemon_idle_interval_seconds: int = 30
     daemon_heartbeat_seconds: int = 5
-    daemon_stale_run_seconds: int = 600
-    daemon_retry_cooldown_seconds: int = 120
-    daemon_max_retries_per_state: int = 3
     task_create_auto_start_daemon: bool = False
     root_node_mode: bool = False
     preferred_goal_execution_mode: str = "in_process_controller"

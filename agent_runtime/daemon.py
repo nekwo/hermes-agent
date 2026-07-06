@@ -7,7 +7,6 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
@@ -22,6 +21,17 @@ from .ticker import RunUntilSettledResult, TickEngine, TickResult
 
 DAEMON_LEASE_TTL_SECONDS = 15.0
 DAEMON_STATUS_SCHEMA_VERSION = 1
+ORPHAN_REAP_REASON_RESTART = "daemon_orphan_reap_restart"
+ORPHAN_REAP_REASON_STOP = "daemon_orphan_reap_stop"
+
+# Why this module keeps three cooperating loops:
+# - The main loop owns TickEngine progress and target settlement under the daemon
+#   lease.
+# - The heartbeat thread keeps CLI/Mission Control freshness visible while the
+#   main loop sleeps between idle polls.
+# - The liveness thread classifies hung active runs even when no task is
+#   currently eligible for a tick. Merging it into the main loop would hide
+#   stalled runs behind idle sleeps.
 
 
 def _is_windows() -> bool:
@@ -30,16 +40,6 @@ def _is_windows() -> bool:
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
-
-
-@dataclass(slots=True)
-class DaemonLoopResult:
-    loops: int
-    last_tick_id: str | None
-    stopped: bool
-
-    def to_json(self) -> dict:
-        return {"loops": self.loops, "last_tick_id": self.last_tick_id, "stopped": self.stopped}
 
 
 class MissionDaemon:
@@ -86,7 +86,7 @@ class MissionDaemon:
                     "error": "daemon_lease_held",
                     "lease_pid": lease.get("pid"),
                 })
-            return DaemonLoopResult(loops=0, last_tick_id=None, stopped=True).to_json()
+            return {"loops": 0, "last_tick_id": None, "stopped": True}
         previous_int = signal.getsignal(signal.SIGINT)
         previous_term = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGINT, self.request_stop)
@@ -95,7 +95,7 @@ class MissionDaemon:
         last_tick_id: str | None = None
         # A previous daemon killed mid-turn leaves its run row active with no
         # engine; reap immediately instead of waiting on the liveness watchdog.
-        orphans_reaped = reap_orphaned_active_runs(reason="daemon_restart_orphan")
+        orphans_reaped = reap_orphaned_active_runs(reason=ORPHAN_REAP_REASON_RESTART)
         self._emit_startup_doctor_report()
         self._emit_lifecycle_event("daemon.started", orphan_runs_reaped=len(orphans_reaped))
         try:
@@ -118,7 +118,7 @@ class MissionDaemon:
                     "loops": loops,
                     "heartbeat_at": _utc_now(),
                     "target_task_id": self.target_task_id,
-                    "queue_mode": self._queue_mode(),
+                    "queue_mode": "lane",
                     "services_open_tasks": True,
                     "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                 }))
@@ -135,7 +135,7 @@ class MissionDaemon:
                         "loops": loops,
                         "heartbeat_at": _utc_now(),
                         "target_task_id": self.target_task_id,
-                        "queue_mode": self._queue_mode(),
+                        "queue_mode": "lane",
                         "services_open_tasks": True,
                         "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                         "last_tick_id": last_tick_id,
@@ -157,7 +157,7 @@ class MissionDaemon:
                         "loops": loops,
                         "heartbeat_at": _utc_now(),
                         "target_task_id": self.target_task_id,
-                        "queue_mode": self._queue_mode(),
+                        "queue_mode": "lane",
                         "services_open_tasks": True,
                         "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
                         "error_class": type(exc).__name__,
@@ -171,8 +171,10 @@ class MissionDaemon:
                 next_wake = _utc_now() + timedelta(seconds=wait_seconds)
                 _write_daemon_status(_status_from_tick(tick, loops=loops, wait_seconds=wait_seconds, next_wake_at=next_wake))
                 if self.target_task_id and stop_reason == "task_terminal":
+                    terminal_cleanup = self._settle_terminal_target_if_needed()
+                    if terminal_cleanup is not None:
+                        last_tick_id = terminal_cleanup.get("settle_id") or last_tick_id
                     self._stop_requested = True
-                    self._archive_terminal_target()
                     break
                 if wait_seconds > 0 and not self._stop_requested:
                     self._sleep_with_stop(wait_seconds)
@@ -191,10 +193,7 @@ class MissionDaemon:
             self._emit_lifecycle_event("daemon.stopped", reason="stop_requested" if self._stop_requested else "loop_bound_reached")
             signal.signal(signal.SIGINT, previous_int)
             signal.signal(signal.SIGTERM, previous_term)
-        return DaemonLoopResult(loops=loops, last_tick_id=last_tick_id, stopped=self._stop_requested).to_json()
-
-    def _queue_mode(self) -> str:
-        return "lane"
+        return {"loops": loops, "last_tick_id": last_tick_id, "stopped": self._stop_requested}
 
     def _run_settled_cycle(self, engine) -> RunUntilSettledResult:
         if not self.target_task_id:
@@ -213,26 +212,6 @@ class MissionDaemon:
         if getattr(tick, "stop_reason", None) in {"no_eligible_action", "incident_opened", "task_blocked"}:
             tick.stop_reason = "background_progress"
         return tick
-
-    def _archive_terminal_target(self) -> None:
-        if not self.target_task_id:
-            return
-        try:
-            from .store import ArchiveStore, TaskStore
-            from .states import TaskState
-
-            task = TaskStore().get(self.target_task_id)
-            if task.state not in {TaskState.DONE, TaskState.CANCELLED}:
-                return
-            ArchiveStore().archive_tasks(
-                [self.target_task_id],
-                actor="daemon",
-                reason="auto-archive terminal foreground goal",
-            )
-        except Exception:
-            # Archiving is best-effort cleanup; the goal outcome is already recorded
-            # and `task archive` remains available to the operator.
-            pass
 
     def _settle_terminal_target_if_needed(self) -> dict | None:
         if not self.target_task_id:
@@ -366,7 +345,7 @@ class MissionDaemon:
                 "mode": "mission_daemon",
                 "self_driven": True,
                 "pid": os.getpid(),
-                "queue_mode": self._queue_mode(),
+                "queue_mode": "lane",
             }
             if reason:
                 payload["reason"] = str(reason)[:120]
@@ -555,7 +534,7 @@ def stop_daemon() -> dict:
     if not isinstance(pid, int) or not _pid_is_alive(pid):
         _write_daemon_status({"state": "offline"})
         _clear_daemon_lease(pid if isinstance(pid, int) else None)
-        orphans = reap_orphaned_active_runs(reason="daemon_stop_orphan")
+        orphans = reap_orphaned_active_runs(reason=ORPHAN_REAP_REASON_STOP)
         return {"stopped": False, "state": "offline", "orphan_runs_cancelled": orphans}
     if _is_windows():
         subprocess.run(["taskkill", "/PID", str(pid), "/T"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -573,7 +552,7 @@ def stop_daemon() -> dict:
         return {"stopped": False, "pid": pid, "state": status.get("state", "running"), "error": "daemon_pid_survived_stop"}
     # The daemon process is gone; any run it was driving mid-turn can never
     # finish. Cancel it now instead of waiting on the liveness watchdog.
-    orphans = reap_orphaned_active_runs(reason="daemon_stop_orphan")
+    orphans = reap_orphaned_active_runs(reason=ORPHAN_REAP_REASON_STOP)
     _write_daemon_status({"state": "offline", "last_pid": pid})
     _clear_daemon_lease(pid)
     return {"stopped": True, "pid": pid, "state": "offline", "orphan_runs_cancelled": orphans}

@@ -744,7 +744,7 @@ class TickEngine:
                 task_store=self.task_store,
                 stage_id=task.current_stage_id,
             )
-        max_attempts = max(1, min(int(getattr(self.config, "daemon_max_retries_per_state", 1) or 1), 3))
+        max_attempts = 1
         last_run_id = None
         for attempt in range(1, max_attempts + 1):
             worker = None
