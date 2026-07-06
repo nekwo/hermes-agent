@@ -85,7 +85,6 @@ class SimplifiedAgentContractConfig:
     enabled: bool = False
     expose_only_simplified_actions: bool = True
     keep_internal_state_machine: bool = True
-    allow_legacy_decision_aliases: bool = True
     terminal_feedback_enabled: bool = True
 
 

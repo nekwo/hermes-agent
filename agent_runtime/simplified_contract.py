@@ -23,17 +23,6 @@ COLLAPSED_SIGNAL_TYPES = frozenset(
     }
 )
 
-# Removal target: Stage 45 / 2026-07-20 after one release of alias telemetry.
-LEGACY_SIGNAL_ALIASES = {
-    DecisionType.PROPOSE_PATCH: DecisionType.HAND_OFF,
-    DecisionType.REQUEST_TEST_RUN: DecisionType.HAND_OFF,
-    DecisionType.REQUEST_QA_REVIEW: DecisionType.HAND_OFF,
-    DecisionType.REPORT_ISSUE_DISCOVERY: DecisionType.ESCALATE,
-    DecisionType.PROPOSE_ACCEPTANCE: DecisionType.SCOPE_ROUTE,
-    DecisionType.REPORT_QA_VERDICT: DecisionType.QA_VERDICT,
-    DecisionType.APPROVE: DecisionType.QA_VERDICT,
-}
-
 
 def public_decision_type(decision_type: DecisionType | str | None) -> DecisionType | None:
     if decision_type is None:
@@ -42,7 +31,7 @@ def public_decision_type(decision_type: DecisionType | str | None) -> DecisionTy
         resolved = decision_type if isinstance(decision_type, DecisionType) else DecisionType(str(decision_type))
     except Exception:
         return None
-    return LEGACY_SIGNAL_ALIASES.get(resolved, resolved)
+    return resolved
 
 
 def public_decision_type_value(decision_type: DecisionType | str | None) -> str | None:
@@ -72,18 +61,13 @@ def expose_only_simplified_actions(config: RuntimeConfig | None) -> bool:
     return simplified_contract_enabled(config) and bool(getattr(simplified, "expose_only_simplified_actions", False))
 
 
-def allow_legacy_aliases(config: RuntimeConfig | None) -> bool:
-    simplified = getattr(config, "simplified_agent_contract", None)
-    return bool(getattr(simplified, "allow_legacy_decision_aliases", True))
-
-
 def keep_internal_state_machine(config: RuntimeConfig | None) -> bool:
     simplified = getattr(config, "simplified_agent_contract", None)
     return bool(getattr(simplified, "keep_internal_state_machine", True))
 
 
 def collapsed_signal_for(decision_type: DecisionType) -> DecisionType:
-    return LEGACY_SIGNAL_ALIASES.get(decision_type, decision_type)
+    return decision_type
 
 
 def project_decision_for_execution(task: Task, decision: AgentDecision, *, config: RuntimeConfig | None, actor: str, run_id: str | None, event_log: EventLog | None = None) -> DecisionProjection:
@@ -100,7 +84,7 @@ def project_decision_for_execution(task: Task, decision: AgentDecision, *, confi
         return projection
 
     public_type = collapsed_signal_for(decision.type)
-    if decision.type not in COLLAPSED_SIGNAL_TYPES and decision.type not in LEGACY_SIGNAL_ALIASES:
+    if decision.type not in COLLAPSED_SIGNAL_TYPES:
         projection = DecisionProjection(
             public_decision=decision,
             execution_decision=decision,
@@ -112,29 +96,12 @@ def project_decision_for_execution(task: Task, decision: AgentDecision, *, confi
         )
         _record_parity(task, projection, actor=actor, run_id=run_id, event_log=event_log)
         return projection
-    if decision.type in LEGACY_SIGNAL_ALIASES and not allow_legacy_aliases(config):
-        projection = DecisionProjection(
-            public_decision=decision,
-            execution_decision=decision,
-            public_type=public_type,
-            execution_type=decision.type,
-            mode="simplified_legacy_rejected",
-            blocked_reason=f"legacy decision {decision.type.value} is disabled by simplified_agent_contract.allow_legacy_decision_aliases=false",
-            source_type=decision.type,
-        )
-        _record_parity(task, projection, actor=actor, run_id=run_id, event_log=event_log)
-        return projection
 
     public_decision = decision
     execution = decision
     mode = "simplified"
     shimmed = False
-    if decision.type in LEGACY_SIGNAL_ALIASES:
-        mode = "simplified_legacy_alias"
-        shimmed = True
-        public_decision = _public_decision_from_legacy_alias(task, decision, public_type)
-        execution = public_decision
-    elif keep_internal_state_machine(config):
+    if keep_internal_state_machine(config):
         execution = _internal_execution_decision(task, decision)
         if execution.type != decision.type:
             mode = "simplified_internal_projection"
@@ -163,90 +130,6 @@ def _internal_execution_decision(task: Task, decision: AgentDecision) -> AgentDe
     if decision.type == DecisionType.ESCALATE:
         return decision
     return decision
-
-
-def _public_decision_from_legacy_alias(task: Task, decision: AgentDecision, public_type: DecisionType) -> AgentDecision:
-    payload = dict(decision.payload or {})
-    if public_type == DecisionType.HAND_OFF:
-        return AgentDecision(
-            type=DecisionType.HAND_OFF,
-            summary=decision.summary,
-            rationale=decision.rationale,
-            payload={
-                "stage_id": payload.get("stage_id") or getattr(task, "current_stage_id", None),
-                "summary": payload.get("summary") or decision.summary,
-                "known_gaps": payload.get("known_gaps", []),
-            },
-            requires_approval=decision.requires_approval,
-            schema_version=decision.schema_version,
-        )
-    if public_type == DecisionType.SCOPE_ROUTE:
-        handoff_packet = payload.get("handoff_packet") if isinstance(payload.get("handoff_packet"), dict) else {}
-        proof_gate = payload.get("proof_gate") if isinstance(payload.get("proof_gate"), dict) else handoff_packet.get("proof_gate")
-        proof_gate = proof_gate if isinstance(proof_gate, dict) else {"required": False, "required_proof_types": [], "minimum_status": "passed", "visual_required": False}
-        target_owner = str(payload.get("target_owner") or handoff_packet.get("target_owner") or _first_string(payload.get("suggested_roles"), "dev")).strip()
-        target_repo = str(payload.get("target_repo") or handoff_packet.get("target_repo") or _first_string(payload.get("affected_repos"), "none")).strip()
-        return AgentDecision(
-            type=DecisionType.SCOPE_ROUTE,
-            summary=decision.summary,
-            rationale=decision.rationale,
-            payload={
-                "objective": payload.get("objective") or decision.summary,
-                "acceptance_criteria": payload.get("acceptance_criteria") or list(getattr(task, "acceptance_criteria", []) or ["Routed owner completes the stage."]),
-                "target_owner": target_owner,
-                "target_repo": target_repo,
-                "proof_gate": proof_gate,
-                "non_goals": payload.get("non_goals", []),
-                "suggested_roles": payload.get("suggested_roles", []),
-                "requires_visual_proof": bool(payload.get("requires_visual_proof", False)),
-                "risk_flags": payload.get("risk_flags", []),
-                "release_stage_id": payload.get("release_stage_id"),
-                "scope_override_reason": payload.get("scope_override_reason"),
-            },
-            requires_approval=decision.requires_approval,
-            schema_version=decision.schema_version,
-        )
-    if public_type == DecisionType.QA_VERDICT:
-        verdict = payload.get("verdict") or ("approved" if decision.type == DecisionType.APPROVE else "blocked")
-        return AgentDecision(
-            type=DecisionType.QA_VERDICT,
-            summary=decision.summary,
-            rationale=decision.rationale,
-            payload={
-                "verdict": verdict,
-                "coverage": payload.get("coverage", {}),
-                "findings": payload.get("findings", []),
-                "proof_ids": payload.get("proof_ids", []),
-            },
-            requires_approval=decision.requires_approval,
-            schema_version=decision.schema_version,
-        )
-    if public_type == DecisionType.ESCALATE:
-        return AgentDecision(
-            type=DecisionType.ESCALATE,
-            summary=decision.summary,
-            rationale=decision.rationale,
-            payload={
-                "title": payload.get("title") or decision.summary,
-                "summary": payload.get("summary") or decision.summary,
-                "severity": payload.get("severity", "medium"),
-                "evidence": payload.get("evidence", []),
-            },
-            requires_approval=decision.requires_approval,
-            schema_version=decision.schema_version,
-        )
-    return decision
-
-
-def _first_string(value: Any, default: str) -> str:
-    if isinstance(value, str):
-        return value.strip() or default
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            text = str(item).strip()
-            if text:
-                return text
-    return default
 
 
 def legacy_acceptance_decision_from_scope_route(task: Task, decision: AgentDecision) -> AgentDecision:

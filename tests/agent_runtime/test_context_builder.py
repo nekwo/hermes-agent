@@ -841,7 +841,7 @@ def test_simplified_agent_contract_flag_exposes_worker_actions_with_rollback_met
 
     assert hud["decision_contract_mode"] == "simplified_agent_contract"
     assert hud["decision_contract_migration"]["enabled"] is True
-    assert hud["decision_contract_migration"]["legacy_aliases_allowed"] is True
+    assert "legacy_aliases_allowed" not in hud["decision_contract_migration"]
     assert hud["decision_contract_migration"]["internal_state_machine_retained"] is True
     assert "disable simplified_agent_contract.enabled" in hud["decision_contract_migration"]["rollback"]
     assert hud["worker_action_menu"]

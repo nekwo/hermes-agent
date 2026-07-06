@@ -120,7 +120,7 @@ def test_flag_on_proof_only_hud_requires_agent_session_self_test_before_handoff(
     assert "payload_skeleton" not in hud["agent_hud"]["recommended_action"]
 
 
-def test_simplified_projection_maps_hand_off_and_can_reject_legacy_aliases(isolate_agent_runtime_root):
+def test_simplified_projection_maps_hand_off_and_rejects_pruned_legacy_decisions(isolate_agent_runtime_root):
     task = _task("task_h5_projection")
     enabled = RuntimeConfig(simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True))
     hand_off = AgentDecision(
@@ -136,16 +136,14 @@ def test_simplified_projection_maps_hand_off_and_can_reject_legacy_aliases(isola
     assert projection.execution_type == DecisionType.HAND_OFF
     assert projection.mode == "simplified"
 
-    legacy_disabled = RuntimeConfig(
-        simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True, allow_legacy_decision_aliases=False)
-    )
+    pruned = RuntimeConfig(simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True))
     legacy = AgentDecision(type=DecisionType.REQUEST_TEST_RUN, summary="legacy", rationale="old", payload={"stage_id": "build", "commands": ["pytest"]})
 
-    rejected = project_decision_for_execution(task, legacy, config=legacy_disabled, actor="dev", run_id="run_2")
+    rejected = project_decision_for_execution(task, legacy, config=pruned, actor="dev", run_id="run_2")
 
-    assert rejected.public_type == DecisionType.HAND_OFF
+    assert rejected.public_type == DecisionType.REQUEST_TEST_RUN
     assert rejected.blocked_reason
-    assert "allow_legacy_decision_aliases=false" in rejected.blocked_reason
+    assert "not in the collapsed signal set" in rejected.blocked_reason
 
 
 def test_rollback_disabled_flag_leaves_legacy_decision_unprojected(isolate_agent_runtime_root):

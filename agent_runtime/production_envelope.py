@@ -50,7 +50,7 @@ def _h5_migration_rollback(cfg: Any) -> dict[str, Any]:
             "expose_only_simplified_actions removes legacy delivery and proof-request payload fill surfaces from the HUD",
             "proof-from-trace records agent terminal self-tests as observed ProofStore records; authoritative gates still rerun harness-side",
             "hand_off captures the grounded isolated-worktree diff and then runs the stage proof recipe/test plan as the authoritative gate",
-            "allow_legacy_decision_aliases keeps the compatibility shim available during migration and logs decision_contract.parity",
+            "legacy decision aliases are pruned; simplified contracts accept only collapsed signal decisions",
             "keep_internal_state_machine preserves the old deterministic executor behind the simplified action surface",
             "rollback is operator-safe: disable simplified_agent_contract.enabled to restore closed-choice/normal-worker-flow exposure for in-flight goals",
             "HUD exposes decision_contract_migration so old/new contract mode and rollback state are observable",
@@ -58,7 +58,6 @@ def _h5_migration_rollback(cfg: Any) -> dict[str, Any]:
         flags={
             "simplified_agent_contract.enabled": bool(getattr(simplified, "enabled", False)),
             "expose_only_simplified_actions": bool(getattr(simplified, "expose_only_simplified_actions", False)),
-            "allow_legacy_decision_aliases": bool(getattr(simplified, "allow_legacy_decision_aliases", False)),
             "keep_internal_state_machine": bool(getattr(simplified, "keep_internal_state_machine", False)),
         },
     )

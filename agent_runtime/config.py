@@ -375,7 +375,6 @@ def _simplified_agent_contract_config(raw: dict[str, Any]) -> SimplifiedAgentCon
         enabled=bool(raw.get("enabled", defaults.enabled)),
         expose_only_simplified_actions=bool(raw.get("expose_only_simplified_actions", defaults.expose_only_simplified_actions)),
         keep_internal_state_machine=bool(raw.get("keep_internal_state_machine", defaults.keep_internal_state_machine)),
-        allow_legacy_decision_aliases=bool(raw.get("allow_legacy_decision_aliases", defaults.allow_legacy_decision_aliases)),
         terminal_feedback_enabled=bool(raw.get("terminal_feedback_enabled", defaults.terminal_feedback_enabled)),
     )
 
