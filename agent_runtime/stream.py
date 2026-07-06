@@ -53,7 +53,7 @@ def heartbeat_frame(*, offset: int) -> dict[str, Any]:
     }
 
 
-def delta_frame(event: Event, *, offset: int) -> dict[str, Any]:
+def delta_frame(event: Event, *, offset: int, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = _redaction_safe_json(event.payload)
     return {
         "type": "delta",
@@ -78,6 +78,7 @@ def delta_frame(event: Event, *, offset: int) -> dict[str, Any]:
             "session_id": event.session_id,
             "correlation_id": payload.get("correlation_id") if isinstance(payload, dict) else None,
         },
+        "core": snapshot if snapshot is not None else build_snapshot(),
     }
 
 
