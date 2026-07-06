@@ -82,6 +82,7 @@ class Task:
     # means the contract default; resolved via delivery_directive.task_delivery_directive.
     delivery_directive: dict[str, Any] | None = None
     acceptance_criteria: list[str] = field(default_factory=list)
+    proof_expectations: list[str] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
     affected_repos: list[str] = field(default_factory=list)
     suggested_roles: list[str] = field(default_factory=list)

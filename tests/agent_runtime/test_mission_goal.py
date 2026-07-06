@@ -1,7 +1,9 @@
 import json
 
 import agent_runtime.mission_goal as mission_goal_mod
+from agent_runtime.events import EventLog
 from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
+from agent_runtime.repo_bundles import RepoBundleStore
 from agent_runtime.store import TaskStore
 from tools.mission_goal_tool import mission_goal_create
 
@@ -113,6 +115,98 @@ def test_create_mission_goal_accepts_canonical_stage38_request(tmp_path, monkeyp
 
     assert duplicate["state"] == "already_created"
     assert duplicate["task_id"] == data["task_id"]
+
+
+def test_create_mission_goal_default_single_repo_scope_uses_single_dev_blueprint(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    data = create_mission_goal(
+        title="Document stream contract",
+        description="Create the mission-control stream docs in hermes-agent only.",
+        requested_by="tony",
+        start_daemon_mode=False,
+        repo_scope=["hermes-agent"],
+        proof_expectations=[
+            "python -m pytest tests/agent_runtime/test_stream.py -q passes",
+            "doc grep shows hydrate delta heartbeat schema_version",
+        ],
+    )
+
+    assert data["state"] == "created"
+    assert data["blueprint_id"] == "neko_single_dev"
+    assert data["delivery_directive"]["promote"] == "apply_to_repo"
+    assert data["proof_expectations"] == [
+        "python -m pytest tests/agent_runtime/test_stream.py -q passes",
+        "doc grep shows hydrate delta heartbeat schema_version",
+    ]
+    task = TaskStore().get(data["task_id"])
+    implement = next(stage for stage in task.mission_plan.stages if stage.id == "implement")
+    assert implement.repo == "hermes-agent"
+    assert implement.owner == "dev"
+    assert [stage.owner for stage in task.mission_plan.stages if stage.owner in {"dev", "backend_dev"}] == ["dev"]
+
+    bundles = RepoBundleStore().create_or_update_from_task(task)
+    assert len(bundles) == 1
+    assert bundles[0].repo == "hermes-agent"
+    assert bundles[0].proof_targets == data["proof_expectations"]
+
+
+def test_create_mission_goal_rejects_unroutable_explicit_blueprint(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    data = create_mission_goal(
+        title="Document stream contract",
+        description="Create docs in hermes-agent only.",
+        requested_by="tony",
+        start_daemon_mode=False,
+        requested_blueprint_id="neko_two_dev_default",
+        blueprint_selection_mode="explicit",
+        repo_scope=["hermes-agent"],
+    )
+
+    assert data["error"]["code"] == "repo_scope_unroutable"
+    assert data["error"]["retryable"] is False
+    assert data["error"]["safe_details"]["unroutable_repos"] == ["hermes-agent"]
+    assert data["error"]["safe_details"]["blueprint_id"] == "neko_two_dev_default"
+    assert TaskStore().list_all() == []
+
+
+def test_create_mission_goal_dry_run_validates_route_without_writing(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    data = create_mission_goal(
+        title="Document stream contract",
+        description="Create docs in hermes-agent only.",
+        requested_by="tony",
+        start_daemon_mode=True,
+        repo_scope=["hermes-agent"],
+        dry_run=True,
+    )
+
+    assert data["state"] == "dry_run"
+    assert data["blueprint_id"] == "neko_single_dev"
+    assert TaskStore().list_all() == []
+
+
+def test_create_from_request_emits_field_dropped_warning_event(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    data = create_mission_goal_from_request(
+        _canonical_request(
+            repo_scope=["hermes-agent"],
+            extra_envelope="ignored",
+            goal={"title": "T", "description": "D", "unknown_goal_field": "ignored"},
+            blueprint={"selection_mode": "default"},
+        ),
+        start_daemon_mode=False,
+    )
+
+    task_id = data["task_id"]
+    events = EventLog().for_task(task_id, types={"goal_create.field_dropped"})
+    assert [event.payload["field"] for event in events] == ["extra_envelope", "goal.unknown_goal_field"]
+    task = TaskStore().get(task_id)
+    warnings = task.harness_self_heal["mission_goal_create"]["field_drop_warnings"]
+    assert [warning["field"] for warning in warnings] == ["extra_envelope", "goal.unknown_goal_field"]
 
 
 def test_create_mission_goal_from_request_binds_graph_owner_to_lead_slot(tmp_path, monkeypatch):

@@ -1374,7 +1374,11 @@ def _cmd_goal_create(args) -> int:
 
     if getattr(args, "request_json", None):
         request = _load_request_json(args.request_json)
-        data = create_mission_goal_from_request(request)
+        data = create_mission_goal_from_request(
+            request,
+            start_daemon_mode=getattr(args, "start_daemon", None),
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
     else:
         if not args.title or not args.description:
             return emit_harness_error(ValueError("--title and --description are required unless --request-json is provided"), args=args, code="invalid_request")
@@ -4959,6 +4963,7 @@ def _cmd_task_create(args) -> int:
             data = create_mission_goal_from_request(
                 request,
                 start_daemon_mode=getattr(args, "start_daemon", None),
+                dry_run=bool(getattr(args, "dry_run", False)),
             )
     else:
         if not args.title or not args.description:
@@ -4997,6 +5002,8 @@ def _cmd_task_create(args) -> int:
                     requested_by=args.requested_by,
                     start_daemon_mode=getattr(args, "start_daemon", None),
                     repo_scope=repo_scope,
+                    idempotency_key=getattr(args, "idempotency_key", None),
+                    dry_run=bool(getattr(args, "dry_run", False)),
                 )
     if args.json:
         print(emit_json(data))

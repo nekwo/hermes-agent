@@ -276,6 +276,7 @@ def desired_bundles_for_task(task: Task) -> list[RepoBundle]:
                 objective=task.description,
                 acceptance=list(getattr(task, "acceptance_criteria", None) or []),
                 non_goals=list(getattr(task, "non_goals", None) or []),
+                proof_targets=list(getattr(task, "proof_expectations", None) or []),
                 proof_requirements=["final_gate"],
                 visual_requirements=["visual_proof"] if getattr(task, "requires_visual_proof", False) else [],
                 created_at=created_at,
@@ -372,7 +373,7 @@ def _bundles_from_mission_plan(task: Task, stages: list[MissionPlanStage]) -> li
         bundle_id = bundle_id_for(task.id, repo, stage_ids=stage_ids)
         stage_to_bundle.update({stage_id: bundle_id for stage_id in stage_ids})
         requires_visual = any(bool(getattr(stage, "requires_visual_proof", False)) for stage in repo_stages) or bool(getattr(task, "requires_visual_proof", False))
-        proof_targets = []
+        proof_targets = list(getattr(task, "proof_expectations", None) or [])
         for stage in repo_stages:
             recipe_id = getattr(stage, "proof_recipe_id", None)
             if recipe_id:
