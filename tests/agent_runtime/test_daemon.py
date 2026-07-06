@@ -1,10 +1,12 @@
+import json
+from pathlib import Path
 from datetime import datetime, timezone
 
 from hermes_time import now
 
 from agent_runtime.daemon import MissionDaemon, read_daemon_status
 from agent_runtime.models import Task
-from agent_runtime.states import TaskState
+from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import TaskStore
 from agent_runtime.ticker import TickResult
 
@@ -103,6 +105,15 @@ class TargetAndQueueEngine:
                 )
             ],
         )
+
+
+class FailingEngine:
+    def __init__(self):
+        self.calls = 0
+
+    def run_until_settled(self, *, task_id=None, max_actions=None):
+        self.calls += 1
+        raise AssertionError("daemon should settle terminal target before ticking")
 
 
 def test_daemon_uses_settled_loop_and_records_compact_stop_reason(isolate_agent_runtime_root):
@@ -499,6 +510,52 @@ def test_targeted_daemon_archives_terminal_task_on_exit(isolate_agent_runtime_ro
 
     remaining = [t.id for t in store.list_all()]
     assert "task_term" not in remaining
+
+
+def test_targeted_daemon_settles_cancelled_target_before_tick(isolate_agent_runtime_root):
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.store import RunStore
+    from agent_runtime.worker_sessions import WorkerSessionStore
+
+    ts = now()
+    store = TaskStore()
+    store.create(Task(id="task_cancelled_target", title="T", description="d", state=TaskState.CANCELLED, created_at=ts, updated_at=ts, requested_by="human"))
+    runs = RunStore()
+    run = runs.open_run("dev", "task_cancelled_target", stage_id="implement")
+    run.state = RunState.WAITING_ON_APPROVAL
+    runs.update(run)
+    persona = AgentPersona(
+        id="dev",
+        display_name="Dev",
+        role="dev",
+        model=None,
+        provider=None,
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="",
+    )
+    workers = WorkerSessionStore()
+    worker = workers.open(task_id="task_cancelled_target", persona=persona, stage_id="implement")
+    engine = FailingEngine()
+    daemon = MissionDaemon(engine_factory=lambda: engine, target_task_id="task_cancelled_target", interval_seconds=0, idle_interval_seconds=0)
+
+    result = daemon.run_foreground(max_loops=3)
+    status = read_daemon_status()
+
+    assert result["loops"] == 1
+    assert result["stopped"] is True
+    assert engine.calls == 0
+    assert status["state"] == "offline"
+    assert status["settle_stop_reason"] == "task_cancelled"
+    assert status["target_cleanup"]["cancelled_run_ids"] == [run.id]
+    assert status["target_cleanup"]["closed_worker_session_ids"] == [worker.id]
+    archive_dir = Path(status["target_cleanup"]["archive_result"]["archive_dir"])
+    assert archive_dir.is_dir()
+    archived_run = json.loads((archive_dir / "runs" / f"{run.id}.json").read_text(encoding="utf-8"))
+    archived_worker = json.loads((archive_dir / "worker_sessions" / f"{worker.id}.json").read_text(encoding="utf-8"))
+    assert archived_run["state"] == "cancelled"
+    assert archived_worker["state"] == "closed"
+    assert "task_cancelled_target" not in [task.id for task in store.list_all()]
 
 
 def test_daemon_stop_reaps_orphaned_active_run_when_daemon_already_dead(isolate_agent_runtime_root):

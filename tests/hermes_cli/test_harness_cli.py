@@ -350,6 +350,23 @@ def test_harness_parser_exposes_daemon_start_status_stop():
     assert p.parse_args(["harness", "daemon", "run-once", "--json"]).daemon_command == "run-once"
 
 
+def test_harness_parser_exposes_doctor_fix_flags():
+    args = parser().parse_args(["harness", "doctor", "--fix", "--dry-run", "--json"])
+
+    assert args.harness_command == "doctor"
+    assert args.fix is True
+    assert args.dry_run is True
+
+
+def test_harness_doctor_fix_requires_confirmation(capsys):
+    args = parser().parse_args(["harness", "doctor", "--fix", "--json"])
+
+    assert args.func(args) == 8
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is False
+    assert data["error"] == "confirmation_required"
+
+
 def test_harness_parser_exposes_config_migrate_and_verify():
     p = parser()
     assert p.parse_args(["harness", "config", "show", "--json"]).config_command == "show"

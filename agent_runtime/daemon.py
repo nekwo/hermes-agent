@@ -95,6 +95,7 @@ class MissionDaemon:
         # A previous daemon killed mid-turn leaves its run row active with no
         # engine; reap immediately instead of waiting on the liveness watchdog.
         orphans_reaped = reap_orphaned_active_runs(reason="daemon_restart_orphan")
+        self._emit_startup_doctor_report()
         self._emit_lifecycle_event("daemon.started", orphan_runs_reaped=len(orphans_reaped))
         try:
             heartbeat_stop = threading.Event()
@@ -122,6 +123,24 @@ class MissionDaemon:
                 }))
                 _refresh_daemon_lease(os.getpid())
                 if _daemon_status_owned_by_other_live_pid(os.getpid()):
+                    self._stop_requested = True
+                    break
+                terminal_cleanup = self._settle_terminal_target_if_needed()
+                if terminal_cleanup is not None:
+                    last_tick_id = terminal_cleanup.get("settle_id")
+                    _write_daemon_status(_carry_liveness({
+                        "state": "idle",
+                        "pid": os.getpid(),
+                        "loops": loops,
+                        "heartbeat_at": _utc_now(),
+                        "target_task_id": self.target_task_id,
+                        "queue_mode": self._queue_mode(),
+                        "services_open_tasks": True,
+                        "foreground_runtime_instance_id": self.foreground_runtime_instance_id,
+                        "last_tick_id": last_tick_id,
+                        "settle_stop_reason": terminal_cleanup.get("settle_stop_reason"),
+                        "target_cleanup": terminal_cleanup,
+                    }))
                     self._stop_requested = True
                     break
                 try:
@@ -212,6 +231,127 @@ class MissionDaemon:
         except Exception:
             # Archiving is best-effort cleanup; the goal outcome is already recorded
             # and `task archive` remains available to the operator.
+            pass
+
+    def _settle_terminal_target_if_needed(self) -> dict | None:
+        if not self.target_task_id:
+            return None
+        try:
+            from .errors import NotFound
+            from .states import TaskState
+            from .store import ARCHIVABLE_TASK_STATES, ArchiveStore, RunStore, TaskStore
+            from .worker_sessions import WorkerSessionStore
+
+            try:
+                task = TaskStore().get(self.target_task_id)
+            except NotFound:
+                if not _target_task_archived(self.target_task_id):
+                    return None
+                return {
+                    "settle_id": f"settle_missing_{self.target_task_id}",
+                    "settle_stop_reason": "task_archived",
+                    "task_id": self.target_task_id,
+                    "task_state": "archived_or_missing",
+                    "cancelled_run_ids": [],
+                    "closed_worker_session_ids": [],
+                    "archive_result": None,
+                }
+            if task.state not in {TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED}:
+                return None
+            stop_reason = "task_cancelled" if task.state == TaskState.CANCELLED else "task_terminal"
+            run_store = RunStore()
+            worker_store = WorkerSessionStore()
+            cancelled_run_ids: list[str] = []
+            for run in list(run_store.find_active(task_id=task.id)):
+                try:
+                    run_store.cancel(run.id, reason=f"target task is {task.state.value}")
+                    cancelled_run_ids.append(run.id)
+                except Exception:
+                    continue
+            closed_worker_ids: list[str] = []
+            for worker in list(worker_store.find_active(task_id=task.id)):
+                try:
+                    closed = worker_store.close(
+                        worker.id,
+                        reason=f"target task is {task.state.value}",
+                    )
+                    closed_worker_ids.append(closed.id)
+                except Exception:
+                    continue
+            archive_result = None
+            if task.state in ARCHIVABLE_TASK_STATES:
+                archive_result = ArchiveStore().archive_tasks(
+                    [task.id],
+                    actor="daemon",
+                    reason=f"auto-archive foreground target {task.state.value}",
+                )
+            cleanup = {
+                "settle_id": f"settle_terminal_{task.id}",
+                "settle_stop_reason": stop_reason,
+                "task_id": task.id,
+                "task_state": task.state.value,
+                "cancelled_run_ids": cancelled_run_ids,
+                "closed_worker_session_ids": closed_worker_ids,
+                "archive_result": archive_result,
+            }
+            self._emit_target_cleanup_event(cleanup)
+            return cleanup
+        except Exception as exc:
+            return {
+                "settle_id": f"settle_error_{self.target_task_id}",
+                "settle_stop_reason": "target_cleanup_failed",
+                "task_id": self.target_task_id,
+                "error_class": type(exc).__name__,
+            }
+
+    def _emit_startup_doctor_report(self) -> None:
+        if not self.target_task_id:
+            return
+        try:
+            from .harness_doctor import run_harness_doctor
+            from .events import EventLog
+            from .models import Event
+            from hermes_time import now
+
+            report = run_harness_doctor(fix=False, include_worktrees=False)
+            counts = dict((report.get("summary") or {}).get("finding_counts") or {})
+            EventLog().append(
+                Event(
+                    now(),
+                    "daemon.doctor_report",
+                    self.target_task_id,
+                    None,
+                    None,
+                    {"finding_counts": counts, "fix": False, "dry_run": False},
+                )
+            )
+        except Exception:
+            pass
+
+    def _emit_target_cleanup_event(self, cleanup: dict) -> None:
+        try:
+            from .events import EventLog
+            from .models import Event
+            from hermes_time import now
+
+            archive_result = cleanup.get("archive_result") if isinstance(cleanup.get("archive_result"), dict) else {}
+            EventLog().append(
+                Event(
+                    now(),
+                    "daemon.target_settled",
+                    self.target_task_id,
+                    None,
+                    None,
+                    {
+                        "settle_stop_reason": cleanup.get("settle_stop_reason"),
+                        "task_state": cleanup.get("task_state"),
+                        "cancelled_runs": len(cleanup.get("cancelled_run_ids") or []),
+                        "closed_workers": len(cleanup.get("closed_worker_session_ids") or []),
+                        "archive_batch": archive_result.get("archive_batch"),
+                    },
+                )
+            )
+        except Exception:
             pass
 
     def _emit_lifecycle_event(self, event_type: str, *, reason: str | None = None, orphan_runs_reaped: int | None = None) -> None:
@@ -613,6 +753,17 @@ def _carry_liveness(status: dict) -> dict:
     if isinstance(previous, dict) and "liveness" not in status:
         status["liveness"] = previous
     return status
+
+
+def _target_task_archived(task_id: str) -> bool:
+    archive_root = paths.deleted_archive_dir()
+    if not archive_root.exists():
+        return False
+    task_name = f"{task_id}.json"
+    try:
+        return any(path.name == task_name for path in archive_root.glob("*/tasks/*.json"))
+    except OSError:
+        return False
 
 
 def _write_daemon_status(status: dict) -> None:

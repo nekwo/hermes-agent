@@ -322,7 +322,12 @@ def reap_task_run_worktrees(
     return reaped
 
 
-def reap_orphan_worktrees(*, min_age_seconds: int = 3600, event_log: EventLog | None = None) -> dict[str, Any]:
+def reap_orphan_worktrees(
+    *,
+    min_age_seconds: int = 3600,
+    event_log: EventLog | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
     """Capture-then-reap harness worktrees no open task run owns.
 
     Protection, in order: worktrees deterministically owned by any open task's
@@ -380,6 +385,9 @@ def reap_orphan_worktrees(*, min_age_seconds: int = 3600, event_log: EventLog | 
             # Git no longer recognizes this directory. Remove it only when it
             # holds no files at all; otherwise keep it for a human to inspect.
             if _is_empty_husk(worktree):
+                if dry_run:
+                    reaped.append({**entry, "husk": True, "dry_run": True})
+                    continue
                 import shutil
 
                 try:
@@ -392,6 +400,12 @@ def reap_orphan_worktrees(*, min_age_seconds: int = 3600, event_log: EventLog | 
             continue
         patch = worktree_patch_text(worktree)
         if patch.strip():
+            if dry_run:
+                entry["would_capture_patch"] = True
+                entry["patch_bytes_estimate"] = len(patch.encode("utf-8", errors="replace"))
+                entry["dry_run"] = True
+                reaped.append(entry)
+                continue
             capture_dir.mkdir(parents=True, exist_ok=True)
             capture_path = capture_dir / f"{worktree.name}.patch"
             try:
@@ -401,28 +415,31 @@ def reap_orphan_worktrees(*, min_age_seconds: int = 3600, event_log: EventLog | 
                 continue
             entry["captured_patch"] = capture_path.name
             entry["patch_bytes"] = capture_path.stat().st_size
-        if remove_orphan_worktree(worktree, reason="orphan_reap"):
+        if dry_run:
+            reaped.append({**entry, "dry_run": True})
+        elif remove_orphan_worktree(worktree, reason="orphan_reap"):
             reaped.append(entry)
         else:
             kept.append({**entry, "reason": "remove_failed"})
-    try:
-        (event_log or EventLog()).append(
-            Event(
-                ts=now(),
-                type="worktree.orphans_reaped",
-                task_id=None,
-                run_id=None,
-                persona_id=None,
-                payload={
-                    "reaped_count": len(reaped),
-                    "kept_count": len(kept),
-                    "captured": [item["captured_patch"] for item in reaped if item.get("captured_patch")][:20],
-                },
+    if not dry_run:
+        try:
+            (event_log or EventLog()).append(
+                Event(
+                    ts=now(),
+                    type="worktree.orphans_reaped",
+                    task_id=None,
+                    run_id=None,
+                    persona_id=None,
+                    payload={
+                        "reaped_count": len(reaped),
+                        "kept_count": len(kept),
+                        "captured": [item["captured_patch"] for item in reaped if item.get("captured_patch")][:20],
+                    },
+                )
             )
-        )
-    except Exception:
-        pass
-    return {"reaped": reaped, "kept": kept, "capture_dir": str(capture_dir)}
+        except Exception:
+            pass
+    return {"reaped": reaped, "kept": kept, "capture_dir": str(capture_dir), "dry_run": dry_run}
 
 
 def _promote_patch_to_repo(

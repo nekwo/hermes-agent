@@ -43,6 +43,13 @@ from agent_runtime.errors import (
 )
 from agent_runtime.events import EventLog
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
+from agent_runtime.harness_doctor import (
+    DEFAULT_STALE_RUN_HOURS,
+    DEFAULT_STALE_TASK_DAYS,
+    DEFAULT_STALE_WORKER_HOURS,
+    DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+    run_harness_doctor,
+)
 from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
 from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
 from agent_runtime.models import AgentPersona, Event, Task
@@ -816,8 +823,15 @@ def build_parser(parent_subparsers) -> None:
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=_cmd_status)
 
-    doctor = subs.add_parser("doctor", help="Show Harness runtime resolution diagnostics")
+    doctor = subs.add_parser("doctor", help="Show Harness runtime diagnostics and stale-state report")
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--fix", action="store_true", help="Repair stale Harness runtime rows and reap orphan worktrees")
+    doctor.add_argument("--dry-run", action="store_true", help="Preview --fix repairs without mutating runtime state")
+    doctor.add_argument("--yes", "-y", action="store_true", help="Confirm --fix repairs")
+    doctor.add_argument("--stale-run-hours", type=int, default=DEFAULT_STALE_RUN_HOURS)
+    doctor.add_argument("--stale-worker-hours", type=int, default=DEFAULT_STALE_WORKER_HOURS)
+    doctor.add_argument("--stale-task-days", type=int, default=DEFAULT_STALE_TASK_DAYS)
+    doctor.add_argument("--worktree-min-age-seconds", type=int, default=DEFAULT_WORKTREE_MIN_AGE_SECONDS)
     doctor.set_defaults(func=_cmd_doctor)
 
     health = subs.add_parser("health", help="Check Harness runtime/provider dependencies before live ticks")
@@ -2251,7 +2265,27 @@ def _cmd_install_harness_skills(args) -> int:
 
 def _cmd_doctor(args) -> int:
     resolution = resolve_runtime()
+    if getattr(args, "fix", False) and not getattr(args, "dry_run", False) and not getattr(args, "yes", False):
+        data = {
+            "ok": False,
+            "error": "confirmation_required",
+            "summary": "harness doctor --fix requires --yes, or use --dry-run to preview repairs",
+        }
+        print(emit_json(data) if args.json else data["summary"])
+        return ERROR_EXIT_CODES["confirmation_required"]
+    hygiene = run_harness_doctor(
+        fix=bool(getattr(args, "fix", False)),
+        dry_run=bool(getattr(args, "dry_run", False)),
+        stale_run_hours=int(getattr(args, "stale_run_hours", DEFAULT_STALE_RUN_HOURS) or DEFAULT_STALE_RUN_HOURS),
+        stale_worker_hours=int(getattr(args, "stale_worker_hours", DEFAULT_STALE_WORKER_HOURS) or DEFAULT_STALE_WORKER_HOURS),
+        stale_task_days=int(getattr(args, "stale_task_days", DEFAULT_STALE_TASK_DAYS) or DEFAULT_STALE_TASK_DAYS),
+        worktree_min_age_seconds=int(
+            getattr(args, "worktree_min_age_seconds", DEFAULT_WORKTREE_MIN_AGE_SECONDS)
+            or DEFAULT_WORKTREE_MIN_AGE_SECONDS
+        ),
+    )
     data = {
+        "ok": True,
         "runtime_resolution": {
             "store_root": str(resolution.store_root),
             "layer": resolution.layer,
@@ -2259,7 +2293,8 @@ def _cmd_doctor(args) -> int:
             "config_path": resolution.config_path,
             "trace": list(resolution.trace),
             "layers": resolution_table(),
-        }
+        },
+        "hygiene": hygiene,
     }
     if args.json:
         print(emit_json(data))
@@ -2272,6 +2307,17 @@ def _cmd_doctor(args) -> int:
                 f"{marker} {row['layer']:<7} value={row['value'] or '<unset>'} "
                 f"exists={row['exists']} tasks={row['tasks']}"
             )
+        counts = hygiene["summary"]["finding_counts"]
+        print("Harness doctor")
+        print(
+            "findings: "
+            f"runs={counts['stale_runs']} workers={counts['stale_workers']} "
+            f"tasks={counts['stale_open_tasks']} worktrees={counts['orphan_worktrees']} "
+            f"snapshot_null_ids={counts['snapshot_null_id_rows']}"
+        )
+        if getattr(args, "fix", False):
+            mode = "dry run" if getattr(args, "dry_run", False) else "applied"
+            print(f"repairs: {mode}")
     return 0
 
 
