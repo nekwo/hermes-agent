@@ -817,6 +817,15 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
         context_expansion_menu = []
     agent_hud = _simplified_agent_hud(task, run, role=role, simplified_contract=simplified_surface)
     agent_hud["options"] = _agent_hud_options(decision_menu)
+    if simplified_surface and isinstance(agent_hud.get("contract"), dict):
+        contract = dict(agent_hud["contract"])
+        allowed_actions = list(contract.get("allowed_actions") or [])
+        for item in decision_menu:
+            decision_type = str(item.get("decision_type") or "").strip() if isinstance(item, dict) else ""
+            if decision_type and decision_type not in allowed_actions:
+                allowed_actions.append(decision_type)
+        contract["allowed_actions"] = allowed_actions
+        agent_hud["contract"] = contract
     if context_expansion_menu:
         agent_hud["context_options"] = _agent_hud_options(context_expansion_menu)
     recommended_action = _recommended_action(decision_menu, next_move=next_move, role=role)

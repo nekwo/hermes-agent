@@ -103,6 +103,26 @@ def _collapsed_actions(role: str, task: Task, run: AgentRun) -> list[WorkerActio
             _block_action(reason="Use only for a true external/human/environment blocker."),
         ]
     if role == "qa" or (stage is not None and _stage_owner_role(stage.owner) == "qa"):
+        if _typed_visual_missing(task):
+            return [
+                WorkerAction(
+                    "request_missing_proof",
+                    DecisionType.REQUEST_SCREENSHOT,
+                    "qa.request_screenshot",
+                    "Request Visual Proof",
+                    primary=True,
+                    reason="Visual proof is required but no launcher_qa screenshot proof is attached yet.",
+                    payload_template={
+                        "stage_id": getattr(stage, "id", None) or run.stage_id or task.current_stage_id,
+                        "target": "mission_control",
+                        "proof_requirement": "fullscreen visual proof for the current stage",
+                        "mcp_server": "launcher_qa",
+                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    },
+                ),
+                _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
+                WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            ]
         return [
             WorkerAction("qa_verdict", DecisionType.QA_VERDICT, "qa.verdict", "QA Verdict", primary=True, reason="Issue a verdict over Harness-verified proof."),
             WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
@@ -112,6 +132,31 @@ def _collapsed_actions(role: str, task: Task, run: AgentRun) -> list[WorkerActio
         if stage is None:
             return [
                 _block_action(primary=True, reason="No typed current stage is active; block with the missing-stage evidence."),
+                WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            ]
+        stage_explicitly_product_edit = getattr(stage, "requires_product_edit", None) is True
+        if (
+            not stage_explicitly_product_edit
+            and _typed_visual_missing(task)
+            and (not stage_requires_product_edit(task, stage) or _visual_no_edit_intent(task, stage))
+        ):
+            return [
+                WorkerAction(
+                    "request_visual_gate",
+                    DecisionType.REQUEST_SCREENSHOT,
+                    "dev.request_screenshot",
+                    "Request Visual Proof",
+                    primary=True,
+                    reason="Visual proof is required for this no-product-edit stage; ask Harness for launcher_qa screenshot proof.",
+                    payload_template={
+                        "stage_id": stage.id,
+                        "target": "mission_control",
+                        "proof_requirement": "fullscreen visual proof for the current stage",
+                        "mcp_server": "launcher_qa",
+                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    },
+                ),
+                _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
                 WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
             ]
         return [

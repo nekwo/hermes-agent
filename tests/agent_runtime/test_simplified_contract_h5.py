@@ -120,6 +120,64 @@ def test_flag_on_proof_only_hud_requires_agent_session_self_test_before_handoff(
     assert "payload_skeleton" not in hud["agent_hud"]["recommended_action"]
 
 
+def test_flag_on_visual_proof_stage_exposes_screenshot_signal():
+    task = _task("task_h5_visual")
+    task.requires_visual_proof = True
+    task.mission_plan = MissionPlan(
+        enabled=True,
+        mission_intent=MissionIntent(title=task.title, objective="Capture fullscreen Mission Control screenshot proof."),
+        current_stage_id="build",
+        stages=[
+            MissionPlanStage(
+                id="build",
+                title="Visual Proof",
+                objective="Capture fullscreen Mission Control screenshot proof without product edits.",
+                owner="dev",
+                repo="hermes-agent",
+                kind="proof_only",
+                status=StageStatus.IMPLEMENTING,
+                requires_product_edit=False,
+                requires_visual_proof=True,
+                proof_gate={
+                    "required": True,
+                    "minimum_status": "passed",
+                    "required_proof_types": ["screenshot"],
+                    "visual_required": True,
+                },
+            )
+        ],
+    )
+    cfg = RuntimeConfig(
+        normal_worker_flow=NormalWorkerFlowConfig(enabled=False),
+        simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True, expose_only_simplified_actions=True),
+    )
+
+    hud = build_context(task, _run(task), config=cfg).mission_hud
+
+    assert hud["decision_menu"][0]["decision_type"] == "request_screenshot"
+    assert hud["decision_menu"][0]["shape_id"] == "dev.request_screenshot"
+    assert hud["next_required_move"]["shape_id"] == "dev.request_screenshot"
+    assert "request_screenshot" in hud["agent_hud"]["contract"]["allowed_actions"]
+
+    decision = AgentDecision(
+        type=DecisionType.REQUEST_SCREENSHOT,
+        summary="Capture launcher_qa screenshot proof.",
+        rationale="The active visual gate requires launcher_qa screenshot proof.",
+        payload={
+            "stage_id": "build",
+            "target": "mission_control",
+            "proof_requirement": "fullscreen Mission Control screenshot proof",
+            "mcp_server": "launcher_qa",
+            "required_launch_pins": {"hermes_profile": "Tony", "runtime_root_id": "agent-runtime"},
+        },
+    )
+
+    projection = project_decision_for_execution(task, decision, config=cfg, actor="dev", run_id="run_visual")
+
+    assert projection.mode == "simplified"
+    assert projection.execution_type == DecisionType.REQUEST_SCREENSHOT
+
+
 def test_simplified_projection_maps_hand_off_and_rejects_pruned_legacy_decisions(isolate_agent_runtime_root):
     task = _task("task_h5_projection")
     enabled = RuntimeConfig(simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True))

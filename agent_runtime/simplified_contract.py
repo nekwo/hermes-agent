@@ -19,6 +19,8 @@ COLLAPSED_SIGNAL_TYPES = frozenset(
         DecisionType.SCOPE_ROUTE,
         DecisionType.RESOLVE_INCIDENT,
         DecisionType.TRIAGE_ISSUE_DISCOVERY,
+        DecisionType.REQUEST_SCREENSHOT,
+        DecisionType.REQUEST_VIDEO,
         DecisionType.QA_VERDICT,
     }
 )
