@@ -9,6 +9,7 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
+from .delivery_directive import read_bundle_promotion_record
 from .events import EventLog
 from .models import Event, MissionPlanStage, RepoBundle, Task
 from .serde import from_jsonable, to_jsonable
@@ -153,10 +154,35 @@ class RepoBundleStore:
             safe = safe_token(proof_id)
             if safe and safe not in bundle.proof_ids:
                 bundle.proof_ids.append(safe)
+        # Capture the worktree patch BEFORE active_run_id is cleared — after
+        # this point the delivering run's worktree is otherwise unrecoverable.
+        delivering_run_id = bundle.active_run_id
+        try:
+            from .delivery_directive import capture_bundle_patch
+
+            capture = capture_bundle_patch(bundle, event_log=self.event_log)
+        except Exception as exc:
+            capture = {"captured": False, "reason": f"capture_error_{type(exc).__name__}"}
+        bundle.delivery_capture = {
+            "run_id": delivering_run_id,
+            "captured": bool(capture.get("captured")),
+            "patch_name": f"{bundle.id}.patch" if capture.get("captured") else None,
+            "patch_bytes": int(capture.get("patch_bytes") or 0),
+            "changed_files": list(capture.get("changed_files") or [])[:50],
+            "reason": capture.get("reason"),
+        }
         bundle.state = "delivered_waiting_for_qa"
         bundle.active_run_id = None
         bundle.delivered_at = now()
-        return self.update(bundle, event_type="repo_bundle.delivered", payload={"proof_count": len(bundle.proof_ids)})
+        return self.update(
+            bundle,
+            event_type="repo_bundle.delivered",
+            payload={
+                "proof_count": len(bundle.proof_ids),
+                "diff_captured": bool(capture.get("captured")),
+                "changed_file_count": len(capture.get("changed_files") or []),
+            },
+        )
 
     def mark_verified(self, bundle: RepoBundle, *, proof_ids: list[str] | None = None) -> RepoBundle:
         for proof_id in proof_ids or []:
@@ -491,6 +517,7 @@ def bundle_queue_summary(bundles: list[RepoBundle]) -> list[dict[str, Any]]:
 
 
 def repo_bundle_summary(bundle: RepoBundle) -> dict[str, Any]:
+    promotion = read_bundle_promotion_record(bundle.task_id, bundle.id)
     return {
         "repo_bundle_id": bundle.id,
         "task_id": bundle.task_id,
@@ -512,10 +539,12 @@ def repo_bundle_summary(bundle: RepoBundle) -> dict[str, Any]:
         "assignment_id": bundle.assignment_id,
         "active_run_id": bundle.active_run_id,
         "proof_ids": list(bundle.proof_ids or []),
-        "delivery_contract": REPO_BUNDLE_DELIVERY_CONTRACT,
-        "checkout_applied": False,
-        "checkout_status": REPO_BUNDLE_CHECKOUT_STATUS,
-        "closeout_label": _repo_bundle_closeout_label(bundle),
+        "delivery_contract": _bundle_delivery_contract(promotion),
+        "checkout_applied": _promotion_applied(promotion),
+        "checkout_status": _bundle_checkout_status(promotion),
+        "closeout_label": _repo_bundle_closeout_label(bundle, promotion),
+        "delivery_capture": dict(getattr(bundle, "delivery_capture", None) or {}),
+        "promotion": _promotion_summary(promotion),
         "queue_reason": bundle.queue_reason,
         "wake_condition": bundle.wake_condition,
         "delivered_at": bundle.delivered_at,
@@ -535,18 +564,62 @@ def repo_bundle_delivery_summary(bundles: list[RepoBundle]) -> dict[str, Any]:
         for bundle in bundle_list
         if bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"}
     ]
+    promotions = {
+        bundle.id: read_bundle_promotion_record(bundle.task_id, bundle.id)
+        for bundle in bundle_list
+    }
+    promoted_ids = [bundle_id for bundle_id, record in promotions.items() if _promotion_applied(record)]
+    any_promoted = bool(promoted_ids)
     return {
-        "delivery_contract": REPO_BUNDLE_DELIVERY_CONTRACT,
-        "checkout_applied": False,
-        "checkout_status": REPO_BUNDLE_CHECKOUT_STATUS,
+        "delivery_contract": "delivery_directive" if any_promoted else REPO_BUNDLE_DELIVERY_CONTRACT,
+        "checkout_applied": any_promoted,
+        "checkout_status": "promoted" if any_promoted else REPO_BUNDLE_CHECKOUT_STATUS,
         "repo_bundle_ids": [bundle.id for bundle in bundle_list],
         "delivered_repo_bundle_ids": delivered_ids,
+        "promoted_repo_bundle_ids": promoted_ids,
         "state_counts": {state: len([bundle for bundle in bundle_list if bundle.state == state]) for state in sorted(states)},
-        "closeout_label": _repo_bundle_task_closeout_label(bundle_list),
+        "closeout_label": _repo_bundle_task_closeout_label(bundle_list, promotions),
     }
 
 
-def _repo_bundle_closeout_label(bundle: RepoBundle) -> str:
+def _promotion_applied(promotion: dict[str, Any] | None) -> bool:
+    status = str(((promotion or {}).get("promote") or {}).get("status") or "")
+    return status in {"promoted", "already_applied"}
+
+
+def _promotion_summary(promotion: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not promotion:
+        return None
+    promote = promotion.get("promote") or {}
+    worktree = promotion.get("worktree") or {}
+    return {
+        "status": promote.get("status"),
+        "reason": promote.get("reason"),
+        "commit": promote.get("commit"),
+        "worktree_status": worktree.get("status"),
+        "recorded_at": promotion.get("recorded_at"),
+    }
+
+
+def _bundle_delivery_contract(promotion: dict[str, Any] | None) -> str:
+    return "delivery_directive" if promotion else REPO_BUNDLE_DELIVERY_CONTRACT
+
+
+def _bundle_checkout_status(promotion: dict[str, Any] | None) -> str:
+    if _promotion_applied(promotion):
+        return "promoted"
+    if promotion and str((promotion.get("promote") or {}).get("status")) == "failed":
+        return "promotion_failed"
+    return REPO_BUNDLE_CHECKOUT_STATUS
+
+
+def _repo_bundle_closeout_label(bundle: RepoBundle, promotion: dict[str, Any] | None = None) -> str:
+    if _promotion_applied(promotion):
+        commit = ((promotion or {}).get("promote") or {}).get("commit")
+        suffix = f" as commit {commit}" if commit else ""
+        return f"Repo bundle promoted to the checkout by the delivery directive{suffix}."
+    if promotion and str((promotion.get("promote") or {}).get("status")) == "failed":
+        return "Delivery directive could not promote this bundle; see the bundle_promotion_failed incident."
     if bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"}:
         return "Staged repo bundle delivered; checkout not modified by bundle delivery."
     if bundle.state in {"blocked", "rejected", "cancelled"}:
@@ -554,9 +627,17 @@ def _repo_bundle_closeout_label(bundle: RepoBundle) -> str:
     return "Repo bundle is staged; checkout not modified by bundle delivery."
 
 
-def _repo_bundle_task_closeout_label(bundles: list[RepoBundle]) -> str:
+def _repo_bundle_task_closeout_label(
+    bundles: list[RepoBundle], promotions: dict[str, dict[str, Any] | None] | None = None
+) -> str:
     if not bundles:
         return "No repo bundles are attached to this task."
+    promotions = promotions or {}
+    promoted = [bundle for bundle in bundles if _promotion_applied(promotions.get(bundle.id))]
+    if promoted and len(promoted) == len(bundles):
+        return "All repo bundles promoted to the checkout by the delivery directive."
+    if promoted:
+        return "Some repo bundles promoted by the delivery directive; others remain staged."
     if all(bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"} for bundle in bundles):
         return "Task repo bundles are staged/delivered only; checkout not modified by bundle delivery."
     if any(bundle.state in {"blocked", "rejected"} for bundle in bundles):

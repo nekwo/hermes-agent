@@ -556,3 +556,68 @@ def test_loop_status_rewrite_preserves_liveness_block(isolate_agent_runtime_root
     status = read_daemon_status()
 
     assert status["liveness"] == {"enabled": True, "checked_runs": 3, "warnings": 0, "hung_runs": 0}
+
+
+def test_untargeted_daemon_start_adopts_active_foreground_lane(monkeypatch, isolate_agent_runtime_root):
+    from agent_runtime import daemon as daemon_mod
+    from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
+
+    ts = now()
+    task_store = TaskStore()
+    task_store.create(Task(id="task_stale", title="Stale backlog", description="d", state=TaskState.CREATED, created_at=ts, updated_at=ts, requested_by="human"))
+    task_store.create(Task(id="task_fresh", title="Fresh goal", description="d", state=TaskState.CREATED, created_at=ts, updated_at=ts, requested_by="human"))
+    lane = GoalRuntimeInstanceStore().create_foreground(task_id="task_fresh", started_by="test")
+
+    class _Proc:
+        pid = 4321
+
+    spawned = []
+
+    def fake_popen(cmd, **kwargs):
+        spawned.append(cmd)
+        return _Proc()
+
+    # Only the fake spawned daemon pid counts as alive, so the pre-start check
+    # sees no live daemon and the post-start status read does not collapse to offline.
+    monkeypatch.setattr(daemon_mod, "_pid_is_alive", lambda pid: pid == _Proc.pid)
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", fake_popen)
+
+    result = daemon_mod.start_daemon()
+
+    assert result["started"] is True
+    assert result["target_task_id"] == "task_fresh"
+    assert result["target_source"] == "foreground_lane"
+    assert result["queue_mode"] == "foreground"
+    assert any("--task" in cmd and "task_fresh" in cmd for cmd in spawned)
+    status = daemon_mod.read_daemon_status()
+    assert status["target_task_id"] == "task_fresh"
+    assert status["foreground_runtime_instance_id"] == lane.id
+
+
+def test_untargeted_daemon_start_without_lane_stays_lane_mode(monkeypatch, isolate_agent_runtime_root):
+    from agent_runtime import daemon as daemon_mod
+
+    class _Proc:
+        pid = 4322
+
+    monkeypatch.setattr(daemon_mod, "_pid_is_alive", lambda pid: False)
+    monkeypatch.setattr(daemon_mod.subprocess, "Popen", lambda cmd, **kwargs: _Proc())
+
+    result = daemon_mod.start_daemon()
+
+    assert result["started"] is True
+    assert result["target_task_id"] is None
+    assert result["target_source"] is None
+    assert result["queue_mode"] == "lane"
+
+
+def test_active_foreground_skips_lanes_for_terminal_tasks(isolate_agent_runtime_root):
+    from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
+
+    ts = now()
+    task_store = TaskStore()
+    task_store.create(Task(id="task_done", title="Done goal", description="d", state=TaskState.DONE, created_at=ts, updated_at=ts, requested_by="human"))
+    store = GoalRuntimeInstanceStore()
+    store.create_foreground(task_id="task_done", started_by="test")
+
+    assert store.active_foreground() is None

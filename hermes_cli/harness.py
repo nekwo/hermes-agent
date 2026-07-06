@@ -889,6 +889,16 @@ def build_parser(parent_subparsers) -> None:
     daemon_foreground.set_defaults(func=_cmd_daemon)
     daemon_run_once.set_defaults(func=_cmd_daemon)
 
+    worktree = subs.add_parser("worktree", help="Manage harness-managed git worktrees")
+    worktree_subs = worktree.add_subparsers(dest="worktree_command", required=True)
+    worktree_reap = worktree_subs.add_parser(
+        "reap",
+        help="Capture-then-reap orphan worktrees not owned by any open task run",
+    )
+    worktree_reap.add_argument("--min-age-seconds", type=int, default=3600)
+    worktree_reap.add_argument("--json", action="store_true")
+    worktree_reap.set_defaults(func=_cmd_worktree_reap)
+
     agent = subs.add_parser("agent", help="List harness agent definitions")
     agent_subs = agent.add_subparsers(dest="agent_command", required=True)
     agent_list = agent_subs.add_parser("list", help="List persisted/configured agent definitions")
@@ -4909,6 +4919,20 @@ def _normalize_cli_persona_or_template_id(persona_id: str) -> str:
     return _normalize_cli_persona_id(raw)
 
 
+def _cmd_worktree_reap(args) -> int:
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+
+    data = reap_orphan_worktrees(min_age_seconds=int(getattr(args, "min_age_seconds", 3600) or 3600))
+    if getattr(args, "json", False):
+        print(emit_json(data))
+    else:
+        print(f"reaped {len(data.get('reaped') or [])} worktree(s); kept {len(data.get('kept') or [])}")
+        for item in data.get("reaped") or []:
+            captured = f" (diff -> {item['captured_patch']})" if item.get("captured_patch") else ""
+            print(f"  - {item['worktree']}{captured}")
+    return 0
+
+
 def _cmd_task_create(args) -> int:
     from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
     from agent_runtime.repo_context import canonical_repo_scope_label, known_repo_scope_labels
@@ -4927,7 +4951,10 @@ def _cmd_task_create(args) -> int:
                 },
             }
         else:
-            data = create_mission_goal_from_request(request)
+            data = create_mission_goal_from_request(
+                request,
+                start_daemon_mode=getattr(args, "start_daemon", None),
+            )
     else:
         if not args.title or not args.description:
             data = {

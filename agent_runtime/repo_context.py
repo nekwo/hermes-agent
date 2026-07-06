@@ -359,6 +359,120 @@ def _run_git_quiet(cwd: Path, args: list[str]) -> None:
     )
 
 
+def existing_run_worktrees(repo_label: str, *, task_id: str, run_id: str) -> list[Path]:
+    """Deterministic isolated-worktree paths that exist for (repo, task, run).
+
+    Mirrors the candidate fan used by ``_ensure_isolated_worktree`` so callers
+    (delivery-directive capture/reap) can recover a run's worktree without any
+    side-channel state.
+    """
+
+    source_root = resolve_affected_repo_workdir(repo_label)
+    git_root = _git_root_for(source_root) if source_root is not None else None
+    if git_root is None:
+        return []
+    # The creation-time token used the execution context's derived label
+    # (directory name), NOT the caller's repo alias/path string — recompute it
+    # the same way or the hash never matches (e.g. "EterniaBackend" alias vs
+    # "eternia-backend" directory).
+    token_label = _safe_repo_label(source_root.resolve().name)
+    base = _worktree_base_dir() / _worktree_token(git_root, task_id=task_id, run_id=run_id, repo_label=token_label)
+    candidates = [base, *[base.with_name(f"{base.name}_{idx}") for idx in range(1, 4)]]
+    return [candidate for candidate in candidates if candidate.is_dir() and _git_root_for(candidate) is not None]
+
+
+def worktree_patch_text(worktree: Path, *, include_untracked: bool = True, timeout_seconds: int = 60) -> str:
+    """Binary-safe unified patch of a worktree's changes vs HEAD.
+
+    Raw ``git diff --binary`` stdout — deliberately NOT routed through
+    ``_git_output``, which strips/drops lines and would corrupt patch context.
+    ``--intent-to-add`` makes untracked files appear as new-file hunks without
+    staging content.
+    """
+
+    root = _git_root_for(Path(worktree).expanduser())
+    if root is None:
+        return ""
+    if include_untracked:
+        _run_git_quiet(root, ["git", "add", "--all", "--intent-to-add"])
+    try:
+        # Byte-faithful capture: text mode would apply universal-newline
+        # translation and silently strip CR from CRLF content, producing a
+        # patch that no longer applies to CRLF working trees.
+        result = subprocess.run(
+            ["git", "diff", "--binary", "--no-ext-diff", "HEAD"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if result.returncode not in {0, 1}:
+        return ""
+    text = (result.stdout or b"").decode("utf-8", errors="replace")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+def remove_harness_worktree_for_repo(repo_label: str, worktree: Path, *, reason: str) -> bool:
+    """Public reap for a harness-managed worktree, followed by prune."""
+
+    source_root = resolve_affected_repo_workdir(repo_label)
+    git_root = _git_root_for(source_root) if source_root is not None else None
+    if git_root is None:
+        return False
+    removed = _remove_harness_worktree(git_root, Path(worktree), reason=reason)
+    if removed:
+        _run_git_quiet(git_root, ["git", "worktree", "prune"])
+    return removed
+
+
+def harness_worktree_dirs() -> list[Path]:
+    """Every directory in the harness worktree base, oldest mtime first."""
+
+    base = _worktree_base_dir()
+    if not base.is_dir():
+        return []
+    entries = [entry for entry in base.iterdir() if entry.is_dir()]
+
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return sorted(entries, key=_mtime)
+
+
+def worktree_source_root(worktree: Path) -> Path | None:
+    """Main repository root a harness worktree belongs to (via git-common-dir)."""
+
+    git_dir_text = _git_output(Path(worktree), ["git", "rev-parse", "--git-common-dir"], single=True)
+    if not git_dir_text:
+        return None
+    git_dir = Path(git_dir_text)
+    if not git_dir.is_absolute():
+        git_dir = Path(worktree) / git_dir
+    # <repo>/.git → repo root
+    root = git_dir.resolve().parent
+    return root if root.is_dir() else None
+
+
+def remove_orphan_worktree(worktree: Path, *, reason: str) -> bool:
+    """Reap a worktree by resolving its own source repo, then prune."""
+
+    source_root = worktree_source_root(worktree)
+    if source_root is None:
+        return False
+    removed = _remove_harness_worktree(source_root, Path(worktree), reason=reason)
+    if removed:
+        _run_git_quiet(source_root, ["git", "worktree", "prune"])
+    return removed
+
+
 def _materialize_worktree_local_support(source_root: Path, worktree: Path) -> None:
     """Add ignored local-only support needed for deterministic proofs.
 

@@ -78,6 +78,9 @@ class Task:
     updated_at: datetime
     requested_by: str
     requires_visual_proof: bool = False
+    # Declared delivery directive (promote / preserve_diff / worktree). None
+    # means the contract default; resolved via delivery_directive.task_delivery_directive.
+    delivery_directive: dict[str, Any] | None = None
     acceptance_criteria: list[str] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
     affected_repos: list[str] = field(default_factory=list)
@@ -378,6 +381,10 @@ class RepoBundle:
     verified_at: datetime | None = None
     rejected_at: datetime | None = None
     last_terminal_feedback: dict[str, Any] = field(default_factory=dict)
+    # Delivery-time capture facts (delivering run id, patch name, changed
+    # files) recorded by the delivery directive so the diff and worktree stay
+    # recoverable after ``active_run_id`` is cleared.
+    delivery_capture: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
     schema_version: int = 1

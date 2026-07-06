@@ -29,6 +29,7 @@ from .cli_format import task_summary
 from .config import load_agent_runtime_config
 from .daemon import start_daemon
 from .default_plan import ensure_default_mission_plan, specialize_default_plan_for_task
+from .delivery_directive import DeliveryDirectiveInvalid, normalize_delivery_directive
 from .goal_hygiene import (
     activate_foreground_runtime,
     prepare_new_goal_runtime,
@@ -55,6 +56,8 @@ def create_mission_goal(
     operator: dict[str, Any] | None = None,
     acceptance_criteria: list[str] | None = None,
     proof_expectations: list[str] | None = None,
+    requires_visual_proof: bool = False,
+    delivery_directive: dict[str, Any] | None = None,
     requested_blueprint_id: str | None = None,
     blueprint_selection_mode: str = "default",
     blueprint_bindings: dict[str, str] | None = None,
@@ -84,6 +87,14 @@ def create_mission_goal(
     )
     if validation_error is not None:
         return validation_error
+    try:
+        resolved_delivery_directive = normalize_delivery_directive(delivery_directive)
+    except DeliveryDirectiveInvalid as exc:
+        return _create_error(
+            "invalid_request",
+            f"Unsupported delivery directive: {exc}",
+            retryable=False,
+        )
     idempotency_key = _safe_idempotency_key(idempotency_key)
     safe_graph_owner = _safe_persona_id(graph_owner_persona_id)
     effective_blueprint_bindings = dict(blueprint_bindings or {})
@@ -145,6 +156,8 @@ def create_mission_goal(
         created_at=ts,
         updated_at=ts,
         requested_by=requested_by,
+        requires_visual_proof=bool(requires_visual_proof),
+        delivery_directive=resolved_delivery_directive,
         acceptance_criteria=list(acceptance_criteria or []),
         affected_repos=list(repo_scope or []),
     )
@@ -201,8 +214,18 @@ def create_mission_goal(
     return data
 
 
-def create_mission_goal_from_request(request: dict[str, Any], *, config: Any | None = None) -> dict[str, Any]:
-    """Create a goal from the Stage 38 canonical request envelope."""
+def create_mission_goal_from_request(
+    request: dict[str, Any],
+    *,
+    config: Any | None = None,
+    start_daemon_mode: bool | None = None,
+) -> dict[str, Any]:
+    """Create a goal from the Stage 38 canonical request envelope.
+
+    ``start_daemon_mode`` mirrors the CLI tri-state ``--start-daemon`` flag; it
+    is transport-level (who drives the daemon), so it rides beside the envelope
+    rather than inside it.
+    """
 
     goal = request.get("goal") if isinstance(request.get("goal"), dict) else {}
     blueprint = request.get("blueprint") if isinstance(request.get("blueprint"), dict) else {}
@@ -221,6 +244,7 @@ def create_mission_goal_from_request(request: dict[str, Any], *, config: Any | N
         title=str(goal.get("title") or ""),
         description=str(goal.get("description") or ""),
         requested_by=str(operator.get("operator_id") or "launcher"),
+        start_daemon_mode=start_daemon_mode,
         config=config,
         schema_version=int(request.get("schema_version") or 1),
         idempotency_key=str(request.get("idempotency_key") or ""),
@@ -228,6 +252,8 @@ def create_mission_goal_from_request(request: dict[str, Any], *, config: Any | N
         operator=operator,
         acceptance_criteria=_string_list(goal.get("acceptance_criteria")),
         proof_expectations=_string_list(goal.get("proof_expectations")),
+        requires_visual_proof=bool(goal.get("requires_visual_proof") or False),
+        delivery_directive=goal.get("delivery_directive") if isinstance(goal.get("delivery_directive"), dict) else None,
         requested_blueprint_id=str(blueprint.get("requested_blueprint_id") or ""),
         blueprint_selection_mode=str(blueprint.get("selection_mode") or "default"),
         blueprint_bindings=bindings,

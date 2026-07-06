@@ -18,6 +18,7 @@ from .capabilities import capability_descriptors
 from .config import ensure_persisted_personas, load_agent_runtime_config
 from .daemon import read_daemon_status
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash, event_catalog
+from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
 from .events import CachedEventLog, EventLog
 from .migrations import effective_config_summary, migration_status
@@ -1464,6 +1465,7 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "can_start_run": _can_start_run(task, active_runs, open_incidents),
         "run_blocked_reason": _run_blocked_reason(task, active_runs, open_incidents, run_store=run_store),
         "requires_visual_proof": task.requires_visual_proof,
+        "delivery_directive": task_delivery_directive(task),
         "missing_proof": gate.missing,
         "open_incident_count": len(task.open_incident_ids) or len(open_incidents),
         "issue_discovery_counts": issue_discovery_counts(task),

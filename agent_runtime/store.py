@@ -296,8 +296,13 @@ class ArchiveStore:
             }
             atomic_json_write(archive_dir / "manifest.prepare.json", prepare_manifest, indent=2, sort_keys=True)
 
+            delivery_outcomes = self._execute_delivery_directives(ready)
+
             for task in ready:
-                archived.append(self._archive_one(task, archive_dir, run_store))
+                entry = self._archive_one(task, archive_dir, run_store)
+                if task.id in delivery_outcomes:
+                    entry["delivery_directive_outcomes"] = delivery_outcomes[task.id]
+                archived.append(entry)
 
             manifest = {
                 "schema_version": 1,
@@ -321,6 +326,53 @@ class ArchiveStore:
                 skipped=skipped,
                 manifest_path=archive_dir / "manifest.json",
             )
+
+    def _execute_delivery_directives(self, ready: list[Task]) -> dict[str, list[dict]]:
+        """Run each terminal task's declared delivery directive before its
+        evidence moves: promote delivered bundles, then reap their worktrees.
+
+        This is the single choke point both the daemon auto-archive and manual
+        ``task archive`` route through, so ``done`` always means the directive
+        ran — never a bundle stranded in a disposable worktree.
+        """
+
+        from .delivery_directive import execute_task_delivery_directives, reap_task_run_worktrees
+        from .repo_bundles import RepoBundleStore
+
+        outcomes: dict[str, list[dict]] = {}
+        bundle_store = RepoBundleStore()
+        run_store = RunStore(event_log=self.event_log)
+        for task in ready:
+            try:
+                bundles = bundle_store.list_for_task(task.id)
+            except Exception:
+                bundles = []
+            results: list[dict] = []
+            if bundles:
+                results = execute_task_delivery_directives(
+                    task,
+                    bundles,
+                    event_log=self.event_log,
+                    incident_store=IncidentStore(event_log=self.event_log),
+                )
+            # A terminal task owns nothing anymore: capture-then-reap every
+            # remaining run worktree (non-delivered bundles, failed runs)
+            # so litter never outlives the goal.
+            try:
+                repos = list(dict.fromkeys(list(task.affected_repos or []) + [b.repo for b in bundles]))
+                reap = reap_task_run_worktrees(
+                    task.id,
+                    run_ids=[run.id for run in run_store.list_for_task(task.id)],
+                    repos=repos,
+                    event_log=self.event_log,
+                )
+                if reap:
+                    results.append({"task_worktree_reap": reap})
+            except Exception:
+                pass
+            if results:
+                outcomes[task.id] = results
+        return outcomes
 
     def _archive_one(self, task: Task, archive_dir: Path, run_store: "RunStore") -> dict:
         task_dest = archive_dir / "tasks" / f"{task.id}.json"

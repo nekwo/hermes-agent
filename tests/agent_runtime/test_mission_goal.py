@@ -243,3 +243,56 @@ def test_supervisor_chat_toolset_gains_mission_goal_even_if_persona_list_omits_i
         system_prompt_path="",
     )
     assert "mission_goal" not in _enabled_toolsets_for_chat(dev, session_id="sess_x")
+
+
+def test_create_from_request_threads_start_daemon_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    calls = []
+
+    def fake_start_daemon(**kwargs):
+        calls.append(kwargs)
+        return {"started": True, "pid": 1, "state": "starting", "target_task_id": kwargs.get("task_id"), "queue_mode": "foreground"}
+
+    monkeypatch.setattr(mission_goal_mod, "start_daemon", fake_start_daemon)
+    result = create_mission_goal_from_request(_canonical_request(), start_daemon_mode=True)
+    assert "error" not in result
+    assert result["daemon_start"]["started"] is True
+    assert len(calls) == 1
+    assert calls[0]["task_id"] == result["task_id"]
+
+
+def test_create_from_request_default_daemon_mode_still_defers_to_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    result = create_mission_goal_from_request(_canonical_request())
+    assert "error" not in result
+    assert result["daemon_start"]["attempted"] is False
+
+
+def test_create_from_request_threads_requires_visual_proof_and_delivery_directive(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    request = _canonical_request(
+        goal={
+            "title": "UI slice",
+            "description": "Launcher dialog change.",
+            "requires_visual_proof": True,
+            "delivery_directive": {"promote": "hold"},
+        }
+    )
+    result = create_mission_goal_from_request(request, start_daemon_mode=False)
+    assert "error" not in result
+    task = TaskStore().get(result["task_id"])
+    assert task.requires_visual_proof is True
+    assert task.delivery_directive["promote"] == "hold"
+    assert task.delivery_directive["preserve_diff"] == "archive"
+    assert task.delivery_directive["worktree"] == "reap_after_promote"
+
+
+def test_create_from_request_rejects_invalid_delivery_directive(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    request = _canonical_request(
+        goal={"title": "T", "description": "D", "delivery_directive": {"promote": "yolo"}}
+    )
+    result = create_mission_goal_from_request(request, start_daemon_mode=False)
+    assert result["error"]["code"] == "invalid_request"
+    assert "delivery directive" in result["error"]["message"].lower()

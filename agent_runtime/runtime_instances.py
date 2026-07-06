@@ -217,6 +217,33 @@ class GoalRuntimeInstanceStore:
         return None
 
     def active_foreground(self) -> GoalRuntimeInstance | None:
+        """Most recent foreground lane actively driving an OPEN task.
+
+        The lane registered at goal-create is the operator's declared target.
+        An untargeted daemon start adopts it instead of scanning the stale
+        open-task backlog — the lane IS the targeting directive.
+        """
+
+        from .states import TaskState
+        from .store import NotFound, TaskStore
+
+        active_states = {ACTIVE_STATE, WAITING_STATE, "queued", "activating", "running"}
+        task_store = TaskStore(event_log=self.event_log)
+        for item in reversed(self.list_all()):
+            # Post lane-pivot, ``lane`` holds the instance id; production
+            # lane_kind + active state is what marks a live operator-declared lane.
+            if getattr(item, "lane_kind", "production") != "production" or item.state not in active_states:
+                continue
+            if not item.task_id:
+                continue
+            try:
+                task = task_store.get(item.task_id)
+            except NotFound:
+                continue
+            except Exception:
+                continue
+            if task.state in {TaskState.CREATED, TaskState.RUNNING}:
+                return item
         return None
 
 

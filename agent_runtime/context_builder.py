@@ -115,6 +115,19 @@ def build_context(
     )
 
 
+def _delivery_directive_line(task) -> str:
+    """One HUD line stating what the harness will do with delivered bundles,
+    so personas never have to guess (or decide) promotion/cleanup policy."""
+
+    from .delivery_directive import task_delivery_directive
+
+    directive = task_delivery_directive(task)
+    return (
+        f"promote={directive['promote']} preserve_diff={directive['preserve_diff']} "
+        f"worktree={directive['worktree']} (executed by the harness at terminal settle; not a persona decision)"
+    )
+
+
 def render_context(ctx: AgentContext) -> str:
     objective_stage = _context_objective_stage(ctx.task, ctx.run)
     lines = [
@@ -126,6 +139,7 @@ def render_context(ctx: AgentContext) -> str:
         f"- state: {ctx.task.state}",
         f"- requested_by: {ctx.task.requested_by}",
         f"- requires_visual_proof: {ctx.task.requires_visual_proof}",
+        f"- delivery_directive: {_delivery_directive_line(ctx.task)}",
         "",
         "## Objective",
         render_objective(

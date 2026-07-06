@@ -333,6 +333,13 @@ def _write_final_offline_status(pid: int, *, loops: int, last_tick_id: str | Non
 def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: str | None = None, interval_seconds: float | None = None, idle_interval_seconds: float | None = None) -> dict:
     task_id = _safe_task_id(task_id)
     foreground_runtime_instance_id = _safe_task_id(foreground_runtime_instance_id)
+    target_source = "explicit" if task_id else None
+    if not task_id:
+        adopted = _adopt_active_foreground_lane()
+        if adopted is not None:
+            task_id = adopted["task_id"]
+            foreground_runtime_instance_id = foreground_runtime_instance_id or adopted["instance_id"]
+            target_source = "foreground_lane"
     status = read_daemon_status()
     pid = status.get("pid")
     if isinstance(pid, int) and _pid_is_alive(pid):
@@ -379,11 +386,26 @@ def start_daemon(*, task_id: str | None = None, foreground_runtime_instance_id: 
         "pid": proc.pid,
         "heartbeat_at": _utc_now(),
         "target_task_id": task_id,
+        "target_source": target_source,
         "queue_mode": queue_mode,
         "services_open_tasks": True,
         "foreground_runtime_instance_id": foreground_runtime_instance_id,
     })
-    return {"started": True, "pid": proc.pid, "state": "starting", "target_task_id": task_id, "queue_mode": queue_mode, "services_open_tasks": True}
+    return {"started": True, "pid": proc.pid, "state": "starting", "target_task_id": task_id, "target_source": target_source, "queue_mode": queue_mode, "services_open_tasks": True}
+
+
+def _adopt_active_foreground_lane() -> dict | None:
+    """Declared foreground lane target for an untargeted daemon start."""
+
+    try:
+        from .runtime_instances import GoalRuntimeInstanceStore
+
+        instance = GoalRuntimeInstanceStore().active_foreground()
+    except Exception:
+        return None
+    if instance is None or not instance.task_id:
+        return None
+    return {"task_id": instance.task_id, "instance_id": instance.id}
 
 
 def stop_daemon() -> dict:
