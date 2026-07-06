@@ -241,6 +241,7 @@ def _intervention(
     summary: str,
     **extra: Any,
 ) -> dict[str, Any]:
+    expires_at = extra.pop("expires_at", None)
     data = {
         "kind": kind,
         "severity": severity,
@@ -248,9 +249,49 @@ def _intervention(
         "task_id": task_id,
         "run_id": run_id,
         "summary": summary,
+        "ask": summary,
+        "risk_if_ignored": _risk_if_ignored(kind, severity),
+        "allowed_actions": _allowed_actions(kind, subject),
+        "expires_at": expires_at,
+        "safe_refs": {
+            key: value
+            for key, value in {
+                "task_id": task_id,
+                "run_id": run_id,
+                "incident_id": extra.get("incident_id"),
+                "worker_session_id": extra.get("worker_session_id"),
+                "context_request_id": extra.get("context_request_id"),
+                "discovery_id": extra.get("discovery_id"),
+            }.items()
+            if value
+        },
     }
     data.update(extra)
     return data
+
+
+def _risk_if_ignored(kind: str, severity: str) -> str:
+    if severity in {"critical", "high"}:
+        return "Mission progress can remain blocked or drift from Harness truth."
+    if kind in {"context_request_loop", "context_request_unfulfilled"}:
+        return "Agents may keep requesting context instead of advancing the mission."
+    return "Mission Control may remain degraded until this is resolved."
+
+
+def _allowed_actions(kind: str, subject: str) -> list[str]:
+    if kind == "open_incident":
+        return ["answer_intervention", "retry_stage"]
+    if kind in {"daemon_offline", "daemon_error", "daemon_stale"}:
+        return ["start_daemon"]
+    if subject == "run":
+        return ["cancel_run", "retry_stage"]
+    if subject == "worker_session":
+        return ["nudge_worker", "cancel_run"]
+    if kind.startswith("context_request"):
+        return ["answer_intervention"]
+    if kind == "issue_discovery_triage_needed":
+        return ["answer_intervention", "create_goal"]
+    return ["answer_intervention"]
 
 
 def _severity_for_incident(incident: Incident) -> str:

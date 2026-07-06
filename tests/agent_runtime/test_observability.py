@@ -88,6 +88,16 @@ def test_observability_flags_stale_daemon_stalled_run_and_repeated_context_reque
     assert obs["active_runs"][0]["progress"] is None
     assert obs["signals"]["repeated_context_request_tasks"] == 1
     assert {item["kind"] for item in obs["interventions"]} >= {"daemon_stale", "run_stalled", "open_incident", "context_request_loop"}
+    incident_intervention = next(item for item in obs["interventions"] if item["kind"] == "open_incident")
+    assert incident_intervention["ask"] == "Open model_invalid_output incident requires review"
+    assert incident_intervention["risk_if_ignored"]
+    assert incident_intervention["allowed_actions"] == ["answer_intervention", "retry_stage"]
+    assert incident_intervention["expires_at"] is None
+    assert incident_intervention["safe_refs"] == {
+        "task_id": task.id,
+        "run_id": run.id,
+        "incident_id": incident.id,
+    }
     assert obs["recent_events"] == [
         {
             "ts": ts,
