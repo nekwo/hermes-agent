@@ -828,6 +828,7 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "task_id": safe_assignment_text(getattr(event, "task_id", None), limit=160),
         "persona_id": safe_assignment_token(getattr(event, "persona_id", None)) or "unknown",
         "run_id": safe_assignment_text(getattr(event, "run_id", None), limit=160),
+        "turn_id": safe_assignment_text(getattr(event, "turn_id", None) or payload.get("turn_id"), limit=160),
         "stage_id": _safe_trace_text(payload.get("stage_id"), limit=120),
         "event": trace_event,
         "tool_name": tool_name,

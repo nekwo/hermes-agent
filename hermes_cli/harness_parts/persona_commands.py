@@ -901,6 +901,7 @@ def _cmd_mission_chat_message(args) -> int:
             trace_callback=_stream_progress,
             agent_ready_callback=_agent_ready_for_steer,
             preloaded_skill_prompt=preloaded_skill_prompt,
+            turn_id=safe_assignment_token(client_message_id),
         )
         final_model_input = (getattr(chat_result, "raw", {}) or {}).get("model_input_observability")
         prompt_context = mission_chat_prompt_observability(
@@ -2380,6 +2381,7 @@ def _run_free_floating_assignment_once(
             persona,
             chat_message,
             session_id=None,
+            turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
             max_wall_seconds=max_seconds,
             stream_callback=_stream_delta if stream else None,
             trace_callback=_stream_progress if stream_emitter is not None else None,

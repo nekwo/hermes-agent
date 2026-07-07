@@ -287,6 +287,14 @@ class _OperatorChannelBuilder:
             runs=channel_runs,
             accountant=accountant,
         )
+        if _turn_identity_dropped(entries, conversation.get("messages") or []):
+            warnings.append(
+                {
+                    "code": "operator_conversations.turn_identity_dropped",
+                    "detail": "trace entries carry turn_id but projected tool/thinking conversation rows dropped it",
+                    "entity_id": channel_id,
+                }
+            )
         # trace_empty is evaluated AFTER the conversation: a channel whose goal
         # turns already flow as canonical messages is not an empty channel, even
         # when the legacy trace lane happens to be null.
@@ -398,6 +406,27 @@ def _row_runtime_ids(row: dict[str, Any]) -> set[str]:
         if normalized:
             ids.add(normalized)
     return ids
+
+
+def _turn_identity_dropped(entries: list[Any], messages: list[Any]) -> bool:
+    has_trace_turn_id = any(
+        isinstance(entry, dict)
+        and bool(safe_assignment_text(entry.get("turn_id"), limit=160))
+        for entry in entries
+    )
+    if not has_trace_turn_id:
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if safe_assignment_token(message.get("kind")) not in {"tool_call", "thinking_summary"}:
+            continue
+        refs = message.get("refs")
+        if not isinstance(refs, dict) or refs.get("source") != "persona_chat_trace":
+            continue
+        if not safe_assignment_text(message.get("turn_id"), limit=160):
+            return True
+    return False
 
 
 def _entry_runtime_ids(entry: dict[str, Any]) -> set[str]:
@@ -624,7 +653,8 @@ def _conversation_history_message(
     redaction_status = safe_assignment_token(row.get("redaction_status")) or "safe"
     if redaction_status in {"redacted", "unsafe"}:
         text = "Message hidden by redaction boundary."
-    return {
+    client_message_id = safe_assignment_text(row.get("client_message_id"), limit=240)
+    message = {
         "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
         "seq": 0,
         "timestamp": row.get("timestamp"),
@@ -638,6 +668,12 @@ def _conversation_history_message(
         "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
         "refs": {"source": "persona_chat_history"},
     }
+    if role == "operator" and client_message_id:
+        message["client_message_id"] = client_message_id
+    if role == "agent" and client_message_id:
+        message["turn_id"] = safe_assignment_token(client_message_id) or client_message_id
+        message["client_message_id"] = client_message_id
+    return message
 
 
 def _conversation_trace_message(
@@ -670,7 +706,8 @@ def _conversation_trace_message(
             value = safe_assignment_text(entry.get(key), limit=160)
             if value:
                 refs[key] = value
-        return {
+        turn_id = safe_assignment_text(entry.get("turn_id"), limit=160)
+        message = {
             "id": f"{channel_id}:thinking:{refs.get('run_id', 'run')}:{index}",
             "seq": 0,
             "timestamp": entry.get("ts"),
@@ -684,6 +721,9 @@ def _conversation_trace_message(
             "redaction_status": "safe",
             "refs": refs,
         }
+        if turn_id:
+            message["turn_id"] = turn_id
+        return message
     summary = _safe_conversation_text(
         entry.get("summary") or entry.get("rationale"),
         limit=1200,
@@ -698,7 +738,8 @@ def _conversation_trace_message(
         value = safe_assignment_text(entry.get(key), limit=160)
         if value:
             refs[key] = value
-    return {
+    turn_id = safe_assignment_text(entry.get("turn_id"), limit=160)
+    message = {
         "id": f"{channel_id}:progress:{refs.get('run_id', 'run')}:{index}",
         "seq": 0,
         "timestamp": entry.get("ts"),
@@ -712,6 +753,9 @@ def _conversation_trace_message(
         "redaction_status": "safe",
         "refs": refs,
     }
+    if turn_id:
+        message["turn_id"] = turn_id
+    return message
 
 
 def _conversation_assignment_message(
@@ -899,21 +943,25 @@ def _conversation_tool_call_messages(
         event = safe_assignment_token(entry.get("event"))
         if event not in {"tool_started", "tool_finished"}:
             continue
-        run_id = safe_assignment_text(entry.get("run_id"), limit=160) or "run"
+        turn_id = safe_assignment_text(entry.get("turn_id"), limit=160)
+        real_run_id = safe_assignment_text(entry.get("run_id"), limit=160)
+        bucket_id = turn_id or real_run_id or "run"
         tool_name = safe_assignment_text(entry.get("tool_name"), limit=120) or "tool"
-        key = (run_id, tool_name)
+        key = (bucket_id, tool_name)
         summary = _safe_conversation_text(entry.get("summary"), limit=1200)
         files = _safe_conversation_list(entry.get("files"), limit=200)
         if event == "tool_started":
             if accountant is not None:
                 accountant.consider(1)
-            ordinal = ordinals.get(run_id, 0)
-            ordinals[run_id] = ordinal + 1
+            ordinal = ordinals.get(bucket_id, 0)
+            ordinals[bucket_id] = ordinal + 1
             message = _tool_call_message(
                 channel_id=channel_id,
                 persona_id=persona_id,
                 persona_instance_id=persona_instance_id,
-                run_id=run_id,
+                bucket_id=bucket_id,
+                run_id=real_run_id,
+                turn_id=turn_id,
                 ordinal=ordinal,
                 tool_name=tool_name,
                 status="running",
@@ -946,14 +994,16 @@ def _conversation_tool_call_messages(
             continue
         if accountant is not None:
             accountant.consider(1)
-        ordinal = ordinals.get(run_id, 0)
-        ordinals[run_id] = ordinal + 1
+        ordinal = ordinals.get(bucket_id, 0)
+        ordinals[bucket_id] = ordinal + 1
         messages.append(
             _tool_call_message(
                 channel_id=channel_id,
                 persona_id=persona_id,
                 persona_instance_id=persona_instance_id,
-                run_id=run_id,
+                bucket_id=bucket_id,
+                run_id=real_run_id,
+                turn_id=turn_id,
                 ordinal=ordinal,
                 tool_name=tool_name,
                 status=status,
@@ -977,7 +1027,9 @@ def _tool_call_message(
     channel_id: str,
     persona_id: str,
     persona_instance_id: str | None,
-    run_id: str,
+    bucket_id: str,
+    run_id: str | None,
+    turn_id: str | None,
     ordinal: int,
     tool_name: str,
     status: str,
@@ -988,7 +1040,9 @@ def _tool_call_message(
     task_id: str | None,
     entry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    refs: dict[str, Any] = {"source": "persona_chat_trace", "run_id": run_id, "tool_name": tool_name}
+    refs: dict[str, Any] = {"source": "persona_chat_trace", "tool_name": tool_name}
+    if run_id:
+        refs["run_id"] = run_id
     if stage_id:
         refs["stage_id"] = stage_id
     if task_id:
@@ -998,8 +1052,8 @@ def _tool_call_message(
         tool["files"] = files
     if entry is not None:
         _merge_tool_detail(tool, entry)
-    return {
-        "id": f"{channel_id}:tool:{run_id}:{ordinal}",
+    message = {
+        "id": f"{channel_id}:tool:{bucket_id}:{ordinal}",
         "seq": 0,
         "timestamp": timestamp,
         "actor_persona_id": persona_id,
@@ -1013,6 +1067,9 @@ def _tool_call_message(
         "refs": refs,
         "tool": tool,
     }
+    if turn_id:
+        message["turn_id"] = turn_id
+    return message
 
 
 # Operator-detail fields carried from a trace entry onto the tool_call payload.

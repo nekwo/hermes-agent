@@ -1,5 +1,7 @@
 from agent_runtime.events import EventLog
-from agent_runtime.progress import ChatProgressSink, _safe_progress_payload
+from agent_runtime.models import Event
+from agent_runtime.progress import ChatProgressSink, _append_bounded_event, _safe_progress_payload
+from hermes_time import now
 
 
 def test_safe_progress_payload_preserves_dev_work_file_summary_but_not_paths():
@@ -89,6 +91,44 @@ def test_chat_progress_sink_records_session_keyed_tool_events(isolate_agent_runt
     assert all(event.session_id == "chat_1" for event in rows)
     assert all(event.persona_id == "neko_supervisor" for event in rows)
     assert rows[0].payload["command_label"] == "echo PARITY_OK_2026"
+
+
+def test_chat_progress_sink_stamps_turn_id_on_events_and_retry(isolate_agent_runtime_root):
+    log = EventLog()
+    sink = ChatProgressSink(
+        session_id="chat_1",
+        persona_id="neko_supervisor",
+        event_log=log,
+        turn_id="agent-chat-send-1",
+    )
+
+    sink.emit("run.tool.started", {"type": "run.tool.started", "tool_name": "terminal"})
+    sink.emit("run.tool.finished", {"type": "run.tool.finished", "tool_name": "terminal", "status": "passed"})
+
+    rows = log.for_session("chat_1")
+    assert [event.turn_id for event in rows] == ["agent-chat-send-1", "agent-chat-send-1"]
+
+    _append_bounded_event(
+        log,
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id=None,
+            run_id=None,
+            persona_id="neko_supervisor",
+            session_id="chat_1",
+            turn_id="agent-chat-send-1",
+            payload={
+                "type": "run.tool.finished",
+                "tool_name": "terminal",
+                "status": "passed",
+                "output": "x" * 5000,
+            },
+        ),
+    )
+    retried = log.for_session("chat_1")[-1]
+    assert retried.turn_id == "agent-chat-send-1"
+    assert retried.payload["output_truncated"] is True
 
 
 def test_chat_progress_sink_drops_noise_and_secrets(isolate_agent_runtime_root):

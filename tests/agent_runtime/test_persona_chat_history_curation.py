@@ -743,6 +743,34 @@ def test_trace_entry_carries_operator_detail_fields():
     assert read["target"] == "lib/main.dart"
 
 
+def test_trace_entry_projects_turn_id():
+    events = EventLog()
+    ts = now()
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.started",
+            task_id=None,
+            run_id=None,
+            persona_id="profile:alice",
+            session_id="chat_1",
+            turn_id="agent-chat-send-1",
+            payload={
+                "tool_name": "terminal",
+                "status": "started",
+                "summary": "Started tool terminal",
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[_chat_persona_instance("personainst_alice", "profile:alice", "chat_1")],
+        event_log=events,
+    )
+
+    assert rows[0]["entries"][0]["turn_id"] == "agent-chat-send-1"
+
+
 def test_trace_entry_carries_reasoning_summary_but_never_the_placeholder():
     events = EventLog()
     ts = now()

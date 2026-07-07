@@ -225,6 +225,7 @@ class GPTPersonaRuntime:
                 progress_callback=_chat_trace_callback(
                     session_id=session_id,
                     persona=persona,
+                    turn_id=turn_id,
                     before_first_trace=pre_trace_callback,
                     on_trace=trace_callback,
                 ),
@@ -241,6 +242,7 @@ class GPTPersonaRuntime:
         *,
         session_id: str | None = None,
         permission_session_id: str | None = None,
+        turn_id: str | None = None,
         provider_override: str | None = None,
         model_override: str | None = None,
         surface_prompt: str | None = "",
@@ -322,6 +324,7 @@ class GPTPersonaRuntime:
                 progress_callback=_chat_trace_callback(
                     session_id=perm_session_id,
                     persona=persona,
+                    turn_id=turn_id,
                     before_first_trace=pre_trace_callback,
                     on_trace=trace_callback,
                 ),

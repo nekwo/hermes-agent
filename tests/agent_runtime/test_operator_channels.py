@@ -81,6 +81,118 @@ def test_operator_channel_collapses_alias_instances_and_keeps_trace_without_warn
     )
 
 
+def test_operator_conversation_projects_turn_identity_keys_and_scopes_tool_pairing():
+    session_id = "persona_chat_personainst_profile_alice_identity"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _instance(
+                "personainst_profile_alice",
+                session_id=session_id,
+                updated_at="2026-07-07T14:00:00Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "title": "Alice Agent chat",
+                "message_count": 2,
+                "messages": [
+                    {
+                        "id": "operator_1",
+                        "role": "operator",
+                        "text": "run proof one",
+                        "client_message_id": "agent-chat-send-1",
+                        "timestamp": "2026-07-07T14:00:00Z",
+                    },
+                    {
+                        "id": "agent_1",
+                        "role": "agent",
+                        "text": "proof one complete",
+                        "client_message_id": "agent-chat-send-1",
+                        "timestamp": "2026-07-07T14:00:08Z",
+                    },
+                ],
+                "updated_at": "2026-07-07T14:00:08Z",
+            }
+        ],
+        persona_chat_trace=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "entries": [
+                    {
+                        "event": "progress",
+                        "summary": "Agent thinking process updated",
+                        "reasoning_summary": "Preparing first proof.",
+                        "status": "running",
+                        "turn_id": "agent-chat-send-1",
+                        "ts": "2026-07-07T14:00:01Z",
+                    },
+                    {
+                        "event": "tool_started",
+                        "tool_name": "terminal",
+                        "summary": "Started first terminal",
+                        "status": "started",
+                        "turn_id": "agent-chat-send-1",
+                        "ts": "2026-07-07T14:00:02Z",
+                    },
+                    {
+                        "event": "tool_started",
+                        "tool_name": "terminal",
+                        "summary": "Started second terminal",
+                        "status": "started",
+                        "turn_id": "agent-chat-send-2",
+                        "ts": "2026-07-07T14:00:03Z",
+                    },
+                    {
+                        "event": "tool_finished",
+                        "tool_name": "terminal",
+                        "summary": "Finished second terminal: failed",
+                        "status": "failed",
+                        "turn_id": "agent-chat-send-2",
+                        "ts": "2026-07-07T14:00:04Z",
+                    },
+                    {
+                        "event": "tool_finished",
+                        "tool_name": "terminal",
+                        "summary": "Finished first terminal: passed",
+                        "status": "passed",
+                        "turn_id": "agent-chat-send-1",
+                        "ts": "2026-07-07T14:00:05Z",
+                    },
+                ],
+            }
+        ],
+    )
+
+    messages = channels[0]["conversation"]["messages"]
+    operator = next(message for message in messages if message["id"] == "operator_1")
+    agent = next(message for message in messages if message["id"] == "agent_1")
+    thinking = next(message for message in messages if message["kind"] == "thinking_summary")
+    tool_calls = [message for message in messages if message["kind"] == "tool_call"]
+
+    assert operator["client_message_id"] == "agent-chat-send-1"
+    assert agent["client_message_id"] == "agent-chat-send-1"
+    assert agent["turn_id"] == "agent-chat-send-1"
+    assert thinking["turn_id"] == "agent-chat-send-1"
+    assert {message["turn_id"] for message in tool_calls} == {
+        "agent-chat-send-1",
+        "agent-chat-send-2",
+    }
+    by_turn = {message["turn_id"]: message for message in tool_calls}
+    assert by_turn["agent-chat-send-1"]["status"] == "ok"
+    assert by_turn["agent-chat-send-2"]["status"] == "failed"
+    assert by_turn["agent-chat-send-1"]["id"].endswith(":tool:agent-chat-send-1:0")
+    assert by_turn["agent-chat-send-2"]["id"].endswith(":tool:agent-chat-send-2:0")
+    assert not any(
+        warning["code"] == "operator_conversations.turn_identity_dropped"
+        for warning in channels[0]["warnings"]
+    )
+
+
 def test_operator_channel_reports_missing_history_loudly():
     session_id = "persona_chat_personainst_profile_alice_missing"
     channels = operator_channel_summary(

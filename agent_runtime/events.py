@@ -511,6 +511,7 @@ def event_with_operator_summary(evt: Event) -> Event:
         persona_id=evt.persona_id,
         payload=payload,
         session_id=evt.session_id,
+        turn_id=evt.turn_id,
     )
 
 
