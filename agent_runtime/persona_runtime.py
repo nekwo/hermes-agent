@@ -596,7 +596,7 @@ def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None)
 # existed) may not yet enumerate. Without this, a deployment whose supervisor
 # toolsets were persisted before ``mission_goal`` shipped could never trigger a
 # real Mission Control goal from chat — the very thing the tool exists for.
-_CHAT_CAPABILITY_TOOLSETS = ("mission_goal",)
+_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat")
 
 
 def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> list[str]:

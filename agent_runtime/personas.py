@@ -56,9 +56,9 @@ def coerce_agent_role(role: AgentRole | str | None) -> AgentRole:
 
 
 ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
-    AgentRole.PM: frozenset({"file", "session_search", "todo", "skills"}),
-    AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills"}),
-    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills"}),
+    AgentRole.PM: frozenset({"file", "session_search", "todo", "skills", "agent_chat"}),
+    AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills", "agent_chat"}),
+    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills", "agent_chat"}),
     AgentRole.ALICE_SUPERVISOR: frozenset(
         {
             "file",
@@ -72,6 +72,7 @@ ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
             "todo",
             "skills",
             "mission_goal",
+            "agent_chat",
         }
     ),
 }
@@ -86,6 +87,7 @@ PROFILE_CHAT_FALLBACK_TOOLSETS = (
     "session_search",
     "skills",
     "mission_goal",
+    "agent_chat",
 )
 
 
@@ -156,7 +158,7 @@ def profile_chat_toolsets(profile_id: str, personas: list[AgentPersona] | tuple[
     )
     toolsets = list(getattr(matching, "toolsets", []) or []) if matching is not None else list(PROFILE_CHAT_FALLBACK_TOOLSETS)
     for toolset in PROFILE_CHAT_FALLBACK_TOOLSETS:
-        if toolset == "mission_goal" and toolset not in toolsets:
+        if toolset in ("mission_goal", "agent_chat") and toolset not in toolsets:
             toolsets.append(toolset)
     return [toolset for toolset in toolsets if toolset]
 

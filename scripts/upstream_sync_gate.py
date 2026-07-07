@@ -16,6 +16,7 @@ AGENT_TOOL_SEAMS = (
     "agent_runtime/",
     "hermes_cli/harness.py",
     "hermes_cli/harness_",
+    "tools/agent_chat_tool.py",
     "tools/mission_goal_tool.py",
 )
 
