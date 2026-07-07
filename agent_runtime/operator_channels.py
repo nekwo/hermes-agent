@@ -148,6 +148,34 @@ class _OperatorChannelBuilder:
             warning["entity_id"] = entity_id
         self.warnings.append(warning)
 
+    def _bound_history(self) -> dict[str, Any] | None:
+        """History row for an instance's BOUND session, when present.
+
+        ``persona.instance.open_chat`` rebinds an instance to an arbitrary
+        saved session; the channel must project that binding, not whichever
+        curated row happens to carry the newest timestamp. Observed live
+        2026-07-07: rebinding Alice to an older chat left her channel on the
+        newest session, so the Launcher console never switched chats.
+        """
+        bound = {
+            session
+            for session in (
+                _safe_session(getattr(instance, "session_id", None))
+                for instance in self.instances
+            )
+            if session
+        }
+        if not bound:
+            return None
+        matches = [
+            row
+            for row in self.history_rows
+            if _safe_session(row.get("session_id")) in bound
+        ]
+        if not matches:
+            return None
+        return _latest_history(matches)
+
     def build(
         self,
         *,
@@ -155,7 +183,7 @@ class _OperatorChannelBuilder:
         run_lookup: "_RunLookup | None" = None,
         accountant: Any = None,
     ) -> dict[str, Any] | None:
-        history = _latest_history(self.history_rows)
+        history = self._bound_history() or _latest_history(self.history_rows)
         trace = _merged_trace(self.trace_rows)
         canonical = _canonical_instance(self.instances, history=history)
         persona_id = _first_text(

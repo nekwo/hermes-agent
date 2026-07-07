@@ -134,6 +134,85 @@ def test_operator_channel_allows_quiet_chat_without_trace():
     assert channels[0]["warnings"] == []
 
 
+def test_operator_channel_projects_bound_session_after_open_chat_rebind():
+    """persona.instance.open_chat rebinds an instance to an older saved chat;
+    the channel must project the BOUND session, not the newest curated row.
+    Observed live 2026-07-07: rebinding Alice to an older chat left her
+    channel on the newest session, so the Launcher console never switched."""
+    bound_session = "persona_chat_personainst_profile_alice_older"
+    newest_session = "persona_chat_personainst_profile_alice_newest"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _instance(
+                "personainst_profile_alice",
+                session_id=bound_session,
+                updated_at="2026-07-07T16:10:00Z",
+            )
+        ],
+        persona_chat_history=[
+            {
+                "session_id": bound_session,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "title": "Older chat",
+                "message_count": 1,
+                "messages": [{"role": "agent", "text": "older transcript"}],
+                "updated_at": "2026-07-07T14:32:34Z",
+            },
+            {
+                "session_id": newest_session,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "title": "Newest chat",
+                "message_count": 1,
+                "messages": [{"role": "agent", "text": "newest transcript"}],
+                "updated_at": "2026-07-07T15:58:40Z",
+            },
+        ],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert channel["session_id"] == bound_session
+    assert channel["history"]["session_id"] == bound_session
+    assert channel["history"]["title"] == "Older chat"
+
+
+def test_operator_channel_keeps_per_session_channels_without_instance_binding():
+    """History-only rows (no instance) keep one channel per session —
+    the bound-session preference must not collapse or re-route them."""
+    channels = operator_channel_summary(
+        persona_instances=[],
+        persona_chat_history=[
+            {
+                "session_id": "chat_older",
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "title": "Older chat",
+                "message_count": 1,
+                "messages": [{"role": "agent", "text": "older transcript"}],
+                "updated_at": "2026-07-07T14:32:34Z",
+            },
+            {
+                "session_id": "chat_newest",
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "title": "Newest chat",
+                "message_count": 1,
+                "messages": [{"role": "agent", "text": "newest transcript"}],
+                "updated_at": "2026-07-07T15:58:40Z",
+            },
+        ],
+        persona_chat_trace=[],
+    )
+
+    assert sorted(channel["session_id"] for channel in channels) == [
+        "chat_newest",
+        "chat_older",
+    ]
+
+
 def test_operator_channel_projects_canonical_goal_conversation_and_filters_telemetry():
     ts = now()
     task = Task(
