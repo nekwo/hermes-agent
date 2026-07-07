@@ -161,3 +161,30 @@ def test_relay_trace_drops_secret_bearing_briefings():
     )
     assert started["target_label"] == "→ dev"
     assert "sk-123456789" not in str(started)
+
+
+def test_conversation_drops_thinking_rows_that_echo_the_reply():
+    from agent_runtime.operator_channels import _dedupe_conversation_messages
+
+    messages = [
+        {"kind": "operator_message", "display_text": "say hi", "id": "1"},
+        {
+            "kind": "thinking_summary",
+            "display_text": "Hello Master — I'm online.",
+            "id": "2",
+        },
+        {"kind": "reply", "display_text": "Hello Master — I'm online.", "id": "3"},
+        {
+            "kind": "thinking_summary",
+            "display_text": "Planning the relay first.",
+            "id": "4",
+        },
+    ]
+    deduped = _dedupe_conversation_messages(messages)
+    kinds = [(m["kind"], m["id"]) for m in deduped]
+    # The echo thinking row (id 2) is curated out; genuine thinking survives.
+    assert kinds == [
+        ("operator_message", "1"),
+        ("reply", "3"),
+        ("thinking_summary", "4"),
+    ]

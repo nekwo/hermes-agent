@@ -1130,6 +1130,15 @@ def _dedupe_conversation_messages(messages: list[dict[str, Any]]) -> list[dict[s
         for message in messages
         if message.get("kind") in {"thinking_summary", "turn"} and message.get("display_text")
     }
+    # The model's final text segment is often captured as a trailing "thinking"
+    # step whose text IS the reply verbatim. Rendering both paints the reply
+    # twice (an untimestamped Thinking bubble above the real one) — the reply
+    # wins, the echo is curated out.
+    reply_texts = {
+        str(message.get("display_text") or "").strip()
+        for message in messages
+        if message.get("kind") == "reply" and message.get("display_text")
+    }
     deduped: list[dict[str, Any]] = []
     for message in messages:
         refs = message.get("refs")
@@ -1153,6 +1162,8 @@ def _dedupe_conversation_messages(messages: list[dict[str, Any]]) -> list[dict[s
         # Keep the first occurrence in timeline order; drop later repeats.
         if message.get("kind") == "thinking_summary":
             text = message.get("display_text")
+            if text and str(text).strip() in reply_texts:
+                continue
             if text and text in seen_thinking_texts:
                 continue
             if text:
