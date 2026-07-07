@@ -177,6 +177,7 @@ class GPTPersonaRuntime:
         message: str,
         *,
         session_id: str | None = None,
+        turn_id: str | None = None,
         max_wall_seconds: float | None = 120.0,
         max_api_calls: int | None = 8,
         max_total_tokens: int | None = None,
@@ -562,11 +563,16 @@ def _chat_trace_callback(
     *,
     session_id: str | None,
     persona: AgentPersona,
+    turn_id: str | None = None,
     before_first_trace: Callable[[dict], None] | None = None,
     on_trace: Callable[[dict], None] | None = None,
 ) -> Callable[[dict], None] | None:
     """Build a runner ``progress_callback`` that records a chat turn's tool
     calls as redaction-safe trace events keyed on the chat session.
+
+    ``turn_id`` is the turn's canonical identity (the operator's
+    ``client_message_id`` token); it is stamped on every recorded event so the
+    snapshot projections carry one reconciliation key for the whole turn.
 
     Returns ``None`` when there is no session to key on (e.g. a sandbox run with
     no durable chat), which leaves the chat turn's telemetry exactly as it was
@@ -578,6 +584,7 @@ def _chat_trace_callback(
     sink = ChatProgressSink(
         session_id=session_id or "",
         persona_id=getattr(persona, "id", None),
+        turn_id=turn_id,
         before_first_trace=before_first_trace,
         on_trace=on_trace,
     )

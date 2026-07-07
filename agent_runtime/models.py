@@ -423,6 +423,12 @@ class Event:
     # projection can surface them per chat session. Optional + trailing keeps the
     # JSONL envelope backward compatible: older event rows decode with ``None``.
     session_id: str | None = None
+    # Canonical chat-turn identity: the turn key derived from the operator's
+    # ``client_message_id``. This is THE reconciliation key clients use to match
+    # a projected trace/conversation row to their locally streamed copy of the
+    # same turn — it is minted once at the send boundary and never re-derived.
+    # Task-run events leave this ``None`` (their identity is ``run_id``).
+    turn_id: str | None = None
 
 
 @dataclass(slots=True)

@@ -137,6 +137,7 @@ class ChatProgressSink:
         session_id: str,
         persona_id: str | None,
         run_id: str | None = None,
+        turn_id: str | None = None,
         event_log: EventLog | None = None,
         before_first_trace: Callable[[dict[str, Any]], None] | None = None,
         on_trace: Callable[[dict[str, Any]], None] | None = None,
@@ -144,6 +145,10 @@ class ChatProgressSink:
         self.session_id = session_id
         self.persona_id = persona_id
         self.run_id = run_id
+        # Turn key (the operator's client_message_id token): stamped on every
+        # event so downstream projections carry ONE reconciliation identity for
+        # the whole turn instead of clients matching rows by content.
+        self.turn_id = turn_id
         self.event_log = event_log or EventLog()
         self.before_first_trace = before_first_trace
         self.on_trace = on_trace
@@ -177,6 +182,7 @@ class ChatProgressSink:
                     persona_id=self.persona_id,
                     payload=safe_payload,
                     session_id=self.session_id,
+                    turn_id=self.turn_id,
                 ),
             )
         except Exception:
@@ -219,6 +225,7 @@ def _append_bounded_event(event_log: EventLog, event: Event) -> None:
                 persona_id=event.persona_id,
                 payload=payload,
                 session_id=event.session_id,
+                turn_id=event.turn_id,
             )
         )
 
