@@ -173,8 +173,14 @@ def persona_chat_history_summary(
             "started_at": getattr(instance, "assigned_at", None) or timestamp,
             "last_active": timestamp,
         }
-        row = _history_row(synthetic, instance, session_id=session_id, session_db=db, message_tail=message_tail)
-        row["live_mission"] = True
+        row = _history_row(
+            synthetic,
+            instance,
+            session_id=session_id,
+            session_db=db,
+            message_tail=message_tail,
+            kind="mission",
+        )
         row["task_id"] = task_id
         rows.append(row)
         seen.add(session_id)
@@ -474,6 +480,7 @@ def _history_row(
     session_id: str,
     session_db: Any | None = None,
     message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+    kind: str = "chat",
 ) -> dict[str, Any]:
     persona_id = _canonical_persona_id(getattr(instance, "persona_id", None)) or "unknown"
     raw_title = safe_assignment_text(raw.get("title"), limit=120)
@@ -509,11 +516,13 @@ def _history_row(
             getattr(instance, "id", None) or persona_instance_id_for(persona_id),
             limit=160,
         ),
+        "kind": "mission" if kind == "mission" or bool(raw.get("live_mission")) else "chat",
+        "live_mission": bool(kind == "mission" or raw.get("live_mission")),
         "title": title,
         "last_message_preview": preview,
         "message_count": _safe_int(raw.get("message_count")),
-        "created_at": raw.get("started_at"),
-        "updated_at": raw.get("last_active") or raw.get("ended_at") or raw.get("started_at"),
+        "created_at": _iso_timestamp(raw.get("started_at")),
+        "updated_at": _iso_timestamp(raw.get("last_active") or raw.get("ended_at") or raw.get("started_at")),
         "state": "archived" if bool(raw.get("archived")) else "open",
         "redaction_status": redaction_status,
         **({"would_redact": would_redact} if would_redact else {}),
@@ -689,34 +698,57 @@ def _safe_recent_messages(
 
 
 def _iso_timestamp(value: Any) -> str | None:
-    """Normalize a message timestamp to the same ISO-8601 ``Z`` form as traces.
+    """Normalize SessionDB timestamps to the same ISO-8601 ``Z`` form as traces.
 
     SessionDB stores message timestamps as epoch-seconds floats (``time.time()``),
     while harness-trace rows carry ISO strings (``Event.ts`` via ``to_jsonable``).
     The Launcher merges the two channels by parsing each ``ts`` with
     ``DateTime.tryParse`` and orders them — an epoch float is unparseable there, so
-    without this the curated rows lose their time and the trace block jumps ahead
-    of them. Project both channels in one comparable format.
+    without this the curated rows lose their time and the trace block jumps
+    ahead of them. Project message and session timestamps in one comparable UTC
+    format, and never pass raw unparseable values through the snapshot contract.
     """
 
     if value is None:
         return None
     if isinstance(value, bool):
         return None
-    if isinstance(value, str):
-        text = value.strip()
-        return text or None
-    if isinstance(value, (int, float)):
-        from datetime import datetime, timezone
+    from datetime import datetime, timezone
 
+    def _format(moment: datetime) -> str:
+        return moment.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    if isinstance(value, (int, float)):
         epoch = float(value)
         if epoch > 1e12:  # tolerate millisecond clocks
             epoch /= 1000.0
         try:
-            moment = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            return _format(datetime.fromtimestamp(epoch, tz=timezone.utc))
         except (OverflowError, OSError, ValueError):
             return None
-        return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            epoch = float(text)
+        except ValueError:
+            pass
+        else:
+            if epoch > 1e12:  # tolerate millisecond clocks
+                epoch /= 1000.0
+            try:
+                return _format(datetime.fromtimestamp(epoch, tz=timezone.utc))
+            except (OverflowError, OSError, ValueError):
+                return None
+        parse_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+        try:
+            parsed = datetime.fromisoformat(parse_text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return _format(parsed)
     return None
 
 

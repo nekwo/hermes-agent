@@ -20,6 +20,7 @@ from agent_runtime.mission_chat_turns import (
 from agent_runtime.persona_chat_history import (
     _iso_timestamp,
     _safe_recent_messages,
+    persona_chat_history_summary,
     persona_chat_trace_summary,
 )
 from agent_runtime.states import WorkerSessionState
@@ -31,6 +32,28 @@ class FakeSessionDB:
 
     def get_messages(self, session_id, include_inactive=False):
         return list(self._messages)
+
+
+class FakeHistorySessionDB(FakeSessionDB):
+    def __init__(self, sessions, messages=None):
+        super().__init__(messages or [])
+        self._sessions = list(sessions)
+
+    def list_sessions_rich(self, **kwargs):
+        source = kwargs.get("source")
+        exclude_sources = set(kwargs.get("exclude_sources") or [])
+        rows = list(self._sessions)
+        if source is not None:
+            rows = [row for row in rows if row.get("source") == source]
+        if exclude_sources:
+            rows = [row for row in rows if row.get("source") not in exclude_sources]
+        return rows[: kwargs.get("limit", len(rows))]
+
+    def get_session(self, session_id):
+        for row in self._sessions:
+            if row.get("id") == session_id:
+                return dict(row)
+        return None
 
 
 _DECISION = json.dumps(
@@ -137,6 +160,88 @@ def test_message_timestamps_are_iso_so_they_merge_with_trace_by_ts():
     assert _iso_timestamp(1782162002.5) == rows[0]["timestamp"]
     assert _iso_timestamp("2026-06-22T21:00:02.500000Z") == "2026-06-22T21:00:02.500000Z"
     assert _iso_timestamp(None) is None
+
+
+def test_history_row_timestamps_are_iso_utc_at_projection_boundary():
+    db = FakeHistorySessionDB(
+        [
+            {
+                "id": "chat_neko",
+                "title": "Neko briefing",
+                "message_count": 2,
+                "started_at": 1782162000.25,
+                "last_active": "1782162002.5",
+            }
+        ]
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=[_chat_persona_instance("personainst_neko", "neko_supervisor", "chat_neko")],
+        session_db=db,
+    )
+
+    assert rows[0]["created_at"] == "2026-06-22T21:00:00.250000Z"
+    assert rows[0]["updated_at"] == "2026-06-22T21:00:02.500000Z"
+
+
+def test_history_row_normalizes_iso_and_drops_garbage_timestamps():
+    db = FakeHistorySessionDB(
+        [
+            {
+                "id": "chat_neko",
+                "title": "Neko briefing",
+                "started_at": "2026-07-07T09:00:40",
+                "last_active": "not a timestamp",
+            }
+        ]
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=[_chat_persona_instance("personainst_neko", "neko_supervisor", "chat_neko")],
+        session_db=db,
+    )
+
+    assert rows[0]["created_at"] == "2026-07-07T09:00:40.000000Z"
+    assert rows[0]["updated_at"] is None
+
+
+def test_persona_chat_history_rows_always_emit_kind():
+    db = FakeHistorySessionDB(
+        [
+            {
+                "id": "chat_neko",
+                "title": "Neko briefing",
+                "message_count": 1,
+                "started_at": 1782162000.25,
+                "last_active": 1782162002.5,
+            }
+        ]
+    )
+    mission_instance = PersonaInstance(
+        id="personainst_dev",
+        persona_id="dev",
+        role="dev",
+        display_name="Dev",
+        profile_id=None,
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="task_bound",
+        session_id="mission_dev",
+        current_task_id="task_1",
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=[
+            _chat_persona_instance("personainst_neko", "neko_supervisor", "chat_neko"),
+            mission_instance,
+        ],
+        session_db=db,
+    )
+
+    assert {row["kind"] for row in rows} == {"chat", "mission"}
+    assert all(row["kind"] in {"chat", "mission"} for row in rows)
+    assert next(row for row in rows if row["kind"] == "chat")["live_mission"] is False
+    assert next(row for row in rows if row["kind"] == "mission")["live_mission"] is True
 
 
 def test_safe_recent_messages_returns_deeper_bounded_tail():
