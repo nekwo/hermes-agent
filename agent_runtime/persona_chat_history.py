@@ -4,8 +4,6 @@ import json
 import re
 from typing import Any, Iterable
 
-from hermes_time import now
-
 from .models import PersonaInstance
 from .mission_chat_turns import mission_chat_turn_elements
 from .parity import ProjectionAccountant
@@ -165,13 +163,13 @@ def persona_chat_history_summary(
         if not session_id or not task_id or session_id in seen:
             continue
         goal = safe_assignment_text(getattr(instance, "current_chat_goal", None), limit=120)
-        timestamp = now().isoformat()
+        assigned = _iso_timestamp(getattr(instance, "assigned_at", None))
         synthetic = {
             "id": session_id,
             "title": goal or "Mission run",
             "message_count": 0,
-            "started_at": getattr(instance, "assigned_at", None) or timestamp,
-            "last_active": timestamp,
+            "started_at": assigned,
+            "last_active": assigned,
         }
         row = _history_row(
             synthetic,

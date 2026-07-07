@@ -8,6 +8,7 @@ leaking into the Agent Console).
 """
 
 import json
+from types import SimpleNamespace
 
 from hermes_time import now
 
@@ -242,6 +243,54 @@ def test_persona_chat_history_rows_always_emit_kind():
     assert all(row["kind"] in {"chat", "mission"} for row in rows)
     assert next(row for row in rows if row["kind"] == "chat")["live_mission"] is False
     assert next(row for row in rows if row["kind"] == "mission")["live_mission"] is True
+
+
+def test_synthetic_mission_row_uses_assigned_timestamp():
+    db = FakeHistorySessionDB([])
+    instance = SimpleNamespace(
+        id="personainst_dev",
+        persona_id="dev",
+        role="dev",
+        display_name="Dev",
+        profile_id=None,
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="task_bound",
+        session_id="mission_dev",
+        current_task_id="task_1",
+        current_chat_goal="Implement the fix",
+        assigned_at=1782162002.5,
+    )
+
+    first = persona_chat_history_summary(persona_instances=[instance], session_db=db)
+    second = persona_chat_history_summary(persona_instances=[instance], session_db=db)
+
+    assert first[0]["kind"] == "mission"
+    assert first[0]["created_at"] == "2026-06-22T21:00:02.500000Z"
+    assert first[0]["updated_at"] == "2026-06-22T21:00:02.500000Z"
+    assert first[0]["updated_at"] == second[0]["updated_at"]
+
+
+def test_synthetic_mission_row_keeps_unknown_timestamp_null():
+    db = FakeHistorySessionDB([])
+    instance = PersonaInstance(
+        id="personainst_dev",
+        persona_id="dev",
+        role="dev",
+        display_name="Dev",
+        profile_id=None,
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="task_bound",
+        session_id="mission_dev",
+        current_task_id="task_1",
+    )
+
+    rows = persona_chat_history_summary(persona_instances=[instance], session_db=db)
+
+    assert rows[0]["kind"] == "mission"
+    assert rows[0]["created_at"] is None
+    assert rows[0]["updated_at"] is None
 
 
 def test_safe_recent_messages_returns_deeper_bounded_tail():
