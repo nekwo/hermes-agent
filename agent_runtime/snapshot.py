@@ -4,7 +4,7 @@ import json
 import re
 import time
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 
 from hermes_cli.profiles import available_profile_templates
 from hermes_time import now
@@ -288,6 +288,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=history_accountant,
+            persona_assignments=persona_assignments,
         )
         data["persona_chat_trace"] = persona_chat_trace_summary(
             persona_instances=persona_instances,
@@ -516,16 +517,26 @@ def _parity_warnings(data) -> list[dict]:
             current = chat_latest_by_persona.get(persona_id)
             if current is None or timestamp > current:
                 chat_latest_by_persona[persona_id] = timestamp
+    build_moment = data.get("generated_at")
+    if not isinstance(build_moment, datetime):
+        build_moment = _parse_iso_timestamp(build_moment)
     for persona_id, (mission_time, session_id) in mission_latest_by_persona.items():
         chat_time = chat_latest_by_persona.get(persona_id)
-        if chat_time is not None and mission_time > chat_time:
-            warnings.append(
-                {
-                    "code": "persona_chat_history.live_mission_shadow",
-                    "entity_id": session_id,
-                    "detail": "mission chat-history row is newer than every real chat for the persona",
-                }
-            )
+        if chat_time is None or mission_time <= chat_time:
+            continue
+        # Mission rows anchor to the persisted assignment created_at, which is
+        # legitimately newer than every chat right after a mission is assigned.
+        # The regression this guard exists for is BUILD-TIME restamping — only a
+        # mission timestamp hugging the snapshot's own generated_at is drift.
+        if build_moment is not None and abs((mission_time - build_moment).total_seconds()) > _LIVE_MISSION_RESTAMP_EPSILON_SECONDS:
+            continue
+        warnings.append(
+            {
+                "code": "persona_chat_history.live_mission_shadow",
+                "entity_id": session_id,
+                "detail": "mission chat-history row tracks snapshot build time and shadows every real chat for the persona",
+            }
+        )
 
     channels = data.get("operator_channels")
     if channels is None:
@@ -586,6 +597,12 @@ def _parity_warnings(data) -> list[dict]:
     return warnings
 
 
+# A mission row anchored to its assignment's persisted created_at only matches
+# the snapshot's own build moment in the transient poll right after assignment;
+# a timestamp that hugs generated_at on every build is the restamping regression.
+_LIVE_MISSION_RESTAMP_EPSILON_SECONDS = 10.0
+
+
 def _parse_iso_timestamp(value) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
@@ -593,6 +610,8 @@ def _parse_iso_timestamp(value) -> datetime | None:
         parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
 
 

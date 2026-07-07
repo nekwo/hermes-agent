@@ -8,12 +8,13 @@ leaking into the Agent Console).
 """
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from hermes_time import now
 
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, PersonaInstance
+from agent_runtime.models import Event, PersonaAssignment, PersonaInstance
 from agent_runtime.mission_chat_turns import (
     mission_chat_turn_elements,
     persist_mission_chat_turn,
@@ -245,7 +246,74 @@ def test_persona_chat_history_rows_always_emit_kind():
     assert next(row for row in rows if row["kind"] == "mission")["live_mission"] is True
 
 
-def test_synthetic_mission_row_uses_assigned_timestamp():
+def test_synthetic_mission_row_anchors_to_assignment_created_at():
+    # R3: PersonaInstance persists no assigned_at, so the synthetic row anchors
+    # to the bound PersonaAssignment's created_at via current_assignment_id.
+    db = FakeHistorySessionDB([])
+    assignment = _persona_assignment(
+        "assign_1",
+        instance_id="personainst_dev",
+        task_id="task_1",
+        created_at=datetime(2026, 6, 22, 21, 0, 2, 500000, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 6, 22, 21, 30, 0, tzinfo=timezone.utc),
+    )
+    instance = _mission_persona_instance("personainst_dev", "dev", "task_1", assignment_id="assign_1")
+
+    first = persona_chat_history_summary(
+        persona_instances=[instance], session_db=db, persona_assignments=[assignment]
+    )
+    second = persona_chat_history_summary(
+        persona_instances=[instance], session_db=db, persona_assignments=[assignment]
+    )
+
+    assert first[0]["kind"] == "mission"
+    assert first[0]["created_at"] == "2026-06-22T21:00:02.500000Z"
+    # updated_at anchors to the SAME assignment moment (spec Slice 2 baseline:
+    # last_active = assigned) so consecutive builds stay byte-identical even
+    # while assignment state transitions bump the assignment's own updated_at.
+    assert first[0]["updated_at"] == "2026-06-22T21:00:02.500000Z"
+    assert first[0]["created_at"] == second[0]["created_at"]
+    assert first[0]["updated_at"] == second[0]["updated_at"]
+
+
+def test_synthetic_mission_row_matches_assignment_by_instance_and_task():
+    # When current_assignment_id is unset, the newest assignment for the same
+    # (persona_instance_id, task_id) vouches — still no store scan.
+    db = FakeHistorySessionDB([])
+    older = _persona_assignment(
+        "assign_old",
+        instance_id="personainst_dev",
+        task_id="task_1",
+        created_at=datetime(2026, 6, 22, 20, 0, 0, tzinfo=timezone.utc),
+    )
+    newer = _persona_assignment(
+        "assign_new",
+        instance_id="personainst_dev",
+        task_id="task_1",
+        created_at=datetime(2026, 6, 22, 21, 0, 2, 500000, tzinfo=timezone.utc),
+    )
+    other_task = _persona_assignment(
+        "assign_other",
+        instance_id="personainst_dev",
+        task_id="task_2",
+        created_at=datetime(2026, 6, 23, 9, 0, 0, tzinfo=timezone.utc),
+    )
+    instance = _mission_persona_instance("personainst_dev", "dev", "task_1", assignment_id=None)
+
+    rows = persona_chat_history_summary(
+        persona_instances=[instance],
+        session_db=db,
+        persona_assignments=[older, newer, other_task],
+    )
+
+    assert rows[0]["kind"] == "mission"
+    assert rows[0]["created_at"] == "2026-06-22T21:00:02.500000Z"
+    assert rows[0]["updated_at"] == "2026-06-22T21:00:02.500000Z"
+
+
+def test_synthetic_mission_row_falls_back_to_instance_assigned_at():
+    # Forward-compat duck path: if an instance ever grows assigned_at, it backs
+    # the anchor when no assignment record is resolvable.
     db = FakeHistorySessionDB([])
     instance = SimpleNamespace(
         id="personainst_dev",
@@ -259,6 +327,7 @@ def test_synthetic_mission_row_uses_assigned_timestamp():
         session_id="mission_dev",
         current_task_id="task_1",
         current_chat_goal="Implement the fix",
+        current_assignment_id=None,
         assigned_at=1782162002.5,
     )
 
@@ -269,6 +338,14 @@ def test_synthetic_mission_row_uses_assigned_timestamp():
     assert first[0]["created_at"] == "2026-06-22T21:00:02.500000Z"
     assert first[0]["updated_at"] == "2026-06-22T21:00:02.500000Z"
     assert first[0]["updated_at"] == second[0]["updated_at"]
+
+
+def test_iso_timestamp_normalizes_datetime_values():
+    aware = datetime(2026, 6, 22, 21, 0, 2, 500000, tzinfo=timezone.utc)
+    naive = datetime(2026, 6, 22, 21, 0, 2, 500000)
+
+    assert _iso_timestamp(aware) == "2026-06-22T21:00:02.500000Z"
+    assert _iso_timestamp(naive) == "2026-06-22T21:00:02.500000Z"
 
 
 def test_synthetic_mission_row_keeps_unknown_timestamp_null():
@@ -933,6 +1010,48 @@ def test_persona_chat_trace_tolerates_event_log_without_for_session():
         event_log=_TaskOnlyLog(),
     )
     assert rows == []
+
+
+def _mission_persona_instance(
+    instance_id: str, persona_id: str, task_id: str, *, assignment_id: str | None
+) -> PersonaInstance:
+    return PersonaInstance(
+        id=instance_id,
+        persona_id=persona_id,
+        role="dev",
+        display_name=persona_id,
+        profile_id=None,
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="task_bound",
+        session_id=f"mission_{persona_id}",
+        current_task_id=task_id,
+        current_assignment_id=assignment_id,
+        current_chat_goal="Implement the fix",
+    )
+
+
+def _persona_assignment(
+    assignment_id: str,
+    *,
+    instance_id: str,
+    task_id: str,
+    created_at: datetime,
+    updated_at: datetime | None = None,
+) -> PersonaAssignment:
+    return PersonaAssignment(
+        id=assignment_id,
+        persona_instance_id=instance_id,
+        persona_id="dev",
+        kind="task",
+        state="running",
+        title="Mission",
+        message="Do the mission",
+        created_by="operator",
+        created_at=created_at,
+        updated_at=updated_at or created_at,
+        task_id=task_id,
+    )
 
 
 def _persona_instance(instance_id: str, persona_id: str, task_id: str) -> PersonaInstance:

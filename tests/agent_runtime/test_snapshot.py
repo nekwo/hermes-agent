@@ -148,6 +148,60 @@ def test_snapshot_parity_warns_when_live_mission_row_shadows_chat():
     )
 
 
+def _shadow_parity_data(generated_at):
+    return {
+        "generated_at": generated_at,
+        "persona_instance_runtime": {"enabled": True},
+        "persona_instances": [
+            {"persona_id": "neko_supervisor", "persona_instance_id": "personainst_neko"}
+        ],
+        "persona_chat_history": [
+            {
+                "session_id": "relay_chat",
+                "persona_id": "neko_supervisor",
+                "persona_instance_id": "personainst_neko",
+                "kind": "chat",
+                "created_at": "2026-07-07T09:00:00Z",
+                "updated_at": "2026-07-07T09:00:00Z",
+            },
+            {
+                "session_id": "mission_run",
+                "persona_id": "neko_supervisor",
+                "persona_instance_id": "personainst_neko",
+                "kind": "mission",
+                "created_at": "2026-07-07T09:10:00Z",
+                "updated_at": "2026-07-07T09:10:00Z",
+            },
+        ],
+        "persona_chat_trace": [],
+        "operator_channels": [],
+        "summary": {},
+    }
+
+
+def test_live_mission_shadow_fires_when_mission_row_tracks_build_time():
+    # The restamping regression: the mission row's timestamp hugs the
+    # snapshot's own generated_at on every build.
+    warnings = _parity_warnings(_shadow_parity_data("2026-07-07T09:10:01Z"))
+
+    assert any(
+        warning["code"] == "persona_chat_history.live_mission_shadow"
+        and warning["entity_id"] == "mission_run"
+        for warning in warnings
+    )
+
+
+def test_live_mission_shadow_stays_quiet_for_honest_assignment_anchor():
+    # An assignment-anchored mission row is legitimately newer than every chat
+    # after a mission is assigned; only build-time proximity is drift.
+    warnings = _parity_warnings(_shadow_parity_data("2026-07-07T12:00:00Z"))
+
+    assert not any(
+        warning["code"] == "persona_chat_history.live_mission_shadow"
+        for warning in warnings
+    )
+
+
 def test_snapshot_coalesces_progress_events_by_event_id(isolate_agent_runtime_root):
     n = now()
     TaskStore().create(

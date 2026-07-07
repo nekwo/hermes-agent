@@ -41,6 +41,7 @@ def persona_chat_history_summary(
     limit: int = 50,
     message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
     accountant: ProjectionAccountant | None = None,
+    persona_assignments: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return redaction-safe persona chat-history rows for Harness snapshots.
 
@@ -48,7 +49,11 @@ def persona_chat_history_summary(
     projects sessions already bound to a persona instance; it includes a
     bounded redaction-safe message tail and never starts/ticks a model turn. The
     optional ``session_db`` parameter keeps tests hermetic and lets production
-    use the normal ``hermes_state.SessionDB`` lazily.
+    use the normal ``hermes_state.SessionDB`` lazily. ``persona_assignments``
+    is the already-loaded assignment list the snapshot/status builders hold —
+    synthetic live-mission rows anchor their timestamps to the bound
+    assignment's persisted ``created_at`` (R3); this helper never scans the
+    assignment store itself.
     """
 
     bound_by_session: dict[str, PersonaInstance] = {}
@@ -155,6 +160,12 @@ def persona_chat_history_summary(
     # so the session is selectable and the console can switch to what is running.
     # This is NOT resurrecting a deleted chat: it is an active mission, and the
     # row only exists while the instance is bound to a task.
+    assignment_rows = [item for item in (persona_assignments or []) if item is not None]
+    assignments_by_id: dict[str, Any] = {}
+    for item in assignment_rows:
+        assignment_id = safe_assignment_text(getattr(item, "id", None), limit=160)
+        if assignment_id:
+            assignments_by_id[assignment_id] = item
     for instance in persona_instances:
         if safe_assignment_token(getattr(instance, "mode", None)) != "task_bound":
             continue
@@ -163,7 +174,15 @@ def persona_chat_history_summary(
         if not session_id or not task_id or session_id in seen:
             continue
         goal = safe_assignment_text(getattr(instance, "current_chat_goal", None), limit=120)
-        assigned = _iso_timestamp(getattr(instance, "assigned_at", None))
+        # R3 anchor: PersonaInstance persists no assigned_at, and its updated_at
+        # restamps on every derive_from_workers pass — the bound assignment's
+        # created_at is the only byte-stable "assigned at" truth in reach. Both
+        # synthetic timestamps use it (never build time); unknown stays null so
+        # it sorts as unknown rather than newest.
+        assignment = _mission_assignment_for(instance, assignments_by_id, assignment_rows, task_id=task_id)
+        assigned = _iso_timestamp(getattr(assignment, "created_at", None)) if assignment is not None else None
+        if assigned is None:
+            assigned = _iso_timestamp(getattr(instance, "assigned_at", None))
         synthetic = {
             "id": session_id,
             "title": goal or "Mission run",
@@ -471,6 +490,37 @@ def _default_session_db() -> Any | None:
         return None
 
 
+def _mission_assignment_for(
+    instance: Any,
+    assignments_by_id: dict[str, Any],
+    assignment_rows: list[Any],
+    *,
+    task_id: str,
+) -> Any | None:
+    """Resolve the assignment record a task-bound instance is running under.
+
+    Primary join is ``instance.current_assignment_id``; when that is unset the
+    newest assignment matching ``(persona_instance_id, task_id)`` vouches. Both
+    lookups stay inside the caller-provided list — no store scan.
+    """
+
+    assignment_id = safe_assignment_text(getattr(instance, "current_assignment_id", None), limit=160)
+    if assignment_id and assignment_id in assignments_by_id:
+        return assignments_by_id[assignment_id]
+    instance_id = safe_assignment_text(getattr(instance, "id", None), limit=160)
+    if not instance_id:
+        return None
+    candidates = [
+        item
+        for item in assignment_rows
+        if safe_assignment_text(getattr(item, "persona_instance_id", None), limit=160) == instance_id
+        and safe_assignment_text(getattr(item, "task_id", None), limit=160) == task_id
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: _iso_timestamp(getattr(item, "created_at", None)) or "")
+
+
 def _history_row(
     raw: dict[str, Any],
     instance: PersonaInstance,
@@ -716,6 +766,9 @@ def _iso_timestamp(value: Any) -> str | None:
     def _format(moment: datetime) -> str:
         return moment.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return _format(moment)
     if isinstance(value, (int, float)):
         epoch = float(value)
         if epoch > 1e12:  # tolerate millisecond clocks

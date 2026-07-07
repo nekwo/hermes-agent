@@ -149,6 +149,11 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         }
         data["persona_instances"] = [persona_instance_summary(instance) for instance in instances]
         session_db = _default_persona_session_db()
+        assignments = (
+            PersonaAssignmentStore(event_log=event_log).list_all()
+            if persona_assignment_store_enabled(cfg)
+            else []
+        )
         history_accountant = ProjectionAccountant("persona_chat_history")
         trace_accountant = ProjectionAccountant("persona_chat_trace")
         data["persona_chat_history"] = persona_chat_history_summary(
@@ -156,6 +161,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=history_accountant,
+            persona_assignments=assignments,
         )
         data["persona_chat_trace"] = persona_chat_trace_summary(
             persona_instances=instances,
@@ -175,8 +181,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         }
         drop_samples = history_accountant.drop_samples() + trace_accountant.drop_samples()
         if persona_assignment_store_enabled(cfg):
-            assignment_store = PersonaAssignmentStore(event_log=event_log)
-            assignments = assignment_store.list_all()
             data["persona_assignments"] = {
                 "active": [persona_assignment_summary(item) for item in assignments if item.state in {"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"}],
                 "recent": [persona_assignment_summary(item) for item in assignments[-25:]],
