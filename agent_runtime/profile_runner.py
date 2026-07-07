@@ -693,6 +693,24 @@ def _progress_payload_from_callback(event_type: str, args: tuple[Any, ...], kwar
     return {"type": event_type, "phase": "tool", "step": "progress", "status": "running", "summary": "Run progress update"}
 
 
+def _agent_chat_target_label(tool_name: str | None, invocation: Any) -> str | None:
+    """Operator label for an agent-to-agent relay: who was messaged plus a
+    bounded excerpt of the briefing. Secret-bearing text is dropped whole —
+    the relay stays legible, never leaky."""
+
+    if tool_name != "agent_chat_send" or not isinstance(invocation, dict):
+        return None
+    persona = str(invocation.get("persona_id") or "").strip()
+    if not persona or _line_has_secret(persona):
+        return None
+    excerpt = " ".join(str(invocation.get("message") or "").split())
+    if excerpt and _line_has_secret(excerpt):
+        excerpt = ""
+    if len(excerpt) > 90:
+        excerpt = excerpt[:89] + "…"
+    return f"→ {persona}: {excerpt}" if excerpt else f"→ {persona}"
+
+
 def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation: Any = None) -> dict[str, Any]:
     payload = {"type": event_type, "phase": "tool", "step": "tool_started", "status": "started"}
     if tool_name:
@@ -700,6 +718,11 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
         payload["summary"] = f"Started tool {tool_name}"
     else:
         payload["summary"] = "Started tool"
+    agent_chat_label = _agent_chat_target_label(tool_name, invocation)
+    if agent_chat_label:
+        payload["target_label"] = agent_chat_label
+        payload["summary"] = f"Started tool {tool_name}: {agent_chat_label}"
+        return payload
     command_label = _safe_command_label(invocation)
     if command_label:
         payload["command_label"] = command_label
@@ -739,7 +762,9 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
         # the target, and the raw invocation path may be machine-absolute.
         payload.update(dev_work_payload)
         return payload
-    target_label = _safe_operator_target(invocation)
+    target_label = (
+        _agent_chat_target_label(tool_name, invocation) or _safe_operator_target(invocation)
+    )
     if target_label:
         payload["target_label"] = target_label
     subject = f"tool {tool_name}" if tool_name else "tool"

@@ -127,3 +127,37 @@ def test_chat_capability_augmentation_includes_agent_chat():
     from agent_runtime.persona_runtime import _CHAT_CAPABILITY_TOOLSETS
 
     assert "agent_chat" in _CHAT_CAPABILITY_TOOLSETS
+
+
+def test_relay_trace_carries_target_and_briefing_excerpt():
+    from agent_runtime.profile_runner import _tool_finished_payload, _tool_started_payload
+
+    invocation = {
+        "persona_id": "neko_supervisor",
+        "message": "From Tony via Alice: review the Stage 47 results and report readiness.",
+    }
+    started = _tool_started_payload("run.tool.started", "agent_chat_send", invocation=invocation)
+    assert started["target_label"].startswith("→ neko_supervisor: From Tony via Alice")
+    assert "neko_supervisor" in started["summary"]
+
+    finished = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result=None,
+        invocation=invocation,
+    )
+    assert finished["target_label"].startswith("→ neko_supervisor")
+
+
+def test_relay_trace_drops_secret_bearing_briefings():
+    from agent_runtime.profile_runner import _tool_started_payload
+
+    started = _tool_started_payload(
+        "run.tool.started",
+        "agent_chat_send",
+        invocation={"persona_id": "dev", "message": "use API_KEY=sk-123456789 for the deploy"},
+    )
+    assert started["target_label"] == "→ dev"
+    assert "sk-123456789" not in str(started)
