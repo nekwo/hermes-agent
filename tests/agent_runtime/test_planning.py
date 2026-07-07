@@ -157,8 +157,11 @@ def test_typed_neko_acceptance_creates_plan_without_shrinking_parent_goal():
         mission_plan_flow=True,
     )
 
-    assert t.description == "Run backend contract smoke."
-    assert t.mission_plan.mission_intent.acceptance_criteria == ["Backend proof passes."]
+    assert t.description == "Backend stream proof, Launcher UI repair, and QA screenshot must all complete."
+    assert t.acceptance_criteria == ["All role streams render in Mission Control."]
+    assert t.routing_scope["objective"] == "Run backend contract smoke."
+    assert t.routing_scope["acceptance_criteria"] == ["Backend proof passes."]
+    assert t.mission_plan.mission_intent.acceptance_criteria == ["All role streams render in Mission Control."]
     assert [stage.id for stage in t.mission_plan.stages] == [
         "scope",
         "backend_implementation",

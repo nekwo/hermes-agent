@@ -2280,7 +2280,7 @@ def test_normal_worker_flow_auto_runs_final_gate_after_patch_delivery():
     proof = proofs.get(stored.proof_ids[0])
     assert proof.metadata["proof_intent"] == "auto_final_gate_after_delivery"
     events = EventLog().for_task("task_1", limit=0)
-    assert any(event.type == "patch.proposed" and event.payload.get("normal_worker_flow") is True for event in events)
+    assert any(event.type == "delivery.intent" and event.payload.get("normal_worker_flow") is True for event in events)
     assert any(event.type == "proof.gate_checked" and event.payload.get("gate_source") == "auto_after_delivery" for event in events)
 
 

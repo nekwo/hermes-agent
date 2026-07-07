@@ -805,12 +805,16 @@ def _patch_was_proposed_for_delivery(
     run_id: str | None,
     persona_id: str | None,
 ) -> bool:
-    events = event_log.for_task(task_id, limit=200, types={"patch.proposed"})
+    events = event_log.for_task(task_id, limit=200, types={"delivery.intent", "patch.proposed"})
     for event in reversed(events):
         if run_id and event.run_id not in {None, run_id}:
             continue
         if persona_id and event.persona_id not in {None, persona_id}:
             continue
+        if event.type == "delivery.intent":
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if payload.get("no_edit") or str(payload.get("mode") or "") in {"no_edit", "proof_only"}:
+                continue
         return True
     return False
 

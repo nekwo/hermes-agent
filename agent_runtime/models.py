@@ -94,6 +94,9 @@ class Task:
     waiver: dict[str, str] | None = None
     parent_task_id: str | None = None
     risk_flags: list[str] = field(default_factory=list)
+    # Neko/supervisor may narrow a goal into the current routing slice. Keep
+    # that scope separate so operator-authored goal fields remain stable.
+    routing_scope: dict[str, Any] = field(default_factory=dict)
     operator_notes: list[str] = field(default_factory=list)
     harness_self_heal: dict[str, Any] = field(default_factory=dict)
     context_requests: list[dict[str, Any]] = field(default_factory=list)

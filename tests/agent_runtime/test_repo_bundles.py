@@ -98,7 +98,7 @@ def test_empty_delivery_capture_opens_patch_landed_nowhere_incident(isolate_agen
 
     monkeypatch.setattr("agent_runtime.delivery_directive.capture_bundle_patch", _empty_capture)
     log = EventLog()
-    log.append(Event(now(), "patch.proposed", task.id, "run_empty_1", "dev", {"summary": "Proposed patch to hermes-agent: 1 file"}))
+    log.append(Event(now(), "delivery.intent", task.id, "run_empty_1", "dev", {"mode": "patch", "summary": "Patch delivery intent.", "changed_file_count": 1}))
 
     delivered = RepoBundleStore(event_log=log).mark_delivered(_simple_bundle(task_id=task.id))
 
@@ -110,6 +110,26 @@ def test_empty_delivery_capture_opens_patch_landed_nowhere_incident(isolate_agen
     guard = saved.harness_self_heal["delivery_no_progress_guard"]["implement"]
     assert guard["empty_capture_count"] == 1
     assert guard["cited_evidence_ids"] == ["proof_same", "delivery_capture:bundle_empty:worktree_missing_or_clean"]
+
+
+def test_proof_only_delivery_intent_does_not_open_empty_patch_incident(isolate_agent_runtime_root, monkeypatch):
+    task = _task_with_plan("task_proof_only_intent")
+    task.affected_repos = ["hermes-agent"]
+    TaskStore().create(task)
+
+    def _empty_capture(_bundle, *, event_log):
+        return {"captured": False, "reason": "worktree_missing_or_clean"}
+
+    monkeypatch.setattr("agent_runtime.delivery_directive.capture_bundle_patch", _empty_capture)
+    log = EventLog()
+    log.append(Event(now(), "delivery.intent", task.id, "run_proof_1", "dev", {"mode": "proof_only", "diff_chars": 0, "summary": "Proof-only delivery intent."}))
+
+    delivered = RepoBundleStore(event_log=log).mark_delivered(
+        _simple_bundle(task_id=task.id, run_id="run_proof_1")
+    )
+
+    assert delivered.delivery_capture["captured"] is False
+    assert IncidentStore().list_open() == []
 
 
 def test_no_product_edit_proof_delivery_skips_patch_landed_nowhere_incident(isolate_agent_runtime_root, monkeypatch):

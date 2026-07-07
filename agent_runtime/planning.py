@@ -132,7 +132,7 @@ def _coerce_neko_budget_acceptance_to_continuation(
                 cancelled = RunStore().cancel(incident.run_id, reason="Neko scope recovery after Dev read/search loop without delivery")
             except Exception:
                 cancelled = None
-            _apply_acceptance(task, decision.payload)
+            _apply_acceptance(task, decision.payload, actor=actor)
             incident_store.close(
                 incident_id,
                 reason=str(decision.payload.get("summary") or decision.summary or "Neko narrowed scope after Dev read/search loop without delivery"),
@@ -158,7 +158,7 @@ def _coerce_neko_budget_acceptance_to_continuation(
             approved = RunStore().approve_continuation(incident.run_id)
         except Exception:
             continue
-        _apply_acceptance(task, decision.payload)
+        _apply_acceptance(task, decision.payload, actor=actor)
         incident_store.close(
             incident_id,
             reason=str(decision.payload.get("summary") or decision.summary or "Neko approved bounded same-session Dev continuation"),
@@ -202,7 +202,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
     if _coerce_neko_budget_acceptance_to_continuation(task, decision, actor=actor, incident_store=incident_store, log=log, run_id=run_id):
         return task
     if mission_plan_flow and is_mission_lead_actor(task, actor) and decision.type == DecisionType.PROPOSE_ACCEPTANCE:
-        _apply_acceptance(task, decision.payload)
+        _apply_acceptance(task, decision.payload, actor=actor)
         ensure_mission_plan(task, decision.payload, actor=actor)
         target = release_next_stage(task, str(decision.payload.get("release_stage_id") or "").strip() or None)
         if target is not None:
@@ -333,10 +333,11 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             task.updated_at = now()
             log.append(Event(now(), "task.transition", task.id, run_id, actor, {"source": "pm_post_qa_remaining_stage_guard", "to": TaskState.RUNNING.value, "proof_ids": len(task.proof_ids)}))
             return task
-        _apply_acceptance(task, decision.payload)
+        _apply_acceptance(task, decision.payload, actor=actor)
         if (
             is_mission_lead_actor(task, actor)
             and _payload_is_launcher_handoff(decision.payload)
+            and not _payload_is_visual_recovery_handoff(decision.payload)
             and _is_cross_stack_backend_first(task)
             and not _has_backend_contract_proof(task, proof_store=proof_store)
         ):
@@ -567,7 +568,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                 if stage is not None and stage.kind in {"context", "investigation", "audit"} and not stage_requires_product_edit(task, stage):
                     task.state = TaskState.RUNNING
                     task.updated_at = now()
-                    log.append(Event(now(), "patch.proposed", task.id, None, actor, {"requires_approval": decision.requires_approval, "normal_worker_flow": True, "no_edit_findings_delivery": True}))
+                    log.append(_delivery_intent_event(task.id, actor, decision, mode="no_edit", no_edit=True, normal_worker_flow=True))
                     return task
             if task.current_stage_id:
                 for stage in task_stage_records(task):
@@ -577,7 +578,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
                         break
             task.state = TaskState.RUNNING
             task.updated_at = now()
-            log.append(Event(now(), "patch.proposed", task.id, None, actor, {"requires_approval": decision.requires_approval, "normal_worker_flow": True}))
+            log.append(_delivery_intent_event(task.id, actor, decision, mode="proof_only", diff_chars=0, normal_worker_flow=True))
             return task
         if task.current_stage_id:
             for stage in task_stage_records(task):
@@ -591,7 +592,7 @@ def apply_planning_decision(task: Task, decision: AgentDecision, *, actor: str, 
             _advance_to_next_dev_stage(task)
         task.state = TaskState.RUNNING if _all_stages_dev_complete(task) else TaskState.RUNNING
         task.updated_at = now()
-        log.append(Event(now(), "patch.proposed", task.id, None, actor, {"requires_approval": decision.requires_approval}))
+        log.append(_delivery_intent_event(task.id, actor, decision, mode="patch"))
     elif decision.type == DecisionType.REQUEST_QA_REVIEW:
         proof_ids = decision.payload.get("proof_ids", [])
         stage_id = str(decision.payload.get("stage_id") or task.current_stage_id or "").strip()
@@ -844,19 +845,111 @@ def _route_backend_contract_packet_repair(task: Task, *, actor: str, log: EventL
     )
 
 
-def _apply_acceptance(task: Task, payload: dict[str, Any]) -> None:
+def _apply_acceptance(task: Task, payload: dict[str, Any], *, actor: str | None = None) -> None:
+    task.routing_scope = _routing_scope_from_acceptance(payload, actor=actor)
+    preserve_operator_goal = bool(
+        actor
+        and is_mission_lead_actor(task, actor)
+        and _task_has_operator_goal_detail(task)
+    )
     objective = str(payload.get("objective", "")).strip()
-    if objective:
+    if objective and not preserve_operator_goal:
         task.description = objective
-    task.acceptance_criteria = list(payload.get("acceptance_criteria", []))
-    task.non_goals = list(payload.get("non_goals", []))
+    if not preserve_operator_goal:
+        task.acceptance_criteria = list(payload.get("acceptance_criteria", []))
+        task.non_goals = list(payload.get("non_goals", []))
     affected_repos = _canonical_affected_repos(payload.get("affected_repos", []) or [])
     fallback_repos = _affected_repos_from_handoff(payload) or _canonical_affected_repos(_pinned_repo_scope(task))
     if affected_repos or fallback_repos:
         task.affected_repos = affected_repos or fallback_repos
-    task.suggested_roles = list(payload.get("suggested_roles", []))
+    if not preserve_operator_goal:
+        task.suggested_roles = list(payload.get("suggested_roles", []))
     task.requires_visual_proof = bool(payload.get("requires_visual_proof", task.requires_visual_proof))
-    task.risk_flags = list(payload.get("risk_flags", []))
+    if not preserve_operator_goal:
+        task.risk_flags = list(payload.get("risk_flags", []))
+
+
+def _routing_scope_from_acceptance(payload: dict[str, Any], *, actor: str | None = None) -> dict[str, Any]:
+    scope = {
+        "objective": str(payload.get("objective", "")).strip() or None,
+        "acceptance_criteria": list(payload.get("acceptance_criteria", [])),
+        "non_goals": list(payload.get("non_goals", [])),
+        "suggested_roles": list(payload.get("suggested_roles", [])),
+        "risk_flags": list(payload.get("risk_flags", [])),
+        "affected_repos": _canonical_affected_repos(payload.get("affected_repos", []) or []),
+        "handoff_target_repo": _routing_scope_handoff_target_repo(payload),
+        "actor": actor,
+        "updated_at": now(),
+    }
+    return {key: value for key, value in scope.items() if value not in (None, [], "")}
+
+
+def _task_has_operator_goal_detail(task: Task) -> bool:
+    plan = getattr(task, "mission_plan", None)
+    if getattr(plan, "mission_intent", None) is not None:
+        return True
+    return bool(
+        getattr(task, "acceptance_criteria", None)
+        or getattr(task, "non_goals", None)
+        or getattr(task, "suggested_roles", None)
+        or getattr(task, "risk_flags", None)
+    )
+
+
+def _routing_scope_handoff_target_repo(payload: dict[str, Any]) -> str | None:
+    handoff = payload.get("handoff_packet")
+    if not isinstance(handoff, dict):
+        return None
+    repo = str(handoff.get("target_repo") or "").strip()
+    return repo or None
+
+
+def _routing_scope_text(task: Task) -> str:
+    scope = getattr(task, "routing_scope", None)
+    if not isinstance(scope, dict):
+        return ""
+    return " ".join(
+        [
+            str(scope.get("objective") or ""),
+            " ".join(str(item) for item in (scope.get("acceptance_criteria") or [])),
+            " ".join(str(item) for item in (scope.get("non_goals") or [])),
+            " ".join(str(item) for item in (scope.get("risk_flags") or [])),
+            " ".join(str(item) for item in (scope.get("affected_repos") or [])),
+        ]
+    )
+
+
+def _routing_scope_flags(task: Task) -> set[str]:
+    scope = getattr(task, "routing_scope", None)
+    if not isinstance(scope, dict):
+        return set()
+    return {str(flag).strip().lower() for flag in (scope.get("risk_flags") or [])}
+
+
+def _delivery_intent_event(
+    task_id: str,
+    actor: str | None,
+    decision: AgentDecision,
+    *,
+    mode: str,
+    no_edit: bool = False,
+    diff_chars: int | None = None,
+    normal_worker_flow: bool = False,
+) -> Event:
+    payload: dict[str, Any] = {
+        "mode": mode,
+        "requires_approval": decision.requires_approval,
+        "normal_worker_flow": normal_worker_flow,
+        "no_edit": no_edit,
+        "summary": str(decision.summary or "Delivery handoff recorded.").strip()[:500],
+    }
+    if diff_chars is not None:
+        payload["diff_chars"] = diff_chars
+    changed_files = decision.payload.get("changed_files") or decision.payload.get("files_touched")
+    if isinstance(changed_files, list):
+        payload["changed_files"] = [str(item) for item in changed_files[:40]]
+        payload["changed_file_count"] = len(changed_files)
+    return Event(now(), "delivery.intent", task_id, None, actor, payload)
 
 
 def _release_stage_affected_repos(task: Task, stage_repo: str | None) -> list[str]:
@@ -871,6 +964,13 @@ def _release_stage_affected_repos(task: Task, stage_repo: str | None) -> list[st
     pinned_repos = _canonical_affected_repos(_pinned_repo_scope(task))
     if pinned_repos:
         return pinned_repos
+    routing_scope = getattr(task, "routing_scope", None)
+    routing_repos = _canonical_affected_repos(
+        routing_scope.get("affected_repos", []) if isinstance(routing_scope, dict) else []
+    )
+    routing_target_repo = str(routing_scope.get("handoff_target_repo") or "").strip() if isinstance(routing_scope, dict) else ""
+    if len(routing_repos) == 1 and routing_target_repo:
+        return routing_repos
     plan_repos = _mission_plan_affected_repos(task)
     task_repos = _canonical_affected_repos(getattr(task, "affected_repos", []) or [])
     if len(task_repos) == 1:
@@ -1658,6 +1758,7 @@ def _should_release_backend_first_slice(task: Task) -> bool:
             " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
             " ".join(str(item) for item in (getattr(task, "non_goals", []) or [])),
             " ".join(str(item) for item in (getattr(task, "risk_flags", []) or [])),
+            _routing_scope_text(task),
         ]
     ).lower()
     has_backend_first = any(
@@ -1711,6 +1812,7 @@ def _is_cross_stack_backend_first(task: Task) -> bool:
 
 def _has_cross_stack_backend_first_flag(task: Task) -> bool:
     flags = {str(flag).strip().lower() for flag in (getattr(task, "risk_flags", []) or [])}
+    flags.update(_routing_scope_flags(task))
     return bool(
         flags.intersection(
             {
@@ -1732,6 +1834,7 @@ def _text_implies_backend_first_cross_stack(task: Task) -> bool:
             " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
             " ".join(str(item) for item in (getattr(task, "non_goals", []) or [])),
             " ".join(str(item) for item in (getattr(task, "risk_flags", []) or [])),
+            _routing_scope_text(task),
             " ".join(
                 " ".join(
                     [

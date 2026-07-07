@@ -21,6 +21,7 @@ ALLOWED_EVENT_TYPES = allowed_event_types()
 
 OPERATOR_SUMMARY_EVENT_TYPES = frozenset(
     {
+        "delivery.intent",
         "patch.proposed",
         "repo_bundle.delivered",
         "repo_bundle.updated",
@@ -546,6 +547,21 @@ def operator_event_summary(evt: Event) -> str | None:
         if changed:
             return f"{prefix}: {changed} file{'s' if changed != 1 else ''} touched."
         return f"{prefix}."
+    if event_type == "delivery.intent":
+        mode = _safe_text(payload.get("mode")) or "handoff"
+        changed = (
+            _safe_int(payload.get("changed_file_count"))
+            or _safe_count(payload.get("changed_files"))
+            or _safe_count(payload.get("files_touched"))
+        )
+        diff_chars = _safe_int(payload.get("diff_chars"))
+        if payload.get("no_edit") or mode in {"no_edit", "proof_only"}:
+            return "Recorded no-edit delivery intent."
+        if diff_chars is not None and diff_chars <= 0 and not changed:
+            return "Recorded proof-only delivery intent."
+        if changed:
+            return f"Recorded delivery intent: {changed} file{'s' if changed != 1 else ''} touched."
+        return "Recorded delivery intent."
     if event_type in {"repo_bundle.assigned", "repo_bundle.updated", "repo_bundle.delivered"}:
         repo = _safe_text(payload.get("repo")) or _safe_text(payload.get("repo_bundle_id")) or "repo bundle"
         state = _safe_text(payload.get("state"))

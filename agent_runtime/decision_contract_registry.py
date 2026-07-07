@@ -1152,6 +1152,7 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "lane.transition_rejected": EventContract("lane.transition_rejected", "Lane transition rejected", ("runtime_instance_id", "from", "to"), ("reason",)),
     "plan.reviewed": EventContract("plan.reviewed", "Plan reviewed", ("verdict",), ("findings",)),
     "goal_create.field_dropped": EventContract("goal_create.field_dropped", "Goal-create field dropped", ("field", "reason", "summary"), ()),
+    "delivery.intent": EventContract("delivery.intent", "Delivery intent recorded", ("mode", "summary"), ("diff_chars", "no_edit", "changed_files")),
     "patch.proposed": EventContract("patch.proposed", "Patch proposed", ("summary",), ("changed_files",)),
     "context.requested": EventContract("context.requested", "Context requested", ("reason",), ("paths", "requested_context", "request_id", "status", "failure_reason", "bundle_id", "summary", "next_expected", "path_results")),
     "missing_input.requested": EventContract("missing_input.requested", "Missing input requested", ("input_type", "route_to"), ("question", "context_ref")),
