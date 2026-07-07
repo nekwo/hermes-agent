@@ -9,7 +9,7 @@ from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, M
 from agent_runtime.persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
-from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, build_snapshot, write_snapshot
+from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, _parity_warnings, build_snapshot, write_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
@@ -77,6 +77,74 @@ def test_snapshot_parity_warns_on_legacy_operator_event_without_summary(isolate_
     assert any(
         warning.get("code") == "event_summary_missing" and warning.get("event_type") == "run.opened"
         for warning in snap["parity"]["warnings"]
+    )
+
+
+def test_snapshot_parity_warns_on_non_iso_persona_chat_history_timestamp():
+    warnings = _parity_warnings(
+        {
+            "persona_instance_runtime": {"enabled": True},
+            "persona_instances": [
+                {"persona_id": "neko_supervisor", "persona_instance_id": "personainst_neko"}
+            ],
+            "persona_chat_history": [
+                {
+                    "session_id": "chat_bad",
+                    "persona_id": "neko_supervisor",
+                    "persona_instance_id": "personainst_neko",
+                    "kind": "chat",
+                    "created_at": "2026-07-07T09:00:40Z",
+                    "updated_at": 1783423009.58381,
+                }
+            ],
+            "persona_chat_trace": [],
+            "operator_channels": [],
+            "summary": {},
+        }
+    )
+
+    assert any(
+        warning["code"] == "persona_chat_history.non_iso_timestamp"
+        and warning["entity_id"] == "chat_bad"
+        for warning in warnings
+    )
+
+
+def test_snapshot_parity_warns_when_live_mission_row_shadows_chat():
+    warnings = _parity_warnings(
+        {
+            "persona_instance_runtime": {"enabled": True},
+            "persona_instances": [
+                {"persona_id": "neko_supervisor", "persona_instance_id": "personainst_neko"}
+            ],
+            "persona_chat_history": [
+                {
+                    "session_id": "relay_chat",
+                    "persona_id": "neko_supervisor",
+                    "persona_instance_id": "personainst_neko",
+                    "kind": "chat",
+                    "created_at": "2026-07-07T09:00:00Z",
+                    "updated_at": "2026-07-07T09:00:00Z",
+                },
+                {
+                    "session_id": "mission_run",
+                    "persona_id": "neko_supervisor",
+                    "persona_instance_id": "personainst_neko",
+                    "kind": "mission",
+                    "created_at": "2026-07-07T09:10:00Z",
+                    "updated_at": "2026-07-07T09:10:00Z",
+                },
+            ],
+            "persona_chat_trace": [],
+            "operator_channels": [],
+            "summary": {},
+        }
+    )
+
+    assert any(
+        warning["code"] == "persona_chat_history.live_mission_shadow"
+        and warning["entity_id"] == "mission_run"
+        for warning in warnings
     )
 
 
@@ -1193,6 +1261,39 @@ def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isola
             "metadata": {"status": "passed", "exit_code": 0, "duration_ms": 321},
         },
     )
+    (archive / "events_task_archived.jsonl").write_text(
+        "\n".join(
+            json.dumps(to_jsonable(event), separators=(",", ":"))
+            for event in [
+                Event(
+                    ts=now(),
+                    type="run.tool.finished",
+                    task_id="task_archived",
+                    run_id="run_slot",
+                    persona_id="dev",
+                    payload={
+                        "tool_name": "flutter test",
+                        "status": "passed",
+                        "summary": "Focused archive replay proof passed.",
+                        "duration_ms": 321,
+                    },
+                ),
+                Event(
+                    ts=now(),
+                    type="proof.gate_checked",
+                    task_id="task_archived",
+                    run_id=None,
+                    persona_id="qa",
+                    payload={
+                        "status": "passed",
+                        "summary": "Proof gate accepted archived command proof.",
+                    },
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     snap = build_snapshot()
 
@@ -1243,6 +1344,8 @@ def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isola
         "run.progress",
         "run.decision",
         "proof.attached",
+        "run.tool.finished",
+        "proof.gate_checked",
     ]
     assert archived["recent_events"][0]["summary"] == "Agent decision process summarized"
     assert archived["recent_events"][0]["phase"] == "thinking_process"
@@ -1251,6 +1354,7 @@ def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isola
     assert archived["recent_events"][1]["summary"] == "Implemented archived transcript mapping."
     assert archived["recent_events"][1]["rationale"] == "Tests are required before QA handoff."
     assert archived["recent_events"][1]["reasoning_summary"] == "Tests are required before QA handoff."
+    assert archived["recent_events"][3]["tool_name"] == "flutter test"
 
 
 def test_snapshot_projects_archived_goal_as_operator_channel(monkeypatch, isolate_agent_runtime_root):

@@ -483,6 +483,50 @@ def _parity_warnings(data) -> list[dict]:
                 }
             )
 
+    chat_rows = [
+        row for row in data.get("persona_chat_history") or [] if isinstance(row, dict)
+    ]
+    for row in chat_rows:
+        for field in ("created_at", "updated_at"):
+            value = row.get(field)
+            if value is not None and _parse_iso_timestamp(value) is None:
+                warnings.append(
+                    {
+                        "code": "persona_chat_history.non_iso_timestamp",
+                        "entity_id": row.get("session_id"),
+                        "detail": f"persona_chat_history.{field} is not an ISO-8601 timestamp",
+                    }
+                )
+                break
+
+    chat_latest_by_persona: dict[str, datetime] = {}
+    mission_latest_by_persona: dict[str, tuple[datetime, str | None]] = {}
+    for row in chat_rows:
+        persona_id = _canonical_persona_id(row.get("persona_id")) or ""
+        if not persona_id:
+            continue
+        timestamp = _parse_iso_timestamp(row.get("updated_at")) or _parse_iso_timestamp(row.get("created_at"))
+        if timestamp is None:
+            continue
+        if row.get("kind") == "mission" or row.get("live_mission") is True:
+            current = mission_latest_by_persona.get(persona_id)
+            if current is None or timestamp > current[0]:
+                mission_latest_by_persona[persona_id] = (timestamp, row.get("session_id"))
+        else:
+            current = chat_latest_by_persona.get(persona_id)
+            if current is None or timestamp > current:
+                chat_latest_by_persona[persona_id] = timestamp
+    for persona_id, (mission_time, session_id) in mission_latest_by_persona.items():
+        chat_time = chat_latest_by_persona.get(persona_id)
+        if chat_time is not None and mission_time > chat_time:
+            warnings.append(
+                {
+                    "code": "persona_chat_history.live_mission_shadow",
+                    "entity_id": session_id,
+                    "detail": "mission chat-history row is newer than every real chat for the persona",
+                }
+            )
+
     channels = data.get("operator_channels")
     if channels is None:
         warnings.append(
@@ -540,6 +584,16 @@ def _parity_warnings(data) -> list[dict]:
             }
         )
     return warnings
+
+
+def _parse_iso_timestamp(value) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed
 
 
 def _redaction_observed(value) -> dict[str, int]:
@@ -674,13 +728,20 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
     persona_assignments = _archived_persona_assignment_summaries(batch_dir, task_id) if batch_dir is not None else []
     repo_bundles = _archived_repo_bundle_summaries(batch_dir, task_id) if batch_dir is not None else []
     incident_ids = raw.get("incident_ids") if isinstance(raw.get("incident_ids"), list) else raw.get("open_incident_ids") if isinstance(raw.get("open_incident_ids"), list) else []
-    recent_events = _archived_transcript_events(task_id, runs, proofs)
+    archive_events = _archived_event_log_events(batch_dir, task_id) if batch_dir is not None else []
+    recent_events = _dedupe_archived_events(
+        [
+            *_archived_transcript_events(task_id, runs, proofs),
+            *archive_events,
+        ]
+    )[-80:]
     persona_timing_summaries = _persona_timing_summaries(runs)
     return {
         "task_id": task_id,
         "goal_id": str(raw.get("goal_id") or raw.get("mission_goal_id") or "").strip() or None,
         "title": str(raw.get("title") or "Archived mission"),
         "description": str(raw.get("description") or "").strip() or None,
+        "routing_scope": raw.get("routing_scope") if isinstance(raw.get("routing_scope"), dict) else None,
         "acceptance_criteria": [
             str(item)
             for item in (raw.get("acceptance_criteria") or [])
@@ -1149,6 +1210,87 @@ def _archived_persona_streams(task_id: str, assignments: list[dict], runs: list[
     return streams
 
 
+def _archived_event_log_events(batch_dir, task_id: str) -> list[dict]:
+    """Read archived events_<task>.jsonl rows for replay/projection."""
+
+    if batch_dir is None:
+        return []
+    path = batch_dir / f"events_{_safe_archive_task_filename(task_id)}.jsonl"
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    events: list[dict] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(raw, dict) or str(raw.get("task_id") or "") != task_id:
+            continue
+        payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        event_type = str(raw.get("type") or "event")
+        event = {
+            "type": event_type,
+            "ts": raw.get("ts"),
+            "task_id": task_id,
+            "run_id": raw.get("run_id") or payload.get("run_id"),
+            "persona_id": raw.get("persona_id") or payload.get("persona_id"),
+            "summary": payload.get("summary") or payload.get("display_summary") or _archived_event_display_title(event_type, payload),
+            "event_id": payload.get("event_id") or raw.get("event_id"),
+            "phase": payload.get("phase"),
+            "severity": payload.get("severity"),
+            "step": payload.get("step"),
+            "status": payload.get("status"),
+            "tool_name": payload.get("tool_name") or payload.get("tool"),
+            "tool_id": payload.get("tool_id"),
+            "skill_id": payload.get("skill_id"),
+            "detail": payload.get("detail"),
+            "exit_code": payload.get("exit_code"),
+            "duration_ms": payload.get("duration_ms"),
+            "proof_id": payload.get("proof_id"),
+            "decision_type": payload.get("decision_type"),
+            "validation_status": payload.get("validation_status"),
+            "next_expected": payload.get("next_expected"),
+            "rationale": payload.get("rationale") or payload.get("decision_rationale"),
+            "reasoning_summary": payload.get("reasoning_summary"),
+            "display_kind": payload.get("display_kind") or _archived_event_display_kind(event_type),
+            "display_title": payload.get("display_title") or _archived_event_display_title(event_type, payload),
+            "display_summary": payload.get("display_summary") or payload.get("summary"),
+            "redaction_status": payload.get("redaction_status") or "safe",
+        }
+        events.append({key: value for key, value in event.items() if value is not None})
+    return events
+
+
+def _safe_archive_task_filename(task_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id).strip())[:80] or "task"
+
+
+def _dedupe_archived_events(events: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for event in events:
+        event_id = str(event.get("event_id") or "").strip()
+        if event_id:
+            key = ("event_id", event_id, "")
+        else:
+            key = (
+                str(event.get("type") or ""),
+                str(event.get("run_id") or ""),
+                str(event.get("ts") or ""),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(event)
+    return deduped
+
+
 def _run_summary_from_mapping(raw: dict) -> dict:
     final_decision = raw.get("final_decision") if isinstance(raw.get("final_decision"), dict) else {}
     llm = _safe_llm(raw.get("llm"))
@@ -1537,6 +1679,9 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "task_id": task.id,
         "goal_id": getattr(task, "goal_id", None) or task.id,
         "title": task.title,
+        "description": getattr(task, "description", None),
+        "acceptance_criteria": list(getattr(task, "acceptance_criteria", []) or []),
+        "routing_scope": getattr(task, "routing_scope", {}) or None,
         "state": str(task.state),
         "workspace_id": getattr(task, "workspace_id", None),
         "realm_id": None,
