@@ -5,7 +5,7 @@ import re
 from typing import Any, Iterable
 
 from .models import PersonaInstance
-from .mission_chat_turns import mission_chat_turn_elements
+from .mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_records
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction_mode import redaction_observe_enabled
@@ -689,6 +689,7 @@ def _safe_recent_messages(
         return [], "safe"
     rows: list[dict[str, Any]] = []
     redacted = False
+    assistant_client_message_ids: set[str] = set()
     # Curate the agent's raw working transcript into an operator-facing one.
     # The bound session is the agent's internal session, so its raw rows are
     # verbose tick-context prompts (role=user) and serialized decision dicts
@@ -704,6 +705,8 @@ def _safe_recent_messages(
             raw.get("platform_message_id") or raw.get("client_message_id"),
             limit=240,
         )
+        if role == "agent" and client_message_id:
+            assistant_client_message_ids.add(client_message_id)
         curated = _curate_chat_message_text(
             role, raw.get("content") or raw.get("text")
         )
@@ -741,8 +744,56 @@ def _safe_recent_messages(
             if elements:
                 row["turn_elements"] = elements
         rows.append(row)
+    rows.extend(
+        _interrupted_turn_rows(
+            session_id=session_id,
+            assistant_client_message_ids=assistant_client_message_ids,
+        )
+    )
+    rows = _ordered_message_rows(rows)
     rows = rows[-_bounded_message_tail(limit):]
     return rows, "redacted" if redacted else "safe"
+
+
+def _interrupted_turn_rows(
+    *,
+    session_id: str,
+    assistant_client_message_ids: set[str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for record in mission_chat_turn_records(session_id=session_id):
+        if safe_assignment_token(record.get("state")) != "interrupted":
+            continue
+        client_message_id = safe_assignment_text(record.get("client_message_id"), limit=240)
+        if not client_message_id or client_message_id in assistant_client_message_ids:
+            continue
+        turn_id = safe_assignment_token(record.get("turn_id")) or safe_assignment_token(client_message_id)
+        if not turn_id:
+            continue
+        rows.append(
+            {
+                "id": f"{session_id}:turn-interrupted:{client_message_id}",
+                "role": "system",
+                "text": "Agent turn interrupted before a reply was recorded. Retry the message to run a fresh turn.",
+                "timestamp": _iso_timestamp(record.get("updated_at")),
+                "redaction_status": "safe",
+                "client_message_id": client_message_id,
+                "turn_id": turn_id,
+            }
+        )
+    return rows
+
+
+def _ordered_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    indexed = list(enumerate(rows))
+    indexed.sort(
+        key=lambda item: (
+            1 if item[1].get("timestamp") else 0,
+            str(item[1].get("timestamp") or ""),
+            item[0],
+        )
+    )
+    return [row for _, row in indexed]
 
 
 def _iso_timestamp(value: Any) -> str | None:

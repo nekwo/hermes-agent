@@ -854,33 +854,30 @@ def _cmd_mission_chat_message(args) -> int:
         current_message=message,
         model_selection=model_selection,
     )
-    stream_emitter = (
-        _ChatProtocolV2Emitter(
-            turn_id=safe_assignment_token(client_message_id),
+    stream = bool(getattr(args, "stream", False))
+    stream_emitter = _ChatProtocolV2Emitter(
+        turn_id=safe_assignment_token(client_message_id),
+        client_message_id=client_message_id,
+        emit_frames=stream,
+        on_update=lambda emitter: persist_mission_chat_turn(
+            session_id=session_id,
             client_message_id=client_message_id,
-            on_update=lambda emitter: persist_mission_chat_turn(
-                session_id=session_id,
-                client_message_id=client_message_id,
-                turn_id=emitter.turn_id,
-                elements=emitter.elements,
-            ),
-        )
-        if getattr(args, "stream", False)
-        else None
+            turn_id=emitter.turn_id,
+            elements=emitter.elements,
+            state="running",
+        ),
     )
 
     def _stream_delta(delta: str | None) -> None:
         _emit_chat_delta(delta)
-        if stream_emitter is not None:
-            stream_emitter.delta(delta)
+        stream_emitter.delta(delta)
 
     trace_payloads: list[dict[str, object]] = []
 
     def _stream_progress(payload: dict[str, object] | None) -> None:
         if payload:
             trace_payloads.append(payload)
-        if stream_emitter is not None:
-            stream_emitter.progress(payload)
+        stream_emitter.progress(payload)
 
     def _agent_ready_for_steer(agent):
         if not getattr(args, "stream", False):
@@ -896,6 +893,17 @@ def _cmd_mission_chat_message(args) -> int:
         return handle.close
 
     try:
+        mark_stale_running_turns_interrupted(
+            session_id=session_id,
+            active_client_message_id=client_message_id,
+        )
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+            state="running",
+        )
         chat_result = GPTPersonaRuntime(
             default_provider=cfg.default_provider,
             default_model=cfg.default_model,
@@ -981,8 +989,14 @@ def _cmd_mission_chat_message(args) -> int:
                 "observability_persist_error": safe_assignment_text(type(persist_exc).__name__, limit=80),
             }
     except Exception as exc:
-        if stream_emitter is not None:
-            stream_emitter.finish(state="failed")
+        stream_emitter.finish(state="failed")
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+            state="failed",
+        )
         data = {
             "ok": False,
             "persona_instance_id": instance.id,
@@ -1007,13 +1021,6 @@ def _cmd_mission_chat_message(args) -> int:
         text=reply_text,
         client_message_id=client_message_id,
     )
-    if stream_emitter is not None:
-        persist_mission_chat_turn(
-            session_id=session_id,
-            client_message_id=client_message_id,
-            turn_id=stream_emitter.turn_id,
-            elements=stream_emitter.elements,
-        )
     _update_persona_chat_token_counts(
         session_db=session_db,
         session_id=session_id,
@@ -1036,7 +1043,7 @@ def _cmd_mission_chat_message(args) -> int:
 
     data = {
         "ok": True,
-        "protocol_version": 2 if stream_emitter is not None else None,
+        "protocol_version": 2 if stream else None,
         "capability_id": "mission.chat.message",
         "agent_profile_id": instance.id,
         "persona_instance_id": instance.id,
@@ -1064,17 +1071,36 @@ def _cmd_mission_chat_message(args) -> int:
         "model_selection": model_selection,
         "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
     }
-    if getattr(args, "stream", False):
-        if stream_emitter is not None:
-            data["turn_elements"] = stream_emitter.elements
-            stream_emitter.finish(
-                state="completed",
-                input_tokens=data.get("input_tokens"),
-                output_tokens=data.get("output_tokens"),
-                total_tokens=data.get("total_tokens"),
-            )
+    if stream:
+        data["turn_elements"] = stream_emitter.elements
+        stream_emitter.finish(
+            state="completed",
+            input_tokens=data.get("input_tokens"),
+            output_tokens=data.get("output_tokens"),
+            total_tokens=data.get("total_tokens"),
+        )
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+            state="completed",
+        )
         _emit_chat_final(data)
     else:
+        stream_emitter.finish(
+            state="completed",
+            input_tokens=data.get("input_tokens"),
+            output_tokens=data.get("output_tokens"),
+            total_tokens=data.get("total_tokens"),
+        )
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+            state="completed",
+        )
         print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
     return 0
 
@@ -1539,11 +1565,19 @@ class _ChatProtocolV2Emitter:
     These v2 frames give the Launcher stable ids and per-turn sequence order.
     """
 
-    def __init__(self, *, turn_id: str | None, client_message_id: str | None, on_update=None):
+    def __init__(
+        self,
+        *,
+        turn_id: str | None,
+        client_message_id: str | None,
+        on_update=None,
+        emit_frames: bool = True,
+    ):
         safe_turn = safe_assignment_token(turn_id) or f"turn_{uuid.uuid4().hex[:12]}"
         self.turn_id = safe_turn
         self.client_message_id = safe_assignment_text(client_message_id, limit=200) or None
         self._on_update = on_update
+        self._emit_frames = bool(emit_frames)
         self._seq = 0
         self._started_at = time.monotonic()
         self._current_segment: dict[str, object] | None = None
@@ -1551,7 +1585,7 @@ class _ChatProtocolV2Emitter:
         self._tool_count = 0
         self._active_tools: dict[str, list[dict[str, object]]] = {}
         self.elements: list[dict[str, object]] = []
-        _emit_chat_frame(
+        self._emit_chat_frame(
             {
                 "type": "turn.start",
                 "protocol_version": 2,
@@ -1566,7 +1600,7 @@ class _ChatProtocolV2Emitter:
         segment = self._ensure_segment()
         text = str(delta)
         segment["text"] = str(segment.get("text") or "") + text
-        _emit_chat_frame(
+        self._emit_chat_frame(
             {
                 "type": "segment.delta",
                 "protocol_version": 2,
@@ -1597,7 +1631,7 @@ class _ChatProtocolV2Emitter:
             return
         segment["state"] = state
         segment["duration_ms"] = _elapsed_ms(segment.get("started_at"))
-        _emit_chat_frame(
+        self._emit_chat_frame(
             {
                 "type": "segment.end",
                 "protocol_version": 2,
@@ -1620,7 +1654,7 @@ class _ChatProtocolV2Emitter:
         total_tokens: object = None,
     ) -> None:
         self.end_segment(state="settled" if state == "completed" else state)
-        _emit_chat_frame(
+        self._emit_chat_frame(
             {
                 "type": "turn.end",
                 "protocol_version": 2,
@@ -1652,7 +1686,7 @@ class _ChatProtocolV2Emitter:
         segment["ttft_ms"] = _elapsed_ms(self._started_at)
         self._current_segment = segment
         self.elements.append(segment)
-        _emit_chat_frame(
+        self._emit_chat_frame(
             {
                 "type": "segment.start",
                 "protocol_version": 2,
@@ -1687,7 +1721,7 @@ class _ChatProtocolV2Emitter:
         }
         self.elements.append(tool)
         self._active_tools.setdefault(name, []).append(tool)
-        _emit_chat_frame(
+        self._emit_chat_frame(
             {
                 "type": "tool.started",
                 "protocol_version": 2,
@@ -1738,7 +1772,7 @@ class _ChatProtocolV2Emitter:
         exit_code = _safe_exit_code_value(payload.get("exit_code"))
         if exit_code is not None:
             tool["exit_code"] = exit_code
-        _emit_chat_frame(
+        self._emit_chat_frame(
             {
                 "type": "tool.finished",
                 "protocol_version": 2,
@@ -1763,6 +1797,10 @@ class _ChatProtocolV2Emitter:
             self._on_update(self)
         except Exception:
             pass
+
+    def _emit_chat_frame(self, payload: dict[str, object]) -> None:
+        if self._emit_frames:
+            _emit_chat_frame(payload)
 
 
 def _safe_stream_text(value: object, *, limit: int = 800) -> str | None:
@@ -2376,31 +2414,38 @@ def _run_free_floating_assignment_once(
         session_id=session_id,
         message=message,
     )
-    stream_emitter = (
-        _ChatProtocolV2Emitter(
-            turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
+    stream_emitter = _ChatProtocolV2Emitter(
+        turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
+        client_message_id=client_message_id,
+        emit_frames=stream,
+        on_update=lambda emitter: persist_mission_chat_turn(
+            session_id=session_id,
             client_message_id=client_message_id,
-            on_update=lambda emitter: persist_mission_chat_turn(
-                session_id=session_id,
-                client_message_id=client_message_id,
-                turn_id=emitter.turn_id,
-                elements=emitter.elements,
-            ),
-        )
-        if stream
-        else None
+            turn_id=emitter.turn_id,
+            elements=emitter.elements,
+            state="running",
+        ),
     )
 
     def _stream_delta(delta: str | None) -> None:
         _emit_chat_delta(delta)
-        if stream_emitter is not None:
-            stream_emitter.delta(delta)
+        stream_emitter.delta(delta)
 
     def _stream_progress(payload: dict[str, object] | None) -> None:
-        if stream_emitter is not None:
-            stream_emitter.progress(payload)
+        stream_emitter.progress(payload)
 
     try:
+        mark_stale_running_turns_interrupted(
+            session_id=session_id,
+            active_client_message_id=client_message_id,
+        )
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+            state="running",
+        )
         # Keep the model run out of SessionDB. The canonical operator transcript
         # is written below; persisting the internal run as a second hidden
         # session creates orphaned final answers when copy-back is interrupted.
@@ -2416,11 +2461,17 @@ def _run_free_floating_assignment_once(
             turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
             max_wall_seconds=max_seconds,
             stream_callback=_stream_delta if stream else None,
-            trace_callback=_stream_progress if stream_emitter is not None else None,
+            trace_callback=_stream_progress,
         )
     except Exception as exc:
-        if stream_emitter is not None:
-            stream_emitter.finish(state="failed")
+        stream_emitter.finish(state="failed")
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+            state="failed",
+        )
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
         return 2, {
             "ok": False,
@@ -2437,13 +2488,6 @@ def _run_free_floating_assignment_once(
         text=reply_text,
         client_message_id=client_message_id,
     )
-    if stream_emitter is not None:
-        persist_mission_chat_turn(
-            session_id=session_id,
-            client_message_id=client_message_id,
-            turn_id=stream_emitter.turn_id,
-            elements=stream_emitter.elements,
-        )
     _update_persona_chat_token_counts(
         session_db=session_db,
         session_id=session_id,
@@ -2475,7 +2519,7 @@ def _run_free_floating_assignment_once(
         "execution_state": "completed",
         "session_id": session_id,
         "reply": reply_text,
-        "turn_id": stream_emitter.turn_id if stream_emitter is not None else None,
+        "turn_id": stream_emitter.turn_id,
         "client_message_id": client_message_id,
         "run_ids": [],
         "task_id": None,
@@ -2484,7 +2528,7 @@ def _run_free_floating_assignment_once(
         "total_tokens": getattr(chat_result, "total_tokens", None),
         "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
     }
-    if stream_emitter is not None:
+    if stream:
         data["protocol_version"] = 2
         data["turn_elements"] = stream_emitter.elements
         stream_emitter.finish(
@@ -2492,6 +2536,27 @@ def _run_free_floating_assignment_once(
             input_tokens=data.get("input_tokens"),
             output_tokens=data.get("output_tokens"),
             total_tokens=data.get("total_tokens"),
+        )
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+            state="completed",
+        )
+    else:
+        stream_emitter.finish(
+            state="completed",
+            input_tokens=data.get("input_tokens"),
+            output_tokens=data.get("output_tokens"),
+            total_tokens=data.get("total_tokens"),
+        )
+        persist_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            elements=stream_emitter.elements,
+            state="completed",
         )
     return 0, data
 
