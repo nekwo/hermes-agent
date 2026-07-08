@@ -964,7 +964,7 @@ def test_conversation_message_ids_stable_across_rebuilds():
     assert len({message["id"] for message in first}) == len(first)
 
 
-def test_operator_channel_reports_incomplete_conversation_when_no_messages_project():
+def test_operator_channel_reports_empty_conversation_for_new_chats():
     channels = operator_channel_summary(
         persona_instances=[],
         persona_chat_history=[],
@@ -974,6 +974,9 @@ def test_operator_channel_reports_incomplete_conversation_when_no_messages_proje
 
     assert channels == []
 
+    # A brand-new chat session with no messages yet is NOT a contract breach:
+    # it must project as "empty" (no intervention row in Mission Control),
+    # not "incomplete".
     orphan = operator_channel_summary(
         persona_instances=[],
         persona_chat_history=[
@@ -982,6 +985,27 @@ def test_operator_channel_reports_incomplete_conversation_when_no_messages_proje
                 "persona_id": "neko_supervisor",
                 "persona_instance_id": "personainst_neko_supervisor",
                 "messages": [],
+            }
+        ],
+        persona_chat_trace=[],
+        tasks=[],
+    )[0]
+
+    assert orphan["conversation_status"] == "empty"
+    assert orphan["conversation"]["incomplete_reason"] is None
+
+
+def test_operator_channel_reports_incomplete_when_sources_exist_but_nothing_projects():
+    # Source rows exist but every one fails projection (blank text) — that IS
+    # the contract breach "incomplete" is reserved for.
+    orphan = operator_channel_summary(
+        persona_instances=[],
+        persona_chat_history=[
+            {
+                "session_id": "persona_chat_orphan",
+                "persona_id": "neko_supervisor",
+                "persona_instance_id": "personainst_neko_supervisor",
+                "messages": [{"role": "user", "text": "   "}],
             }
         ],
         persona_chat_trace=[],

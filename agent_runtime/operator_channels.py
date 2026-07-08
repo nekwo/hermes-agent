@@ -568,9 +568,23 @@ def _conversation_contract(
     for seq, message in enumerate(messages, start=1):
         message["seq"] = seq
 
-    status = "complete" if messages else "incomplete"
+    # "incomplete" is a contract breach: source rows existed but nothing
+    # projected. A brand-new chat with no sources at all is simply "empty" —
+    # it must NOT surface an intervention row in Mission Control.
+    had_sources = bool(
+        task is not None
+        or (history or {}).get("messages")
+        or (trace or {}).get("entries")
+        or runs
+    )
+    if messages:
+        status = "complete"
+    elif had_sources:
+        status = "incomplete"
+    else:
+        status = "empty"
     reason = None
-    if not messages:
+    if status == "incomplete":
         reason = "No canonical conversation messages were projected for this operator channel."
     return {
         "schema_version": OPERATOR_CONVERSATION_SCHEMA_VERSION,
