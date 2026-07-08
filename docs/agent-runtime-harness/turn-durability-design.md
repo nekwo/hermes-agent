@@ -138,3 +138,61 @@ Projection:
 Known pre-existing failures (do not mask, not yours to own): 2 tests in
 `tests/agent_runtime/test_persona_assignments.py` are stale against the S1
 ISO-timestamp/`kind`/`live_mission` projection shape.
+
+## Hardening (2026-07-08)
+
+Shipped on top of the base implementation after review; branch
+`turn-durability-hardening`. The feature contract above is unchanged; the
+following retire the structural weaknesses the review flagged.
+
+### Store — single write chokepoint + cross-process lock (W1)
+
+All mutations (`persist_mission_chat_turn`,
+`mark_stale_running_turns_interrupted`) go through `_mutate_store`, which
+holds an exclusive cross-process file lock (`mission_chat_turns.lock`,
+`msvcrt.locking` on Windows / `flock` elsewhere) for the whole
+read-modify-write window. Concurrent CLI turns can no longer lose each
+other's records. The lock wait is bounded (2s, 10ms polls): on timeout the
+mutation is **skipped, never blocked** — a chat turn must not hang on a stuck
+lock — and the skip is surfaced as a typed outcome. The opportunistic repair
+(`mark_stale…`) returns `[]` on timeout by design; the next send retries it.
+
+### Store — typed persist outcomes (W2)
+
+`persist_mission_chat_turn` returns `MissionChatTurnPersistOutcome`
+(`persisted | skipped_no_keys | skipped_empty_legacy |
+rejected_invalid_state | rejected_stale_transition | skipped_lock_timeout`).
+Handlers attach non-`persisted` outcomes to the response payload
+(`turn_persist_outcome`, `turn_write_ahead_outcome`) so no write is lost
+silently. The incremental `on_update` lane deliberately ignores its outcome —
+it is best-effort by contract (mirrors SEND_POLICY's durable vs best-effort
+split); the write-ahead and terminal persists are the durable lane.
+
+### Store — transition authority (W3)
+
+`next_turn_state(current, requested, write_ahead=)` is the single state
+authority, consulted inside the locked mutation. Terminal
+(`completed`/`failed`) and repair (`interrupted`) writes always win; a fresh
+turn start passes `write_ahead=True` and may reopen any record (same-client
+retry); an incremental `on_update` flush (`running`, `write_ahead=False`) can
+only continue a live record — it is REJECTED (`rejected_stale_transition`)
+against settled records, so a late flush from a turn another process already
+repaired can no longer resurrect it. The full table is unit-tested in
+`tests/agent_runtime/test_mission_chat_turns_hardening.py`.
+
+### Handlers — terminal persist on every post-provider exit (W4)
+
+In both chat-turn sites, everything after the provider reply (assistant
+append, token counts, auto-title, instance bookkeeping, payload build/emit)
+runs under a guard: a crash there persists `failed` (with the reply preserved
+in the error payload, `error_kind: post_turn_persist_failed`) and still emits
+exactly one JSON object. If the crash lands after the terminal persist
+already succeeded, the handler re-raises instead of emitting a second JSON
+object — the record is settled and the stdout contract stays intact.
+
+### Emitter — idempotent finish, no redundant settle race (W5)
+
+`_ChatProtocolV2Emitter.finish` is idempotent (a crash-path second call
+cannot emit a duplicate `turn.end` frame) and suppresses `on_update` for the
+whole finish window: the caller's terminal persist is the single settling
+write, with no stray `running` persist racing it.
