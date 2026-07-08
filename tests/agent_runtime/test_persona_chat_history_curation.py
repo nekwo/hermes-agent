@@ -16,7 +16,9 @@ from hermes_time import now
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event, PersonaAssignment, PersonaInstance
 from agent_runtime.mission_chat_turns import (
+    mark_stale_running_turns_interrupted,
     mission_chat_turn_elements,
+    mission_chat_turn_record,
     persist_mission_chat_turn,
 )
 from agent_runtime.persona_chat_history import (
@@ -558,6 +560,204 @@ def test_mission_chat_turn_persists_command_output_and_exit_code(isolate_agent_r
     assert tool["exit_code"] == 1
     assert tool["detail"] == "see failing test"
     assert "Exception: failed" in tool["output"]
+
+
+def test_mission_chat_turn_state_persists_empty_marker_and_preserves_state(isolate_agent_runtime_root):
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_1",
+        turn_id="turn_1",
+        elements=[],
+        state="running",
+    )
+
+    record = mission_chat_turn_record(session_id="s1", client_message_id="client_1")
+    assert record["state"] == "running"
+    assert record["elements"] == []
+    assert record["updated_at"].endswith("Z")
+
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_1",
+        turn_id="turn_1",
+        elements=[
+            {
+                "kind": "segment",
+                "id": "seg_1",
+                "turn_id": "turn_1",
+                "seq": 1,
+                "text": "partial",
+            }
+        ],
+    )
+
+    assert mission_chat_turn_record(session_id="s1", client_message_id="client_1")["state"] == "running"
+
+
+def test_mission_chat_turn_defaults_running_and_rejects_invalid_state(isolate_agent_runtime_root):
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_1",
+        turn_id="turn_1",
+        elements=[
+            {
+                "kind": "segment",
+                "id": "seg_1",
+                "turn_id": "turn_1",
+                "seq": 1,
+                "text": "partial",
+            }
+        ],
+    )
+
+    assert mission_chat_turn_record(session_id="s1", client_message_id="client_1")["state"] == "running"
+
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_bad",
+        turn_id="turn_bad",
+        elements=[],
+        state="definitely_not_valid",
+    )
+
+    assert mission_chat_turn_record(session_id="s1", client_message_id="client_bad") is None
+
+
+def test_mission_chat_turn_marks_stale_running_turns_interrupted(isolate_agent_runtime_root):
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_old",
+        turn_id="turn_old",
+        elements=[],
+        state="running",
+    )
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_active",
+        turn_id="turn_active",
+        elements=[],
+        state="running",
+    )
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_done",
+        turn_id="turn_done",
+        elements=[],
+        state="completed",
+    )
+    persist_mission_chat_turn(
+        session_id="s2",
+        client_message_id="client_other_session",
+        turn_id="turn_other_session",
+        elements=[],
+        state="running",
+    )
+
+    flipped = mark_stale_running_turns_interrupted(
+        session_id="s1",
+        active_client_message_id="client_active",
+    )
+
+    assert flipped == ["client_old"]
+    assert mission_chat_turn_record(session_id="s1", client_message_id="client_old")["state"] == "interrupted"
+    assert mission_chat_turn_record(session_id="s1", client_message_id="client_active")["state"] == "running"
+    assert mission_chat_turn_record(session_id="s1", client_message_id="client_done")["state"] == "completed"
+    assert mission_chat_turn_record(session_id="s2", client_message_id="client_other_session")["state"] == "running"
+
+
+def test_mission_chat_turn_legacy_record_reads_as_completed(isolate_agent_runtime_root):
+    store_path = isolate_agent_runtime_root / "mission_chat_turns.json"
+    store_path.parent.mkdir(parents=True, exist_ok=True)
+    store_path.write_text(
+        json.dumps(
+            {
+                "s1": {
+                    "client_legacy": {
+                        "schema_version": 1,
+                        "turn_id": "turn_legacy",
+                        "elements": [],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = mission_chat_turn_record(session_id="s1", client_message_id="client_legacy")
+
+    assert record["state"] == "completed"
+    assert record["turn_id"] == "turn_legacy"
+
+
+def test_interrupted_turn_without_assistant_row_synthesizes_system_message(isolate_agent_runtime_root):
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_interrupted",
+        turn_id="turn_interrupted",
+        elements=[],
+        state="interrupted",
+    )
+    record = mission_chat_turn_record(session_id="s1", client_message_id="client_interrupted")
+    db = FakeSessionDB(
+        [
+            {
+                "id": "operator_1",
+                "role": "user",
+                "content": "please do the thing",
+                "platform_message_id": "client_interrupted",
+            }
+        ]
+    )
+
+    rows, status = _safe_recent_messages(db, session_id="s1")
+
+    assert status == "safe"
+    marker = rows[-1]
+    assert marker["id"] == "s1:turn-interrupted:client_interrupted"
+    assert marker["role"] == "system"
+    assert marker["client_message_id"] == "client_interrupted"
+    assert marker["turn_id"] == "turn_interrupted"
+    assert marker["timestamp"] == record["updated_at"]
+    assert "Retry the message" in marker["text"]
+
+
+def test_interrupted_turn_synthesis_skips_completed_running_and_answered(isolate_agent_runtime_root):
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_completed",
+        turn_id="turn_completed",
+        elements=[],
+        state="completed",
+    )
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_running",
+        turn_id="turn_running",
+        elements=[],
+        state="running",
+    )
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_answered",
+        turn_id="turn_answered",
+        elements=[],
+        state="interrupted",
+    )
+    db = FakeSessionDB(
+        [
+            {
+                "id": "agent_1",
+                "role": "assistant",
+                "content": "I actually answered.",
+                "platform_message_id": "client_answered",
+            }
+        ]
+    )
+
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+
+    assert [row["role"] for row in rows] == ["agent"]
+    assert all("turn-interrupted" not in row["id"] for row in rows)
 
 
 def test_persona_chat_trace_projects_tool_events_by_persona_without_raw_secrets():

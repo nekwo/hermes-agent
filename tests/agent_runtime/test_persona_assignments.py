@@ -14,7 +14,7 @@ from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, PersonaInstance, Proof, Task
-from agent_runtime.mission_chat_turns import mission_chat_turn_elements
+from agent_runtime.mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_record, persist_mission_chat_turn
 from agent_runtime.persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
     ChatBusyError,
@@ -1956,7 +1956,7 @@ def test_prompt_observability_reports_redaction_safe_available_skill_catalog(
     assert context["skills_catalog"] == context["available_skills"]
 
 
-def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, isolate_agent_runtime_root):
+def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, capsys, isolate_agent_runtime_root):
     """Chat-first wiring: auto-run uses chat_reply (no decision/task), persists the
     redacted operator + agent turns, wires SessionDB for recall, and completes
     the assignment with run_ids=[]/task_id=None."""
@@ -1994,9 +1994,15 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
         json_output=True,
         auto_run=True,
         max_seconds=5.0,
+        client_message_id="client_free_1",
     )
 
     assert code == 0
+    stdout = capsys.readouterr().out
+    assert '"type": "turn.start"' not in stdout
+    assert '"type": "segment.delta"' not in stdout
+    payload = json.loads(stdout)
+    assert payload["client_message_id"] == "client_free_1"
     # The visible transcript is the only persisted operator-chat ledger; the
     # model run must not create a hidden scratch SessionDB row.
     assert captured["runtime_kwargs"].get("session_db") is db
@@ -2011,6 +2017,9 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
     assert db.messages[session_id][0]["content"] == "hey, how are you"
     assert db.messages[session_id][1]["content"] == "Hey — doing great, what's up?"
     assert db.get_session_title(session_id) == "Quick Persona Check"
+    record = mission_chat_turn_record(session_id=session_id, client_message_id="client_free_1")
+    assert record["state"] == "completed"
+    assert record["elements"] == []
 
     assignments = PersonaAssignmentStore().list_for_persona("dev")
     assert len(assignments) == 1
@@ -2166,6 +2175,235 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
     )
     assert [item["id"] for item in persisted] == [lines[-1]["turn_elements"][0]["id"]]
     assert persisted[0]["text"] == "Hello"
+
+
+def test_chat_protocol_v2_emitter_can_suppress_frames_while_accumulating(capsys):
+    from hermes_cli import harness
+
+    updates = []
+    emitter = harness._ChatProtocolV2Emitter(
+        turn_id="turn_1",
+        client_message_id="client_1",
+        emit_frames=False,
+        on_update=lambda item: updates.append(list(item.elements)),
+    )
+
+    emitter.delta("He")
+    emitter.delta("llo")
+    emitter.progress(
+        {
+            "type": "run.tool.started",
+            "tool_name": "terminal",
+            "summary": "run tests",
+        }
+    )
+    emitter.progress(
+        {
+            "type": "run.tool.finished",
+            "tool_name": "terminal",
+            "status": "ok",
+            "output": "passed",
+        }
+    )
+    emitter.finish(state="completed")
+
+    assert capsys.readouterr().out == ""
+    assert updates
+    assert emitter.elements[0]["kind"] == "segment"
+    assert emitter.elements[0]["text"] == "Hello"
+    assert emitter.elements[1]["kind"] == "tool"
+    assert emitter.elements[1]["state"] == "finished"
+
+
+def test_mission_chat_non_stream_persists_completed_turn_and_prints_one_json(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            kwargs["trace_callback"](
+                {
+                    "type": "run.tool.started",
+                    "tool_name": "terminal",
+                    "summary": "run focused tests",
+                }
+            )
+            kwargs["trace_callback"](
+                {
+                    "type": "run.tool.finished",
+                    "tool_name": "terminal",
+                    "status": "ok",
+                    "output": "passed",
+                }
+            )
+            return SimpleNamespace(
+                final_response="Done.",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                api_calls=1,
+                model="gpt-test",
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="please run it",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_durable_1",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    stdout = capsys.readouterr().out
+    assert '"type": "turn.start"' not in stdout
+    assert '"type": "tool.started"' not in stdout
+    payload = json.loads(stdout)
+    assert payload["ok"] is True
+    assert payload["protocol_version"] is None
+    record = mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_durable_1",
+    )
+    assert record["state"] == "completed"
+    assert [item["kind"] for item in record["elements"]] == ["tool"]
+    assert record["elements"][0]["state"] == "finished"
+
+
+def test_mission_chat_failure_marks_turn_failed(monkeypatch, capsys, isolate_agent_runtime_root):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="please run it",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_failed_1",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    record = mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_failed_1",
+    )
+    assert record["state"] == "failed"
+
+
+def test_mission_chat_new_turn_interrupts_prior_running_turn(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+    persist_mission_chat_turn(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_stale",
+        turn_id="turn_stale",
+        elements=[],
+        state="running",
+    )
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            return SimpleNamespace(
+                final_response="Fresh turn.",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                api_calls=1,
+                model="gpt-test",
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="new one",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_fresh",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    json.loads(capsys.readouterr().out)
+    assert mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_stale",
+    )["state"] == "interrupted"
+    assert mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_fresh",
+    )["state"] == "completed"
 
 
 def test_mission_chat_message_replays_duplicate_client_message_id(
