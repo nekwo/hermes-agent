@@ -2241,6 +2241,72 @@ def test_mission_chat_message_replays_duplicate_client_message_id(
     assert replay["reply"] == "Recovered canonical reply."
 
 
+def test_mission_chat_message_generates_client_message_id_when_missing(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    captured = {}
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(
+        "agent.title_generator.generate_title",
+        lambda user_message, assistant_response, **kwargs: "Mission Chat",
+    )
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            captured["turn_id"] = kwargs.get("turn_id")
+            return SimpleNamespace(
+                final_response="Generated id reply.",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                api_calls=1,
+                model="gpt-test",
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="hi",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id=None,
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    client_message_id = payload["client_message_id"]
+    assert client_message_id.startswith("agent-chat-send-")
+    assert payload["turn_id"] == client_message_id
+    assert captured["turn_id"] == client_message_id
+    assert {
+        item["platform_message_id"]
+        for item in db.messages["persona_chat_personainst_dev"]
+    } == {client_message_id}
+    assert payload["prompt_observability"]["turn_id"] == client_message_id
+
+
 def test_mission_chat_message_persists_pre_trace_ack_before_final_reply(
     monkeypatch,
     capsys,

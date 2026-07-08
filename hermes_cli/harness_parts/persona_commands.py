@@ -743,7 +743,7 @@ def _cmd_mission_chat_message(args) -> int:
 
     client_message_id = safe_assignment_text(
         getattr(args, "client_message_id", None), limit=200
-    )
+    ) or f"agent-chat-send-{uuid.uuid4().hex[:12]}"
     replay = _persona_chat_existing_turn(
         session_db=session_db,
         session_id=session_id,
