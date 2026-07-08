@@ -317,6 +317,37 @@ def dispatch_argv(argv: list[str]) -> int:
     return code if isinstance(code, int) else 0
 
 
+def _prewarm_provider_runtime() -> None:
+    """Best-effort warmup of the per-process one-time costs a chat turn pays.
+
+    Runs on a daemon thread right after the ready frame. Each step is
+    independent and failure-isolated: a broken CA bundle or missing provider
+    dependency surfaces on the first real turn with its normal typed error,
+    exactly as it would without prewarm.
+    """
+    try:
+        from agent.process_bootstrap import _load_openai_cls, shared_ssl_context
+
+        _load_openai_cls()
+        shared_ssl_context()
+    except Exception:
+        pass
+    try:
+        from agent.ssl_guard import verify_ca_bundle
+
+        verify_ca_bundle()
+    except Exception:
+        pass
+    try:
+        from model_tools import get_tool_definitions
+
+        # The exact cache key varies per persona toolset; this call warms the
+        # shared parts (tool module imports, registry build, config parse).
+        get_tool_definitions(quiet_mode=True)
+    except Exception:
+        pass
+
+
 def serve_loop(
     reader: TextIO,
     writer: TextIO,
@@ -433,6 +464,19 @@ def serve_loop(
                 "runtime_root": runtime_root,
             }
         )
+        # Prewarm the first chat turn's one-time costs in the background:
+        # lazy OpenAI SDK import (~1.7s), shared SSL context / CA-guard
+        # verification (~0.7s), and the tool-definition module imports +
+        # registry build (~1.2s). Serve boots eagerly at Mission Control
+        # open, so this runs while the operator is still looking at the
+        # canvas — without it the FIRST message of every launcher session
+        # pays the whole warmup inline. Best-effort: failures surface on
+        # the first real turn exactly as they do today.
+        threading.Thread(
+            target=_prewarm_provider_runtime,
+            name="harness-serve-prewarm",
+            daemon=True,
+        ).start()
         with ThreadPoolExecutor(
             max_workers=max(1, pool_size), thread_name_prefix="harness-serve"
         ) as pool:
