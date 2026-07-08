@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tools.agent_chat_tool import AGENT_CHAT_SEND_SCHEMA, _RELAY_STATE, agent_chat_send
+from tools.agent_chat_tool import AGENT_CHAT_SEND_SCHEMA, _RELAY_CHAIN, agent_chat_send
 from tools.registry import registry
 
 
@@ -46,14 +46,78 @@ def test_scope_off_disables_the_tool(monkeypatch):
     assert "disabled" in data["error"]
 
 
-def test_depth_guard_blocks_chained_relays():
-    _RELAY_STATE.depth = 1
+def test_depth_guard_blocks_relays_past_max_depth():
+    token = _RELAY_CHAIN.set(("alice_supervisor", "neko_supervisor", "backend_dev"))
     try:
         data = json.loads(agent_chat_send(persona_id="dev", message="hi"))
     finally:
-        _RELAY_STATE.depth = 0
+        _RELAY_CHAIN.reset(token)
     assert data["ok"] is False
-    assert "depth" in data["error"]
+    assert data["error_kind"] == "relay_depth_limit"
+    assert data["relay_chain"] == ["alice_supervisor", "neko_supervisor", "backend_dev"]
+
+
+def test_depth_guard_honors_env_override(monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_CHAT_MAX_DEPTH", "1")
+    token = _RELAY_CHAIN.set(("alice_supervisor",))
+    try:
+        data = json.loads(agent_chat_send(persona_id="dev", message="hi"))
+    finally:
+        _RELAY_CHAIN.reset(token)
+    assert data["ok"] is False
+    assert data["error_kind"] == "relay_depth_limit"
+
+
+def test_second_hop_relay_is_allowed(monkeypatch):
+    # Operator -> Alice -> Neko -> Dev: Neko's turn (chain depth 1) must be
+    # able to relay onward to dev.
+    def fake_handler(args):
+        assert args.persona_id == "dev"
+        print(json.dumps({"ok": True, "reply": "ack from dev"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    token = _RELAY_CHAIN.set(("neko_supervisor",))
+    try:
+        data = json.loads(agent_chat_send(persona_id="dev", message="hi"))
+    finally:
+        _RELAY_CHAIN.reset(token)
+    assert data["ok"] is True
+    assert data["reply"] == "ack from dev"
+
+
+def test_relay_cycle_is_refused():
+    token = _RELAY_CHAIN.set(("neko_supervisor",))
+    try:
+        data = json.loads(agent_chat_send(persona_id="Neko_Supervisor", message="hi"))
+    finally:
+        _RELAY_CHAIN.reset(token)
+    assert data["ok"] is False
+    assert data["error_kind"] == "relay_cycle"
+
+
+def test_relay_chain_propagates_into_copied_contexts(monkeypatch):
+    # The concurrent tool executor runs workers under copy_context(); the
+    # chain must be visible there (the old threading.local guard was not).
+    import contextvars
+
+    def fake_handler(args):
+        seen = {}
+
+        def _worker():
+            seen["chain"] = _RELAY_CHAIN.get()
+
+        contextvars.copy_context().run(_worker)
+        assert seen["chain"] == ("dev",)
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert json.loads(agent_chat_send(persona_id="dev", message="hi"))["ok"]
 
 
 def test_happy_path_returns_compact_reply_without_observability(monkeypatch):
@@ -107,11 +171,11 @@ def test_failed_target_turn_surfaces_typed_error(monkeypatch):
     assert data["exit_code"] == 2
 
 
-def test_depth_state_resets_after_relay(monkeypatch):
+def test_relay_chain_resets_after_relay(monkeypatch):
     def fake_handler(args):
-        # While the relay runs, depth must be exactly 1 so the TARGET turn
-        # cannot relay onward.
-        assert int(getattr(_RELAY_STATE, "depth", 0)) == 1
+        # While the relay runs, the target is on the chain so ITS turn sees
+        # itself as hop 1.
+        assert _RELAY_CHAIN.get() == ("dev",)
         print(json.dumps({"ok": True, "reply": "ack"}))
         return 0
 
@@ -119,7 +183,7 @@ def test_depth_state_resets_after_relay(monkeypatch):
 
     monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
     assert json.loads(agent_chat_send(persona_id="dev", message="hi"))["ok"]
-    assert int(getattr(_RELAY_STATE, "depth", 0)) == 0
+    assert _RELAY_CHAIN.get() == ()
 
 
 @pytest.mark.parametrize("role_key", ["PM", "DEV", "QA", "ALICE_SUPERVISOR"])
