@@ -994,6 +994,10 @@ def build_parser(parent_subparsers) -> None:
     stream.add_argument("--heartbeat-interval", type=float, default=5.0)
     stream.add_argument("--max-frames", type=int, default=None, help=argparse.SUPPRESS)
     stream.set_defaults(func=_cmd_stream)
+    serve = subs.add_parser("serve", help="Persistent NDJSON stdio bridge: dispatch harness argv requests in one warm process (Mission Control serve lane)")
+    serve.add_argument("--ndjson", action="store_true", help="NDJSON frame transport over stdio (the only v1 transport)")
+    serve.add_argument("--pool-size", type=int, default=4, help=argparse.SUPPRESS)
+    serve.set_defaults(func=_cmd_serve)
     rebuild_read_model = subs.add_parser("rebuild-read-model", help="Rebuild read_model.db from the current event-sourced store")
     rebuild_read_model.add_argument("--json", action="store_true")
     rebuild_read_model.set_defaults(func=_cmd_rebuild_read_model)
@@ -2406,6 +2410,14 @@ def _cmd_goal_run(args) -> int:
         print(f"goal {result.task_id}: stop={result.stop_reason} state={result.final_task_state} actions={result.actions_taken}")
     return result.exit_code
 
+
+
+def _cmd_serve(args) -> int:
+    # serve is a real module (not an exec'd part): it is the process's main
+    # loop, owns sys.stdout/sys.stderr swaps, and is imported by tests.
+    from hermes_cli.harness_parts.serve import _cmd_serve as _run_serve
+
+    return _run_serve(args)
 
 
 def _load_command_parts() -> None:
