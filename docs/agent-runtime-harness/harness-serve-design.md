@@ -60,6 +60,13 @@ no cross-request stdout bleed).
 3. **Degraded mode:** silent per-call CLI fallback + quiet bridge-status chip
    ("degraded (CLI fallback)"); supervisor respawns with backoff.
 4. **Pool:** single ThreadPoolExecutor(4).
+5. **Turn-aware supervisor (recording safety):** today's one-process-per-command
+   model isolates chat turns from kills; serve concentrates everything in one
+   process. The Launcher supervisor therefore NEVER kills serve while a chat
+   turn is streaming — a hung non-chat request routes to the CLI fallback
+   instead, and the process is recycled only when the chat lane is idle.
+   Serve advertises in-flight chat turns via a `{"event":"busy","chat_turns":N}`
+   frame on ping so the supervisor can decide honestly.
 
 ## Future: phone / remote control (designed, NOT scheduled)
 
@@ -71,10 +78,19 @@ allowlist (dangerous caps like `worker.interrupt` / `run.cancel` gated).
 Telegram gateway plugin remains the chat-only cheap alternative. Cross-repo
 feature → durable note belongs in the parent ArcadiaLabs brain when scheduled.
 
-## Follow-up slice (separate, measured)
+## Follow-up slices (separate, measured)
 
-Snapshot **compute** stays ~7s. Serve from the persisted read-model /
-in-serve cache with sequence check. Do after serve ships; measure first.
+1. **Snapshot compute** stays ~7s. Serve from the persisted read-model /
+   in-serve cache with sequence check. Do after serve ships; measure first.
+2. **Turn durability** (transport-independent; what actually *ensures*
+   provider-reply recording). Today: operator message is write-ahead
+   persisted, streamed turns persist incrementally, final reply appends with
+   client_message_id replay dedup. Gaps: (a) non-streamed turns persist
+   nothing between operator message and completion — a mid-turn kill loses
+   the reply; run the incremental turn recorder unconditionally, not only
+   under --stream. (b) no terminal turn marker — an interrupted turn
+   vanishes silently; persist turn status (completed/failed/interrupted) so
+   the Launcher can render "turn interrupted — retry" honestly.
 
 ## Test plan
 
