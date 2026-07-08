@@ -19,9 +19,12 @@ def _frames(buffer: io.StringIO) -> list[dict]:
     return [json.loads(line) for line in buffer.getvalue().splitlines() if line]
 
 
-def _run(requests, *, dispatch, pool_size: int = 4) -> list[dict]:
+def _run(requests, *, dispatch, pool_size: int = 4, **kwargs) -> list[dict]:
     out = io.StringIO()
-    assert serve_loop(iter(requests), out, pool_size=pool_size, dispatch=dispatch) == 0
+    assert (
+        serve_loop(iter(requests), out, pool_size=pool_size, dispatch=dispatch, **kwargs)
+        == 0
+    )
     return _frames(out)
 
 
@@ -183,6 +186,145 @@ def test_dispatch_exception_emits_error_frame_and_nonzero_exit():
     assert errors and errors[0]["error"] == "dispatch_failed"
     exits = [f for f in frames if f.get("event") == "exit"]
     assert exits[0]["id"] == "r1" and exits[0]["code"] != 0
+
+
+def test_read_model_cache_replays_identical_poll():
+    calls: list[list[str]] = []
+
+    def dispatch(argv):
+        calls.append(list(argv))
+        print('{"open_tasks": 3}')
+        return 0
+
+    frames = _run(
+        [
+            _request("p1", ["harness", "status", "--json"]),
+            _request("p2", ["harness", "status", "--json"]),
+            SHUTDOWN,
+        ],
+        dispatch=dispatch,
+        pool_size=1,  # serialize so p1's build lands before p2 resolves
+        fingerprint=lambda: ("stable",),
+    )
+
+    assert len(calls) == 1  # second poll never re-dispatched
+    p2_lines = [
+        f["line"] for f in frames if f.get("event") == "line" and f.get("id") == "p2"
+    ]
+    assert p2_lines == ['{"open_tasks": 3}']
+    exits = {f["id"]: f for f in frames if f.get("event") == "exit"}
+    assert exits["p1"]["code"] == 0
+    assert "served_from_cache" not in exits["p1"]  # builds are not stamped
+    assert exits["p2"]["code"] == 0
+    assert exits["p2"]["served_from_cache"] is True
+    assert isinstance(exits["p2"]["cache_age_ms"], int)
+
+
+def test_read_model_cache_invalidates_when_fingerprint_moves():
+    calls: list[list[str]] = []
+    fingerprints = iter([("gen-1",), ("gen-2",)])
+
+    def dispatch(argv):
+        calls.append(list(argv))
+        print(f"build {len(calls)}")
+        return 0
+
+    frames = _run(
+        [
+            _request("p1", ["harness", "status", "--json"]),
+            _request("p2", ["harness", "status", "--json"]),
+            SHUTDOWN,
+        ],
+        dispatch=dispatch,
+        pool_size=1,
+        fingerprint=lambda: next(fingerprints),
+    )
+
+    assert len(calls) == 2  # store state moved -> sequence check forces rebuild
+    exits = {f["id"]: f for f in frames if f.get("event") == "exit"}
+    assert "served_from_cache" not in exits["p2"]
+    p2_lines = [
+        f["line"] for f in frames if f.get("event") == "line" and f.get("id") == "p2"
+    ]
+    assert p2_lines == ["build 2"]
+
+
+def test_read_model_cache_ttl_bounds_out_of_band_staleness():
+    # Git working trees / provider health live outside the fingerprint; the
+    # TTL forces a rebuild even when the fingerprint holds. max_age=-1 makes
+    # every entry already-expired without sleeping.
+    calls: list[list[str]] = []
+
+    def dispatch(argv):
+        calls.append(list(argv))
+        print("fresh")
+        return 0
+
+    frames = _run(
+        [
+            _request("p1", ["harness", "status", "--json"]),
+            _request("p2", ["harness", "status", "--json"]),
+            SHUTDOWN,
+        ],
+        dispatch=dispatch,
+        pool_size=1,
+        fingerprint=lambda: ("stable",),
+        read_cache_max_age=-1.0,
+    )
+
+    assert len(calls) == 2
+    exits = {f["id"]: f for f in frames if f.get("event") == "exit"}
+    assert "served_from_cache" not in exits["p2"]
+
+
+def test_read_model_cache_never_replays_failed_builds():
+    codes = iter([1, 0])
+    calls: list[list[str]] = []
+
+    def dispatch(argv):
+        calls.append(list(argv))
+        code = next(codes)
+        print(f"exit {code}")
+        return code
+
+    frames = _run(
+        [
+            _request("p1", ["harness", "snapshot", "--json"]),
+            _request("p2", ["harness", "snapshot", "--json"]),
+            SHUTDOWN,
+        ],
+        dispatch=dispatch,
+        pool_size=1,
+        fingerprint=lambda: ("stable",),
+    )
+
+    assert len(calls) == 2  # the failed build was not fossilized
+    exits = {f["id"]: f for f in frames if f.get("event") == "exit"}
+    assert exits["p1"]["code"] == 1
+    assert exits["p2"]["code"] == 0
+    assert "served_from_cache" not in exits["p2"]
+
+
+def test_read_model_cache_ignores_non_poll_commands():
+    calls: list[list[str]] = []
+
+    def dispatch(argv):
+        calls.append(list(argv))
+        print("ran")
+        return 0
+
+    _run(
+        [
+            _request("t1", ["harness", "task", "show", "task_1", "--json"]),
+            _request("t2", ["harness", "task", "show", "task_1", "--json"]),
+            SHUTDOWN,
+        ],
+        dispatch=dispatch,
+        pool_size=1,
+        fingerprint=lambda: ("stable",),
+    )
+
+    assert len(calls) == 2  # only the status/snapshot poll lanes cache
 
 
 def test_real_dispatch_status_json(isolate_agent_runtime_root):

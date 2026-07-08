@@ -82,6 +82,26 @@ feature → durable note belongs in the parent ArcadiaLabs brain when scheduled.
 
 1. **Snapshot compute** stays ~7s. Serve from the persisted read-model /
    in-serve cache with sequence check. Do after serve ships; measure first.
+   **SHIPPED 2026-07-08.** Measured first: warm `build_status` was 3.7s and
+   `persona_chat_trace` alone was 2.0s — status built with a plain
+   `EventLog` and re-read the 80MB log per instance while `build_snapshot`
+   already used `CachedEventLog`. Two fixes:
+   - `agent_runtime/status.py` now defaults to `CachedEventLog` (same as
+     snapshot): warm `build_status` 3.7s → **1.76s**.
+   - Serve-side `_ReadModelCache` (`hermes_cli/harness_parts/serve.py`):
+     the exact stdout payload of `harness status --json` /
+     `harness snapshot --json` is cached keyed on a stat-based
+     runtime-state fingerprint (events.jsonl, turn store, daemon status,
+     scope pointers, store dirs, SessionDB incl. -wal/-journal) — the
+     sequence check. Out-of-band signals (git dirty state, provider
+     health) are bounded by a 20s TTL. Replayed responses stamp
+     `served_from_cache` + `cache_age_ms` on the exit frame; the payload's
+     parity `generated_at` stays the honest build time. Failed builds are
+     never cached. Live-verified: first poll 2.70s (build), identical
+     second poll **0.19s** served_from_cache, payloads byte-identical,
+     clean shutdown. Tests: 5 cache cases in
+     `tests/agent_runtime/test_harness_serve.py` (replay, fingerprint
+     move, TTL, failed-build, non-poll argv).
 2. **Turn durability** (transport-independent; what actually *ensures*
    provider-reply recording). Today: operator message is write-ahead
    persisted, streamed turns persist incrementally, final reply appends with
@@ -91,6 +111,12 @@ feature → durable note belongs in the parent ArcadiaLabs brain when scheduled.
    under --stream. (b) no terminal turn marker — an interrupted turn
    vanishes silently; persist turn status (completed/failed/interrupted) so
    the Launcher can render "turn interrupted — retry" honestly.
+   **SHIPPED end-to-end 2026-07-08:** turn store + interrupted-turn history
+   rows landed with the turn-durability chain; the operator conversation now
+   projects a typed `turn_interrupted` marker (turn identity preserved) and
+   settles orphaned still-`running` tool_call rows to `interrupted`
+   (`2a9d6639f`); the Launcher renders it as a retryable interruption tile
+   (EterniaLauncher `e29442dd`).
 
 ## Test plan
 

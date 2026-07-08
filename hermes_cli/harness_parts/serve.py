@@ -17,6 +17,9 @@ Protocol (NDJSON, one frame per line):
 - request:   ``{"id":"req-7","argv":["harness","status","--json"]}``
 - reply:     ``{"id":"req-7","event":"line","line":…}`` × N then
              ``{"id":"req-7","event":"exit","code":0}``
+             (a status/snapshot poll replayed from the read-model cache adds
+             ``"served_from_cache": true, "cache_age_ms": N`` to its exit
+             frame — additive; see _ReadModelCache below)
 - stderr:    ``{"id":<request id or null>,"event":"stderr","line":…}``
 - ping:      ``{"op":"ping"}`` → ``{"event":"busy","chat_turns":N,"pending":M}``
              (the Launcher supervisor must NEVER recycle serve while
@@ -40,6 +43,7 @@ import json
 import os
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, TextIO
 
@@ -49,6 +53,146 @@ DEFAULT_POOL_SIZE = 4
 # Chat turns must survive supervisor recycles (recording safety): these argv
 # shapes mark a request as an in-flight chat turn for the busy/ping frame.
 _CHAT_TURN_COMMANDS = (("mission-chat", "message"), ("mission-chat", "steer"))
+
+# ── Read-model cache (follow-up slice 1 of the serve design doc) ─────────────
+#
+# The Launcher polls `harness status --json` / `harness snapshot --json` on a
+# fixed cadence; each build recomputes the full projection (~1.7s status /
+# ~7s snapshot warm) even when NOTHING changed. Serve is a warm process, so it
+# caches the exact stdout payload of these read-only requests keyed by a
+# runtime-state fingerprint (the sequence check) and replays it while the
+# fingerprint holds.
+#
+# The fingerprint stats the cheap change signals: events.jsonl (every store
+# mutation appends an event — the architecture's change feed), the turn store,
+# daemon status, scope pointers, the store directories (record add/rename
+# flips a directory's mtime), and the SessionDB files (chat writes; -wal /
+# -journal included because a SQLite WAL commit does not touch the main db's
+# mtime). Signals that live OUTSIDE the runtime root (git working trees for
+# dirty state, provider health) cannot flip the fingerprint, so a TTL bounds
+# their staleness: a cached payload older than _READ_CACHE_MAX_AGE_SECONDS is
+# rebuilt even on a fingerprint match.
+#
+# Visibility: a replayed response stamps `served_from_cache` + `cache_age_ms`
+# on its exit frame (additive), and the payload's own parity envelope keeps
+# the honest original `generated_at`.
+
+_CACHEABLE_ARGV: dict[tuple[str, ...], str] = {
+    ("harness", "status", "--json"): "status",
+    ("harness", "snapshot", "--json"): "snapshot",
+}
+_READ_CACHE_MAX_AGE_SECONDS = 20.0
+
+_FINGERPRINT_ROOT_FILES = (
+    "events.jsonl",
+    "mission_chat_turns.json",
+    "daemon_status.json",
+    "active_realm.json",
+    "active_workspace.json",
+)
+_FINGERPRINT_STORE_DIRS = (
+    "tasks",
+    "runs",
+    "incidents",
+    "agents",
+    "proofs",
+    "worker_sessions",
+    "repo_bundles",
+    "runtime_instances",
+    "persona_instances",
+    "persona_assignments",
+    "goals",
+    "workspaces",
+    "realms",
+)
+
+
+def _runtime_state_fingerprint() -> tuple | None:
+    """Cheap stat-based sequence check over the harness read-model inputs.
+
+    Returns None when the runtime root cannot be resolved — callers must
+    treat None as "never cache"."""
+    try:
+        from agent_runtime import paths as _paths
+
+        root = _paths.store_root()
+    except Exception:
+        return None
+    parts: list[tuple[str, int, int]] = []
+
+    def _stat(path: Any) -> None:
+        try:
+            st = os.stat(path)
+        except OSError:
+            parts.append((str(path), -1, -1))
+            return
+        parts.append((str(path), st.st_mtime_ns, st.st_size))
+
+    for name in _FINGERPRINT_ROOT_FILES:
+        _stat(root / name)
+    for name in _FINGERPRINT_STORE_DIRS:
+        _stat(root / name)
+    try:
+        from hermes_state import SessionDB
+
+        db_path = str(SessionDB().db_path)
+        for suffix in ("", "-wal", "-journal"):
+            _stat(db_path + suffix)
+    except Exception:
+        # Chat persistence unavailable → its absence is itself stable.
+        parts.append(("session_db", -1, -1))
+    return tuple(parts)
+
+
+class _ReadModelCacheEntry:
+    __slots__ = ("fingerprint", "lines", "code", "built_monotonic")
+
+    def __init__(
+        self, fingerprint: tuple, lines: list[str], code: int, built_monotonic: float
+    ):
+        self.fingerprint = fingerprint
+        self.lines = lines
+        self.code = code
+        self.built_monotonic = built_monotonic
+
+
+class _ReadModelCache:
+    """Per-serve-loop response cache for the read-only poll commands."""
+
+    def __init__(self, max_age_seconds: float = _READ_CACHE_MAX_AGE_SECONDS):
+        self._entries: dict[str, _ReadModelCacheEntry] = {}
+        self._lock = threading.Lock()
+        self._max_age = max_age_seconds
+
+    def get(
+        self, key: str, fingerprint: tuple | None, now_monotonic: float
+    ) -> _ReadModelCacheEntry | None:
+        if fingerprint is None:
+            return None
+        with self._lock:
+            entry = self._entries.get(key)
+        if entry is None or entry.fingerprint != fingerprint:
+            return None
+        if now_monotonic - entry.built_monotonic > self._max_age:
+            return None
+        return entry
+
+    def put(
+        self,
+        key: str,
+        fingerprint: tuple | None,
+        lines: list[str],
+        code: int,
+        now_monotonic: float,
+    ) -> None:
+        # Only successful builds are worth replaying; a failed build must
+        # re-run so the error stays live, not fossilized.
+        if fingerprint is None or code != 0:
+            return
+        with self._lock:
+            self._entries[key] = _ReadModelCacheEntry(
+                fingerprint, lines, code, now_monotonic
+            )
 
 _request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "harness_serve_request_id", default=None
@@ -78,6 +222,7 @@ class _LineFrameProxy(io.TextIOBase):
         self._frames = frames
         self._event = event
         self._buffers: dict[str | None, str] = {}
+        self._captures: dict[str | None, list[str]] = {}
         self._lock = threading.Lock()
 
     def writable(self) -> bool:  # pragma: no cover - io protocol
@@ -95,6 +240,9 @@ class _LineFrameProxy(io.TextIOBase):
             buffered = self._buffers.get(rid, "") + str(text)
             *lines, remainder = buffered.split("\n")
             self._buffers[rid] = remainder
+            capture = self._captures.get(rid)
+            if capture is not None:
+                capture.extend(lines)
         for line in lines:
             self._frames.emit({"id": rid, "event": self._event, "line": line})
         return len(text)
@@ -102,11 +250,25 @@ class _LineFrameProxy(io.TextIOBase):
     def flush(self) -> None:  # pragma: no cover - io protocol
         return None
 
+    def begin_capture(self, rid: str | None) -> None:
+        """Start mirroring [rid]'s emitted lines for the read-model cache."""
+        with self._lock:
+            self._captures[rid] = []
+
+    def end_capture(self, rid: str | None) -> list[str]:
+        """Stop mirroring and return everything captured for [rid]."""
+        with self._lock:
+            return self._captures.pop(rid, [])
+
     def flush_request(self, rid: str | None) -> None:
         """Emit a request's unterminated tail (handler printed without a
         trailing newline) and drop its buffer."""
         with self._lock:
             remainder = self._buffers.pop(rid, "")
+            if remainder:
+                capture = self._captures.get(rid)
+                if capture is not None:
+                    capture.append(remainder)
         if remainder:
             self._frames.emit({"id": rid, "event": self._event, "line": remainder})
 
@@ -161,12 +323,15 @@ def serve_loop(
     *,
     pool_size: int = DEFAULT_POOL_SIZE,
     dispatch: Callable[[list[str]], int] = dispatch_argv,
+    fingerprint: Callable[[], tuple | None] = _runtime_state_fingerprint,
+    read_cache_max_age: float = _READ_CACHE_MAX_AGE_SECONDS,
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; a
     future remote lane feeds the same loop (design doc §Future)."""
     frames = _FrameWriter(writer)
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")
+    read_cache = _ReadModelCache(read_cache_max_age)
 
     inflight: dict[str, _ArgvRequest] = {}
     inflight_lock = threading.Lock()
@@ -180,7 +345,30 @@ def serve_loop(
     def _run(request: _ArgvRequest) -> None:
         token = _request_id.set(request.rid)
         code = 1
+        cache_key = _CACHEABLE_ARGV.get(tuple(request.argv))
+        request_fingerprint: tuple | None = None
+        served_from_cache = False
+        cache_age_ms = 0
+        capturing = False
         try:
+            cached = None
+            if cache_key is not None:
+                request_fingerprint = fingerprint()
+                cached = read_cache.get(
+                    cache_key, request_fingerprint, time.monotonic()
+                )
+            if cached is not None:
+                served_from_cache = True
+                cache_age_ms = int(
+                    (time.monotonic() - cached.built_monotonic) * 1000
+                )
+                code = cached.code
+                for line in cached.lines:
+                    frames.emit({"id": request.rid, "event": "line", "line": line})
+                return
+            if cache_key is not None and request_fingerprint is not None:
+                stdout_proxy.begin_capture(request.rid)
+                capturing = True
             try:
                 code = dispatch(list(request.argv))
             except SystemExit as exc:  # argparse usage errors land here
@@ -207,10 +395,26 @@ def serve_loop(
         finally:
             stdout_proxy.flush_request(request.rid)
             stderr_proxy.flush_request(request.rid)
+            if capturing:
+                read_cache.put(
+                    cache_key,
+                    request_fingerprint,
+                    stdout_proxy.end_capture(request.rid),
+                    code,
+                    time.monotonic(),
+                )
             _request_id.reset(token)
             with inflight_lock:
                 inflight.pop(request.rid, None)
-            frames.emit({"id": request.rid, "event": "exit", "code": code})
+            exit_frame: dict[str, Any] = {
+                "id": request.rid,
+                "event": "exit",
+                "code": code,
+            }
+            if served_from_cache:
+                exit_frame["served_from_cache"] = True
+                exit_frame["cache_age_ms"] = cache_age_ms
+            frames.emit(exit_frame)
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
     sys.stdout, sys.stderr = stdout_proxy, stderr_proxy

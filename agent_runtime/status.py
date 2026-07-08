@@ -7,7 +7,7 @@ from .budget_approval import budget_incident_can_continue, budget_incident_needs
 from .daemon import daemon_status_schema
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .dirty_state import build_dirty_state
-from .events import EventLog
+from .events import CachedEventLog, EventLog
 from .observability import build_observability
 from .operator_channels import operator_channel_summary
 from .parity import ProjectionAccountant
@@ -42,7 +42,10 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     incident_store = incident_store or IncidentStore()
     agent_store = agent_store or AgentStore()
     proof_store = proof_store or ProofStore()
-    event_log = event_log or EventLog()
+    # Status calls persona_chat_trace/for_session dozens of times on the same
+    # log; CachedEventLog reads events.jsonl once and serves all of them from
+    # memory (same as build_snapshot — this was the 2s hog of a warm status).
+    event_log = event_log or CachedEventLog()
     worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
     tasks = task_store.list_all()
     runs = run_store.list_all()
