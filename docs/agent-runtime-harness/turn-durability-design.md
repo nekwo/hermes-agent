@@ -1,9 +1,9 @@
 # Turn durability — design (2026-07-08)
 
-Status: **settled with Tony, not yet implemented.** Implementation prompt:
-`turn-durability-implementation-prompt.md`. Review prompt:
-`turn-durability-review-prompt.md`. Sibling design: `harness-serve-design.md`
-(§Follow-up slices item 2 is this document, expanded).
+Status: **settled with Tony, not yet implemented.** Implementation and
+review prompts are delivered operator-side (not committed). Sibling design:
+`harness-serve-design.md` (§Follow-up slices item 2 is this document,
+expanded).
 
 ## Problem
 
