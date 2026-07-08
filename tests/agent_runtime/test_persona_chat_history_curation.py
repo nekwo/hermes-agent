@@ -804,6 +804,56 @@ def test_untimestamped_row_holds_position_when_interrupted_marker_is_merged(isol
     ]
 
 
+def test_recent_interrupted_marker_survives_retention_churn_and_synthesizes(
+    isolate_agent_runtime_root, monkeypatch
+):
+    from agent_runtime import mission_chat_turns
+
+    monkeypatch.setattr(mission_chat_turns, "_RETENTION_MAX_TURNS_PER_SESSION", 10)
+    # Old settled turns that retention will churn through.
+    for index in range(15):
+        persist_mission_chat_turn(
+            session_id="s1",
+            client_message_id=f"client_old_{index}",
+            turn_id=f"turn_old_{index}",
+            elements=[],
+            state="completed",
+        )
+    # The RECENT interrupted turn, then more churn behind it.
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_interrupted",
+        turn_id="turn_interrupted",
+        elements=[],
+        state="interrupted",
+    )
+    for index in range(8):
+        persist_mission_chat_turn(
+            session_id="s1",
+            client_message_id=f"client_new_{index}",
+            turn_id=f"turn_new_{index}",
+            elements=[],
+            state="completed",
+        )
+    db = FakeSessionDB(
+        [
+            {
+                "id": "operator_1",
+                "role": "user",
+                "content": "please do the thing",
+                "platform_message_id": "client_interrupted",
+            }
+        ]
+    )
+
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+
+    marker = rows[-1]
+    assert marker["id"] == "s1:turn-interrupted:client_interrupted"
+    assert marker["role"] == "system"
+    assert marker["turn_id"] == "turn_interrupted"
+
+
 def test_persona_chat_trace_projects_tool_events_by_persona_without_raw_secrets():
     events = EventLog()
     ts = now()

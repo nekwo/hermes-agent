@@ -1590,6 +1590,14 @@ def _emit_chat_frame(payload: dict[str, object]) -> None:
     sys.stdout.flush()
 
 
+# Streamed delta chunks arrive far faster than the turn store can absorb full
+# locked rewrites (O(file size) per persist). Delta-driven on_update flushes
+# are therefore debounced to at most one per interval; segment boundaries,
+# tool events, and the handler-owned write-ahead/terminal persists stay
+# immediate and unthrottled.
+_CHAT_TURN_INCREMENTAL_FLUSH_INTERVAL_SECONDS = 0.25
+
+
 class _ChatProtocolV2Emitter:
     """Additive Mission Control chat stream protocol.
 
@@ -1604,12 +1612,17 @@ class _ChatProtocolV2Emitter:
         client_message_id: str | None,
         on_update=None,
         emit_frames: bool = True,
+        clock=time.monotonic,
     ):
         safe_turn = safe_assignment_token(turn_id) or f"turn_{uuid.uuid4().hex[:12]}"
         self.turn_id = safe_turn
         self.client_message_id = safe_assignment_text(client_message_id, limit=200) or None
         self._on_update = on_update
         self._emit_frames = bool(emit_frames)
+        # Debounce bookkeeping only — element timing fields keep using
+        # time.monotonic directly so an injected test clock cannot skew them.
+        self._clock = clock
+        self._last_on_update_flush: float | None = None
         self._finishing = False
         self._finished = False
         self._seq = 0
@@ -1644,7 +1657,7 @@ class _ChatProtocolV2Emitter:
                 "text": text,
             }
         )
-        self._notify_update()
+        self._notify_update(immediate=False)
 
     def progress(self, payload: dict[str, object] | None) -> None:
         if not isinstance(payload, dict):
@@ -1742,7 +1755,9 @@ class _ChatProtocolV2Emitter:
                 "ttft_ms": segment["ttft_ms"],
             }
         )
-        self._notify_update()
+        # No on_update here: the only caller is delta(), which notifies right
+        # after appending its text — flushing before the append would burn the
+        # debounce window on an empty segment.
         return segment
 
     def _tool_started(self, payload: dict[str, object]) -> None:
@@ -1835,9 +1850,21 @@ class _ChatProtocolV2Emitter:
             }
         )
 
-    def _notify_update(self) -> None:
+    def _notify_update(self, *, immediate: bool = True) -> None:
+        # Debounced (immediate=False) callers are the streamed-delta path:
+        # they flush at most once per interval. Segment boundaries and tool
+        # events flush immediately — they are rare and carry the trace
+        # visibility operators debug from. A delta suppressed here is never
+        # lost: `elements` accumulates in place, so the next flush of any
+        # flavor (interval, boundary, tool, terminal) carries the full text.
         if self._on_update is None or self._finishing:
             return
+        now = self._clock()
+        if not immediate:
+            last = self._last_on_update_flush
+            if last is not None and (now - last) < _CHAT_TURN_INCREMENTAL_FLUSH_INTERVAL_SECONDS:
+                return
+        self._last_on_update_flush = now
         try:
             self._on_update(self)
         except Exception:

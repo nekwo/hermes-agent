@@ -17,6 +17,12 @@ _LOCK_TIMEOUT_SECONDS = 2.0
 _LOCK_POLL_SECONDS = 0.01
 _MAX_ELEMENTS = 80
 _MAX_TEXT = 20000
+# Retention bounds, applied on every write inside the _mutate_store lock.
+# The per-session bound must stay comfortably above the projection's
+# displayable message tail (MAX_PERSONA_CHAT_MESSAGE_TAIL = 40 in
+# persona_chat_history.py) so no displayable agent row loses turn_elements.
+_RETENTION_MAX_TURNS_PER_SESSION = 100
+_RETENTION_MAX_SESSIONS = 50
 _SENSITIVE_FILE_MARKERS = ("private_token", "secret_token", "api_key", "apikey", "credential")
 _VALID_TURN_STATES = {"running", "completed", "failed", "interrupted"}
 
@@ -112,6 +118,8 @@ def persist_mission_chat_turn(
     return _mutate_store(
         _mutate,
         timeout_result=MissionChatTurnPersistOutcome.SKIPPED_LOCK_TIMEOUT,
+        protected_session=session_key,
+        protected_message=message_key,
     )
 
 
@@ -203,13 +211,20 @@ def mark_stale_running_turns_interrupted(
 
     # Lock timeout returns [] — this repair is opportunistic by design
     # (repair-on-next-write); the next send in the session retries it.
-    return _mutate_store(_mutate, timeout_result=[])
+    return _mutate_store(
+        _mutate,
+        timeout_result=[],
+        protected_session=session_key,
+        protected_message=active_key,
+    )
 
 
 def _mutate_store(
     mutator: Callable[[dict[str, Any]], tuple[bool, _T]],
     *,
     timeout_result: _T,
+    protected_session: str | None = None,
+    protected_message: str | None = None,
 ) -> _T:
     """Single write chokepoint for the turn store.
 
@@ -218,6 +233,11 @@ def _mutate_store(
     other's records. On lock timeout the mutation is skipped and
     ``timeout_result`` is returned — a chat turn must never hang on a stuck
     lock; the skip is surfaced through the typed persist outcome.
+
+    Every changed write also applies retention (same lock, same atomic
+    tmp-replace) so the store cannot grow without bound. Retention never
+    evicts ``running`` records or the protected record/session being
+    written, and it is invisible to the mutator's result.
     """
 
     with _store_lock() as acquired:
@@ -226,8 +246,77 @@ def _mutate_store(
         store = _read_store()
         changed, result = mutator(store)
         if changed:
+            _apply_retention(
+                store,
+                protected_session=protected_session,
+                protected_message=protected_message,
+            )
             _write_store(store)
         return result
+
+
+def _apply_retention(
+    store: dict[str, Any],
+    *,
+    protected_session: str | None = None,
+    protected_message: str | None = None,
+) -> None:
+    """Bound the store deterministically on write.
+
+    Per-session tail: keep the ``_RETENTION_MAX_TURNS_PER_SESSION`` most
+    recent records by ``updated_at``. Session bound: keep the
+    ``_RETENTION_MAX_SESSIONS`` most recently updated sessions; older
+    sessions drop wholesale. ``running`` records are never evicted (a live
+    concurrent turn must not lose its write-ahead marker) and neither is the
+    record/session being written, so a session can transiently exceed its
+    bound rather than lose live state.
+    """
+
+    for session_key, session in store.items():
+        if not isinstance(session, dict):
+            continue
+        excess = len(session) - _RETENTION_MAX_TURNS_PER_SESSION
+        if excess <= 0:
+            continue
+        evictable = sorted(
+            (
+                str(record.get("updated_at") or "") if isinstance(record, dict) else "",
+                str(message_key),
+            )
+            for message_key, record in session.items()
+            if not (
+                (session_key == protected_session and str(message_key) == str(protected_message))
+                or _record_state(record) == "running"
+            )
+        )
+        for _, message_key in evictable[:excess]:
+            session.pop(message_key, None)
+
+    session_keys = [key for key, value in store.items() if isinstance(value, dict)]
+    excess = len(session_keys) - _RETENTION_MAX_SESSIONS
+    if excess <= 0:
+        return
+
+    def _session_recency(key: str) -> str:
+        return max(
+            (
+                str(record.get("updated_at") or "")
+                for record in store[key].values()
+                if isinstance(record, dict)
+            ),
+            default="",
+        )
+
+    dropped = 0
+    for key in sorted(session_keys, key=lambda item: (_session_recency(item), item)):
+        if dropped >= excess:
+            break
+        if key == protected_session:
+            continue
+        if any(_record_state(record) == "running" for record in store[key].values()):
+            continue
+        store.pop(key, None)
+        dropped += 1
 
 
 @contextmanager
@@ -304,7 +393,10 @@ def _write_store(data: dict[str, Any]) -> None:
     path = _store_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
     tmp.replace(path)
 
 
