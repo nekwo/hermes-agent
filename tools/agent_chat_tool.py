@@ -52,15 +52,18 @@ AGENT_CHAT_SEND_SCHEMA = {
         "message lands in that persona's own Mission Control chat session and their reply is "
         "returned to you. This does NOT create a tracked goal, start the Mission Daemon, or run "
         "proof gates — use mission_goal_create when the operator wants real tracked work to start. "
-        "Pass the persona id (e.g. neko_supervisor, dev, backend_dev, qa), not a display name or "
-        "instance id."
+        "Prefer the persona id (e.g. neko_supervisor, dev, backend_dev, qa); a personainst_* "
+        "instance id is resolved to its persona automatically. Display names are not accepted."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "persona_id": {
                 "type": "string",
-                "description": "Target persona id, e.g. 'neko_supervisor'. Never a personainst_* instance id.",
+                "description": (
+                    "Target persona id, e.g. 'neko_supervisor'. A personainst_* instance id is "
+                    "also accepted and resolved to its persona."
+                ),
             },
             "message": {
                 "type": "string",
@@ -119,11 +122,6 @@ def agent_chat_send(
     message = (message or "").strip()
     if not persona_id:
         return _refusal("agent_chat_send requires a persona_id.")
-    if persona_id.startswith("personainst_"):
-        return _refusal(
-            f"'{persona_id}' is an instance id, not a persona id. Pass the persona id "
-            "(e.g. neko_supervisor, dev, backend_dev, qa)."
-        )
     if not message:
         return _refusal("agent_chat_send requires a non-empty message.")
     if len(message) > _MESSAGE_LIMIT:

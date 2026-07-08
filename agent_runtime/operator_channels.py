@@ -1171,17 +1171,23 @@ def _safe_conversation_text(value: Any, *, limit: int) -> str | None:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     # Mask secret-bearing lines in place instead of dropping the whole message —
     # a dev rationale that quotes one env assignment must not vanish wholesale.
+    # Preserve intra-line whitespace on the survivors: conversation text carries
+    # code blocks and aligned output whose indentation must reach the display.
     lines = [
         "[redacted line — contained a secret]"
         if _SECRET_RE.search(line)
-        else " ".join(line.split())
+        else line.rstrip()
         for line in text.split("\n")
     ]
     normalized = "\n".join(lines).strip()
     normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
     if not normalized:
         return None
-    return normalized[:limit].rstrip()
+    if len(normalized) > limit:
+        # Truncation must be visible, never silent. Single-line marker: this
+        # sanitizer also feeds single-line fields (titles, list items).
+        normalized = normalized[:limit].rstrip() + " … [truncated]"
+    return normalized
 
 
 def _safe_conversation_list(value: Any, *, limit: int) -> list[str]:

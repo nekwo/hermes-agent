@@ -20,11 +20,23 @@ def test_refuses_blank_persona_and_message():
     assert not json.loads(agent_chat_send(persona_id="dev", message="  "))["ok"]
 
 
-def test_refuses_instance_ids_with_guidance():
+def test_instance_shaped_ids_are_relayed_for_canonical_resolution(monkeypatch):
+    # Agents copy personainst_* ids straight out of Mission Control payloads;
+    # the canonical mission-chat handler resolves them, so the tool forwards
+    # instead of refusing.
+    seen = {}
+
+    def fake_handler(args):
+        seen["persona_id"] = args.persona_id
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
     data = json.loads(agent_chat_send(persona_id="personainst_dev", message="hi"))
-    assert data["ok"] is False
-    assert "instance id" in data["error"]
-    assert "neko_supervisor" in data["error"]
+    assert data["ok"] is True
+    assert seen["persona_id"] == "personainst_dev"
 
 
 def test_scope_off_disables_the_tool(monkeypatch):

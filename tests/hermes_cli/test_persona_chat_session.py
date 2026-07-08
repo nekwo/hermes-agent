@@ -141,3 +141,16 @@ def test_redaction_on_write_continuity_context():
 def test_redactor_passes_clean_text():
     assert _redact_persona_chat_text("just a normal message", limit=100) == "just a normal message"
     assert _redact_persona_chat_text(None, limit=100) == ""
+
+
+def test_chat_body_preserves_code_indentation_and_inline_spacing():
+    # Message fidelity: persisted chat bodies must keep code indentation and
+    # aligned columns — collapsing intra-line whitespace mangles agent replies.
+    body = "def f():\n    return   1\n\ncol_a    col_b"
+    assert _redact_persona_chat_text(body, limit=500) == body
+
+
+def test_chat_body_truncation_is_marked_not_silent():
+    safe = _redact_persona_chat_text("x" * 250, limit=200)
+    assert safe.startswith("x" * 200)
+    assert safe.endswith("… [truncated]")

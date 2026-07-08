@@ -632,7 +632,25 @@ def _cmd_mission_chat_steer(args) -> int:
 
 def _cmd_mission_chat_message(args) -> int:
     cfg = load_agent_runtime_config()
-    normalized_persona = _normalize_cli_persona_or_template_id(args.persona_id)
+    try:
+        normalized_persona = _resolve_mission_chat_persona_id(
+            args.persona_id, getattr(args, "persona_instance_id", None)
+        )
+    except ValueError as exc:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "rejected",
+            "error_kind": "unsupported_persona",
+            "error": safe_assignment_text(str(exc), limit=240),
+            "persona_id": safe_assignment_token(args.persona_id),
+            "next_expected": "pass a seeded persona id (e.g. neko_supervisor, dev), profile:<name>, or a known personainst_* instance id",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
     persona = _persona_by_id(cfg, normalized_persona)
     if persona is None:
         data = {"ok": False, "error": f"unknown persona {safe_assignment_token(args.persona_id)}"}
@@ -751,7 +769,7 @@ def _cmd_mission_chat_message(args) -> int:
     )
     if replay.get("assistant"):
         reply_text = _redact_persona_chat_text(
-            replay["assistant"].get("content"), limit=8000
+            replay["assistant"].get("content"), limit=PERSONA_CHAT_REPLY_LIMIT
         )
         data = {
             "ok": True,
@@ -982,7 +1000,7 @@ def _cmd_mission_chat_message(args) -> int:
             print(emit_json(data) if args.json else data["blocker"])
         return 2
 
-    reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=8000)
+    reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
     _append_persona_assistant_text(
         session_db=session_db,
         session_id=session_id,
@@ -2026,6 +2044,14 @@ _PERSONA_CHAT_SECRET_RE = re.compile(
 )
 
 
+# One pair of caps for the whole mission-chat lane. The reply cap matches the
+# operator-channel projection read cap (operator_channels._safe_conversation_text
+# limit=20000) so a persisted reply is never shorter than what the projection
+# is willing to display.
+PERSONA_CHAT_OPERATOR_MESSAGE_LIMIT = 12000
+PERSONA_CHAT_REPLY_LIMIT = 20000
+
+
 def _redact_persona_chat_text(value, *, limit: int) -> str:
     safe = _safe_persona_chat_body_text(value, limit=limit)
     if not safe:
@@ -2036,10 +2062,16 @@ def _redact_persona_chat_text(value, *, limit: int) -> str:
 def _safe_persona_chat_body_text(value, *, limit: int) -> str:
     text = str(value or "").replace("\x00", " ")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [" ".join(line.split()) for line in text.split("\n")]
+    # Preserve intra-line whitespace: chat bodies carry code blocks and aligned
+    # output, and collapsing runs of spaces destroys them irreversibly at
+    # persistence time. Only trim line endings and cap blank runs.
+    lines = [line.rstrip() for line in text.split("\n")]
     normalized = "\n".join(lines).strip()
     normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
-    return normalized[:limit].rstrip()
+    if len(normalized) > limit:
+        # Truncation must be visible, never silent.
+        normalized = normalized[:limit].rstrip() + " … [truncated]"
+    return normalized
 
 
 def _persona_chat_existing_turn(
@@ -2084,7 +2116,7 @@ def _append_persona_operator_turn(
         return
     if skip_if_present:
         return
-    safe_message = _redact_persona_chat_text(message, limit=12000)
+    safe_message = _redact_persona_chat_text(message, limit=PERSONA_CHAT_OPERATOR_MESSAGE_LIMIT)
     if not safe_message:
         return
     try:
@@ -2108,7 +2140,7 @@ def _append_persona_assistant_text(
 ) -> None:
     if session_db is None or not session_id:
         return
-    safe = _redact_persona_chat_text(text, limit=8000)
+    safe = _redact_persona_chat_text(text, limit=PERSONA_CHAT_REPLY_LIMIT)
     if not safe:
         return
     safe_client_message_id = safe_assignment_text(client_message_id, limit=200)
@@ -2251,7 +2283,7 @@ def _display_name_for_profile(profile_id: str) -> str:
 
 
 def _persona_chat_message_with_history(*, session_db, session_id: str, message: str) -> str:
-    safe_message = _redact_persona_chat_text(message, limit=12000)
+    safe_message = _redact_persona_chat_text(message, limit=PERSONA_CHAT_OPERATOR_MESSAGE_LIMIT)
     if session_db is None or not session_id:
         return safe_message
     try:
@@ -2398,7 +2430,7 @@ def _run_free_floating_assignment_once(
             "next_expected": "fix the runtime blocker and retry the persona chat turn",
         }
 
-    reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=8000)
+    reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
     _append_persona_assistant_text(
         session_db=session_db,
         session_id=session_id,
@@ -2524,6 +2556,23 @@ def _persona_id_from_instance_id(persona_instance_id: str) -> str:
         raise ValueError(f"unsupported persona instance {persona_instance_id!r}") from exc
 
 
+def _resolve_mission_chat_persona_id(persona_id, persona_instance_id) -> str:
+    """Resolve the chat target persona from whichever identity the caller sent.
+
+    Prefer the persona id; when it is mangled (a stale instance-shaped id from a
+    legacy SessionDB row, a display token, etc.) but the caller also supplied a
+    resolvable persona_instance_id, the instance wins instead of failing the
+    whole send.
+    """
+    try:
+        return _normalize_cli_persona_or_template_id(persona_id)
+    except ValueError:
+        instance_token = safe_assignment_token(persona_instance_id)
+        if instance_token:
+            return _persona_id_from_instance_id(instance_token)
+        raise
+
+
 def _cmd_persona_diagnose(args) -> int:
     cfg = load_agent_runtime_config()
     os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
@@ -2591,4 +2640,10 @@ def _normalize_cli_persona_or_template_id(persona_id: str) -> str:
         if not profile:
             raise ValueError(f"unsupported persona {persona_id!r}")
         return f"profile:{profile}"
+    if safe_assignment_token(raw).startswith("personainst_"):
+        # Mission Control payloads, legacy SessionDB rows, and agent tool calls
+        # routinely leak persona INSTANCE ids into persona-id slots. Resolve
+        # them here — the one persona-id boundary — instead of rejecting, so
+        # every chat entry point accepts either form.
+        return _persona_id_from_instance_id(raw)
     return _normalize_cli_persona_id(raw)
