@@ -196,3 +196,51 @@ object — the record is settled and the stdout contract stays intact.
 cannot emit a duplicate `turn.end` frame) and suppresses `on_update` for the
 whole finish window: the caller's terminal persist is the single settling
 write, with no stray `running` persist racing it.
+
+### Performance (2026-07-08)
+
+Branch `turn-durability-perf`. The store rewrites the whole file under the
+cross-process lock on every persist (~69ms at ~1,000 records pre-slice), and
+in streaming mode every delta chunk triggered one full locked rewrite. Three
+changes defuse the growth bomb without touching any durability guarantee:
+
+**Debounced incremental flushes.** `delta()`-driven `on_update` flushes are
+debounced to at most one per interval
+(`_CHAT_TURN_INCREMENTAL_FLUSH_INTERVAL_SECONDS = 0.25` in
+`persona_commands.py`), via an injectable monotonic-clock seam on the emitter
+(`clock=time.monotonic` ctor param) — pure bookkeeping on the synchronous
+call path, no threads/timers. Segment ends and tool events flush
+immediately (rare, and they carry the trace visibility operators debug
+from). The write-ahead `running` marker, the terminal `completed`/`failed`
+persists, and the `mark_stale` repair are handler calls that never pass
+through the debounced path — the durable lane stays immediate and
+unthrottled. A suppressed delta is never lost: elements accumulate in
+place, so the next flush of any flavor carries the full accumulated text.
+**Traded guarantee:** after a mid-stream kill, the recovered partial text
+may be up to one debounce interval (250ms) stale. Losing tool events or
+terminal states remains impossible.
+
+**Retention on write.** `_mutate_store` applies deterministic retention on
+every changed write, inside the same lock and atomic tmp-replace: the
+`_RETENTION_MAX_TURNS_PER_SESSION = 100` most recent turn records per
+session by `updated_at`, and the `_RETENTION_MAX_SESSIONS = 50` most
+recently updated sessions (older sessions drop wholesale). `running`
+records are never evicted (a live concurrent turn must not lose its
+write-ahead marker), nor is the record/session being written — a session
+may transiently exceed its bound rather than lose live state. Retention is
+invisible to the caller's typed outcome. The per-session bound sits safely
+above the projection's displayable tail
+(`MAX_PERSONA_CHAT_MESSAGE_TAIL = 40` in `persona_chat_history.py`), so no
+displayable agent row can lose its `turn_elements` and interrupted-turn
+synthesis keeps working for every turn the Launcher can still display.
+
+**Compact serialization.** `_write_store` uses `separators=(",", ":")`
+instead of `indent=2` (still `sort_keys=True, ensure_ascii=False`): ~22%
+smaller file at 1,000 records.
+
+Measured (same machine, ~1,000-record store): 69.0 → 31.0 ms/persist;
+store 2,301KB → 1,797KB; a simulated 200-delta streamed turn over 20s went
+from 201 incremental store writes to 67 (interval-bound, ≤80). Coverage:
+`tests/agent_runtime/test_mission_chat_turns_perf.py` plus the
+retention-churn synthesis test in
+`tests/agent_runtime/test_persona_chat_history_curation.py`.
