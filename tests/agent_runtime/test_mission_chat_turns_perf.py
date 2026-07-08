@@ -317,3 +317,62 @@ def test_defaults_exceed_projection_message_tail():
     assert mission_chat_turns._RETENTION_MAX_TURNS_PER_SESSION >= (
         MAX_PERSONA_CHAT_MESSAGE_TAIL * 2
     )
+
+
+# ---------------------------------------------------------------------------
+# P3 — worker-thread frames keep the serve request context
+# ---------------------------------------------------------------------------
+
+
+def test_frames_from_worker_thread_carry_construction_context(monkeypatch):
+    """Streamed deltas fire on the provider's worker thread. Under
+    ``harness serve`` the stdout proxy tags lines with a request-id
+    ContextVar that threads do not inherit — so delta frames went out with
+    id=null and the Launcher dropped them. The emitter must run every frame
+    write inside the context captured at construction (handler thread)."""
+
+    import contextvars
+    import threading
+
+    from hermes_cli import harness
+
+    request_id = contextvars.ContextVar("test_request_id", default=None)
+    seen: list[tuple[str, object]] = []
+
+    def _capturing_emit(payload):
+        seen.append((str(payload.get("type")), request_id.get()))
+
+    monkeypatch.setattr(harness, "_emit_chat_frame", _capturing_emit)
+
+    def _build_in_request_context():
+        request_id.set("req-42")
+        return harness._ChatProtocolV2Emitter(
+            turn_id="turn_ctx",
+            client_message_id="m-ctx",
+            emit_frames=True,
+        )
+
+    emitter = contextvars.copy_context().run(_build_in_request_context)
+
+    worker_error: list[BaseException] = []
+
+    def _worker():
+        try:
+            # Fresh thread: request_id is unset here, like the codex stream
+            # worker under serve.
+            assert request_id.get() is None
+            emitter.delta("Hello")
+            emitter.emit_legacy_delta("Hello")
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            worker_error.append(exc)
+
+    thread = threading.Thread(target=_worker)
+    thread.start()
+    thread.join(timeout=10)
+    assert not worker_error, worker_error
+
+    frame_rids = {rid for (_, rid) in seen}
+    assert frame_rids == {"req-42"}, seen
+    frame_types = [frame_type for (frame_type, _) in seen]
+    assert "turn.start" in frame_types
+    assert "segment.delta" in frame_types

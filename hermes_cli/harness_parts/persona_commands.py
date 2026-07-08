@@ -905,7 +905,9 @@ def _cmd_mission_chat_message(args) -> int:
     )
 
     def _stream_delta(delta: str | None) -> None:
-        _emit_chat_delta(delta)
+        # Route through the emitter so the legacy frame also carries the
+        # serve request context (deltas fire on the provider worker thread).
+        stream_emitter.emit_legacy_delta(delta)
         stream_emitter.delta(delta)
 
     trace_payloads: list[dict[str, object]] = []
@@ -1677,11 +1679,24 @@ class _ChatProtocolV2Emitter:
         emit_frames: bool = True,
         clock=time.monotonic,
     ):
+        import contextvars as _contextvars
+        import threading as _threading
+
         safe_turn = safe_assignment_token(turn_id) or f"turn_{uuid.uuid4().hex[:12]}"
         self.turn_id = safe_turn
         self.client_message_id = safe_assignment_text(client_message_id, limit=200) or None
         self._on_update = on_update
         self._emit_frames = bool(emit_frames)
+        # Streaming deltas fire from the provider's worker thread. Under
+        # `harness serve` the stdout proxy tags each line with a request-id
+        # ContextVar that new threads do NOT inherit, so frames written from
+        # the worker thread went out with id=null and the Launcher's
+        # per-request frame router dropped them — the console showed nothing
+        # until turn end. Capture the request context here (handler thread,
+        # request id set) and emit every frame inside it; the lock keeps the
+        # single Context from being entered concurrently (RuntimeError).
+        self._turn_context = _contextvars.copy_context()
+        self._emit_lock = _threading.Lock()
         # Debounce bookkeeping only — element timing fields keep using
         # time.monotonic directly so an injected test clock cannot skew them.
         self._clock = clock
@@ -1933,9 +1948,20 @@ class _ChatProtocolV2Emitter:
         except Exception:
             pass
 
+    def emit_legacy_delta(self, delta: str | None) -> None:
+        """Emit the legacy ``chat.delta`` frame inside the turn's request
+        context (see ``__init__`` — worker-thread writes lose the serve
+        request id otherwise)."""
+        if not delta:
+            return
+        with self._emit_lock:
+            self._turn_context.run(_emit_chat_delta, delta)
+
     def _emit_chat_frame(self, payload: dict[str, object]) -> None:
-        if self._emit_frames:
-            _emit_chat_frame(payload)
+        if not self._emit_frames:
+            return
+        with self._emit_lock:
+            self._turn_context.run(_emit_chat_frame, payload)
 
 
 def _safe_stream_text(value: object, *, limit: int = 800) -> str | None:
@@ -2563,7 +2589,9 @@ def _run_free_floating_assignment_once(
     )
 
     def _stream_delta(delta: str | None) -> None:
-        _emit_chat_delta(delta)
+        # Route through the emitter so the legacy frame also carries the
+        # serve request context (deltas fire on the provider worker thread).
+        stream_emitter.emit_legacy_delta(delta)
         stream_emitter.delta(delta)
 
     def _stream_progress(payload: dict[str, object] | None) -> None:
