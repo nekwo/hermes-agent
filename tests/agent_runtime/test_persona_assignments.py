@@ -1999,8 +1999,10 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
 
     assert code == 0
     stdout = capsys.readouterr().out
-    assert '"type": "turn.start"' not in stdout
-    assert '"type": "segment.delta"' not in stdout
+    # Protocol-v2 frames serialize compactly (separators=(",", ":")); the final
+    # payload is indented, so the compact form only ever matches a leaked frame.
+    assert '"type":"turn.start"' not in stdout
+    assert '"type":"segment.delta"' not in stdout
     payload = json.loads(stdout)
     assert payload["client_message_id"] == "client_free_1"
     # The visible transcript is the only persisted operator-chat ledger; the
@@ -2280,8 +2282,10 @@ def test_mission_chat_non_stream_persists_completed_turn_and_prints_one_json(
 
     assert code == 0
     stdout = capsys.readouterr().out
-    assert '"type": "turn.start"' not in stdout
-    assert '"type": "tool.started"' not in stdout
+    # Protocol-v2 frames serialize compactly (separators=(",", ":")); the final
+    # payload is indented, so the compact form only ever matches a leaked frame.
+    assert '"type":"turn.start"' not in stdout
+    assert '"type":"tool.started"' not in stdout
     payload = json.loads(stdout)
     assert payload["ok"] is True
     assert payload["protocol_version"] is None

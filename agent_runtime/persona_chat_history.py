@@ -785,15 +785,18 @@ def _interrupted_turn_rows(
 
 
 def _ordered_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    indexed = list(enumerate(rows))
-    indexed.sort(
-        key=lambda item: (
-            1 if item[1].get("timestamp") else 0,
-            str(item[1].get("timestamp") or ""),
-            item[0],
-        )
-    )
-    return [row for _, row in indexed]
+    # Merge synthesized rows into the transcript by timestamp, keeping the
+    # original order as the tie-breaker. A row without a parseable timestamp
+    # inherits the preceding row's, so it holds its transcript position instead
+    # of front-loading (where the tail bound would evict it first).
+    keyed: list[tuple[str, int, dict[str, Any]]] = []
+    last_timestamp = ""
+    for index, row in enumerate(rows):
+        timestamp = str(row.get("timestamp") or "") or last_timestamp
+        last_timestamp = timestamp
+        keyed.append((timestamp, index, row))
+    keyed.sort(key=lambda item: (item[0], item[1]))
+    return [row for _, _, row in keyed]
 
 
 def _iso_timestamp(value: Any) -> str | None:

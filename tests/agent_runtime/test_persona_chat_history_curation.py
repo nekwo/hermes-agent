@@ -760,6 +760,50 @@ def test_interrupted_turn_synthesis_skips_completed_running_and_answered(isolate
     assert all("turn-interrupted" not in row["id"] for row in rows)
 
 
+def test_untimestamped_row_holds_position_when_interrupted_marker_is_merged(isolate_agent_runtime_root):
+    persist_mission_chat_turn(
+        session_id="s1",
+        client_message_id="client_interrupted",
+        turn_id="turn_interrupted",
+        elements=[],
+        state="interrupted",
+    )
+    db = FakeSessionDB(
+        [
+            {
+                "id": "operator_1",
+                "role": "user",
+                "content": "first message",
+                "created_at": 100.0,
+            },
+            {
+                "id": "agent_no_ts",
+                "role": "assistant",
+                "content": "reply without a stored timestamp",
+            },
+            {
+                "id": "operator_2",
+                "role": "user",
+                "content": "second message",
+                "created_at": 200.0,
+                "platform_message_id": "client_interrupted",
+            },
+        ]
+    )
+
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+
+    # The untimestamped agent row inherits its predecessor's timestamp and
+    # keeps its transcript position; the synthesized marker (updated_at = now)
+    # merges after everything else.
+    assert [row["id"] for row in rows] == [
+        "operator_1",
+        "agent_no_ts",
+        "operator_2",
+        "s1:turn-interrupted:client_interrupted",
+    ]
+
+
 def test_persona_chat_trace_projects_tool_events_by_persona_without_raw_secrets():
     events = EventLog()
     ts = now()
