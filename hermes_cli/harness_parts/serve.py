@@ -262,6 +262,26 @@ def serve_loop(
                 if op == "ping":
                     frames.emit(_busy_frame())
                     continue
+                if op == "stacks":
+                    # Operator diagnostic: dump every thread's stack as
+                    # stderr frames (hung-request forensics without py-spy).
+                    import traceback
+
+                    for thread_id, frame in sys._current_frames().items():
+                        frames.emit(
+                            {
+                                "id": None,
+                                "event": "stderr",
+                                "line": f"--- thread {thread_id} ---",
+                            }
+                        )
+                        for entry in traceback.format_stack(frame):
+                            for line in entry.rstrip().splitlines():
+                                frames.emit(
+                                    {"id": None, "event": "stderr", "line": line}
+                                )
+                    frames.emit({"event": "stacks_dumped"})
+                    continue
                 if op == "shutdown":
                     break
                 rid = message.get("id")
@@ -303,6 +323,52 @@ def serve_loop(
         sys.stdout, sys.stderr = original_stdout, original_stderr
 
 
+def _raw_fd_lines(fd: int):
+    """Yield lines from [fd] as they arrive on an OPEN interactive pipe.
+
+    Reads the descriptor directly (``os.read`` returns per pipe write, lines
+    are assembled manually) instead of iterating a text wrapper, so no stdio
+    layer can buffer a request until EOF."""
+    buffer = b""
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            chunk = b""
+        if not chunk:
+            if buffer:
+                yield buffer.decode("utf-8", errors="replace")
+            return
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            yield line.decode("utf-8", errors="replace")
+
+
+def _claim_protocol_pipes() -> tuple[int, int]:
+    """Move the NDJSON protocol onto private descriptors and detach fd 0/1.
+
+    Handlers spawn subprocesses (git for dirty state, proof runners, …) that
+    inherit the standard descriptors. With serve's stdin pipe left on fd 0,
+    any child that reads stdin blocks forever against the Launcher's open
+    pipe — ``git status`` deadlocked the whole status handler (observed live
+    2026-07-08; the piped smoke passed only because a closed pipe is
+    instant EOF). A child writing raw output to an inherited fd 1 would
+    likewise corrupt the frame stream. Serve therefore dups the protocol
+    pipes to private fds and points fd 0 at the null device (children read
+    EOF) and fd 1 at the null device (stray child writes vanish; every
+    handler print already flows through the contextvar proxy)."""
+    protocol_in = os.dup(0)
+    protocol_out = os.dup(1)
+    devnull_read = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull_read, 0)
+    os.close(devnull_read)
+    devnull_write = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull_write, 1)
+    os.close(devnull_write)
+    return protocol_in, protocol_out
+
+
 def _cmd_serve(args) -> int:
     if not getattr(args, "ndjson", False):
         print(
@@ -315,15 +381,21 @@ def _cmd_serve(args) -> int:
             )
         )
         return 2
-    # The real stdout belongs to the frame writer for the process lifetime;
-    # reconfigure to line-buffered UTF-8 so frames survive Windows pipes.
-    stdout = sys.stdout
+    protocol_in, protocol_out = _claim_protocol_pipes()
+    writer = os.fdopen(protocol_out, "w", encoding="utf-8", newline="\n")
     try:
-        stdout.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[union-attr]
-    except Exception:
-        pass
-    return serve_loop(
-        sys.stdin,
-        stdout,
-        pool_size=getattr(args, "pool_size", DEFAULT_POOL_SIZE) or DEFAULT_POOL_SIZE,
-    )
+        return serve_loop(
+            _raw_fd_lines(protocol_in),
+            writer,
+            pool_size=getattr(args, "pool_size", DEFAULT_POOL_SIZE)
+            or DEFAULT_POOL_SIZE,
+        )
+    finally:
+        try:
+            writer.flush()
+        except Exception:
+            pass
+        try:
+            os.close(protocol_in)
+        except OSError:
+            pass
