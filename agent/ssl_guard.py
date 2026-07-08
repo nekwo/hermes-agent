@@ -9,11 +9,19 @@ from __future__ import annotations
 import logging
 import os
 import ssl
+import threading
 from pathlib import Path
 
 from agent.errors import SSLConfigurationError
 
 logger = logging.getLogger(__name__)
+
+# Fingerprint of the last successfully verified CA configuration. The check
+# parses the full CA bundle (~400ms), and a warm serve process re-runs it on
+# every agent construction — memoize success, never failure, and re-verify
+# whenever an env var or the certifi bundle file changes.
+_VERIFIED_FINGERPRINT: tuple | None = None
+_VERIFIED_LOCK = threading.Lock()
 
 _CA_BUNDLE_ENV_VARS = (
     "HERMES_CA_BUNDLE",
@@ -58,17 +66,40 @@ def _validate_bundle_path(label: str, value: str, *, require_substantial: bool =
         raise _ssl_err(f"{label} CA bundle at {value} did not load any certificates")
 
 
+def _ca_config_fingerprint() -> tuple:
+    """Env CA overrides + certifi bundle identity (path, mtime, size)."""
+    parts: list = [os.getenv(env_var) or "" for env_var in _CA_BUNDLE_ENV_VARS]
+    try:
+        import certifi
+
+        path = str(certifi.where())
+        st = os.stat(path)
+        parts.append((path, st.st_mtime_ns, st.st_size))
+    except Exception:
+        parts.append(None)
+    return tuple(parts)
+
+
 def verify_ca_bundle() -> None:
     """Verify configured and bundled CA certificates are present and loadable.
+
+    Success is memoized per CA-configuration fingerprint; the full bundle
+    parse re-runs only when an env override or the certifi file changes.
 
     Raises:
         SSLConfigurationError: If an explicit CA-bundle environment variable
             points at a bad path, or if certifi's bundled ``cacert.pem`` is
             missing/corrupt.
     """
+    global _VERIFIED_FINGERPRINT
     if _skip_ssl_guard_enabled():
         logger.debug("SSL CA bundle guard skipped via HERMES_SKIP_SSL_GUARD")
         return
+
+    fingerprint = _ca_config_fingerprint()
+    with _VERIFIED_LOCK:
+        if _VERIFIED_FINGERPRINT == fingerprint:
+            return
 
     for env_var in _CA_BUNDLE_ENV_VARS:
         value = os.getenv(env_var)
@@ -82,6 +113,9 @@ def verify_ca_bundle() -> None:
 
     ca_bundle = str(certifi.where())
     _validate_bundle_path("certifi", ca_bundle, require_substantial=True)
+
+    with _VERIFIED_LOCK:
+        _VERIFIED_FINGERPRINT = fingerprint
 
 
 def verify_ca_bundle_with_fallback() -> None:

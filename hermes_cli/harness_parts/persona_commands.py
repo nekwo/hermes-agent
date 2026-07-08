@@ -1129,6 +1129,12 @@ def _cmd_mission_chat_message(args) -> int:
             "input_tokens": getattr(chat_result, "input_tokens", None),
             "output_tokens": getattr(chat_result, "output_tokens", None),
             "total_tokens": getattr(chat_result, "total_tokens", None),
+            # Turn latency accounting (see harness-serve brain note, 2026-07-08):
+            # latency_ms is the whole runner.run wall; profile_timing carries the
+            # per-phase breakdown (agent construct, provider dispatch, stream).
+            # Without these, diagnosing a slow chat turn needs an in-process probe.
+            "latency_ms": getattr(chat_result, "latency_ms", None),
+            "profile_timing": dict(getattr(chat_result, "profile_timing", None) or {}) or None,
             "prompt_context_id": prompt_context["context_id"],
             "prompt_observability": prompt_context,
             "queued_skills_loaded": preloaded_skills_loaded,
@@ -2665,6 +2671,8 @@ def _run_free_floating_assignment_once(
             "input_tokens": getattr(chat_result, "input_tokens", None),
             "output_tokens": getattr(chat_result, "output_tokens", None),
             "total_tokens": getattr(chat_result, "total_tokens", None),
+            "latency_ms": getattr(chat_result, "latency_ms", None),
+            "profile_timing": dict(getattr(chat_result, "profile_timing", None) or {}) or None,
             "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
         }
         stream_emitter.finish(

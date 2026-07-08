@@ -3608,8 +3608,12 @@ class AIAgent:
             import httpx as _httpx
             import socket as _socket
 
+            from agent.process_bootstrap import shared_ssl_context as _shared_ssl_context
+
+            _ssl_context = _shared_ssl_context()
+
             if "api.githubcopilot.com" in str(base_url or "").lower():
-                return _httpx.Client()
+                return _httpx.Client() if _ssl_context is None else _httpx.Client(verify=_ssl_context)
 
             _sock_opts = [(_socket.SOL_SOCKET, _socket.SO_KEEPALIVE, 1)]
             if hasattr(_socket, "TCP_KEEPIDLE"):
@@ -3623,8 +3627,14 @@ class AIAgent:
             # Explicitly read proxy settings while still honoring NO_PROXY for
             # loopback / local endpoints such as a locally hosted sub2api.
             _proxy = _get_proxy_for_base_url(base_url)
+            _transport_kwargs = {"socket_options": _sock_opts}
+            if _ssl_context is not None:
+                # Process-wide context — skip the ~300ms CA bundle re-parse
+                # inside every transport build (agent init + request-scoped
+                # clients + auxiliary clients all pass through here).
+                _transport_kwargs["verify"] = _ssl_context
             return _httpx.Client(
-                transport=_httpx.HTTPTransport(socket_options=_sock_opts),
+                transport=_httpx.HTTPTransport(**_transport_kwargs),
                 proxy=_proxy,
             )
         except Exception:

@@ -16,6 +16,11 @@ Three concerns, all tied to ``AIAgent`` boot-time / runtime IO setup:
    ``HTTPS_PROXY`` / ``HTTP_PROXY`` / ``ALL_PROXY``;
    ``_get_proxy_for_base_url`` respects ``NO_PROXY`` for the given base URL.
 
+4. **Shared SSL context** — ``shared_ssl_context`` memoizes the httpx
+   default SSL context so every fresh ``httpx.Client``/transport build
+   (agent init, request-scoped clients, auxiliary clients) stops re-parsing
+   the CA bundle (~300ms each; a warm serve chat turn paid it 2-3×).
+
 ``run_agent`` re-exports every name so existing
 ``from run_agent import _get_proxy_from_env`` imports keep working
 unchanged.
@@ -25,6 +30,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import urllib.request
 from typing import Any, Optional
 
@@ -123,6 +129,54 @@ def _get_proxy_from_env() -> Optional[str]:
     return None
 
 
+# (fingerprint, ssl.SSLContext) — rebuilt when the CA configuration changes.
+_SSL_CONTEXT_CACHE: Optional[tuple] = None
+_SSL_CONTEXT_LOCK = threading.Lock()
+
+
+def _ssl_context_fingerprint() -> tuple:
+    """CA inputs that feed httpx's default SSL context.
+
+    httpx honors ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` (trust_env) and falls
+    back to certifi. Stat certifi so a reinstall/rotation rebuilds the context.
+    """
+    parts: list = [os.environ.get("SSL_CERT_FILE") or "", os.environ.get("SSL_CERT_DIR") or ""]
+    try:
+        import certifi
+
+        path = certifi.where()
+        st = os.stat(path)
+        parts.append((path, st.st_mtime_ns, st.st_size))
+    except Exception:
+        parts.append(None)
+    return tuple(parts)
+
+
+def shared_ssl_context() -> Optional[Any]:
+    """Process-wide memoized httpx default SSL context.
+
+    ``ssl.SSLContext`` is thread-safe for use and safe to share across
+    transports; only its *creation* (CA bundle parse) is expensive. Returns
+    ``None`` when httpx (or context creation) is unavailable so callers fall
+    back to httpx's own per-transport default.
+    """
+    global _SSL_CONTEXT_CACHE
+    fingerprint = _ssl_context_fingerprint()
+    with _SSL_CONTEXT_LOCK:
+        if _SSL_CONTEXT_CACHE is not None and _SSL_CONTEXT_CACHE[0] == fingerprint:
+            return _SSL_CONTEXT_CACHE[1]
+    try:
+        import httpx
+        from httpx._config import create_ssl_context
+
+        context = create_ssl_context()
+    except Exception:
+        return None
+    with _SSL_CONTEXT_LOCK:
+        _SSL_CONTEXT_CACHE = (fingerprint, context)
+    return context
+
+
 def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:
     """Return an env-configured proxy unless NO_PROXY excludes this base URL."""
     proxy = _get_proxy_from_env()
@@ -159,9 +213,11 @@ def build_keepalive_http_client(
         import httpx
         import socket
 
+        ssl_context = shared_ssl_context()
+
         if "api.githubcopilot.com" in str(base_url or "").lower():
             client_cls = httpx.AsyncClient if async_mode else httpx.Client
-            return client_cls()
+            return client_cls() if ssl_context is None else client_cls(verify=ssl_context)
 
         sock_opts = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
         if hasattr(socket, "TCP_KEEPIDLE"):
@@ -174,8 +230,13 @@ def build_keepalive_http_client(
         proxy = _get_proxy_for_base_url(base_url)
         transport_cls = httpx.AsyncHTTPTransport if async_mode else httpx.HTTPTransport
         client_cls = httpx.AsyncClient if async_mode else httpx.Client
+        transport_kwargs: dict = {"socket_options": sock_opts}
+        if ssl_context is not None:
+            # Reuse the process-wide context instead of re-parsing the CA
+            # bundle inside every transport build (~300ms each).
+            transport_kwargs["verify"] = ssl_context
         return client_cls(
-            transport=transport_cls(socket_options=sock_opts),
+            transport=transport_cls(**transport_kwargs),
             proxy=proxy,
         )
     except Exception:
@@ -205,4 +266,5 @@ __all__ = [
     "_get_proxy_from_env",
     "_get_proxy_for_base_url",
     "build_keepalive_http_client",
+    "shared_ssl_context",
 ]
