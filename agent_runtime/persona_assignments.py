@@ -88,6 +88,29 @@ LIVE_RUN_STATES = frozenset(
 )
 
 
+def _worker_carries_live_binding(worker: WorkerSession) -> bool:
+    """Whether a worker may stamp its ``task_bound`` binding onto the persona
+    instance during snapshot derivation.
+
+    The binding follows the TASK's life, not the worker's: an idle worker
+    between ticks of a live task keeps the persona attached (agents must not
+    flicker off the goal topology between runs), but once the owning task is
+    terminal or archived the worker is history — it must not resurrect the
+    binding. Dead workers used to be picked as ``latest_by_persona`` and
+    re-stamp a settled mission's task/session onto the instance on every
+    snapshot build (undoing the terminal-task reaper and orphan sweep), so
+    Mission Control opened the persona's console on an empty dead mission
+    session instead of the latest chat (2026-07-08). A persona whose latest
+    worker is dead now falls through to the configured/idle reset below
+    instead. Precedence mirrors ``sweep_orphaned_task_bound_instances``: an
+    actively working session always carries (even mid-setup before its task
+    file lands); a non-active worker carries only while its task is live."""
+    if worker.state in ACTIVE_PERSONA_WORKER_STATES:
+        return True
+    task_id = safe_optional_token(worker.task_id)
+    return bool(task_id) and _owning_task_release_state(task_id) is None
+
+
 class ChatBusyError(AgentRuntimeError):
     def __init__(self, instance: PersonaInstance, *, active_run_id: str | None, active_worker_session_id: str | None):
         super().__init__("chat_busy")
@@ -668,6 +691,8 @@ class PersonaInstanceStore:
             self.ensure_for_persona(persona)
         latest_by_persona: dict[str, WorkerSession] = {}
         for worker in workers:
+            if not _worker_carries_live_binding(worker):
+                continue
             existing = latest_by_persona.get(worker.persona_id)
             if existing is None or (worker.last_heartbeat_at or worker.opened_at) >= (existing.last_heartbeat_at or existing.opened_at):
                 latest_by_persona[worker.persona_id] = worker

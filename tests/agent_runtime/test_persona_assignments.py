@@ -209,6 +209,9 @@ def test_persona_instance_derivation_does_not_mark_idle_worker_active(isolate_ag
     store = PersonaInstanceStore()
     workers = WorkerSessionStore()
     runs = RunStore()
+    # The attachment follows the TASK's life: between ticks of a LIVE task the
+    # idle worker keeps the persona on the goal, without looking active.
+    TaskStore().create(_task("task_1", state=TaskState.RUNNING))
     worker = workers.open(
         task_id="task_1",
         persona=_persona("dev"),
@@ -225,6 +228,41 @@ def test_persona_instance_derivation_does_not_mark_idle_worker_active(isolate_ag
     instance = instances[0]
     assert instance.state == WorkerSessionState.IDLE
     assert instance.current_task_id == "task_1"
+    assert instance.active_worker_session_id is None
+    assert instance.active_run_id is None
+
+
+def test_dead_worker_of_settled_task_does_not_resurrect_binding(isolate_agent_runtime_root):
+    # Live defect (2026-07-08): the latest worker for a persona belonged to a
+    # mission that settled days earlier; derivation kept re-stamping its
+    # task/session binding on every snapshot build, undoing the terminal-task
+    # reaper — Mission Control opened the persona's console on the empty dead
+    # mission session instead of the latest chat.
+    tasks = TaskStore()
+    store = PersonaInstanceStore()
+    workers = WorkerSessionStore()
+    runs = RunStore()
+    task = tasks.create(_task("task_settled", state=TaskState.RUNNING))
+    worker = workers.open(
+        task_id=task.id,
+        persona=_persona("dev"),
+        stage_id="stage_1",
+        assignment_id="assign_1",
+    )
+    run = runs.open_run("dev", task.id, "stage_1", session_id="session_dead_mission")
+    worker = workers.assign_run(worker.id, run)
+    run = runs.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "done", "summary": "done"})
+    workers.update_after_run(worker.id, run, close_reason="tick_completed")
+    task.state = TaskState.DONE
+    tasks.update(task, actor="harness", reason="completed")
+
+    instances = store.derive_from_workers([_persona("dev")], workers.list_all())
+
+    instance = instances[0]
+    assert instance.state == WorkerSessionState.IDLE
+    assert instance.mode == "configured"
+    assert instance.current_task_id is None
+    assert instance.session_id is None
     assert instance.active_worker_session_id is None
     assert instance.active_run_id is None
 
