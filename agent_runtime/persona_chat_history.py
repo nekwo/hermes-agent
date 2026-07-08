@@ -774,6 +774,9 @@ def _interrupted_turn_rows(
             {
                 "id": f"{session_id}:turn-interrupted:{client_message_id}",
                 "role": "system",
+                # Typed marker: downstream projections (operator conversation,
+                # Mission Control tiles) key on this instead of matching text.
+                "kind": "turn_interrupted",
                 "text": "Agent turn interrupted before a reply was recorded. Retry the message to run a fresh turn.",
                 "timestamp": _iso_timestamp(record.get("updated_at")),
                 "redaction_status": "safe",

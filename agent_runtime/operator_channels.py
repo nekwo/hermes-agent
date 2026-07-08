@@ -562,6 +562,8 @@ def _conversation_contract(
         )
     )
 
+    _settle_interrupted_tool_calls(messages, history=history)
+
     messages.sort(key=_conversation_message_sort_key)
     messages = _dedupe_conversation_messages(messages)
     messages = _apply_conversation_cap(messages, channel_id=channel_id, accountant=accountant)
@@ -603,6 +605,46 @@ def _conversation_contract(
         "incomplete_reason": reason,
         "messages": messages,
     }
+
+
+def _settle_interrupted_tool_calls(
+    messages: list[dict[str, Any]],
+    *,
+    history: dict[str, Any] | None,
+) -> None:
+    """Flip still-``running`` tool_call rows of interrupted turns to ``interrupted``.
+
+    A turn killed mid-flight leaves ``tool_started`` trace entries with no
+    finish row, so the paired tool_call projects ``running`` forever. The
+    turn store's terminal marker (surfaced as ``turn_interrupted`` history
+    rows) is the truth that those calls will never finish; settle them at the
+    contract source so every consumer stops rendering a live spinner.
+    Interrupted turn ids come from the history SOURCE rows, not the projected
+    messages, so a capped/deduped marker still settles its tools.
+    """
+
+    interrupted_turn_ids: set[str] = set()
+    for row in (history or {}).get("messages") or []:
+        if not isinstance(row, dict):
+            continue
+        if safe_assignment_token(row.get("kind")) != "turn_interrupted":
+            continue
+        turn_id = safe_assignment_token(row.get("turn_id")) or safe_assignment_token(
+            row.get("client_message_id")
+        )
+        if turn_id:
+            interrupted_turn_ids.add(turn_id)
+    if not interrupted_turn_ids:
+        return
+    for message in messages:
+        if message.get("kind") != "tool_call" or message.get("status") != "running":
+            continue
+        if safe_assignment_token(message.get("turn_id")) not in interrupted_turn_ids:
+            continue
+        message["status"] = "interrupted"
+        tool = message.get("tool")
+        if isinstance(tool, dict):
+            tool["status"] = "interrupted"
 
 
 def _conversation_goal_input(
@@ -668,6 +710,31 @@ def _conversation_history_message(
     if redaction_status in {"redacted", "unsafe"}:
         text = "Message hidden by redaction boundary."
     client_message_id = safe_assignment_text(row.get("client_message_id"), limit=240)
+    if safe_assignment_token(row.get("kind")) == "turn_interrupted":
+        # Terminal turn-status marker synthesized by persona_chat_history for a
+        # turn that died without a recorded reply. Keep the typed kind + turn
+        # identity so the Launcher can render a retry affordance and settle any
+        # still-"running" tool rows of the same turn.
+        turn_id = safe_assignment_token(row.get("turn_id")) or safe_assignment_token(client_message_id)
+        message = {
+            "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
+            "seq": 0,
+            "timestamp": row.get("timestamp"),
+            "actor_persona_id": persona_id,
+            "actor_instance_id": persona_instance_id,
+            "role": "system",
+            "kind": "turn_interrupted",
+            "status": "interrupted",
+            "display_title": "Turn interrupted",
+            "display_text": text,
+            "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
+            "refs": {"source": "persona_chat_history"},
+        }
+        if client_message_id:
+            message["client_message_id"] = client_message_id
+        if turn_id:
+            message["turn_id"] = turn_id
+        return message
     message = {
         "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
         "seq": 0,

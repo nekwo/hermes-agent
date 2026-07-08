@@ -193,6 +193,84 @@ def test_operator_conversation_projects_turn_identity_keys_and_scopes_tool_pairi
     )
 
 
+def test_operator_conversation_projects_interrupted_turn_marker_and_settles_running_tools():
+    session_id = "persona_chat_personainst_profile_alice_interrupted"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _instance(
+                "personainst_profile_alice",
+                session_id=session_id,
+                updated_at="2026-07-08T09:00:00Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "title": "Alice Agent chat",
+                "message_count": 1,
+                "messages": [
+                    {
+                        "id": "operator_1",
+                        "role": "operator",
+                        "text": "run the slow proof",
+                        "client_message_id": "agent-chat-send-9",
+                        "timestamp": "2026-07-08T09:00:00Z",
+                    },
+                    {
+                        "id": f"{session_id}:turn-interrupted:agent-chat-send-9",
+                        "role": "system",
+                        "kind": "turn_interrupted",
+                        "text": "Agent turn interrupted before a reply was recorded. Retry the message to run a fresh turn.",
+                        "timestamp": "2026-07-08T09:00:30Z",
+                        "redaction_status": "safe",
+                        "client_message_id": "agent-chat-send-9",
+                        "turn_id": "agent-chat-send-9",
+                    },
+                ],
+                "updated_at": "2026-07-08T09:00:30Z",
+            }
+        ],
+        persona_chat_trace=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "entries": [
+                    {
+                        "event": "tool_started",
+                        "tool_name": "terminal",
+                        "summary": "Started terminal",
+                        "status": "started",
+                        "turn_id": "agent-chat-send-9",
+                        "ts": "2026-07-08T09:00:05Z",
+                    },
+                ],
+            }
+        ],
+    )
+
+    messages = channels[0]["conversation"]["messages"]
+    marker = next(m for m in messages if m["kind"] == "turn_interrupted")
+    tool_call = next(m for m in messages if m["kind"] == "tool_call")
+
+    # The typed terminal turn-status marker survives projection with its turn
+    # identity so the Launcher can pair a retry affordance with the operator
+    # message that started the turn.
+    assert marker["role"] == "system"
+    assert marker["status"] == "interrupted"
+    assert marker["display_title"] == "Turn interrupted"
+    assert marker["client_message_id"] == "agent-chat-send-9"
+    assert marker["turn_id"] == "agent-chat-send-9"
+
+    # The orphaned tool_started must not project an eternal "running" call:
+    # the marker is the truth that this turn will never finish.
+    assert tool_call["turn_id"] == "agent-chat-send-9"
+    assert tool_call["status"] == "interrupted"
+    assert tool_call["tool"]["status"] == "interrupted"
+
+
 def test_operator_channel_reports_missing_history_loudly():
     session_id = "persona_chat_personainst_profile_alice_missing"
     channels = operator_channel_summary(
