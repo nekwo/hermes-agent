@@ -2410,6 +2410,203 @@ def test_mission_chat_new_turn_interrupts_prior_running_turn(
     )["state"] == "completed"
 
 
+def test_mission_chat_post_provider_crash_settles_failed_and_prints_one_json(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    """W4: a crash AFTER the provider replied (transcript/bookkeeping steps)
+    must persist a terminal `failed` state — never strand `running` — and the
+    stdout contract (exactly one JSON object) must hold."""
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    def _boom(**_kwargs):
+        raise RuntimeError("transcript write exploded")
+
+    monkeypatch.setattr(harness, "_append_persona_assistant_text", _boom)
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            return SimpleNamespace(
+                final_response="The reply that must not vanish.",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                api_calls=1,
+                model="gpt-test",
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="please answer",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_post_crash",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "post_turn_persist_failed"
+    assert payload["reply"] == "The reply that must not vanish."
+    assert "transcript write exploded" in payload["blocker"]
+    record = mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_post_crash",
+    )
+    assert record["state"] == "failed"
+
+
+def test_free_floating_post_provider_crash_settles_failed(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+
+    def _boom(**_kwargs):
+        raise RuntimeError("token bookkeeping exploded")
+
+    monkeypatch.setattr(harness, "_update_persona_chat_token_counts", _boom)
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def chat_reply(self, persona, message, **kwargs):
+            return SimpleNamespace(final_response="Still here.")
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._queue_free_floating_assignment(
+        persona_id="launcher-dev",
+        title="Launcher Dev chat",
+        message="hey",
+        requested_by="test",
+        json_output=True,
+        auto_run=True,
+        max_seconds=5.0,
+        client_message_id="client_free_crash",
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "post_turn_persist_failed"
+    assert payload["reply"] == "Still here."
+    session_id = payload["session_id"]
+    record = mission_chat_turn_record(
+        session_id=session_id,
+        client_message_id="client_free_crash",
+    )
+    assert record["state"] == "failed"
+    assignments = PersonaAssignmentStore().list_for_persona("dev")
+    assert len(assignments) == 1
+    assert assignments[0].state == "blocked"
+
+
+def test_mission_chat_success_persist_sequence_has_single_terminal_write(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    """W5: one write-ahead, one on_update per tool event, ONE terminal write.
+    finish() must not sneak an extra `running` persist around the terminal."""
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+
+    recorded: list[tuple[str | None, bool]] = []
+    real_persist = harness.persist_mission_chat_turn
+
+    def _recording_persist(**kwargs):
+        recorded.append((kwargs.get("state"), bool(kwargs.get("write_ahead"))))
+        return real_persist(**kwargs)
+
+    monkeypatch.setattr(harness, "persist_mission_chat_turn", _recording_persist)
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            kwargs["trace_callback"](
+                {"type": "run.tool.started", "tool_name": "terminal", "summary": "run"}
+            )
+            kwargs["trace_callback"](
+                {"type": "run.tool.finished", "tool_name": "terminal", "status": "ok"}
+            )
+            return SimpleNamespace(
+                final_response="Done.",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                api_calls=1,
+                model="gpt-test",
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="run it",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_sequence",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    json.loads(capsys.readouterr().out)
+    assert recorded == [
+        ("running", True),  # write-ahead marker
+        ("running", False),  # on_update: tool started
+        ("running", False),  # on_update: tool finished
+        ("completed", False),  # single terminal write, nothing after it
+    ]
+
+
 def test_mission_chat_message_replays_duplicate_client_message_id(
     monkeypatch,
     capsys,

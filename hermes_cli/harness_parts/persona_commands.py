@@ -897,12 +897,13 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             active_client_message_id=client_message_id,
         )
-        persist_mission_chat_turn(
+        write_ahead_outcome = persist_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
             state="running",
+            write_ahead=True,
         )
         chat_result = GPTPersonaRuntime(
             default_provider=cfg.default_provider,
@@ -990,7 +991,7 @@ def _cmd_mission_chat_message(args) -> int:
             }
     except Exception as exc:
         stream_emitter.finish(state="failed")
-        persist_mission_chat_turn(
+        failed_outcome = persist_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
@@ -1008,6 +1009,8 @@ def _cmd_mission_chat_message(args) -> int:
             "model_selection": model_selection,
             "next_expected": "fix the runtime blocker and retry the mission chat turn",
         }
+        if failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
+            data["turn_persist_outcome"] = failed_outcome.value
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -1015,94 +1018,123 @@ def _cmd_mission_chat_message(args) -> int:
         return 2
 
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
-    _append_persona_assistant_text(
-        session_db=session_db,
-        session_id=session_id,
-        text=reply_text,
-        client_message_id=client_message_id,
-    )
-    _update_persona_chat_token_counts(
-        session_db=session_db,
-        session_id=session_id,
-        result=chat_result,
-    )
-    _maybe_auto_title_persona_chat(
-        session_db=session_db,
-        session_id=session_id,
-        user_message=message,
-        assistant_response=reply_text,
-    )
+    # The provider already replied: from here on EVERY exit must settle the
+    # turn record. A crash in the transcript/bookkeeping steps below persists
+    # `failed` and still emits exactly one JSON object on stdout.
+    terminal_outcome: MissionChatTurnPersistOutcome | None = None
     try:
-        instance.active_run_id = None
-        instance.current_assignment_id = None
-        instance.state = WorkerSessionState.IDLE
-        instance.session_id = session_id
-        instance_store.update(instance)
-    except Exception:
-        pass
+        _append_persona_assistant_text(
+            session_db=session_db,
+            session_id=session_id,
+            text=reply_text,
+            client_message_id=client_message_id,
+        )
+        _update_persona_chat_token_counts(
+            session_db=session_db,
+            session_id=session_id,
+            result=chat_result,
+        )
+        _maybe_auto_title_persona_chat(
+            session_db=session_db,
+            session_id=session_id,
+            user_message=message,
+            assistant_response=reply_text,
+        )
+        try:
+            instance.active_run_id = None
+            instance.current_assignment_id = None
+            instance.state = WorkerSessionState.IDLE
+            instance.session_id = session_id
+            instance_store.update(instance)
+        except Exception:
+            pass
 
-    data = {
-        "ok": True,
-        "protocol_version": 2 if stream else None,
-        "capability_id": "mission.chat.message",
-        "agent_profile_id": instance.id,
-        "persona_instance_id": instance.id,
-        "persona_id": normalized_persona,
-        "session_id": session_id,
-        "chat_session_id": session_id,
-        "task_id": task_id,
-        "goal_id": goal_id,
-        "client_message_id": client_message_id,
-        "execution_state": "completed",
-        "kind": "mission_chat_message",
-        "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None)) or "chat",
-        "surface_prompt": safe_assignment_text(getattr(args, "surface_prompt", ""), limit=4000) or "",
-        "limiting_wrapper_active": False,
-        "reply": reply_text,
-        "turn_id": safe_assignment_token(client_message_id),
-        "run_ids": [],
-        "input_tokens": getattr(chat_result, "input_tokens", None),
-        "output_tokens": getattr(chat_result, "output_tokens", None),
-        "total_tokens": getattr(chat_result, "total_tokens", None),
-        "prompt_context_id": prompt_context["context_id"],
-        "prompt_observability": prompt_context,
-        "queued_skills_loaded": preloaded_skills_loaded,
-        "queued_skills_missing": preloaded_skills_missing,
-        "model_selection": model_selection,
-        "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
-    }
-    if stream:
-        data["turn_elements"] = stream_emitter.elements
+        data = {
+            "ok": True,
+            "protocol_version": 2 if stream else None,
+            "capability_id": "mission.chat.message",
+            "agent_profile_id": instance.id,
+            "persona_instance_id": instance.id,
+            "persona_id": normalized_persona,
+            "session_id": session_id,
+            "chat_session_id": session_id,
+            "task_id": task_id,
+            "goal_id": goal_id,
+            "client_message_id": client_message_id,
+            "execution_state": "completed",
+            "kind": "mission_chat_message",
+            "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None)) or "chat",
+            "surface_prompt": safe_assignment_text(getattr(args, "surface_prompt", ""), limit=4000) or "",
+            "limiting_wrapper_active": False,
+            "reply": reply_text,
+            "turn_id": safe_assignment_token(client_message_id),
+            "run_ids": [],
+            "input_tokens": getattr(chat_result, "input_tokens", None),
+            "output_tokens": getattr(chat_result, "output_tokens", None),
+            "total_tokens": getattr(chat_result, "total_tokens", None),
+            "prompt_context_id": prompt_context["context_id"],
+            "prompt_observability": prompt_context,
+            "queued_skills_loaded": preloaded_skills_loaded,
+            "queued_skills_missing": preloaded_skills_missing,
+            "model_selection": model_selection,
+            "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
+        }
         stream_emitter.finish(
             state="completed",
             input_tokens=data.get("input_tokens"),
             output_tokens=data.get("output_tokens"),
             total_tokens=data.get("total_tokens"),
         )
-        persist_mission_chat_turn(
+        terminal_outcome = persist_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
             state="completed",
         )
-        _emit_chat_final(data)
-    else:
-        stream_emitter.finish(
-            state="completed",
-            input_tokens=data.get("input_tokens"),
-            output_tokens=data.get("output_tokens"),
-            total_tokens=data.get("total_tokens"),
-        )
-        persist_mission_chat_turn(
+        if terminal_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
+            data["turn_persist_outcome"] = terminal_outcome.value
+        if write_ahead_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
+            data["turn_write_ahead_outcome"] = write_ahead_outcome.value
+        if stream:
+            data["turn_elements"] = stream_emitter.elements
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
+        return 0
+    except Exception as exc:
+        if terminal_outcome is not None:
+            # The record is already settled; stdout may be mid-write, so a
+            # second JSON object would corrupt the contract. Crash honestly.
+            raise
+        stream_emitter.finish(state="failed")
+        failed_outcome = persist_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="completed",
+            state="failed",
         )
-        print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
-    return 0
+        data = {
+            "ok": False,
+            "error_kind": "post_turn_persist_failed",
+            "persona_instance_id": instance.id,
+            "persona_id": normalized_persona,
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "reply": reply_text,
+            "blocker": safe_assignment_text(str(exc), limit=240),
+            "prompt_context_id": prompt_context["context_id"],
+            "model_selection": model_selection,
+            "next_expected": "the agent replied but recording the turn failed; inspect the blocker and retry the message",
+        }
+        if failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
+            data["turn_persist_outcome"] = failed_outcome.value
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["blocker"])
+        return 2
 
 
 def _cmd_mission_chat_queue_skill(args) -> int:
@@ -1578,6 +1610,8 @@ class _ChatProtocolV2Emitter:
         self.client_message_id = safe_assignment_text(client_message_id, limit=200) or None
         self._on_update = on_update
         self._emit_frames = bool(emit_frames)
+        self._finishing = False
+        self._finished = False
         self._seq = 0
         self._started_at = time.monotonic()
         self._current_segment: dict[str, object] | None = None
@@ -1653,20 +1687,31 @@ class _ChatProtocolV2Emitter:
         output_tokens: object = None,
         total_tokens: object = None,
     ) -> None:
-        self.end_segment(state="settled" if state == "completed" else state)
-        self._emit_chat_frame(
-            {
-                "type": "turn.end",
-                "protocol_version": 2,
-                "turn_id": self.turn_id,
-                "state": state,
-                "duration_ms": _elapsed_ms(self._started_at),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-            }
-        )
-        self._notify_update()
+        # Idempotent: a crash-path caller may reach finish() after the success
+        # path already finished — a second turn.end frame would corrupt the
+        # stream protocol. on_update is suppressed for the whole finish window:
+        # the caller's terminal persist is the single settling write, and an
+        # extra incremental "running" persist here would race it.
+        if self._finished:
+            return
+        self._finished = True
+        self._finishing = True
+        try:
+            self.end_segment(state="settled" if state == "completed" else state)
+            self._emit_chat_frame(
+                {
+                    "type": "turn.end",
+                    "protocol_version": 2,
+                    "turn_id": self.turn_id,
+                    "state": state,
+                    "duration_ms": _elapsed_ms(self._started_at),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": total_tokens,
+                }
+            )
+        finally:
+            self._finishing = False
 
     def _ensure_segment(self) -> dict[str, object]:
         if self._current_segment is not None:
@@ -1791,7 +1836,7 @@ class _ChatProtocolV2Emitter:
         )
 
     def _notify_update(self) -> None:
-        if self._on_update is None:
+        if self._on_update is None or self._finishing:
             return
         try:
             self._on_update(self)
@@ -2439,12 +2484,13 @@ def _run_free_floating_assignment_once(
             session_id=session_id,
             active_client_message_id=client_message_id,
         )
-        persist_mission_chat_turn(
+        write_ahead_outcome = persist_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
             state="running",
+            write_ahead=True,
         )
         # Keep the model run out of SessionDB. The canonical operator transcript
         # is written below; persisting the internal run as a second hidden
@@ -2465,7 +2511,7 @@ def _run_free_floating_assignment_once(
         )
     except Exception as exc:
         stream_emitter.finish(state="failed")
-        persist_mission_chat_turn(
+        failed_outcome = persist_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
@@ -2473,92 +2519,120 @@ def _run_free_floating_assignment_once(
             state="failed",
         )
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
-        return 2, {
+        data = {
             "ok": False,
             "execution_state": "blocked",
             "session_id": session_id,
             "blocker": safe_assignment_text(str(exc), limit=240),
             "next_expected": "fix the runtime blocker and retry the persona chat turn",
         }
+        if failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
+            data["turn_persist_outcome"] = failed_outcome.value
+        return 2, data
 
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
-    _append_persona_assistant_text(
-        session_db=session_db,
-        session_id=session_id,
-        text=reply_text,
-        client_message_id=client_message_id,
-    )
-    _update_persona_chat_token_counts(
-        session_db=session_db,
-        session_id=session_id,
-        result=chat_result,
-    )
-
-    PersonaAssignmentStore().complete(assignment_id, state="completed")
+    # Provider replied: every exit below must settle the turn record. The
+    # caller prints the returned payload, so this block never writes stdout.
+    terminal_outcome: MissionChatTurnPersistOutcome | None = None
+    assignment_completed = False
     try:
-        instance_store = PersonaInstanceStore()
-        instance = instance_store.get(persona_instance_id)
-        instance.active_run_id = None
-        instance.current_assignment_id = None
-        instance.state = WorkerSessionState.IDLE
-        if instance.mode != "chat":
-            instance.mode = "free_floating"
-        instance.session_id = session_id
-        instance_store.update(instance)
-    except Exception:
-        pass
+        _append_persona_assistant_text(
+            session_db=session_db,
+            session_id=session_id,
+            text=reply_text,
+            client_message_id=client_message_id,
+        )
+        _update_persona_chat_token_counts(
+            session_db=session_db,
+            session_id=session_id,
+            result=chat_result,
+        )
 
-    _maybe_auto_title_persona_chat(
-        session_db=session_db,
-        session_id=session_id,
-        user_message=message,
-        assistant_response=reply_text,
-    )
-    data = {
-        "ok": True,
-        "execution_state": "completed",
-        "session_id": session_id,
-        "reply": reply_text,
-        "turn_id": stream_emitter.turn_id,
-        "client_message_id": client_message_id,
-        "run_ids": [],
-        "task_id": None,
-        "input_tokens": getattr(chat_result, "input_tokens", None),
-        "output_tokens": getattr(chat_result, "output_tokens", None),
-        "total_tokens": getattr(chat_result, "total_tokens", None),
-        "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
-    }
-    if stream:
-        data["protocol_version"] = 2
-        data["turn_elements"] = stream_emitter.elements
+        PersonaAssignmentStore().complete(assignment_id, state="completed")
+        assignment_completed = True
+        try:
+            instance_store = PersonaInstanceStore()
+            instance = instance_store.get(persona_instance_id)
+            instance.active_run_id = None
+            instance.current_assignment_id = None
+            instance.state = WorkerSessionState.IDLE
+            if instance.mode != "chat":
+                instance.mode = "free_floating"
+            instance.session_id = session_id
+            instance_store.update(instance)
+        except Exception:
+            pass
+
+        _maybe_auto_title_persona_chat(
+            session_db=session_db,
+            session_id=session_id,
+            user_message=message,
+            assistant_response=reply_text,
+        )
+        data = {
+            "ok": True,
+            "execution_state": "completed",
+            "session_id": session_id,
+            "reply": reply_text,
+            "turn_id": stream_emitter.turn_id,
+            "client_message_id": client_message_id,
+            "run_ids": [],
+            "task_id": None,
+            "input_tokens": getattr(chat_result, "input_tokens", None),
+            "output_tokens": getattr(chat_result, "output_tokens", None),
+            "total_tokens": getattr(chat_result, "total_tokens", None),
+            "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
+        }
         stream_emitter.finish(
             state="completed",
             input_tokens=data.get("input_tokens"),
             output_tokens=data.get("output_tokens"),
             total_tokens=data.get("total_tokens"),
         )
-        persist_mission_chat_turn(
+        terminal_outcome = persist_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
             state="completed",
         )
-    else:
-        stream_emitter.finish(
-            state="completed",
-            input_tokens=data.get("input_tokens"),
-            output_tokens=data.get("output_tokens"),
-            total_tokens=data.get("total_tokens"),
-        )
-        persist_mission_chat_turn(
+        if terminal_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
+            data["turn_persist_outcome"] = terminal_outcome.value
+        if write_ahead_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
+            data["turn_write_ahead_outcome"] = write_ahead_outcome.value
+        if stream:
+            data["protocol_version"] = 2
+            data["turn_elements"] = stream_emitter.elements
+        return 0, data
+    except Exception as exc:
+        if terminal_outcome is not None:
+            raise
+        stream_emitter.finish(state="failed")
+        failed_outcome = persist_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="completed",
+            state="failed",
         )
-    return 0, data
+        if not assignment_completed:
+            try:
+                PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
+            except Exception:
+                pass
+        data = {
+            "ok": False,
+            "execution_state": "blocked",
+            "error_kind": "post_turn_persist_failed",
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "reply": reply_text,
+            "blocker": safe_assignment_text(str(exc), limit=240),
+            "next_expected": "the agent replied but recording the turn failed; inspect the blocker and retry the message",
+        }
+        if failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
+            data["turn_persist_outcome"] = failed_outcome.value
+        return 2, data
 
 
 def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, json_output: bool, terminal_state: str) -> int:

@@ -1,17 +1,72 @@
 from __future__ import annotations
 
 import json
+import os
+import time
+from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator, TypeVar
 
 from . import paths
 from .persona_assignments import safe_assignment_text, safe_assignment_token
 
 _STORE_NAME = "mission_chat_turns.json"
+_LOCK_NAME = "mission_chat_turns.lock"
+_LOCK_TIMEOUT_SECONDS = 2.0
+_LOCK_POLL_SECONDS = 0.01
 _MAX_ELEMENTS = 80
 _MAX_TEXT = 20000
 _SENSITIVE_FILE_MARKERS = ("private_token", "secret_token", "api_key", "apikey", "credential")
 _VALID_TURN_STATES = {"running", "completed", "failed", "interrupted"}
+
+_T = TypeVar("_T")
+
+
+class MissionChatTurnPersistOutcome(str, Enum):
+    """Typed result of a turn-record persist. No write is ever lost silently:
+    every skipped or rejected persist names its reason."""
+
+    PERSISTED = "persisted"
+    SKIPPED_NO_KEYS = "skipped_no_keys"
+    SKIPPED_EMPTY_LEGACY = "skipped_empty_legacy"
+    REJECTED_INVALID_STATE = "rejected_invalid_state"
+    REJECTED_STALE_TRANSITION = "rejected_stale_transition"
+    SKIPPED_LOCK_TIMEOUT = "skipped_lock_timeout"
+
+
+def next_turn_state(
+    current: str | None,
+    requested: str | None,
+    *,
+    write_ahead: bool = False,
+) -> str | None:
+    """Single transition authority for turn-record states.
+
+    Returns the state to store, or ``None`` when the write must be rejected.
+    Rules:
+    - ``requested=None`` (legacy elements-only call) preserves the current
+      state; a brand-new record defaults to ``running``.
+    - Explicit terminal states (``completed``/``failed``) and the repair state
+      (``interrupted``) always win — a completed reply recorded after a
+      repair flip must not be lost.
+    - ``running`` with ``write_ahead=True`` is a fresh turn start (same-client
+      retry after an interrupted/failed turn) and always wins.
+    - ``running`` with ``write_ahead=False`` is an incremental on_update flush
+      and must NOT resurrect a settled record: a late flush from a turn that
+      another process already repaired to ``interrupted`` (or that completed)
+      is stale and is rejected.
+    """
+
+    if requested is None:
+        return current or "running"
+    if requested not in _VALID_TURN_STATES:
+        return None
+    if requested != "running":
+        return requested
+    if write_ahead or current is None or current == "running":
+        return "running"
+    return None
 
 
 def persist_mission_chat_turn(
@@ -21,31 +76,43 @@ def persist_mission_chat_turn(
     turn_id: str | None,
     elements: list[dict[str, Any]] | None,
     state: str | None = None,
-) -> None:
+    write_ahead: bool = False,
+) -> MissionChatTurnPersistOutcome:
     session_key = safe_assignment_text(session_id, limit=240)
     message_key = safe_assignment_text(client_message_id, limit=240)
     if not session_key or not message_key:
-        return
+        return MissionChatTurnPersistOutcome.SKIPPED_NO_KEYS
     requested_state = _safe_turn_state(state) if state is not None else None
     if state is not None and requested_state is None:
-        return
+        return MissionChatTurnPersistOutcome.REJECTED_INVALID_STATE
     if state is None and not elements:
-        return
+        return MissionChatTurnPersistOutcome.SKIPPED_EMPTY_LEGACY
     safe_elements = _safe_elements(elements)
     if state is None and not safe_elements:
-        return
-    store = _read_store()
-    existing = (store.get(session_key) or {}).get(message_key)
-    existing_state = _record_state(existing)
-    next_state = requested_state or existing_state or "running"
-    store.setdefault(session_key, {})[message_key] = {
-        "schema_version": 1,
-        "turn_id": safe_assignment_token(turn_id) or safe_assignment_token(message_key),
-        "state": next_state,
-        "updated_at": _utc_now_iso(),
-        "elements": safe_elements,
-    }
-    _write_store(store)
+        return MissionChatTurnPersistOutcome.SKIPPED_EMPTY_LEGACY
+
+    def _mutate(store: dict[str, Any]) -> tuple[bool, MissionChatTurnPersistOutcome]:
+        existing = (store.get(session_key) or {}).get(message_key)
+        resolved_state = next_turn_state(
+            _record_state(existing),
+            requested_state,
+            write_ahead=write_ahead,
+        )
+        if resolved_state is None:
+            return False, MissionChatTurnPersistOutcome.REJECTED_STALE_TRANSITION
+        store.setdefault(session_key, {})[message_key] = {
+            "schema_version": 1,
+            "turn_id": safe_assignment_token(turn_id) or safe_assignment_token(message_key),
+            "state": resolved_state,
+            "updated_at": _utc_now_iso(),
+            "elements": safe_elements,
+        }
+        return True, MissionChatTurnPersistOutcome.PERSISTED
+
+    return _mutate_store(
+        _mutate,
+        timeout_result=MissionChatTurnPersistOutcome.SKIPPED_LOCK_TIMEOUT,
+    )
 
 
 def mission_chat_turn_elements(
@@ -116,24 +183,106 @@ def mark_stale_running_turns_interrupted(
     active_key = safe_assignment_text(active_client_message_id, limit=240)
     if not session_key:
         return []
-    store = _read_store()
-    raw_session = store.get(session_key)
-    if not isinstance(raw_session, dict):
-        return []
-    flipped: list[str] = []
-    now_iso = _utc_now_iso()
-    for message_key, record in raw_session.items():
-        safe_key = safe_assignment_text(message_key, limit=240)
-        if not safe_key or safe_key == active_key or not isinstance(record, dict):
-            continue
-        if _record_state(record) != "running":
-            continue
-        record["state"] = "interrupted"
-        record["updated_at"] = now_iso
-        flipped.append(safe_key)
-    if flipped:
-        _write_store(store)
-    return flipped
+
+    def _mutate(store: dict[str, Any]) -> tuple[bool, list[str]]:
+        raw_session = store.get(session_key)
+        if not isinstance(raw_session, dict):
+            return False, []
+        flipped: list[str] = []
+        now_iso = _utc_now_iso()
+        for message_key, record in raw_session.items():
+            safe_key = safe_assignment_text(message_key, limit=240)
+            if not safe_key or safe_key == active_key or not isinstance(record, dict):
+                continue
+            if _record_state(record) != "running":
+                continue
+            record["state"] = "interrupted"
+            record["updated_at"] = now_iso
+            flipped.append(safe_key)
+        return bool(flipped), flipped
+
+    # Lock timeout returns [] — this repair is opportunistic by design
+    # (repair-on-next-write); the next send in the session retries it.
+    return _mutate_store(_mutate, timeout_result=[])
+
+
+def _mutate_store(
+    mutator: Callable[[dict[str, Any]], tuple[bool, _T]],
+    *,
+    timeout_result: _T,
+) -> _T:
+    """Single write chokepoint for the turn store.
+
+    Holds an exclusive cross-process file lock for the whole
+    read-modify-write window so concurrent CLI turns can never lose each
+    other's records. On lock timeout the mutation is skipped and
+    ``timeout_result`` is returned — a chat turn must never hang on a stuck
+    lock; the skip is surfaced through the typed persist outcome.
+    """
+
+    with _store_lock() as acquired:
+        if not acquired:
+            return timeout_result
+        store = _read_store()
+        changed, result = mutator(store)
+        if changed:
+            _write_store(store)
+        return result
+
+
+@contextmanager
+def _store_lock(
+    timeout_seconds: float | None = None,
+) -> Iterator[bool]:
+    if timeout_seconds is None:
+        timeout_seconds = _LOCK_TIMEOUT_SECONDS
+    lock_path = paths.store_root() / _LOCK_NAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    acquired = False
+    try:
+        deadline = time.monotonic() + max(timeout_seconds, 0.0)
+        while True:
+            try:
+                _lock_fd_exclusive_nonblocking(fd)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_LOCK_POLL_SECONDS)
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                _unlock_fd(fd)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def _lock_fd_exclusive_nonblocking(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_fd(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def _store_path() -> Path:

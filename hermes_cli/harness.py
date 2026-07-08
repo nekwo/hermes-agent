@@ -83,7 +83,7 @@ from agent_runtime.realm_sync import (
 from agent_runtime.resolution import resolution_table, resolve_runtime
 from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
-from agent_runtime.mission_chat_turns import mark_stale_running_turns_interrupted, persist_mission_chat_turn
+from agent_runtime.mission_chat_turns import MissionChatTurnPersistOutcome, mark_stale_running_turns_interrupted, persist_mission_chat_turn
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
