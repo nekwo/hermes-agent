@@ -806,6 +806,8 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--client-message-id", default=None)
     mission_chat_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
+    mission_chat_message.add_argument("--relay-chain", default=None, help="Comma-separated canonical persona ids already on the agent-relay chain (envelope provenance for chained agent_chat_send hops)")
+    mission_chat_message.add_argument("--relay-deadline-epoch", type=float, default=None, help="Absolute unix-epoch deadline shared by every hop on the relay chain")
     mission_chat_message.add_argument("--json", action="store_true")
     mission_chat_message.set_defaults(func=_cmd_mission_chat_message)
     mission_chat_queue_skill = mission_chat_subs.add_parser("queue-skill", help="Load a skill on the next Mission Control chat turn")

@@ -16,14 +16,18 @@ In-process matters: one Hermes process shelling out to another can hit the
 must never fork a second, slightly different chat pipeline.
 
 Scope contract (V2 — chained relays enabled 2026-07-08):
-- relays may chain (operator -> Alice -> Neko -> Dev) up to
-  ``HERMES_AGENT_CHAT_MAX_DEPTH`` hops (default 3). The relay chain is a
-  ``ContextVar`` so it survives both the sequential tool path (same thread)
-  and the concurrent tool executor (workers run under ``copy_context`` via
-  ``propagate_context_to_thread``) — the V1 ``threading.local`` guard only
-  worked on the sequential path;
-- loop detection: a relay to a persona already on the current chain is a
-  typed ``relay_cycle`` refusal (A -> B -> A ping-pong is not orchestration);
+- relays may chain (operator -> Alice -> Neko -> Dev). Depth, cycle, and
+  budget decisions are owned by ONE authority — ``agent_runtime.relay_policy``
+  evaluated by the mission-chat handler at the canonical persona chokepoint
+  (after persona-id canonicalization, so instance-id targets cannot dodge the
+  cycle guard). This tool only CARRIES the envelope: it reads the current
+  chain/deadline from the policy ContextVars (seeded per turn by the handler;
+  tool workers inherit them via ``copy_context``) and forwards them as
+  explicit ``relay_chain`` / ``relay_deadline_epoch`` request fields, so
+  provenance survives process boundaries;
+- typed refusals propagate honestly: ``relay_depth_limit``, ``relay_cycle``,
+  ``relay_budget_exhausted`` (all carry ``relay_chain``);
+- chained hops share ONE wall deadline — a relay does not reset the clock;
 - ``HERMES_AGENT_CHAT_SCOPE=off`` disables the tool with a typed refusal;
   a blueprint-graph allow-list (only message agents wired to yours) is the
   planned ``graph`` scope and is not implemented yet — the tool passes the
@@ -36,21 +40,15 @@ import io
 import json
 import logging
 import os
+import time
 import uuid
-from contextvars import ContextVar
 from types import SimpleNamespace
 
+from agent_runtime import relay_policy
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
 
-# Personas already visited on the current relay chain, outermost first.
-# ContextVar (not threading.local): the nested target turn runs on the calling
-# thread, but ITS tool calls run on ThreadPoolExecutor workers that inherit a
-# copied Context — so the chain follows the logical call chain, not the thread.
-_RELAY_CHAIN: ContextVar[tuple[str, ...]] = ContextVar("hermes_agent_chat_relay_chain", default=())
-
-_DEFAULT_MAX_DEPTH = 3
 _REPLY_LIMIT = 8000
 _MESSAGE_LIMIT = 12000
 
@@ -101,19 +99,6 @@ AGENT_CHAT_SEND_SCHEMA = {
 }
 
 
-def _max_relay_depth() -> int:
-    raw = (os.environ.get("HERMES_AGENT_CHAT_MAX_DEPTH") or "").strip()
-    try:
-        value = int(raw) if raw else _DEFAULT_MAX_DEPTH
-    except ValueError:
-        return _DEFAULT_MAX_DEPTH
-    return max(1, min(value, 8))
-
-
-def _persona_key(persona_id: str) -> str:
-    return persona_id.strip().lower()
-
-
 def _refusal(error: str, **extra) -> str:
     return json.dumps({"ok": False, "error": error, **extra})
 
@@ -138,31 +123,32 @@ def agent_chat_send(
         return _refusal("agent_chat_send requires a persona_id.")
     if not message:
         return _refusal("agent_chat_send requires a non-empty message.")
-    chain = _RELAY_CHAIN.get()
-    max_depth = _max_relay_depth()
-    if len(chain) >= max_depth:
-        return _refusal(
-            f"agent-to-agent relay depth limit reached (max {max_depth} chained hops; "
-            f"chain so far: {' -> '.join(chain)}). Answer your caller directly instead "
-            "of relaying onward.",
-            error_kind="relay_depth_limit",
-            relay_chain=list(chain),
-        )
-    if _persona_key(persona_id) in chain:
-        return _refusal(
-            f"relay cycle detected: '{persona_id}' is already on this relay chain "
-            f"({' -> '.join(chain)}). Answer your caller directly instead of relaying "
-            "back around the loop.",
-            error_kind="relay_cycle",
-            relay_chain=list(chain),
-        )
     if len(message) > _MESSAGE_LIMIT:
         return _refusal(f"message exceeds the {_MESSAGE_LIMIT}-character relay limit; send a briefing, not a dump.")
+
+    # Envelope provenance: the chain/deadline for the CURRENT turn, seeded by
+    # the mission-chat handler. Depth/cycle policy is decided downstream at
+    # the canonical chokepoint; here we only clamp this hop's wall budget to
+    # the shared chain deadline and fast-fail when nothing usable is left.
+    chain = relay_policy.RELAY_CHAIN.get()
+    deadline_epoch = relay_policy.RELAY_DEADLINE.get()
 
     try:
         wall_budget = max(10.0, min(float(max_seconds or 240), 600.0))
     except (TypeError, ValueError):
         wall_budget = 240.0
+    remaining = relay_policy.remaining_budget_seconds(deadline_epoch)
+    if remaining is not None:
+        if remaining < relay_policy.MIN_RELAY_BUDGET_SECONDS:
+            return _refusal(
+                f"relay budget exhausted: {max(remaining, 0.0):.1f}s left on the shared "
+                f"chain deadline (minimum {relay_policy.MIN_RELAY_BUDGET_SECONDS:.0f}s "
+                "per hop). Answer your caller with what you have.",
+                error_kind="relay_budget_exhausted",
+                relay_chain=list(chain),
+            )
+        wall_budget = min(wall_budget, remaining)
+    effective_deadline = deadline_epoch if deadline_epoch is not None else time.time() + wall_budget
 
     requested_by = "agent-chat-relay"
     source_token = str(requested_by_session or "").strip()
@@ -187,12 +173,15 @@ def agent_chat_send(
         stream=False,
         max_seconds=wall_budget,
         json=True,
+        # Explicit relay envelope — the handler's chokepoint guard reads
+        # these; ambient ContextVars never cross a transport boundary.
+        relay_chain=list(chain),
+        relay_deadline_epoch=effective_deadline,
     )
 
     # The CLI handler prints its JSON payload; capture it so a nested reply can
     # never interleave with the OUTER turn's stdout protocol.
     buffer = io.StringIO()
-    chain_token = _RELAY_CHAIN.set(chain + (_persona_key(persona_id),))
     try:
         # persona_commands.py is exec'd into hermes_cli.harness globals by
         # _load_command_parts(); the handler is NOT importable from the part
@@ -204,8 +193,6 @@ def agent_chat_send(
     except Exception as exc:  # pragma: no cover - defensive; surfaced to the model
         logger.exception("agent_chat_send relay failed")
         return _refusal(f"{type(exc).__name__}: {exc}", target_persona=persona_id)
-    finally:
-        _RELAY_CHAIN.reset(chain_token)
 
     raw = buffer.getvalue().strip()
     payload = _parse_last_json_object(raw)
@@ -230,8 +217,12 @@ def agent_chat_send(
         "total_tokens": payload.get("total_tokens"),
         "requested_by": requested_by,
     }
+    if payload.get("relay_chain") is not None:
+        result["relay_chain"] = payload.get("relay_chain")
     if not result["ok"]:
         result["error"] = str(payload.get("error") or payload.get("blocker") or "relay turn failed")[:400]
+        if payload.get("error_kind"):
+            result["error_kind"] = str(payload.get("error_kind"))[:60]
         result["exit_code"] = exit_code
     return json.dumps(result, indent=2, default=str)
 

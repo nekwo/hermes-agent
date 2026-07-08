@@ -651,6 +651,42 @@ def _cmd_mission_chat_message(args) -> int:
         else:
             print(emit_json(data) if args.json else data["error"])
         return 2
+
+    # Relay-chain guard at the canonical persona chokepoint. The chain is
+    # explicit envelope provenance (relay_chain / relay_deadline_epoch), so
+    # every transport into this handler gets the same depth/cycle/budget
+    # answer; agent_chat_send carries the envelope but does not re-decide.
+    import time as _relay_time
+
+    from agent_runtime import relay_policy
+
+    relay_chain_in = relay_policy.normalize_chain(getattr(args, "relay_chain", None))
+    relay_deadline = relay_policy.parse_deadline_epoch(getattr(args, "relay_deadline_epoch", None))
+    relay_decision = relay_policy.evaluate_relay(
+        chain=relay_chain_in,
+        target_persona_id=normalized_persona,
+        deadline_epoch=relay_deadline,
+    )
+    if not relay_decision.allowed:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "rejected",
+            "error_kind": relay_decision.error_kind,
+            "error": safe_assignment_text(relay_decision.reason, limit=400),
+            "persona_id": normalized_persona,
+            "relay_chain": list(relay_decision.chain),
+            "next_expected": "answer your caller directly; do not relay onward on this chain",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
+    # Chain for THIS turn: envelope chain + the persona now speaking. Seeded
+    # into the ContextVars around the model turn so the turn's own
+    # agent_chat_send calls (tool workers run under copy_context) inherit it.
+    turn_relay_chain = relay_decision.chain
     persona = _persona_by_id(cfg, normalized_persona)
     if persona is None:
         data = {"ok": False, "error": f"unknown persona {safe_assignment_token(args.persona_id)}"}
@@ -905,31 +941,51 @@ def _cmd_mission_chat_message(args) -> int:
             state="running",
             write_ahead=True,
         )
-        chat_result = GPTPersonaRuntime(
-            default_provider=cfg.default_provider,
-            default_model=cfg.default_model,
-            session_db=session_db,
-            persist_agent_session=False,
-        ).mission_chat_reply(
-            persona,
-            chat_message,
-            session_id=None,
-            permission_session_id=session_id,
-            provider_override=model_selection.get("effective_provider"),
-            model_override=model_selection.get("effective_model"),
-            surface_prompt=getattr(args, "surface_prompt", "") or "",
-            max_wall_seconds=getattr(args, "max_seconds", 240.0),
-            stream_callback=_stream_delta if getattr(args, "stream", False) else None,
-            pre_trace_callback=lambda payload: _append_persona_pre_trace_ack(
-                session_db=session_db,
-                session_id=session_id,
-                trace_payload=payload,
-            ),
-            trace_callback=_stream_progress,
-            agent_ready_callback=_agent_ready_for_steer,
-            preloaded_skill_prompt=preloaded_skill_prompt,
-            turn_id=safe_assignment_token(client_message_id),
+        # Chained relays share one deadline: this hop's wall budget is capped
+        # by the time left on the chain, and the deadline is seeded (root
+        # turns mint it) so deeper hops inherit the same clock.
+        relay_wall_seconds = float(getattr(args, "max_seconds", 240.0) or 240.0)
+        _relay_remaining = relay_policy.remaining_budget_seconds(relay_deadline)
+        if _relay_remaining is not None:
+            relay_wall_seconds = max(
+                relay_policy.MIN_RELAY_BUDGET_SECONDS,
+                min(relay_wall_seconds, _relay_remaining),
+            )
+        _relay_chain_token = relay_policy.RELAY_CHAIN.set(turn_relay_chain)
+        _relay_deadline_token = relay_policy.RELAY_DEADLINE.set(
+            relay_deadline
+            if relay_deadline is not None
+            else _relay_time.time() + relay_wall_seconds
         )
+        try:
+            chat_result = GPTPersonaRuntime(
+                default_provider=cfg.default_provider,
+                default_model=cfg.default_model,
+                session_db=session_db,
+                persist_agent_session=False,
+            ).mission_chat_reply(
+                persona,
+                chat_message,
+                session_id=None,
+                permission_session_id=session_id,
+                provider_override=model_selection.get("effective_provider"),
+                model_override=model_selection.get("effective_model"),
+                surface_prompt=getattr(args, "surface_prompt", "") or "",
+                max_wall_seconds=relay_wall_seconds,
+                stream_callback=_stream_delta if getattr(args, "stream", False) else None,
+                pre_trace_callback=lambda payload: _append_persona_pre_trace_ack(
+                    session_db=session_db,
+                    session_id=session_id,
+                    trace_payload=payload,
+                ),
+                trace_callback=_stream_progress,
+                agent_ready_callback=_agent_ready_for_steer,
+                preloaded_skill_prompt=preloaded_skill_prompt,
+                turn_id=safe_assignment_token(client_message_id),
+            )
+        finally:
+            relay_policy.RELAY_CHAIN.reset(_relay_chain_token)
+            relay_policy.RELAY_DEADLINE.reset(_relay_deadline_token)
         final_model_input = (getattr(chat_result, "raw", {}) or {}).get("model_input_observability")
         prompt_context = mission_chat_prompt_observability(
             persona=persona,
@@ -1060,6 +1116,7 @@ def _cmd_mission_chat_message(args) -> int:
             "chat_session_id": session_id,
             "task_id": task_id,
             "goal_id": goal_id,
+            "relay_chain": list(turn_relay_chain),
             "client_message_id": client_message_id,
             "execution_state": "completed",
             "kind": "mission_chat_message",

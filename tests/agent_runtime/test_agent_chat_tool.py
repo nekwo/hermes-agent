@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from tools.agent_chat_tool import AGENT_CHAT_SEND_SCHEMA, _RELAY_CHAIN, agent_chat_send
+from agent_runtime.relay_policy import RELAY_CHAIN, RELAY_DEADLINE
+from tools.agent_chat_tool import AGENT_CHAT_SEND_SCHEMA, agent_chat_send
 from tools.registry import registry
 
 
@@ -46,78 +47,101 @@ def test_scope_off_disables_the_tool(monkeypatch):
     assert "disabled" in data["error"]
 
 
-def test_depth_guard_blocks_relays_past_max_depth():
-    token = _RELAY_CHAIN.set(("alice_supervisor", "neko_supervisor", "backend_dev"))
-    try:
-        data = json.loads(agent_chat_send(persona_id="dev", message="hi"))
-    finally:
-        _RELAY_CHAIN.reset(token)
-    assert data["ok"] is False
-    assert data["error_kind"] == "relay_depth_limit"
-    assert data["relay_chain"] == ["alice_supervisor", "neko_supervisor", "backend_dev"]
-
-
-def test_depth_guard_honors_env_override(monkeypatch):
-    monkeypatch.setenv("HERMES_AGENT_CHAT_MAX_DEPTH", "1")
-    token = _RELAY_CHAIN.set(("alice_supervisor",))
-    try:
-        data = json.loads(agent_chat_send(persona_id="dev", message="hi"))
-    finally:
-        _RELAY_CHAIN.reset(token)
-    assert data["ok"] is False
-    assert data["error_kind"] == "relay_depth_limit"
-
-
-def test_second_hop_relay_is_allowed(monkeypatch):
-    # Operator -> Alice -> Neko -> Dev: Neko's turn (chain depth 1) must be
-    # able to relay onward to dev.
-    def fake_handler(args):
-        assert args.persona_id == "dev"
-        print(json.dumps({"ok": True, "reply": "ack from dev"}))
-        return 0
-
-    import hermes_cli.harness as harness
-
-    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
-    token = _RELAY_CHAIN.set(("neko_supervisor",))
-    try:
-        data = json.loads(agent_chat_send(persona_id="dev", message="hi"))
-    finally:
-        _RELAY_CHAIN.reset(token)
-    assert data["ok"] is True
-    assert data["reply"] == "ack from dev"
-
-
-def test_relay_cycle_is_refused():
-    token = _RELAY_CHAIN.set(("neko_supervisor",))
-    try:
-        data = json.loads(agent_chat_send(persona_id="Neko_Supervisor", message="hi"))
-    finally:
-        _RELAY_CHAIN.reset(token)
-    assert data["ok"] is False
-    assert data["error_kind"] == "relay_cycle"
-
-
-def test_relay_chain_propagates_into_copied_contexts(monkeypatch):
-    # The concurrent tool executor runs workers under copy_context(); the
-    # chain must be visible there (the old threading.local guard was not).
-    import contextvars
+def test_relay_envelope_is_forwarded_explicitly(monkeypatch):
+    # The tool carries the CURRENT turn's chain/deadline (seeded by the
+    # handler into the policy ContextVars) as explicit request fields —
+    # provenance must survive transports that don't share this process.
+    seen = {}
 
     def fake_handler(args):
-        seen = {}
-
-        def _worker():
-            seen["chain"] = _RELAY_CHAIN.get()
-
-        contextvars.copy_context().run(_worker)
-        assert seen["chain"] == ("dev",)
+        seen["relay_chain"] = args.relay_chain
+        seen["relay_deadline_epoch"] = args.relay_deadline_epoch
+        seen["max_seconds"] = args.max_seconds
         print(json.dumps({"ok": True, "reply": "ack"}))
         return 0
 
+    import time
+
     import hermes_cli.harness as harness
 
     monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
-    assert json.loads(agent_chat_send(persona_id="dev", message="hi"))["ok"]
+    deadline = time.time() + 60.0
+    chain_token = RELAY_CHAIN.set(("neko_supervisor",))
+    deadline_token = RELAY_DEADLINE.set(deadline)
+    try:
+        data = json.loads(agent_chat_send(persona_id="dev", message="hi", max_seconds=240))
+    finally:
+        RELAY_CHAIN.reset(chain_token)
+        RELAY_DEADLINE.reset(deadline_token)
+    assert data["ok"] is True
+    assert seen["relay_chain"] == ["neko_supervisor"]
+    assert seen["relay_deadline_epoch"] == deadline
+    # This hop's wall budget is clamped to the shared chain deadline.
+    assert seen["max_seconds"] <= 60.0
+
+
+def test_root_relay_mints_the_shared_deadline(monkeypatch):
+    seen = {}
+
+    def fake_handler(args):
+        seen["relay_chain"] = args.relay_chain
+        seen["relay_deadline_epoch"] = args.relay_deadline_epoch
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import time
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    before = time.time()
+    data = json.loads(agent_chat_send(persona_id="dev", message="hi", max_seconds=120))
+    assert data["ok"] is True
+    assert seen["relay_chain"] == []
+    assert before + 110 <= seen["relay_deadline_epoch"] <= time.time() + 121
+
+
+def test_exhausted_shared_deadline_fast_fails_before_the_send(monkeypatch):
+    import time
+
+    def fake_handler(args):  # pragma: no cover - must not be reached
+        raise AssertionError("relay must fast-fail before dispatch")
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    deadline_token = RELAY_DEADLINE.set(time.time() + 1.0)
+    try:
+        data = json.loads(agent_chat_send(persona_id="dev", message="hi"))
+    finally:
+        RELAY_DEADLINE.reset(deadline_token)
+    assert data["ok"] is False
+    assert data["error_kind"] == "relay_budget_exhausted"
+
+
+def test_typed_chokepoint_refusals_propagate(monkeypatch):
+    # Depth/cycle authority lives in the mission-chat handler; the tool must
+    # surface its typed refusal, not re-decide.
+    def fake_handler(args):
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error_kind": "relay_cycle",
+                    "error": "relay cycle detected: 'dev' is already on this relay chain",
+                    "relay_chain": ["neko_supervisor", "dev"],
+                }
+            )
+        )
+        return 2
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    data = json.loads(agent_chat_send(persona_id="dev", message="hi"))
+    assert data["ok"] is False
+    assert data["error_kind"] == "relay_cycle"
+    assert data["relay_chain"] == ["neko_supervisor", "dev"]
 
 
 def test_happy_path_returns_compact_reply_without_observability(monkeypatch):
@@ -171,11 +195,11 @@ def test_failed_target_turn_surfaces_typed_error(monkeypatch):
     assert data["exit_code"] == 2
 
 
-def test_relay_chain_resets_after_relay(monkeypatch):
+def test_tool_does_not_mutate_ambient_relay_state(monkeypatch):
+    # Seeding the turn chain is the HANDLER's job (single write path); the
+    # tool only reads and forwards the envelope.
     def fake_handler(args):
-        # While the relay runs, the target is on the chain so ITS turn sees
-        # itself as hop 1.
-        assert _RELAY_CHAIN.get() == ("dev",)
+        assert RELAY_CHAIN.get() == ()
         print(json.dumps({"ok": True, "reply": "ack"}))
         return 0
 
@@ -183,7 +207,8 @@ def test_relay_chain_resets_after_relay(monkeypatch):
 
     monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
     assert json.loads(agent_chat_send(persona_id="dev", message="hi"))["ok"]
-    assert _RELAY_CHAIN.get() == ()
+    assert RELAY_CHAIN.get() == ()
+    assert RELAY_DEADLINE.get() is None
 
 
 @pytest.mark.parametrize("role_key", ["PM", "DEV", "QA", "ALICE_SUPERVISOR"])
