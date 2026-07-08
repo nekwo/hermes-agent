@@ -293,6 +293,36 @@ def test_operator_channel_reports_missing_history_loudly():
     assert any(warning["code"] == "trace_empty" for warning in channels[0]["warnings"])
 
 
+def test_operator_channel_dormant_instance_has_no_trace_empty_warning():
+    """A seeded/probe instance that never chatted — no session, no history,
+    no task, empty conversation — is dormant, not anomalous. It must not emit
+    a standing trace_empty parity warning on every snapshot (live 2026-07-08:
+    pm/qa + three codex probe instances produced 5 permanent warnings)."""
+    channels = operator_channel_summary(
+        persona_instances=[
+            PersonaInstance(
+                id="personainst_pm",
+                persona_id="pm",
+                role="pm",
+                display_name="PM",
+                profile_id=None,
+                runtime_root="test-runtime",
+                state=WorkerSessionState.IDLE,
+                mode="chat",
+                session_id=None,
+                updated_at="2026-07-08T09:00:00Z",
+            )
+        ],
+        persona_chat_history=[],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 1
+    assert not any(
+        warning["code"] == "trace_empty" for warning in channels[0]["warnings"]
+    )
+
+
 def test_operator_channel_allows_quiet_chat_without_trace():
     session_id = "persona_chat_personainst_profile_alice_quiet"
     channels = operator_channel_summary(

@@ -302,7 +302,22 @@ class _OperatorChannelBuilder:
             message.get("kind") in {"thinking_summary", "turn", "tool_call"}
             for message in conversation.get("messages") or []
         )
-        if trace is None and not has_flow_messages and (history is None or task_id):
+        # A dormant instance channel — no session, no history, no task binding,
+        # and an empty conversation — has never had anything to trace; flagging
+        # it would emit a permanent false-positive parity warning for every
+        # idle seeded/probe persona instance.
+        dormant_channel = (
+            history is None
+            and session_id is None
+            and task_id is None
+            and not (conversation.get("messages") or [])
+        )
+        if (
+            trace is None
+            and not has_flow_messages
+            and (history is None or task_id)
+            and not dormant_channel
+        ):
             warnings.append(
                 {
                     "code": "trace_empty",
