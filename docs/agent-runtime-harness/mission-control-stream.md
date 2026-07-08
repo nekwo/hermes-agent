@@ -35,6 +35,7 @@ For `heartbeat` frames:
 
 - `watermark.event_offset` repeats the latest offset known to the stream.
 - Heartbeats do not advance the read model by themselves; they only prove the stream is alive at the current offset.
+- Heartbeats additionally carry the current `daemon` status block (see the `heartbeat` frame section) so runtime HUDs stay live while an idle daemon emits no deltas. Consumers may merge it into their read model's daemon view; it never changes any other entity.
 
 ## `hydrate` frame
 
@@ -152,6 +153,17 @@ Top-level shape:
   "watermark": {
     "event_offset": 0,
     "captured_at": "..."
+  },
+  "daemon": {
+    "schema_version": 1,
+    "state": "idle",
+    "pid": 12345,
+    "heartbeat_at": "...",
+    "target_task_id": null,
+    "settle_stop_reason": "no_eligible_action",
+    "loops": 47,
+    "next_wake_at": "...",
+    "wait_seconds": 30
   }
 }
 ```
@@ -163,6 +175,7 @@ Fields:
 - `generated_at`: the time the heartbeat frame was emitted.
 - `watermark.event_offset`: the latest event-log offset known to the stream.
 - `watermark.captured_at`: the time the heartbeat watermark was captured.
+- `daemon`: the versioned daemon status block (`daemon_status_schema()` — the same shape `harness daemon status --json` returns). The daemon writes its per-loop status to `daemon_status.json`, not the EventLog, so an idle daemon produces no deltas; this block is the only live channel for daemon liveness between deltas. It is read-model telemetry: fire-and-forget, never acknowledged, and a missing/dropped block only means "no update this frame" (the field is omitted if the status file cannot be read). Optional keys beyond the core set (e.g. `next_wake_at`, `wait_seconds`, `last_tick_id`, `liveness`) appear when the daemon has recorded them.
 
 CLI timing flags:
 
