@@ -1568,8 +1568,20 @@ def _cmd_workspace_create(args) -> int:
 def _cmd_workspace_use(args) -> int:
     WorkspaceStore().set_active(args.workspace_id)
     item = WorkspaceStore().get(args.workspace_id)
+    _append_scope_activation_event("workspace.activated", workspace_id=item.id, name=item.name)
     _print_stage42(_object_envelope("workspace", _workspace_row(item)), args=args, default_output="json")
     return 0
+
+
+def _append_scope_activation_event(event_type: str, **payload) -> None:
+    """Advance the EventLog watermark after an active-scope change so
+    stream/read-model consumers see it (event-less store mutations are
+    invisible — the launcher scope switcher would never reflect the
+    switch). Best effort: a broken event log must not fail the verb."""
+    try:
+        EventLog().append(Event(now(), event_type, None, None, None, dict(payload)))
+    except Exception:
+        pass
 
 
 def _cmd_workspace_actors(args) -> int:
@@ -1729,6 +1741,7 @@ def _cmd_realm_bind_server(args) -> int:
 def _cmd_realm_use(args) -> int:
     RealmStore().set_active(args.realm_id)
     item = RealmStore().get(args.realm_id)
+    _append_scope_activation_event("realm.activated", realm_id=item.id, name=item.name)
     _print_stage42(_object_envelope("realm", _realm_row(item)), args=args, default_output="json")
     return 0
 

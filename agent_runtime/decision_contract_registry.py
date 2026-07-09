@@ -1260,6 +1260,8 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # (launcher snapshot, serve read model) until an unrelated event
     # happens to advance the offset.
     "realm.adopted": EventContract("realm.adopted", "Realm adopted", ("realm_id", "name"), ("server_id",)),
+    "realm.activated": EventContract("realm.activated", "Active realm changed", ("realm_id",), ("name",)),
+    "workspace.activated": EventContract("workspace.activated", "Active workspace changed", ("workspace_id",), ("name",)),
     "realm.sync.pulled": EventContract("realm.sync.pulled", "Realm pulled", ("realm_id", "changed"), ("artifacts",)),
     "realm.sync.published": EventContract("realm.sync.published", "Realm published", ("realm_id", "changed"), ("artifacts", "commit")),
 }
