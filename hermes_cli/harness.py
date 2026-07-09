@@ -1742,8 +1742,39 @@ def _cmd_realm_use(args) -> int:
     RealmStore().set_active(args.realm_id)
     item = RealmStore().get(args.realm_id)
     _append_scope_activation_event("realm.activated", realm_id=item.id, name=item.name)
+    _reconcile_active_workspace_to_realm(item)
     _print_stage42(_object_envelope("realm", _realm_row(item)), args=args, default_output="json")
     return 0
+
+
+def _reconcile_active_workspace_to_realm(realm) -> None:
+    """Switching realms must not leave the active workspace pointing into
+    another realm. Keep it when it already belongs; otherwise fall to the
+    realm's first (configured order, then listing order) unarchived
+    workspace, or clear it when the realm has none."""
+    store = WorkspaceStore()
+    active_id = store.active_id()
+    if active_id:
+        try:
+            active = store.get(active_id)
+        except Exception:
+            active = None
+        if active is not None and getattr(active, "realm_id", None) == realm.id:
+            return
+    candidates = [
+        workspace
+        for workspace in store.list_all()
+        if getattr(workspace, "realm_id", None) == realm.id and not workspace.archived
+    ]
+    configured_order = {wid: index for index, wid in enumerate(getattr(realm, "workspace_ids", None) or [])}
+    candidates.sort(key=lambda workspace: (configured_order.get(workspace.id, len(configured_order)), workspace.id))
+    next_workspace = candidates[0] if candidates else None
+    store.set_active(next_workspace.id if next_workspace else None)
+    _append_scope_activation_event(
+        "workspace.activated",
+        workspace_id=next_workspace.id if next_workspace else None,
+        name=next_workspace.name if next_workspace else None,
+    )
 
 
 def _realm_sync_credential(args):

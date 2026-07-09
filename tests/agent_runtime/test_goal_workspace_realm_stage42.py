@@ -74,6 +74,33 @@ def test_workspace_and_realm_round_trip(isolate_agent_runtime_root):
     assert RealmStore().active_id() == realm.id
 
 
+def test_realm_use_reconciles_active_workspace(isolate_agent_runtime_root):
+    """Switching realms must not leave the active workspace pointing into
+    another realm: fall to the new realm's first workspace or clear it,
+    and emit activation events so stream consumers see the switch."""
+    from agent_runtime.events import EventLog
+
+    realm_a = RealmStore().create(name="Realm A")
+    realm_b = RealmStore().create(name="Realm B")
+    workspace_a = WorkspaceStore().create(name="A Workspace", realm_id=realm_a.id)
+    RealmStore().set_active(realm_a.id)
+    WorkspaceStore().set_active(workspace_a.id)
+
+    result = _run_harness("realm", "use", realm_b.id, "--json")
+    assert result.returncode == 0, result.stderr
+    assert RealmStore().active_id() == realm_b.id
+    # Realm B has no workspaces — the cross-realm workspace is cleared.
+    assert WorkspaceStore().active_id() is None
+
+    result = _run_harness("realm", "use", realm_a.id, "--json")
+    assert result.returncode == 0, result.stderr
+    assert WorkspaceStore().active_id() == workspace_a.id
+
+    types = [event.type for event in EventLog().tail(6)]
+    assert "realm.activated" in types
+    assert "workspace.activated" in types
+
+
 def test_goal_id_current_stage_and_assignment_grouping(isolate_agent_runtime_root):
     task = TaskStore().create(_task("task_1", goal_id="goal_1"))
     loaded = TaskStore().get_goal("goal_1")
