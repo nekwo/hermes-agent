@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 from collections import Counter
 from collections.abc import Collection, Iterator
@@ -9,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
-from .decision_contract_registry import allowed_event_types
+from .decision_contract_registry import allowed_event_types, validate_event_payload
 from .errors import EventPayloadTooLarge
 from .locks import events_lock
 from .models import Event
@@ -37,10 +39,33 @@ OPERATOR_SUMMARY_EVENT_TYPES = frozenset(
 )
 
 
+def _strict_event_contracts() -> bool:
+    """Contract validation posture (Stage 12 D): strict in tests/CI via
+    HERMES_EVENT_CONTRACT_STRICT, observe-and-warn live — a validation bug
+    must never take down the runtime, but CI must not let a violation land."""
+
+    return str(os.environ.get("HERMES_EVENT_CONTRACT_STRICT", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Observe-mode dedupe: warn once per (type, missing-fields) shape per process.
+# High-frequency emitters (run.heartbeat every few seconds) must not turn a
+# contract drift into log spam; one line per shape is enough to find the bug.
+_WARNED_CONTRACT_SHAPES: set[tuple[str, tuple[str, ...]]] = set()
+
+
 class EventLog:
     def append(self, evt: Event) -> None:
         if evt.type not in ALLOWED_EVENT_TYPES:
             raise ValueError(f"unknown event type: {evt.type}")
+        missing = validate_event_payload(evt.type, evt.payload)
+        if missing:
+            message = f"event {evt.type} payload missing contract summary fields: {missing}"
+            if _strict_event_contracts():
+                raise ValueError(message)
+            shape = (evt.type, missing)
+            if shape not in _WARNED_CONTRACT_SHAPES:
+                _WARNED_CONTRACT_SHAPES.add(shape)
+                logging.getLogger(__name__).warning(message)
         evt = event_with_operator_summary(evt)
         payload_bytes = json.dumps(to_jsonable(evt.payload), ensure_ascii=False).encode("utf-8")
         if len(payload_bytes) > EVENT_PAYLOAD_LIMIT_BYTES:

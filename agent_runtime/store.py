@@ -140,7 +140,8 @@ class TaskStore:
                     task_id=task.id,
                     run_id=None,
                     persona_id=None,
-                    payload={"state": str(task.state), "actor": "harness"},
+                    # title is a contract summary field (Stage 12 D caught the drift)
+                    payload={"title": task.title, "state": str(task.state), "actor": "harness"},
                 )
             )
         return self.get(task.id)
@@ -818,6 +819,9 @@ class RunStore:
                 task_id=run.task_id,
                 run_id=run.id,
                 persona_id=run.persona_id,
+                # contract summary fields; run_id is duplicated from the envelope
+                # column because consumers validate/render from the payload
+                payload={"run_id": run.id, "state": str(run.state)},
             )
         )
         return run

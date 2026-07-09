@@ -97,9 +97,20 @@ fingerprint + client force-poll (rebuilds the forceFresh crutch).
 `decision_contract_registry.py` checks a contract's `summary_fields` are
 present (unknown extra keys stay allowed — additive evolution is cheap).
 `EventLog.append` wires it: **strict** (raise) when
-`HERMES_EVENT_CONTRACT_STRICT=1`, **observe** (logging.warning) otherwise.
-The flag is enabled for the new test modules; flipping it suite-wide happens
-once a full strict run is measured clean (recorded below when done).
+`HERMES_EVENT_CONTRACT_STRICT=1`, **observe** (logging.warning, deduped once
+per (type, missing-fields) shape per process so a high-frequency drift like
+run.heartbeat can never spam logs) otherwise. The flag is enabled inside the
+Stage 12 tests.
+
+**Strict-run measurement (2026-07-09): 314 failed / 1310 passed** across
+`tests/agent_runtime` — contract/emitter drift is broad (ticker, worker
+sessions, transition events, plus many test fixtures that append minimal
+events). The two highest-frequency REAL emitter drifts were fixed in this
+stage (`task.created` missing `title`; `run.heartbeat` carrying no payload
+against a contract naming `run_id`/`state`). Flipping strict suite-wide is
+recorded follow-up debt: burn the remaining drift down type-by-type (fix the
+emitter or right-size the contract), then enable the flag in conftest. Until
+then observe-mode warnings name each drifted shape once per process.
 
 ### Slice F — pin the heartbeat side channel
 The daemon block on heartbeat frames is the one sanctioned out-of-band
@@ -158,3 +169,9 @@ that names any future regression.
 ## Log
 
 - 2026-07-09: audit complete; plan written; implementation begins.
+- 2026-07-09: slices A, B1, B2, C, D, F implemented on
+  `fix/eventless-mutation-chokepoint` (per-slice commits). Launcher slice E
+  (producer-violation tripwire: `MissionReadModel.applyForcedSnapshot` +
+  `producerViolationCount`, both bridge force sites routed through it)
+  implemented with tests in the EterniaLauncher repo. Strict-run measured
+  314/1310 → suite-wide strict recorded as follow-up debt (see slice D).

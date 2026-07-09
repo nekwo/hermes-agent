@@ -328,6 +328,22 @@ def allowed_event_types() -> frozenset[str]:
     return frozenset(_EVENT_CONTRACTS)
 
 
+def validate_event_payload(event_type: str, payload: object) -> tuple[str, ...]:
+    """Missing contract summary fields for a registered event type (Stage 12 D).
+
+    ``summary_fields`` are the fields the contract declares every emission
+    carries; a payload without them renders as a blank row on every consumer.
+    Extra keys are always allowed — the contract is additive. Unregistered
+    types return () here; ``EventLog.append`` already rejects those outright.
+    """
+
+    contract = _EVENT_CONTRACTS.get(str(event_type))
+    if contract is None:
+        return ()
+    body = payload if isinstance(payload, dict) else {}
+    return tuple(field for field in contract.summary_fields if field not in body)
+
+
 def contract_manifest() -> dict[str, Any]:
     return {
         "schema_version": CONTRACT_SCHEMA_VERSION,
