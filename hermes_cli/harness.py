@@ -1561,6 +1561,14 @@ def _cmd_workspace_create(args) -> int:
         if item.id not in realm.workspace_ids:
             realm.workspace_ids.append(item.id)
             RealmStore().save(realm)
+    _append_scope_activation_event("workspace.created", workspace_id=item.id, name=item.name, realm_id=item.realm_id)
+    # A workspace created inside the ACTIVE realm while no workspace is
+    # active becomes active immediately — the operator just gave the
+    # realm its first (or replacement) workspace and expects to land in
+    # it, not to run a second `workspace use` by hand.
+    if item.realm_id and item.realm_id == RealmStore().active_id() and WorkspaceStore().active_id() is None:
+        WorkspaceStore().set_active(item.id)
+        _append_scope_activation_event("workspace.activated", workspace_id=item.id, name=item.name)
     _print_stage42(_object_envelope("workspace", _workspace_row(item), warnings=[]), args=args, default_output="json")
     return 0
 
@@ -1725,6 +1733,7 @@ def _cmd_realm_create(args) -> int:
         _print_stage42(_object_envelope("realm", row), args=args, default_output="json")
         return 0
     item = RealmStore().create(name=args.name, server_id=args.server)
+    _append_scope_activation_event("realm.created", realm_id=item.id, name=item.name, server_id=item.server_id)
     _print_stage42(_object_envelope("realm", _realm_row(item)), args=args, default_output="json")
     return 0
 

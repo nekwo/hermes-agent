@@ -101,6 +101,29 @@ def test_realm_use_reconciles_active_workspace(isolate_agent_runtime_root):
     assert "workspace.activated" in types
 
 
+def test_workspace_create_in_active_realm_auto_activates(isolate_agent_runtime_root):
+    """Creating a workspace inside the active realm while none is active
+    lands the operator in it (workspace.created + workspace.activated
+    events keep stream consumers current)."""
+    from agent_runtime.events import EventLog
+
+    realm = RealmStore().create(name="Fresh Realm")
+    RealmStore().set_active(realm.id)
+    assert WorkspaceStore().active_id() is None
+
+    result = _run_harness(
+        "workspace", "create", "--name", "First Workspace", "--realm", realm.id, "--json"
+    )
+    assert result.returncode == 0, result.stderr
+    created = json.loads(result.stdout)
+    assert WorkspaceStore().active_id() == created["id"]
+    assert WorkspaceStore().get(created["id"]).realm_id == realm.id
+
+    types = [event.type for event in EventLog().tail(4)]
+    assert "workspace.created" in types
+    assert "workspace.activated" in types
+
+
 def test_goal_id_current_stage_and_assignment_grouping(isolate_agent_runtime_root):
     task = TaskStore().create(_task("task_1", goal_id="goal_1"))
     loaded = TaskStore().get_goal("goal_1")
