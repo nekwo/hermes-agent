@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import logging
 import re
 import time
 from collections.abc import Iterator
@@ -7,6 +9,7 @@ from typing import Any
 
 from hermes_time import now
 
+from . import paths
 from .daemon import daemon_status_schema
 from .events import EventLog
 from .models import Event
@@ -106,12 +109,28 @@ def stream_frames(
     heartbeat_interval_seconds: float = 5.0,
     max_frames: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Yield hydrate, delta, and heartbeat frames for ``hermes harness stream``."""
+    """Yield hydrate, delta, and heartbeat frames for ``hermes harness stream``.
+
+    Freshness backstop (Stage 12): every store mutation is supposed to append
+    an EventLog event (enforced by test_store_event_invariant), but a write
+    that slips the rule would freeze watermark-gated consumers FOREVER — they
+    drop same-offset re-hydrates, so only an offset advance converges them.
+    At heartbeat cadence this loop fingerprints the scope/catalog state that
+    isn't guarded by evented stores at runtime; if the fingerprint changed
+    while the offset did not, it appends a synthetic ``state.reconciled``
+    event, which flows out as an ordinary full-core delta. Declared SLO:
+    client staleness ≤ 2× heartbeat interval for ANY write. Every
+    ``state.reconciled`` in the log names a producer bug to fix at source.
+    """
 
     log = event_log or EventLog()
     emitted = 0
     hydrate = hydrate_frame()
     offset = int(((hydrate.get("watermark") or {}).get("event_offset")) or 0)
+    # Memoize BEFORE the first yield: a generator body pauses at yield, so a
+    # memo taken after it would absorb any write racing the consumer's first
+    # pull — exactly the writes the watchdog exists to catch.
+    known_fingerprint = _scope_fingerprint()
     yield hydrate
     emitted += 1
     if max_frames is not None and emitted >= max_frames:
@@ -128,8 +147,18 @@ def stream_frames(
             last_heartbeat = time.monotonic()
             if max_frames is not None and emitted >= max_frames:
                 return
+        if emitted_delta:
+            # Evented mutations legitimately move the fingerprint; refresh the
+            # memo so the watchdog only fires on offset-less changes.
+            known_fingerprint = _scope_fingerprint()
 
         if not emitted_delta and time.monotonic() - last_heartbeat >= heartbeat_interval_seconds:
+            fingerprint = _scope_fingerprint()
+            if fingerprint != known_fingerprint and _append_state_reconciled(log, fingerprint):
+                known_fingerprint = fingerprint
+                # Skip the sleep: the next iteration reads the appended event
+                # and emits the reconcile delta (which resets the heartbeat).
+                continue
             yield heartbeat_frame(offset=offset)
             emitted += 1
             last_heartbeat = time.monotonic()
@@ -137,6 +166,78 @@ def stream_frames(
                 return
 
         time.sleep(max(0.01, float(poll_interval_seconds)))
+
+
+def _scope_fingerprint() -> str:
+    """Cheap mtime/size fingerprint of scope/catalog state (Stage 12 backstop).
+
+    Covers exactly the state whose writers have historically slipped the
+    event rule or sit outside ``agent_runtime/store.py``: the active-scope
+    pointer files, the workspace/realm/persona stores, and the blueprint
+    catalog. Evented, high-churn stores (tasks/runs/proofs/incidents) are
+    guarded by the store/event CI invariant instead — fingerprinting them
+    here would only mask violations that test already prevents.
+    """
+
+    parts: list[str] = []
+    for path in (paths.active_realm_path(), paths.active_workspace_path()):
+        try:
+            stat = path.stat()
+            parts.append(f"{path.name}:{stat.st_mtime_ns}:{stat.st_size}")
+        except OSError:
+            parts.append(f"{path.name}:absent")
+    directories = [paths.workspaces_dir(), paths.realms_dir(), paths.agents_dir()]
+    try:
+        from .blueprints.store import BlueprintStore
+
+        directories.extend(BlueprintStore().roots)
+    except Exception:  # noqa: BLE001 — catalog fingerprint is best-effort
+        pass
+    for directory in directories:
+        try:
+            entries = [
+                entry
+                for pattern in ("*.json", "*.yaml", "*.yml")
+                for entry in directory.glob(pattern)
+            ]
+        except OSError:
+            continue
+        for entry in sorted(entries):
+            try:
+                stat = entry.stat()
+                parts.append(f"{entry.name}:{stat.st_mtime_ns}:{stat.st_size}")
+            except OSError:
+                continue
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _append_state_reconciled(log: EventLog, fingerprint: str) -> bool:
+    """Append the synthetic watchdog event; True when the offset advanced.
+
+    Cross-process guard: if another stream consumer just reconciled the same
+    fingerprint, its event already advanced the offset — skip the duplicate
+    and let the normal delta path deliver it. Best effort: a broken event log
+    degrades to plain heartbeats (bounded UI ageing), never a stream crash.
+    """
+
+    try:
+        tail = log.tail(1)
+        if tail and tail[0].type == "state.reconciled" and tail[0].payload.get("fingerprint") == fingerprint:
+            return True
+        log.append(
+            Event(
+                now(),
+                "state.reconciled",
+                None,
+                None,
+                None,
+                {"fingerprint": fingerprint, "source": "stream_watchdog"},
+            )
+        )
+        return True
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).warning("state.reconciled append failed", exc_info=True)
+        return False
 
 
 def _delta_op(event: Event) -> str:

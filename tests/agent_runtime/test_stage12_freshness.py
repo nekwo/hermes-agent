@@ -141,6 +141,80 @@ def test_agent_store_save_emits_persona_updated():
     assert event.payload["persona_id"] == "stage12_persona"
 
 
+# ── Slice C: stream backstop — bounded staleness for ANY write ──────────────
+
+
+def test_stream_scope_switch_yields_delta_with_fresh_active_pointer():
+    """A scope switch mid-stream must reach the client as a delta whose full
+    core already carries the new active pointer — no forced poll."""
+
+    from agent_runtime.store import RealmStore
+    from agent_runtime.stream import stream_frames
+
+    realm_a = RealmStore().create(name="Realm A")
+    realm_b = RealmStore().create(name="Realm B")
+    RealmStore().set_active(realm_a.id)
+
+    frames = stream_frames(poll_interval_seconds=0.01, heartbeat_interval_seconds=30.0)
+    hydrate = next(frames)
+    assert hydrate["type"] == "hydrate"
+    assert hydrate["core"]["active_realm_id"] == realm_a.id
+
+    RealmStore().set_active(realm_b.id)
+    delta = next(frames)
+    frames.close()
+    assert delta["type"] == "delta"
+    assert delta["entity"]["event"]["type"] == "realm.activated"
+    assert delta["core"]["active_realm_id"] == realm_b.id
+
+
+def test_stream_backstop_reconciles_eventless_write():
+    """A write that bypasses the store entirely (rule violation) must still
+    converge within the Stage 12 SLO via a synthetic state.reconciled delta."""
+
+    import json
+
+    import agent_runtime.paths as paths
+    from agent_runtime.store import RealmStore
+    from agent_runtime.stream import stream_frames
+
+    realm = RealmStore().create(name="Ghost Realm")
+
+    frames = stream_frames(poll_interval_seconds=0.01, heartbeat_interval_seconds=0.05)
+    assert next(frames)["type"] == "hydrate"
+
+    # Simulate the violation: flip the active pointer with a RAW file write —
+    # no store, no event, offset unchanged.
+    pointer = paths.active_realm_path()
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"realm_id": realm.id}), encoding="utf-8")
+
+    reconcile = None
+    for _ in range(50):  # bounded: well past 2× the 0.05s heartbeat interval
+        frame = next(frames)
+        if frame["type"] == "delta":
+            reconcile = frame
+            break
+    frames.close()
+
+    assert reconcile is not None, "event-less write never reconciled — backstop failed"
+    assert reconcile["entity"]["event"]["type"] == "state.reconciled"
+    assert reconcile["entity"]["event"]["payload"]["source"] == "stream_watchdog"
+    assert reconcile["core"]["active_realm_id"] == realm.id
+
+
+def test_stream_backstop_stays_quiet_without_mutations():
+    """No false positives: an idle harness heartbeats, never reconciles."""
+
+    from agent_runtime.stream import stream_frames
+
+    frames = stream_frames(poll_interval_seconds=0.01, heartbeat_interval_seconds=0.03)
+    assert next(frames)["type"] == "hydrate"
+    kinds = {next(frames)["type"] for _ in range(3)}
+    frames.close()
+    assert kinds == {"heartbeat"}
+
+
 def test_workspace_use_verb_emits_exactly_one_activation(capsys):
     """No double emission: the verb no longer appends on top of the store."""
     from hermes_cli.harness import _cmd_workspace_use
