@@ -56,6 +56,11 @@ def heartbeat_frame(*, offset: int) -> dict[str, Any]:
     stream consumer's runtime HUD freezes exactly while the daemon idles.
     The block is read-model telemetry: consumers merge it fire-and-forget
     and a dropped frame only ages the HUD, never runtime state.
+
+    Stage 12 rule: this block is the ONE sanctioned out-of-band channel
+    (eventing per-loop status writes would flood the log), and its shape is
+    pinned by ``daemon_status_schema`` + the stream contract test. New
+    event-less state gets EVENTS, not a second heartbeat rider.
     """
 
     frame = {
@@ -138,6 +143,13 @@ def stream_frames(
 
     last_heartbeat = time.monotonic()
     while True:
+        # Fingerprint BEFORE reading events. A delta batch rebuilds a full
+        # snapshot per event (slow); a memo taken AFTER the batch would absorb
+        # any event-less write that raced the batch — swallowing forever the
+        # exact violations the watchdog exists to catch (found by live proof).
+        # Taken before the read, a racing write always lands in a LATER
+        # iteration's candidate and reconciles at the next heartbeat.
+        fingerprint_candidate = _scope_fingerprint()
         emitted_delta = False
         for next_offset, event in log.iter_from_offset(offset):
             offset = int(next_offset)
@@ -148,14 +160,16 @@ def stream_frames(
             if max_frames is not None and emitted >= max_frames:
                 return
         if emitted_delta:
-            # Evented mutations legitimately move the fingerprint; refresh the
-            # memo so the watchdog only fires on offset-less changes.
-            known_fingerprint = _scope_fingerprint()
+            # Evented mutations legitimately move the fingerprint; adopt the
+            # pre-batch candidate so the watchdog only fires on offset-less
+            # changes. (An evented write landing between the candidate and the
+            # batch read can cause one spurious reconcile — harmless: it is
+            # just an extra full-core delta.)
+            known_fingerprint = fingerprint_candidate
 
         if not emitted_delta and time.monotonic() - last_heartbeat >= heartbeat_interval_seconds:
-            fingerprint = _scope_fingerprint()
-            if fingerprint != known_fingerprint and _append_state_reconciled(log, fingerprint):
-                known_fingerprint = fingerprint
+            if fingerprint_candidate != known_fingerprint and _append_state_reconciled(log, fingerprint_candidate):
+                known_fingerprint = fingerprint_candidate
                 # Skip the sleep: the next iteration reads the appended event
                 # and emits the reconcile delta (which resets the heartbeat).
                 continue

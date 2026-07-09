@@ -203,6 +203,51 @@ def test_stream_backstop_reconciles_eventless_write():
     assert reconcile["core"]["active_realm_id"] == realm.id
 
 
+def test_eventless_write_coincident_with_evented_batch_still_converges():
+    """Live-proof regression (2026-07-09): the watchdog memo must be taken
+    BEFORE the delta batch. A memo taken after the batch absorbed any
+    event-less write racing the batch — swallowed forever. With the pre-batch
+    candidate, a write visible before the batch is delivered through the
+    batch's own full cores (each delta rebuilds the snapshot at emission
+    time), and a write after the candidate reconciles at the next heartbeat —
+    either way the client converges."""
+
+    import json
+
+    import agent_runtime.paths as paths
+    from agent_runtime.store import RealmStore, WorkspaceStore
+    from agent_runtime.stream import stream_frames
+
+    realm_a = RealmStore().create(name="Realm A")
+    realm_b = RealmStore().create(name="Realm B")
+    workspace = WorkspaceStore().create(name="WS")
+    RealmStore().set_active(realm_a.id)
+
+    frames = stream_frames(poll_interval_seconds=0.01, heartbeat_interval_seconds=0.05)
+    assert next(frames)["type"] == "hydrate"
+
+    # Evented mutation AND a raw rule-violating write land in the same window.
+    RealmStore().set_active(realm_b.id)
+    pointer = paths.active_workspace_path()
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(json.dumps({"workspace_id": workspace.id}), encoding="utf-8")
+
+    converged = None
+    for _ in range(60):
+        frame = next(frames)
+        if frame["type"] != "delta":
+            continue
+        core = frame["core"]
+        if core.get("active_realm_id") == realm_b.id and core.get("active_workspace_id") == workspace.id:
+            converged = frame
+            break
+    frames.close()
+    assert converged is not None, (
+        "client never converged on BOTH the evented switch and the raw write — "
+        "the batch/memo race is back"
+    )
+
+
 def test_stream_backstop_stays_quiet_without_mutations():
     """No false positives: an idle harness heartbeats, never reconciles."""
 
@@ -213,6 +258,85 @@ def test_stream_backstop_stays_quiet_without_mutations():
     kinds = {next(frames)["type"] for _ in range(3)}
     frames.close()
     assert kinds == {"heartbeat"}
+
+
+# ── Slice D: contract-validated appends — strict in CI, observe live ────────
+
+
+def test_strict_mode_rejects_missing_summary_fields(monkeypatch):
+    from hermes_time import now as _now
+
+    from agent_runtime.models import Event
+
+    monkeypatch.setenv("HERMES_EVENT_CONTRACT_STRICT", "1")
+    import pytest
+
+    with pytest.raises(ValueError, match="missing contract summary fields"):
+        EventLog().append(Event(_now(), "realm.created", None, None, None, {}))
+    assert EventLog().tail(1) == []
+
+
+def test_observe_mode_warns_but_appends(monkeypatch, caplog):
+    import logging
+
+    from hermes_time import now as _now
+
+    from agent_runtime.models import Event
+
+    monkeypatch.delenv("HERMES_EVENT_CONTRACT_STRICT", raising=False)
+    import agent_runtime.events as events_module
+
+    events_module._WARNED_CONTRACT_SHAPES.clear()  # per-process warn dedupe
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.events"):
+        EventLog().append(Event(_now(), "realm.created", None, None, None, {}))
+    assert EventLog().tail(1)[0].type == "realm.created"
+    assert any("missing contract summary fields" in record.message for record in caplog.records)
+
+
+def test_strict_mode_accepts_contract_complete_payload(monkeypatch):
+    from hermes_time import now as _now
+
+    from agent_runtime.models import Event
+
+    monkeypatch.setenv("HERMES_EVENT_CONTRACT_STRICT", "1")
+    EventLog().append(
+        Event(_now(), "realm.created", None, None, None, {"realm_id": "realm_x", "name": "X"})
+    )
+    assert EventLog().tail(1)[0].payload["realm_id"] == "realm_x"
+
+
+# ── Slice F: the heartbeat daemon block is the ONE pinned side channel ──────
+
+
+def test_heartbeat_daemon_block_schema_is_pinned():
+    """The daemon block is the single sanctioned out-of-band heartbeat rider
+    (eventing per-loop status writes would flood the log). Pin its shape so
+    it evolves consciously — and pin that heartbeats carry NO core: the
+    launcher drops same-offset snapshots, so a heartbeat core would be a
+    silently-dead channel (Stage 12)."""
+
+    from agent_runtime.daemon import DAEMON_STATUS_SCHEMA_VERSION
+    from agent_runtime.stream import heartbeat_frame
+
+    frame = heartbeat_frame(offset=123)
+    assert "core" not in frame
+    block = frame.get("daemon")
+    assert isinstance(block, dict)
+    required = {
+        "schema_version",
+        "field_set_version",
+        "state",
+        "pid",
+        "heartbeat_at",
+        "target_task_id",
+        "settle_stop_reason",
+        "loops",
+    }
+    missing = required - set(block)
+    assert not missing, f"daemon status block lost pinned keys: {sorted(missing)}"
+    assert block["schema_version"] == DAEMON_STATUS_SCHEMA_VERSION
+    assert isinstance(block["state"], str)
+    assert isinstance(block["loops"], int)
 
 
 def test_workspace_use_verb_emits_exactly_one_activation(capsys):
