@@ -251,6 +251,51 @@ def test_chat_reply_routes_tool_calls_into_session_keyed_trace(tmp_path, monkeyp
     assert events[1].payload.get("status") == "passed"
 
 
+def test_reasoning_summary_does_not_fire_pre_trace_ack(tmp_path, monkeypatch):
+    # gpt-5.5 (codex) emits a reasoning-summary run.progress event on EVERY
+    # turn, including tool-less "Hi" turns. It belongs in the Trace lane but
+    # must NOT latch before_first_trace: doing so persisted a canned
+    # "I'll check that now…" acknowledgment row on every conversational turn
+    # (a phantom transcript row with no client_message_id that reordered the
+    # Agent Console at snapshot reconcile). The ack hook fires on the first
+    # run.tool.started only.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime.progress import ChatProgressSink
+
+    fired = []
+    sink = ChatProgressSink(
+        session_id="session_reasoning_no_ack",
+        persona_id="neko_supervisor",
+        before_first_trace=fired.append,
+    )
+
+    sink.emit(
+        "run.progress",
+        {
+            "type": "run.progress",
+            "phase": "thinking_process",
+            "step": "reasoning_summary",
+            "status": "running",
+            "reasoning_summary": "Hi Master — I'm here.",
+        },
+    )
+    assert fired == []  # reasoning trace recorded, ack hook untouched
+
+    sink.emit(
+        "run.tool.started",
+        {"type": "run.tool.started", "tool_name": "terminal", "status": "running"},
+    )
+    assert len(fired) == 1
+    assert fired[0]["type"] == "run.tool.started"
+
+    # Latched: a second tool start must not re-fire the ack.
+    sink.emit(
+        "run.tool.started",
+        {"type": "run.tool.started", "tool_name": "terminal", "status": "running"},
+    )
+    assert len(fired) == 1
+
+
 def test_persona_chat_prompt_allows_real_tools_and_forbids_fabrication():
     from agent_runtime.persona_runtime import _persona_chat_system_prompt
 

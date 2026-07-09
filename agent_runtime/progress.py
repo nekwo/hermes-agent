@@ -166,7 +166,16 @@ class ChatProgressSink:
                 if self.on_trace is not None:
                     self.on_trace(safe_payload)
                 return None
-            if not self._did_emit_first_trace:
+            # before_first_trace is the operator-channel "agent started tool
+            # work" hook (the mission-chat handler persists an acknowledgment
+            # row from it). Latch it on the first REAL tool start only: a
+            # reasoning-summary run.progress event also reaches this sink (it
+            # belongs in the Trace lane), and latching on it persisted a
+            # canned "I'll check that now…" row on every tool-less chat turn —
+            # a phantom transcript row with no client_message_id that popped
+            # in above the streamed reply at snapshot reconcile and made the
+            # console order jump.
+            if not self._did_emit_first_trace and event_type == "run.tool.started":
                 self._did_emit_first_trace = True
                 if self.before_first_trace is not None:
                     self.before_first_trace(safe_payload)
