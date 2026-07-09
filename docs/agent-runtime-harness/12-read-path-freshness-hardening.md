@@ -175,3 +175,19 @@ that names any future regression.
   `producerViolationCount`, both bridge force sites routed through it)
   implemented with tests in the EterniaLauncher repo. Strict-run measured
   314/1310 → suite-wide strict recorded as follow-up debt (see slice D).
+- 2026-07-09 validation: full gate `tests/agent_runtime` +
+  `tests/hermes_cli/test_harness_cli.py` — **1658 passed, 0 failed** (default
+  posture). LIVE PROOF (real CLI, isolated root): (1) `realm use` reached the
+  stream as a `realm.activated` delta carrying the new `active_realm_id`
+  within one cycle, no forced poll; (2) a RAW pointer write (rule violation,
+  no store, no event) reconciled via a `state.reconciled` delta in **2.78s**
+  (SLO 4s at 2s heartbeat). The live proof also caught a real defect the unit
+  tests missed: the watchdog memo must be taken BEFORE the delta batch — a
+  post-batch memo absorbed writes racing the batch (fixed `8e12a5e02`,
+  regression-pinned in `test_stage12_freshness.py`). Launcher: tripwire tests
+  4/4 + bridge suite 74/74, `flutter analyze` clean; launcher edits left
+  uncommitted (entangled with pre-existing uncommitted MC work in the same
+  files — commit together with that set).
+- REMAINING TO SHIP: merge this branch to hermes `main` (+ push per deploy
+  policy); commit the launcher MC working set; live-soak
+  `producerViolationCount` at zero, then remove the forceFresh gate bypass.
