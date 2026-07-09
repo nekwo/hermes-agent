@@ -102,9 +102,9 @@ def test_realm_use_reconciles_active_workspace(isolate_agent_runtime_root):
 
 
 def test_workspace_create_in_active_realm_auto_activates(isolate_agent_runtime_root):
-    """Creating a workspace inside the active realm while none is active
-    lands the operator in it (workspace.created + workspace.activated
-    events keep stream consumers current)."""
+    """Creating a workspace inside the active realm lands the operator in
+    it — the view follows the creation (workspace.created +
+    workspace.activated events keep stream consumers current)."""
     from agent_runtime.events import EventLog
 
     realm = RealmStore().create(name="Fresh Realm")
@@ -122,6 +122,15 @@ def test_workspace_create_in_active_realm_auto_activates(isolate_agent_runtime_r
     types = [event.type for event in EventLog().tail(4)]
     assert "workspace.created" in types
     assert "workspace.activated" in types
+
+    # A second create in the same active realm moves the active pointer:
+    # the operator always lands in the workspace they just created.
+    result = _run_harness(
+        "workspace", "create", "--name", "Second Workspace", "--realm", realm.id, "--json"
+    )
+    assert result.returncode == 0, result.stderr
+    second = json.loads(result.stdout)
+    assert WorkspaceStore().active_id() == second["id"]
 
 
 def test_goal_id_current_stage_and_assignment_grouping(isolate_agent_runtime_root):

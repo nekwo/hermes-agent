@@ -1261,8 +1261,11 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # happens to advance the offset.
     "realm.adopted": EventContract("realm.adopted", "Realm adopted", ("realm_id", "name"), ("server_id",)),
     "realm.created": EventContract("realm.created", "Realm created", ("realm_id", "name"), ("server_id",)),
+    "realm.updated": EventContract("realm.updated", "Realm updated", ("realm_id", "change"), ("server_id",)),
     "realm.activated": EventContract("realm.activated", "Active realm changed", ("realm_id",), ("name",)),
     "workspace.created": EventContract("workspace.created", "Workspace created", ("workspace_id", "name"), ("realm_id",)),
+    "workspace.updated": EventContract("workspace.updated", "Workspace updated", ("workspace_id", "change"), ("name", "persona_id")),
+    "workspace.archived": EventContract("workspace.archived", "Workspace archived", ("workspace_id",), ("name",)),
     "workspace.activated": EventContract("workspace.activated", "Active workspace changed", ("workspace_id",), ("name",)),
     "realm.sync.pulled": EventContract("realm.sync.pulled", "Realm pulled", ("realm_id", "changed"), ("artifacts",)),
     "realm.sync.published": EventContract("realm.sync.published", "Realm published", ("realm_id", "changed"), ("artifacts", "commit")),
