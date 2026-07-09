@@ -1269,4 +1269,11 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "workspace.activated": EventContract("workspace.activated", "Active workspace changed", ("workspace_id",), ("name",)),
     "realm.sync.pulled": EventContract("realm.sync.pulled", "Realm pulled", ("realm_id", "changed"), ("artifacts",)),
     "realm.sync.published": EventContract("realm.sync.published", "Realm published", ("realm_id", "changed"), ("artifacts", "commit")),
+    "blueprint.saved": EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title")),
+    "persona.updated": EventContract("persona.updated", "Persona updated", ("persona_id",), ("display_name",)),
+    # Synthetic watchdog event: appended by stream_frames when the scope/catalog
+    # fingerprint changed while the EventLog offset did not — an event-less write
+    # slipped the Stage 12 rule. Advances the watermark so gated consumers
+    # converge; every occurrence names a producer bug to fix at the source.
+    "state.reconciled": EventContract("state.reconciled", "Read model reconciled after event-less write", ("fingerprint",), ("source",)),
 }

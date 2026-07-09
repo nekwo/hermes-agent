@@ -2138,6 +2138,10 @@ def _cmd_blueprint_save(args) -> int:
         data = {"ok": False, "error": str(exc)}
         print(emit_json(data) if args.json else data["error"])
         return 2
+    # The blueprint catalog is client-visible snapshot state (snapshot
+    # `blueprints[]`); a save without an event is invisible to the
+    # watermark-gated stream/read-model pipeline (Stage 12).
+    _append_scope_event("blueprint.saved", blueprint_id=bp.id, version=bp.version, title=bp.title)
     data = {"ok": True, "blueprint_id": bp.id, "version": bp.version, "path": str(path), "blueprint": blueprint_summary(bp)}
     print(emit_json(data) if args.json else f"saved blueprint {bp.id} -> {path}")
     return 0
