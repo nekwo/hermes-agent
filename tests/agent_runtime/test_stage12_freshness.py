@@ -73,3 +73,85 @@ def test_blueprint_save_failure_appends_no_event(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     assert EventLog().tail(1) == []
     assert not (tmp_path / "catalog").exists()
+
+
+# ── Slice B1: emission lives at the STORE chokepoint, not the CLI verb ──────
+
+
+def _offset() -> int:
+    import agent_runtime.paths as paths
+
+    path = paths.events_path()
+    return path.stat().st_size if path.exists() else 0
+
+
+def test_workspace_set_active_emits_at_store_level_and_advances_offset():
+    from agent_runtime.store import WorkspaceStore
+
+    workspace = WorkspaceStore().create(name="Chokepoint WS")
+    before = _offset()
+    WorkspaceStore().set_active(workspace.id)  # programmatic caller, NO CLI verb
+    assert _offset() > before
+
+    event = EventLog().tail(1)[0]
+    assert event.type == "workspace.activated"
+    assert event.payload["workspace_id"] == workspace.id
+    assert event.payload["name"] == "Chokepoint WS"
+
+
+def test_realm_set_active_clear_emits_cleared_payload():
+    from agent_runtime.store import RealmStore
+
+    RealmStore().set_active(None)
+    event = EventLog().tail(1)[0]
+    assert event.type == "realm.activated"
+    assert event.payload["cleared"] is True
+    assert "realm_id" not in event.payload
+
+
+def test_workspace_rename_emits_specific_event_exactly_once():
+    from agent_runtime.store import WorkspaceStore
+
+    workspace = WorkspaceStore().create(name="Before")
+    WorkspaceStore().rename(workspace.id, "After")
+    renames = [e for e in EventLog().tail(10) if e.type == "workspace.updated"]
+    assert len(renames) == 1  # named mutator emits once; save(emit_event=False) inside
+    assert renames[0].payload["change"] == "renamed"
+    assert renames[0].payload["name"] == "After"
+
+
+def test_agent_store_save_emits_persona_updated():
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.store import AgentStore
+
+    AgentStore().save(
+        AgentPersona(
+            id="stage12_persona",
+            display_name="Stage 12",
+            role="dev",
+            model="m",
+            provider="p",
+            api_mode="codex_responses",
+            toolsets=[],
+            system_prompt_path="dev.md",
+        )
+    )
+    event = EventLog().tail(1)[0]
+    assert event.type == "persona.updated"
+    assert event.payload["persona_id"] == "stage12_persona"
+
+
+def test_workspace_use_verb_emits_exactly_one_activation(capsys):
+    """No double emission: the verb no longer appends on top of the store."""
+    from hermes_cli.harness import _cmd_workspace_use
+    from agent_runtime.store import WorkspaceStore
+
+    workspace = WorkspaceStore().create(name="Verb WS")
+    assert _cmd_workspace_use(SimpleNamespace(workspace_id=workspace.id, json=True)) == 0
+    capsys.readouterr()
+    activations = [
+        e
+        for e in EventLog().tail(10)
+        if e.type == "workspace.activated" and e.payload.get("workspace_id") == workspace.id
+    ]
+    assert len(activations) == 1

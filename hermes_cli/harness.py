@@ -1561,13 +1561,13 @@ def _cmd_workspace_create(args) -> int:
         if item.id not in realm.workspace_ids:
             realm.workspace_ids.append(item.id)
             RealmStore().save(realm)
-    _append_scope_event("workspace.created", workspace_id=item.id, name=item.name, realm_id=item.realm_id)
     # A workspace created inside the ACTIVE realm becomes active
     # immediately — the operator expects to land in the workspace they
     # just created, not to run a second `workspace use` by hand.
+    # (workspace.created / workspace.activated are emitted by the store
+    # chokepoint — Stage 12.)
     if item.realm_id and item.realm_id == RealmStore().active_id():
         WorkspaceStore().set_active(item.id)
-        _append_scope_event("workspace.activated", workspace_id=item.id, name=item.name)
     _print_stage42(_object_envelope("workspace", _workspace_row(item), warnings=[]), args=args, default_output="json")
     return 0
 
@@ -1575,17 +1575,16 @@ def _cmd_workspace_create(args) -> int:
 def _cmd_workspace_use(args) -> int:
     WorkspaceStore().set_active(args.workspace_id)
     item = WorkspaceStore().get(args.workspace_id)
-    _append_scope_event("workspace.activated", workspace_id=item.id, name=item.name)
     _print_stage42(_object_envelope("workspace", _workspace_row(item)), args=args, default_output="json")
     return 0
 
 
 def _append_scope_event(event_type: str, **payload) -> None:
-    """Advance the EventLog watermark after a scope store mutation
-    (create/update/archive/activate) so stream/read-model consumers see
-    it — event-less store mutations are invisible to them until an
-    unrelated event happens to move the offset. Payload values of None
-    are dropped. Best effort: a broken event log must not fail the verb."""
+    """Advance the EventLog watermark after a verb-layer mutation with no
+    evented store chokepoint. Stage 12 moved scope emission into the stores
+    (agent_runtime/store.py); this helper remains for catalog writes like
+    `blueprint save`. Payload values of None are dropped. Best effort: a
+    broken event log must not fail the verb."""
     try:
         body = {key: value for key, value in payload.items() if value is not None}
         EventLog().append(Event(now(), event_type, None, None, None, body))
@@ -1653,7 +1652,6 @@ def _cmd_workspace_add_agent(args) -> int:
         _print_stage42(_object_envelope("workspace", row, warnings=warnings), args=args, default_output="json")
         return 0
     item = WorkspaceStore().add_agent(args.workspace_id, args.persona_id)
-    _append_scope_event("workspace.updated", workspace_id=item.id, change="agent_added", persona_id=args.persona_id)
     warnings = _workspace_agent_sync_warnings(item.id, args.persona_id)
     _print_stage42(_object_envelope("workspace", _workspace_row(item), warnings=warnings), args=args, default_output="json")
     return 0
@@ -1680,7 +1678,6 @@ def _cmd_workspace_remove_agent(args) -> int:
         item = WorkspaceStore().get(args.workspace_id)
     else:
         item = WorkspaceStore().remove_agent(args.workspace_id, args.persona_id)
-        _append_scope_event("workspace.updated", workspace_id=item.id, change="agent_removed", persona_id=args.persona_id)
     _print_stage42(_object_envelope("workspace", _workspace_row(item)), args=args, default_output="json")
     return 0
 
@@ -1690,7 +1687,6 @@ def _cmd_workspace_rename(args) -> int:
         item = WorkspaceStore().get(args.workspace_id)
     else:
         item = WorkspaceStore().rename(args.workspace_id, args.name)
-        _append_scope_event("workspace.updated", workspace_id=item.id, change="renamed", name=item.name)
     row = _workspace_row(item)
     if getattr(args, "dry_run", False):
         row["name"] = args.name
@@ -1705,7 +1701,6 @@ def _cmd_workspace_archive(args) -> int:
         item = WorkspaceStore().get(args.workspace_id)
     else:
         item = WorkspaceStore().archive(args.workspace_id)
-        _append_scope_event("workspace.archived", workspace_id=item.id, name=item.name)
     _print_stage42(_object_envelope("workspace", _workspace_row(item, full=True)), args=args, default_output="json")
     return 0
 
@@ -1744,7 +1739,6 @@ def _cmd_realm_create(args) -> int:
         _print_stage42(_object_envelope("realm", row), args=args, default_output="json")
         return 0
     item = RealmStore().create(name=args.name, server_id=args.server)
-    _append_scope_event("realm.created", realm_id=item.id, name=item.name, server_id=item.server_id)
     _print_stage42(_object_envelope("realm", _realm_row(item)), args=args, default_output="json")
     return 0
 
@@ -1754,7 +1748,6 @@ def _cmd_realm_bind_server(args) -> int:
         item = RealmStore().get(args.realm_id)
     else:
         item = RealmStore().bind_server(args.realm_id, args.server_id)
-        _append_scope_event("realm.updated", realm_id=item.id, change="server_bound", server_id=args.server_id)
     row = _realm_row(item)
     if getattr(args, "dry_run", False):
         row["server_id"] = args.server_id
@@ -1765,7 +1758,6 @@ def _cmd_realm_bind_server(args) -> int:
 def _cmd_realm_use(args) -> int:
     RealmStore().set_active(args.realm_id)
     item = RealmStore().get(args.realm_id)
-    _append_scope_event("realm.activated", realm_id=item.id, name=item.name)
     _reconcile_active_workspace_to_realm(item)
     _print_stage42(_object_envelope("realm", _realm_row(item)), args=args, default_output="json")
     return 0
@@ -1793,12 +1785,9 @@ def _reconcile_active_workspace_to_realm(realm) -> None:
     configured_order = {wid: index for index, wid in enumerate(getattr(realm, "workspace_ids", None) or [])}
     candidates.sort(key=lambda workspace: (configured_order.get(workspace.id, len(configured_order)), workspace.id))
     next_workspace = candidates[0] if candidates else None
+    # set_active emits workspace.activated (or {"cleared": true}) at the
+    # store chokepoint — Stage 12.
     store.set_active(next_workspace.id if next_workspace else None)
-    _append_scope_event(
-        "workspace.activated",
-        workspace_id=next_workspace.id if next_workspace else None,
-        name=next_workspace.name if next_workspace else None,
-    )
 
 
 def _realm_sync_credential(args):

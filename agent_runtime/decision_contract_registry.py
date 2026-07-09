@@ -1262,11 +1262,15 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "realm.adopted": EventContract("realm.adopted", "Realm adopted", ("realm_id", "name"), ("server_id",)),
     "realm.created": EventContract("realm.created", "Realm created", ("realm_id", "name"), ("server_id",)),
     "realm.updated": EventContract("realm.updated", "Realm updated", ("realm_id", "change"), ("server_id",)),
-    "realm.activated": EventContract("realm.activated", "Active realm changed", ("realm_id",), ("name",)),
+    # Activation events carry realm_id/workspace_id when a scope is activated
+    # and {"cleared": true} when the active pointer is cleared — so the ids
+    # live in detail_fields, not summary_fields (Stage 12 slice D validates
+    # summary_fields on append).
+    "realm.activated": EventContract("realm.activated", "Active realm changed", (), ("realm_id", "name", "cleared")),
     "workspace.created": EventContract("workspace.created", "Workspace created", ("workspace_id", "name"), ("realm_id",)),
     "workspace.updated": EventContract("workspace.updated", "Workspace updated", ("workspace_id", "change"), ("name", "persona_id")),
     "workspace.archived": EventContract("workspace.archived", "Workspace archived", ("workspace_id",), ("name",)),
-    "workspace.activated": EventContract("workspace.activated", "Active workspace changed", ("workspace_id",), ("name",)),
+    "workspace.activated": EventContract("workspace.activated", "Active workspace changed", (), ("workspace_id", "name", "cleared")),
     "realm.sync.pulled": EventContract("realm.sync.pulled", "Realm pulled", ("realm_id", "changed"), ("artifacts",)),
     "realm.sync.published": EventContract("realm.sync.published", "Realm published", ("realm_id", "changed"), ("artifacts", "commit")),
     "blueprint.saved": EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title")),

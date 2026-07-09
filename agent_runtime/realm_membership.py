@@ -288,7 +288,10 @@ def _upsert_realm(store: RealmStore, *, realm_id: str, server_id: str, name: str
         item.sync_manifest_ref = git_url
         changed = True
     if changed and not dry_run:
-        item = store.save(item)  # workspace_ids untouched — preserved on re-adopt
+        # emit_event=False: adopt_realms appends its own richer realm.adopted
+        # event for this same mutation; a generic realm.updated would be a
+        # duplicate watermark bump (Stage 12).
+        item = store.save(item, emit_event=False)  # workspace_ids untouched — preserved on re-adopt
     return item
 
 

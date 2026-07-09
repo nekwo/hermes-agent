@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import uuid
@@ -87,6 +88,25 @@ def _read_model(cls: type[T], path: Path) -> T:
 def _write_model(path: Path, model) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json_write(path, to_jsonable(model), indent=2, sort_keys=True)
+
+
+def _append_store_event(event_log: EventLog, event_type: str, **payload) -> None:
+    """Advance the EventLog watermark after a store mutation (Stage 12).
+
+    The stream/read-model pipeline is watermark-gated: a store write with no
+    event is invisible to every consumer (launcher snapshot, serve read model)
+    until an unrelated event advances the offset. Emission lives HERE, at the
+    store chokepoint, so programmatic callers are covered — not just CLI verbs.
+    Payload values of None are dropped. Best effort: a broken event log must
+    not fail the write, but the failure is logged, never silent.
+    """
+    try:
+        body = {key: value for key, value in payload.items() if value is not None}
+        event_log.append(Event(now(), event_type, None, None, None, body))
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "store event append failed: %s", event_type, exc_info=True
+        )
 
 
 def _list_models(cls: type[T], directory: Path) -> list[T]:
@@ -490,8 +510,17 @@ class ArchiveStore:
 
 
 class AgentStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
     def save(self, persona: AgentPersona) -> AgentPersona:
         _write_model(paths.agent_path(persona.id), persona)
+        _append_store_event(
+            self.event_log,
+            "persona.updated",
+            persona_id=persona.id,
+            display_name=persona.display_name,
+        )
         return persona
 
     def get(self, persona_id: str) -> AgentPersona:
@@ -502,6 +531,9 @@ class AgentStore:
 
 
 class WorkspaceStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
     def create(
         self,
         *,
@@ -537,6 +569,13 @@ class WorkspaceStore:
         if path.exists():
             raise AlreadyExists(item.id)
         _write_model(path, item)
+        _append_store_event(
+            self.event_log,
+            "workspace.created",
+            workspace_id=item.id,
+            name=item.name,
+            realm_id=item.realm_id,
+        )
         return self.get(item.id)
 
     def get(self, workspace_id: str) -> Workspace:
@@ -548,16 +587,25 @@ class WorkspaceStore:
             items = [item for item in items if not item.archived]
         return sorted(items, key=lambda item: (item.name.lower(), item.id))
 
-    def save(self, item: Workspace) -> Workspace:
+    def save(self, item: Workspace, *, emit_event: bool = True) -> Workspace:
+        """``emit_event=False`` is for named mutators (rename/archive/…) that
+        append their own, more specific event — never for skipping emission."""
         item.updated_at = now()
         _write_model(paths.workspace_path(item.id), item)
+        if emit_event:
+            _append_store_event(
+                self.event_log, "workspace.updated", workspace_id=item.id, change="saved", name=item.name
+            )
         return self.get(item.id)
 
     def set_active(self, workspace_id: str | None) -> dict:
         value = _safe_model_id(workspace_id)
-        if value:
-            self.get(value)
+        name = self.get(value).name if value else None
         _write_model(paths.active_workspace_path(), {"workspace_id": value, "updated_at": now()})
+        if value:
+            _append_store_event(self.event_log, "workspace.activated", workspace_id=value, name=name)
+        else:
+            _append_store_event(self.event_log, "workspace.activated", cleared=True)
         return {"workspace_id": value}
 
     def active_id(self) -> str | None:
@@ -572,27 +620,44 @@ class WorkspaceStore:
         persona = _safe_model_id(persona_id)
         if persona and persona not in item.agent_ids:
             item.agent_ids.append(persona)
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log, "workspace.updated", workspace_id=item.id, change="agent_added", persona_id=persona
+        )
+        return item
 
     def remove_agent(self, workspace_id: str, persona_id: str) -> Workspace:
         item = self.get(workspace_id)
         persona = _safe_model_id(persona_id)
         item.agent_ids = [value for value in item.agent_ids if value != persona]
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log, "workspace.updated", workspace_id=item.id, change="agent_removed", persona_id=persona
+        )
+        return item
 
     def rename(self, workspace_id: str, name: str) -> Workspace:
         item = self.get(workspace_id)
         item.name = _safe_display_name(name)
         item.slug = _slugify(item.name)
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log, "workspace.updated", workspace_id=item.id, change="renamed", name=item.name
+        )
+        return item
 
     def archive(self, workspace_id: str) -> Workspace:
         item = self.get(workspace_id)
         item.archived = True
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(self.event_log, "workspace.archived", workspace_id=item.id, name=item.name)
+        return item
 
 
 class RealmStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
     def create(self, *, name: str, server_id: str | None = None, realm_id: str | None = None) -> Realm:
         clean_name = _safe_display_name(name)
         if not clean_name:
@@ -611,6 +676,9 @@ class RealmStore:
         if path.exists():
             raise AlreadyExists(item.id)
         _write_model(path, item)
+        _append_store_event(
+            self.event_log, "realm.created", realm_id=item.id, name=item.name, server_id=item.server_id
+        )
         return self.get(item.id)
 
     def get(self, realm_id: str) -> Realm:
@@ -622,21 +690,32 @@ class RealmStore:
             items = [item for item in items if not item.archived]
         return sorted(items, key=lambda item: (item.name.lower(), item.id))
 
-    def save(self, item: Realm) -> Realm:
+    def save(self, item: Realm, *, emit_event: bool = True) -> Realm:
+        """``emit_event=False`` is for callers that append their own, more
+        specific event in the same mutation (bind_server, realm adopt)."""
         item.updated_at = now()
         _write_model(paths.realm_path(item.id), item)
+        if emit_event:
+            _append_store_event(self.event_log, "realm.updated", realm_id=item.id, change="saved")
         return self.get(item.id)
 
     def bind_server(self, realm_id: str, server_id: str) -> Realm:
         item = self.get(realm_id)
         item.server_id = _safe_model_id(server_id)
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log, "realm.updated", realm_id=item.id, change="server_bound", server_id=item.server_id
+        )
+        return item
 
     def set_active(self, realm_id: str | None) -> dict:
         value = _safe_model_id(realm_id)
-        if value:
-            self.get(value)
+        name = self.get(value).name if value else None
         _write_model(paths.active_realm_path(), {"realm_id": value, "updated_at": now()})
+        if value:
+            _append_store_event(self.event_log, "realm.activated", realm_id=value, name=name)
+        else:
+            _append_store_event(self.event_log, "realm.activated", cleared=True)
         return {"realm_id": value}
 
     def active_id(self) -> str | None:
