@@ -38,6 +38,18 @@ _DENY_CODES = {"membership_denied", "role_insufficient", "sync_auth_failed", "in
 _HTTP_TIMEOUT_SECONDS = 10.0
 
 
+def _user_agent() -> str:
+    """Explicit UA for every realm-sync backend request. The stdlib
+    default (``Python-urllib/3.x``) is bot-blocked by the Cloudflare
+    edge in front of the production API — those requests die as bare
+    403s that used to masquerade as ``membership_denied``."""
+    try:
+        from hermes_cli import __version__ as version
+    except Exception:  # noqa: BLE001 — UA must never break a sync call
+        version = "unknown"
+    return f"Hermes-Agent/{version} (realm-sync)"
+
+
 @dataclass(frozen=True, slots=True)
 class RealmSyncCredential:
     """Parsed launcher-brokered sync credential (contract frozen, schema v1)."""
@@ -257,6 +269,16 @@ def _decision_from_response(status: int, payload: Any, *, action: str) -> Member
     body = payload if isinstance(payload, dict) else {}
     message = str(body.get("message") or "").strip()
     code = str(body.get("code") or "").strip()
+    # Django Ninja HttpError bodies carry the deny code as {"detail": …}
+    # (no code/message keys) — honor it so real backend reasons
+    # (role_insufficient, …) survive instead of collapsing to the
+    # generic membership_denied string.
+    detail = str(body.get("detail") or "").strip()
+    if detail:
+        if not code and detail in _DENY_CODES:
+            code = detail
+        elif not message:
+            message = detail
     if status == 200 and "allowed" in body:
         if bool(body.get("allowed")):
             return MembershipDecision(True, code or None, message)
@@ -303,6 +325,7 @@ def _request_json(
     """
     data = None
     request_headers = dict(headers or {})
+    request_headers.setdefault("User-Agent", _user_agent())
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         request_headers["Content-Type"] = "application/json"

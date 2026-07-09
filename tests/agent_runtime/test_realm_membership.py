@@ -229,6 +229,59 @@ def test_backend_provider_rejects_unknown_action():
     assert decision.code == "invalid_request"
 
 
+def test_request_json_sends_hermes_user_agent(monkeypatch):
+    """The stdlib default UA (Python-urllib/3.x) is bot-blocked by the
+    Cloudflare edge in front of the production API — every realm-sync
+    request must carry an explicit Hermes-Agent UA."""
+    captured = {}
+
+    class _FakeResponse:
+        status = 200
+
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    def _fake_urlopen(request, timeout):
+        captured["user_agent"] = request.get_header("User-agent")
+        return _FakeResponse()
+
+    monkeypatch.setattr(
+        realm_membership_module.urllib.request, "urlopen", _fake_urlopen
+    )
+    status, _payload = realm_membership_module._request_json(
+        "GET", "https://api.test.invalid/api/realms"
+    )
+    assert status == 200
+    assert captured["user_agent"].startswith("Hermes-Agent/")
+    assert "Python-urllib" not in captured["user_agent"]
+
+
+def test_decision_from_response_honors_ninja_detail_code():
+    """Django Ninja HttpError bodies carry the deny code as
+    {"detail": …} — the real backend reason must survive instead of
+    collapsing to the generic membership_denied string."""
+    decision = realm_membership_module._decision_from_response(
+        403, {"detail": "role_insufficient"}, action="publish"
+    )
+    assert decision.allowed is False
+    assert decision.code == "role_insufficient"
+
+
+def test_decision_from_response_uses_unknown_detail_as_message():
+    decision = realm_membership_module._decision_from_response(
+        403, {"detail": "banned from this server"}, action="pull"
+    )
+    assert decision.allowed is False
+    assert decision.code == "membership_denied"
+    assert decision.message == "banned from this server"
+
+
 # --- realm adopt ---------------------------------------------------------------
 
 
