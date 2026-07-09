@@ -19,7 +19,8 @@ if TYPE_CHECKING:
 
 from . import paths
 from .config import ensure_persisted_personas, load_agent_runtime_config
-from .models import AgentPersona, Realm, Workspace
+from .events import EventLog
+from .models import AgentPersona, Event, Realm, Workspace
 from .profile_context import active_profile_name, resolve_persona_profile
 from .skill_install import HARNESS_SKILLS, install_harness_skills, install_harness_skills_for_personas
 from .store import RealmStore, WorkspaceStore
@@ -173,6 +174,12 @@ def publish_realm_sync(
     if warnings:
         result["warnings"] = warnings
     _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifact_count=len(artifacts))
+    _append_realm_sync_event(
+        "realm.sync.published",
+        realm,
+        changed=changed,
+        artifacts=len(artifacts),
+    )
     return result
 
 
@@ -217,7 +224,38 @@ def pull_realm_sync(
         "ok": all(item.ok for item in install_results),
     }
     _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifact_count=len(artifacts))
+    _append_realm_sync_event(
+        "realm.sync.pulled",
+        realm,
+        changed=changed,
+        artifacts=len(artifacts),
+    )
     return result
+
+
+def _append_realm_sync_event(event_type: str, realm: Realm, *, changed: bool, artifacts: int) -> None:
+    """Advance the EventLog watermark after a sync mutation so stream /
+    read-model consumers refresh (event-less store/sidecar writes are
+    invisible to them). Emitted for pull/publish only — NEVER for
+    status, which itself runs off published events and would loop.
+    Best effort: a broken event log must not fail the sync verb."""
+    try:
+        EventLog().append(
+            Event(
+                now(),
+                event_type,
+                None,
+                None,
+                None,
+                {
+                    "realm_id": realm.id,
+                    "changed": changed,
+                    "artifacts": artifacts,
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 — evidence channel, not the mutation
+        pass
 
 
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:

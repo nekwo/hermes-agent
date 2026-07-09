@@ -323,6 +323,14 @@ def test_adopt_upserts_granted_realms(isolate_agent_runtime_root, monkeypatch):
     assert stored.name == "Eternia Community"
     assert stored.sync_manifest_ref == "https://git.test.invalid/realm-sync/eternia.git"
 
+    # The store mutation must advance the EventLog watermark — the
+    # stream/read-model pipeline is invisible to event-less writes.
+    from agent_runtime.events import EventLog
+
+    adopted_events = [e for e in EventLog().iter_all() if e.type == "realm.adopted"]
+    assert sorted(e.payload["realm_id"] for e in adopted_events) == ["realm_eternia", "realm_other"]
+    assert adopted_events[0].payload["server_id"] == "srv_9"
+
 
 def test_adopt_is_idempotent(isolate_agent_runtime_root, monkeypatch):
     monkeypatch.setattr(
@@ -386,6 +394,10 @@ def test_adopt_dry_run_persists_nothing(isolate_agent_runtime_root, monkeypatch)
     adopted = adopt_realms(_credential(), dry_run=True)
     assert sorted(item.id for item in adopted) == ["realm_eternia", "realm_other"]
     assert RealmStore().list_all() == []
+
+    from agent_runtime.events import EventLog
+
+    assert [e for e in EventLog().iter_all() if e.type == "realm.adopted"] == []
 
 
 def test_adopt_denied_maps_membership_denied(isolate_agent_runtime_root, monkeypatch):

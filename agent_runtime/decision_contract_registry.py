@@ -1254,4 +1254,12 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "scope.override_recorded": EventContract("scope.override_recorded", "Scope override recorded", ("affected_repos",), ("named_repo_scope", "scope_override_reason", "summary")),
     "daemon.started": EventContract("daemon.started", "Mission driver started", ("mode",), ("pid", "queue_mode", "self_driven")),
     "daemon.stopped": EventContract("daemon.stopped", "Mission driver stopped", ("mode",), ("pid", "reason", "self_driven")),
+    # Realm store mutations. Every RealmStore write MUST ride one of
+    # these: the stream/read-model pipeline is watermark-gated on the
+    # EventLog, so an event-less mutation is invisible to every consumer
+    # (launcher snapshot, serve read model) until an unrelated event
+    # happens to advance the offset.
+    "realm.adopted": EventContract("realm.adopted", "Realm adopted", ("realm_id", "name"), ("server_id",)),
+    "realm.sync.pulled": EventContract("realm.sync.pulled", "Realm pulled", ("realm_id", "changed"), ("artifacts",)),
+    "realm.sync.published": EventContract("realm.sync.published", "Realm published", ("realm_id", "changed"), ("artifacts", "commit")),
 }

@@ -26,7 +26,8 @@ from typing import Any
 from hermes_time import now
 
 from .errors import NotFound
-from .models import Realm
+from .events import EventLog
+from .models import Event, Realm
 from .realm_sync import MembershipDecision, RealmMembershipProvider, RealmSyncError
 from .store import RealmStore
 
@@ -211,7 +212,33 @@ def adopt_realms(credential: RealmSyncCredential, *, server_id: str | None = Non
                 dry_run=dry_run,
             )
         )
+    if not dry_run:
+        for realm in adopted:
+            _append_realm_adopted_event(realm)
     return adopted
+
+
+def _append_realm_adopted_event(realm: Realm) -> None:
+    """Advance the EventLog watermark so stream/read-model consumers see
+    the store mutation (event-less writes are invisible to them). Best
+    effort: a broken event log must never fail the adopt itself."""
+    try:
+        EventLog().append(
+            Event(
+                now(),
+                "realm.adopted",
+                None,
+                None,
+                None,
+                {
+                    "realm_id": realm.id,
+                    "name": realm.name,
+                    "server_id": realm.server_id,
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 — evidence channel, not the mutation
+        pass
 
 
 def notify_realm_published(credential: RealmSyncCredential, realm_id: str, *, commit: str, artifact_counts: dict[str, int]) -> None:
