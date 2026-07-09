@@ -248,8 +248,17 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             )
             for t in tasks
         ],
-        "workspaces": [_workspace_summary(item, tasks=tasks) for item in workspaces],
-        "realms": [_realm_summary(item, workspaces=workspaces) for item in realms],
+        # Rows carry a resolved ``active`` flag alongside the top-level
+        # ``active_*_id`` keys — consumers (launcher scope switcher) key
+        # selection off the row flag and must not re-derive it.
+        "workspaces": [
+            _workspace_summary(item, tasks=tasks, active_id=workspace_store.active_id())
+            for item in workspaces
+        ],
+        "realms": [
+            _realm_summary(item, workspaces=workspaces, active_id=realm_store.active_id())
+            for item in realms
+        ],
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
@@ -2018,7 +2027,7 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
     return row
 
 
-def _workspace_summary(workspace, *, tasks) -> dict:
+def _workspace_summary(workspace, *, tasks, active_id: str | None = None) -> dict:
     goals = [task for task in tasks if getattr(task, "workspace_id", None) == workspace.id]
     return {
         "id": workspace.id,
@@ -2033,11 +2042,12 @@ def _workspace_summary(workspace, *, tasks) -> dict:
         "max_concurrent_lanes": workspace.max_concurrent_lanes,
         "default_blueprint_id": workspace.default_blueprint_id,
         "archived": bool(workspace.archived),
+        "active": workspace.id == active_id,
         "updated_at": workspace.updated_at,
     }
 
 
-def _realm_summary(realm, *, workspaces) -> dict:
+def _realm_summary(realm, *, workspaces, active_id: str | None = None) -> dict:
     workspace_ids = [workspace.id for workspace in workspaces if getattr(workspace, "realm_id", None) == realm.id]
     configured_ids = list(getattr(realm, "workspace_ids", []) or [])
     merged_ids = list(dict.fromkeys([*configured_ids, *workspace_ids]))
@@ -2055,6 +2065,7 @@ def _realm_summary(realm, *, workspaces) -> dict:
         # null so the launcher renders "not checked", not a fake in_sync.
         "sync": read_realm_sync_sidecar(realm.id),
         "archived": bool(realm.archived),
+        "active": realm.id == active_id,
         "updated_at": realm.updated_at,
     }
 
