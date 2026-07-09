@@ -28,6 +28,27 @@ hygiene). Observability rows only — never authority.
 
 **Result: reported `build_ms` 3700 → 2943 warm (~20%).**
 
+## Slice 2 — coalesced concurrent builds (SHIPPED this stage)
+
+Concurrent default-store builds are strictly additive under the GIL —
+measured live: one warm build 3.3s, **three concurrent builds 8.8s EACH**
+(this, not the build itself, was the launcher's 9050ms chip: boot fires
+hydrate + status polls together). `build_snapshot` now serializes and
+coalesces the default path: arrivals during a build wait and share the NEXT
+build (never the in-flight one — its state may predate the caller's
+arrival), so a boot storm costs at most two sequential fast builds.
+Injected stores (tests, doctors) bypass coalescing.
+
+Sharing copies via `copy.deepcopy`, NOT a JSON round-trip — the core
+carries datetime objects and `json.dumps` raised `TypeError`, which a
+defensive except silently converted into "no sharing at all" on the live
+store while the JSON-safe unit fakes stayed green. The regression test now
+puts a datetime in the fake core.
+
+**Result: boot-storm first response 8.2s → 3.6s; per-request
+[8.24, 8.27, 8.77] → [3.62, 7.78, 7.93]; individual builds no longer
+degrade under concurrency.**
+
 ## Remaining plan (in value order, not scheduled)
 
 1. **Per-domain store read caches in the serve child** — most of the 7,302

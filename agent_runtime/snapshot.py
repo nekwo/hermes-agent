@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
+import threading
 import time
 import hashlib
 from datetime import datetime, timezone
@@ -106,7 +108,97 @@ def _runtime_paths_diagnostic(available_personas: list) -> dict:
     return out
 
 
+# Concurrent core builds are strictly additive under the GIL — measured
+# 2026-07-09 on the live store: one warm build 3.3s, three concurrent builds
+# 8.8s EACH (the launcher's "snapshot build 9050ms" chip). Mission Control
+# boot fires hydrate + status polls together, so without coalescing every
+# boot request pays the whole storm. Builds on the default-store path are
+# therefore serialized and coalesced: a caller arriving while a build runs
+# waits and shares the NEXT build (never the in-flight one — its state may
+# predate the caller's arrival), so N concurrent requests cost at most two
+# sequential fast builds. Sharing copies via copy.deepcopy, NOT a JSON
+# round-trip: the core carries datetime objects, and a json.dumps here
+# raised TypeError and silently disabled sharing on the live store (found
+# 2026-07-09 — the unit fakes were JSON-safe). The builder deep-copies once
+# into the share slot and every waiter deep-copies out, so no two callers
+# ever alias one snapshot dict.
+_BUILD_COALESCE = threading.Condition()
+_build_coalesce_state: dict = {
+    "running": False,
+    "started": 0,
+    "done": 0,
+    "result": None,
+    "waiters": 0,
+}
+
+
 def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
+    custom_stores = any(
+        value is not None
+        for value in (
+            task_store,
+            run_store,
+            agent_store,
+            proof_store,
+            incident_store,
+            event_log,
+            worker_session_store,
+        )
+    )
+    if custom_stores:
+        # Injected stores (tests, doctors) must observe exactly their own
+        # fixtures — never a coalesced result built from the default stores.
+        return _build_snapshot_uncoalesced(
+            task_store=task_store,
+            run_store=run_store,
+            agent_store=agent_store,
+            proof_store=proof_store,
+            incident_store=incident_store,
+            event_log=event_log,
+            worker_session_store=worker_session_store,
+        )
+    state = _build_coalesce_state
+    with _BUILD_COALESCE:
+        # The first build STARTED at/after arrival is the one that satisfies
+        # this caller; an in-flight build began earlier and may miss writes
+        # this caller has already observed.
+        target = state["started"] + 1
+        while True:
+            if state["done"] >= target and state["result"] is not None:
+                payload = copy.deepcopy(state["result"])
+                if state["waiters"] == 0:
+                    state["result"] = None
+                return payload
+            if not state["running"]:
+                state["running"] = True
+                state["started"] += 1
+                generation = state["started"]
+                break
+            state["waiters"] += 1
+            _BUILD_COALESCE.wait()
+            state["waiters"] -= 1
+    result = None
+    try:
+        result = _build_snapshot_uncoalesced()
+        return result
+    finally:
+        with _BUILD_COALESCE:
+            state["running"] = False
+            if result is not None:
+                state["done"] = generation
+                state["result"] = None
+                if state["waiters"]:
+                    try:
+                        state["result"] = copy.deepcopy(result)
+                    except Exception:
+                        # Uncopyable core: waiters fall back to building
+                        # their own — never raise from finally (it would
+                        # replace the builder's own return value).
+                        state["result"] = None
+            _BUILD_COALESCE.notify_all()
+
+
+def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
     _build_started = time.perf_counter()
     task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
