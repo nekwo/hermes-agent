@@ -3197,10 +3197,42 @@ def _agent_summary(agent, *, include_tool_details: bool = False):
     return summary
 
 
-def _available_persona_summary(agents) -> list[dict]:
+# Profile-template discovery re-parses every profile YAML (~0.7s of one
+# snapshot core, measured 2026-07-09) and the catalog changes only when the
+# operator installs/creates a profile. Same TTL-memo treatment as the skill
+# catalog in prompt_observability — observability rows, never authority; a
+# new profile appears on the first core built after the TTL lapses.
+_PROFILE_TEMPLATE_TTL_SECONDS = 15.0
+_profile_template_memo: dict = {"at": 0.0, "rows": None, "fn": None}
+
+
+def _profile_templates_cached() -> list:
+    """Memo keyed on BOTH the TTL and the fetcher's identity: a
+    monkeypatched `available_profile_templates` invalidates the memo
+    immediately instead of being masked for a TTL window."""
+    import time
+
+    fetcher = available_profile_templates
+    now = time.monotonic()
+    if (
+        _profile_template_memo["rows"] is not None
+        and _profile_template_memo["fn"] is fetcher
+        and now - _profile_template_memo["at"] < _PROFILE_TEMPLATE_TTL_SECONDS
+    ):
+        return _profile_template_memo["rows"]
     try:
-        templates = available_profile_templates()
+        rows = list(fetcher())
     except Exception:
+        rows = []
+    _profile_template_memo["rows"] = rows
+    _profile_template_memo["at"] = now
+    _profile_template_memo["fn"] = fetcher
+    return rows
+
+
+def _available_persona_summary(agents) -> list[dict]:
+    templates = _profile_templates_cached()
+    if not templates:
         return []
     backs_by_profile = {
         str(getattr(agent, "hermes_profile", "") or ""): str(getattr(agent, "id", "") or "")

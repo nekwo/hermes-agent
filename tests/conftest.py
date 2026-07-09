@@ -326,6 +326,25 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
 
 
 @pytest.fixture(autouse=True)
+def _reset_snapshot_catalog_memos():
+    """The snapshot core's TTL memos (installed-skill catalog, profile
+    templates) must never leak rows across tests — tests monkeypatch the
+    underlying fetchers (`skills_tool._find_all_skills`,
+    `snapshot.available_profile_templates`) and a warm memo would mask the
+    patch. Start every test cold."""
+    for module_name, attr in (
+        ("agent_runtime.prompt_observability", "_skill_catalog_memo"),
+        ("agent_runtime.snapshot", "_profile_template_memo"),
+    ):
+        module = sys.modules.get(module_name)
+        memo = getattr(module, attr, None) if module else None
+        if isinstance(memo, dict):
+            memo["rows"] = None
+            memo["at"] = 0.0
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_environment(tmp_path, monkeypatch):
     """Blank out all credential/behavioral env vars so local and CI match.
 

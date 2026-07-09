@@ -623,6 +623,53 @@ def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any
     return skills
 
 
+# The installed-skill catalog walk parses every SKILL.md frontmatter (~1k
+# YAML loads across one snapshot core, measured 2026-07-09), and the core
+# asks once per persona chat session (15+ times per build). A short TTL memo
+# collapses that to one walk per build. Observability rows only — never
+# authority — so a skill installed/removed mid-window simply appears on the
+# first core built after the TTL lapses.
+_SKILL_CATALOG_TTL_SECONDS = 15.0
+_skill_catalog_memo: dict[str, Any] = {"at": 0.0, "rows": None, "walker": None}
+
+
+def _resolve_skill_walker():
+    try:
+        from tools.skills_tool import _find_all_skills
+
+        return _find_all_skills
+    except Exception:
+        return None
+
+
+def _installed_skill_catalog() -> list:
+    """Memo keyed on BOTH the TTL and the walker's identity: a monkeypatched
+    or hot-reloaded `skills_tool._find_all_skills` invalidates the memo
+    immediately instead of being masked for a TTL window."""
+    import time
+
+    walker = _resolve_skill_walker()
+    now = time.monotonic()
+    if (
+        _skill_catalog_memo["rows"] is not None
+        and _skill_catalog_memo["walker"] is walker
+        and now - _skill_catalog_memo["at"] < _SKILL_CATALOG_TTL_SECONDS
+    ):
+        return _skill_catalog_memo["rows"]
+    rows: list = []
+    if walker is not None:
+        try:
+            installed = walker()
+            if isinstance(installed, list):
+                rows = installed
+        except Exception:
+            rows = []
+    _skill_catalog_memo["rows"] = rows
+    _skill_catalog_memo["at"] = now
+    _skill_catalog_memo["walker"] = walker
+    return rows
+
+
 def available_skills_context(
     *,
     accessible_skills: list[dict[str, Any]] | None = None,
@@ -640,12 +687,7 @@ def available_skills_context(
         if isinstance(item, dict) and safe_assignment_token(item.get("name"))
     }
     rows: list[dict[str, Any]] = []
-    try:
-        from tools.skills_tool import _find_all_skills
-
-        installed = _find_all_skills()
-    except Exception:
-        installed = []
+    installed = _installed_skill_catalog()
     if isinstance(installed, list):
         for skill in installed:
             if not isinstance(skill, dict):
