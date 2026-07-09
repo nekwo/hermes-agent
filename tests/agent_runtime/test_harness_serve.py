@@ -353,3 +353,73 @@ def test_real_dispatch_argv_parse_failure(isolate_agent_runtime_root):
     exits = [f for f in frames if f.get("event") == "exit"]
     assert exits[0]["code"] == 2
     assert any(f.get("event") == "stderr" for f in frames)
+
+
+def test_cancel_drops_a_queued_request_before_dispatch():
+    """A request still queued behind the pool is cancellable: it must answer
+    an exit frame with cancelled=true and its argv must NEVER dispatch (the
+    Stage 13 wedged-child scenario — an abandoned scope mutation draining
+    minutes later)."""
+    started = threading.Event()
+    release = threading.Event()
+    dispatched: list[list[str]] = []
+
+    def dispatch(argv):
+        dispatched.append(list(argv))
+        started.set()
+        assert release.wait(10)
+        return 0
+
+    def requests():
+        yield _request("r1", ["harness", "status", "--json"])
+        assert started.wait(10)
+        # pool_size=1: r1 owns the only worker, so r2 sits queued.
+        yield _request("r2", ["harness", "realm", "use", "realm_x", "--json"])
+        yield json.dumps({"op": "cancel", "id": "r2"}) + "\n"
+        release.set()
+        yield SHUTDOWN
+
+    out = io.StringIO()
+    assert serve_loop(requests(), out, pool_size=1, dispatch=dispatch) == 0
+    frames = _frames(out)
+
+    exits = {frame["id"]: frame for frame in frames if frame.get("event") == "exit"}
+    assert exits["r2"]["cancelled"] is True
+    assert exits["r2"]["code"] == 130
+    assert exits["r1"]["code"] == 0
+    assert dispatched == [["harness", "status", "--json"]]
+
+
+def test_cancel_of_running_or_unknown_request_is_denied():
+    """A running request is uninterruptible and an unknown id may already
+    have finished — both answer cancel_denied with the state, telling the
+    client the side effect may still land (the --issued-at replay guard is
+    what makes that safe)."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def dispatch(argv):
+        started.set()
+        assert release.wait(10)
+        return 0
+
+    def requests():
+        yield _request("r1", ["harness", "status", "--json"])
+        assert started.wait(10)
+        yield json.dumps({"op": "cancel", "id": "r1"}) + "\n"
+        yield json.dumps({"op": "cancel", "id": "ghost"}) + "\n"
+        yield json.dumps({"op": "cancel"}) + "\n"
+        release.set()
+        yield SHUTDOWN
+
+    out = io.StringIO()
+    assert serve_loop(requests(), out, dispatch=dispatch) == 0
+    frames = _frames(out)
+
+    denied = {frame["id"]: frame for frame in frames if frame.get("event") == "cancel_denied"}
+    assert denied["r1"]["state"] == "running"
+    assert denied["ghost"]["state"] == "unknown"
+    errors = [frame for frame in frames if frame.get("event") == "error"]
+    assert errors and errors[0]["error"] == "invalid_request"
+    exits = {frame["id"]: frame for frame in frames if frame.get("event") == "exit"}
+    assert exits["r1"]["code"] == 0 and "cancelled" not in exits["r1"]

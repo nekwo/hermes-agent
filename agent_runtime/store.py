@@ -109,6 +109,58 @@ def _append_store_event(event_log: EventLog, event_type: str, **payload) -> None
         )
 
 
+def _parse_intent_basis(value):
+    """Parse an ISO-8601 UTC intent basis into a datetime; None when absent or
+    unparseable (fail-open — a malformed basis must never block a scope
+    switch, it just loses supersede protection for that one write)."""
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+
+        text = str(value).strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _resolve_activation_write(pointer_path: Path, key: str, value: str | None, issued_at: str | None) -> tuple[str, str | None, str]:
+    """Compare-and-set decision for an active-pointer write.
+
+    Mutation intents carry the wall-clock instant the operator issued them
+    (``issued_at``). Transport can deliver an intent twice (serve timeout →
+    CLI fallback re-runs the same argv) or late (a wedged serve child drains
+    an abandoned request minutes later) — the intent's basis, not its arrival
+    order, decides who wins. Returns ``(decision, current_value, basis)``:
+
+    - ``apply``      — write the pointer and emit the activation event.
+    - ``superseded`` — a strictly newer intent already owns the pointer; do
+      not write, do not emit.
+    - ``duplicate``  — the exact same intent (same basis, same target) was
+      already applied; do not write, do not emit (exact-once event feed).
+
+    A caller with no basis (human at a terminal, legacy callers) is stamped
+    ``now()`` so the basis timeline always advances and manual actions win.
+    """
+    basis = issued_at or now()
+    try:
+        current = _read_json(pointer_path)
+    except Exception:
+        return "apply", None, basis
+    current_value = _safe_model_id(current.get(key))
+    incoming = _parse_intent_basis(basis)
+    stored = _parse_intent_basis(current.get("intent_issued_at"))
+    if incoming is None or stored is None:
+        return "apply", current_value, basis
+    if incoming < stored:
+        return "superseded", current_value, basis
+    if incoming == stored and value == current_value:
+        return "duplicate", current_value, basis
+    return "apply", current_value, basis
+
+
 def _list_models(cls: type[T], directory: Path) -> list[T]:
     if not directory.exists():
         return []
@@ -599,15 +651,23 @@ class WorkspaceStore:
             )
         return self.get(item.id)
 
-    def set_active(self, workspace_id: str | None) -> dict:
+    def set_active(self, workspace_id: str | None, *, issued_at: str | None = None) -> dict:
         value = _safe_model_id(workspace_id)
         name = self.get(value).name if value else None
-        _write_model(paths.active_workspace_path(), {"workspace_id": value, "updated_at": now()})
+        decision, current_value, basis = _resolve_activation_write(
+            paths.active_workspace_path(), "workspace_id", value, issued_at
+        )
+        if decision != "apply":
+            return {"workspace_id": current_value, "applied": False, "reason": decision, "requested_workspace_id": value}
+        _write_model(
+            paths.active_workspace_path(),
+            {"workspace_id": value, "updated_at": now(), "intent_issued_at": basis},
+        )
         if value:
             _append_store_event(self.event_log, "workspace.activated", workspace_id=value, name=name)
         else:
             _append_store_event(self.event_log, "workspace.activated", cleared=True)
-        return {"workspace_id": value}
+        return {"workspace_id": value, "applied": True}
 
     def active_id(self) -> str | None:
         try:
@@ -709,15 +769,23 @@ class RealmStore:
         )
         return item
 
-    def set_active(self, realm_id: str | None) -> dict:
+    def set_active(self, realm_id: str | None, *, issued_at: str | None = None) -> dict:
         value = _safe_model_id(realm_id)
         name = self.get(value).name if value else None
-        _write_model(paths.active_realm_path(), {"realm_id": value, "updated_at": now()})
+        decision, current_value, basis = _resolve_activation_write(
+            paths.active_realm_path(), "realm_id", value, issued_at
+        )
+        if decision != "apply":
+            return {"realm_id": current_value, "applied": False, "reason": decision, "requested_realm_id": value}
+        _write_model(
+            paths.active_realm_path(),
+            {"realm_id": value, "updated_at": now(), "intent_issued_at": basis},
+        )
         if value:
             _append_store_event(self.event_log, "realm.activated", realm_id=value, name=name)
         else:
             _append_store_event(self.event_log, "realm.activated", cleared=True)
-        return {"realm_id": value}
+        return {"realm_id": value, "applied": True}
 
     def active_id(self) -> str | None:
         try:

@@ -405,6 +405,12 @@ def build_parser(parent_subparsers) -> None:
     workspace_create.set_defaults(func=_cmd_workspace_create)
     workspace_use = workspace_subs.add_parser("use", help="Set active workspace")
     workspace_use.add_argument("workspace_id")
+    workspace_use.add_argument(
+        "--issued-at",
+        dest="issued_at",
+        default=None,
+        help="ISO-8601 UTC instant the operator issued this switch; a pointer already owned by a strictly newer intent rejects this one as superseded (transport replay guard)",
+    )
     _add_stage42_global_args(workspace_use, mutation=True)
     workspace_use.set_defaults(func=_cmd_workspace_use)
     workspace_actors = workspace_subs.add_parser("actors", help="List typed actors in a workspace")
@@ -458,6 +464,12 @@ def build_parser(parent_subparsers) -> None:
     realm_bind.set_defaults(func=_cmd_realm_bind_server)
     realm_use = realm_subs.add_parser("use", help="Set active realm")
     realm_use.add_argument("realm_id")
+    realm_use.add_argument(
+        "--issued-at",
+        dest="issued_at",
+        default=None,
+        help="ISO-8601 UTC instant the operator issued this switch; a pointer already owned by a strictly newer intent rejects this one as superseded (transport replay guard)",
+    )
     _add_stage42_global_args(realm_use, mutation=True)
     realm_use.set_defaults(func=_cmd_realm_use)
     realm_sync = realm_subs.add_parser("sync", help="Git-backed selective sync for non-source-controlled realm artifacts")
@@ -1573,10 +1585,40 @@ def _cmd_workspace_create(args) -> int:
 
 
 def _cmd_workspace_use(args) -> int:
-    WorkspaceStore().set_active(args.workspace_id)
-    item = WorkspaceStore().get(args.workspace_id)
-    _print_stage42(_object_envelope("workspace", _workspace_row(item)), args=args, default_output="json")
+    store = WorkspaceStore()
+    outcome = store.set_active(args.workspace_id, issued_at=getattr(args, "issued_at", None))
+    if not outcome.get("applied", True):
+        _print_stage42(
+            _object_envelope("workspace", _activation_outcome_row(store, _workspace_row, outcome, "workspace_id")),
+            args=args,
+            default_output="json",
+        )
+        return 0
+    item = store.get(args.workspace_id)
+    row = _workspace_row(item)
+    row["applied"] = True
+    _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
     return 0
+
+
+def _activation_outcome_row(store, row_builder, outcome: dict, key: str) -> dict:
+    """Envelope row for a set_active call the store declined. The row shows
+    the pointer's CURRENT owner (what stays active); `applied`/`reason` tell
+    the client why its request did not take. `superseded` = a strictly newer
+    intent owns the pointer (client should drop its optimistic state);
+    `duplicate` = this exact intent already applied (client treats as
+    success). Exit code stays 0 — both are valid protocol outcomes, not
+    errors."""
+    current_id = outcome.get(key)
+    try:
+        row = row_builder(store.get(current_id)) if current_id else {"id": None, "name": None}
+    except Exception:
+        row = {"id": current_id, "name": None}
+    row["applied"] = False
+    row["reason"] = outcome.get("reason")
+    row["superseded"] = outcome.get("reason") == "superseded"
+    row[f"requested_{key}"] = outcome.get(f"requested_{key}")
+    return row
 
 
 def _append_scope_event(event_type: str, **payload) -> None:
@@ -1756,14 +1798,25 @@ def _cmd_realm_bind_server(args) -> int:
 
 
 def _cmd_realm_use(args) -> int:
-    RealmStore().set_active(args.realm_id)
-    item = RealmStore().get(args.realm_id)
-    _reconcile_active_workspace_to_realm(item)
-    _print_stage42(_object_envelope("realm", _realm_row(item)), args=args, default_output="json")
+    store = RealmStore()
+    issued_at = getattr(args, "issued_at", None)
+    outcome = store.set_active(args.realm_id, issued_at=issued_at)
+    if not outcome.get("applied", True):
+        _print_stage42(
+            _object_envelope("realm", _activation_outcome_row(store, _realm_row, outcome, "realm_id")),
+            args=args,
+            default_output="json",
+        )
+        return 0
+    item = store.get(args.realm_id)
+    _reconcile_active_workspace_to_realm(item, issued_at=issued_at)
+    row = _realm_row(item)
+    row["applied"] = True
+    _print_stage42(_object_envelope("realm", row), args=args, default_output="json")
     return 0
 
 
-def _reconcile_active_workspace_to_realm(realm) -> None:
+def _reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None) -> None:
     """Switching realms must not leave the active workspace pointing into
     another realm. Keep it when it already belongs; otherwise fall to the
     realm's first (configured order, then listing order) unarchived
@@ -1786,8 +1839,10 @@ def _reconcile_active_workspace_to_realm(realm) -> None:
     candidates.sort(key=lambda workspace: (configured_order.get(workspace.id, len(configured_order)), workspace.id))
     next_workspace = candidates[0] if candidates else None
     # set_active emits workspace.activated (or {"cleared": true}) at the
-    # store chokepoint — Stage 12.
-    store.set_active(next_workspace.id if next_workspace else None)
+    # store chokepoint — Stage 12. The realm intent's basis rides along so a
+    # late-delivered realm switch cannot clobber a newer explicit workspace
+    # selection through its reconcile.
+    store.set_active(next_workspace.id if next_workspace else None, issued_at=issued_at)
 
 
 def _realm_sync_credential(args):

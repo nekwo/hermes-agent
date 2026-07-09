@@ -25,6 +25,12 @@ Protocol (NDJSON, one frame per line):
              (the Launcher supervisor must NEVER recycle serve while
              ``chat_turns`` > 0 — recording safety)
 - shutdown:  ``{"op":"shutdown"}`` → drain in-flight requests, exit 0
+- cancel:    ``{"op":"cancel","id":"req-7"}`` → a QUEUED request is dropped
+             and answers ``{"id":"req-7","event":"exit","code":130,
+             "cancelled":true}``; a request already RUNNING (or unknown)
+             answers ``{"id":…,"event":"cancel_denied","state":
+             "running"|"unknown"}`` — its side effects may still happen, so
+             mutation verbs carry their own replay guard (``--issued-at``).
 - errors:    ``{"id":…,"event":"error","error":"invalid_request"|…,"detail":…}``
 
 Per-request stdout: handlers ``print()`` directly and streaming turns emit
@@ -44,7 +50,7 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, TextIO
 
 SERVE_SCHEMA_VERSION = 1
@@ -365,6 +371,11 @@ def serve_loop(
     read_cache = _ReadModelCache(read_cache_max_age)
 
     inflight: dict[str, _ArgvRequest] = {}
+    # Futures by request id so ``{"op":"cancel"}`` can drop work that is
+    # still queued behind the pool. A running request is uninterruptible —
+    # cancel() then returns False and the client is told the side effect may
+    # still land.
+    inflight_futures: dict[str, Future] = {}
     inflight_lock = threading.Lock()
 
     def _busy_frame() -> dict[str, Any]:
@@ -437,6 +448,7 @@ def serve_loop(
             _request_id.reset(token)
             with inflight_lock:
                 inflight.pop(request.rid, None)
+                inflight_futures.pop(request.rid, None)
             exit_frame: dict[str, Any] = {
                 "id": request.rid,
                 "event": "exit",
@@ -532,6 +544,46 @@ def serve_loop(
                     continue
                 if op == "shutdown":
                     break
+                if op == "cancel":
+                    cancel_id = message.get("id")
+                    cancel_id = cancel_id.strip() if isinstance(cancel_id, str) else ""
+                    if not cancel_id:
+                        frames.emit(
+                            {
+                                "id": None,
+                                "event": "error",
+                                "error": "invalid_request",
+                                "detail": 'cancel needs {"op": "cancel", "id": "<request id>"}',
+                            }
+                        )
+                        continue
+                    with inflight_lock:
+                        future = inflight_futures.get(cancel_id)
+                        known = cancel_id in inflight
+                    if future is not None and future.cancel():
+                        with inflight_lock:
+                            inflight.pop(cancel_id, None)
+                            inflight_futures.pop(cancel_id, None)
+                        frames.emit(
+                            {
+                                "id": cancel_id,
+                                "event": "exit",
+                                "code": 130,
+                                "cancelled": True,
+                            }
+                        )
+                    else:
+                        # Already running (uninterruptible) or unknown — the
+                        # side effect may still land; mutation verbs' own
+                        # --issued-at replay guard is what makes that safe.
+                        frames.emit(
+                            {
+                                "id": cancel_id,
+                                "event": "cancel_denied",
+                                "state": "running" if known else "unknown",
+                            }
+                        )
+                    continue
                 rid = message.get("id")
                 argv = message.get("argv")
                 if (
@@ -563,7 +615,13 @@ def serve_loop(
                         )
                         continue
                     inflight[request.rid] = request
-                pool.submit(_run, request)
+                future = pool.submit(_run, request)
+                with inflight_lock:
+                    # _run may already have finished and popped the request;
+                    # only track the future while the request is in flight so
+                    # the registry cannot leak completed entries.
+                    if request.rid in inflight:
+                        inflight_futures[request.rid] = future
             # Context-manager exit drains in-flight work before shutdown.
         frames.emit({"event": "shutdown", "pid": os.getpid()})
         return 0
