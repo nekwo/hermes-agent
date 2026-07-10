@@ -211,6 +211,7 @@ def adopt_realms(credential: RealmSyncCredential, *, server_id: str | None = Non
                 git_url=git_url,
                 default_workspace_id=str(item.get("default_workspace_id") or "").strip() or None,
                 default_workspace_name=str(item.get("default_workspace_name") or "Default").strip() or "Default",
+                default_workspace_version=_nonnegative_int(item.get("default_workspace_version")),
                 dry_run=dry_run,
             )
         )
@@ -237,6 +238,7 @@ def _append_realm_adopted_event(realm: Realm) -> None:
                     "name": realm.name,
                     "server_id": realm.server_id,
                     "default_workspace_id": realm.default_workspace_id,
+                    "default_workspace_version": realm.default_workspace_version,
                 },
             )
         )
@@ -259,6 +261,13 @@ def notify_realm_published(credential: RealmSyncCredential, realm_id: str, *, co
         )
 
 
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _upsert_realm(
     store: RealmStore,
     *,
@@ -269,6 +278,7 @@ def _upsert_realm(
     git_url: str,
     default_workspace_id: str | None,
     default_workspace_name: str,
+    default_workspace_version: int,
     dry_run: bool,
 ) -> Realm:
     workspace_store = WorkspaceStore()
@@ -300,6 +310,7 @@ def _upsert_realm(
                 server_id=server_id,
                 default_workspace_id=default_workspace_id,
                 default_workspace_name=default_workspace_name,
+                default_workspace_version=default_workspace_version,
                 workspace_ids=[default_workspace_id] if default_workspace_id else [],
                 sync_manifest_ref=git_url or None,
             )
@@ -309,6 +320,7 @@ def _upsert_realm(
             realm_id=realm_id,
             default_workspace_id=default_workspace_id,
             default_workspace_name=default_workspace_name,
+            default_workspace_version=default_workspace_version,
         )
     changed = False
     if name and item.name != name:
@@ -328,6 +340,9 @@ def _upsert_realm(
         changed = True
     if item.default_workspace_name != default_workspace_name:
         item.default_workspace_name = default_workspace_name
+        changed = True
+    if item.default_workspace_version != default_workspace_version:
+        item.default_workspace_version = default_workspace_version
         changed = True
     if default_workspace_id and default_workspace_id not in item.workspace_ids:
         item.workspace_ids.append(default_workspace_id)

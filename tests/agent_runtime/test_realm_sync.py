@@ -7,6 +7,7 @@ import pytest
 
 from hermes_constants import get_hermes_home
 
+from agent_runtime import paths as runtime_paths
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
 from agent_runtime.realm_sync import (
     RealmSyncError,
@@ -158,6 +159,70 @@ def test_realm_sync_status_cli_uses_stage42_envelope(isolate_agent_runtime_root,
     assert payload["id"] == realm.id
     assert payload["state"] in {"in_sync", "ahead", "behind", "conflict"}
     assert "sync_repo" in payload
+
+
+def test_local_workspace_status_is_local(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    workspace = WorkspaceStore().create(name="Local Office", realm_id=realm.id)
+
+    result = realm_sync_status(realm.id)
+
+    assert result["workspace_statuses"] == [
+        {"workspace_id": workspace.id, "state": "local"},
+    ]
+
+
+def test_server_workspace_moves_unpublished_to_published_and_back(
+    isolate_agent_runtime_root, tmp_path,
+):
+    realm, _repo = _realm_with_remote(tmp_path)
+    realm = RealmStore().bind_server(realm.id, "srv_workspace_status")
+    workspace = WorkspaceStore().create(name="Shared Office", realm_id=realm.id)
+
+    before = realm_sync_status(realm.id)
+    assert before["workspace_statuses"] == [
+        {"workspace_id": workspace.id, "state": "unpublished"},
+    ]
+
+    published = publish_realm_sync(realm.id)
+    assert published["workspace_statuses"] == [
+        {"workspace_id": workspace.id, "state": "published"},
+    ]
+
+    workspace.name = "Shared Office Updated"
+    WorkspaceStore().save(workspace)
+    changed = realm_sync_status(realm.id)
+    assert changed["workspace_statuses"] == [
+        {"workspace_id": workspace.id, "state": "unpublished"},
+    ]
+
+
+def test_server_pull_preserves_backend_owned_default_pointer(
+    isolate_agent_runtime_root, tmp_path,
+):
+    realm, repo = _realm_with_remote(tmp_path)
+    realm = RealmStore().bind_server(realm.id, "srv_authority")
+    realm.default_workspace_id = "ws_backend_default"
+    realm.default_workspace_name = "Backend Office"
+    realm.default_workspace_version = 8
+    realm = RealmStore().save(realm)
+
+    stale = {
+        **json.loads(runtime_paths.realm_path(realm.id).read_text(encoding="utf-8")),
+        "default_workspace_id": "ws_stale",
+        "default_workspace_name": "Stale Office",
+        "default_workspace_version": 2,
+    }
+    remote_realm = repo / "realms" / realm.id / "store" / "realms" / f"{realm.id}.json"
+    remote_realm.parent.mkdir(parents=True, exist_ok=True)
+    remote_realm.write_text(json.dumps(stale), encoding="utf-8")
+
+    pull_realm_sync(realm.id)
+
+    pulled = RealmStore().get(realm.id)
+    assert pulled.default_workspace_id == "ws_backend_default"
+    assert pulled.default_workspace_name == "Backend Office"
+    assert pulled.default_workspace_version == 8
 
 
 def _server_bound_remote_realm(name: str = "Bound Realm"):
@@ -351,6 +416,7 @@ def test_sidecar_written_by_each_verb(isolate_agent_runtime_root, tmp_path):
     assert payload["realm_id"] == realm.id
     assert payload["state"] in {"in_sync", "ahead", "behind", "conflict"}
     assert payload["checked_at"]
+    assert payload["workspace_statuses"] == []
 
     sidecar.unlink()
     pull_realm_sync(realm.id)

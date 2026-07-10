@@ -2151,6 +2151,7 @@ def _realm_summary(realm, *, workspaces, active_id: str | None = None) -> dict:
         "server_id": realm.server_id,
         "default_workspace_id": getattr(realm, "default_workspace_id", None),
         "default_workspace_name": getattr(realm, "default_workspace_name", "Default"),
+        "default_workspace_version": getattr(realm, "default_workspace_version", 0),
         "workspaces": len(merged_ids),
         "workspace_ids": merged_ids,
         # Stage 43 (Decision 7): sync state comes ONLY from the cached sidecar

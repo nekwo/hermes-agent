@@ -111,6 +111,7 @@ def realm_sync_status(
     repo = _ensure_sync_repo(realm, credential=credential)
     git = _git_state(repo)
     artifacts = resolve_realm_sync_artifacts(realm_id)
+    workspace_statuses = _workspace_sync_statuses(realm, repo)
     skills_drift = _skills_drift_for_artifacts(artifacts)
     state = _sync_state(git)
     _write_sync_sidecar(realm, repo=repo, git=git, skills_drift=skills_drift, artifact_count=len(artifacts))
@@ -127,6 +128,7 @@ def realm_sync_status(
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
         "artifacts": len(artifacts),
         "sync_repo": _safe_display_path(repo),
+        "workspace_statuses": workspace_statuses,
     }
 
 
@@ -207,7 +209,7 @@ def pull_realm_sync(
     for artifact in artifacts:
         artifact.destination.parent.mkdir(parents=True, exist_ok=True)
         before = artifact.destination.read_bytes() if artifact.destination.exists() else None
-        data = artifact.source.read_bytes()
+        data = _pulled_artifact_bytes(artifact, realm=realm)
         if before != data:
             artifact.destination.write_bytes(data)
             changed = True
@@ -401,6 +403,39 @@ def _artifacts_from_subtree(subtree: Path) -> list[RealmSyncArtifact]:
             continue
         artifacts.append(RealmSyncArtifact(kind=_kind_for_sync_path(rel), source=source, relative_path=rel, destination=destination))
     return artifacts
+
+
+def _pulled_artifact_bytes(artifact: RealmSyncArtifact, *, realm: Realm) -> bytes:
+    """Preserve backend-owned realm identity during a Git pull.
+
+    The realm JSON is shared so workspace membership can travel through Git,
+    but a server-bound realm's identity/default pointer is authoritative from
+    backend adoption. An older repo snapshot must never roll that pointer back.
+    """
+    data = artifact.source.read_bytes()
+    if artifact.kind != "realm" or not realm.server_id or not artifact.destination.exists():
+        return data
+    try:
+        incoming = json.loads(data.decode("utf-8"))
+        current = json.loads(artifact.destination.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return data
+    if not isinstance(incoming, dict) or not isinstance(current, dict):
+        return data
+    authority_fields = {
+        "id",
+        "name",
+        "slug",
+        "server_id",
+        "default_workspace_id",
+        "default_workspace_name",
+        "default_workspace_version",
+        "sync_manifest_ref",
+    }
+    for field in authority_fields:
+        if field in current:
+            incoming[field] = current[field]
+    return json.dumps(incoming, indent=2, sort_keys=True, default=str).encode("utf-8")
 
 
 def _destination_for_sync_path(rel: str) -> Path | None:
@@ -654,12 +689,13 @@ def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
         "last_publish": raw.get("last_publish"),
         "artifacts": raw.get("artifacts"),
         "checked_at": raw.get("checked_at"),
+        "workspace_statuses": raw.get("workspace_statuses") or [],
     }
 
 
 def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills_drift: list[str], artifact_count: int) -> None:
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "realm_id": realm.id,
         "state": _sync_state(git),
         "ahead": git["ahead"],
@@ -670,6 +706,7 @@ def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
         "artifacts": artifact_count,
         "checked_at": now().astimezone(timezone.utc).isoformat(),
+        "workspace_statuses": _workspace_sync_statuses(realm, repo),
     }
     try:
         atomic_json_write(realm_sync_sidecar_path(realm.id), payload)
@@ -705,7 +742,40 @@ def _sync_result(realm: Realm, action: str, state: str, artifacts: list[RealmSyn
         "secrets_excluded": [],
         "sync_repo": _safe_display_path(repo),
         "updated_at": now(),
+        "workspace_statuses": _workspace_sync_statuses(realm, repo),
     }
+
+
+def _workspace_sync_statuses(realm: Realm, repo: Path) -> list[dict[str, str]]:
+    """Return honest per-workspace publication truth for this realm.
+
+    Local realms are device-owned. A server-bound workspace is published only
+    when its current store file byte-matches the file in the checked-out realm
+    subtree; a missing or changed remote artifact is unpublished. Transient
+    syncing is deliberately a launcher phase, never persisted here.
+    """
+    workspace_store = WorkspaceStore()
+    workspace_ids = set(realm.workspace_ids or [])
+    for workspace in workspace_store.list_all(include_archived=True):
+        if workspace.realm_id == realm.id:
+            workspace_ids.add(workspace.id)
+    rows: list[dict[str, str]] = []
+    subtree = _realm_subtree(repo, realm.id) / "store" / "workspaces"
+    for workspace_id in sorted(workspace_ids):
+        local = paths.workspace_path(workspace_id)
+        if not local.exists():
+            continue
+        if not realm.server_id:
+            state = "local"
+        else:
+            published = subtree / f"{_safe_token(workspace_id)}.json"
+            try:
+                matches = published.exists() and published.read_bytes() == local.read_bytes()
+            except OSError:
+                matches = False
+            state = "published" if matches else "unpublished"
+        rows.append({"workspace_id": workspace_id, "state": state})
+    return rows
 
 
 def _skills_drift_for_artifacts(artifacts: list[RealmSyncArtifact]) -> list[str]:

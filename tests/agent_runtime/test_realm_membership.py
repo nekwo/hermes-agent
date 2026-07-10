@@ -338,6 +338,7 @@ def test_adopt_materializes_fresh_realm_owned_default_workspace(
     items = _adopt_items()
     items[0].update({
         "default_workspace_id": "ws_realm_fresh",
+        "default_workspace_version": 3,
         "default_workspace_name": "Custom Office",
     })
     monkeypatch.setattr(
@@ -351,6 +352,7 @@ def test_adopt_materializes_fresh_realm_owned_default_workspace(
     realm = RealmStore().get("realm_eternia")
     workspace = WorkspaceStore().get("ws_realm_fresh")
     assert realm.default_workspace_id == "ws_realm_fresh"
+    assert realm.default_workspace_version == 3
     assert realm.default_workspace_name == "Custom Office"
     assert realm.workspace_ids == ["ws_realm_fresh"]
     assert workspace.name == "Custom Office"

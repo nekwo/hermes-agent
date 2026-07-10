@@ -727,6 +727,7 @@ class RealmStore:
         realm_id: str | None = None,
         default_workspace_id: str | None = None,
         default_workspace_name: str = "Default",
+        default_workspace_version: int = 0,
     ) -> Realm:
         clean_name = _safe_display_name(name)
         if not clean_name:
@@ -740,6 +741,7 @@ class RealmStore:
             server_id=_safe_model_id(server_id),
             default_workspace_id=_safe_model_id(default_workspace_id),
             default_workspace_name=_safe_display_name(default_workspace_name) or "Default",
+            default_workspace_version=max(0, int(default_workspace_version)),
             created_at=ts,
             updated_at=ts,
         )
