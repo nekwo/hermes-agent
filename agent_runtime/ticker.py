@@ -35,7 +35,7 @@ from .final_gate import (
     packet_named_gate_commands,
     stage_repo_for_gate,
 )
-from .models import Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Task
+from .models import Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Task, apply_instance_model_overrides
 from .mission_plan import attach_proofs_to_plan_stage, current_plan_stage, _sync_task_stage_compat_from_plan
 from .persona_assignments import (
     PersonaAssignmentSpec,
@@ -759,6 +759,14 @@ class TickEngine:
                 task_store=self.task_store,
                 stage_id=task.current_stage_id,
             )
+        # Fold the persona-instance model override tier into the persona used
+        # for this attempt (WorkerSession stamp, run llm metadata, run_tick),
+        # so two instances of one persona can run different models. Cascade:
+        # instance override > persona default > cfg default. Failure-tolerant:
+        # an unreadable instance record must never crash a tick.
+        persona = _persona_with_instance_model_overrides(
+            persona, child_instance=child_instance, assignment=assignment
+        )
         max_attempts = 1
         last_run_id = None
         for attempt in range(1, max_attempts + 1):

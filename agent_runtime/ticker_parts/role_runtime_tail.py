@@ -266,6 +266,30 @@ def _persona_int(persona, field: str, default: int) -> int:
     return max(1, value) if value is not None else default
 
 
+def _persona_with_instance_model_overrides(persona, *, child_instance=None, assignment=None):
+    """Overlay the persona-instance model override tier for run/tick model
+    resolution (see models.apply_instance_model_overrides).
+
+    Resolves the instance from the already-materialized goal child instance
+    when present, else from the assignment's persona_instance_id pointer.
+    Failure-tolerant by contract: an unreadable/missing instance record falls
+    through to the persona's own values — a model switch must never be able to
+    crash a tick.
+    """
+    instance = child_instance
+    if instance is None and assignment is not None:
+        instance_id = str(getattr(assignment, "persona_instance_id", "") or "").strip()
+        if instance_id:
+            try:
+                instance = PersonaInstanceStore().get(instance_id)
+            except Exception:
+                instance = None
+    try:
+        return apply_instance_model_overrides(persona, instance)
+    except Exception:
+        return persona
+
+
 def _apply_deterministic_proof_handoff(task: Task, proof_ids: list[str], decision, *, proof_store: ProofStore, actor: str, run_id: str) -> bool:
     if not proof_ids:
         return False

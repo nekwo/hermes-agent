@@ -54,11 +54,12 @@ from agent_runtime.harness_doctor import (
 )
 from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
 from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
-from agent_runtime.models import AgentPersona, Event, Task
+from agent_runtime.models import AgentPersona, Event, Task, apply_instance_model_overrides
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     ChatBusyError,
     PersonaAssignmentSpec,
+    StaleModelOverrideWrite,
     PersonaAssignmentStore,
     PersonaInstanceStore,
     persona_assignment_store_enabled,
@@ -699,6 +700,15 @@ def build_parser(parent_subparsers) -> None:
     persona_chat_delete.add_argument("--json", action="store_true")
     persona_chat_delete.set_defaults(func=_cmd_persona_chat_delete)
 
+    persona_set_model = persona_subs.add_parser("set-model", help="Persist a persona's default provider/model (profile-default lane; future instances inherit it)")
+    persona_set_model.add_argument("persona_id", help="Persona id, alias, or profile:<name>")
+    persona_set_model.add_argument("--provider", default=None, help="Provider lane (canonical name or alias; api_mode is derived from it)")
+    persona_set_model.add_argument("--model", default=None, help="Model id for the provider lane")
+    persona_set_model.add_argument("--use-default", action="store_true", help="Clear the persona's model/provider/api_mode so the runtime default cascade applies")
+    persona_set_model.add_argument("--issued-at", default=None, help="ISO-8601 issue timestamp; stale writes are superseded instead of applied")
+    persona_set_model.add_argument("--requested-by", default="operator")
+    persona_set_model.add_argument("--json", action="store_true")
+    persona_set_model.set_defaults(func=_cmd_persona_set_model)
     persona_instance = persona_subs.add_parser("instance", help="Create, message, run, close, and archive free-floating persona instances")
     persona_instance_subs = persona_instance.add_subparsers(dest="persona_instance_command")
     persona_instance_create = persona_instance_subs.add_parser("create", help="Create an Agent Profile or queue a free-floating persona assignment")
@@ -798,6 +808,16 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_update)
     persona_instance_update.add_argument("--json", action="store_true")
     persona_instance_update.set_defaults(func=_cmd_persona_instance_update_profile)
+    persona_instance_set_model = persona_instance_subs.add_parser("set-model", help="Persist an instance-level provider/model override (this agent only; duplicates keep theirs)")
+    persona_instance_set_model.add_argument("persona_instance_id")
+    persona_instance_set_model.add_argument("--provider", default=None, help="Provider lane (canonical name or alias; api_mode is derived from it)")
+    persona_instance_set_model.add_argument("--model", default=None, help="Model id for the provider lane")
+    persona_instance_set_model.add_argument("--use-profile-default", action="store_true", help="Clear the instance override so the backing profile default applies live")
+    persona_instance_set_model.add_argument("--issued-at", default=None, help="ISO-8601 issue timestamp; stale writes are superseded instead of applied")
+    persona_instance_set_model.add_argument("--requested-by", default="operator")
+    _add_coordinator_permission_args(persona_instance_set_model)
+    persona_instance_set_model.add_argument("--json", action="store_true")
+    persona_instance_set_model.set_defaults(func=_cmd_persona_instance_set_model)
 
     mission_chat = subs.add_parser("mission-chat", help="Canonical Mission Control chat path")
     mission_chat_subs = mission_chat.add_subparsers(dest="mission_chat_command")
@@ -1755,12 +1775,13 @@ def _realm_row(realm, *, full: bool = False) -> dict:
         "name": realm.name,
         "server_id": realm.server_id,
         "default_workspace_id": getattr(realm, "default_workspace_id", None),
+        "default_workspace_version": getattr(realm, "default_workspace_version", 0),
         "workspaces": len(workspace_ids),
         "sync": "in_sync",
         "updated_at": realm.updated_at,
     }
     if full:
-        row.update({"kind": "realm", "slug": realm.slug, "workspace_ids": workspace_ids, "default_workspace_name": getattr(realm, "default_workspace_name", "Default"), "sync_manifest_ref": realm.sync_manifest_ref, "archived": bool(realm.archived), "created_at": realm.created_at})
+        row.update({"kind": "realm", "slug": realm.slug, "workspace_ids": workspace_ids, "default_workspace_name": getattr(realm, "default_workspace_name", "Default"), "default_workspace_version": getattr(realm, "default_workspace_version", 0), "sync_manifest_ref": realm.sync_manifest_ref, "archived": bool(realm.archived), "created_at": realm.created_at})
     return row
 
 

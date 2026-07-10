@@ -4,6 +4,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from hermes_time import now
@@ -117,6 +118,34 @@ class ChatBusyError(AgentRuntimeError):
         self.instance = instance
         self.active_run_id = active_run_id
         self.active_worker_session_id = active_worker_session_id
+
+
+class StaleModelOverrideWrite(AgentRuntimeError):
+    """A model-override write carried an ``issued_at`` older than (or equal to)
+    the last applied model write for the instance. The newer value wins; the
+    stale intent must never be applied silently (supersede guard, mirroring the
+    Stage 13 scope-flip fix)."""
+
+    def __init__(self, instance: PersonaInstance, *, issued_at: datetime, applied_issued_at: datetime):
+        super().__init__("model_override_write_superseded")
+        self.instance = instance
+        self.issued_at = issued_at
+        self.applied_issued_at = applied_issued_at
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _safe_model_override_text(value: str, *, field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_name} must not be empty")
+    if len(text) > 200:
+        raise ValueError(f"{field_name} exceeds 200 characters")
+    if any(ord(ch) < 0x20 for ch in text):
+        raise ValueError(f"{field_name} contains control characters")
+    return text
 
 
 @dataclass(slots=True)
@@ -320,6 +349,12 @@ class PersonaInstanceStore:
         goal_id: str | None = None,
         skills: list[str] | None = None,
         clear_skills: bool = False,
+        provider: str | None = None,
+        model: str | None = None,
+        api_mode: str | None = None,
+        clear_model_override: bool = False,
+        model_issued_at: datetime | None = None,
+        requested_by: str | None = None,
     ) -> PersonaInstance:
         """Persist operator-editable runtime profile overrides.
 
@@ -327,9 +362,43 @@ class PersonaInstanceStore:
         Hermes profile template. Editing ``Alice Agent`` therefore updates the
         live ``personainst_*`` record while leaving the lower ``alice`` profile
         untouched for future default instances.
+
+        ``provider``/``model``/``api_mode`` form the instance model-override
+        tier (None = inherit the backing persona live; see
+        ``models.apply_instance_model_overrides``). ``clear_model_override``
+        resets all three. A ``model_issued_at`` older than the last applied
+        model write raises :class:`StaleModelOverrideWrite` instead of
+        clobbering the newer value.
         """
         instance = self.get(persona_instance_id)
         changed = False
+        model_lane_touched = clear_model_override or any(
+            value is not None for value in (provider, model, api_mode)
+        )
+        if clear_model_override and any(value is not None for value in (provider, model, api_mode)):
+            raise ValueError("clear_model_override conflicts with provider/model/api_mode values")
+        if model_lane_touched:
+            if model_issued_at is not None and instance.model_override_issued_at is not None:
+                issued = _as_utc(model_issued_at)
+                applied = _as_utc(instance.model_override_issued_at)
+                if issued <= applied:
+                    raise StaleModelOverrideWrite(instance, issued_at=issued, applied_issued_at=applied)
+            if clear_model_override:
+                if instance.model is not None or instance.provider is not None or instance.api_mode is not None:
+                    instance.model = None
+                    instance.provider = None
+                    instance.api_mode = None
+                    changed = True
+            else:
+                for field_name, raw in (("provider", provider), ("model", model), ("api_mode", api_mode)):
+                    if raw is None:
+                        continue
+                    value = _safe_model_override_text(raw, field_name=field_name)
+                    if getattr(instance, field_name) != value:
+                        setattr(instance, field_name, value)
+                        changed = True
+            if changed:
+                instance.model_override_issued_at = _as_utc(model_issued_at) if model_issued_at is not None else now()
         if display_name is not None:
             value = safe_assignment_text(display_name, limit=120)
             if not value:
@@ -358,16 +427,18 @@ class PersonaInstanceStore:
         if changed:
             instance.updated_at = now()
             self._write(instance)
-            self._event(
-                "persona_instance.profile_updated",
-                instance,
-                {
-                    "display_name": instance.display_name,
-                    "current_chat_goal": instance.current_chat_goal,
-                    "goal_id": instance.goal_id,
-                    "skill_overrides": list(instance.skill_overrides or []),
-                },
-            )
+            payload: dict[str, Any] = {
+                "display_name": instance.display_name,
+                "current_chat_goal": instance.current_chat_goal,
+                "goal_id": instance.goal_id,
+                "skill_overrides": list(instance.skill_overrides or []),
+                "provider": instance.provider,
+                "model": instance.model,
+                "api_mode": instance.api_mode,
+            }
+            if requested_by:
+                payload["requested_by"] = str(requested_by)[:80]
+            self._event("persona_instance.profile_updated", instance, payload)
         return self.get(instance.id)
 
     def _validate_no_steering_cycle(self, persona_instance_id: str, parent_instance_id: str) -> None:
@@ -1186,6 +1257,15 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "repo_scope_label": getattr(persona, "repo_scope_label", None),
         "skills": skills,
         "skill_overrides": list(instance.skill_overrides) if instance.skill_overrides is not None else None,
+        # Instance model-override tier (None = inherit persona live). The
+        # effective_* pair is the agent-level value (override or persona
+        # default); the config-default tier below persona resolves at runtime.
+        "model": instance.model,
+        "provider": instance.provider,
+        "api_mode": instance.api_mode,
+        "model_is_override": bool(instance.model or instance.provider),
+        "effective_model": instance.model or getattr(visibility_persona, "model", None),
+        "effective_provider": instance.provider or getattr(visibility_persona, "provider", None),
         "toolsets": list(getattr(visibility_persona, "toolsets", []) or []),
         "runtime_root": instance.runtime_root,
         "state": state,

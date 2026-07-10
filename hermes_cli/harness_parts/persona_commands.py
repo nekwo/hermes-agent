@@ -753,6 +753,7 @@ def _cmd_mission_chat_message(args) -> int:
             persona=persona,
             config=cfg,
             override=chat_override,
+            instance=instance,
         )
     except ValueError as exc:
         data = {
@@ -966,7 +967,10 @@ def _cmd_mission_chat_message(args) -> int:
                 session_db=session_db,
                 persist_agent_session=False,
             ).mission_chat_reply(
-                persona,
+                # Instance model-override tier folded in (api_mode included);
+                # the chat-session override still wins via the explicit
+                # provider_override/model_override args below.
+                apply_instance_model_overrides(persona, instance),
                 chat_message,
                 session_id=None,
                 permission_session_id=session_id,
@@ -1435,6 +1439,286 @@ def _cmd_persona_instance_update_profile(args) -> int:
         "next_expected": "refresh Harness snapshot; runtime instance overrides should be visible without modifying the backing Hermes profile",
     }
     print(emit_json(data) if args.json else f"updated runtime profile {updated.id}")
+    return 0
+
+
+class _SetModelRequestError(ValueError):
+    """Typed validation failure for the set-model verbs (machine-readable error_code)."""
+
+    def __init__(self, error_code: str, message: str, *, extra: dict | None = None):
+        super().__init__(message)
+        self.error_code = error_code
+        self.extra = dict(extra or {})
+
+
+def _set_model_error_payload(exc: _SetModelRequestError, **identity) -> dict:
+    return {
+        "ok": False,
+        "error_code": exc.error_code,
+        "error": safe_assignment_text(str(exc), limit=320),
+        **exc.extra,
+        **identity,
+        "next_expected": "fix the arguments and retry; no model settings were changed",
+    }
+
+
+def _validated_set_model_request(args) -> dict:
+    """Shared validation for `persona set-model` / `persona-instance set-model`.
+
+    Provider must resolve in the plugin registry (canonical name is persisted;
+    api_mode is derived from the provider profile so a lane switch can never
+    strand a stale api_mode). Model ids are shape-checked only — the harness
+    has no catalog authority, so catalog membership is deliberately NOT faked
+    (`model_catalog_checked: false` in the envelope).
+    """
+    use_default = bool(getattr(args, "use_default", False) or getattr(args, "use_profile_default", False))
+    try:
+        provider_raw = _safe_chat_model_override_value(getattr(args, "provider", None), field="provider")
+        model = _safe_chat_model_override_value(getattr(args, "model", None), field="model")
+    except ValueError as exc:
+        raise _SetModelRequestError("invalid_value", str(exc)) from exc
+    if use_default and (provider_raw or model):
+        raise _SetModelRequestError("conflicting_args", "--use-default cannot be combined with --provider or --model")
+    if not use_default and not provider_raw and not model:
+        raise _SetModelRequestError("missing_args", "pass --provider and/or --model, or the use-default flag to clear the override")
+    provider = None
+    api_mode = None
+    warnings: list[dict] = []
+    if provider_raw:
+        from providers import get_provider_profile, list_providers
+
+        profile = get_provider_profile(provider_raw)
+        if profile is None:
+            known = sorted({str(item.name) for item in list_providers()})
+            raise _SetModelRequestError(
+                "unknown_provider",
+                f"unknown provider: {provider_raw}",
+                extra={"known_providers": known},
+            )
+        provider = str(profile.name)
+        api_mode = str(getattr(profile, "api_mode", "") or "") or None
+        import os as _os
+
+        env_vars = tuple(getattr(profile, "env_vars", ()) or ())
+        if env_vars and not any(_os.environ.get(name) for name in env_vars):
+            warnings.append(
+                {
+                    "code": "provider_credentials_not_detected",
+                    "message": f"no API-key env var ({', '.join(env_vars)}) detected on this host; OAuth/auth-store credentials may still apply at runtime",
+                }
+            )
+    issued_at = None
+    raw_issued = str(getattr(args, "issued_at", None) or "").strip()
+    if raw_issued:
+        text = raw_issued[:-1] + "+00:00" if raw_issued.endswith("Z") else raw_issued
+        try:
+            issued_at = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise _SetModelRequestError("invalid_value", f"--issued-at is not an ISO-8601 timestamp: {raw_issued}") from exc
+    return {
+        "use_default": use_default,
+        "provider": provider,
+        "model": model,
+        "api_mode": api_mode,
+        "issued_at": issued_at,
+        "warnings": warnings,
+    }
+
+
+def _cmd_persona_instance_set_model(args) -> int:
+    cfg = load_agent_runtime_config()
+    if not persona_assignment_store_enabled(cfg):
+        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    persona_instance_id = safe_assignment_token(args.persona_instance_id)
+    if not persona_instance_id:
+        data = {"ok": False, "error_code": "persona_not_found", "error": "persona_instance_id is required"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    store = PersonaInstanceStore()
+    try:
+        target = store.get(persona_instance_id)
+    except Exception:
+        data = {"ok": False, "error_code": "persona_not_found", "error": f"persona instance not found: {persona_instance_id}"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    coordinator_id = _coordinator_actor_id(args)
+    if coordinator_id:
+        persona = _persona_by_id(cfg, target.persona_id)
+        scope = _coordinator_scope_from_args(args, cfg, persona)
+        auth = authorize_coordinator_action("persona.instance.set_model", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
+        if not auth.ok:
+            data = _coordinator_confirm_payload("persona.instance.set_model", coordinator_id, auth)
+            print(emit_json(data) if args.json else data["status"])
+            return 2
+    try:
+        request = _validated_set_model_request(args)
+    except _SetModelRequestError as exc:
+        data = _set_model_error_payload(exc, persona_instance_id=persona_instance_id, scope="agent_instance")
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    status = "applied"
+    try:
+        updated = store.update_profile(
+            persona_instance_id,
+            provider=request["provider"],
+            model=request["model"],
+            api_mode=request["api_mode"],
+            clear_model_override=request["use_default"],
+            model_issued_at=request["issued_at"],
+            requested_by=getattr(args, "requested_by", None) or "operator",
+        )
+    except StaleModelOverrideWrite as exc:
+        updated = exc.instance
+        status = "superseded"
+    except ValueError as exc:
+        data = {"ok": False, "error_code": "invalid_value", "error": safe_assignment_text(str(exc), limit=320), "persona_instance_id": persona_instance_id}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    try:
+        persona = _persona_by_id(cfg, updated.persona_id)
+    except Exception:
+        persona = None
+    default_provider = getattr(persona, "provider", None) or getattr(cfg, "default_provider", None)
+    default_model = getattr(persona, "model", None) or getattr(cfg, "default_model", None)
+    data = {
+        "ok": True,
+        "status": status,
+        "applied": status == "applied",
+        "scope": "agent_instance",
+        "cleared": bool(request["use_default"]) and status == "applied",
+        "persona_instance_id": updated.id,
+        "persona_id": updated.persona_id,
+        "backing_profile": updated.profile_id,
+        "provider": updated.provider,
+        "model": updated.model,
+        "api_mode": updated.api_mode,
+        "default_provider": default_provider,
+        "default_model": default_model,
+        "effective_provider": updated.provider or default_provider,
+        "effective_model": updated.model or default_model,
+        "model_is_instance_override": bool(updated.provider or updated.model),
+        "model_catalog_checked": False,
+        "persistence": "persona_instance_store",
+        "warnings": request["warnings"],
+        "next_expected": (
+            "a newer model write already applied for this agent; refresh the Harness snapshot for current truth"
+            if status == "superseded"
+            else "refresh Harness snapshot; this agent's future chat turns and mission runs use the instance override unless a chat-session override is active"
+        ),
+    }
+    print(emit_json(data) if args.json else f"{status}: {updated.id} model={data['effective_model']} provider={data['effective_provider']}")
+    return 0
+
+
+def _cmd_persona_set_model(args) -> int:
+    cfg = load_agent_runtime_config()
+    raw_id = str(getattr(args, "persona_id", "") or "").strip()
+    try:
+        persona = _persona_by_id(cfg, raw_id)
+    except ValueError:
+        persona = None
+    if persona is None:
+        data = {"ok": False, "error_code": "persona_not_found", "error": f"unknown persona: {safe_assignment_token(raw_id)}"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    try:
+        request = _validated_set_model_request(args)
+    except _SetModelRequestError as exc:
+        data = _set_model_error_payload(exc, persona_id=str(getattr(persona, "id", "") or raw_id), scope="agent_default")
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    store = AgentStore()
+    persona_id = str(getattr(persona, "id", "") or "")
+    if persona_id.startswith("profile:"):
+        profile_name = persona_id.split(":", 1)[1]
+        candidates = [item for item in store.list_all() if str(getattr(item, "hermes_profile", "") or "") == profile_name]
+        if not candidates:
+            data = {
+                "ok": False,
+                "error_code": "persona_not_persisted",
+                "error": f"agent defaults can only be set on store-persisted agents; {persona_id} has no backing agent record",
+                "persona_id": persona_id,
+            }
+            print(emit_json(data) if args.json else data["error"])
+            return 2
+        if len(candidates) > 1:
+            data = {
+                "ok": False,
+                "error_code": "ambiguous_profile_persona",
+                "error": f"{persona_id} is backed by multiple store personas; target one explicitly",
+                "persona_id": persona_id,
+                "candidates": sorted(str(item.id) for item in candidates),
+            }
+            print(emit_json(data) if args.json else data["error"])
+            return 2
+        target = candidates[0]
+    else:
+        try:
+            target = store.get(persona_id)
+        except Exception:
+            data = {
+                "ok": False,
+                "error_code": "persona_not_persisted",
+                "error": f"agent defaults can only be set on store-persisted agents; {persona_id} is not in the agent store",
+                "persona_id": persona_id,
+            }
+            print(emit_json(data) if args.json else data["error"])
+            return 2
+    status = "applied"
+    issued_at = request["issued_at"]
+    if issued_at is not None and getattr(target, "model_override_issued_at", None) is not None:
+        issued = issued_at if issued_at.tzinfo is not None else issued_at.replace(tzinfo=timezone.utc)
+        applied_at = target.model_override_issued_at
+        applied_at = applied_at if applied_at.tzinfo is not None else applied_at.replace(tzinfo=timezone.utc)
+        if issued <= applied_at:
+            status = "superseded"
+    changed = False
+    if status == "applied":
+        if request["use_default"]:
+            if target.model is not None or target.provider is not None or target.api_mode is not None:
+                target.model = None
+                target.provider = None
+                target.api_mode = None
+                changed = True
+        else:
+            for field_name in ("provider", "model", "api_mode"):
+                value = request[field_name]
+                if value is not None and getattr(target, field_name) != value:
+                    setattr(target, field_name, value)
+                    changed = True
+        if changed:
+            target.model_override_issued_at = issued_at or datetime.now(timezone.utc)
+            store.save(target)
+    default_provider = getattr(cfg, "default_provider", None)
+    default_model = getattr(cfg, "default_model", None)
+    data = {
+        "ok": True,
+        "status": status,
+        "applied": status == "applied",
+        "changed": changed,
+        "scope": "agent_default",
+        "cleared": bool(request["use_default"]) and status == "applied",
+        "persona_id": persona_id,
+        "applied_to_persona_id": str(target.id),
+        "provider": target.provider,
+        "model": target.model,
+        "api_mode": target.api_mode,
+        "default_provider": default_provider,
+        "default_model": default_model,
+        "effective_provider": target.provider or default_provider,
+        "effective_model": target.model or default_model,
+        "model_catalog_checked": False,
+        "persistence": "agent_store",
+        "warnings": request["warnings"],
+        "next_expected": (
+            "a newer model write already applied for this persona; refresh the Harness snapshot for current truth"
+            if status == "superseded"
+            else "refresh Harness snapshot; instances without their own override inherit this default live"
+        ),
+    }
+    print(emit_json(data) if args.json else f"{status}: {target.id} model={data['effective_model']} provider={data['effective_provider']}")
     return 0
 
 
@@ -2125,19 +2409,37 @@ def _chat_effective_model_payload(
     persona,
     config,
     override: dict[str, object] | None,
+    instance=None,
 ) -> dict[str, object]:
+    """Effective-model cascade for one chat turn.
+
+    Tiers (highest wins): chat-session override > instance override >
+    persona default > agent_runtime config default. ``default_*`` stays the
+    persona/config tier so the instance tier is reported honestly instead of
+    being folded in silently; ``agent_*`` is what future turns/runs of THIS
+    agent use when no chat override is active.
+    """
     default_provider = getattr(persona, "provider", None) or getattr(config, "default_provider", None)
     default_model = getattr(persona, "model", None) or getattr(config, "default_model", None)
-    provider = (override or {}).get("provider") or default_provider
-    model = (override or {}).get("model") or default_model
+    instance_provider = getattr(instance, "provider", None) if instance is not None else None
+    instance_model = getattr(instance, "model", None) if instance is not None else None
+    agent_provider = instance_provider or default_provider
+    agent_model = instance_model or default_model
+    provider = (override or {}).get("provider") or agent_provider
+    model = (override or {}).get("model") or agent_model
     return {
         "default_provider": default_provider,
         "default_model": default_model,
+        "instance_provider": instance_provider,
+        "instance_model": instance_model,
+        "agent_provider": agent_provider,
+        "agent_model": agent_model,
         "chat_provider": (override or {}).get("provider"),
         "chat_model": (override or {}).get("model"),
         "effective_provider": provider,
         "effective_model": model,
         "model_is_default": not bool(override and ((override.get("provider") or "") or (override.get("model") or ""))),
+        "model_is_instance_override": bool(instance_provider or instance_model),
         "scope": "mission_control_chat_session",
     }
 

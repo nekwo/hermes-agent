@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -146,6 +146,7 @@ class Realm:
     # never a copy of a member's local/stale default workspace contents.
     default_workspace_id: str | None = None
     default_workspace_name: str = "Default"
+    default_workspace_version: int = 0
     workspace_ids: list[str] = field(default_factory=list)
     sync_manifest_ref: str | None = None
     archived: bool = False
@@ -222,6 +223,9 @@ class AgentPersona:
     max_api_calls: int | None = None
     max_total_tokens: int | None = None
     readiness: dict[str, Any] = field(default_factory=dict)
+    # issued_at of the last applied model-default write; stale writes are
+    # superseded (same guard as PersonaInstance.model_override_issued_at).
+    model_override_issued_at: datetime | None = None
     schema_version: int = 1
 
 
@@ -306,6 +310,13 @@ class PersonaInstance:
     returned_to: str | None = None
     current_chat_goal: str | None = None
     skill_overrides: list[str] | None = None
+    # Instance-level model override tier: None = inherit the backing persona
+    # live (cascade: chat-session override > instance > persona > cfg default).
+    model: str | None = None
+    provider: str | None = None
+    api_mode: str | None = None
+    # issued_at of the last applied model write; stale writes are superseded.
+    model_override_issued_at: datetime | None = None
     current_assignment_id: str | None = None
     current_task_id: str | None = None
     active_worker_session_id: str | None = None
@@ -322,6 +333,30 @@ class PersonaInstance:
     last_heartbeat_at: datetime | None = None
     updated_at: datetime | None = None
     schema_version: int = 1
+
+
+def apply_instance_model_overrides(
+    persona: AgentPersona, instance: PersonaInstance | None
+) -> AgentPersona:
+    """Overlay a persona instance's model override tier onto its backing persona.
+
+    Pure: returns a copy, never mutates. ``None`` on the instance means inherit
+    the persona value live. Both the chat lane and the run/tick lane must
+    resolve model/provider/api_mode through this single overlay so two
+    instances of one persona can run different models without drift between
+    the lanes.
+    """
+
+    if instance is None:
+        return persona
+    if instance.model is None and instance.provider is None and instance.api_mode is None:
+        return persona
+    return replace(
+        persona,
+        model=instance.model if instance.model is not None else persona.model,
+        provider=instance.provider if instance.provider is not None else persona.provider,
+        api_mode=instance.api_mode if instance.api_mode is not None else persona.api_mode,
+    )
 
 
 @dataclass(slots=True)
