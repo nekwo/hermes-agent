@@ -142,6 +142,10 @@ class Realm:
     created_at: datetime
     updated_at: datetime
     server_id: str | None = None
+    # Stable identity minted by the membership backend. This is a pointer,
+    # never a copy of a member's local/stale default workspace contents.
+    default_workspace_id: str | None = None
+    default_workspace_name: str = "Default"
     workspace_ids: list[str] = field(default_factory=list)
     sync_manifest_ref: str | None = None
     archived: bool = False

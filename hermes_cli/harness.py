@@ -1754,12 +1754,13 @@ def _realm_row(realm, *, full: bool = False) -> dict:
         "id": realm.id,
         "name": realm.name,
         "server_id": realm.server_id,
+        "default_workspace_id": getattr(realm, "default_workspace_id", None),
         "workspaces": len(workspace_ids),
         "sync": "in_sync",
         "updated_at": realm.updated_at,
     }
     if full:
-        row.update({"kind": "realm", "slug": realm.slug, "workspace_ids": workspace_ids, "sync_manifest_ref": realm.sync_manifest_ref, "archived": bool(realm.archived), "created_at": realm.created_at})
+        row.update({"kind": "realm", "slug": realm.slug, "workspace_ids": workspace_ids, "default_workspace_name": getattr(realm, "default_workspace_name", "Default"), "sync_manifest_ref": realm.sync_manifest_ref, "archived": bool(realm.archived), "created_at": realm.created_at})
     return row
 
 
@@ -1819,8 +1820,8 @@ def _cmd_realm_use(args) -> int:
 def _reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None) -> None:
     """Switching realms must not leave the active workspace pointing into
     another realm. Keep it when it already belongs; otherwise fall to the
-    realm's first (configured order, then listing order) unarchived
-    workspace, or clear it when the realm has none."""
+    realm's declared default, then its configured order, then listing order,
+    choosing only unarchived workspaces; clear it when the realm has none."""
     store = WorkspaceStore()
     active_id = store.active_id()
     if active_id:
@@ -1836,7 +1837,14 @@ def _reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None)
         if getattr(workspace, "realm_id", None) == realm.id and not workspace.archived
     ]
     configured_order = {wid: index for index, wid in enumerate(getattr(realm, "workspace_ids", None) or [])}
-    candidates.sort(key=lambda workspace: (configured_order.get(workspace.id, len(configured_order)), workspace.id))
+    default_workspace_id = getattr(realm, "default_workspace_id", None)
+    candidates.sort(
+        key=lambda workspace: (
+            0 if workspace.id == default_workspace_id else 1,
+            configured_order.get(workspace.id, len(configured_order)),
+            workspace.id,
+        )
+    )
     next_workspace = candidates[0] if candidates else None
     # set_active emits workspace.activated (or {"cleared": true}) at the
     # store chokepoint — Stage 12. The realm intent's basis rides along so a

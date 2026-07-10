@@ -29,7 +29,7 @@ from .errors import NotFound
 from .events import EventLog
 from .models import Event, Realm
 from .realm_sync import MembershipDecision, RealmMembershipProvider, RealmSyncError
-from .store import RealmStore
+from .store import RealmStore, WorkspaceStore
 
 CREDENTIAL_ENV_VAR = "HERMES_REALM_SYNC_CREDENTIAL"
 CREDENTIAL_SCHEMA_VERSION = 1
@@ -209,6 +209,8 @@ def adopt_realms(credential: RealmSyncCredential, *, server_id: str | None = Non
                 name=str(item.get("name") or "").strip() or realm_id,
                 slug=str(item.get("slug") or "").strip(),
                 git_url=git_url,
+                default_workspace_id=str(item.get("default_workspace_id") or "").strip() or None,
+                default_workspace_name=str(item.get("default_workspace_name") or "Default").strip() or "Default",
                 dry_run=dry_run,
             )
         )
@@ -234,6 +236,7 @@ def _append_realm_adopted_event(realm: Realm) -> None:
                     "realm_id": realm.id,
                     "name": realm.name,
                     "server_id": realm.server_id,
+                    "default_workspace_id": realm.default_workspace_id,
                 },
             )
         )
@@ -256,7 +259,31 @@ def notify_realm_published(credential: RealmSyncCredential, realm_id: str, *, co
         )
 
 
-def _upsert_realm(store: RealmStore, *, realm_id: str, server_id: str, name: str, slug: str, git_url: str, dry_run: bool) -> Realm:
+def _upsert_realm(
+    store: RealmStore,
+    *,
+    realm_id: str,
+    server_id: str,
+    name: str,
+    slug: str,
+    git_url: str,
+    default_workspace_id: str | None,
+    default_workspace_name: str,
+    dry_run: bool,
+) -> Realm:
+    workspace_store = WorkspaceStore()
+    existing_default = None
+    if default_workspace_id:
+        try:
+            existing_default = workspace_store.get(default_workspace_id)
+        except NotFound:
+            pass
+        if existing_default is not None and existing_default.realm_id not in {None, realm_id}:
+            raise RealmSyncError(
+                "sync_conflict",
+                "Realm default workspace identity is already owned by another realm; refusing to move it.",
+                safe_details={"workspace_id": default_workspace_id, "realm_id": realm_id},
+            )
     try:
         item = store.get(realm_id)
     except NotFound:
@@ -271,9 +298,18 @@ def _upsert_realm(store: RealmStore, *, realm_id: str, server_id: str, name: str
                 created_at=ts,
                 updated_at=ts,
                 server_id=server_id,
+                default_workspace_id=default_workspace_id,
+                default_workspace_name=default_workspace_name,
+                workspace_ids=[default_workspace_id] if default_workspace_id else [],
                 sync_manifest_ref=git_url or None,
             )
-        item = store.create(name=name, server_id=server_id, realm_id=realm_id)
+        item = store.create(
+            name=name,
+            server_id=server_id,
+            realm_id=realm_id,
+            default_workspace_id=default_workspace_id,
+            default_workspace_name=default_workspace_name,
+        )
     changed = False
     if name and item.name != name:
         item.name = name
@@ -287,6 +323,25 @@ def _upsert_realm(store: RealmStore, *, realm_id: str, server_id: str, name: str
     if git_url and (item.sync_manifest_ref or "") != git_url:
         item.sync_manifest_ref = git_url
         changed = True
+    if item.default_workspace_id != default_workspace_id:
+        item.default_workspace_id = default_workspace_id
+        changed = True
+    if item.default_workspace_name != default_workspace_name:
+        item.default_workspace_name = default_workspace_name
+        changed = True
+    if default_workspace_id and default_workspace_id not in item.workspace_ids:
+        item.workspace_ids.append(default_workspace_id)
+        changed = True
+    if default_workspace_id and not dry_run:
+        if existing_default is None:
+            workspace_store.create(
+                name=default_workspace_name,
+                realm_id=realm_id,
+                workspace_id=default_workspace_id,
+            )
+        elif existing_default.realm_id is None:
+            existing_default.realm_id = realm_id
+            workspace_store.save(existing_default)
     if changed and not dry_run:
         # emit_event=False: adopt_realms appends its own richer realm.adopted
         # event for this same mutation; a generic realm.updated would be a

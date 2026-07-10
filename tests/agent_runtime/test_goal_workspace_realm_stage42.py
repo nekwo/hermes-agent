@@ -101,6 +101,25 @@ def test_realm_use_reconciles_active_workspace(isolate_agent_runtime_root):
     assert "workspace.activated" in types
 
 
+def test_realm_use_prefers_declared_default_workspace(isolate_agent_runtime_root):
+    realm = RealmStore().create(
+        name="Realm With Default",
+        default_workspace_id="ws_realm_default",
+        default_workspace_name="Custom Office",
+    )
+    WorkspaceStore().create(
+        name="Alphabetically First", realm_id=realm.id, workspace_id="ws_alpha"
+    )
+    WorkspaceStore().create(
+        name="Custom Office", realm_id=realm.id, workspace_id="ws_realm_default"
+    )
+
+    result = _run_harness("realm", "use", realm.id, "--json")
+
+    assert result.returncode == 0, result.stderr
+    assert WorkspaceStore().active_id() == "ws_realm_default"
+
+
 def test_workspace_create_in_active_realm_auto_activates(isolate_agent_runtime_root):
     """Creating a workspace inside the active realm lands the operator in
     it — the view follows the creation (workspace.created +

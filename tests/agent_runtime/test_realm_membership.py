@@ -17,7 +17,7 @@ from agent_runtime.realm_membership import (
     select_membership_provider,
 )
 from agent_runtime.realm_sync import RealmMembershipProvider, RealmSyncError
-from agent_runtime.store import RealmStore
+from agent_runtime.store import RealmStore, WorkspaceStore
 
 
 def _credential_payload(**overrides) -> dict:
@@ -330,6 +330,59 @@ def test_adopt_upserts_granted_realms(isolate_agent_runtime_root, monkeypatch):
     adopted_events = [e for e in EventLog().iter_all() if e.type == "realm.adopted"]
     assert sorted(e.payload["realm_id"] for e in adopted_events) == ["realm_eternia", "realm_other"]
     assert adopted_events[0].payload["server_id"] == "srv_9"
+
+
+def test_adopt_materializes_fresh_realm_owned_default_workspace(
+    isolate_agent_runtime_root, monkeypatch
+):
+    items = _adopt_items()
+    items[0].update({
+        "default_workspace_id": "ws_realm_fresh",
+        "default_workspace_name": "Custom Office",
+    })
+    monkeypatch.setattr(
+        realm_membership_module,
+        "_request_json",
+        lambda method, url, **kwargs: (200, {"count": 2, "items": items}),
+    )
+
+    adopt_realms(_credential())
+
+    realm = RealmStore().get("realm_eternia")
+    workspace = WorkspaceStore().get("ws_realm_fresh")
+    assert realm.default_workspace_id == "ws_realm_fresh"
+    assert realm.default_workspace_name == "Custom Office"
+    assert realm.workspace_ids == ["ws_realm_fresh"]
+    assert workspace.name == "Custom Office"
+    assert workspace.realm_id == realm.id
+    assert workspace.agent_ids == []
+
+
+def test_adopt_default_workspace_collision_fails_closed_without_moving_workspace(
+    isolate_agent_runtime_root, monkeypatch
+):
+    other = RealmStore().create(name="Other")
+    WorkspaceStore().create(
+        name="Occupied", realm_id=other.id, workspace_id="ws_realm_collision"
+    )
+    items = _adopt_items()
+    items[0].update({
+        "default_workspace_id": "ws_realm_collision",
+        "default_workspace_name": "Custom Office",
+    })
+    monkeypatch.setattr(
+        realm_membership_module,
+        "_request_json",
+        lambda method, url, **kwargs: (200, {"count": 2, "items": items}),
+    )
+
+    with pytest.raises(RealmSyncError) as excinfo:
+        adopt_realms(_credential())
+
+    assert excinfo.value.code == "sync_conflict"
+    assert WorkspaceStore().get("ws_realm_collision").realm_id == other.id
+    with pytest.raises(Exception):
+        RealmStore().get("realm_eternia")
 
 
 def test_adopt_is_idempotent(isolate_agent_runtime_root, monkeypatch):
