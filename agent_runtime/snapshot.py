@@ -42,6 +42,7 @@ from .persona_assignments import (
     persona_instance_summary,
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _SECRET_RE, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
+from .persona_instance_identity import duplicate_persona_instance_groups, identity_aliases_for_rows
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
@@ -382,6 +383,10 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
             for instance in persona_instances
         ]
+        # Legacy persona-instance id -> canonical id aliases (durable
+        # reconciler registry + structurally derivable drift still live in
+        # this snapshot). Consumers key dedup on this instead of heuristics.
+        data["identity_map"] = identity_aliases_for_rows(data["persona_instances"])
         history_accountant = ProjectionAccountant("persona_chat_history")
         trace_accountant = ProjectionAccountant("persona_chat_trace")
         data["persona_chat_history"] = persona_chat_history_summary(
@@ -563,6 +568,18 @@ def _parity_warnings(data) -> list[dict]:
         return warnings
 
     instances = data.get("persona_instances") or []
+    for group in duplicate_persona_instance_groups(instances):
+        warnings.append(
+            {
+                "code": "duplicate_persona_instance",
+                "entity_id": group["canonical_id"],
+                "detail": (
+                    f"{len(group['instance_ids'])} live persona-instance rows alias to one canonical id; "
+                    "run `harness persona-instance reconcile`"
+                ),
+                "instance_ids": group["instance_ids"],
+            }
+        )
     instance_personas = {
         _canonical_persona_id(inst.get("persona_id")) for inst in instances if isinstance(inst, dict)
     }

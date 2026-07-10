@@ -296,6 +296,12 @@ def _identity_map(snapshot: dict[str, Any]) -> dict[str, str]:
             alias = _text(channel.get(key))
             if alias:
                 identity[alias] = canonical
+    # The snapshot's legacy->canonical aliases (reconciler registry + live
+    # structural drift) OVERRIDE the per-row self aliases above: a retired id
+    # must resolve to its canonical channel, not to itself.
+    for key, value in (snapshot.get("identity_map") or {}).items():
+        if isinstance(key, str) and isinstance(value, str) and key and value:
+            identity[key] = value
     return identity
 
 

@@ -15,6 +15,23 @@ def _cmd_worktree_reap(args) -> int:
     return 0
 
 
+def _cmd_persona_instance_reconcile(args) -> int:
+    from agent_runtime.persona_instance_identity import reconcile_persona_instances
+
+    data = reconcile_persona_instances(apply=not bool(getattr(args, "dry_run", False)))
+    if getattr(args, "json", False):
+        print(emit_json(data))
+    else:
+        mode = "applied" if data["applied"] else "dry-run"
+        print(
+            f"persona-instance reconcile ({mode}): merged={data['merged_count']} "
+            f"renamed={data['renamed_count']} skipped={data['skipped_count']} aliases={data['alias_count']}"
+        )
+        for item in data["actions"]:
+            print(f"  - {item['action']}: {item['from_id']} -> {item['to_id']}")
+    return 0
+
+
 def _cmd_task_create(args) -> int:
     from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
     from agent_runtime.repo_context import canonical_repo_scope_label, known_repo_scope_labels

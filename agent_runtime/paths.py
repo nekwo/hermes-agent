@@ -29,6 +29,19 @@ def persona_instances_dir() -> Path:
     return store_root() / "persona_instances"
 
 
+def persona_instances_archive_dir() -> Path:
+    return store_root() / "persona_instances_archive"
+
+
+def persona_instance_aliases_path() -> Path:
+    """Durable legacy-id -> canonical-id registry written by the reconciler.
+
+    Emitted as ``identity_map`` on the snapshot/stream so consumers can
+    collapse rows persisted under retired id schemes without heuristics.
+    """
+    return store_root() / "persona_instance_aliases.json"
+
+
 def persona_assignments_dir() -> Path:
     return store_root() / "persona_assignments"
 

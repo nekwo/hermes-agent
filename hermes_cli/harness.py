@@ -955,6 +955,25 @@ def build_parser(parent_subparsers) -> None:
     worktree_reap.add_argument("--json", action="store_true")
     worktree_reap.set_defaults(func=_cmd_worktree_reap)
 
+    persona_instance = subs.add_parser(
+        "persona-instance", help="Manage durable persona-instance store rows"
+    )
+    persona_instance_subs = persona_instance.add_subparsers(
+        dest="persona_instance_command", required=True
+    )
+    persona_instance_reconcile = persona_instance_subs.add_parser(
+        "reconcile",
+        help=(
+            "Archive-and-fold legacy-id persona-instance rows onto their canonical "
+            "channel (duplicate agent cards repair); records identity_map aliases"
+        ),
+    )
+    persona_instance_reconcile.add_argument(
+        "--dry-run", action="store_true", help="Report actions without mutating the store"
+    )
+    persona_instance_reconcile.add_argument("--json", action="store_true")
+    persona_instance_reconcile.set_defaults(func=_cmd_persona_instance_reconcile)
+
     agent = subs.add_parser("agent", help="List harness agent definitions")
     agent_subs = agent.add_subparsers(dest="agent_command", required=True)
     agent_list = agent_subs.add_parser("list", help="List persisted/configured agent definitions")

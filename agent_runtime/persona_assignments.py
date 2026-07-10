@@ -592,7 +592,11 @@ class PersonaInstanceStore:
         if not normalized_session:
             raise ValueError("session_id is required")
 
-        normalized_instance = safe_assignment_token(persona_instance_id) if persona_instance_id else None
+        normalized_instance = (
+            canonical_persona_instance_id(persona_instance_id, persona_id=normalized_persona)
+            if persona_instance_id
+            else None
+        )
         instance_id = normalized_instance or persona_instance_id_for(normalized_persona)
         safe_display_name = safe_assignment_text(display_name, limit=120) if display_name is not None else None
         safe_profile_id = safe_assignment_token(profile_id) if profile_id is not None else None
@@ -858,7 +862,7 @@ class PersonaAssignmentStore:
     def create_or_resume(self, spec: PersonaAssignmentSpec) -> PersonaAssignment:
         persona_id = safe_assignment_token(spec.persona_id)
         goal_id = safe_optional_token(spec.goal_id or spec.task_id)
-        instance_id = spec.persona_instance_id or (
+        instance_id = canonical_persona_instance_id(spec.persona_instance_id, persona_id=persona_id) or (
             persona_instance_id_for_placement(f"{goal_id}:{persona_id}") if goal_id else persona_instance_id_for(persona_id)
         )
         signal_hash = assignment_signal_hash_from_parts(
@@ -1127,12 +1131,51 @@ class PersonaAssignmentStore:
         )
 
 
+PERSONA_INSTANCE_ID_PREFIX = "personainst_"
+
+# An operator-channel actor token ('persona_' + instance id) that leaked into
+# a store row id. Live evidence 2026-07-10: persona_personainst_neko_supervisor
+# persisted beside personainst_neko_supervisor for the same channel.
+_ACTOR_TOKEN_DRIFT_PREFIX = f"persona_{PERSONA_INSTANCE_ID_PREFIX}"
+
+
 def persona_instance_id_for(persona_id: str) -> str:
-    return f"personainst_{safe_assignment_token(persona_id) or 'persona'}"
+    return f"{PERSONA_INSTANCE_ID_PREFIX}{safe_assignment_token(persona_id) or 'persona'}"
 
 
 def persona_instance_id_for_placement(placement_id: str) -> str:
-    return f"personainst_{safe_assignment_token(placement_id) or 'persona'}"
+    return f"{PERSONA_INSTANCE_ID_PREFIX}{safe_assignment_token(placement_id) or 'persona'}"
+
+
+def canonical_persona_instance_id(raw_id: Any, *, persona_id: str | None = None) -> str | None:
+    """SINGLE derivation authority for a caller-supplied persona-instance id.
+
+    Every path that accepts an instance id from outside the store (operator
+    chat opens, assignment specs, CLI verbs) must resolve it through here
+    before minting or joining a row. The store historically persisted the
+    same logical channel under four id schemes because callers' tokens were
+    written through verbatim; this collapses the two schemes that are
+    structurally recognizable:
+
+    - ``persona_personainst_x`` (actor-token drift) -> ``personainst_x``
+    - ``persona:<persona_id>`` selector tokens (launcher idle-row ids,
+      mangled to ``persona_<persona_id>``) -> the persona's canonical
+      operator-channel id.
+
+    The legacy ``personainst_operator_<hash>`` scheme is not structurally
+    derivable; the store reconciler (persona_instance_identity.py) retires
+    those rows and records their aliases.
+    """
+    token = safe_assignment_token(raw_id)
+    if not token:
+        return None
+    while token.startswith(_ACTOR_TOKEN_DRIFT_PREFIX):
+        token = token[len("persona_") :]
+    if persona_id:
+        persona_token = safe_assignment_token(persona_id)
+        if persona_token and token == f"persona_{persona_token}":
+            return persona_instance_id_for(persona_id)
+    return token
 
 
 def persona_chat_session_id_for(persona_instance_id: str) -> str:
