@@ -6,7 +6,7 @@ from utils import atomic_json_write
 from agent_runtime.blueprints.runs import BlueprintRunStore
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
-from agent_runtime.persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
+from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore, PersonaInstanceStore
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, _parity_warnings, build_snapshot, write_snapshot
@@ -404,6 +404,85 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     assert row["proof_gate_state"]["missing_stage_ids"] == ["implement", "verify"]
     assert row["proof_gate_state"]["why_not_ready"]
     assert row["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is True
+
+
+def test_mission_level_actors_emit_typed_persona_instance_id(monkeypatch, isolate_agent_runtime_root):
+    # Strict contract (launcher handoff, HERMES_HANDOFF_persona_instance_id_2026-07-10):
+    # every mission-level actor carries `persona_instance_id` — the persona
+    # instance it is running as when bound, None when unbound. The launcher's
+    # Mission Office matches live actors to authored placements by this id
+    # (tier-1 sameInstance); dropping the field would regress that matching to
+    # guessing by role.
+    import agent_runtime.snapshot as snapshot_mod
+
+    cfg = AgentRuntimeConfig(
+        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
+            enabled=True,
+            worker_session_store=True,
+            persona_instance_runtime=True,
+            persona_assignment_store=True,
+        )
+    )
+    monkeypatch.setattr(snapshot_mod, "load_agent_runtime_config", lambda: cfg)
+    n = now()
+    task = Task(
+        id="task_actor_contract",
+        title="Actor instance contract",
+        description="Bound dev emits its instance id; unbound qa emits None.",
+        state=TaskState.RUNNING,
+        created_at=n,
+        updated_at=n,
+        requested_by="tony",
+        mission_plan=MissionPlan(
+            mission_intent=MissionIntent(title="Actor instance contract", objective="Pin the actor-to-instance link."),
+            current_stage_id="implement",
+            blueprint_id="neko_dev_qa_basic",
+            blueprint_version=1,
+            bindings={"builder": "dev", "verifier": "qa"},
+            stages=[
+                MissionPlanStage(
+                    id="implement",
+                    title="Implement",
+                    objective="Implement.",
+                    owner="dev",
+                    owner_slot="builder",
+                    repo="hermes-agent",
+                    kind="implementation",
+                    status=StageStatus.IMPLEMENTING,
+                ),
+                MissionPlanStage(
+                    id="verify",
+                    title="Verify",
+                    objective="Verify.",
+                    owner="qa",
+                    owner_slot="verifier",
+                    repo="hermes-agent",
+                    kind="qa_verdict",
+                    depends_on=["implement"],
+                ),
+            ],
+        ),
+    )
+    TaskStore().create(task)
+    PersonaAssignmentStore().create_or_resume(
+        PersonaAssignmentSpec(
+            persona_id="dev",
+            kind="task_stage",
+            title="Implement",
+            message="Implement the slice.",
+            persona_instance_id="personainst_goal_task_actor_contract_dev",
+            task_id=task.id,
+            stage_id="implement",
+        )
+    )
+
+    snap = build_snapshot()
+    row = next(item for item in snap["tasks"] if item["task_id"] == "task_actor_contract")
+    actors = {actor["persona_id"]: actor for actor in row["mission_level_state"]["actors"]}
+
+    # Indexing (not .get) so a dropped field fails the contract loudly.
+    assert actors["dev"]["persona_instance_id"] == "personainst_goal_task_actor_contract_dev"
+    assert actors["qa"]["persona_instance_id"] is None
 
 
 def test_steer_route_executes_live_available_action(isolate_agent_runtime_root):
