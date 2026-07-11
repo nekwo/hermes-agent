@@ -529,6 +529,66 @@ _SANE_PATH = (
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
+
+def _windows_system_path_dirs() -> "list[str]":
+    """Windows dirs that host the native command tooling the agent may shell
+    out to from its bash terminal — ``cmd.exe``, ``powershell.exe`` (Windows
+    PowerShell 5.1), ``pwsh.exe`` (PowerShell 7), ``ssh``/``curl``, etc.
+
+    The agent's ``terminal`` runs through Git Bash; from there it reaches
+    Windows-native tooling by invoking these executables directly (e.g.
+    ``powershell.exe -NoProfile -Command ...``).  A gateway launched with a
+    minimal/sanitised PATH (service manager, restricted parent env) may not
+    carry these, so we append the ones that exist to the subprocess PATH —
+    append-only, so a healthy native PATH keeps its original precedence.
+    """
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    system32 = os.path.join(system_root, "System32")
+    candidates = [
+        system32,
+        system_root,
+        os.path.join(system32, "Wbem"),  # wmic and friends
+        os.path.join(system32, "WindowsPowerShell", "v1.0"),  # powershell.exe
+        os.path.join(system32, "OpenSSH"),  # ssh/scp
+    ]
+    # PowerShell 7 (pwsh) installs outside System32.
+    for base in (
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramW6432"),
+        os.environ.get("ProgramFiles(x86)"),
+    ):
+        if base:
+            candidates.append(os.path.join(base, "PowerShell", "7"))
+    seen: set[str] = set()
+    dirs: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        key = os.path.normcase(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if os.path.isdir(candidate):
+            dirs.append(candidate)
+    return dirs
+
+
+def _augment_windows_system_path(existing_path: str) -> str:
+    """Append missing Windows system tooling dirs to ``existing_path``.
+
+    Preserves the caller PATH verbatim (order + entries) and only appends the
+    system dirs from :func:`_windows_system_path_dirs` that aren't already
+    present (case-insensitive, separator-tolerant). No-op off Windows.
+    """
+    if not _IS_WINDOWS:
+        return existing_path
+    entries = [e for e in existing_path.split(os.pathsep) if e] if existing_path else []
+    present = {os.path.normcase(e.rstrip("\\/")) for e in entries}
+    for directory in _windows_system_path_dirs():
+        if os.path.normcase(directory.rstrip("\\/")) not in present:
+            entries.append(directory)
+    return os.pathsep.join(entries)
+
 # Cached directory containing the ``hermes`` console-script.
 # ``_SENTINEL`` distinguishes "not resolved yet" from a resolved ``None``.
 _SENTINEL = object()
@@ -693,6 +753,10 @@ def _make_run_env(env: dict) -> dict:
     path_key = _path_env_key(run_env)
     if path_key is not None:
         new_path = _append_missing_sane_path_entries(run_env.get(path_key, ""))
+        # On Windows, guarantee the native command tooling (cmd.exe,
+        # powershell.exe, pwsh, ssh) is reachable so the agent can shell out to
+        # PowerShell/cmd from its bash terminal even under a minimal gateway PATH.
+        new_path = _augment_windows_system_path(new_path)
         # Ensure the hermes install dir is reachable so plugins can shell out
         # to bare ``hermes`` via the terminal tool even when the gateway was
         # launched without it on PATH (systemd, service managers, cron, etc.).

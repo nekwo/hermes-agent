@@ -913,6 +913,22 @@ _WINDOWS_BASH_SHELL_HINT = (
     "POSIX equivalents (`ls`, `$FOO`, `grep`)."
 )
 
+# Eternia fork addendum (additive — do NOT fold into the upstream hint above,
+# so that string keeps merging cleanly from NousResearch). The upstream hint
+# tells the model its terminal *is* bash; this clarifies how to still reach
+# Windows-native tooling from that bash terminal without implying PowerShell is
+# the shell. Paired with the Windows system-PATH augmentation in
+# tools/environments/local.py that keeps powershell.exe / pwsh / cmd.exe
+# reachable in the terminal subprocess.
+_WINDOWS_NATIVE_TOOLING_HINT = (
+    "Windows-native tooling: your terminal is bash, but when a task genuinely "
+    "needs PowerShell or cmd (a cmdlet, a `.ps1` script, a Windows-only CLI), "
+    "invoke it as a program from bash — `powershell.exe -NoProfile -Command "
+    "'<script>'` (or `pwsh` for PowerShell 7), or `cmd.exe /c '<command>'`. "
+    "These are on PATH; quote the inner command so bash passes it through "
+    "verbatim. Prefer plain POSIX for everything else."
+)
+
 
 def _probe_remote_backend(env_type: str) -> str | None:
     """Run a tiny introspection command inside the active terminal backend.
@@ -1051,6 +1067,9 @@ def build_environment_hints() -> str:
         # know this or it will issue PowerShell syntax and fail.
         if sys.platform == "win32" and not is_wsl():
             hints.append(_WINDOWS_BASH_SHELL_HINT)
+            # Eternia fork addendum: how to reach PowerShell/cmd from that
+            # bash terminal when Windows-native tooling is genuinely required.
+            hints.append(_WINDOWS_NATIVE_TOOLING_HINT)
     else:
         # --- Remote backend block (host info suppressed) ---
         probe = _probe_remote_backend(backend)

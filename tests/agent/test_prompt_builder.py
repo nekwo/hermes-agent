@@ -1567,3 +1567,39 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 
 
+
+
+class TestWindowsNativeToolingHint:
+    """The Windows-native tooling addendum must ship ALONGSIDE the upstream
+    bash hint (additive), telling the agent it can reach PowerShell/cmd from
+    its bash terminal — without editing or replacing the upstream statement."""
+
+    def _win_hints(self, monkeypatch):
+        import sys as _sys
+
+        import agent.prompt_builder as pb
+        # build_environment_hints() does a local `import sys`, which returns the
+        # same cached module object — patching sys.platform here reaches it.
+        monkeypatch.setattr(_sys, "platform", "win32")
+        monkeypatch.setattr(pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        return pb.build_environment_hints()
+
+    def test_addendum_ships_with_upstream_hint(self, monkeypatch):
+        from agent.prompt_builder import (
+            _WINDOWS_BASH_SHELL_HINT,
+            _WINDOWS_NATIVE_TOOLING_HINT,
+        )
+        out = self._win_hints(monkeypatch)
+        # Upstream statement is still present verbatim (not replaced).
+        assert _WINDOWS_BASH_SHELL_HINT in out
+        # Fork addendum is appended.
+        assert _WINDOWS_NATIVE_TOOLING_HINT in out
+        assert "powershell.exe" in out
+        assert "cmd.exe /c" in out
+
+    def test_upstream_hint_string_unchanged(self):
+        """Guard: the upstream string must merge cleanly — keep it byte-stable."""
+        from agent.prompt_builder import _WINDOWS_BASH_SHELL_HINT
+        assert "NOT PowerShell or cmd.exe" in _WINDOWS_BASH_SHELL_HINT
+        assert "will NOT work" in _WINDOWS_BASH_SHELL_HINT
