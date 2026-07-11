@@ -620,10 +620,21 @@ def _token_usage_fields(raw: dict[str, Any]) -> dict[str, int]:
     total_tokens = _safe_int(raw.get("total_tokens"))
     if total_tokens == 0 and (input_tokens or output_tokens):
         total_tokens = input_tokens + output_tokens
+    # Cache split (Launcher contract): ``input_tokens`` is already the UNCACHED,
+    # full-price input (canonical usage subtracts cache reads/writes; see
+    # agent/usage_pricing.CanonicalUsage). Forwarding the cache buckets lets the
+    # Launcher show a cache hit % and a full-price count so operators can tell a
+    # warm cache from a stale one that is being re-billed at full rate. The
+    # session DB already accumulates these columns per API call — this projection
+    # simply stops dropping them at the snapshot boundary.
+    cache_read_tokens = _safe_int(raw.get("cache_read_tokens"))
+    cache_write_tokens = _safe_int(raw.get("cache_write_tokens"))
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
     }
 
 

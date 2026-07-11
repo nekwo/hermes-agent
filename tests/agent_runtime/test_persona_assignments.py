@@ -1028,6 +1028,8 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
                     "message_count": 7,
                     "input_tokens": 1234,
                     "output_tokens": 56,
+                    "cache_read_tokens": 9000,
+                    "cache_write_tokens": 300,
                     "started_at": 10,
                     "last_active": 20,
                     "archived": 0,
@@ -1054,6 +1056,8 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
             "input_tokens": 1234,
             "output_tokens": 56,
             "total_tokens": 1290,
+            "cache_read_tokens": 9000,
+            "cache_write_tokens": 300,
             "messages": [],
         }
     ]
@@ -1316,6 +1320,8 @@ def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_age
             "input_tokens": 0,
             "output_tokens": 0,
             "total_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
             "messages": [
                 {
                     "id": "msg_1",
