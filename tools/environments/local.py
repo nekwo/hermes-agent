@@ -344,6 +344,113 @@ def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str
     return env
 
 
+def _is_windows_system_shim(path: str) -> bool:
+    """True when ``path`` lives under the Windows system dirs that host the
+    WSL launcher (``C:\\Windows\\System32\\bash.exe`` and friends).
+
+    ``shutil.which("bash")`` happily returns that stub on any box with the
+    WSL optional feature enabled, and routing the agent's terminal through it
+    invokes ``wsl`` — which fails with "no installed distributions" on a
+    normal Windows host.  We must never treat it as Git Bash.
+    """
+    if not path:
+        return False
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+
+    def _norm(p: str) -> str:
+        # Separator- and case-agnostic so mixed C:\...\ / forward-slash forms
+        # (and POSIX-hosted unit tests) compare correctly.
+        return p.replace("\\", "/").rstrip("/").lower()
+
+    norm = _norm(path)
+    root = _norm(system_root)
+    for sub in ("system32", "syswow64", "sysnative"):
+        if norm.startswith(f"{root}/{sub}/"):
+            return True
+    return False
+
+
+def _bash_from_git() -> "str | None":
+    """Derive ``bash.exe`` from the installed ``git`` executable.
+
+    Git for Windows ships ``bash.exe`` beside ``git.exe`` in predictable
+    layouts.  ``git`` is a hard install prerequisite for Hermes, so if it's on
+    PATH we can locate its bash without any separate provisioning.  We
+    ``realpath`` first so scoop/chocolatey shims resolve to the real install.
+    """
+    git = shutil.which("git")
+    if not git or _is_windows_system_shim(git):
+        return None
+    git_dir = os.path.dirname(os.path.realpath(git))
+    # git.exe can live in <root>\cmd, <root>\bin, or <root>\mingw64\bin;
+    # bash.exe lives in <root>\bin or <root>\usr\bin.  Probe relative to the
+    # git dir covering all three git.exe locations.
+    for rel in (
+        (os.pardir, "bin", "bash.exe"),
+        (os.pardir, "usr", "bin", "bash.exe"),
+        (os.pardir, os.pardir, "bin", "bash.exe"),
+        (os.pardir, os.pardir, "usr", "bin", "bash.exe"),
+    ):
+        candidate = os.path.normpath(os.path.join(git_dir, *rel))
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _find_windows_git_bash() -> "str | None":
+    """Resolve Git Bash on Windows without ever returning the WSL stub.
+
+    Resolution order (first hit wins):
+      1. ``HERMES_GIT_BASH_PATH`` — explicit override / what postinstall persists.
+      2. Our own portable Git under ``%LOCALAPPDATA%\\hermes\\git`` — a broken or
+         partially-uninstalled system Git can't hijack the lookup.
+      3. Derived from the installed ``git`` executable (``_bash_from_git``).
+      4. Standard Git-for-Windows install locations.
+      5. ``shutil.which("bash")`` — ONLY when it is not the System32 WSL stub.
+
+    Returns the bash path, or ``None`` when Git Bash genuinely isn't present.
+    """
+    custom = os.environ.get("HERMES_GIT_BASH_PATH")
+    if custom and os.path.isfile(custom):
+        return custom
+
+    # Portable Git layouts (both checked so MinGit⇄PortableGit upgrades work):
+    #   PortableGit: %LOCALAPPDATA%\hermes\git\bin\bash.exe   (primary)
+    #   MinGit:      %LOCALAPPDATA%\hermes\git\usr\bin\bash.exe (legacy/32-bit)
+    _local_appdata = os.environ.get("LOCALAPPDATA", "")
+    if _local_appdata:
+        _hermes_portable_git = os.path.join(_local_appdata, "hermes", "git")
+        for candidate in (
+            os.path.join(_hermes_portable_git, "bin", "bash.exe"),
+            os.path.join(_hermes_portable_git, "usr", "bin", "bash.exe"),
+        ):
+            if os.path.isfile(candidate):
+                return candidate
+
+    from_git = _bash_from_git()
+    if from_git:
+        return from_git
+
+    for base in (
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.path.join(_local_appdata, "Programs") if _local_appdata else "",
+    ):
+        if not base:
+            continue
+        for rel in (("Git", "bin", "bash.exe"), ("Git", "usr", "bin", "bash.exe")):
+            candidate = os.path.join(base, *rel)
+            if os.path.isfile(candidate):
+                return candidate
+
+    # Last resort: PATH, but reject the System32 WSL launcher stub.
+    found = shutil.which("bash")
+    if found and not _is_windows_system_shim(found):
+        return found
+
+    return None
+
+
 def _find_bash() -> str:
     """Find bash for command execution."""
     if not _IS_WINDOWS:
@@ -355,45 +462,15 @@ def _find_bash() -> str:
             or "/bin/sh"
         )
 
-    custom = os.environ.get("HERMES_GIT_BASH_PATH")
-    if custom and os.path.isfile(custom):
-        return custom
-
-    # Prefer our own portable Git install first — this way a broken or
-    # partially-uninstalled system Git can't hijack the bash lookup.  The
-    # install.ps1 installer always drops portable Git here when the user
-    # didn't already have a working system Git.
-    #
-    # Layouts (both checked so upgrades between MinGit and PortableGit
-    # installs work transparently):
-    #   PortableGit: %LOCALAPPDATA%\hermes\git\bin\bash.exe   (primary)
-    #   MinGit:      %LOCALAPPDATA%\hermes\git\usr\bin\bash.exe (legacy/32-bit fallback)
-    _local_appdata = os.environ.get("LOCALAPPDATA", "")
-    _hermes_portable_git = os.path.join(_local_appdata, "hermes", "git") if _local_appdata else ""
-    if _hermes_portable_git:
-        for candidate in (
-            os.path.join(_hermes_portable_git, "bin", "bash.exe"),        # PortableGit (primary)
-            os.path.join(_hermes_portable_git, "usr", "bin", "bash.exe"), # MinGit fallback
-        ):
-            if os.path.isfile(candidate):
-                return candidate
-
-    found = shutil.which("bash")
+    found = _find_windows_git_bash()
     if found:
         return found
-
-    for candidate in (
-        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
-        os.path.join(_local_appdata, "Programs", "Git", "bin", "bash.exe"),
-    ):
-        if candidate and os.path.isfile(candidate):
-            return candidate
 
     raise RuntimeError(
         "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
         "Install it from: https://git-scm.com/download/win\n"
-        "Or set HERMES_GIT_BASH_PATH to your bash.exe location."
+        "Or set HERMES_GIT_BASH_PATH to your bash.exe location.\n"
+        "(The Windows System32 'bash.exe' is the WSL launcher and is not used.)"
     )
 
 

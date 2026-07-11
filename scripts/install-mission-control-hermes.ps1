@@ -132,7 +132,9 @@ $env:HERMES_HOME = $hermesHome
 $env:ETERNIA_HERMES_HOME = $hermesHome
 
 Invoke-Step -Stage "postinstall" -Code "install_postinstall_failed" -Body {
-    Invoke-Native -File $hermesExe -Arguments @("postinstall", "--yes") -Cwd $clone
+    # --json emits a machine-readable shell-provisioning + PATH summary on the
+    # final stdout line (Git Bash resolution, HERMES_GIT_BASH_PATH, hermes shim).
+    Invoke-Native -File $hermesExe -Arguments @("postinstall", "--yes", "--json") -Cwd $clone
 }
 
 Invoke-Step -Stage "harness_init" -Code "install_postinstall_failed" -Body {

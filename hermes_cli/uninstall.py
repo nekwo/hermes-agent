@@ -324,7 +324,7 @@ def _hermes_path_markers(hermes_home: Path) -> list[str]:
     root = str(hermes_home).rstrip("\\/")
     # Match on prefix so sub-entries (git\cmd, git\bin, git\usr\bin, node, etc.)
     # all get swept.  Also match the bare hermes-agent install dir.
-    markers = [root + "\\hermes-agent", root + "\\git", root + "\\node", root + "\\venv"]
+    markers = [root + "\\hermes-agent", root + "\\git", root + "\\node", root + "\\venv", root + "\\bin"]
     # Also match if HERMES_HOME was customised to somewhere else — find-and-nuke
     # any entry whose path component contains "hermes".  We don't want to catch
     # unrelated entries like "chermes-foo" or "ephermeral", so we look for
@@ -402,7 +402,7 @@ def remove_portable_tooling_windows(hermes_home: Path) -> list[Path]:
     ``%LOCALAPPDATA%\\hermes\\``.  Only called on full uninstall; they're
     isolated from any system Git / Node so they cannot break other tools."""
     removed: list[Path] = []
-    for sub in ("git", "node", "gateway-service"):
+    for sub in ("git", "node", "gateway-service", "bin"):
         target = hermes_home / sub
         if target.exists():
             try:

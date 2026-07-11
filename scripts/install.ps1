@@ -1902,8 +1902,16 @@ function Set-PathVariable {
     # Add the venv Scripts dir to user PATH so hermes is globally available
     # On Windows, the hermes.exe in venv\Scripts\ has the venv Python baked in
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    
-    if ($currentPath -notlike "*$hermesBin*") {
+
+    # Segment-wise, case-insensitive, trailing-separator-tolerant dedup.
+    # A substring "-like" check mis-fires on prefix collisions (a different
+    # install whose path merely contains this one) and silently skips the add.
+    $target = $hermesBin.TrimEnd('\')
+    $segments = @()
+    if ($currentPath) {
+        $segments = $currentPath -split ';' | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
+    }
+    if ($segments -notcontains $target) {
         [Environment]::SetEnvironmentVariable(
             "Path",
             "$hermesBin;$currentPath",
@@ -3251,6 +3259,18 @@ function Invoke-EnsureMode {
     foreach ($dep in $depList) {
         $dep = $dep.Trim()
         switch ($dep) {
+            "git" {
+                if (-not (Install-Git)) {
+                    Write-Err "Git (with Git Bash) could not be installed"
+                    exit 1
+                }
+            }
+            "git-bash" {
+                if (-not (Install-Git)) {
+                    Write-Err "Git Bash could not be installed"
+                    exit 1
+                }
+            }
             "node" {
                 [void](Test-Node)
                 if (-not $script:HasNode) {
