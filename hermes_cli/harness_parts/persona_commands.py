@@ -2698,18 +2698,47 @@ def _persona_pre_trace_ack_text(trace_payload: dict) -> str:
 
 
 def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:
+    """Record this turn's canonical token usage onto the bound chat session.
+
+    Mission Control runs each persona-chat turn under a fresh runtime with an
+    ephemeral scratch session (``session_id=None``), so ``conversation_loop``'s
+    own per-call token writes land on the throwaway scratch row, never here. This
+    is the *only* writer of the bound session the Launcher reads, and each turn's
+    ``result`` carries that turn's totals (the runtime is per-turn), so the
+    increment is a true cumulative — no double count.
+
+    It forwards the COMPLETE canonical usage (cache reads/writes and reasoning,
+    not just input/output). ``input_tokens`` is already the uncached, full-price
+    remainder; the cache buckets are what let the Launcher tell a warm cache from
+    a cold one being re-billed at full rate. Dropping them here was the reason the
+    bound session always reported zero cache — keep this write canonical so no
+    lossy subset can silently diverge again.
+    """
     if session_db is None or not session_id or result is None:
         return
     input_tokens = _positive_int_or_zero(getattr(result, "input_tokens", None))
     output_tokens = _positive_int_or_zero(getattr(result, "output_tokens", None))
+    cache_read_tokens = _positive_int_or_zero(getattr(result, "cache_read_tokens", None))
+    cache_write_tokens = _positive_int_or_zero(getattr(result, "cache_write_tokens", None))
+    reasoning_tokens = _positive_int_or_zero(getattr(result, "reasoning_tokens", None))
     api_calls = _positive_int_or_zero(getattr(result, "api_calls", None))
-    if input_tokens == 0 and output_tokens == 0 and api_calls == 0:
+    if (
+        input_tokens == 0
+        and output_tokens == 0
+        and cache_read_tokens == 0
+        and cache_write_tokens == 0
+        and reasoning_tokens == 0
+        and api_calls == 0
+    ):
         return
     try:
         session_db.update_token_counts(
             session_id,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            reasoning_tokens=reasoning_tokens,
             api_call_count=api_calls,
             model=getattr(result, "model", None),
         )

@@ -957,3 +957,38 @@ def test_tool_lifecycle_finished_marks_timeout_exit_code_as_failed():
             "command_full": "pytest",
         }
     ]
+
+
+def test_normalize_result_carries_canonical_cache_and_reasoning():
+    # finalize_turn emits the full canonical usage in the run result dict; the
+    # normalizer must carry the cache/reasoning buckets through so downstream
+    # accounting (persona-chat bound session, Launcher cache indicator) reads a
+    # complete record rather than a lossy input/output-only subset.
+    from agent_runtime.profile_runner import AgentRunResult, _normalize_result
+
+    class _Agent:
+        session_id = "scratch_1"
+        provider = "openai-codex"
+        model = "gpt-5.6-luna"
+        base_url = "https://example.invalid/v1"
+
+    result = _normalize_result(
+        {
+            "final_response": "hi",
+            "messages": [],
+            "api_calls": 2,
+            "input_tokens": 25225,
+            "output_tokens": 36,
+            "total_tokens": 25261,
+            "cache_read_tokens": 1432576,
+            "cache_write_tokens": 300,
+            "reasoning_tokens": 128,
+        },
+        agent=_Agent(),
+    )
+
+    assert isinstance(result, AgentRunResult)
+    assert result.input_tokens == 25225  # uncached, full-price remainder
+    assert result.cache_read_tokens == 1432576
+    assert result.cache_write_tokens == 300
+    assert result.reasoning_tokens == 128

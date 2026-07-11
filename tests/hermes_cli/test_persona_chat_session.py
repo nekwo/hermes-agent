@@ -37,6 +37,9 @@ class FakeSessionDB:
         session_id,
         input_tokens=0,
         output_tokens=0,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        reasoning_tokens=0,
         api_call_count=0,
         model=None,
     ):
@@ -45,6 +48,9 @@ class FakeSessionDB:
                 "session_id": session_id,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_write_tokens": cache_write_tokens,
+                "reasoning_tokens": reasoning_tokens,
                 "api_call_count": api_call_count,
                 "model": model,
             }
@@ -64,9 +70,16 @@ def test_assistant_turn_is_persisted():
 
 
 def test_persona_chat_token_counts_are_persisted():
+    # The bound-session write must forward the COMPLETE canonical usage — cache
+    # reads/writes and reasoning, not just input/output. Dropping the cache
+    # buckets here is what previously left the Launcher's source-of-truth session
+    # reporting zero cache; this asserts the accounting stays canonical.
     class Result:
         input_tokens = 120
         output_tokens = 30
+        cache_read_tokens = 9000
+        cache_write_tokens = 300
+        reasoning_tokens = 45
         api_calls = 2
         model = "gpt-test"
 
@@ -78,10 +91,33 @@ def test_persona_chat_token_counts_are_persisted():
             "session_id": "s1",
             "input_tokens": 120,
             "output_tokens": 30,
+            "cache_read_tokens": 9000,
+            "cache_write_tokens": 300,
+            "reasoning_tokens": 45,
             "api_call_count": 2,
             "model": "gpt-test",
         }
     ]
+
+
+def test_persona_chat_records_a_cache_only_turn():
+    # A turn that was served entirely from cache (no fresh full-price input, no
+    # completion recorded on this hop) still carries billable cache activity —
+    # the write must not be skipped just because input/output are zero.
+    class Result:
+        input_tokens = 0
+        output_tokens = 0
+        cache_read_tokens = 20000
+        cache_write_tokens = 0
+        reasoning_tokens = 0
+        api_calls = 0
+        model = "gpt-test"
+
+    db = FakeSessionDB()
+    _update_persona_chat_token_counts(session_db=db, session_id="s1", result=Result())
+
+    assert len(db.token_updates) == 1
+    assert db.token_updates[0]["cache_read_tokens"] == 20000
 
 
 def test_continuity_prepends_prior_turns():

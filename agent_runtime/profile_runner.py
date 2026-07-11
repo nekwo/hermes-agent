@@ -75,6 +75,15 @@ class AgentRunResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    # Canonical cache/reasoning buckets. ``input_tokens`` is already the uncached,
+    # full-price remainder (canonical usage subtracts these; see
+    # agent/usage_pricing.CanonicalUsage). Carrying them here keeps the accounting
+    # object complete end-to-end so downstream writers never have to reconstruct
+    # a lossy subset — the persona-chat bound-session record and the Launcher
+    # cache indicator both read from these.
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
     latency_ms: int | None = None
     profile_timing: dict[str, int] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -1343,6 +1352,9 @@ def _normalize_result(result: Any, *, agent) -> AgentRunResult:
             input_tokens=result.get("input_tokens") or result.get("prompt_tokens"),
             output_tokens=result.get("output_tokens") or result.get("completion_tokens"),
             total_tokens=result.get("total_tokens"),
+            cache_read_tokens=result.get("cache_read_tokens"),
+            cache_write_tokens=result.get("cache_write_tokens"),
+            reasoning_tokens=result.get("reasoning_tokens"),
             raw=dict(result),
         )
     return AgentRunResult(
