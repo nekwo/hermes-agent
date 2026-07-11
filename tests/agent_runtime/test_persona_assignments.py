@@ -1058,9 +1058,42 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
             "total_tokens": 1290,
             "cache_read_tokens": 9000,
             "cache_write_tokens": 300,
+            "cache_mode": "none",
+            "cache_ttl_seconds": None,
+            "cache_ttl_basis": None,
             "messages": [],
         }
     ]
+
+
+def test_persona_chat_history_emits_cache_policy_for_known_provider(isolate_agent_runtime_root):
+    # A session whose effective model is an automatic-prefix provider must carry
+    # the estimated warm-window policy so the Launcher can render an honest
+    # (non-contractual) freshness indicator.
+    store = PersonaInstanceStore()
+    instance = store.open_chat(persona_id="dev", session_id="chat_codex_1")
+
+    rows = persona_chat_history_summary(
+        persona_instances=[instance],
+        session_db=_FakeSessionDB(
+            [
+                {
+                    "id": "chat_codex_1",
+                    "title": "codex chat",
+                    "message_count": 2,
+                    "provider": "openai-codex",
+                    "model": "gpt-5.6-luna",
+                    "api_mode": "codex",
+                    "started_at": 10,
+                    "last_active": 20,
+                }
+            ]
+        ),
+    )
+
+    assert rows[0]["cache_mode"] == "automatic_prefix"
+    assert rows[0]["cache_ttl_basis"] == "estimated"
+    assert rows[0]["cache_ttl_seconds"] == 300
 
 
 def test_persona_chat_history_accounting_ignores_unrelated_session_sources(isolate_agent_runtime_root):
@@ -1322,6 +1355,9 @@ def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_age
             "total_tokens": 0,
             "cache_read_tokens": 0,
             "cache_write_tokens": 0,
+            "cache_mode": "none",
+            "cache_ttl_seconds": None,
+            "cache_ttl_basis": None,
             "messages": [
                 {
                     "id": "msg_1",

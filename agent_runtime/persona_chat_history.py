@@ -576,8 +576,34 @@ def _history_row(
         **({"would_redact": would_redact} if would_redact else {}),
         **_token_usage_fields(raw),
         **_chat_model_fields(raw),
+        **_cache_policy_fields(raw),
         "messages": messages,
     }
+
+
+def _cache_policy_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    """Emit the session's prompt-cache policy so the Launcher can render an
+    honest freshness/expiry indicator (see agent_runtime.cache_policy).
+
+    Provider/model are resolved the same way the token label picks its effective
+    identity: a chat-scoped model override wins over the session's own record.
+    """
+    from .cache_policy import resolve_cache_policy
+
+    model_fields = _chat_model_fields(raw)
+    provider = model_fields.get("effective_provider") or safe_assignment_text(
+        raw.get("provider"), limit=220
+    ) or None
+    model = model_fields.get("effective_model") or safe_assignment_text(
+        raw.get("model"), limit=220
+    ) or None
+    policy = resolve_cache_policy(
+        provider=provider,
+        model=model,
+        api_mode=safe_assignment_text(raw.get("api_mode"), limit=60) or None,
+        base_url=safe_assignment_text(raw.get("base_url"), limit=400) or None,
+    )
+    return policy.as_snapshot_fields()
 
 
 def _chat_model_fields(raw: dict[str, Any]) -> dict[str, Any]:
