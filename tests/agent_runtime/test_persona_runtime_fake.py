@@ -310,6 +310,9 @@ def test_persona_chat_prompt_allows_real_tools_and_forbids_fabrication():
     # Hard anti-fabrication invariant.
     assert "Never fabricate" in prompt
     assert "inventing output" in prompt
+    # Embodiment context: office + HUD state the operator can see.
+    assert "Mission Control office" in prompt
+    assert "steer handle" in prompt
 
 
 def test_mission_chat_surface_message_always_carries_operative_rules():
