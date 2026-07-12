@@ -129,6 +129,7 @@ def run_harness_doctor(
         "snapshot_null_id_rows": len(snapshot_defects),
         "event_log_compactable_rows": int(event_compaction.get("removed_event_count") or 0),
     }
+    model_authority = _model_authority_report()
     return {
         "schema_version": 1,
         "generated_at": ref,
@@ -161,7 +162,64 @@ def run_harness_doctor(
             "event_log": event_health,
             "event_log_compaction": event_compaction,
         },
+        # Informational, deliberately OUTSIDE finding_counts: a stale/redundant
+        # model pin is operator judgment, not something `--fix` should silently
+        # rewrite (config.yaml's single writer is upstream save_config). Doctor
+        # detects and labels; the operator edits.
+        "model_authority": model_authority,
         "repairs": repairs,
+    }
+
+
+def _model_authority_report() -> dict[str, Any]:
+    """Detect stale/redundant runtime-default overrides and per-persona pins.
+
+    Reads config only; never mutates. Surfaces the "agent_runtime.default_model
+    shadows model.default" divergence (the stale-pin class) plus redundant pins,
+    so a recurrence is visible without hand-diffing config.yaml.
+    """
+    from .config import describe_runtime_default_authority
+
+    try:
+        authority = describe_runtime_default_authority()
+    except Exception as exc:  # pragma: no cover - defensive; doctor must not crash
+        return {"available": False, "error": str(exc)}
+
+    override = authority.get("harness_override", {})
+    pins = authority.get("persona_pins", []) or []
+    redundant_pins = [p for p in pins if p.get("matches_runtime_default") is True]
+    provider_only_pins = [p for p in pins if p.get("provider_pinned_without_model")]
+    notices: list[str] = []
+    if override.get("model_state") == "shadowing":
+        notices.append(
+            f"agent_runtime.default_model ({override.get('model')}) shadows the runtime "
+            f"default from model.default — agents are NOT running the model you set; remove it "
+            "unless the harness is deliberately pinned"
+        )
+    elif override.get("model_state") == "redundant":
+        notices.append(
+            "agent_runtime.default_model duplicates model.default and is unmaintained — remove it"
+        )
+    if redundant_pins:
+        ids = ", ".join(sorted(p.get("persona_id", "?") for p in redundant_pins))
+        notices.append(
+            f"persona pins duplicate the runtime default (likely stale): {ids} — "
+            "remove the model/provider/api_mode pin so they follow the default"
+        )
+    if provider_only_pins:
+        ids = ", ".join(sorted(p.get("persona_id", "?") for p in provider_only_pins))
+        notices.append(
+            f"persona provider pinned without a model (pairing hazard on default change): {ids}"
+        )
+
+    return {
+        "available": True,
+        "resolved": authority.get("resolved", {}),
+        "top_level": authority.get("top_level", {}),
+        "harness_override": override,
+        "persona_pins": pins,
+        "divergent": override.get("model_state") == "shadowing",
+        "notices": notices,
     }
 
 

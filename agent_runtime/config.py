@@ -20,6 +20,55 @@ class AgentRuntimeConfig(RuntimeConfig):
     store_root: str | None = None
     head_agent_profile: str | None = None
     personas: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Provenance of the resolved runtime default: which YAML key actually
+    # supplied ``default_model`` / ``default_provider``. The top-level ``model:``
+    # block is the surface ``hermes model`` / ``hermes status`` own and the user
+    # treats as truth; ``agent_runtime.default_*`` is an explicit harness-wide
+    # override (and, when absent, silence — the runtime follows the top-level
+    # default). These labels let the launcher and ``hermes harness config show``
+    # report which authority won without re-deriving it.
+    default_model_source: str = "unset"
+    default_provider_source: str = "unset"
+
+
+def _clean_config_str(value: Any) -> str | None:
+    """Return a stripped non-empty string, else None (empty/whitespace == unset)."""
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _top_level_model_authority(top: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Read the top-level ``model:`` block — the authority the user sets via
+    ``hermes model`` and reads back via ``hermes status``.
+
+    Tolerates ``model:`` as a mapping (``default``/``name`` + ``provider``) or as
+    a bare string model id, mirroring ``hermes_cli/status.py``'s tolerance.
+    """
+    model_block = top.get("model")
+    if isinstance(model_block, dict):
+        model = _clean_config_str(model_block.get("default")) or _clean_config_str(model_block.get("name"))
+        return (model, _clean_config_str(model_block.get("provider")))
+    if isinstance(model_block, str):
+        return (_clean_config_str(model_block), None)
+    return (None, None)
+
+
+def _resolve_default_authority(
+    override_value: Any,
+    top_value: str | None,
+    override_source: str,
+    top_source: str,
+) -> tuple[str | None, str]:
+    """Resolve a runtime default: an explicit ``agent_runtime.*`` override wins;
+    otherwise the top-level ``model.*`` authority; otherwise unset."""
+    override = _clean_config_str(override_value)
+    if override is not None:
+        return (override, override_source)
+    if top_value is not None:
+        return (top_value, top_source)
+    return (None, "unset")
 
 
 def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeConfig:
@@ -29,7 +78,18 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     # mtime-cached parse: this is called many times per snapshot build (and across
     # the runtime) and was re-parsing the full config.yaml each time.
     loaded = cached_yaml_file(config_path, default=None)
-    raw = (loaded.get("agent_runtime", {}) or {}) if isinstance(loaded, dict) else {}
+    top = loaded if isinstance(loaded, dict) else {}
+    raw = top.get("agent_runtime", {}) or {}
+    # Single runtime-default authority: the harness follows the top-level
+    # ``model.default`` the user sets, unless ``agent_runtime.default_*`` is
+    # explicitly pinned as a harness-wide override.
+    top_model, top_provider = _top_level_model_authority(top)
+    resolved_model, default_model_source = _resolve_default_authority(
+        raw.get("default_model"), top_model, "agent_runtime.default_model", "model.default"
+    )
+    resolved_provider, default_provider_source = _resolve_default_authority(
+        raw.get("default_provider"), top_provider, "agent_runtime.default_provider", "model.provider"
+    )
     enterprise_worker_sessions = _enterprise_worker_sessions_config(raw.get("enterprise_worker_sessions") or {})
     continuous_role_sessions = _continuous_role_sessions_config(raw.get("continuous_role_sessions") or {})
     normal_worker_flow = _normal_worker_flow_config(raw.get("normal_worker_flow") or {})
@@ -50,8 +110,8 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         schema_version=int(raw.get("schema_version", 1)),
         store_root=raw.get("store_root"),
         head_agent_profile=raw.get("head_agent_profile") or raw.get("head_profile"),
-        default_provider=raw.get("default_provider"),
-        default_model=raw.get("default_model"),
+        default_provider=resolved_provider,
+        default_model=resolved_model,
         default_api_mode=raw.get("default_api_mode", "codex_responses"),
         redaction_mode=normalize_redaction_mode(raw.get("redaction_mode") or os.environ.get("HERMES_REDACTION_MODE", "strict")),
         open_incident_warning_threshold=_positive_int(raw.get("open_incident_warning_threshold"), 100),
@@ -97,8 +157,89 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         supervision=supervision,
         coordinator_permissions=coordinator_permissions,
         personas=raw.get("personas", {}) or {},
+        default_model_source=default_model_source,
+        default_provider_source=default_provider_source,
     )
     return cfg
+
+
+def _override_state(override: str | None, top_value: str | None) -> str:
+    """Classify an ``agent_runtime.default_*`` value against the top-level authority.
+
+    - ``absent``: no override (the healthy state — the runtime follows the user default).
+    - ``override_only``: override set but no top-level authority to compare against.
+    - ``redundant``: override equals the top-level default (an unmaintained duplicate;
+      recommend removal so the single authority stays single).
+    - ``shadowing``: override diverges from the top-level default (the stale-pin bug —
+      agents silently run something other than what the user set).
+    """
+    if override is None:
+        return "absent"
+    if top_value is None:
+        return "override_only"
+    return "redundant" if override == top_value else "shadowing"
+
+
+def describe_runtime_default_authority(config_path: Path | None = None) -> dict[str, Any]:
+    """Pure, redaction-safe provenance report comparing the top-level ``model:``
+    authority against any ``agent_runtime.*`` override and per-persona pins.
+
+    Single source of truth for the migrations warning and the harness-doctor
+    ``model_authority`` block, so the "shadowing vs redundant vs stale pin"
+    classification is never re-derived divergently.
+    """
+    from .parse_cache import cached_yaml_file
+
+    config_path = config_path or get_config_path()
+    loaded = cached_yaml_file(config_path, default=None)
+    top = loaded if isinstance(loaded, dict) else {}
+    raw = top.get("agent_runtime", {}) or {}
+    top_model, top_provider = _top_level_model_authority(top)
+    override_model = _clean_config_str(raw.get("default_model"))
+    override_provider = _clean_config_str(raw.get("default_provider"))
+    resolved_model, model_source = _resolve_default_authority(
+        raw.get("default_model"), top_model, "agent_runtime.default_model", "model.default"
+    )
+    resolved_provider, provider_source = _resolve_default_authority(
+        raw.get("default_provider"), top_provider, "agent_runtime.default_provider", "model.provider"
+    )
+
+    persona_pins: list[dict[str, Any]] = []
+    personas = raw.get("personas", {}) or {}
+    if isinstance(personas, dict):
+        for pid, overrides in personas.items():
+            if not isinstance(overrides, dict):
+                continue
+            pin_model = _clean_config_str(overrides.get("model"))
+            pin_provider = _clean_config_str(overrides.get("provider"))
+            if pin_model is None and pin_provider is None:
+                continue
+            persona_pins.append({
+                "persona_id": "neko_supervisor" if pid == "alice_supervisor" else pid,
+                "model": pin_model,
+                "provider": pin_provider,
+                # None when the pin sets no model (provider-only pin); otherwise
+                # whether the pin duplicates the resolved runtime default (redundant).
+                "matches_runtime_default": (pin_model == resolved_model) if pin_model is not None else None,
+                "provider_pinned_without_model": pin_provider is not None and pin_model is None,
+            })
+
+    return {
+        "resolved": {
+            "model": resolved_model,
+            "provider": resolved_provider,
+            "model_source": model_source,
+            "provider_source": provider_source,
+        },
+        "top_level": {"model": top_model, "provider": top_provider},
+        "harness_override": {
+            "model": override_model,
+            "provider": override_provider,
+            "model_state": _override_state(override_model, top_model),
+            "provider_state": _override_state(override_provider, top_provider),
+        },
+        "persona_pins": persona_pins,
+    }
 
 
 def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):

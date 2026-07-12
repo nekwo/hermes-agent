@@ -291,6 +291,17 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "daemon": daemon_status,
         "foreground_runtime": runtime_instances_summary(runtime_instances),
         "execution_mode": execution_mode,
+        # Single runtime-default authority, resolved + provenance-stamped, as a
+        # typed top-level block so surfaces (launcher model-switcher caption,
+        # `hermes harness config show`) report what agents actually follow
+        # without re-deriving the top-level-vs-agent_runtime precedence.
+        "runtime_default": {
+            "model": _safe_model_label(cfg.default_model),
+            "provider": _safe_model_label(cfg.default_provider),
+            "api_mode": cfg.default_api_mode,
+            "model_source": getattr(cfg, "default_model_source", "unset"),
+            "provider_source": getattr(cfg, "default_provider_source", "unset"),
+        },
         "runtime_config": effective_config_summary(cfg),
         "migration": migration_status(),
         "capabilities": capability_descriptors(),

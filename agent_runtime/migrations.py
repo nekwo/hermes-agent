@@ -125,7 +125,42 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
     if version != CURRENT_RUNTIME_SCHEMA_VERSION:
         errors.append({"field": "schema_version", "reason": f"unsupported runtime schema version {version}"})
 
-    return {"ok": not errors, "errors": errors, "schema_version": CURRENT_RUNTIME_SCHEMA_VERSION}
+    # Additive, non-fatal: flag an ``agent_runtime.default_model`` that shadows or
+    # duplicates the top-level ``model.default`` authority. Warnings never flip
+    # ``ok`` — a deliberate harness-wide override is valid, just worth surfacing.
+    warnings = _runtime_default_warnings()
+
+    return {"ok": not errors, "errors": errors, "warnings": warnings, "schema_version": CURRENT_RUNTIME_SCHEMA_VERSION}
+
+
+def _runtime_default_warnings() -> list[dict[str, str]]:
+    from .config import describe_runtime_default_authority
+
+    try:
+        authority = describe_runtime_default_authority()
+    except Exception:
+        return []
+    warnings: list[dict[str, str]] = []
+    override = authority.get("harness_override", {})
+    top = authority.get("top_level", {})
+    if override.get("model_state") == "shadowing":
+        warnings.append({
+            "field": "agent_runtime.default_model",
+            "reason": (
+                f"shadows model.default ({override.get('model')} vs {top.get('model')}) — "
+                "agents run the agent_runtime override, not the model you set; "
+                "remove it unless the harness is deliberately pinned"
+            ),
+        })
+    elif override.get("model_state") == "redundant":
+        warnings.append({
+            "field": "agent_runtime.default_model",
+            "reason": (
+                "duplicates model.default and is unmaintained by any write path — "
+                "remove it so the single runtime-default authority stays single"
+            ),
+        })
+    return warnings
 
 
 def migration_status(root: Path | None = None) -> dict[str, Any]:

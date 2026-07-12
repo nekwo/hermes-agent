@@ -15,6 +15,38 @@ def test_validate_runtime_config_rejects_bad_ceiling_order():
     assert any(item["field"] == "mission_max_total_tokens" for item in result["errors"])
 
 
+def test_validate_runtime_config_warns_on_shadowing_override(tmp_path, monkeypatch):
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "model:\n"
+        "  default: gpt-5.6-luna\n"
+        "agent_runtime:\n"
+        "  default_model: gpt-5.5\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("agent_runtime.config.get_config_path", lambda: p)
+
+    result = validate_runtime_config(AgentRuntimeConfig())
+
+    # Warnings never flip ok; they surface the stale-pin divergence.
+    assert result["ok"] is True
+    assert any(
+        w["field"] == "agent_runtime.default_model" and "shadows" in w["reason"]
+        for w in result["warnings"]
+    )
+
+
+def test_validate_runtime_config_no_warning_when_authority_is_clean(tmp_path, monkeypatch):
+    p = tmp_path / "config.yaml"
+    p.write_text("model:\n  default: gpt-5.6-luna\n", encoding="utf-8")
+    monkeypatch.setattr("agent_runtime.config.get_config_path", lambda: p)
+
+    result = validate_runtime_config(AgentRuntimeConfig())
+
+    assert result["ok"] is True
+    assert result["warnings"] == []
+
+
 def test_validate_runtime_config_rejects_bad_storage_watermark_order():
     cfg = AgentRuntimeConfig(
         artifact_storage_low_watermark_mb=100,

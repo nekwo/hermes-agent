@@ -26,6 +26,51 @@ def _persona() -> AgentPersona:
     )
 
 
+def _write_config(monkeypatch, tmp_path, body: str):
+    p = tmp_path / "config.yaml"
+    p.write_text(body, encoding="utf-8")
+    monkeypatch.setattr("agent_runtime.config.get_config_path", lambda: p)
+    return p
+
+
+def test_harness_doctor_flags_shadowing_model_authority(isolate_agent_runtime_root, tmp_path, monkeypatch):
+    _write_config(
+        monkeypatch,
+        tmp_path,
+        "model:\n"
+        "  default: gpt-5.6-luna\n"
+        "agent_runtime:\n"
+        "  default_model: gpt-5.5\n"
+        "  personas:\n"
+        "    neko_supervisor:\n"
+        "      model: gpt-5.5\n"
+        "    pm:\n"
+        "      model: gpt-5.3-codex-spark\n",
+    )
+
+    report = run_harness_doctor(include_worktrees=False, snapshot_builder=lambda: {"runs": [], "tasks": []})
+
+    authority = report["model_authority"]
+    assert authority["available"] is True
+    assert authority["divergent"] is True
+    assert authority["harness_override"]["model_state"] == "shadowing"
+    assert any("shadows the runtime default" in notice for notice in authority["notices"])
+    # Informational only — a stale pin never turns the doctor into a fix job.
+    assert report["summary"]["needs_fix"] is False
+
+
+def test_harness_doctor_model_authority_clean_when_only_top_level(isolate_agent_runtime_root, tmp_path, monkeypatch):
+    _write_config(monkeypatch, tmp_path, "model:\n  default: gpt-5.6-luna\n")
+
+    report = run_harness_doctor(include_worktrees=False, snapshot_builder=lambda: {"runs": [], "tasks": []})
+
+    authority = report["model_authority"]
+    assert authority["divergent"] is False
+    assert authority["harness_override"]["model_state"] == "absent"
+    assert authority["notices"] == []
+    assert authority["resolved"]["model"] == "gpt-5.6-luna"
+
+
 def test_harness_doctor_reports_stale_runtime_and_snapshot_null_ids(isolate_agent_runtime_root):
     stamp = now() - timedelta(days=3)
     tasks = TaskStore()
