@@ -878,6 +878,13 @@ def _cmd_mission_chat_message(args) -> int:
             preloaded_skill_prompt = ""
             preloaded_skills_loaded = []
             preloaded_skills_missing = list(queued_skills)
+    workspace_agents = load_workspace_agents_context(
+        getattr(args, "agents_file", None)
+    )
+    workspace_id = safe_assignment_token(getattr(args, "workspace_id", None))
+    workspace_name = safe_assignment_text(
+        getattr(args, "workspace_name", None), limit=120
+    )
     prompt_context = mission_chat_prompt_observability(
         persona=persona,
         persona_instance_id=instance.id,
@@ -890,6 +897,9 @@ def _cmd_mission_chat_message(args) -> int:
         session_db=session_db,
         current_message=message,
         model_selection=model_selection,
+        workspace_id=workspace_id,
+        workspace_name=workspace_name,
+        workspace_agents=workspace_agents,
     )
     stream = bool(getattr(args, "stream", False))
     stream_emitter = _ChatProtocolV2Emitter(
@@ -987,6 +997,9 @@ def _cmd_mission_chat_message(args) -> int:
                 trace_callback=_stream_progress,
                 agent_ready_callback=_agent_ready_for_steer,
                 preloaded_skill_prompt=preloaded_skill_prompt,
+                workspace_agents_content=(
+                    workspace_agents.content if workspace_agents is not None else None
+                ),
                 turn_id=safe_assignment_token(client_message_id),
             )
         finally:
@@ -1007,6 +1020,9 @@ def _cmd_mission_chat_message(args) -> int:
             final_model_input=final_model_input,
             model_selection=model_selection,
             trace_events=trace_payloads,
+            workspace_id=workspace_id,
+            workspace_name=workspace_name,
+            workspace_agents=workspace_agents,
         )
         if preloaded_skills_loaded:
             prompt_context["used_skills"] = prompt_context.get("used_skills") or []

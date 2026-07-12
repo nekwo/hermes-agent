@@ -326,6 +326,13 @@ def test_mission_chat_surface_message_always_carries_operative_rules():
     assert "Never fabricate" in composed
     assert composed.endswith("Focus on the auth refresh path.")
 
+    workspace_composed = _mission_chat_surface_message(
+        "",
+        workspace_agents_content="# Selected workspace\nUse its conventions.",
+    )
+    assert "operator-selected AGENTS.md" in workspace_composed
+    assert workspace_composed.endswith("Use its conventions.")
+
 
 def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -356,11 +363,13 @@ def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path
         "run echo PARITY_OK_2026",
         permission_session_id="session_mission_chat",
         agent_ready_callback=agent_ready,
+        workspace_agents_content="# Workspace rules\nUse the selected conventions.",
     )
 
     system_message = captured["request"].system_message
     assert "Never fabricate" in system_message
     assert "actually use your tools" in system_message
+    assert "# Workspace rules" in system_message
     # And the chat-trace callback is wired on the canonical operator path too.
     assert captured["request"].progress_callback is not None
     assert captured["request"].agent_ready_callback is agent_ready

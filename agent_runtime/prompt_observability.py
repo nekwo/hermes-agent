@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
@@ -15,6 +16,73 @@ from .serde import to_jsonable
 
 SAFE_PREVIEW_LIMIT = 1200
 DEFAULT_CHAT_HISTORY_LIMIT = 8
+MAX_WORKSPACE_AGENTS_BYTES = 128 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceAgentsContext:
+    """One explicitly selected workspace ``AGENTS.md`` and its safe receipt."""
+
+    content: str | None
+    receipt: dict[str, Any]
+
+
+def load_workspace_agents_context(value: str | None) -> WorkspaceAgentsContext | None:
+    """Load a Launcher-selected ``AGENTS.md`` without changing process CWD.
+
+    Invalid, missing, unreadable, and oversized files produce an honest receipt
+    and no injected content. Mission chat remains available in every case.
+    """
+
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    requested = Path(raw_value).expanduser()
+    receipt: dict[str, Any] = {
+        "path": str(requested),
+        "name": requested.name or "AGENTS.md",
+        "kind": "workspace_context",
+        "source": "workspace",
+        "included": False,
+        "status": "invalid_path",
+    }
+    if not requested.is_absolute():
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    if requested.name.lower() != "agents.md":
+        receipt["status"] = "invalid_name"
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    try:
+        resolved = requested.resolve(strict=True)
+    except (OSError, RuntimeError):
+        receipt["status"] = "missing"
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    receipt["path"] = str(resolved)
+    if not resolved.is_file():
+        receipt["status"] = "not_a_file"
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    try:
+        size = resolved.stat().st_size
+    except OSError as exc:
+        receipt.update(status="unreadable", error=type(exc).__name__)
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    receipt["bytes"] = size
+    if size > MAX_WORKSPACE_AGENTS_BYTES:
+        receipt.update(status="too_large", max_bytes=MAX_WORKSPACE_AGENTS_BYTES)
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    try:
+        raw = resolved.read_bytes()
+    except OSError as exc:
+        receipt.update(status="unreadable", error=type(exc).__name__)
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    content = raw.decode("utf-8", errors="replace")
+    receipt.update(
+        included=True,
+        status="loaded",
+        sha256=hashlib.sha256(raw).hexdigest().upper(),
+        bytes=len(raw),
+        preview=_safe_preview(content),
+    )
+    return WorkspaceAgentsContext(content=content, receipt=receipt)
 
 
 def mission_chat_prompt_observability(
@@ -33,6 +101,9 @@ def mission_chat_prompt_observability(
     model_selection: dict[str, Any] | None = None,
     trace_events: Iterable[dict[str, Any]] | None = None,
     prompt_mode: str = "normal_hermes_profile_chat",
+    workspace_id: str | None = None,
+    workspace_name: str | None = None,
+    workspace_agents: WorkspaceAgentsContext | None = None,
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
 
@@ -54,6 +125,13 @@ def mission_chat_prompt_observability(
                 goal_id,
                 turn_id,
                 current_message,
+                workspace_id,
+                workspace_name,
+                (
+                    workspace_agents.receipt.get("sha256")
+                    if workspace_agents is not None
+                    else None
+                ),
             )
         ).encode("utf-8", errors="replace")
     ).hexdigest()[:16]
@@ -81,6 +159,8 @@ def mission_chat_prompt_observability(
         "chat": chat,
         "task_id": safe_assignment_token(task_id),
         "goal_id": safe_assignment_token(goal_id),
+        "workspace_id": safe_assignment_token(workspace_id),
+        "workspace_name": safe_assignment_text(workspace_name, limit=120),
         "turn_id": safe_assignment_token(turn_id),
         "surface_prompt": surface,
         "surface_prompt_is_blank": surface == "",
@@ -105,6 +185,22 @@ def mission_chat_prompt_observability(
                 "status": "loaded",
                 "summary": "Loaded through normal Hermes profile context files and memory.",
             },
+            *(
+                [
+                    {
+                        "name": "Workspace AGENTS.md",
+                        "kind": "workspace_context",
+                        "status": workspace_agents.receipt.get("status", "unknown"),
+                        "summary": (
+                            "Injected from the operator-selected workspace directory."
+                            if workspace_agents.content is not None
+                            else "Workspace instructions were not injected; see the file receipt."
+                        ),
+                    }
+                ]
+                if workspace_agents is not None
+                else []
+            ),
             {
                 "name": "Chat history context",
                 "kind": "conversation",
@@ -112,7 +208,10 @@ def mission_chat_prompt_observability(
                 "summary": f"{len(history)} prior redaction-safe chat message(s) supplied before this turn.",
             },
         ],
-        "context_files": _profile_context_files(profile),
+        "context_files": [
+            *_profile_context_files(profile),
+            *([workspace_agents.receipt] if workspace_agents is not None else []),
+        ],
         "used_skills": used_skills,
         "accessible_skills": accessible_skills,
         "available_skills": available_skills,
@@ -129,6 +228,9 @@ def mission_chat_prompt_observability(
             "load_soul_identity": True,
             "surface_prompt_blank": surface == "",
             "limiting_wrapper_active": bool(limiting_wrapper_active),
+            "workspace_agents_injected": bool(
+                workspace_agents is not None and workspace_agents.content is not None
+            ),
         },
         "redaction": {
             "status": "safe",
@@ -884,7 +986,6 @@ def _profile_context_files(profile: str) -> list[dict[str, Any]]:
         profile_dir / "SOUL.md",
         profile_dir / "memories" / "MEMORY.md",
         profile_dir / "memories" / "USER.md",
-        profile_dir / "AGENTS.md",
         profile_dir / ".skills_prompt_snapshot.json",
         profile_dir / "config.yaml",
     ]

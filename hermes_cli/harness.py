@@ -89,7 +89,7 @@ from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, sub
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.personas import profile_chat_toolsets, seed_personas
-from agent_runtime.prompt_observability import mission_chat_prompt_observability, persist_prompt_observability_context
+from agent_runtime.prompt_observability import load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context
 from agent_runtime.queued_skills import consume_skills_for_next_turn, queue_skill_for_next_turn
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
@@ -833,6 +833,9 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--model", default=None, help="Model override for this persona chat session only")
     mission_chat_message.add_argument("--use-agent-default", action="store_true", help="Clear the chat-scoped provider/model override before sending")
     mission_chat_message.add_argument("--surface-prompt", default="")
+    mission_chat_message.add_argument("--agents-file", default=None, help="Absolute path to one operator-selected workspace AGENTS.md to inject for this turn")
+    mission_chat_message.add_argument("--workspace-id", default=None)
+    mission_chat_message.add_argument("--workspace-name", default=None)
     mission_chat_message.add_argument("--intent-hint", default="chat")
     mission_chat_message.add_argument("--requested-by", default="cli")
     mission_chat_message.add_argument("--client-message-id", default=None)

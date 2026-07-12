@@ -254,6 +254,7 @@ class GPTPersonaRuntime:
         trace_callback: Callable[[dict], None] | None = None,
         agent_ready_callback: Callable[[object], Callable[[], None] | None] | None = None,
         preloaded_skill_prompt: str | None = None,
+        workspace_agents_content: str | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -314,6 +315,7 @@ class GPTPersonaRuntime:
                 system_message=_mission_chat_surface_message(
                     surface_prompt,
                     preloaded_skill_prompt=preloaded_skill_prompt,
+                    workspace_agents_content=workspace_agents_content,
                 ),
                 stream_callback=stream_callback,
                 agent_ready_callback=agent_ready_callback,
@@ -423,6 +425,7 @@ def _mission_chat_surface_message(
     surface_prompt: str | None,
     *,
     preloaded_skill_prompt: str | None = None,
+    workspace_agents_content: str | None = None,
 ) -> str:
     """Compose the operator-chat system message: the non-negotiable operative
     rules first, then the operator's optional per-session surface prompt. The
@@ -431,10 +434,16 @@ def _mission_chat_surface_message(
 
     operator_surface = (surface_prompt or "").strip()
     skill_prompt = (preloaded_skill_prompt or "").strip()
+    workspace_agents = (workspace_agents_content or "").strip()
     rules = _mission_chat_operative_rules()
     parts = [rules]
     if skill_prompt:
         parts.append(skill_prompt)
+    if workspace_agents:
+        parts.append(
+            "Workspace instructions from the operator-selected AGENTS.md "
+            "(apply these instructions to this turn):\n\n" + workspace_agents
+        )
     if operator_surface:
         parts.append(operator_surface)
     return "\n\n".join(parts)
