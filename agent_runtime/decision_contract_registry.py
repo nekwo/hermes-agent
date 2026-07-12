@@ -1221,6 +1221,7 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "persona_instance.steered": EventContract("persona_instance.steered", "Persona instance steering edge changed", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by", "detached")),
     "persona_instance.reaped": EventContract("persona_instance.reaped", "Stale persona instance reaped from the live graph", ("persona_instance_id", "reason"), ("task_id", "goal_id", "owner_state")),
     "persona_instance.reconciled": EventContract("persona_instance.reconciled", "Legacy-id persona instance row folded onto its canonical channel", ("persona_instance_id", "from_id", "to_id", "action"), ("persona_id",)),
+    "persona_instance.pruned": EventContract("persona_instance.pruned", "Orphaned/legacy-role persona instance archived from the live graph", ("persona_instance_id", "reason"), ("persona_id", "role", "profile_id", "updated_at")),
     "steer.requested": EventContract("steer.requested", "Steer requested", ("action_id", "verb", "source_node_id", "target_node_id"), ("requested_by", "reason")),
     "steer.started": EventContract("steer.started", "Steer started", ("action_id", "verb", "source_node_id", "target_node_id"), ("requested_by", "reason")),
     "steer.returned": EventContract("steer.returned", "Steer returned", ("action_id", "verb", "source_node_id", "target_node_id"), ("result", "stage_id", "persona_instance_id")),

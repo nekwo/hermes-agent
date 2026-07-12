@@ -27,6 +27,17 @@ BASE_PERSONA_ID = "base"
 DEFAULT_PERSONA_IDS = frozenset({BASE_PERSONA_ID})
 
 
+# Roles/personas retired from the product flow. A persona instance persisted under one
+# of these — historically the legacy ``pm`` slot (``shared_harness_overlay.md``: "Treat
+# PM names ... as legacy compatibility only; do not present PM as the product flow") —
+# must never render as a live product agent. The persona-instance reconciler prunes such
+# rows (archive, never delete). Single-sourced here so liveness/roster checks resolve a
+# mothballed role through this set instead of hand-rolling ``role == "pm"`` string tests.
+MOTHBALLED_ROLES: frozenset[AgentRole] = frozenset({AgentRole.PM})
+MOTHBALLED_ROLE_TOKENS: frozenset[str] = frozenset(role.value for role in MOTHBALLED_ROLES)
+MOTHBALLED_PERSONA_IDS: frozenset[str] = frozenset({AgentRole.PM.value})
+
+
 # Synthetic operator-channel personas built from a raw Hermes profile carry the
 # "profile" role sentinel (see ``hermes_cli.harness._persona_by_id``). They are not
 # a typed mission slot, so it is not a real ``AgentRole`` — passing it straight into

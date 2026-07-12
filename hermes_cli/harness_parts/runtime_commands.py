@@ -25,10 +25,16 @@ def _cmd_persona_instance_reconcile(args) -> int:
         mode = "applied" if data["applied"] else "dry-run"
         print(
             f"persona-instance reconcile ({mode}): merged={data['merged_count']} "
-            f"renamed={data['renamed_count']} skipped={data['skipped_count']} aliases={data['alias_count']}"
+            f"renamed={data['renamed_count']} skipped={data['skipped_count']} "
+            f"pruned={data.get('pruned_count', 0)} held={data.get('held_count', 0)} "
+            f"aliases={data['alias_count']}"
         )
         for item in data["actions"]:
             print(f"  - {item['action']}: {item['from_id']} -> {item['to_id']}")
+        for item in data.get("pruned") or []:
+            print(f"  - pruned ({item['reason']}): {item['persona_instance_id']}")
+        for item in data.get("held") or []:
+            print(f"  - held ({item['reason']}): {item['persona_instance_id']}")
     return 0
 
 

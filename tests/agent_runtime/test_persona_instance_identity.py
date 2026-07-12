@@ -22,6 +22,8 @@ from agent_runtime.persona_assignments import (
     persona_instance_id_for,
 )
 from agent_runtime.persona_instance_identity import (
+    backed_persona_identity,
+    classify_orphan_persona_instances,
     duplicate_persona_instance_groups,
     identity_aliases_for_rows,
     load_persona_instance_aliases,
@@ -330,3 +332,202 @@ def test_persona_instance_id_for_matches_canonical_of_selector():
             canonical_persona_instance_id(f"persona:{persona_id}", persona_id=persona_id)
             == persona_instance_id_for(persona_id)
         )
+
+
+# ── Orphan / legacy-role prune ──────────────────────────────────────────────
+
+_FIXED_NOW = datetime(2026, 7, 12, 20, 0, 0, tzinfo=timezone.utc)
+_STALE = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)  # ~6 weeks old
+_FRESH = datetime(2026, 7, 12, 19, 30, 0, tzinfo=timezone.utc)  # 30 min old
+
+
+def _backed_universe():
+    # dev/qa/neko_supervisor/backend_dev resolve via default_personas() even though only
+    # ``base`` is seeded; ``alice`` is a live profile template.
+    return backed_persona_identity(profile_names=["alice", "base", "backend-dev"])
+
+
+def _orphan_row(instance_id, **over):
+    row = {
+        "persona_instance_id": instance_id,
+        "persona_id": "profile:ghost",
+        "role": "profile",
+        "profile_id": "ghost",
+        "mode": "configured",
+        "updated_at": _STALE.isoformat(),
+        "last_heartbeat_at": None,
+        "active_worker_session_id": None,
+        "active_run_id": None,
+        "current_assignment_id": None,
+        "current_task_id": None,
+    }
+    row.update(over)
+    return row
+
+
+def test_classify_orphan_truth_table():
+    backed_ids, backed_profiles = _backed_universe()
+    rows = [
+        # Prunable orphans.
+        _orphan_row("codex", persona_id="profile:codex_create_probe", profile_id="codex_create_probe"),
+        _orphan_row("pm", persona_id="pm", role="pm", profile_id="pm"),
+        # Real product agents — never orphaned, not even held.
+        _orphan_row("dev", persona_id="dev", role="dev", profile_id=None),
+        _orphan_row("qa", persona_id="qa", role="qa", profile_id=None),
+        _orphan_row("neko", persona_id="neko_supervisor", role="neko_supervisor", profile_id=None),
+        _orphan_row("bdev", persona_id="backend_dev", role="dev", profile_id=None),
+        _orphan_row("base", persona_id="base", role="profile", profile_id="base"),
+        _orphan_row("alice", persona_id="profile:alice", role="profile", profile_id="alice"),
+        # Orphan-shaped but PROTECTED → held, not pruned.
+        _orphan_row("held_active", active_worker_session_id="ws_1"),
+        _orphan_row("held_run", active_run_id="run_1"),
+        _orphan_row("held_assign", current_assignment_id="a_1"),
+        _orphan_row("held_taskbound", mode="task_bound"),
+        _orphan_row("held_heartbeat", last_heartbeat_at=_FRESH.isoformat()),
+        _orphan_row("held_recent", updated_at=_FRESH.isoformat()),
+    ]
+    res = classify_orphan_persona_instances(
+        rows, backed_persona_ids=backed_ids, backed_profile_names=backed_profiles, now=_FIXED_NOW
+    )
+
+    prunable = {e["persona_instance_id"]: e["reason"] for e in res["prunable"]}
+    held = {e["persona_instance_id"]: e["reason"] for e in res["held"]}
+
+    assert prunable == {"codex": "orphan-no-profile", "pm": "legacy-role"}
+    # No real agent appears anywhere.
+    for real in ("dev", "qa", "neko", "bdev", "base", "alice"):
+        assert real not in prunable and real not in held
+    assert held == {
+        "held_active": "active-binding",
+        "held_run": "active-binding",
+        "held_assign": "active-binding",
+        "held_taskbound": "task-bound",
+        "held_heartbeat": "fresh-heartbeat",
+        "held_recent": "recently-updated",
+    }
+
+
+def test_classify_legacy_role_still_seeded_is_held():
+    # If the mothballed persona is still present in the backed universe, pruning would
+    # flap (it gets re-ensured), so it is held, not pruned.
+    backed_ids, backed_profiles = _backed_universe()
+    backed_ids = set(backed_ids) | {"pm"}
+    res = classify_orphan_persona_instances(
+        [_orphan_row("pm", persona_id="pm", role="pm", profile_id="pm")],
+        backed_persona_ids=backed_ids,
+        backed_profile_names=backed_profiles,
+        now=_FIXED_NOW,
+    )
+    assert res["prunable"] == []
+    assert res["held"] == [
+        {
+            "persona_instance_id": "pm",
+            "persona_id": "pm",
+            "role": "pm",
+            "profile_id": "pm",
+            "updated_at": _STALE.isoformat(),
+            "reason": "legacy-role-still-seeded",
+        }
+    ]
+
+
+def test_reconcile_prunes_orphans_holds_and_is_idempotent(monkeypatch):
+    monkeypatch.setattr(
+        "agent_runtime.persona_instance_identity._profile_template_names",
+        lambda: ["alice", "base", "backend-dev"],
+    )
+    # Two true orphans (weeks stale), one held orphan (fresh), and real agents kept.
+    _seed_row(
+        "personainst_profile_codex_create_probe",
+        persona_id="profile:codex_create_probe",
+        display_name="Codex Create Probe",
+        mode="configured",
+        profile_id="codex_create_probe",
+        updated_at=_STALE,
+    )
+    _seed_row("personainst_pm", persona_id="pm", display_name="Pm", mode="configured", profile_id="pm", updated_at=_STALE)
+    _seed_row("personainst_profile_ghost", persona_id="profile:ghost", display_name="Ghost", mode="configured", profile_id="ghost", updated_at=now())
+    _seed_row("personainst_dev", persona_id="dev", display_name="Dev", updated_at=_STALE)
+    _seed_row("personainst_base", persona_id="base", display_name="Base", profile_id="base", updated_at=_STALE)
+
+    before_ids = _live_row_ids()
+
+    # Dry-run writes nothing.
+    dry = reconcile_persona_instances(apply=False, event_log=EventLog())
+    assert dry["pruned_count"] == 2
+    assert {p["persona_instance_id"]: p["reason"] for p in dry["pruned"]} == {
+        "personainst_profile_codex_create_probe": "orphan-no-profile",
+        "personainst_pm": "legacy-role",
+    }
+    assert {h["persona_instance_id"] for h in dry["held"]} == {"personainst_profile_ghost"}
+    assert dry["held"][0]["reason"] == "recently-updated"
+    assert _live_row_ids() == before_ids  # nothing moved
+
+    # Apply archives exactly the two orphans; real agents + held ghost survive.
+    applied = reconcile_persona_instances(apply=True, event_log=EventLog())
+    assert applied["pruned_count"] == 2
+    assert _live_row_ids() == {
+        "personainst_dev",
+        "personainst_base",
+        "personainst_profile_ghost",
+    }
+    prune_dir = paths.persona_instances_archive_dir()
+    archived = {p.name for p in prune_dir.rglob("*.json")}
+    assert "personainst_profile_codex_create_probe.json" in archived
+    assert "personainst_pm.json" in archived
+
+    events = [_event_type(e) for e in EventLog().tail(50)]
+    assert events.count("persona_instance.pruned") == 2
+
+    # Second apply is a no-op.
+    again = reconcile_persona_instances(apply=True, event_log=EventLog())
+    assert again["pruned_count"] == 0
+
+
+class _FakeTemplate:
+    def __init__(self, name):
+        self.name = name
+        self.description = ""
+
+
+def test_snapshot_emits_orphan_and_no_warning_for_real_agent(monkeypatch):
+    cfg = _runtime_config()
+    monkeypatch.setattr("agent_runtime.snapshot.load_agent_runtime_config", lambda: cfg)
+    # Provide an authoritative (non-empty) profile catalog so the profile:* orphan lane
+    # engages; ``codex_create_probe`` is absent from it and must be flagged.
+    monkeypatch.setattr(
+        "agent_runtime.snapshot.available_profile_templates",
+        lambda: [_FakeTemplate("alice"), _FakeTemplate("base")],
+    )
+    # The reconcile prune lane reads the catalog through _profile_template_names; keep it
+    # authoritative there too so the heal step actually archives the flagged orphan.
+    monkeypatch.setattr(
+        "agent_runtime.persona_instance_identity._profile_template_names",
+        lambda: ["alice", "base"],
+    )
+    _seed_row(
+        "personainst_profile_codex_create_probe",
+        persona_id="profile:codex_create_probe",
+        display_name="Codex Create Probe",
+        mode="configured",
+        profile_id="codex_create_probe",
+        updated_at=_STALE,
+    )
+    _seed_row("personainst_dev", persona_id="dev", display_name="Dev", updated_at=_STALE)
+
+    snapshot = build_snapshot()
+    orphan_warnings = [
+        w for w in snapshot["parity"]["warnings"] if w.get("code") == "orphaned_persona_instance"
+    ]
+    entity_ids = {w["entity_id"] for w in orphan_warnings}
+    assert "personainst_profile_codex_create_probe" in entity_ids
+    assert "personainst_dev" not in entity_ids  # real agent never flagged
+    codex_warning = next(w for w in orphan_warnings if w["entity_id"] == "personainst_profile_codex_create_probe")
+    assert codex_warning["reason"] == "orphan-no-profile"
+
+    # After reconcile the orphan is archived and the warning clears.
+    reconcile_persona_instances(event_log=EventLog())
+    healed = build_snapshot()
+    assert not [
+        w for w in healed["parity"]["warnings"] if w.get("code") == "orphaned_persona_instance"
+    ]

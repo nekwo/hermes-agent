@@ -7,7 +7,14 @@ from pathlib import Path
 from collections.abc import Mapping
 
 from .parse_cache import cached_yaml_file
-from .errors import RuntimeRootMismatch
+from .errors import ProbeIsolationViolation, RuntimeRootMismatch
+
+# Env marker a probe run sets to demand hard isolation. When truthy, the runtime root
+# MUST be a dedicated ``agent-runtime-probe-*`` temp dir won via the env layer, or every
+# store access fails fast (see ``assert_probe_isolation`` + ``paths.store_root``).
+PROBE_ISOLATION_ENV = "HERMES_REQUIRE_ISOLATED_ROOT"
+PROBE_ROOT_PREFIX = "agent-runtime-probe"
+_FALSEY = frozenset({"", "0", "false", "no", "off"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -54,6 +61,38 @@ def assert_pinned(resolution: RuntimeResolution, *, pinned_root: str) -> None:
         raise RuntimeRootMismatch(
             f"Runtime root mismatch: resolved {resolution.store_root} via {resolution.layer}, pinned {pinned_root}"
         )
+
+
+def probe_isolation_required(env: Mapping[str, str] | None = None) -> bool:
+    source = os.environ if env is None else env
+    return str(source.get(PROBE_ISOLATION_ENV) or "").strip().lower() not in _FALSEY
+
+
+def assert_probe_isolation(
+    resolution: RuntimeResolution | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Fail fast when a probe run would resolve the live/default store root.
+
+    No-op unless ``HERMES_REQUIRE_ISOLATED_ROOT`` is truthy. When set, the resolution
+    must have been won by the env layer AND point at an ``agent-runtime-probe-*`` root;
+    anything else (config/default layer, or an env root without the probe prefix) means
+    the probe would write into the live store, so raise ``ProbeIsolationViolation``.
+    """
+    source = os.environ if env is None else env
+    if not probe_isolation_required(source):
+        return
+    item = resolution or resolve_runtime(source)
+    basename = item.store_root.name
+    if item.layer == "env" and basename.startswith(PROBE_ROOT_PREFIX):
+        return
+    raise ProbeIsolationViolation(
+        f"{PROBE_ISOLATION_ENV} is set but the resolved runtime root is not an isolated "
+        f"probe root: resolved {item.store_root} via '{item.layer}' layer. Set "
+        f"HERMES_AGENT_RUNTIME_ROOT to a '{PROBE_ROOT_PREFIX}-*' temp dir so the probe "
+        "cannot persist into the live store."
+    )
 
 
 def resolution_table(env: Mapping[str, str] | None = None) -> list[dict[str, object]]:

@@ -42,7 +42,12 @@ from .persona_assignments import (
     persona_instance_summary,
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _SECRET_RE, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
-from .persona_instance_identity import duplicate_persona_instance_groups, identity_aliases_for_rows
+from .persona_instance_identity import (
+    backed_persona_identity,
+    classify_orphan_persona_instances,
+    duplicate_persona_instance_groups,
+    identity_aliases_for_rows,
+)
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
@@ -589,6 +594,53 @@ def _parity_warnings(data) -> list[dict]:
                     "run `harness persona-instance reconcile`"
                 ),
                 "instance_ids": group["instance_ids"],
+            }
+        )
+
+    # Orphan / held persona-instance accounting: rows whose backing persona/profile is
+    # absent (or a mothballed role) project as phantom "on level" agents. Surface them
+    # the same way duplicate rows are surfaced so nothing is silently dropped — the
+    # reconciler prunes (archives) the prunable ones; held rows are protected and shown.
+    template_names = [
+        name
+        for row in (data.get("available_personas") or [])
+        if isinstance(row, dict)
+        for name in (str((row or {}).get("hermes_profile") or "").strip(),)
+        if name
+    ]
+    backed_ids, backed_profiles = backed_persona_identity(
+        agents=data.get("agents") or [],
+        profile_names=template_names,
+    )
+    orphan_classes = classify_orphan_persona_instances(
+        instances,
+        backed_persona_ids=backed_ids,
+        backed_profile_names=backed_profiles,
+        profile_catalog_authoritative=bool(template_names),
+    )
+    for entry in orphan_classes["prunable"]:
+        warnings.append(
+            {
+                "code": "orphaned_persona_instance",
+                "entity_id": entry["persona_instance_id"],
+                "reason": entry["reason"],
+                "detail": (
+                    f"persona instance '{entry['persona_instance_id']}' has no backing persona/profile "
+                    f"({entry['reason']}) and renders as a phantom agent; "
+                    "run `harness persona-instance reconcile [--dry-run]`"
+                ),
+            }
+        )
+    for entry in orphan_classes["held"]:
+        warnings.append(
+            {
+                "code": "held_orphan_persona_instance",
+                "entity_id": entry["persona_instance_id"],
+                "reason": entry["reason"],
+                "detail": (
+                    f"persona instance '{entry['persona_instance_id']}' is orphan-shaped but protected "
+                    f"from prune ({entry['reason']})"
+                ),
             }
         )
     instance_personas = {

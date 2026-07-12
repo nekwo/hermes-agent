@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .resolution import resolve_runtime
+from .resolution import assert_probe_isolation, resolve_runtime
 
 
 def store_root() -> Path:
-    return resolve_runtime().store_root
+    resolution = resolve_runtime()
+    # Probe-isolation gate: a no-op unless HERMES_REQUIRE_ISOLATED_ROOT is set, in which
+    # case a run that would resolve the live/default root fails fast before any store I/O.
+    assert_probe_isolation(resolution)
+    return resolution.store_root
 
 
 def tasks_dir() -> Path:
