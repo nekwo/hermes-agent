@@ -180,7 +180,14 @@ class GPTPersonaRuntime:
         session_id: str | None = None,
         turn_id: str | None = None,
         max_wall_seconds: float | None = 120.0,
-        max_api_calls: int | None = 8,
+        # No API-call cap on the chat lane — align with base Hermes, where a
+        # conversational turn is bounded by the tool-calling loop
+        # (AgentRunRequest.max_iterations = 90) plus the wall-clock budget, not a
+        # hard call count. Operator chats and agent_chat_send relays share this
+        # path; both keep their wall deadline (max_wall_seconds / the shared
+        # relay budget), so a runaway turn is caught by time + iterations, not an
+        # arbitrary 8 that also throttled ordinary multi-step chat requests.
+        max_api_calls: int | None = None,
         max_total_tokens: int | None = None,
         stream_callback: Callable[[str | None], None] | None = None,
         pre_trace_callback: Callable[[dict], None] | None = None,
@@ -252,7 +259,14 @@ class GPTPersonaRuntime:
         model_override: str | None = None,
         surface_prompt: str | None = "",
         max_wall_seconds: float | None = 120.0,
-        max_api_calls: int | None = 8,
+        # No API-call cap on the chat lane — align with base Hermes, where a
+        # conversational turn is bounded by the tool-calling loop
+        # (AgentRunRequest.max_iterations = 90) plus the wall-clock budget, not a
+        # hard call count. Operator chats and agent_chat_send relays share this
+        # path; both keep their wall deadline (max_wall_seconds / the shared
+        # relay budget), so a runaway turn is caught by time + iterations, not an
+        # arbitrary 8 that also throttled ordinary multi-step chat requests.
+        max_api_calls: int | None = None,
         max_total_tokens: int | None = None,
         stream_callback: Callable[[str | None], None] | None = None,
         pre_trace_callback: Callable[[dict], None] | None = None,

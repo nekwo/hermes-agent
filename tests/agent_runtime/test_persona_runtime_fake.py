@@ -490,6 +490,56 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
     )
 
 
+def test_mission_chat_reply_has_no_api_call_cap_and_keeps_iteration_failsafe(
+    tmp_path, monkeypatch
+):
+    # Chat lane matches base Hermes: a turn is bounded by the tool-calling loop
+    # (max_iterations=90) + wall clock, NOT a hard api-call count. The old
+    # max_api_calls=8 also throttled the operator's own multi-step chat requests
+    # (operator chat and agent_chat_send relays share this path), so it was
+    # lifted. Guard against a silent re-introduction of the cap.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime.models import AgentPersona
+
+    profile = AgentPersona(
+        id="profile:alice",
+        display_name="Alice Agent",
+        role="profile",
+        model="gpt-5.5",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        toolsets=["file", "search"],
+        system_prompt_path="",
+        hermes_profile=None,
+    )
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="s",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex",
+        default_model="gpt-5.5",
+        agent_runner=CapturingRunner(),
+    )
+    runtime.mission_chat_reply(
+        profile, "read three files and summarize", permission_session_id="s"
+    )
+
+    request = captured["request"]
+    assert request.max_api_calls is None
+    assert request.max_iterations == 90
+
+
 def test_mission_chat_reply_honors_core_context_file_opt_in(tmp_path, monkeypatch):
     # Regression: the operator chat path used to hardcode skip_context_files=False,
     # forcing the process-cwd repo project docs (e.g. the 72KB hermes-agent
