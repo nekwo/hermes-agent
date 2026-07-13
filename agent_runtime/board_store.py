@@ -640,13 +640,25 @@ class BoardStore:
             [c for c in self._list_active_cards(board_id) if c.column_id == column_id and c.card_id != exclude_card_id]
         )
         keys = [c.order_key for c in column_cards]
-        # before/after are neighbour CARD ids; resolve them to order keys.
-        before_key = _order_key_of(column_cards, before)
-        after_key = _order_key_of(column_cards, after)
-        if before_key is None and after_key is None:
+        # ``after`` = the card the moved card should sit immediately AFTER (its
+        # upper neighbour → lower key bound); ``before`` = the card it should sit
+        # immediately BEFORE (its lower neighbour → upper key bound). Either may
+        # be given alone (the missing bound is derived from the sorted column) or
+        # both (an explicit bracket).
+        lower_key = _order_key_of(column_cards, after)   # after → lower bound
+        upper_key = _order_key_of(column_cards, before)  # before → upper bound
+        if lower_key is None and upper_key is None:
             return board_order.allocate_between(keys[-1] if keys else None, None)
+        if lower_key is not None and upper_key is None:
+            idx = next((i for i, c in enumerate(column_cards) if c.card_id == after), None)
+            if idx is not None:
+                upper_key = column_cards[idx + 1].order_key if idx + 1 < len(column_cards) else None
+        elif upper_key is not None and lower_key is None:
+            idx = next((i for i, c in enumerate(column_cards) if c.card_id == before), None)
+            if idx is not None:
+                lower_key = column_cards[idx - 1].order_key if idx - 1 >= 0 else None
         try:
-            return board_order.allocate_between(before_key, after_key)
+            return board_order.allocate_between(lower_key, upper_key)
         except ValueError:
             # Neighbours out of order or exhausted → rebalance the column, then
             # append at the end (one loud sweep, deterministic keys).
