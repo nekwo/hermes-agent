@@ -103,6 +103,25 @@ def test_add_move_edit_round_trip_emits_event_per_mutation():
         assert expected in types, (expected, types)
 
 
+def test_move_before_and_after_neighbor_semantics():
+    ws = _make_workspace()
+    store = BoardStore()
+    a = store.add_card(workspace_id=ws, title="A")
+    b = store.add_card(workspace_id=ws, title="B")
+    c = store.add_card(workspace_id=ws, title="C")
+    board_id = board_models.default_board_id(ws)
+    ordered = [card.title for card in store.list_cards(board_id)]
+    assert ordered == ["A", "B", "C"], ordered
+    # move C to sit immediately AFTER A → order A, C, B
+    store.move_card(c.card_id, column_id="col_queued", after=a.card_id)
+    ordered = [card.title for card in store.list_cards(board_id)]
+    assert ordered == ["A", "C", "B"], ordered
+    # move A to sit immediately BEFORE B → order C, A, B
+    store.move_card(a.card_id, column_id="col_queued", before=b.card_id)
+    ordered = [card.title for card in store.list_cards(board_id)]
+    assert ordered == ["C", "A", "B"], ordered
+
+
 def test_lazy_default_board_created_once():
     ws = _make_workspace()
     store = BoardStore()
