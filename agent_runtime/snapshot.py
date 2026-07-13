@@ -242,6 +242,16 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     realm_store = RealmStore()
     workspaces = workspace_store.list_all(include_archived=True)
     realms = realm_store.list_all(include_archived=True)
+    # Active scope names for the runtime situational HUD (the same realm/ws the
+    # launcher scope line renders); resolved once and fed to every lane's HUD.
+    active_workspace_name = next(
+        (getattr(w, "name", None) for w in workspaces if getattr(w, "id", None) == workspace_store.active_id()),
+        None,
+    )
+    active_realm_name = next(
+        (getattr(r, "name", None) for r in realms if getattr(r, "id", None) == realm_store.active_id()),
+        None,
+    )
     blueprint_runs = blueprint_run_store.list_all()
     agent_summaries = [_agent_summary(a, include_tool_details=True) for a in agents]
     available_personas = _available_persona_summary(agents)
@@ -316,6 +326,9 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             session_db=session_db,
             tasks=tasks,
             proof_store=proof_store,
+            daemon=daemon_status,
+            realm=active_realm_name,
+            workspace=active_workspace_name,
         ),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
@@ -3368,6 +3381,10 @@ def _agent_summary(agent, *, include_tool_details: bool = False):
                 "tool_resolution": tool_resolution,
                 "turn_tool_context": turn_tool_context_for_persona(agent),
                 "permission_state": permission_state_for_persona(agent),
+                # DEPRECATED: legacy per-persona tools/permissions HUD, due for
+                # migration to the situational-HUD fed path (see runtime_hud.py
+                # and agent_hud_state_for_persona's docstring). Emission kept
+                # until the launcher Agent-HUD dialog is retired.
                 "agent_hud_state": agent_hud_state_for_persona(agent),
             }
         )

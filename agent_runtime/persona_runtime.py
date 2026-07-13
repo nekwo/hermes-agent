@@ -283,6 +283,7 @@ class GPTPersonaRuntime:
         agent_ready_callback: Callable[[object], Callable[[], None] | None] | None = None,
         preloaded_skill_prompt: str | None = None,
         workspace_agents_content: str | None = None,
+        situational_hud_content: str | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -359,6 +360,7 @@ class GPTPersonaRuntime:
                     surface_prompt,
                     preloaded_skill_prompt=preloaded_skill_prompt,
                     workspace_agents_content=workspace_agents_content,
+                    situational_hud_content=situational_hud_content,
                 ),
                 stream_callback=stream_callback,
                 agent_ready_callback=agent_ready_callback,
@@ -523,9 +525,12 @@ def _mission_chat_surface_message(
     *,
     preloaded_skill_prompt: str | None = None,
     workspace_agents_content: str | None = None,
+    situational_hud_content: str | None = None,
 ) -> str:
     """Compose the operator-chat system message: the persona's first-person
     identity block first, then the non-negotiable operative rules, then the
+    runtime situational HUD (the same picture the operator's Mission Control
+    runtime HUD strip shows, so the two are on the same page), then the
     operator's optional per-session surface prompt. The identity block gives the
     isolated chat lane a "you ARE <persona>" hat (the profile SOUL is not loaded
     here); the rules always apply so the anti-fabrication invariant holds even
@@ -535,8 +540,11 @@ def _mission_chat_surface_message(
     operator_surface = (surface_prompt or "").strip()
     skill_prompt = (preloaded_skill_prompt or "").strip()
     workspace_agents = (workspace_agents_content or "").strip()
+    situational_hud = (situational_hud_content or "").strip()
     rules = _mission_chat_operative_rules()
     parts = [identity, rules]
+    if situational_hud:
+        parts.append(situational_hud)
     if skill_prompt:
         parts.append(skill_prompt)
     if workspace_agents:

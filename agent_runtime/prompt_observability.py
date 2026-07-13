@@ -114,6 +114,7 @@ def mission_chat_prompt_observability(
     workspace_name: str | None = None,
     workspace_agents: WorkspaceAgentsContext | None = None,
     mission_hud: dict[str, Any] | None = None,
+    situational_hud: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
 
@@ -173,6 +174,12 @@ def mission_chat_prompt_observability(
         # each turn (typed plan / stage / QA gate). Empty for personas with no
         # bound task; Mission Control's runtime-HUD peek renders it verbatim.
         "mission_hud": mission_hud if isinstance(mission_hud, dict) else {},
+        # The full runtime situational HUD (runtime · scope · mission · lane ·
+        # roster · mission_hud) — the single projection the operator's runtime
+        # HUD strip and the agent's mission-chat turn both render, so operator
+        # and agent share one view. Empty until threaded (snapshot path); the
+        # chat lane feeds the same projection into the model. See runtime_hud.py.
+        "situational_hud": situational_hud if isinstance(situational_hud, dict) else {},
         "workspace_id": safe_assignment_token(workspace_id),
         "workspace_name": safe_assignment_text(workspace_name, limit=120),
         "turn_id": safe_assignment_token(turn_id),
@@ -314,17 +321,24 @@ def snapshot_prompt_observability(
     session_db: Any | None = None,
     tasks: Iterable[Any] | None = None,
     proof_store: Any | None = None,
+    daemon: dict[str, Any] | None = None,
+    realm: str | None = None,
+    workspace: str | None = None,
 ) -> dict[str, Any]:
     # Deferred import: context_builder pulls a large dependency graph, and this
     # module is imported very early. A function-local import keeps module load
     # order robust while still giving the preview a single-authority HUD builder.
     from .context_builder import mission_hud_preview
+    from .runtime_hud import resolve_situational_hud
 
     tasks_by_id = {
         safe_assignment_token(getattr(task, "id", None)): task
         for task in (tasks or [])
         if safe_assignment_token(getattr(task, "id", None))
     }
+    # Materialize once: the roster is reused for every lane's situational HUD
+    # (thread count + on-level list) and the input may be a one-shot iterable.
+    roster = list(persona_instances)
 
     def _preview_for(task_id: str | None) -> dict[str, Any]:
         task = tasks_by_id.get(safe_assignment_token(task_id) or "")
@@ -337,13 +351,31 @@ def snapshot_prompt_observability(
             # snapshot that carries everything else Mission Control renders.
             return {}
 
+    def _situational_for(instance: Any, task_id: str | None) -> dict[str, Any]:
+        try:
+            goal_id = getattr(instance, "goal_id", None)
+            return resolve_situational_hud(
+                instance,
+                daemon=daemon,
+                realm=realm,
+                workspace=workspace,
+                roster=roster,
+                task=tasks_by_id.get(safe_assignment_token(task_id) or ""),
+                goal_task=tasks_by_id.get(safe_assignment_token(goal_id) or ""),
+                proof_store=proof_store,
+            )
+        except Exception:
+            # Same guarantee as the preview: a situational-HUD failure degrades
+            # to {} rather than breaking the snapshot.
+            return {}
+
     contexts: list[dict[str, Any]] = []
     by_persona = {
         safe_assignment_token(getattr(persona, "id", None)): persona
         for persona in personas
         if safe_assignment_token(getattr(persona, "id", None))
     }
-    for instance in persona_instances:
+    for instance in roster:
         persona_id = safe_assignment_token(getattr(instance, "persona_id", None))
         persona = by_persona.get(persona_id) or _profile_persona_from_instance(instance)
         if persona is None:
@@ -360,6 +392,7 @@ def snapshot_prompt_observability(
                 limiting_wrapper_active=False,
                 session_db=session_db,
                 mission_hud=_preview_for(task_id),
+                situational_hud=_situational_for(instance, task_id),
             )
         )
     if not contexts:
@@ -475,6 +508,11 @@ def _backfill_derived_fields(
         built_hud = built.get("mission_hud")
         if isinstance(built_hud, dict) and built_hud and not item.get("mission_hud"):
             item["mission_hud"] = built_hud
+        # Same rationale for the runtime situational HUD: persisted chat rows
+        # never compute one, so prefer the freshly built projection.
+        built_situational = built.get("situational_hud")
+        if isinstance(built_situational, dict) and built_situational and not item.get("situational_hud"):
+            item["situational_hud"] = built_situational
         for key in (
             "used_skills",
             "accessible_skills",
