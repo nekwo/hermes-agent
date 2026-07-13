@@ -970,6 +970,13 @@ def _cmd_mission_chat_message(args) -> int:
             if relay_deadline is not None
             else _relay_time.time() + relay_wall_seconds
         )
+        # Runtime situational HUD for this lane — the same projection the
+        # operator's Mission Control runtime HUD strip renders, fed into the chat
+        # turn so the operator and the agent share one view. Best-effort ('' when
+        # unavailable); never blocks the turn.
+        from agent_runtime.runtime_hud import situational_hud_content_for_instance
+
+        situational_hud_content = situational_hud_content_for_instance(instance)
         try:
             chat_result = GPTPersonaRuntime(
                 default_provider=cfg.default_provider,
@@ -1000,6 +1007,7 @@ def _cmd_mission_chat_message(args) -> int:
                 workspace_agents_content=(
                     workspace_agents.content if workspace_agents is not None else None
                 ),
+                situational_hud_content=situational_hud_content,
                 turn_id=safe_assignment_token(client_message_id),
             )
         finally:

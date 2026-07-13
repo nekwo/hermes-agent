@@ -147,6 +147,20 @@ def permission_state_for_persona(persona: AgentPersona, options: ToolVisibilityO
 
 
 def agent_hud_state_for_persona(persona: AgentPersona, options: ToolVisibilityOptions | None = None) -> dict[str, Any]:
+    """DEPRECATED — legacy per-persona tools/permissions HUD.
+
+    This is the "Agent HUD" surface the launcher's `showAgentHudStateDialog`
+    reads off `instance.agentHudState`. It predates the runtime situational HUD
+    and is **due for migration to the injected situational-HUD fed path** — the
+    single projection (`agent_runtime/runtime_hud.py`) that the operator's
+    Mission Control runtime HUD strip and the agent's chat turn now both render
+    ("parity so the AI and I are on the same page").
+
+    Retained (emission unchanged) only until the launcher Agent-HUD dialog is
+    migrated/removed; do not build new consumers on it — extend the situational
+    HUD instead so operator and agent stay on one authority.
+    """
+
     visibility = resolve_tool_visibility(persona, options)
     return {
         "schema_version": TOOL_VISIBILITY_SCHEMA_VERSION,

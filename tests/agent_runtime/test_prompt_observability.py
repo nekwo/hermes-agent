@@ -221,6 +221,71 @@ def test_snapshot_leaves_mission_hud_empty_for_unbound_instance(monkeypatch):
     assert snapshot["chat_contexts"][0]["mission_hud"] == {}
 
 
+def test_snapshot_includes_situational_hud_for_instance(monkeypatch):
+    from agent_runtime import prompt_observability as po
+
+    monkeypatch.setattr(po, "load_latest_prompt_observability_contexts", lambda: [])
+    persona = SimpleNamespace(
+        id="neko_supervisor", hermes_profile="neko", display_name="Neko Mission Lead", role="supervisor"
+    )
+    instance = SimpleNamespace(
+        id="personainst_neko",
+        persona_id="neko_supervisor",
+        session_id="s",
+        current_task_id=None,
+        goal_id=None,
+        role="supervisor",
+        display_name="Neko Mission Lead",
+        state="idle",
+        mode="configured",
+    )
+    snapshot = snapshot_prompt_observability(
+        personas=[persona],
+        persona_instances=[instance],
+        tasks=[],
+        daemon={"state": "starting", "loops": 0},
+        realm="default",
+        workspace="default",
+    )
+    situational = snapshot["chat_contexts"][0]["situational_hud"]
+    assert situational["runtime"]["state"] == "starting"
+    assert situational["scope"] == {"realm": "default", "workspace": "default"}
+    assert situational["lane"]["persona_instance_id"] == "personainst_neko"
+
+
+def test_snapshot_situational_hud_without_daemon_scope_still_carries_lane(monkeypatch):
+    from agent_runtime import prompt_observability as po
+
+    monkeypatch.setattr(po, "load_latest_prompt_observability_contexts", lambda: [])
+    persona = SimpleNamespace(id="dev", hermes_profile="dev", display_name="Dev", role="dev")
+    instance = SimpleNamespace(
+        id="personainst_dev",
+        persona_id="dev",
+        session_id="s",
+        current_task_id=None,
+        goal_id=None,
+        role="dev",
+        display_name="Dev",
+        state="idle",
+        mode="configured",
+    )
+    snapshot = snapshot_prompt_observability(
+        personas=[persona], persona_instances=[instance], tasks=[]
+    )
+    situational = snapshot["chat_contexts"][0]["situational_hud"]
+    # No daemon/scope threaded → those sub-blocks are absent, but the lane
+    # identity (and the always-present key) still hold a stable shape.
+    assert "runtime" not in situational
+    assert situational["lane"]["persona_instance_id"] == "personainst_dev"
+
+
+def test_backfill_copies_situational_hud_onto_persisted_row():
+    persisted = {"persona_instance_id": "x", "session_id": "s", "persona_id": "p"}
+    built = {"situational_hud": {"preview": True, "lane": {"persona_instance_id": "x"}}}
+    _backfill_derived_fields(persisted, built)
+    assert persisted["situational_hud"] == {"preview": True, "lane": {"persona_instance_id": "x"}}
+
+
 def test_backfill_copies_mission_hud_onto_persisted_row():
     persisted = {"persona_instance_id": "x", "session_id": "s", "persona_id": "p"}
     built = {"mission_hud": {"preview": True, "phase": "in_progress"}}
