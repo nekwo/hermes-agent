@@ -1291,6 +1291,21 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "workspace.activated": EventContract("workspace.activated", "Active workspace changed", (), ("workspace_id", "name", "cleared")),
     "realm.sync.pulled": EventContract("realm.sync.pulled", "Realm pulled", ("realm_id", "changed"), ("artifacts",)),
     "realm.sync.published": EventContract("realm.sync.published", "Realm published", ("realm_id", "changed"), ("artifacts", "commit")),
+    # Mission Board store mutations. Every BoardStore write MUST ride one of
+    # these (standing store rule): the stream/read-model pipeline is
+    # watermark-gated on the EventLog, so an event-less board write is invisible
+    # to every consumer until an unrelated event advances the offset. Cards
+    # NEVER mutate goal state — these are planning-domain events only.
+    "board.created": EventContract("board.created", "Board created", ("board_id", "workspace_id"), ("title",)),
+    "board.updated": EventContract("board.updated", "Board updated", ("board_id", "change"), ("title", "revision")),
+    "board.card.created": EventContract("board.card.created", "Board card created", ("board_id", "card_id"), ("title", "column_id", "created_by")),
+    "board.card.moved": EventContract("board.card.moved", "Board card moved", ("board_id", "card_id", "column_id"), ("from_column_id", "order_key")),
+    "board.card.edited": EventContract("board.card.edited", "Board card edited", ("board_id", "card_id"), ("fields", "revision")),
+    "board.card.escalated": EventContract("board.card.escalated", "Board card escalated to a goal", ("board_id", "card_id", "goal_id"), ("idempotency_key",)),
+    "board.card.archived": EventContract("board.card.archived", "Board card archived", ("board_id", "card_id", "reason"), ("column_id",)),
+    "board.card.restored": EventContract("board.card.restored", "Board card restored", ("board_id", "card_id"), ("column_id",)),
+    "board.card.conflict_resolved": EventContract("board.card.conflict_resolved", "Board card sync conflict resolved", ("board_id", "card_id", "take"), ("revision",)),
+    "board.rebalanced": EventContract("board.rebalanced", "Board column order keys rebalanced", ("board_id", "column_id"), ("card_count",)),
     "blueprint.saved": EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title")),
     "persona.updated": EventContract("persona.updated", "Persona updated", ("persona_id",), ("display_name",)),
     # Synthetic watchdog event: appended by stream_frames when the scope/catalog

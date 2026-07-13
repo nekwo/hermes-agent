@@ -13,6 +13,7 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
+from .board_store import BoardStore
 from .blueprints.runs import BlueprintRunStore, blueprint_run_summary
 from .blueprints.store import BlueprintStore, blueprint_summary
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
@@ -383,6 +384,12 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             _realm_summary(item, workspaces=workspaces, active_id=realm_store.active_id())
             for item in realms
         ],
+        # Mission Board projection: board defs + bounded, redaction-safe card
+        # rows, scoped by workspace. Local reads only — NO git/sync calls in the
+        # snapshot path (conflict state comes from local sidecar files, never a
+        # git call). Cards never carry goal state; a linked_goal_id is resolved
+        # against the snapshot's goals at render time on the client.
+        "boards": _boards_summary(BoardStore(event_log=event_log), {getattr(w, "id", None) for w in workspaces}),
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
@@ -584,10 +591,127 @@ def _runtime_profile_identity() -> dict:
     return {"name": safe or "default"}
 
 
+# Mission Board projection bounds — honest accounting, never a silent cap
+# (the 8.6MB-snapshot lesson): oversized boards report the remainder count and
+# card bodies truncate with a flag rather than growing the snapshot unbounded.
+MAX_BOARD_CARDS_PROJECTED = 500
+BOARD_CARD_DESC_LIMIT = 2048
+
+
+def _mask_board_secrets(text) -> str:
+    """Hard-on secret mask for card prose in the projection (observe mode never
+    disables it). Card text rides the same projection boundary as goal text; the
+    HARD gate is the realm-publish fail-closed scan in ``realm_sync``."""
+
+    if not text:
+        return "" if text is None else text
+    return _ARCHIVED_CONVERSATION_SECRET_RE.sub(lambda m: f"{m.group(1)}: [redacted]", str(text))
+
+
+def _board_card_row(card) -> dict:
+    description = card.description or ""
+    truncated = len(description) > BOARD_CARD_DESC_LIMIT
+    if truncated:
+        description = description[:BOARD_CARD_DESC_LIMIT]
+    return {
+        "card_id": card.card_id,
+        "board_id": card.board_id,
+        "column_id": card.column_id,
+        "title": _mask_board_secrets(card.title),
+        "description": _mask_board_secrets(description),
+        "description_truncated": truncated,
+        "priority": card.priority,
+        "labels": list(card.labels),
+        "assignee": card.assignee,
+        "checklist": [
+            {"text": _mask_board_secrets(str(item.get("text", ""))), "done": bool(item.get("done"))}
+            for item in card.checklist
+            if isinstance(item, dict)
+        ],
+        "linked_goal_id": card.linked_goal_id,
+        "order_key": card.order_key,
+        "state": card.state,
+        "created_by": card.created_by,
+        "updated_at": to_jsonable(card.updated_at),
+        "updated_by": card.updated_by,
+        "revision": card.revision,
+    }
+
+
+def _board_conflict_card_ids(board_id: str) -> list[str]:
+    """Card ids with an OPEN conflict sidecar. Local file reads only — no git."""
+
+    conflicts_dir = paths.board_conflicts_dir(board_id)
+    if not conflicts_dir.exists():
+        return []
+    ids = [path.stem for path in conflicts_dir.glob("*.json") if not path.name.endswith(".resolved.json")]
+    return sorted(ids)
+
+
+def _boards_summary(board_store, workspace_ids: set) -> list[dict]:
+    boards: list[dict] = []
+    for board in board_store.list_all():
+        cards = board_store.list_cards(board.board_id)  # active, (order_key, card_id) sorted
+        projected = cards[:MAX_BOARD_CARDS_PROJECTED]
+        boards.append(
+            {
+                "board_id": board.board_id,
+                "workspace_id": board.workspace_id,
+                "title": board.title,
+                "revision": board.revision,
+                "updated_at": to_jsonable(board.updated_at),
+                "columns": [
+                    {"column_id": c.column_id, "title": c.title, "kind": c.kind, "wip_limit": c.wip_limit}
+                    for c in board.columns
+                ],
+                "cards": [_board_card_row(c) for c in projected],
+                "active_card_count": len(cards),
+                "cards_truncated": max(0, len(cards) - len(projected)),
+                "conflict_card_ids": _board_conflict_card_ids(board.board_id),
+                "archived_card_ids": list(board.archived_card_ids),
+                # A board whose workspace no longer resolves is accounted, never
+                # silently hidden (repair via archive) — parity warning below.
+                "orphaned": board.workspace_id not in workspace_ids,
+            }
+        )
+    return boards
+
+
+def _board_parity_warnings(data) -> list[dict]:
+    warnings: list[dict] = []
+    for board in data.get("boards") or []:
+        if board.get("orphaned"):
+            warnings.append(
+                {
+                    "code": "orphaned_board",
+                    "entity_id": board.get("board_id"),
+                    "detail": (
+                        f"board '{board.get('board_id')}' points at workspace "
+                        f"'{board.get('workspace_id')}' which no longer resolves; archive to repair"
+                    ),
+                }
+            )
+        for card_id in board.get("conflict_card_ids") or []:
+            warnings.append(
+                {
+                    "code": "board_card_conflict",
+                    "entity_id": card_id,
+                    "board_id": board.get("board_id"),
+                    "detail": (
+                        f"board card '{card_id}' has an unresolved realm-sync conflict; "
+                        "resolve with `harness board resolve-conflict <card_id> --take local|remote`"
+                    ),
+                }
+            )
+    return warnings
+
+
 def _parity_warnings(data) -> list[dict]:
     """Snapshot-level self-checks that flag likely UI/harness divergence."""
 
-    warnings: list[dict] = []
+    # Board warnings do not depend on the persona-instance runtime, so they are
+    # computed before the runtime-disabled early return below.
+    warnings: list[dict] = _board_parity_warnings(data)
     runtime = data.get("persona_instance_runtime") or {}
     if not runtime.get("enabled"):
         warnings.append(

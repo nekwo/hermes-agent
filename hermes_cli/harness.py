@@ -38,8 +38,10 @@ from agent_runtime.errors import (
     NotFound,
     ProofMissing,
     RuntimeRootMismatch,
+    StaleRevision,
     StaleRun,
     StoreCorrupt,
+    SyncConflict,
 )
 from agent_runtime.events import EventLog
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
@@ -131,6 +133,7 @@ ERROR_EXIT_CODES = {
     "invalid_isolation": 2,
     "duplicate_conflict": 4,
     "already_exists": 4,
+    "stale_revision": 4,
     "agent_busy": 4,
     "agent_already_assigned": 4,
     "lane_budget_exceeded": 4,
@@ -499,6 +502,83 @@ def build_parser(parent_subparsers) -> None:
     )
     skills_inventory_cmd.add_argument("--json", action="store_true", help="Emit the skills_inventory/v1 contract as JSON")
     skills_inventory_cmd.set_defaults(func=_cmd_skills_inventory)
+
+    board = subs.add_parser("board", help="Manage Mission Board planning boards + cards (planning only — cards never mutate goals)")
+    board_subs = board.add_subparsers(dest="board_command", required=True)
+    board_list = board_subs.add_parser("list", help="List boards")
+    board_list.add_argument("--workspace", default=None)
+    _add_stage42_global_args(board_list)
+    board_list.set_defaults(func=_cmd_board_list)
+    board_show = board_subs.add_parser("show", help="Show one board")
+    board_show.add_argument("board_id")
+    board_show.add_argument("--full", action="store_true", help="Include card bodies")
+    _add_stage42_global_args(board_show)
+    board_show.set_defaults(func=_cmd_board_show)
+    board_create = board_subs.add_parser("create", help="Create a board")
+    board_create.add_argument("--workspace", required=True)
+    board_create.add_argument("--title", default=None)
+    _add_stage42_global_args(board_create, mutation=True)
+    board_create.set_defaults(func=_cmd_board_create)
+    board_update = board_subs.add_parser("update", help="Update a board title/columns")
+    board_update.add_argument("board_id")
+    board_update.add_argument("--title", default=None)
+    board_update.add_argument("--columns-json", dest="columns_json", default=None, help="JSON array of {column_id,title,kind,wip_limit}")
+    board_update.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
+    _add_stage42_global_args(board_update, mutation=True)
+    board_update.set_defaults(func=_cmd_board_update)
+
+    board_card = board_subs.add_parser("card", help="Manage board cards")
+    board_card_subs = board_card.add_subparsers(dest="board_card_command", required=True)
+    card_add = board_card_subs.add_parser("add", help="Add a card")
+    card_add.add_argument("--board", default=None, help="Board id (default: active workspace's default board)")
+    card_add.add_argument("--workspace", default=None)
+    card_add.add_argument("--title", required=True)
+    card_add.add_argument("--description", default="")
+    card_add.add_argument("--column", default=None, help="Column id or kind (default: first queued column)")
+    card_add.add_argument("--priority", default=None, choices=["p0", "p1", "p2", "p3"])
+    card_add.add_argument("--labels", default=None, help="Comma-separated labels")
+    card_add.add_argument("--assignee", default=None)
+    card_add.add_argument("--created-by", dest="created_by", default=None, help="operator (default) or a persona id")
+    _add_stage42_global_args(card_add, mutation=True)
+    card_add.set_defaults(func=_cmd_board_card_add)
+    card_edit = board_card_subs.add_parser("edit", help="Edit a card")
+    card_edit.add_argument("card_id")
+    card_edit.add_argument("--title", default=None)
+    card_edit.add_argument("--description", default=None)
+    card_edit.add_argument("--priority", default=None, choices=["p0", "p1", "p2", "p3"])
+    card_edit.add_argument("--labels", default=None, help="Comma-separated labels (replaces)")
+    card_edit.add_argument("--assignee", default=None)
+    card_edit.add_argument("--clear-assignee", dest="clear_assignee", action="store_true")
+    card_edit.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
+    _add_stage42_global_args(card_edit, mutation=True)
+    card_edit.set_defaults(func=_cmd_board_card_edit)
+    card_move = board_card_subs.add_parser("move", help="Move a card to a column / position")
+    card_move.add_argument("card_id")
+    card_move.add_argument("--column", required=True, help="Target column id or kind")
+    card_move.add_argument("--before", default=None, help="Place before this card id")
+    card_move.add_argument("--after", default=None, help="Place after this card id")
+    card_move.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
+    _add_stage42_global_args(card_move, mutation=True)
+    card_move.set_defaults(func=_cmd_board_card_move)
+    card_archive = board_card_subs.add_parser("archive", help="Archive a card (archive-never-delete)")
+    card_archive.add_argument("card_id")
+    _add_stage42_global_args(card_archive, mutation=True)
+    card_archive.set_defaults(func=_cmd_board_card_archive)
+    card_restore = board_card_subs.add_parser("restore", help="Restore an archived card")
+    card_restore.add_argument("card_id")
+    _add_stage42_global_args(card_restore, mutation=True)
+    card_restore.set_defaults(func=_cmd_board_card_restore)
+
+    board_escalate = board_subs.add_parser("escalate", help="Escalate a card to a goal (idempotent orchestration over the standard goal-create envelope)")
+    board_escalate.add_argument("card_id")
+    board_escalate.add_argument("--request-json", dest="request_json", required=True, help="Goal-create envelope (path or inline JSON)")
+    _add_stage42_global_args(board_escalate, mutation=True)
+    board_escalate.set_defaults(func=_cmd_board_escalate)
+    board_resolve = board_subs.add_parser("resolve-conflict", help="Resolve a realm-sync conflict on a card")
+    board_resolve.add_argument("card_id")
+    board_resolve.add_argument("--take", required=True, choices=["local", "remote"])
+    _add_stage42_global_args(board_resolve, mutation=True)
+    board_resolve.set_defaults(func=_cmd_board_resolve_conflict)
 
     playground = subs.add_parser("playground", help="Replay captured contract-failure scenarios against current contracts")
     playground_subs = playground.add_subparsers(dest="playground_command", required=True)
@@ -1147,6 +1227,8 @@ def _error_code_for_exception(exc: BaseException) -> str:
         (StoreCorrupt, "store_corrupt"),
         (EventPayloadTooLarge, "event_payload_too_large"),
         (RuntimeRootMismatch, "wrong_runtime_root"),
+        (StaleRevision, "stale_revision"),
+        (SyncConflict, "sync_conflict"),
     ):
         if isinstance(exc, exc_type):
             return code
@@ -2740,7 +2822,7 @@ def _cmd_serve(args) -> int:
 
 def _load_command_parts() -> None:
     parts_dir = Path(__file__).with_name("harness_parts")
-    for filename in ("persona_commands.py", "runtime_commands.py"):
+    for filename in ("persona_commands.py", "runtime_commands.py", "board.py"):
         path = parts_dir / filename
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), globals())
 

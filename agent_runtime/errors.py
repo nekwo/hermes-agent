@@ -34,6 +34,20 @@ class RuntimeRootMismatch(AgentRuntimeError):
     """Raised when resolved runtime root does not match a caller pin."""
 
 
+class StaleRevision(AgentRuntimeError):
+    """Raised when an optimistic ``--expect-revision`` check fails.
+
+    The card was mutated since the caller read it; the caller should refresh and
+    replay (or surface the conflict). Replaying the same ``--idempotency-key``
+    never raises this — it returns the recorded result.
+    """
+
+
+class SyncConflict(AgentRuntimeError):
+    """Raised when a board card is under an unresolved realm-sync conflict, or a
+    conflict-resolution verb targets a card that has none."""
+
+
 class ProbeIsolationViolation(AgentRuntimeError):
     """Raised when a run that demanded an isolated probe root would touch the live store.
 

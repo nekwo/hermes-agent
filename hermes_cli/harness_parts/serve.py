@@ -113,6 +113,34 @@ _FINGERPRINT_STORE_DIRS = (
 )
 
 
+_FINGERPRINT_BOARD_CARD_CAP = 600  # bounded per-board card stat; remainder is rare + also evented
+
+
+def _stat_board_tree(root: Any, _stat) -> None:
+    """Bounded stat of the boards/ subtree: the root, each board's def + card
+    files + conflict dir. Card files are stat'd individually so in-place edits
+    (move/edit rewrite a file without touching the dir mtime) still flip the
+    fingerprint. Capped per board to stay cheap on the hot poll path."""
+
+    boards_root = root / "boards"
+    _stat(boards_root)
+    try:
+        board_dirs = sorted(p for p in boards_root.iterdir() if p.is_dir())
+    except OSError:
+        return
+    for board_dir in board_dirs:
+        _stat(board_dir / "board.json")
+        cards_dir = board_dir / "cards"
+        _stat(cards_dir)
+        _stat(board_dir / "conflicts")
+        try:
+            card_files = sorted(cards_dir.glob("*.json"))
+        except OSError:
+            continue
+        for card_path in card_files[:_FINGERPRINT_BOARD_CARD_CAP]:
+            _stat(card_path)
+
+
 def _runtime_state_fingerprint() -> tuple | None:
     """Cheap stat-based sequence check over the harness read-model inputs.
 
@@ -138,6 +166,12 @@ def _runtime_state_fingerprint() -> tuple | None:
         _stat(root / name)
     for name in _FINGERPRINT_STORE_DIRS:
         _stat(root / name)
+    # Mission Board tree is nested two levels deep (boards/<id>/cards/<card>.json),
+    # so a top-level dir stat alone misses card adds/moves/in-place edits and
+    # pull-materialized cards. Every board mutation also advances events.jsonl
+    # (already fingerprinted), but a bounded subtree walk here keeps cached
+    # snapshots honest even for event-less file materialization (realm pull).
+    _stat_board_tree(root, _stat)
     try:
         from hermes_state import SessionDB
 
