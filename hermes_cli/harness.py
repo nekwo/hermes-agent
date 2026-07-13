@@ -491,6 +491,15 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(realm_sync_publish, mutation=True)
     realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
 
+    skills = subs.add_parser("skills", help="Inspect the shared skills substrate the Launcher's Skills console consumes")
+    skills_subs = skills.add_subparsers(dest="skills_command", required=True)
+    skills_inventory_cmd = skills_subs.add_parser(
+        "inventory",
+        help="Typed snapshot of the shared skill catalog, per-persona grants, and per-realm publish/drift state",
+    )
+    skills_inventory_cmd.add_argument("--json", action="store_true", help="Emit the skills_inventory/v1 contract as JSON")
+    skills_inventory_cmd.set_defaults(func=_cmd_skills_inventory)
+
     playground = subs.add_parser("playground", help="Replay captured contract-failure scenarios against current contracts")
     playground_subs = playground.add_subparsers(dest="playground_command", required=True)
     playground_list = playground_subs.add_parser("list", help="List captured replay scenarios")
@@ -2550,6 +2559,37 @@ def _cmd_providers(args) -> int:
                 f"  #{credential['index']}  {credential['label']:<20} "
                 f"{credential['auth_type']:<7} {credential['source']}{tag}{marker}"
             )
+    return 0
+
+
+def _cmd_skills_inventory(args) -> int:
+    from agent_runtime.skills_inventory import build_skills_inventory
+
+    payload = build_skills_inventory()
+    if getattr(args, "json", False):
+        print(emit_json(payload))
+        return 0
+
+    root = payload["shared_root"] or "(none)"
+    print(f"Shared skills root: {root}")
+    if not payload["skills"]:
+        print("  (no shared skills)")
+    for skill in payload["skills"]:
+        count = skill["file_count"]
+        files = f"{count} file" + ("" if count == 1 else "s")
+        shadow = f"  shadowed by {', '.join(skill['shadowed_by'])}" if skill["shadowed_by"] else ""
+        print(f"  {skill['slug']:<28} {files}{shadow}")
+        if skill["description"]:
+            print(f"      {skill['description']}")
+    print("Personas:")
+    for persona in payload["personas"]:
+        print(f"  {persona['id']:<16} {len(persona['skills'])} skills")
+    print("Realms:")
+    for realm in payload["realms"]:
+        bound = "server" if realm["server_bound"] else "local"
+        state = realm["sync_state"] or "not checked"
+        drift = f"  drift: {', '.join(realm['skills_drift'])}" if realm["skills_drift"] else ""
+        print(f"  {realm['realm_id']:<20} [{bound}] {state}{drift}")
     return 0
 
 
