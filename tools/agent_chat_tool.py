@@ -217,6 +217,12 @@ def agent_chat_send(
         "total_tokens": payload.get("total_tokens"),
         "requested_by": requested_by,
     }
+    # Clarify-back: the briefed agent asked a question instead of answering
+    # (it holds context you don't — e.g. "which dev, launcher or backend?").
+    # Forward the structured question so you can answer it by sending the choice
+    # back into this same session_id; that continues the exchange as chat.
+    if payload.get("clarify_request") is not None:
+        result["clarify_request"] = payload.get("clarify_request")
     if payload.get("relay_chain") is not None:
         result["relay_chain"] = payload.get("relay_chain")
     if not result["ok"]:

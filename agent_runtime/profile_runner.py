@@ -57,6 +57,11 @@ class AgentRunRequest:
     progress_callback: Callable[[dict[str, Any]], None] | None = None
     stream_callback: Callable[[str | None], None] | None = None
     agent_ready_callback: Callable[[Any], Callable[[], None] | None] | None = None
+    # Interactive clarify bridge: ``callback(question, choices) -> str``. On the
+    # operator/relay chat lane this is a NON-blocking capture (records the
+    # question and ends the turn) rather than the CLI's blocking human prompt;
+    # unset on autonomous runs so ``clarify`` stays inert there.
+    clarify_callback: Callable[[str, list[str] | None], str] | None = None
     runtime_root: Path | None = None
     workdir: Path | None = None
     stop_on_repeated_read_search: bool = False
@@ -200,6 +205,7 @@ class ProfileAgentRunner:
                 tool_progress_callback=_progress_adapter(request.progress_callback, "run.progress", guard=budget_guard),
                 tool_start_callback=_progress_adapter(request.progress_callback, "run.tool.started", guard=budget_guard),
                 tool_complete_callback=_progress_adapter(request.progress_callback, "run.tool.finished", guard=budget_guard),
+                clarify_callback=request.clarify_callback,
             )
             timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
             budget_guard.set_interrupt_callback(lambda reason: _interrupt_agent_for_budget(agent, reason))

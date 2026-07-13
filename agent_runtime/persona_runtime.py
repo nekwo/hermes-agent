@@ -22,6 +22,7 @@ from .decision_schema import (
 )
 from .decision_contracts import validate_planning_decision
 from .models import AgentPersona, AgentRun
+from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_plan import current_plan_stage
 from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
@@ -203,6 +204,7 @@ class GPTPersonaRuntime:
         if binding.readiness == "missing_profile":
             raise ValueError(binding.summary)
         assert_provider_health_for_persona(persona)
+        clarify_capture = MissionChatClarifyCapture()
         result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
@@ -222,6 +224,7 @@ class GPTPersonaRuntime:
                 user_message=message,
                 system_message=_persona_chat_system_prompt(persona),
                 stream_callback=stream_callback,
+                clarify_callback=clarify_capture.callback,
                 progress_callback=_chat_trace_callback(
                     session_id=session_id,
                     persona=persona,
@@ -233,6 +236,8 @@ class GPTPersonaRuntime:
             )
         )
         ChatToolPermissionStore().consume_turn(persona_id=persona.id, session_id=session_id)
+        if clarify_capture.requested and isinstance(result.raw, dict):
+            result.raw["clarify_request"] = clarify_capture.request
         return result
 
     def mission_chat_reply(
@@ -287,6 +292,11 @@ class GPTPersonaRuntime:
         health_persona.provider = runtime_provider
         health_persona.model = runtime_model
         assert_provider_health_for_persona(health_persona)
+        # Non-blocking clarify bridge for this lane: a clarify call records the
+        # question and ends the turn instead of blocking on a human queue the
+        # spawn does not have. Read back after the run and threaded to the
+        # caller as a structured clarify_request.
+        clarify_capture = MissionChatClarifyCapture()
         result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
@@ -319,6 +329,7 @@ class GPTPersonaRuntime:
                 ),
                 stream_callback=stream_callback,
                 agent_ready_callback=agent_ready_callback,
+                clarify_callback=clarify_capture.callback,
                 # Key chat trace on the real chat session: Mission Control passes
                 # session_id=None (the transcript is already baked into the
                 # message) but the permission/session lineage lives on
@@ -334,6 +345,8 @@ class GPTPersonaRuntime:
             )
         )
         ChatToolPermissionStore().consume_turn(persona_id=persona.id, session_id=perm_session_id)
+        if clarify_capture.requested and isinstance(result.raw, dict):
+            result.raw["clarify_request"] = clarify_capture.request
         return result
 
 
@@ -365,8 +378,9 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         "grant blocks it, say so plainly instead of inventing output. "
         "Keep replies as clean teammate prose: never paste decision JSON, task scopes, acceptance criteria, handoff packets, "
         "or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane. "
-        "If an order is ambiguous or underspecified, ask the operator to clarify before acting — you are in a live channel and "
-        "they are right here, so a one-line question beats guessing on a choice that changes what you do or who you route to. "
+        "If an order is ambiguous or underspecified, use the `clarify` tool to ask before acting instead of guessing — you are "
+        "in a live channel, and on this surface clarify ends your turn with your question and the answer comes back as the "
+        "asker's next message (pass `choices` when the answer is one of a few known options). "
         "If the operator just greets you or makes small talk, talk back like a teammate. "
         "Recall: lean on the inline chat history for continuity. Reach for session_search only when the operator points at "
         "something specific from a past session you can't already see, and consult your durable memory only when it actually "
@@ -421,8 +435,14 @@ def _mission_chat_operative_rules() -> str:
         "never appears in Mission Control. Only fall back to the smoke if the operator explicitly asks to validate the "
         "graph without creating real work.\n"
         "- If an order is ambiguous or underspecified — an unclear target, a missing detail, or a routing choice with more "
-        "than one plausible answer — ask the operator to clarify before acting. You are in a live channel and they are right "
-        "here; a one-line question beats guessing. (This is the operator channel, not an autonomous goal run: here, ask.)\n"
+        "than one plausible answer — use the `clarify` tool to ask before acting, rather than guessing. Pass the question, and "
+        "when the answer is one of a few known options pass them as `choices` (up to 4) so they render as pickable rows. On "
+        "this channel `clarify` does NOT block: it ends your turn with your question, and the answer arrives as their next "
+        "message in this same conversation. This is the operator channel, not an autonomous goal run: here, ask. Reach for it "
+        "especially when you hold context the asker can't see (e.g. which of several same-role agents they mean).\n"
+        "- When an agent you briefed replies with a clarifying question of their own, answer it by sending the choice back to "
+        "them (agent_chat_send into that same session) so the exchange continues as one conversation — don't drop their "
+        "question or answer it by guessing.\n"
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
         "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane."
     )
@@ -575,6 +595,11 @@ def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | Non
         return []
     names = set(blocked_tool_names(persona))
     names.update(extra_blocked_tools_for_permission_mode(options.permission_mode))
+    # clarify is globally blocked (PERSONA_BLOCKED_TOOLS) because autonomous
+    # runs have no interactive callback to answer it — but the operator/relay
+    # chat lane provides a non-blocking clarify bridge (MissionChatClarifyCapture),
+    # so it is allowed here even in bounded permission mode.
+    names.discard("clarify")
     return sorted(names)
 
 
@@ -632,6 +657,12 @@ def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> li
     for toolset in _CHAT_CAPABILITY_TOOLSETS:
         if toolset in allowed and toolset not in augmented:
             augmented.append(toolset)
+    # clarify is a universal operator/relay conversational primitive — ask a
+    # question, get the answer as the next message in the same session — so it
+    # is available to every chat persona regardless of role, unlike the
+    # privileged mission_goal capability which stays gated on `allowed`.
+    if "clarify" not in augmented:
+        augmented.append("clarify")
     return augmented
 
 

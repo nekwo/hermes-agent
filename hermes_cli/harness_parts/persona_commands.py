@@ -1146,6 +1146,12 @@ def _cmd_mission_chat_message(args) -> int:
             "surface_prompt": safe_assignment_text(getattr(args, "surface_prompt", ""), limit=4000) or "",
             "limiting_wrapper_active": False,
             "reply": reply_text,
+            # Structured clarify-back (non-blocking clarify tool on this lane):
+            # when present, the agent is asking a question whose answer is the
+            # operator's / caller's next message in this same session. The HUD
+            # renders `choices` as pickable rows; agent_chat_send forwards it up
+            # the relay so a briefed child can surface context only it has.
+            "clarify_request": (getattr(chat_result, "raw", {}) or {}).get("clarify_request"),
             "turn_id": safe_assignment_token(client_message_id),
             "run_ids": [],
             "input_tokens": getattr(chat_result, "input_tokens", None),

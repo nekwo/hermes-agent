@@ -314,8 +314,27 @@ def test_persona_chat_prompt_allows_real_tools_and_forbids_fabrication():
     assert "Mission Control office" in prompt
     assert "steer handle" in prompt
     # Operator channel is the ask-when-ambiguous surface (vs act_dont_ask on the
-    # autonomous goal path): clarify underspecified orders instead of guessing.
-    assert "ask the operator to clarify before acting" in prompt
+    # autonomous goal path): clarify underspecified orders via the clarify tool
+    # instead of guessing.
+    assert "use the `clarify` tool to ask before acting" in prompt
+
+
+def test_clarify_enabled_and_unblocked_on_chat_lane_but_blocked_on_runs():
+    from agent_runtime.persona_runtime import (
+        _blocked_tool_names_for_chat,
+        _enabled_toolsets_for_chat,
+    )
+    from agent_runtime.personas import blocked_tool_names
+
+    personas = {p.id: p for p in default_personas()}
+    for pid in ("neko_supervisor", "dev", "qa"):
+        persona = personas[pid]
+        # Chat lane: clarify toolset is offered and the tool is not blocked, so
+        # the non-blocking clarify bridge can record a question.
+        assert "clarify" in _enabled_toolsets_for_chat(persona, session_id=None)
+        assert "clarify" not in _blocked_tool_names_for_chat(persona, session_id=None)
+        # Autonomous run lane still blocks clarify — no interactive answer there.
+        assert "clarify" in blocked_tool_names(persona)
 
 
 def test_mission_chat_surface_message_always_carries_operative_rules():
@@ -326,8 +345,13 @@ def test_mission_chat_surface_message_always_carries_operative_rules():
     assert _mission_chat_surface_message("") == _mission_chat_operative_rules()
     assert _mission_chat_surface_message(None) == _mission_chat_operative_rules()
     assert "Never fabricate" in _mission_chat_surface_message("")
-    # Ambiguous-order clarify norm rides the always-injected operative rules.
-    assert "ask the operator to clarify before acting" in _mission_chat_operative_rules()
+    # Ambiguous-order clarify norm rides the always-injected operative rules,
+    # and names the clarify tool + the answer-threads-back contract.
+    rules = _mission_chat_operative_rules()
+    assert "use the `clarify` tool to ask before acting" in rules
+    assert "answer arrives as their next message" in rules
+    # Relay lane: answer a briefed agent's clarify instead of dropping/guessing.
+    assert "answer it by sending the choice back" in rules
 
     # An operator-supplied surface prompt is layered after the rules, not instead.
     composed = _mission_chat_surface_message("Focus on the auth refresh path.")
