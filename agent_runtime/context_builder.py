@@ -924,6 +924,54 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
     return {key: value for key, value in hud.items() if value not in (None, [], {})}
 
 
+def mission_hud_preview(task: Task, *, proof_store=None) -> dict[str, Any]:
+    """Snapshot-time preview of the worker-facing Mission HUD.
+
+    This is the run-independent slice of the same ``## Mission HUD`` block the
+    harness injects into every worker turn — the typed mission plan, the current
+    stage, the QA gate, and the mission phase, all derived from ``task`` alone
+    via the same builders the live turn uses. Run-scoped surfaces (recommended
+    action, counters, terminal feedback, worker action menu) are intentionally
+    omitted: there is no live run at preview time, and reconstructing them would
+    misrepresent what the next turn will actually carry.
+
+    Mission Control's runtime-HUD ``CONTEXT`` peek renders this verbatim so an
+    operator can see the HUD an agent will receive on its upcoming turn without
+    waiting for a run to compose one. The ``preview`` flag lets the surface label
+    it honestly.
+    """
+
+    if task is None:
+        return {}
+    typed_stage = current_plan_stage(task)
+    hud: dict[str, Any] = {
+        "task_id": task.id,
+        "preview": True,
+        "phase": str(task.state),
+        "typed_mission_plan": mission_plan_summary(task),
+    }
+    if typed_stage is not None:
+        proof_gate = _stage_proof_gate(typed_stage)
+        hud["typed_current_stage"] = {
+            "id": typed_stage.id,
+            "owner": typed_stage.owner,
+            "repo": typed_stage.repo,
+            "kind": typed_stage.kind,
+            "status": typed_stage.status.value,
+            "output_type": _stage_output_type(typed_stage),
+            "proof_recipe_id": typed_stage.proof_recipe_id,
+            "proof_gate": proof_gate,
+            "required_proof_types": list(proof_gate.get("required_proof_types", []) or []),
+            "requires_product_edit": typed_stage.requires_product_edit,
+            "requires_visual_proof": typed_stage.requires_visual_proof,
+            "depends_on": list(typed_stage.depends_on),
+            "outgoing_edges": _stage_outgoing_edges(task, typed_stage),
+        }
+    ready, blockers = blocking_stages_ready_for_qa(task, proof_store=proof_store)
+    hud["typed_qa_gate"] = {"ready": ready, "blockers": blockers[:10]}
+    return {key: value for key, value in hud.items() if value not in (None, [], {})}
+
+
 def _terminal_feedback(task: Task, run: AgentRun) -> dict[str, Any] | None:
     context_feedback = _latest_context_request_feedback(task, run)
     if context_feedback:

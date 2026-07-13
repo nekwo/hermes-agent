@@ -104,6 +104,7 @@ def mission_chat_prompt_observability(
     workspace_id: str | None = None,
     workspace_name: str | None = None,
     workspace_agents: WorkspaceAgentsContext | None = None,
+    mission_hud: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
 
@@ -159,6 +160,10 @@ def mission_chat_prompt_observability(
         "chat": chat,
         "task_id": safe_assignment_token(task_id),
         "goal_id": safe_assignment_token(goal_id),
+        # The run-independent slice of the ``## Mission HUD`` the harness injects
+        # each turn (typed plan / stage / QA gate). Empty for personas with no
+        # bound task; Mission Control's runtime-HUD peek renders it verbatim.
+        "mission_hud": mission_hud if isinstance(mission_hud, dict) else {},
         "workspace_id": safe_assignment_token(workspace_id),
         "workspace_name": safe_assignment_text(workspace_name, limit=120),
         "turn_id": safe_assignment_token(turn_id),
@@ -280,7 +285,31 @@ def snapshot_prompt_observability(
     personas: Iterable[Any],
     persona_instances: Iterable[Any],
     session_db: Any | None = None,
+    tasks: Iterable[Any] | None = None,
+    proof_store: Any | None = None,
 ) -> dict[str, Any]:
+    # Deferred import: context_builder pulls a large dependency graph, and this
+    # module is imported very early. A function-local import keeps module load
+    # order robust while still giving the preview a single-authority HUD builder.
+    from .context_builder import mission_hud_preview
+
+    tasks_by_id = {
+        safe_assignment_token(getattr(task, "id", None)): task
+        for task in (tasks or [])
+        if safe_assignment_token(getattr(task, "id", None))
+    }
+
+    def _preview_for(task_id: str | None) -> dict[str, Any]:
+        task = tasks_by_id.get(safe_assignment_token(task_id) or "")
+        if task is None:
+            return {}
+        try:
+            return mission_hud_preview(task, proof_store=proof_store)
+        except Exception:
+            # The peek is diagnostic; never let a HUD preview failure break the
+            # snapshot that carries everything else Mission Control renders.
+            return {}
+
     contexts: list[dict[str, Any]] = []
     by_persona = {
         safe_assignment_token(getattr(persona, "id", None)): persona
@@ -292,16 +321,18 @@ def snapshot_prompt_observability(
         persona = by_persona.get(persona_id) or _profile_persona_from_instance(instance)
         if persona is None:
             continue
+        task_id = getattr(instance, "current_task_id", None)
         contexts.append(
             mission_chat_prompt_observability(
                 persona=persona,
                 persona_instance_id=_persona_instance_id(instance),
                 session_id=getattr(instance, "session_id", None),
-                task_id=getattr(instance, "current_task_id", None),
+                task_id=task_id,
                 goal_id=getattr(instance, "goal_id", None),
                 surface_prompt="",
                 limiting_wrapper_active=False,
                 session_db=session_db,
+                mission_hud=_preview_for(task_id),
             )
         )
     if not contexts:
@@ -411,6 +442,12 @@ def _backfill_derived_fields(
     recompute the budget from the row's own model selection + final input.
     """
     if built:
+        # Persisted rows are written at chat time and never carry the typed
+        # mission-HUD preview (chat turns don't compute one). Prefer the freshly
+        # built preview so the persisted row exposes the same upcoming-turn HUD.
+        built_hud = built.get("mission_hud")
+        if isinstance(built_hud, dict) and built_hud and not item.get("mission_hud"):
+            item["mission_hud"] = built_hud
         for key in (
             "used_skills",
             "accessible_skills",

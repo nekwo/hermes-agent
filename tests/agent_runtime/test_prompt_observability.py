@@ -2,8 +2,10 @@ from types import SimpleNamespace
 
 from agent_runtime.prompt_observability import (
     MAX_WORKSPACE_AGENTS_BYTES,
+    _backfill_derived_fields,
     load_workspace_agents_context,
     mission_chat_prompt_observability,
+    snapshot_prompt_observability,
 )
 
 
@@ -113,3 +115,84 @@ def test_accessible_skills_hash_check_uses_persona_profile_home(monkeypatch, tmp
     )
 
     assert captured["hermes_home"] == home
+
+
+def test_mission_chat_prompt_observability_carries_mission_hud():
+    hud = {"preview": True, "typed_current_stage": {"id": "dev"}}
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(id="dev", hermes_profile="dev", display_name="Dev", role="dev"),
+        persona_instance_id="personainst_dev",
+        task_id="task_live",
+        mission_hud=hud,
+    )
+    assert context["mission_hud"] == hud
+
+
+def test_mission_chat_prompt_observability_defaults_mission_hud_to_empty():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(id="dev", hermes_profile="dev", display_name="Dev", role="dev"),
+    )
+    # No task bound → no HUD; the key is always present so the launcher parser
+    # has a stable shape rather than a sometimes-missing field.
+    assert context["mission_hud"] == {}
+
+
+def test_snapshot_previews_the_mission_hud_for_a_bound_task(monkeypatch):
+    from agent_runtime import context_builder
+    from agent_runtime import prompt_observability as po
+
+    # Isolate from the real on-disk store and stub the single-authority builder;
+    # this test covers the wiring (task lookup + pass-through), not HUD shape.
+    monkeypatch.setattr(po, "load_latest_prompt_observability_contexts", lambda: [])
+    sentinel = {"preview": True, "phase": "in_progress", "task_id": "task_live"}
+    monkeypatch.setattr(
+        context_builder,
+        "mission_hud_preview",
+        lambda task, *, proof_store=None: sentinel,
+    )
+
+    persona = SimpleNamespace(id="dev", hermes_profile="dev", display_name="Dev", role="dev")
+    instance = SimpleNamespace(
+        id="personainst_dev",
+        persona_id="dev",
+        session_id="persona_chat_dev",
+        current_task_id="task_live",
+        goal_id="goal_1",
+    )
+    snapshot = snapshot_prompt_observability(
+        personas=[persona],
+        persona_instances=[instance],
+        tasks=[SimpleNamespace(id="task_live")],
+    )
+
+    contexts = snapshot["chat_contexts"]
+    assert len(contexts) == 1
+    assert contexts[0]["mission_hud"] == sentinel
+
+
+def test_snapshot_leaves_mission_hud_empty_for_unbound_instance(monkeypatch):
+    from agent_runtime import prompt_observability as po
+
+    monkeypatch.setattr(po, "load_latest_prompt_observability_contexts", lambda: [])
+    persona = SimpleNamespace(id="dev", hermes_profile="dev", display_name="Dev", role="dev")
+    instance = SimpleNamespace(id="personainst_dev", persona_id="dev", session_id="s")
+    snapshot = snapshot_prompt_observability(
+        personas=[persona],
+        persona_instances=[instance],
+        tasks=[SimpleNamespace(id="some_other_task")],
+    )
+    assert snapshot["chat_contexts"][0]["mission_hud"] == {}
+
+
+def test_backfill_copies_mission_hud_onto_persisted_row():
+    persisted = {"persona_instance_id": "x", "session_id": "s", "persona_id": "p"}
+    built = {"mission_hud": {"preview": True, "phase": "in_progress"}}
+    _backfill_derived_fields(persisted, built)
+    assert persisted["mission_hud"] == {"preview": True, "phase": "in_progress"}
+
+
+def test_backfill_does_not_overwrite_an_existing_persisted_hud():
+    persisted = {"mission_hud": {"real": True}}
+    built = {"mission_hud": {"preview": True}}
+    _backfill_derived_fields(persisted, built)
+    assert persisted["mission_hud"] == {"real": True}

@@ -314,6 +314,8 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             personas=agents,
             persona_instances=persona_instances,
             session_db=session_db,
+            tasks=tasks,
+            proof_store=proof_store,
         ),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
