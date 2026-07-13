@@ -313,6 +313,9 @@ def test_persona_chat_prompt_allows_real_tools_and_forbids_fabrication():
     # Embodiment context: office + HUD state the operator can see.
     assert "Mission Control office" in prompt
     assert "steer handle" in prompt
+    # Operator channel is the ask-when-ambiguous surface (vs act_dont_ask on the
+    # autonomous goal path): clarify underspecified orders instead of guessing.
+    assert "ask the operator to clarify before acting" in prompt
 
 
 def test_mission_chat_surface_message_always_carries_operative_rules():
@@ -323,6 +326,8 @@ def test_mission_chat_surface_message_always_carries_operative_rules():
     assert _mission_chat_surface_message("") == _mission_chat_operative_rules()
     assert _mission_chat_surface_message(None) == _mission_chat_operative_rules()
     assert "Never fabricate" in _mission_chat_surface_message("")
+    # Ambiguous-order clarify norm rides the always-injected operative rules.
+    assert "ask the operator to clarify before acting" in _mission_chat_operative_rules()
 
     # An operator-supplied surface prompt is layered after the rules, not instead.
     composed = _mission_chat_surface_message("Focus on the auth refresh path.")

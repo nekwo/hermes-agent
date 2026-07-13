@@ -365,6 +365,8 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         "grant blocks it, say so plainly instead of inventing output. "
         "Keep replies as clean teammate prose: never paste decision JSON, task scopes, acceptance criteria, handoff packets, "
         "or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane. "
+        "If an order is ambiguous or underspecified, ask the operator to clarify before acting — you are in a live channel and "
+        "they are right here, so a one-line question beats guessing on a choice that changes what you do or who you route to. "
         "If the operator just greets you or makes small talk, talk back like a teammate. "
         "Recall: lean on the inline chat history for continuity. Reach for session_search only when the operator points at "
         "something specific from a past session you can't already see, and consult your durable memory only when it actually "
@@ -418,6 +420,9 @@ def _mission_chat_operative_rules() -> str:
         "run the no-model smoke test (or any temp/throwaway graph validation) as a stand-in for a real goal — the smoke "
         "never appears in Mission Control. Only fall back to the smoke if the operator explicitly asks to validate the "
         "graph without creating real work.\n"
+        "- If an order is ambiguous or underspecified — an unclear target, a missing detail, or a routing choice with more "
+        "than one plausible answer — ask the operator to clarify before acting. You are in a live channel and they are right "
+        "here; a one-line question beats guessing. (This is the operator channel, not an autonomous goal run: here, ask.)\n"
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
         "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane."
     )
