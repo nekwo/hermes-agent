@@ -632,10 +632,6 @@ def _find_bash() -> str:
     if found:
         return found
 
-    found = shutil.which("bash")
-    if found:
-        return found
-
     raise RuntimeError(
         "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
         "Install it from: https://git-scm.com/download/win\n"

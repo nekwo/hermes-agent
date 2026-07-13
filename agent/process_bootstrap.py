@@ -226,10 +226,15 @@ def build_keepalive_http_client(
     try:
         import httpx
 
-        ssl_context = shared_ssl_context()
-        # Reuse the process-wide SSL context (skip the ~300ms CA re-parse) when
-        # one is available; otherwise fall back to the per-provider verify.
-        effective_verify = ssl_context if ssl_context is not None else verify
+        # Reuse the cached process-wide SSL context (skip the ~300ms CA re-parse)
+        # ONLY for default verification; honor any explicit verify (custom CA
+        # bundle, ssl.SSLContext, or False to disable) so ssl_verify=false and
+        # per-provider ssl_ca_cert are respected.
+        if verify is True:
+            _cached = shared_ssl_context()
+            effective_verify = _cached if _cached is not None else True
+        else:
+            effective_verify = verify
 
         if "api.githubcopilot.com" in str(base_url or "").lower():
             client_cls = httpx.AsyncClient if async_mode else httpx.Client

@@ -3916,10 +3916,15 @@ class AIAgent:
             import httpx as _httpx
             from agent.process_bootstrap import shared_ssl_context as _shared_ssl_context
 
-            _ssl_context = _shared_ssl_context()
-            # Reuse the process-wide SSL context (skip the ~300ms CA re-parse)
-            # when one is available; otherwise fall back to per-provider verify.
-            _effective_verify = _ssl_context if _ssl_context is not None else verify
+            # Reuse the cached process-wide SSL context (skip the ~300ms CA
+            # re-parse) ONLY for default verification; honor any explicit verify
+            # (custom CA bundle, ssl.SSLContext, or False to disable) so
+            # ssl_verify=false and per-provider ssl_ca_cert are respected.
+            if verify is True:
+                _cached = _shared_ssl_context()
+                _effective_verify = _cached if _cached is not None else True
+            else:
+                _effective_verify = verify
 
             if "api.githubcopilot.com" in str(base_url or "").lower():
                 return _httpx.Client(verify=_effective_verify)
