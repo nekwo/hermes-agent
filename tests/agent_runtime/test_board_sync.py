@@ -1,0 +1,223 @@
+"""S3 Mission Board realm-sync tests: exhaustive classify_board_pull decision
+table, apply_board_pull integration (adopt / converge / conflict / archive /
+resurrection guard), the artifact family + exclusions, secret-scan fail-closed,
+and baseline round-trip. Autouse conftest fixtures isolate the runtime root.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from agent_runtime import board_models, paths
+from agent_runtime.board_store import BoardStore
+from agent_runtime.board_sync import (
+    BoardPullAction,
+    apply_board_pull,
+    classify_board_pull,
+    read_board_baseline,
+    update_board_baseline_after_sync,
+    write_board_baseline,
+)
+from agent_runtime.realm_sync import (
+    RealmSyncError,
+    _assert_no_secret_artifacts,
+    resolve_realm_sync_artifacts,
+)
+from agent_runtime.serde import to_jsonable
+from agent_runtime.store import RealmStore, WorkspaceStore
+from utils import atomic_json_write
+
+
+def _make_realm_workspace() -> tuple[str, str]:
+    realm = RealmStore().create(name="Realm")
+    ws = WorkspaceStore().create(name="WS", realm_id=realm.id)
+    realm = RealmStore().get(realm.id)
+    realm.workspace_ids.append(ws.id)
+    RealmStore().save(realm)
+    WorkspaceStore().set_active(ws.id)
+    return realm.id, ws.id
+
+
+# ── exhaustive decision table (§8, all rows) ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "local,remote,baseline,archived,expected,reason",
+    [
+        ("h", "h", "h", False, BoardPullAction.NOOP, "unchanged"),
+        ("h", "x", "h", False, BoardPullAction.WRITE_REMOTE, "take_remote"),
+        ("h", None, "h", False, BoardPullAction.ARCHIVE_LOCAL, "remote_removed"),
+        ("y", "h", "h", False, BoardPullAction.KEEP_LOCAL, "unpublished"),
+        ("y", "y", "h", False, BoardPullAction.WRITE_REMOTE, "converged"),
+        ("y", "z", "h", False, BoardPullAction.CONFLICT, "both_changed"),
+        ("y", None, "h", False, BoardPullAction.CONFLICT, "edit_vs_remove"),
+        ("h", "h", "h", True, BoardPullAction.NOOP, "archived_local"),
+        ("h", None, "h", True, BoardPullAction.NOOP, "archived_local"),
+        ("h", "z", "h", True, BoardPullAction.CONFLICT, "archive_vs_edit"),
+        ("h", None, None, False, BoardPullAction.KEEP_LOCAL, "new_local"),
+        (None, "z", None, False, BoardPullAction.WRITE_REMOTE, "adopt_remote"),
+        ("a", "a", None, False, BoardPullAction.WRITE_REMOTE, "converged"),
+        ("a", "b", None, False, BoardPullAction.CONFLICT, "new_both"),
+        (None, None, None, False, BoardPullAction.NOOP, "absent_both"),
+    ],
+)
+def test_classify_board_pull_decision_table(local, remote, baseline, archived, expected, reason):
+    decision = classify_board_pull(local, remote, baseline, locally_archived=archived)
+    assert decision.action == expected
+    assert decision.reason == reason
+
+
+# ── artifact family + exclusions ──────────────────────────────────────────
+
+
+def test_board_artifacts_included_archive_and_conflicts_excluded():
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    card = store.add_card(workspace_id=ws, title="Sync me")
+    archived = store.add_card(workspace_id=ws, title="Archive me")
+    store.archive_card(archived.card_id)
+    board_id = board_models.default_board_id(ws)
+    # a conflict sidecar must never be published
+    conflict = paths.board_conflict_path(board_id, card.card_id)
+    conflict.parent.mkdir(parents=True, exist_ok=True)
+    conflict.write_text("{}", encoding="utf-8")
+
+    artifacts = resolve_realm_sync_artifacts(realm_id)
+    rels = {a.relative_path for a in artifacts}
+    assert f"store/boards/{board_id}/board.json" in rels
+    assert f"store/boards/{board_id}/cards/{card.card_id}.json" in rels
+    # archived card + conflict sidecar excluded
+    assert not any("/archive/" in r for r in rels)
+    assert not any("/conflicts/" in r for r in rels)
+    assert f"store/boards/{board_id}/cards/{archived.card_id}.json" not in rels
+
+
+def test_publish_secret_scan_fails_closed_on_card_prose():
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    store.add_card(
+        workspace_id=ws,
+        title="Leaky",
+        description="api_key=DEADBEEFDEADBEEF012345 do not ship",
+    )
+    artifacts = resolve_realm_sync_artifacts(realm_id)
+    with pytest.raises(RealmSyncError) as exc:
+        _assert_no_secret_artifacts(artifacts)
+    assert exc.value.code == "sync_secret_excluded"
+
+
+# ── baseline round-trip ───────────────────────────────────────────────────
+
+
+def test_baseline_round_trip_and_publish_update():
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    store.add_card(workspace_id=ws, title="One")
+    board_id = board_models.default_board_id(ws)
+    assert read_board_baseline(realm_id) == {}
+    update_board_baseline_after_sync(realm_id, [board_id])
+    baseline = read_board_baseline(realm_id)
+    assert f"{board_id}:board" in baseline
+    assert any(k.endswith(":card:" + c.card_id) for c in store.list_cards(board_id) for k in baseline)
+
+
+# ── apply_board_pull integration ──────────────────────────────────────────
+
+
+def _remote_subtree(tmp_path: Path, board, cards) -> Path:
+    """Write a fake pulled realm subtree with the given board + card models."""
+    subtree = tmp_path / "subtree"
+    board_dir = subtree / "store" / "boards" / board.board_id
+    atomic_json_write(board_dir / "board.json", to_jsonable(board), indent=2, sort_keys=True)
+    for card in cards:
+        atomic_json_write(board_dir / "cards" / f"{card.card_id}.json", to_jsonable(card), indent=2, sort_keys=True)
+    return subtree
+
+
+def test_apply_pull_adopts_new_remote_card(tmp_path):
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    local = store.add_card(workspace_id=ws, title="Local one")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])  # baseline: local card known
+
+    board = store.get(board_id)
+    # remote adds a brand-new card the local machine has never seen.
+    from agent_runtime.models import BoardCard
+    from hermes_time import now
+
+    remote_new = BoardCard(
+        card_id="card_remote", board_id=board_id, column_id="col_queued",
+        title="From peer", order_key="z", created_by="operator",
+        created_at=now(), updated_at=now(),
+    )
+    local_card = store.get_card(local.card_id)
+    subtree = _remote_subtree(tmp_path, board, [local_card, remote_new])
+
+    summary = apply_board_pull(realm_id, subtree)
+    assert summary.adopted == 1
+    assert store.exists(board_id)
+    titles = {c.title for c in store.list_cards(board_id)}
+    assert "From peer" in titles and "Local one" in titles
+
+
+def test_apply_pull_conflict_keeps_local_and_writes_sidecar(tmp_path):
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    card = store.add_card(workspace_id=ws, title="Original")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])  # baseline == original
+
+    # BOTH sides edit differently after the baseline.
+    store.edit_card(card.card_id, title="Local edit")
+    board = store.get(board_id)
+    remote_card = store.get_card(card.card_id)
+    remote_card.title = "Remote edit"
+    subtree = _remote_subtree(tmp_path, board, [remote_card])
+
+    summary = apply_board_pull(realm_id, subtree)
+    assert summary.conflicts == 1
+    # local copy is untouched (kept)
+    assert store.get_card(card.card_id).title == "Local edit"
+    # a loud conflict sidecar exists
+    assert paths.board_conflict_path(board_id, card.card_id).exists()
+
+
+def test_apply_pull_resurrection_guard_blocks_archived_card(tmp_path):
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    card = store.add_card(workspace_id=ws, title="Doomed")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])
+    board = store.get(board_id)
+    remote_card = store.get_card(card.card_id)  # remote still has it
+    store.archive_card(card.card_id)  # locally archived after baseline
+
+    subtree = _remote_subtree(tmp_path, store.get(board_id), [remote_card])
+    summary = apply_board_pull(realm_id, subtree)
+    # resurrection guard: the archived card is NOT re-created active.
+    active_ids = {c.card_id for c in store.list_cards(board_id)}
+    assert card.card_id not in active_ids
+    assert summary.adopted == 0
+
+
+def test_apply_pull_remote_removal_archives_local(tmp_path):
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    keep = store.add_card(workspace_id=ws, title="Keep")
+    gone = store.add_card(workspace_id=ws, title="Gone remotely")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])
+
+    # remote publishes only `keep` (removed `gone`).
+    board = store.get(board_id)
+    subtree = _remote_subtree(tmp_path, board, [store.get_card(keep.card_id)])
+    summary = apply_board_pull(realm_id, subtree)
+    assert summary.archived == 1
+    active_ids = {c.card_id for c in store.list_cards(board_id)}
+    assert gone.card_id not in active_ids
+    assert keep.card_id in active_ids
+    # archived, never deleted
+    assert paths.board_archived_card_path(board_id, gone.card_id).exists()

@@ -171,6 +171,23 @@ def publish_realm_sync(
         except RealmSyncError as exc:
             raise RealmSyncError("sync_remote_unreachable", "Realm sync publish committed locally but could not push upstream.", retryable=True, safe_details=exc.safe_details) from exc
     _write_timestamp(repo, "last_publish.txt")
+    # Record the published board+card content hashes as the new sync baseline so
+    # a subsequent pull sees local == baseline (no spurious conflict on my own
+    # publish). Board ids are resolved from the local boards that contributed
+    # artifacts (not the tokenized subtree dir names). Baseline is a never-synced
+    # sidecar; best-effort so it never fails a publish.
+    from .board_sync import update_board_baseline_after_sync
+
+    published_board_ids = sorted({
+        artifact.source.parent.parent.name if artifact.kind == "board_card" else artifact.source.parent.name
+        for artifact in artifacts
+        if artifact.kind in ("board", "board_card")
+    })
+    if published_board_ids:
+        try:
+            update_board_baseline_after_sync(realm.id, published_board_ids)
+        except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
+            pass
     warnings = _notify_publish(realm, repo=repo, artifacts=artifacts, credential=credential) if changed else []
     git_after = _git_state(repo)
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
@@ -214,6 +231,14 @@ def pull_realm_sync(
         if before != data:
             artifact.destination.write_bytes(data)
             changed = True
+    # Mission Board: board card files are excluded from the generic overwrite
+    # loop above (_destination_for_sync_path returns None for store/boards/*);
+    # apply the per-card LWW decision table + baseline + conflict sidecars here.
+    from .board_sync import apply_board_pull
+
+    board_summary = apply_board_pull(realm.id, subtree)
+    if board_summary.adopted or board_summary.converged or board_summary.archived:
+        changed = True
     install_results = [
         *install_harness_skills(skills=sorted(HARNESS_SKILLS)),
         *install_harness_skills_for_personas(ensure_persisted_personas(load_agent_runtime_config())),
@@ -221,6 +246,7 @@ def pull_realm_sync(
     _write_timestamp(repo, "last_pull.txt")
     git_after = _git_state(repo)
     result = _sync_result(realm, "pull", "pulled", artifacts, repo=repo, git=git_after, changed=changed)
+    result["board_sync"] = board_summary.as_dict()
     result["skill_reconcile"] = {
         "installed": [item.skill for item in install_results],
         "changed": [item.skill for item in install_results if item.changed],
@@ -275,6 +301,7 @@ def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     artifacts: list[RealmSyncArtifact] = []
     artifacts.extend(_skill_artifacts())
     artifacts.extend(_workspace_realm_artifacts(realm, workspaces))
+    artifacts.extend(_board_artifacts(workspaces))
     for persona_id in wanted_persona_ids:
         persona = personas.get(persona_id)
         if persona is None:
@@ -352,6 +379,48 @@ def _workspace_realm_artifacts(realm: Realm, workspaces: list[Workspace]) -> lis
             )
         )
     return [item for item in artifacts if item.source.exists()]
+
+
+def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
+    """Mission Board artifact family: board.json + active card files for boards
+    whose workspace belongs to this realm. ``archive/``, ``conflicts/``,
+    ``idempotency/`` and the never-synced baseline are all excluded (only
+    ``board.json`` and ``cards/`` are walked). Publish replaces the realm subtree
+    wholesale (see ``publish_realm_sync``), so card removals/archives propagate
+    as absences; pull applies per-card LWW via ``board_sync.apply_board_pull``.
+    """
+
+    from .board_store import BoardStore
+
+    workspace_ids = {ws.id for ws in workspaces}
+    store = BoardStore()
+    artifacts: list[RealmSyncArtifact] = []
+    for board in store.list_all():
+        if board.workspace_id not in workspace_ids:
+            continue
+        board_token = _safe_token(board.board_id)
+        def_path = paths.board_def_path(board.board_id)
+        if def_path.exists():
+            artifacts.append(
+                RealmSyncArtifact(
+                    kind="board",
+                    source=def_path,
+                    relative_path=f"store/boards/{board_token}/board.json",
+                    destination=def_path,
+                )
+            )
+        cards_dir = paths.board_cards_dir(board.board_id)
+        if cards_dir.exists():
+            for card_path in sorted(cards_dir.glob("*.json")):
+                artifacts.append(
+                    RealmSyncArtifact(
+                        kind="board_card",
+                        source=card_path,
+                        relative_path=f"store/boards/{board_token}/cards/{card_path.name}",
+                        destination=card_path,
+                    )
+                )
+    return artifacts
 
 
 def _persona_artifacts(persona: AgentPersona) -> list[RealmSyncArtifact]:
