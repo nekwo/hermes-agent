@@ -614,6 +614,125 @@ def test_cli_persona_set_model_credentials_warning_is_nonblocking(monkeypatch, c
 # --- config-vs-store regression -------------------------------------------------
 
 
+# --- per-instance reasoning effort ---------------------------------------------
+
+
+def test_update_profile_persists_and_clears_reasoning_effort():
+    persona = _persona()
+    store = PersonaInstanceStore()
+    a, _ = _two_instances(store, persona)
+
+    updated = store.update_profile(a.id, reasoning_effort="high")
+    assert updated.reasoning_effort == "high"
+    assert updated.model_override_issued_at is not None
+    raw = json.loads(paths.persona_instance_path(a.id).read_text(encoding="utf-8"))
+    assert raw["reasoning_effort"] == "high"
+
+    # Empty string clears back to the runtime default (None).
+    cleared = store.update_profile(a.id, reasoning_effort="")
+    assert cleared.reasoning_effort is None
+
+    # Reasoning rides the model lane: clear_model_override drops it too.
+    store.update_profile(a.id, reasoning_effort="xhigh")
+    both_cleared = store.update_profile(a.id, clear_model_override=True)
+    assert both_cleared.reasoning_effort is None
+
+
+def test_update_profile_rejects_invalid_reasoning_effort():
+    persona = _persona()
+    store = PersonaInstanceStore()
+    a, _ = _two_instances(store, persona)
+    with pytest.raises(ValueError):
+        store.update_profile(a.id, reasoning_effort="turbo")
+
+
+def test_reasoning_effort_is_isolated_per_instance():
+    persona = _persona()
+    store = PersonaInstanceStore()
+    a, b = _two_instances(store, persona)
+    store.update_profile(b.id, reasoning_effort="high")
+    assert store.get(a.id).reasoning_effort is None
+    assert store.get(b.id).reasoning_effort == "high"
+
+
+def test_persona_instance_summary_projects_reasoning_fields():
+    persona = _persona(model="gpt-5.6-luna")  # reasoning-capable gpt-5 family
+    store = PersonaInstanceStore()
+    a, b = _two_instances(store, persona)
+    store.update_profile(b.id, reasoning_effort="high")
+
+    plain = persona_instance_summary(store.get(a.id), persona)
+    overridden = persona_instance_summary(store.get(b.id), persona)
+
+    assert plain["reasoning_effort"] is None
+    assert plain["reasoning_supported"] is True  # gpt-5 exposes reasoning effort
+    assert plain["model_is_override"] is False
+
+    assert overridden["reasoning_effort"] == "high"
+    assert overridden["reasoning_supported"] is True
+    # A reasoning-only override still marks the instance as overridden.
+    assert overridden["model_is_override"] is True
+
+
+def test_persona_instance_summary_reasoning_unsupported_for_non_reasoning_model():
+    persona = _persona(model="gpt-4.1")  # not a reasoning-effort model
+    store = PersonaInstanceStore()
+    a, _ = _two_instances(store, persona)
+    summary = persona_instance_summary(store.get(a.id), persona)
+    assert summary["reasoning_supported"] is False
+
+
+def test_cli_instance_set_model_reasoning_only_applies(monkeypatch, capsys):
+    harness = _patched_harness(monkeypatch)
+    persona = _persona(model="gpt-5.6-luna")
+    store = PersonaInstanceStore()
+    _, b = _two_instances(store, persona)
+
+    code = harness._cmd_persona_instance_set_model(_instance_args(b.id, reasoning_effort="xhigh"))
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is True
+    assert data["status"] == "applied"
+    assert data["reasoning_effort"] == "xhigh"
+    # Reasoning-only write still flags an instance override.
+    assert data["model_is_instance_override"] is True
+    assert store.get(b.id).reasoning_effort == "xhigh"
+
+
+def test_cli_instance_set_model_invalid_reasoning_rejected(monkeypatch, capsys):
+    harness = _patched_harness(monkeypatch)
+    persona = _persona()
+    store = PersonaInstanceStore()
+    _, b = _two_instances(store, persona)
+
+    code = harness._cmd_persona_instance_set_model(_instance_args(b.id, reasoning_effort="ultra"))
+    assert code == 2
+    data = json.loads(capsys.readouterr().out)
+    assert data["error_code"] == "invalid_value"
+    assert store.get(b.id).reasoning_effort is None
+
+
+def test_cli_instance_set_model_use_profile_default_clears_reasoning(monkeypatch, capsys):
+    harness = _patched_harness(monkeypatch)
+    persona = _persona(model="gpt-5.6-luna")
+    store = PersonaInstanceStore()
+    _, b = _two_instances(store, persona)
+    store.update_profile(b.id, reasoning_effort="high")
+
+    code = harness._cmd_persona_instance_set_model(_instance_args(b.id, use_profile_default=True))
+    assert code == 0
+    assert store.get(b.id).reasoning_effort is None
+
+
+def test_cli_persona_set_model_rejects_reasoning_effort(monkeypatch, capsys):
+    harness = _patched_harness(monkeypatch)
+    ensure_persisted_personas(_cfg())
+    code = harness._cmd_persona_set_model(_persona_args("base", reasoning_effort="high"))
+    assert code == 2
+    data = json.loads(capsys.readouterr().out)
+    assert data["error_code"] == "unsupported_scope"
+
+
 def test_store_persisted_model_survives_config_persona_override(monkeypatch, capsys):
     """config.yaml agent_runtime.personas.base.model must NOT clobber a
     store-persisted verb write on reload (config.py merge: {**catalog, **stored})."""

@@ -315,6 +315,12 @@ class PersonaInstance:
     model: str | None = None
     provider: str | None = None
     api_mode: str | None = None
+    # Per-instance reasoning-effort override (None = inherit the runtime default;
+    # applies only for models that support reasoning effort). One of
+    # hermes_constants.VALID_REASONING_EFFORTS or "none". Rides the same
+    # model-override lane as model/provider/api_mode so a set-model write can
+    # move all four together and use_profile_default clears them together.
+    reasoning_effort: str | None = None
     # issued_at of the last applied model write; stale writes are superseded.
     model_override_issued_at: datetime | None = None
     current_assignment_id: str | None = None

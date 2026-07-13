@@ -265,6 +265,7 @@ class GPTPersonaRuntime:
         turn_id: str | None = None,
         provider_override: str | None = None,
         model_override: str | None = None,
+        reasoning_effort: str | None = None,
         surface_prompt: str | None = "",
         max_wall_seconds: float | None = 120.0,
         # No API-call cap on the chat lane — align with base Hermes, where a
@@ -325,6 +326,7 @@ class GPTPersonaRuntime:
                 provider=runtime_provider,
                 model=runtime_model,
                 api_mode=persona.api_mode,
+                reasoning_effort=reasoning_effort,
                 enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=perm_session_id),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=perm_session_id),
                 quiet_mode=True,

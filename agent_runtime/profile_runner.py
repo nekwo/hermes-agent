@@ -38,6 +38,11 @@ class AgentRunRequest:
     provider: str | None = None
     model: str | None = None
     api_mode: str | None = None
+    # Optional per-run reasoning-effort override (one of
+    # hermes_constants.VALID_REASONING_EFFORTS or "none"). None = inherit the
+    # global config default at the transport. Threaded into the agent's
+    # reasoning_config so a per-agent-instance choice actually takes effect.
+    reasoning_effort: str | None = None
     enabled_toolsets: list[str] | None = None
     disabled_toolsets: list[str] | None = None
     blocked_tool_names: list[str] | None = None
@@ -184,12 +189,24 @@ class ProfileAgentRunner:
             )
             status_callback = _profile_status_callback(request, timing)
             construct_started = time.perf_counter()
+            # Per-run reasoning override → agent reasoning_config. Only passed
+            # when explicitly requested so an unset run keeps the current
+            # behavior (transport reads the global agent.reasoning_effort). The
+            # transport reads params["reasoning_config"] = {"enabled": .., "effort": ..}.
+            reasoning_kwargs: dict[str, Any] = {}
+            if request.reasoning_effort:
+                from hermes_constants import parse_reasoning_effort
+
+                reasoning_config = parse_reasoning_effort(request.reasoning_effort)
+                if reasoning_config is not None:
+                    reasoning_kwargs["reasoning_config"] = reasoning_config
             agent = self._agent_factory(
                 provider=runtime.get("provider") or request.provider,
                 model=runtime.get("model") or request.model or "",
                 api_mode=request.api_mode or runtime.get("api_mode"),
                 base_url=runtime.get("base_url"),
                 api_key=runtime.get("api_key"),
+                **reasoning_kwargs,
                 enabled_toolsets=request.enabled_toolsets,
                 disabled_toolsets=request.disabled_toolsets,
                 blocked_tool_names=request.blocked_tool_names,

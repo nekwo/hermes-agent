@@ -148,6 +148,44 @@ def _safe_model_override_text(value: str, *, field_name: str) -> str:
     return text
 
 
+def _model_supports_reasoning_effort(model_id: str | None) -> bool:
+    """True when the model exposes reasoning-effort control (offline id-heuristic).
+
+    Reuses the canonical Copilot/GPT-5/o-series id heuristic with no catalog or
+    api_key so this stays a cheap, network-free check safe to run for every
+    instance in a snapshot. A resolution failure degrades to ``False`` (control
+    hidden) rather than raising inside the projection.
+    """
+    if not str(model_id or "").strip():
+        return False
+    try:
+        from hermes_cli.models import github_model_reasoning_efforts
+
+        return bool(github_model_reasoning_efforts(model_id))
+    except Exception:
+        return False
+
+
+def _normalize_reasoning_effort_override(value: str) -> str | None:
+    """Normalize a reasoning-effort override to a stored value or ``None``.
+
+    Empty clears the override (inherit the runtime default). ``"none"`` (thinking
+    off) and every level in ``hermes_constants.VALID_REASONING_EFFORTS`` are
+    accepted; anything else raises ``ValueError``.
+    """
+    from hermes_constants import VALID_REASONING_EFFORTS
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text == "none" or text in VALID_REASONING_EFFORTS:
+        return text
+    raise ValueError(
+        f"invalid reasoning_effort: {value!r} (expected one of none, "
+        f"{', '.join(VALID_REASONING_EFFORTS)})"
+    )
+
+
 @dataclass(slots=True)
 class PersonaAssignmentSpec:
     persona_id: str
@@ -352,6 +390,7 @@ class PersonaInstanceStore:
         provider: str | None = None,
         model: str | None = None,
         api_mode: str | None = None,
+        reasoning_effort: str | None = None,
         clear_model_override: bool = False,
         model_issued_at: datetime | None = None,
         requested_by: str | None = None,
@@ -373,10 +412,10 @@ class PersonaInstanceStore:
         instance = self.get(persona_instance_id)
         changed = False
         model_lane_touched = clear_model_override or any(
-            value is not None for value in (provider, model, api_mode)
+            value is not None for value in (provider, model, api_mode, reasoning_effort)
         )
-        if clear_model_override and any(value is not None for value in (provider, model, api_mode)):
-            raise ValueError("clear_model_override conflicts with provider/model/api_mode values")
+        if clear_model_override and any(value is not None for value in (provider, model, api_mode, reasoning_effort)):
+            raise ValueError("clear_model_override conflicts with provider/model/api_mode/reasoning_effort values")
         if model_lane_touched:
             if model_issued_at is not None and instance.model_override_issued_at is not None:
                 issued = _as_utc(model_issued_at)
@@ -384,10 +423,16 @@ class PersonaInstanceStore:
                 if issued <= applied:
                     raise StaleModelOverrideWrite(instance, issued_at=issued, applied_issued_at=applied)
             if clear_model_override:
-                if instance.model is not None or instance.provider is not None or instance.api_mode is not None:
+                if (
+                    instance.model is not None
+                    or instance.provider is not None
+                    or instance.api_mode is not None
+                    or instance.reasoning_effort is not None
+                ):
                     instance.model = None
                     instance.provider = None
                     instance.api_mode = None
+                    instance.reasoning_effort = None
                     changed = True
             else:
                 for field_name, raw in (("provider", provider), ("model", model), ("api_mode", api_mode)):
@@ -396,6 +441,13 @@ class PersonaInstanceStore:
                     value = _safe_model_override_text(raw, field_name=field_name)
                     if getattr(instance, field_name) != value:
                         setattr(instance, field_name, value)
+                        changed = True
+                # Reasoning effort rides the model lane but is a validated enum
+                # (or "none"/empty-clear), not free text — normalize separately.
+                if reasoning_effort is not None:
+                    new_reasoning = _normalize_reasoning_effort_override(reasoning_effort)
+                    if instance.reasoning_effort != new_reasoning:
+                        instance.reasoning_effort = new_reasoning
                         changed = True
             if changed:
                 instance.model_override_issued_at = _as_utc(model_issued_at) if model_issued_at is not None else now()
@@ -435,6 +487,7 @@ class PersonaInstanceStore:
                 "provider": instance.provider,
                 "model": instance.model,
                 "api_mode": instance.api_mode,
+                "reasoning_effort": instance.reasoning_effort,
             }
             if requested_by:
                 payload["requested_by"] = str(requested_by)[:80]
@@ -1306,9 +1359,17 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "model": instance.model,
         "provider": instance.provider,
         "api_mode": instance.api_mode,
-        "model_is_override": bool(instance.model or instance.provider),
+        "model_is_override": bool(instance.model or instance.provider or instance.reasoning_effort),
         "effective_model": instance.model or getattr(visibility_persona, "model", None),
         "effective_provider": instance.provider or getattr(visibility_persona, "provider", None),
+        # Per-instance reasoning-effort override (None = inherit runtime default)
+        # plus whether the effective model supports reasoning effort at all, so
+        # the Launcher only offers the effort control for reasoning-capable
+        # models (no fake affordance). Computed offline from the model id.
+        "reasoning_effort": instance.reasoning_effort,
+        "reasoning_supported": _model_supports_reasoning_effort(
+            instance.model or getattr(visibility_persona, "model", None)
+        ),
         "toolsets": list(getattr(visibility_persona, "toolsets", []) or []),
         "runtime_root": instance.runtime_root,
         "state": state,

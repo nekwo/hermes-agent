@@ -812,6 +812,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_set_model.add_argument("persona_instance_id")
     persona_instance_set_model.add_argument("--provider", default=None, help="Provider lane (canonical name or alias; api_mode is derived from it)")
     persona_instance_set_model.add_argument("--model", default=None, help="Model id for the provider lane")
+    persona_instance_set_model.add_argument("--reasoning-effort", dest="reasoning_effort", default=None, help="Per-instance reasoning effort for reasoning-capable models (none, minimal, low, medium, high, xhigh); empty string clears it")
     persona_instance_set_model.add_argument("--use-profile-default", action="store_true", help="Clear the instance override so the backing profile default applies live")
     persona_instance_set_model.add_argument("--issued-at", default=None, help="ISO-8601 issue timestamp; stale writes are superseded instead of applied")
     persona_instance_set_model.add_argument("--requested-by", default="operator")

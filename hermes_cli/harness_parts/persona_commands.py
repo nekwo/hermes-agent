@@ -986,6 +986,10 @@ def _cmd_mission_chat_message(args) -> int:
                 permission_session_id=session_id,
                 provider_override=model_selection.get("effective_provider"),
                 model_override=model_selection.get("effective_model"),
+                # Per-instance reasoning-effort override for this turn (None =
+                # inherit the runtime default). Applied to the model call by the
+                # transport; unsupported/absent values fall back to the default.
+                reasoning_effort=getattr(instance, "reasoning_effort", None),
                 surface_prompt=getattr(args, "surface_prompt", "") or "",
                 max_wall_seconds=relay_wall_seconds,
                 stream_callback=_stream_delta if getattr(args, "stream", False) else None,
@@ -1499,10 +1503,27 @@ def _validated_set_model_request(args) -> dict:
         model = _safe_chat_model_override_value(getattr(args, "model", None), field="model")
     except ValueError as exc:
         raise _SetModelRequestError("invalid_value", str(exc)) from exc
-    if use_default and (provider_raw or model):
-        raise _SetModelRequestError("conflicting_args", "--use-default cannot be combined with --provider or --model")
-    if not use_default and not provider_raw and not model:
-        raise _SetModelRequestError("missing_args", "pass --provider and/or --model, or the use-default flag to clear the override")
+    # Reasoning-effort override rides the same set-model lane (per-instance).
+    # ``None`` = not provided; ``""`` = clear back to the runtime default; a
+    # level ("none"/minimal/low/medium/high/xhigh) sets it. Shape-checked here
+    # so a bad value is a typed rejection, not a downstream ValueError.
+    reasoning_raw = getattr(args, "reasoning_effort", None)
+    reasoning_effort: str | None = None
+    if reasoning_raw is not None:
+        from hermes_constants import VALID_REASONING_EFFORTS
+
+        reasoning_effort = str(reasoning_raw).strip().lower()
+        if reasoning_effort and reasoning_effort != "none" and reasoning_effort not in VALID_REASONING_EFFORTS:
+            raise _SetModelRequestError(
+                "invalid_value",
+                f"invalid reasoning effort: {reasoning_raw!r} (expected one of none, "
+                f"{', '.join(VALID_REASONING_EFFORTS)})",
+            )
+    reasoning_provided = reasoning_effort is not None
+    if use_default and (provider_raw or model or reasoning_provided):
+        raise _SetModelRequestError("conflicting_args", "--use-default cannot be combined with --provider, --model, or --reasoning-effort")
+    if not use_default and not provider_raw and not model and not reasoning_provided:
+        raise _SetModelRequestError("missing_args", "pass --provider and/or --model, --reasoning-effort, or the use-default flag to clear the override")
     provider = None
     api_mode = None
     warnings: list[dict] = []
@@ -1542,6 +1563,7 @@ def _validated_set_model_request(args) -> dict:
         "provider": provider,
         "model": model,
         "api_mode": api_mode,
+        "reasoning_effort": reasoning_effort,
         "issued_at": issued_at,
         "warnings": warnings,
     }
@@ -1587,6 +1609,7 @@ def _cmd_persona_instance_set_model(args) -> int:
             provider=request["provider"],
             model=request["model"],
             api_mode=request["api_mode"],
+            reasoning_effort=request["reasoning_effort"],
             clear_model_override=request["use_default"],
             model_issued_at=request["issued_at"],
             requested_by=getattr(args, "requested_by", None) or "operator",
@@ -1616,11 +1639,12 @@ def _cmd_persona_instance_set_model(args) -> int:
         "provider": updated.provider,
         "model": updated.model,
         "api_mode": updated.api_mode,
+        "reasoning_effort": updated.reasoning_effort,
         "default_provider": default_provider,
         "default_model": default_model,
         "effective_provider": updated.provider or default_provider,
         "effective_model": updated.model or default_model,
-        "model_is_instance_override": bool(updated.provider or updated.model),
+        "model_is_instance_override": bool(updated.provider or updated.model or updated.reasoning_effort),
         "model_catalog_checked": False,
         "persistence": "persona_instance_store",
         "warnings": request["warnings"],
@@ -1649,6 +1673,20 @@ def _cmd_persona_set_model(args) -> int:
         request = _validated_set_model_request(args)
     except _SetModelRequestError as exc:
         data = _set_model_error_payload(exc, persona_id=str(getattr(persona, "id", "") or raw_id), scope="agent_default")
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    if request["reasoning_effort"] is not None:
+        # Reasoning effort is a per-agent-instance override for now (AgentPersona
+        # carries no reasoning field). Reject at the profile-default scope rather
+        # than silently dropping it.
+        data = _set_model_error_payload(
+            _SetModelRequestError(
+                "unsupported_scope",
+                "reasoning effort can only be set per agent instance (persona.instance.set_model), not on the profile default",
+            ),
+            persona_id=str(getattr(persona, "id", "") or raw_id),
+            scope="agent_default",
+        )
         print(emit_json(data) if args.json else data["error"])
         return 2
     store = AgentStore()
