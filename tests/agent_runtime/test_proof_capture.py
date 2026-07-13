@@ -249,6 +249,9 @@ for line in sys.stdin:
         "    env:\n"
         f"      FAKE_STAGEC_ARTIFACT: {artifact.as_posix()}\n"
         f"      FAKE_STAGEC_ARGS: {args_capture.as_posix()}\n"
+        "      STAGEC_QA_REPO_ROOT: C:/stagec/repo\n"
+        "      STAGEC_LAUNCH_HELPER: C:/stagec/repo/docs/stages/qa-reboot/scripts/Start-StageCDirectExe.ps1\n"
+        "      STAGEC_SCREENSHOT_HELPER: C:/stagec/repo/docs/stages/qa-reboot/scripts/Capture-StageCWindowScreenshot.ps1\n"
         "    timeout: 5\n"
         "    connect_timeout: 5\n",
         encoding="utf-8",
@@ -266,3 +269,66 @@ for line in sys.stdin:
 
     args = json.loads(args_capture.read_text(encoding="utf-8"))
     assert args["force_relaunch"] is True
+    assert args["browser_login"] is True
+    assert "repoRoot" not in args
+    assert "launchHelperPath" not in args
+    assert "screenshotHelperPath" not in args
+
+
+def test_stagec_provider_derives_launcher_helpers_from_configured_repo(tmp_path, monkeypatch, isolate_agent_runtime_root):
+    from agent_runtime import stagec_mcp_visual_provider as stagec
+
+    repo = tmp_path / "launcher"
+    scripts = repo / "docs" / "stages" / "qa-reboot" / "scripts"
+    scripts.mkdir(parents=True)
+    launch_helper = scripts / "Start-StageCDirectExe.ps1"
+    screenshot_helper = scripts / "Capture-StageCWindowScreenshot.ps1"
+    launch_helper.write_text("", encoding="utf-8")
+    screenshot_helper.write_text("", encoding="utf-8")
+    artifact = tmp_path / "mission_control.png"
+    artifact.write_bytes(b"png")
+    seen = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            seen["env"] = dict(config.env)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def initialize(self):
+            return {}
+
+        def call_tool(self, name, arguments):
+            seen["args"] = dict(arguments)
+            return {
+                "ok": True,
+                "screenshot": {"path": str(artifact), "width": 1920, "height": 1080},
+                "redaction": {"safe": True},
+            }
+
+    monkeypatch.setattr(stagec, "StageCMcpJsonRpcClient", FakeClient)
+    monkeypatch.setattr(stagec, "_marionette_preflight_enabled_for_config", lambda metadata, config: False)
+
+    provider = stagec.StageCLauncherMcpVisualCaptureProvider(
+        stagec.StageCMcpServerConfig(name="launcher_qa", command="fake", env={"STAGEC_QA_REPO_ROOT": str(repo)})
+    )
+    capture = provider.capture_screenshot(
+        ScreenshotRequest(
+            task_id="task_stagec_pins",
+            stage_id="stage_1",
+            scenario="mission_control",
+            metadata=_request(),
+        )
+    )
+
+    assert capture.path == str(artifact)
+    assert "repoRoot" not in seen["args"]
+    assert "launchHelperPath" not in seen["args"]
+    assert "screenshotHelperPath" not in seen["args"]
+    assert seen["env"]["STAGEC_QA_REPO_ROOT"] == str(repo)
+    assert seen["env"]["STAGEC_LAUNCH_HELPER"] == str(launch_helper)
+    assert seen["env"]["STAGEC_SCREENSHOT_HELPER"] == str(screenshot_helper)

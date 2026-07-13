@@ -605,12 +605,33 @@ def _self_heal_plan(persona: AgentPersona, ctx: AgentContext) -> str:
 
 
 def _handoff_shape(persona: AgentPersona, ctx: AgentContext) -> str:
+    if _simplified_contract_active():
+        role = str(role_from_persona(persona))
+        if role == "alice_supervisor":
+            return "scope_route with objective, acceptance criteria, target owner/repo, and proof gate."
+        if role == "qa":
+            return "qa_verdict with verdict, cited proof IDs, findings, and remaining risk."
+        return "hand_off with concise summary; Harness captures isolated-worktree diff and runs the authoritative gate or proof recipe."
     role = str(role_from_persona(persona))
     if role == "alice_supervisor":
         return "handoff_packet with target owner/repo, proof gate, join gate, and next expected owner."
     if role == "qa":
-        return "qa_review/report_qa_verdict with verdict, proof IDs, findings, remaining risk, and autonomy packet IDs reviewed."
-    return "delivery/propose_patch with stage ID, proof IDs, changed-file summary, known gaps, and next graph owner; use request_qa_review only when the active graph includes QA."
+        return "qa_verdict with verdict, proof IDs, findings, remaining risk, and autonomy packet IDs reviewed."
+    return "hand_off with concise summary and known gaps; Harness derives changed files, proof IDs, delivery, and next graph owner."
+
+
+def _simplified_contract_active() -> bool:
+    try:
+        from .config import load_agent_runtime_config
+
+        cfg = load_agent_runtime_config()
+    except Exception:
+        return False
+    simplified = getattr(cfg, "simplified_agent_contract", None)
+    return bool(
+        getattr(simplified, "enabled", False)
+        and getattr(simplified, "expose_only_simplified_actions", True)
+    )
 
 
 def _environment_fingerprint_status(ctx: AgentContext) -> str:

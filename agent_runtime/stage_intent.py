@@ -104,6 +104,8 @@ def stage_requires_product_edit(task: Task, stage: TaskStage | None = None) -> b
     text = _combined_text(task, stage)
     if not text:
         return False
+    if stage is not None and _typed_stage_declares_no_product_edit(stage):
+        return False
     if stage is not None and no_product_edit_recipe_id(getattr(stage, "id", None)):
         return False
     stage_recipe_id = no_product_edit_recipe_for_stage(stage)
@@ -142,6 +144,8 @@ def first_incomplete_product_edit_stage(task: Task, *, excluding_stage_id: str |
 def no_product_edit_recipe_conflicts_with_stage(task: Task, stage: TaskStage | None, recipe_id: str | None) -> bool:
     safe_recipe_id = str(recipe_id or "").strip()
     if not no_product_edit_recipe_id(safe_recipe_id):
+        return False
+    if stage is not None and _typed_stage_declares_no_product_edit(stage):
         return False
     if stage is not None and str(getattr(stage, "id", "") or "").strip() == safe_recipe_id:
         return False
@@ -220,6 +224,16 @@ def _combined_text(task: Task, stage: TaskStage | None) -> str:
 
 def _stage_text(stage: TaskStage) -> str:
     return _normalize_text(_stage_raw_text(stage))
+
+
+def _typed_stage_declares_no_product_edit(stage: TaskStage) -> bool:
+    kind = str(getattr(stage, "kind", "") or "").strip()
+    requires_product_edit = getattr(stage, "requires_product_edit", None)
+    if kind == "proof_only":
+        return requires_product_edit is not True
+    if requires_product_edit is False and bool(str(getattr(stage, "proof_recipe_id", "") or "").strip()):
+        return True
+    return False
 
 
 def _stage_raw_text(stage: TaskStage) -> str:

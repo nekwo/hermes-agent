@@ -7,14 +7,15 @@ from hermes_time import now
 from agent_runtime.actions import HarnessAction, HarnessActionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
+from agent_runtime.events import EventLog
+from agent_runtime.models import Event, MissionIntent, MissionPlan, MissionPlanStage, Proof, RepoBundle, Task
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore
 from agent_runtime.repo_bundles import RepoBundleStore, acquire_repo_bundle_locks, desired_bundles_for_task, qa_waiting_on, release_repo_bundle_locks, repo_lock_summary
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig, RepoBundleRoutingConfig, SimplifiedAgentContractConfig
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import StageStatus, TaskState
-from agent_runtime.store import ProofStore, TaskStore
+from agent_runtime.store import IncidentStore, ProofStore, TaskStore
 from agent_runtime.ticker import TickEngine
 
 
@@ -60,6 +61,170 @@ def _task_with_plan(task_id: str = "task_bundle") -> Task:
     )
 
 
+def _simple_bundle(
+    *,
+    task_id: str,
+    bundle_id: str = "bundle_empty",
+    run_id: str = "run_empty_1",
+    repo: str = "hermes-agent",
+    owner_persona_id: str = "dev",
+    stage_ids: list[str] | None = None,
+    proof_ids: list[str] | None = None,
+) -> RepoBundle:
+    ts = now()
+    return RepoBundle(
+        id=bundle_id,
+        task_id=task_id,
+        repo=repo,
+        owner_persona_id=owner_persona_id,
+        state="running",
+        title="Harness bundle",
+        objective="Update docs.",
+        stage_ids=stage_ids or ["implement"],
+        active_run_id=run_id,
+        proof_ids=proof_ids or ["proof_same"],
+        created_at=ts,
+        updated_at=ts,
+    )
+
+
+def test_empty_delivery_capture_opens_patch_landed_nowhere_incident(isolate_agent_runtime_root, monkeypatch):
+    task = _task_with_plan("task_empty_capture")
+    task.affected_repos = ["hermes-agent"]
+    TaskStore().create(task)
+
+    def _empty_capture(_bundle, *, event_log):
+        return {"captured": False, "reason": "worktree_missing_or_clean"}
+
+    monkeypatch.setattr("agent_runtime.delivery_directive.capture_bundle_patch", _empty_capture)
+    log = EventLog()
+    log.append(Event(now(), "delivery.intent", task.id, "run_empty_1", "dev", {"mode": "patch", "summary": "Patch delivery intent.", "changed_file_count": 1}))
+
+    delivered = RepoBundleStore(event_log=log).mark_delivered(_simple_bundle(task_id=task.id))
+
+    assert delivered.delivery_capture["captured"] is False
+    incidents = IncidentStore().list_open()
+    assert [incident.kind for incident in incidents] == ["patch_landed_nowhere"]
+    saved = TaskStore().get(task.id)
+    assert saved.state == TaskState.RUNNING
+    guard = saved.harness_self_heal["delivery_no_progress_guard"]["implement"]
+    assert guard["empty_capture_count"] == 1
+    assert guard["cited_evidence_ids"] == ["proof_same", "delivery_capture:bundle_empty:worktree_missing_or_clean"]
+
+
+def test_proof_only_delivery_intent_does_not_open_empty_patch_incident(isolate_agent_runtime_root, monkeypatch):
+    task = _task_with_plan("task_proof_only_intent")
+    task.affected_repos = ["hermes-agent"]
+    TaskStore().create(task)
+
+    def _empty_capture(_bundle, *, event_log):
+        return {"captured": False, "reason": "worktree_missing_or_clean"}
+
+    monkeypatch.setattr("agent_runtime.delivery_directive.capture_bundle_patch", _empty_capture)
+    log = EventLog()
+    log.append(Event(now(), "delivery.intent", task.id, "run_proof_1", "dev", {"mode": "proof_only", "diff_chars": 0, "summary": "Proof-only delivery intent."}))
+
+    delivered = RepoBundleStore(event_log=log).mark_delivered(
+        _simple_bundle(task_id=task.id, run_id="run_proof_1")
+    )
+
+    assert delivered.delivery_capture["captured"] is False
+    assert IncidentStore().list_open() == []
+
+
+def test_no_product_edit_proof_delivery_skips_patch_landed_nowhere_incident(isolate_agent_runtime_root, monkeypatch):
+    task = _task_with_plan("task_no_edit_empty_capture")
+    task.affected_repos = ["EterniaBackend"]
+    task.current_stage_id = "backend_implementation"
+    task.risk_flags = ["no_product_edits"]
+    task.mission_plan.current_stage_id = "backend_implementation"
+    task.mission_plan.stages = [
+        MissionPlanStage(
+            id="backend_implementation",
+            title="Backend contract smoke",
+            objective="Attach no-product-edit backend proof.",
+            owner="backend_dev",
+            repo="EterniaBackend",
+            kind="implementation",
+            status=StageStatus.IMPLEMENTING,
+            proof_recipe_id="backend_contract_smoke",
+            requires_product_edit=False,
+        )
+    ]
+    TaskStore().create(task)
+    ProofStore().attach(
+        Proof(
+            id="proof_no_edit_backend",
+            task_id=task.id,
+            stage_id="backend_implementation",
+            type=ProofType.TEST_RUN,
+            title="Backend contract smoke",
+            path_or_value="proof.log",
+            created_by="harness",
+            created_at=now(),
+            metadata={
+                "status": "passed",
+                "proof_recipe_mode": "no_product_edit",
+                "proof_recipe_recipe_id": "backend_contract_smoke",
+            },
+            redaction_status="safe",
+        )
+    )
+
+    def _empty_capture(_bundle, *, event_log):
+        return {"captured": False, "reason": "worktree_clean"}
+
+    monkeypatch.setattr("agent_runtime.delivery_directive.capture_bundle_patch", _empty_capture)
+    log = EventLog()
+    log.append(Event(now(), "patch.proposed", task.id, "run_no_edit_1", "backend_dev", {"summary": "Proof-only handoff"}))
+
+    delivered = RepoBundleStore(event_log=log).mark_delivered(
+        _simple_bundle(
+            task_id=task.id,
+            bundle_id="bundle_no_edit",
+            run_id="run_no_edit_1",
+            repo="EterniaBackend",
+            owner_persona_id="backend_dev",
+            stage_ids=["backend_implementation"],
+            proof_ids=["proof_no_edit_backend"],
+        )
+    )
+
+    assert delivered.delivery_capture["captured"] is False
+    assert IncidentStore().list_open() == []
+    saved = TaskStore().get(task.id)
+    assert "delivery_no_progress_guard" not in saved.harness_self_heal
+
+
+def test_repeated_empty_delivery_without_new_proof_waits_for_operator(isolate_agent_runtime_root, monkeypatch):
+    task = _task_with_plan("task_stage_no_progress")
+    task.affected_repos = ["hermes-agent"]
+    TaskStore().create(task)
+
+    def _empty_capture(_bundle, *, event_log):
+        return {"captured": False, "reason": "worktree_missing_or_clean"}
+
+    monkeypatch.setattr("agent_runtime.delivery_directive.capture_bundle_patch", _empty_capture)
+    log = EventLog()
+    store = RepoBundleStore(event_log=log)
+    log.append(Event(now(), "patch.proposed", task.id, "run_empty_1", "dev", {"summary": "Proposed patch to hermes-agent: 1 file"}))
+    store.mark_delivered(_simple_bundle(task_id=task.id, run_id="run_empty_1"))
+    log.append(Event(now(), "patch.proposed", task.id, "run_empty_2", "dev", {"summary": "Proposed patch to hermes-agent: 1 file"}))
+
+    store.mark_delivered(_simple_bundle(task_id=task.id, run_id="run_empty_2"))
+
+    saved = TaskStore().get(task.id)
+    assert saved.state == TaskState.BLOCKED
+    incidents = IncidentStore().list_open()
+    assert {incident.kind for incident in incidents} == {"patch_landed_nowhere", "stage_no_progress"}
+    stage_incident = next(incident for incident in incidents if incident.kind == "stage_no_progress")
+    assert saved.open_incident_ids == [stage_incident.id]
+    assert saved.harness_self_heal["delivery_no_progress_guard"]["implement"]["empty_capture_count"] == 2
+    progress = EventLog().for_task(task.id, types={"run.progress"})
+    assert progress[-1].payload["step"] == "stage_no_progress"
+    assert progress[-1].payload["status"] == "waiting_for_operator"
+
+
 def test_repo_bundle_write_lock_conflict_parks_second_lane(isolate_agent_runtime_root):
     first = acquire_repo_bundle_locks(lane_id="lane_1", task_id="task_1", bundle_ids=["bundle_backend"], mode="write")
     second = acquire_repo_bundle_locks(lane_id="lane_2", task_id="task_2", bundle_ids=["bundle_backend"], mode="write")
@@ -96,13 +261,13 @@ def _bundle_config() -> AgentRuntimeConfig:
 class CompleteDevRuntime:
     def run_tick(self, persona, ctx, *, run):
         return AgentDecision(
-            type=DecisionType.REQUEST_QA_REVIEW,
+            type=DecisionType.HAND_OFF,
             summary="Delivered repo bundle.",
             rationale="The fake runtime completed the assigned repo bundle.",
             payload={
                 "stage_id": "backend_contract",
-                "proof_ids": ["proof_backend"],
-                "handoff": {"to": "qa", "stage_complete": True, "summary": "Backend bundle ready."},
+                "summary": "Backend bundle ready.",
+                "known_gaps": ["Launcher implementation remains queued on this backend contract proof."],
             },
         )
 
@@ -110,23 +275,38 @@ class CompleteDevRuntime:
 class RequestTestRunRuntime:
     def run_tick(self, persona, ctx, *, run):
         return AgentDecision(
-            type=DecisionType.REQUEST_TEST_RUN,
-            summary="Request focused proof.",
-            rationale="Use Harness proof for the current proof-only bundle.",
-            payload={"stage_id": "backend_contract", "commands": ["python -c \"print('ok')\""]},
+            type=DecisionType.HAND_OFF,
+            summary="Deliver focused proof-only bundle.",
+            rationale="Collapsed hand_off lets the Harness run the authoritative proof gate.",
+            payload={
+                "stage_id": "backend_contract",
+                "summary": "Backend contract proof lane is ready for the Harness gate.",
+                "known_gaps": [],
+            },
         )
 
 
 class ApproveQaRuntime:
     def run_tick(self, persona, ctx, *, run):
         return AgentDecision(
-            type=DecisionType.REPORT_QA_VERDICT,
+            type=DecisionType.QA_VERDICT,
             summary="Approve focused proof.",
             rationale="The proof ID covers the requested bundle.",
             payload={
-                "review_scope": "implementation",
                 "verdict": "approved",
-                "proof_ids": ["proof_requested_ok"],
+                "coverage": {
+                    "backend_contract": "reviewed",
+                    "launcher_integration": "reviewed",
+                    "visual_or_mcp": "reviewed",
+                    "cross_stack_join": "reviewed",
+                },
+                "proof_ids": [
+                    "proof_requested_ok",
+                    "proof_launcher",
+                    "proof_backend_docker_postgres",
+                    "proof_staging_k8",
+                    "proof_prod_rollout",
+                ],
                 "findings": [],
             },
         )
@@ -307,9 +487,34 @@ def test_snapshot_projects_repo_bundles_and_qa_waiting_on(isolate_agent_runtime_
 
     assert task_summary["simplified_phase"] == "working"
     assert sorted(task_summary["repo_bundle_ids"]) == sorted(bundle.id for bundle in bundles)
+    assert task_summary["repo_bundle_closeout"]["delivery_contract"] == "staged_bundle_not_applied"
+    assert task_summary["repo_bundle_closeout"]["checkout_applied"] is False
+    assert "checkout not modified" in task_summary["repo_bundle_closeout"]["closeout_label"]
     assert task_summary["bundle_queue"][0]["state"] == "queued_waiting_dependency"
     assert task_summary["qa_waiting_on"]
     assert snapshot["repo_bundles"]
+    assert snapshot["repo_bundles"][0]["delivery_contract"] == "staged_bundle_not_applied"
+    assert snapshot["repo_bundles"][0]["checkout_applied"] is False
+    assert "checkout not modified" in snapshot["repo_bundles"][0]["closeout_label"]
+
+
+def test_done_task_repo_bundle_closeout_labels_staged_not_applied(isolate_agent_runtime_root):
+    task_store = TaskStore()
+    task = task_store.create(_task_with_plan("task_done_bundle_label"))
+    bundle_store = RepoBundleStore()
+    bundles = bundle_store.create_or_update_from_task(task)
+    for bundle in bundles:
+        bundle_store.mark_delivered(bundle, proof_ids=["proof_done"])
+    task.state = TaskState.DONE
+    task_store.update(task, actor="test", reason="done with staged bundles")
+
+    snapshot = build_snapshot(task_store=task_store)
+    task_summary = snapshot["tasks"][0]
+
+    assert task_summary["state"] == "done"
+    assert task_summary["repo_bundle_closeout"]["checkout_status"] == "not_applied"
+    assert task_summary["repo_bundle_closeout"]["delivered_repo_bundle_ids"]
+    assert "staged/delivered only" in task_summary["repo_bundle_closeout"]["closeout_label"]
 
 
 def test_archive_preserves_repo_bundle_evidence(isolate_agent_runtime_root):
@@ -447,11 +652,25 @@ def test_qa_review_does_not_regress_delivered_bundle_to_running(isolate_agent_ru
     )
     assert dev_result.ok is True
     bundle_store = RepoBundleStore()
-    for bundle in bundle_store.list_for_task(task.id):
-        if bundle.repo != "EterniaBackend":
-            bundle_store.mark_delivered(bundle, proof_ids=["proof_launcher"])
     task = task_store.get(task.id)
     local_proof = proof_store.get("proof_requested_ok")
+    for bundle in bundle_store.list_for_task(task.id):
+        if bundle.repo != "EterniaBackend":
+            proof_store.attach(
+                Proof(
+                    id="proof_launcher",
+                    task_id=task.id,
+                    stage_id="launcher_impl",
+                    type=ProofType.SCREENSHOT,
+                    title="Launcher visual proof",
+                    path_or_value="launcher.png",
+                    created_by="harness",
+                    created_at=local_proof.created_at + timedelta(seconds=15),
+                    metadata={"status": "passed"},
+                    redaction_status="safe",
+                )
+            )
+            bundle_store.mark_delivered(bundle, proof_ids=["proof_launcher"])
     _attach_product_promotion_proofs(task, proof_store, after=local_proof.created_at)
     task.current_stage_id = "qa_release"
     task.mission_plan.current_stage_id = "qa_release"

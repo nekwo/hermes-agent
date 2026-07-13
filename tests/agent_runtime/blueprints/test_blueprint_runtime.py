@@ -21,6 +21,7 @@ from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, P
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import StageStatus, TaskState
+from agent_runtime.store import ProofStore
 
 
 def test_schema_rejects_undeclared_owner_slot():
@@ -55,6 +56,81 @@ def test_schema_rejects_unprefixed_bindings():
     assert validate_bindings(bp, {"builder": "gpt-launcher"}) == [
         "binding for slot builder must start with persona: or profile:"
     ]
+
+
+def test_schema_rejects_unknown_agent_topology_slot():
+    raw = {
+        "id": "bad_agent_topology",
+        "version": 1,
+        "title": "Bad Agent Topology",
+        "slots": [{"id": "builder", "role": "builder"}],
+        "stages": [{"id": "build", "title": "Build", "objective": "Build", "owner_slot": "builder"}],
+        "edges": [{"source": "build", "outcome": "passed", "target": "done"}],
+        "agent_topology": {"root": "lead", "edges": [{"source": "lead", "target": "builder"}]},
+    }
+
+    with pytest.raises(ValueError, match="agent_topology root 'lead' is not a declared slot"):
+        blueprint_from_dict(raw)
+
+
+def test_schema_rejects_agent_topology_cycle():
+    raw = {
+        "id": "cyclic_agent_topology",
+        "version": 1,
+        "title": "Cyclic Agent Topology",
+        "slots": [
+            {"id": "lead", "role": "neko"},
+            {"id": "builder", "role": "builder"},
+        ],
+        "stages": [
+            {"id": "scope", "title": "Scope", "objective": "Scope", "owner_slot": "lead"},
+            {"id": "build", "title": "Build", "objective": "Build", "owner_slot": "builder"},
+        ],
+        "edges": [{"source": "scope", "outcome": "ready", "target": "build"}],
+        "agent_topology": {
+            "root": "lead",
+            "edges": [
+                {"source": "lead", "target": "builder"},
+                {"source": "builder", "target": "lead"},
+            ],
+        },
+    }
+
+    with pytest.raises(ValueError, match="agent_topology cycle"):
+        blueprint_from_dict(raw)
+
+
+def test_blueprint_agent_topology_instantiates_to_mission_plan_summary():
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="topology smoke",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = Task(
+        id="task_topology_smoke",
+        title="Topology Smoke",
+        description="topology smoke",
+        state=TaskState.CREATED,
+        created_at=now(),
+        updated_at=now(),
+        requested_by="test",
+        mission_plan=plan,
+    )
+
+    summary = mission_plan_summary(task)
+    # Fan-out: neko (lead) coordinates BOTH dev branches directly — no chain.
+    assert summary["agent_topology"] == {
+        "root": "lead",
+        "edges": [
+            {"source": "lead", "target": "backend_builder", "kind": "steers"},
+            {"source": "lead", "target": "builder", "kind": "steers"},
+        ],
+    }
 
 
 def test_one_agent_blueprint_instantiates_to_mission_plan_and_run_slot():
@@ -254,6 +330,92 @@ def test_blueprint_verify_passed_routes_to_done():
     assert result == "done"
     assert task.mission_plan.current_stage_id is None
     assert MissionStateMachine().next_action(task).type == HarnessActionType.COMPLETE_TASK
+
+
+def test_blueprint_terminal_close_blocks_latest_failed_stage_proof(isolate_agent_runtime_root):
+    task = _blueprint_task("two_agent_build_verify")
+    plan = task.mission_plan
+    for stage in plan.stages:
+        stage.status = StageStatus.PASSED
+    plan.current_stage_id = None
+    task.current_stage_id = None
+    task.state = TaskState.RUNNING
+
+    store = ProofStore()
+    passed = store.attach(
+        Proof(
+            id="proof_implement_passed",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="passed implement proof",
+            path_or_value="proof-pass.log",
+            created_by="dev",
+            created_at=now(),
+            metadata={"status": "passed", "exit_code": 0},
+            redaction_status="safe",
+        )
+    )
+    failed = store.attach(
+        Proof(
+            id="proof_implement_failed",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="failed implement proof",
+            path_or_value="proof-fail.log",
+            created_by="dev",
+            created_at=now(),
+            metadata={"status": "failed", "exit_code": 1},
+            redaction_status="safe",
+        )
+    )
+    task.proof_ids = [passed.id, failed.id]
+
+    action = MissionStateMachine(proof_store=store).next_action(task)
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
+    assert plan.current_stage_id == "implement"
+    implement = next(stage for stage in plan.stages if stage.id == "implement")
+    assert implement.status == StageStatus.BLOCKED
+    assert "latest proof proof_implement_failed" in action.reason
+
+
+def test_blueprint_terminal_close_requires_declared_qa_verdict(isolate_agent_runtime_root):
+    task = _blueprint_task("two_agent_build_verify")
+    plan = task.mission_plan
+    for stage in plan.stages:
+        stage.status = StageStatus.PASSED
+    plan.current_stage_id = None
+    task.current_stage_id = None
+    task.state = TaskState.RUNNING
+
+    store = ProofStore()
+    proof = store.attach(
+        Proof(
+            id="proof_implement_only",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="passed implement proof",
+            path_or_value="proof-pass.log",
+            created_by="dev",
+            created_at=now(),
+            metadata={"status": "passed", "exit_code": 0},
+            redaction_status="safe",
+        )
+    )
+    task.proof_ids = [proof.id]
+
+    action = MissionStateMachine(proof_store=store).next_action(task)
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
+    assert plan.current_stage_id == "verify"
+    verify = next(stage for stage in plan.stages if stage.id == "verify")
+    assert verify.status == StageStatus.BLOCKED
+    assert "missing qa_verdict proof" in action.reason
 
 
 def test_blueprint_terminal_run_writes_versioned_record(tmp_path, monkeypatch):
@@ -556,3 +718,178 @@ def _task_with_plan(plan: MissionPlan) -> Task:
         mission_plan=plan,
         current_stage_id=plan.current_stage_id,
     )
+
+
+def test_scope_decision_outcome_attributes_to_deciding_stage_not_advanced_stage():
+    """Live 2026-07-03 (task_3e2ae539): Neko's scope release advanced the plan's
+    current stage to backend_implementation BEFORE the decision outcome was
+    applied, so the scope_route outcome (PASSED) landed on backend_implementation
+    with zero proof. The terminal proof gate clawed it back, but at the cost of
+    an extra Neko adjudication turn and a redundant dev re-dispatch. The outcome
+    must attribute to the stage the deciding run actually ran (stage_id)."""
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="attribution",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = _task_with_plan(plan)
+    # Simulate apply_planning_decision having already advanced the current stage
+    # (Neko's typed-plan release does this before the outcome is applied).
+    task.mission_plan.current_stage_id = "backend_implementation"
+    task.current_stage_id = "backend_implementation"
+    decision = AgentDecision(
+        type=DecisionType.PROPOSE_ACCEPTANCE,
+        summary="Route the first no-edit proof slice to Backend Dev",
+        rationale="scope",
+        payload={"objective": "route", "acceptance_criteria": ["backend proof attached"]},
+    )
+
+    MissionStateMachine().apply_decision(task, decision, actor="neko_supervisor", stage_id="scope")
+
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+    assert stages["scope"].status == StageStatus.PASSED
+    assert stages["backend_implementation"].status != StageStatus.PASSED, (
+        "a scope decision must never mark the downstream dev stage passed without proof"
+    )
+    assert task.mission_plan.current_stage_id == "backend_implementation"
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id in {"backend_builder", "backend_dev"}, (
+        f"next dispatch must be the backend stage owner, got {action.slot_id}"
+    )
+
+
+def test_scope_decision_on_gated_dev_stage_yields_no_outcome():
+    """Neko's recovery re-scope runs while the blocked dev stage is current; its
+    propose_acceptance must NOT phantom-pass the proof-gated stage (live
+    task_826869af looped neko->implement 5x on exactly this)."""
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="recovery attribution",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = _task_with_plan(plan)
+    task.mission_plan.current_stage_id = "backend_implementation"
+    task.current_stage_id = "backend_implementation"
+    decision = AgentDecision(
+        type=DecisionType.PROPOSE_ACCEPTANCE,
+        summary="Re-route the blocked backend proof slice to Backend Dev",
+        rationale="recovery",
+        payload={"objective": "recover", "acceptance_criteria": ["backend proof attached"]},
+    )
+
+    MissionStateMachine().apply_decision(
+        task, decision, actor="neko_supervisor", stage_id="backend_implementation"
+    )
+
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+    assert stages["backend_implementation"].status != StageStatus.PASSED, (
+        "a routing decision must never mark a proof-gated dev stage passed"
+    )
+    assert stages["implement"].status != StageStatus.PASSED
+
+
+def test_dependency_blocked_branch_waits_for_scope_not_current_stage_id():
+    """Graph-driven guard: the dev branches depend_on [scope]. A stale/over-advanced
+    current_stage_id pointing at a branch must NOT dispatch it before scope passes —
+    dispatch enforces depends_on itself, not current_stage_id blindly. (Descendant of
+    the 2026-07-03 task_3e2ae539 fix, on the fork graph.)"""
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="dependency dispatch",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = _task_with_plan(plan)
+    assert task.mission_plan.limits["strict_depends_on_dispatch"] == 1
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+    stages["scope"].status = StageStatus.READY  # scope NOT passed yet
+    stages["backend_implementation"].status = StageStatus.IMPLEMENTING  # stale over-advance
+    task.mission_plan.current_stage_id = "backend_implementation"
+    task.current_stage_id = "backend_implementation"
+
+    action = MissionStateMachine().next_action(task)
+
+    # Scope (lead) must run first; the branch is blocked on its unmet depends_on.
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "lead"
+    assert stages["backend_implementation"].status != StageStatus.PASSED
+
+
+def test_neko_two_dev_default_fork_dispatches_both_devs_then_completes():
+    # Graph-driven fork: neko scopes, both dev branches fan out in parallel (both
+    # depend only on scope); the harness completes once BOTH pass — no join stage.
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="fork-join dispatch",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    from agent_runtime.runtime_config import RuntimeConfig, SwarmConfig
+
+    task = _task_with_plan(plan)
+    # Graph-driven concurrent dispatch (the swarm-on path neko uses to deploy both).
+    machine = MissionStateMachine(config=RuntimeConfig(swarm=SwarmConfig(max_active_lanes=2)))
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+
+    # Neko scopes first (only the root is ready).
+    scope_actions = machine.next_actions(task)
+    scope_slots = {a.slot_id for a in scope_actions if a.type == HarnessActionType.RUN_SLOT}
+    assert scope_slots == {"lead"}
+    stages["scope"].status = StageStatus.PASSED
+
+    # Both dev branches fan out together (neither depends on the other).
+    dev_actions = machine.next_actions(task)
+    dev_slots = {a.slot_id for a in dev_actions if a.type == HarnessActionType.RUN_SLOT}
+    assert dev_slots == {"backend_builder", "builder"}
+    # No Neko join stage is offered — the fork joins implicitly at completion.
+    assert "lead" not in dev_slots
+
+    # Both branches pass -> the harness completes the task (it waited for both).
+    stages["backend_implementation"].status = StageStatus.PASSED
+    stages["implement"].status = StageStatus.PASSED
+    final = machine.next_action(task)
+    assert final.type == HarnessActionType.COMPLETE_TASK
+
+
+def test_neko_two_dev_default_fires_both_dev_lanes_concurrently_when_lanes_allow():
+    # With >1 active lane, scope passing releases BOTH dev branches in the same tick —
+    # this is what "neko deploys both sub-agents" looks like on the graph.
+    from agent_runtime.runtime_config import RuntimeConfig, SwarmConfig
+
+    bp = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        bp,
+        goal="concurrent fork",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = _task_with_plan(plan)
+    machine = MissionStateMachine(config=RuntimeConfig(swarm=SwarmConfig(max_active_lanes=2)))
+    stages = {stage.id: stage for stage in task.mission_plan.stages}
+    stages["scope"].status = StageStatus.PASSED
+
+    ready = machine.next_actions(task)
+    ready_slots = {action.slot_id for action in ready if action.type == HarnessActionType.RUN_SLOT}
+    assert ready_slots == {"backend_builder", "builder"}

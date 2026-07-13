@@ -27,6 +27,14 @@ from tools.environments.local import hermes_subprocess_env
 
 _IS_WINDOWS = platform.system() == "Windows"
 
+def _git_bash_available() -> bool:
+    """True when a real Git Bash (not the WSL stub) is resolvable."""
+    if _IS_WINDOWS:
+        from tools.environments.local import _find_windows_git_bash
+        return _find_windows_git_bash() is not None
+    return shutil.which("bash") is not None
+
+
 _DEP_CHECKS = {
     "node": lambda: shutil.which("node") is not None,
     "browser": lambda: (
@@ -36,6 +44,8 @@ _DEP_CHECKS = {
     ),
     "ripgrep": lambda: shutil.which("rg") is not None,
     "ffmpeg": lambda: shutil.which("ffmpeg") is not None,
+    "git": lambda: shutil.which("git") is not None,
+    "git-bash": _git_bash_available,
 }
 
 _DEP_DESCRIPTIONS = {
@@ -43,6 +53,8 @@ _DEP_DESCRIPTIONS = {
     "browser": "Browser engine (Chromium, for web browsing tools)",
     "ripgrep": "ripgrep (fast file search)",
     "ffmpeg": "ffmpeg (TTS voice messages)",
+    "git": "Git (version control; Git for Windows also provides Git Bash)",
+    "git-bash": "Git Bash (the shell Hermes runs terminal commands through on Windows)",
 }
 
 
@@ -161,3 +173,42 @@ def ensure_dependency(
     if check:
         return check()
     return True
+
+
+def ensure_git_bash(interactive: bool = True) -> "str | None":
+    """Ensure the shell Hermes runs terminal commands through is provisioned.
+
+    On POSIX bash is native, so this is a no-op that just returns the resolved
+    ``bash`` path (or None if genuinely absent — extraordinarily rare).
+
+    On Windows Hermes' terminal tool runs commands through Git Bash.  If it
+    isn't found we fall back to ``install.ps1 -Ensure git`` (PortableGit) and
+    re-resolve.  On success we persist the resolved path into the User-scope
+    ``HERMES_GIT_BASH_PATH`` env var and the current process env so the agent
+    finds bash in a fresh shell without hitting the System32 WSL stub.
+
+    Returns the resolved bash path, or ``None`` on failure.
+    """
+    if not _IS_WINDOWS:
+        return shutil.which("bash")
+
+    from tools.environments.local import _find_windows_git_bash
+
+    bash = _find_windows_git_bash()
+    if bash is None:
+        # No Git Bash yet — provision PortableGit via the install script.
+        ensure_dependency("git", interactive=interactive)
+        bash = _find_windows_git_bash()
+
+    if bash:
+        os.environ["HERMES_GIT_BASH_PATH"] = bash
+        try:
+            from hermes_cli import windows_env
+            if windows_env.set_user_env("HERMES_GIT_BASH_PATH", bash):
+                windows_env.broadcast_environment_change()
+        except Exception:
+            # Persistence is best-effort; the process env above still lets the
+            # current session's agent find bash.
+            pass
+
+    return bash

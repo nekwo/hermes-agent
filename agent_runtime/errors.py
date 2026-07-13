@@ -28,3 +28,16 @@ class AlreadyExists(AgentRuntimeError):
 
 class EventPayloadTooLarge(AgentRuntimeError):
     """Raised when an event payload exceeds the Stage 1 JSONL budget."""
+
+
+class RuntimeRootMismatch(AgentRuntimeError):
+    """Raised when resolved runtime root does not match a caller pin."""
+
+
+class ProbeIsolationViolation(AgentRuntimeError):
+    """Raised when a run that demanded an isolated probe root would touch the live store.
+
+    Guards Stage-C / QA probe runs: with ``HERMES_REQUIRE_ISOLATED_ROOT`` set, the
+    resolved runtime root must be a dedicated ``agent-runtime-probe-*`` temp dir won via
+    the env layer, so a probe can never persist persona instances into the live store.
+    """

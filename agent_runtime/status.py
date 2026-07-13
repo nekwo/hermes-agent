@@ -4,16 +4,17 @@ import time
 
 from .config import ensure_persisted_personas, load_agent_runtime_config
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
-from .daemon import read_daemon_status
+from .daemon import daemon_status_schema
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .dirty_state import build_dirty_state
-from .events import EventLog
+from .events import CachedEventLog, EventLog
 from .observability import build_observability
 from .operator_channels import operator_channel_summary
 from .parity import ProjectionAccountant
 from .persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    active_persona_instance_agent_summaries,
     persona_assignment_store_enabled,
     persona_assignment_summary,
     persona_instance_runtime_enabled,
@@ -24,7 +25,8 @@ from .profile_readiness import profile_readiness_for_persona
 from .provider_health import provider_health_for_personas
 from .incidents import RUN_BUDGET_EXCEEDED
 from .migrations import effective_config_summary
-from .repo_bundles import RepoBundleStore, bundle_queue_summary, repo_bundle_summary, repo_lock_summary
+from .production_envelope import production_envelope_status
+from .repo_bundles import RepoBundleStore, bundle_queue_summary, repo_bundle_delivery_summary, repo_bundle_summary, repo_lock_summary
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
 from .state_machine import MissionStateMachine
 from .states import RunState, TaskState
@@ -40,18 +42,22 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     incident_store = incident_store or IncidentStore()
     agent_store = agent_store or AgentStore()
     proof_store = proof_store or ProofStore()
-    event_log = event_log or EventLog()
+    # Status calls persona_chat_trace/for_session dozens of times on the same
+    # log; CachedEventLog reads events.jsonl once and serves all of them from
+    # memory (same as build_snapshot — this was the 2s hog of a warm status).
+    event_log = event_log or CachedEventLog()
     worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
     tasks = task_store.list_all()
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     incidents = incident_store.list_all()
     cfg = load_agent_runtime_config()
+    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
     agents = agent_store.list_all() or ensure_persisted_personas(cfg)
     proofs = []
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
-    daemon_status = read_daemon_status()
+    daemon_status = daemon_status_schema()
     from .burn_in import certification_summary
 
     cert = certification_summary()
@@ -92,6 +98,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "dirty_state": dirty_state,
         "runtime_health": provider_health_for_personas(agents),
         "runtime_config": effective_config_summary(cfg),
+        "production_envelope": production_envelope_status(cfg),
         "daemon": daemon_status,
         "swarm": {
             "enabled": bool(getattr(getattr(cfg, "swarm", None), "enabled", False)),
@@ -100,8 +107,15 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
                 "required": bool(getattr(getattr(cfg, "swarm", None), "requires_certification", True)),
             },
         },
+        "recursive_supervision": {
+            "enabled": _recursive_supervision_enabled(cfg),
+            "certification": {
+                **cert,
+                "required": bool(getattr(getattr(cfg, "swarm", None), "requires_certification", True)),
+            },
+        },
         "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=cfg.execution_mode, worker_sessions=workers),
+        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "next_actions": [
             _next_action(
                 t,
@@ -117,6 +131,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "agents": [_agent_status(a) for a in agents],
         "worker_sessions": [worker_session_summary(worker) for worker in workers],
         "repo_bundles": [repo_bundle_summary(bundle) for bundle in repo_bundles],
+        "repo_bundle_closeout": repo_bundle_delivery_summary(repo_bundles) if repo_bundles else None,
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "repo_locks": repo_lock_summary(),
         "runtime_instances": runtime_instances_summary(runtime_instances),
@@ -126,12 +141,22 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         instances = instance_store.derive_from_workers(agents, workers)
+        personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
+        data["agents"] = [
+            *data["agents"],
+            *active_persona_instance_agent_summaries(instances, personas_by_id),
+        ]
         data["persona_instance_runtime"] = {
             "enabled": True,
             "assignment_store_enabled": persona_assignment_store_enabled(cfg),
         }
         data["persona_instances"] = [persona_instance_summary(instance) for instance in instances]
         session_db = _default_persona_session_db()
+        assignments = (
+            PersonaAssignmentStore(event_log=event_log).list_all()
+            if persona_assignment_store_enabled(cfg)
+            else []
+        )
         history_accountant = ProjectionAccountant("persona_chat_history")
         trace_accountant = ProjectionAccountant("persona_chat_trace")
         data["persona_chat_history"] = persona_chat_history_summary(
@@ -139,6 +164,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=history_accountant,
+            persona_assignments=assignments,
         )
         data["persona_chat_trace"] = persona_chat_trace_summary(
             persona_instances=instances,
@@ -150,6 +176,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             persona_instances=instances,
             persona_chat_history=data["persona_chat_history"],
             persona_chat_trace=data["persona_chat_trace"],
+            tasks=tasks,
         )
         completeness = {
             "persona_chat_history": history_accountant.summary(),
@@ -157,8 +184,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         }
         drop_samples = history_accountant.drop_samples() + trace_accountant.drop_samples()
         if persona_assignment_store_enabled(cfg):
-            assignment_store = PersonaAssignmentStore(event_log=event_log)
-            assignments = assignment_store.list_all()
             data["persona_assignments"] = {
                 "active": [persona_assignment_summary(item) for item in assignments if item.state in {"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"}],
                 "recent": [persona_assignment_summary(item) for item in assignments[-25:]],
@@ -171,6 +196,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         data,
         build_started=_build_started,
         last_event=recent_events[-1] if recent_events else None,
+        recent_events=recent_events,
         completeness=completeness,
         drop_samples=drop_samples,
     )
@@ -215,6 +241,20 @@ def _swarm_budget_summary(runs, cfg) -> dict:
         },
         "by_task": by_task,
     }
+
+
+def _recursive_supervision_enabled(cfg) -> bool:
+    supervision = getattr(cfg, "supervision", None)
+    swarm = getattr(cfg, "swarm", None)
+    return any(
+        [
+            bool(getattr(supervision, "child_events_enabled", False)),
+            bool(getattr(supervision, "recursive_enabled", False)),
+            bool(getattr(supervision, "hierarchical_budget_enabled", False)),
+            bool(getattr(supervision, "deploy_verification_enabled", False)),
+            bool(getattr(swarm, "enabled", False)),
+        ]
+    )
 
 
 def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunStore | None = None, proof_store: ProofStore | None = None, config=None):

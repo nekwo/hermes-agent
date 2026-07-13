@@ -31,4 +31,10 @@ def build_postinstall_parser(subparsers, *, cmd_postinstall: Callable) -> None:
         action="store_true",
         help="Alias for --yes for scripted installers.",
     )
+    postinstall_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit a machine-readable summary (shell provisioning + PATH) as "
+        "the final stdout line.",
+    )
     postinstall_parser.set_defaults(func=cmd_postinstall)

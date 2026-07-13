@@ -52,9 +52,9 @@ def test_stage38_goal_create_request_fixture_creates_blueprint_goal(
 
     assert response["schema_version"] == 1
     assert response["state"] == "created"
-    assert response["blueprint_id"] == "neko_dev_qa_basic"
+    assert response["blueprint_id"] == "visual_ui_qa"
     stored = TaskStore().get(response["task_id"])
-    assert stored.mission_plan.blueprint_id == "neko_dev_qa_basic"
+    assert stored.mission_plan.blueprint_id == "visual_ui_qa"
 
     duplicate = create_mission_goal_from_request(request)
     assert duplicate["state"] == "already_created"

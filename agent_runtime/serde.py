@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from functools import lru_cache
 from types import NoneType, UnionType
 from typing import Any, get_args, get_origin, get_type_hints
 
@@ -38,6 +39,11 @@ def upgrade(raw: dict[str, Any]) -> dict[str, Any]:
     if version != 1:
         raise ValueError(f"unsupported schema_version: {version}")
     return raw
+
+
+@lru_cache(maxsize=None)
+def _dataclass_type_hints(cls: type[Any]) -> dict[str, Any]:
+    return get_type_hints(cls)
 
 
 def _coerce(annotation: Any, raw: Any) -> Any:
@@ -91,7 +97,7 @@ def _coerce(annotation: Any, raw: Any) -> Any:
 
             flags, notes = normalize_task_risk_flags(upgraded.get("risk_flags"), upgraded.get("operator_notes"))
             upgraded = {**upgraded, "risk_flags": flags, "operator_notes": notes}
-        hints = get_type_hints(annotation)
+        hints = _dataclass_type_hints(annotation)
         kwargs = {}
         for field in fields(annotation):
             if field.name in upgraded:

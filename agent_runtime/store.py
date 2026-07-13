@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import uuid
@@ -13,18 +14,23 @@ from utils import atomic_json_write
 
 from . import paths
 from .errors import AlreadyExists, NotFound
-from .events import EventLog
+from .events import EventLog, archive_task_events
 from .locks import archive_lock, task_lock, run_lock
-from .models import AgentPersona, AgentRun, Event, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
-from .persona_assignments import PersonaAssignmentStore
+from .models import AgentPersona, AgentRun, Event, Goal, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
+from .persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from .proof_rules import ProofType
 from .recovery_flags import mark_incident_closed_for_recovery
 from .serde import from_jsonable, to_jsonable
+from .simplified_contract import public_decision_type_value
 from .states import RunState, TaskState
 
 T = TypeVar("T")
 
 TERMINAL_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED})
+# States that must release persona assignments on entry. FAILED is included even
+# though it is not in TERMINAL_TASK_STATES (a failed task may still be updated):
+# a failed goal must not keep starving its personas' slots either.
+RELEASE_ASSIGNMENT_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED})
 TERMINAL_RUN_STATES = frozenset({RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED})
 ACTIVE_RUN_STATES = frozenset({RunState.QUEUED, RunState.STARTING, RunState.RUNNING, RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL})
 ARCHIVABLE_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED})
@@ -84,6 +90,77 @@ def _write_model(path: Path, model) -> None:
     atomic_json_write(path, to_jsonable(model), indent=2, sort_keys=True)
 
 
+def _append_store_event(event_log: EventLog, event_type: str, **payload) -> None:
+    """Advance the EventLog watermark after a store mutation (Stage 12).
+
+    The stream/read-model pipeline is watermark-gated: a store write with no
+    event is invisible to every consumer (launcher snapshot, serve read model)
+    until an unrelated event advances the offset. Emission lives HERE, at the
+    store chokepoint, so programmatic callers are covered — not just CLI verbs.
+    Payload values of None are dropped. Best effort: a broken event log must
+    not fail the write, but the failure is logged, never silent.
+    """
+    try:
+        body = {key: value for key, value in payload.items() if value is not None}
+        event_log.append(Event(now(), event_type, None, None, None, body))
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "store event append failed: %s", event_type, exc_info=True
+        )
+
+
+def _parse_intent_basis(value):
+    """Parse an ISO-8601 UTC intent basis into a datetime; None when absent or
+    unparseable (fail-open — a malformed basis must never block a scope
+    switch, it just loses supersede protection for that one write)."""
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+
+        text = str(value).strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        return datetime.fromisoformat(text)
+    except Exception:
+        return None
+
+
+def _resolve_activation_write(pointer_path: Path, key: str, value: str | None, issued_at: str | None) -> tuple[str, str | None, str]:
+    """Compare-and-set decision for an active-pointer write.
+
+    Mutation intents carry the wall-clock instant the operator issued them
+    (``issued_at``). Transport can deliver an intent twice (serve timeout →
+    CLI fallback re-runs the same argv) or late (a wedged serve child drains
+    an abandoned request minutes later) — the intent's basis, not its arrival
+    order, decides who wins. Returns ``(decision, current_value, basis)``:
+
+    - ``apply``      — write the pointer and emit the activation event.
+    - ``superseded`` — a strictly newer intent already owns the pointer; do
+      not write, do not emit.
+    - ``duplicate``  — the exact same intent (same basis, same target) was
+      already applied; do not write, do not emit (exact-once event feed).
+
+    A caller with no basis (human at a terminal, legacy callers) is stamped
+    ``now()`` so the basis timeline always advances and manual actions win.
+    """
+    basis = issued_at or now()
+    try:
+        current = _read_json(pointer_path)
+    except Exception:
+        return "apply", None, basis
+    current_value = _safe_model_id(current.get(key))
+    incoming = _parse_intent_basis(basis)
+    stored = _parse_intent_basis(current.get("intent_issued_at"))
+    if incoming is None or stored is None:
+        return "apply", current_value, basis
+    if incoming < stored:
+        return "superseded", current_value, basis
+    if incoming == stored and value == current_value:
+        return "duplicate", current_value, basis
+    return "apply", current_value, basis
+
+
 def _list_models(cls: type[T], directory: Path) -> list[T]:
     if not directory.exists():
         return []
@@ -103,9 +180,9 @@ class TaskStore:
         self.event_log = event_log or EventLog()
 
     def create(self, task: Task) -> Task:
-        path = paths.task_path(task.id)
+        path = paths.goal_path(task.id)
         with task_lock(task.id):
-            if path.exists():
+            if any(candidate.exists() for candidate in paths.task_storage_candidates(task.id)):
                 raise AlreadyExists(task.id)
             _write_model(path, task)
             self.event_log.append(
@@ -115,13 +192,14 @@ class TaskStore:
                     task_id=task.id,
                     run_id=None,
                     persona_id=None,
-                    payload={"state": str(task.state), "actor": "harness"},
+                    # title is a contract summary field (Stage 12 D caught the drift)
+                    payload={"title": task.title, "state": str(task.state), "actor": "harness"},
                 )
             )
         return self.get(task.id)
 
     def get(self, task_id: str) -> Task:
-        task = _read_model(Task, paths.task_path(task_id))
+        task = _read_model(Goal, paths.existing_task_path(task_id))
         return self._canonicalize_current_stage(task)
 
     def get_goal(self, goal_or_task_id: str) -> Task:
@@ -136,13 +214,15 @@ class TaskStore:
         raise NotFound(value)
 
     def update(self, task: Task, *, actor: str = "harness", reason: str = "") -> None:
-        path = paths.task_path(task.id)
+        path = paths.existing_task_path(task.id)
+        reached_terminal = False
         with task_lock(task.id):
             previous = self.get(task.id)
             if previous.state in TERMINAL_TASK_STATES:
                 return
             _write_model(path, task)
             if previous.state != task.state:
+                reached_terminal = task.state in RELEASE_ASSIGNMENT_TASK_STATES
                 event_type = "task.transition"
                 if task.state == TaskState.BLOCKED:
                     event_type = "task.blocked"
@@ -165,6 +245,24 @@ class TaskStore:
                         },
                     )
                 )
+        if reached_terminal:
+            # Terminal-transition chokepoint: every writer that lands a task in a
+            # terminal state persists through this method (ticker COMPLETE_TASK,
+            # cancel, planning post-QA guards, persona diagnostics' direct DONE),
+            # so releasing persona assignments here closes every bypass path at
+            # once. Writers that also release explicitly stay correct — releasing
+            # is idempotent. Without this, a done-but-unarchived goal keeps its
+            # slots active and every new goal logs agent_already_assigned.
+            PersonaAssignmentStore(event_log=self.event_log).close_for_task(
+                task.id,
+                state="completed" if task.state == TaskState.DONE else "cancelled",
+                reason=f"task reached {getattr(task.state, 'value', task.state)}",
+            )
+            PersonaInstanceStore(event_log=self.event_log).close_for_task(
+                task.id,
+                goal_id=getattr(task, "goal_id", None),
+                reason=f"task reached {getattr(task.state, 'value', task.state)}",
+            )
 
     def list_open(self) -> list[Task]:
         return [task for task in self.list_all() if task.state not in TERMINAL_TASK_STATES]
@@ -176,6 +274,9 @@ class TaskStore:
         task.state = TaskState.CANCELLED
         task.updated_at = now()
         self.update(task, actor=actor, reason=_safe_operator_reason(reason))
+        PersonaAssignmentStore(event_log=self.event_log).close_for_task(
+            task_id, state="cancelled", reason=_safe_operator_reason(reason)
+        )
         return self.get(task_id)
 
     def list_by_state(self, *states: TaskState) -> list[Task]:
@@ -183,7 +284,12 @@ class TaskStore:
         return [task for task in self.list_all() if task.state in wanted]
 
     def list_all(self) -> list[Task]:
-        return [self._canonicalize_current_stage(task) for task in _list_models(Task, paths.tasks_dir())]
+        by_id: dict[str, Task] = {}
+        for task in _list_models(Goal, paths.tasks_dir()):
+            by_id.setdefault(task.id, task)
+        for task in _list_models(Goal, paths.goals_dir()):
+            by_id[task.id] = task
+        return [self._canonicalize_current_stage(task) for task in sorted(by_id.values(), key=lambda item: item.id)]
 
     def list_for_workspace(self, workspace_id: str | None) -> list[Task]:
         normalized = _safe_model_id(workspace_id)
@@ -268,8 +374,13 @@ class ArchiveStore:
             }
             atomic_json_write(archive_dir / "manifest.prepare.json", prepare_manifest, indent=2, sort_keys=True)
 
+            delivery_outcomes = self._execute_delivery_directives(ready)
+
             for task in ready:
-                archived.append(self._archive_one(task, archive_dir, run_store))
+                entry = self._archive_one(task, archive_dir, run_store)
+                if task.id in delivery_outcomes:
+                    entry["delivery_directive_outcomes"] = delivery_outcomes[task.id]
+                archived.append(entry)
 
             manifest = {
                 "schema_version": 1,
@@ -294,10 +405,64 @@ class ArchiveStore:
                 manifest_path=archive_dir / "manifest.json",
             )
 
+    def _execute_delivery_directives(self, ready: list[Task]) -> dict[str, list[dict]]:
+        """Run each terminal task's declared delivery directive before its
+        evidence moves: promote delivered bundles, then reap their worktrees.
+
+        This is the single choke point both the daemon auto-archive and manual
+        ``task archive`` route through, so ``done`` always means the directive
+        ran — never a bundle stranded in a disposable worktree.
+        """
+
+        from .delivery_directive import execute_task_delivery_directives, execute_task_worktree_delivery_directives
+        from .repo_bundles import RepoBundleStore
+
+        outcomes: dict[str, list[dict]] = {}
+        bundle_store = RepoBundleStore()
+        run_store = RunStore(event_log=self.event_log)
+        for task in ready:
+            try:
+                bundles = bundle_store.list_for_task(task.id)
+            except Exception:
+                bundles = []
+            results: list[dict] = []
+            if bundles:
+                results = execute_task_delivery_directives(
+                    task,
+                    bundles,
+                    event_log=self.event_log,
+                    incident_store=IncidentStore(event_log=self.event_log),
+                )
+            # A terminal task owns nothing anymore: capture-then-reap every
+            # remaining run worktree (non-delivered bundles, failed runs).
+            # Dirty worktrees still obey the delivery directive before any
+            # cleanup, so ``apply_to_repo`` cannot be bypassed by a bundleless
+            # run.
+            try:
+                repos = list(dict.fromkeys(list(task.affected_repos or []) + [b.repo for b in bundles]))
+                worktree_results = execute_task_worktree_delivery_directives(
+                    task,
+                    run_ids=[run.id for run in run_store.list_for_task(task.id)],
+                    repos=repos,
+                    event_log=self.event_log,
+                    incident_store=IncidentStore(event_log=self.event_log),
+                )
+                results.extend(worktree_results)
+            except Exception:
+                pass
+            if results:
+                outcomes[task.id] = results
+        return outcomes
+
     def _archive_one(self, task: Task, archive_dir: Path, run_store: "RunStore") -> dict:
+        incident_store = IncidentStore(event_log=self.event_log)
+        for incident in incident_store.list_open():
+            if incident.task_id == task.id:
+                incident_store.close(incident.id, reason="task_archived")
+
         task_dest = archive_dir / "tasks" / f"{task.id}.json"
         task_dest.parent.mkdir(parents=True, exist_ok=True)
-        _move_if_exists(paths.task_path(task.id), task_dest)
+        _move_if_exists(paths.existing_task_path(task.id), task_dest)
 
         archived_runs: list[str] = []
         for run in run_store.list_for_task(task.id):
@@ -317,7 +482,7 @@ class ArchiveStore:
             archived_proofs = [path.stem.removeprefix("proof_") for path in sorted(proof_dest.glob("proof_*.json"))]
 
         archived_incidents: list[str] = []
-        for incident in IncidentStore(event_log=self.event_log).list_all():
+        for incident in incident_store.list_all():
             if incident.task_id != task.id:
                 continue
             incident_dest = archive_dir / "incidents" / f"{incident.id}.json"
@@ -330,23 +495,31 @@ class ArchiveStore:
 
         archived_workers = _archive_worker_evidence(task.id, archive_dir)
         archived_assignments = _archive_persona_assignment_evidence(task.id, archive_dir)
+        archived_persona_instances = _archive_persona_instance_evidence(task, archive_dir)
         archived_repo_bundles = _archive_repo_bundle_evidence(task.id, archive_dir)
         archived_runtime_instances = _archive_runtime_instance_evidence(task.id, archive_dir)
         archived_packet_artifacts = _archive_packet_artifacts(task.id, archive_dir)
         archived_self_tests = _archive_self_test_evidence(task.id, archive_dir)
         archived_role_state = _archive_role_envelope_evidence(task.id, archive_dir)
+        archived_events = archive_task_events(task.id, archive_dir)
 
         return {
             "task_id": task.id,
             "title": task.title,
             "state": str(task.state),
             "task_path": str(task_dest.relative_to(archive_dir)),
+            "events_path": archived_events["events_path"],
+            "event_count": archived_events["event_count"],
+            "event_bytes": archived_events["event_bytes"],
+            "event_compaction_eligible": archived_events["compaction_eligible"],
             "run_ids": archived_runs,
             "proof_ids": archived_proofs,
             "incident_ids": archived_incidents,
             "worker_session_ids": archived_workers.get("worker_session_ids", []),
             "persona_assignment_ids": archived_assignments.get("persona_assignment_ids", []),
             "persona_assignments_archived": archived_assignments.get("persona_assignments_archived", False),
+            "persona_instance_ids": archived_persona_instances.get("persona_instance_ids", []),
+            "persona_instances_archived": archived_persona_instances.get("persona_instances_archived", False),
             "repo_bundle_ids": archived_repo_bundles.get("repo_bundle_ids", []),
             "repo_bundles_archived": archived_repo_bundles.get("repo_bundles_archived", False),
             "runtime_instance_ids": archived_runtime_instances.get("runtime_instance_ids", []),
@@ -380,16 +553,27 @@ class ArchiveStore:
                     "proof_count": len(item.get("proof_ids") or []),
                     "incident_count": len(item.get("incident_ids") or []),
                     "worker_session_count": len(item.get("worker_session_ids") or []),
+                    "persona_instance_count": len(item.get("persona_instance_ids") or []),
                     "runtime_instance_count": len(item.get("runtime_instance_ids") or []),
                     "self_test_evidence_count": len(item.get("self_test_evidence_ids") or []),
+                    "event_count": int(item.get("event_count") or 0),
                 },
             )
         )
 
 
 class AgentStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
     def save(self, persona: AgentPersona) -> AgentPersona:
         _write_model(paths.agent_path(persona.id), persona)
+        _append_store_event(
+            self.event_log,
+            "persona.updated",
+            persona_id=persona.id,
+            display_name=persona.display_name,
+        )
         return persona
 
     def get(self, persona_id: str) -> AgentPersona:
@@ -400,6 +584,9 @@ class AgentStore:
 
 
 class WorkspaceStore:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
     def create(
         self,
         *,
@@ -435,6 +622,13 @@ class WorkspaceStore:
         if path.exists():
             raise AlreadyExists(item.id)
         _write_model(path, item)
+        _append_store_event(
+            self.event_log,
+            "workspace.created",
+            workspace_id=item.id,
+            name=item.name,
+            realm_id=item.realm_id,
+        )
         return self.get(item.id)
 
     def get(self, workspace_id: str) -> Workspace:
@@ -446,17 +640,34 @@ class WorkspaceStore:
             items = [item for item in items if not item.archived]
         return sorted(items, key=lambda item: (item.name.lower(), item.id))
 
-    def save(self, item: Workspace) -> Workspace:
+    def save(self, item: Workspace, *, emit_event: bool = True) -> Workspace:
+        """``emit_event=False`` is for named mutators (rename/archive/…) that
+        append their own, more specific event — never for skipping emission."""
         item.updated_at = now()
         _write_model(paths.workspace_path(item.id), item)
+        if emit_event:
+            _append_store_event(
+                self.event_log, "workspace.updated", workspace_id=item.id, change="saved", name=item.name
+            )
         return self.get(item.id)
 
-    def set_active(self, workspace_id: str | None) -> dict:
+    def set_active(self, workspace_id: str | None, *, issued_at: str | None = None) -> dict:
         value = _safe_model_id(workspace_id)
+        name = self.get(value).name if value else None
+        decision, current_value, basis = _resolve_activation_write(
+            paths.active_workspace_path(), "workspace_id", value, issued_at
+        )
+        if decision != "apply":
+            return {"workspace_id": current_value, "applied": False, "reason": decision, "requested_workspace_id": value}
+        _write_model(
+            paths.active_workspace_path(),
+            {"workspace_id": value, "updated_at": now(), "intent_issued_at": basis},
+        )
         if value:
-            self.get(value)
-        _write_model(paths.active_workspace_path(), {"workspace_id": value, "updated_at": now()})
-        return {"workspace_id": value}
+            _append_store_event(self.event_log, "workspace.activated", workspace_id=value, name=name)
+        else:
+            _append_store_event(self.event_log, "workspace.activated", cleared=True)
+        return {"workspace_id": value, "applied": True}
 
     def active_id(self) -> str | None:
         try:
@@ -470,28 +681,54 @@ class WorkspaceStore:
         persona = _safe_model_id(persona_id)
         if persona and persona not in item.agent_ids:
             item.agent_ids.append(persona)
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log, "workspace.updated", workspace_id=item.id, change="agent_added", persona_id=persona
+        )
+        return item
 
     def remove_agent(self, workspace_id: str, persona_id: str) -> Workspace:
         item = self.get(workspace_id)
         persona = _safe_model_id(persona_id)
         item.agent_ids = [value for value in item.agent_ids if value != persona]
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log, "workspace.updated", workspace_id=item.id, change="agent_removed", persona_id=persona
+        )
+        return item
 
     def rename(self, workspace_id: str, name: str) -> Workspace:
         item = self.get(workspace_id)
         item.name = _safe_display_name(name)
         item.slug = _slugify(item.name)
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log, "workspace.updated", workspace_id=item.id, change="renamed", name=item.name
+        )
+        return item
 
     def archive(self, workspace_id: str) -> Workspace:
         item = self.get(workspace_id)
         item.archived = True
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(self.event_log, "workspace.archived", workspace_id=item.id, name=item.name)
+        return item
 
 
 class RealmStore:
-    def create(self, *, name: str, server_id: str | None = None, realm_id: str | None = None) -> Realm:
+    def __init__(self, event_log: EventLog | None = None):
+        self.event_log = event_log or EventLog()
+
+    def create(
+        self,
+        *,
+        name: str,
+        server_id: str | None = None,
+        realm_id: str | None = None,
+        default_workspace_id: str | None = None,
+        default_workspace_name: str = "Default",
+        default_workspace_version: int = 0,
+    ) -> Realm:
         clean_name = _safe_display_name(name)
         if not clean_name:
             raise ValueError("realm name is required")
@@ -502,6 +739,9 @@ class RealmStore:
             slug=slug,
             name=clean_name,
             server_id=_safe_model_id(server_id),
+            default_workspace_id=_safe_model_id(default_workspace_id),
+            default_workspace_name=_safe_display_name(default_workspace_name) or "Default",
+            default_workspace_version=max(0, int(default_workspace_version)),
             created_at=ts,
             updated_at=ts,
         )
@@ -509,6 +749,9 @@ class RealmStore:
         if path.exists():
             raise AlreadyExists(item.id)
         _write_model(path, item)
+        _append_store_event(
+            self.event_log, "realm.created", realm_id=item.id, name=item.name, server_id=item.server_id
+        )
         return self.get(item.id)
 
     def get(self, realm_id: str) -> Realm:
@@ -520,22 +763,41 @@ class RealmStore:
             items = [item for item in items if not item.archived]
         return sorted(items, key=lambda item: (item.name.lower(), item.id))
 
-    def save(self, item: Realm) -> Realm:
+    def save(self, item: Realm, *, emit_event: bool = True) -> Realm:
+        """``emit_event=False`` is for callers that append their own, more
+        specific event in the same mutation (bind_server, realm adopt)."""
         item.updated_at = now()
         _write_model(paths.realm_path(item.id), item)
+        if emit_event:
+            _append_store_event(self.event_log, "realm.updated", realm_id=item.id, change="saved")
         return self.get(item.id)
 
     def bind_server(self, realm_id: str, server_id: str) -> Realm:
         item = self.get(realm_id)
         item.server_id = _safe_model_id(server_id)
-        return self.save(item)
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log, "realm.updated", realm_id=item.id, change="server_bound", server_id=item.server_id
+        )
+        return item
 
-    def set_active(self, realm_id: str | None) -> dict:
+    def set_active(self, realm_id: str | None, *, issued_at: str | None = None) -> dict:
         value = _safe_model_id(realm_id)
+        name = self.get(value).name if value else None
+        decision, current_value, basis = _resolve_activation_write(
+            paths.active_realm_path(), "realm_id", value, issued_at
+        )
+        if decision != "apply":
+            return {"realm_id": current_value, "applied": False, "reason": decision, "requested_realm_id": value}
+        _write_model(
+            paths.active_realm_path(),
+            {"realm_id": value, "updated_at": now(), "intent_issued_at": basis},
+        )
         if value:
-            self.get(value)
-        _write_model(paths.active_realm_path(), {"realm_id": value, "updated_at": now()})
-        return {"realm_id": value}
+            _append_store_event(self.event_log, "realm.activated", realm_id=value, name=name)
+        else:
+            _append_store_event(self.event_log, "realm.activated", cleared=True)
+        return {"realm_id": value, "applied": True}
 
     def active_id(self) -> str | None:
         try:
@@ -637,6 +899,9 @@ class RunStore:
                 task_id=run.task_id,
                 run_id=run.id,
                 persona_id=run.persona_id,
+                # contract summary fields; run_id is duplicated from the envelope
+                # column because consumers validate/render from the payload
+                payload={"run_id": run.id, "state": str(run.state)},
             )
         )
         return run
@@ -662,11 +927,23 @@ class RunStore:
                 return run
             run.state = state if isinstance(state, RunState) else RunState(state)
             run.finished_at = now()
+            if final_decision and isinstance(final_decision, dict):
+                public_type = public_decision_type_value(final_decision.get("type"))
+                if public_type and public_type != final_decision.get("type"):
+                    raw_decision_type = final_decision.get("type")
+                    final_decision = {**final_decision, "type": public_type}
+                    final_decision.setdefault("execution_type", raw_decision_type)
             run.final_decision = final_decision
             run.error = error
             if isinstance(run.llm, dict):
                 if final_decision and isinstance(final_decision, dict):
-                    run.llm.setdefault("decision_type", final_decision.get("type"))
+                    public_decision_type = public_decision_type_value(final_decision.get("type")) or final_decision.get("type")
+                    prior_decision_type = run.llm.get("decision_type")
+                    if prior_decision_type and public_decision_type and prior_decision_type != public_decision_type:
+                        run.llm.setdefault("raw_decision_type", prior_decision_type)
+                    if public_decision_type:
+                        run.llm["decision_type"] = public_decision_type
+                        run.llm.setdefault("public_decision_type", public_decision_type)
                     run.llm.setdefault("validation_status", "valid")
                 elif error:
                     run.llm.setdefault("validation_status", "invalid")
@@ -871,7 +1148,7 @@ class ProofStore:
             "step": "command_proof" if proof.type == ProofType.TEST_RUN else "proof_attached",
             "status": status,
             "summary": _proof_event_summary(safe_proof_id, proof.type, status=status, exit_code=exit_code, duration_ms=duration_ms),
-            "next_expected": "request_qa_review" if proof.type == ProofType.TEST_RUN and status == "passed" else "inspect_proof",
+            "next_expected": "hand_off" if proof.type == ProofType.TEST_RUN and status == "passed" else "inspect_proof",
         }
         if safe_stage_id is not None:
             payload["stage_id"] = safe_stage_id
@@ -1056,6 +1333,26 @@ def _archive_persona_assignment_evidence(task_id: str, archive_dir: Path) -> dic
     return result
 
 
+def _archive_persona_instance_evidence(task: Task, archive_dir: Path) -> dict:
+    result = {
+        "persona_instance_ids": [],
+        "persona_instances_archived": False,
+    }
+    try:
+        instances = PersonaInstanceStore(event_log=EventLog()).list_for_task(
+            task.id,
+            goal_id=getattr(task, "goal_id", None),
+        )
+    except Exception:
+        instances = []
+    for instance in instances:
+        dest = archive_dir / "persona_instances" / f"{instance.id}.json"
+        if _move_if_exists(paths.persona_instance_path(instance.id), dest):
+            result["persona_instance_ids"].append(instance.id)
+    result["persona_instances_archived"] = bool(result["persona_instance_ids"])
+    return result
+
+
 def _archive_repo_bundle_evidence(task_id: str, archive_dir: Path) -> dict:
     result = {
         "repo_bundle_ids": [],
@@ -1067,7 +1364,11 @@ def _archive_repo_bundle_evidence(task_id: str, archive_dir: Path) -> dict:
     dest = archive_dir / "repo_bundles" / task_id
     if _move_if_exists(source, dest):
         result["repo_bundles_archived"] = True
-        result["repo_bundle_ids"] = [path.stem for path in sorted(dest.glob("*.json"))]
+        result["repo_bundle_ids"] = [
+            path.stem
+            for path in sorted(dest.glob("*.json"))
+            if not path.name.endswith(".promotion.json")
+        ]
     return result
 
 
@@ -1151,6 +1452,12 @@ class IncidentStore:
 
     def open(self, incident: Incident) -> Incident:
         _write_model(paths.incident_path(incident.id), incident)
+        # NOTE: intentionally does NOT auto-link the incident into
+        # task.open_incident_ids. The settle boundary (ticker._settled_boundary)
+        # treats a linked incident as "Neko owns recovery" vs an unlinked one as
+        # a hard stop, so centralized linking here changes stop-vs-recover
+        # semantics. Linking must be done deliberately at the call sites that
+        # want recovery routing, paired with a recovery-semantics review.
         metadata = incident.metadata if isinstance(getattr(incident, "metadata", None), dict) else {}
         payload = {"incident_id": incident.id, "kind": incident.kind}
         for key in ("proof_id", "check_id", "environment_fingerprint", "blocking_event_id", "stage_id", "persona_target", "lane_id", "lane_state_at_open"):
@@ -1177,42 +1484,45 @@ class IncidentStore:
         return _read_model(Incident, paths.incident_path(incident_id))
 
     def close(self, incident_id: str, *, reason: str | None = None) -> Incident:
-        incident = self.get(incident_id)
-        was_open = incident.closed_at is None
-        incident.closed_at = now()
-        _write_model(paths.incident_path(incident_id), incident)
-        if incident.task_id:
-            try:
-                task_store = TaskStore()
-                task = task_store.get(incident.task_id)
-                changed = False
-                if incident.id in (task.open_incident_ids or []):
-                    task.open_incident_ids = [item for item in task.open_incident_ids if item != incident.id]
-                    changed = True
-                if was_open and task.state == TaskState.BLOCKED:
-                    mark_incident_closed_for_recovery(task, incident_id=incident.id)
-                    if not task.open_incident_ids:
-                        task.state = TaskState.RUNNING
-                    changed = True
-                if changed:
-                    task.updated_at = now()
-                    task_store.update(task, actor="harness", reason="incident closed")
-            except NotFound:
-                pass
-        payload = {"incident_id": incident.id}
-        if reason:
-            payload["reason"] = reason
-        self.event_log.append(
-            Event(
-                ts=now(),
-                type="incident.closed",
-                task_id=incident.task_id,
-                run_id=incident.run_id,
-                persona_id=None,
-                payload=payload,
+        from .locks import incident_lock
+
+        with incident_lock(incident_id):
+            incident = self.get(incident_id)
+            was_open = incident.closed_at is None
+            incident.closed_at = now()
+            _write_model(paths.incident_path(incident_id), incident)
+            if incident.task_id:
+                try:
+                    task_store = TaskStore()
+                    task = task_store.get(incident.task_id)
+                    changed = False
+                    if incident.id in (task.open_incident_ids or []):
+                        task.open_incident_ids = [item for item in task.open_incident_ids if item != incident.id]
+                        changed = True
+                    if was_open and task.state == TaskState.BLOCKED:
+                        mark_incident_closed_for_recovery(task, incident_id=incident.id)
+                        if not task.open_incident_ids:
+                            task.state = TaskState.RUNNING
+                        changed = True
+                    if changed:
+                        task.updated_at = now()
+                        task_store.update(task, actor="harness", reason="incident closed")
+                except NotFound:
+                    pass
+            payload = {"incident_id": incident.id}
+            if reason:
+                payload["reason"] = reason
+            self.event_log.append(
+                Event(
+                    ts=now(),
+                    type="incident.closed",
+                    task_id=incident.task_id,
+                    run_id=incident.run_id,
+                    persona_id=None,
+                    payload=payload,
+                )
             )
-        )
-        return incident
+            return incident
 
     def list_open(self) -> list[Incident]:
         return [incident for incident in self.list_all() if incident.closed_at is None]

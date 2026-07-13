@@ -4,6 +4,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from hermes_time import now
@@ -25,6 +26,46 @@ from .tool_visibility import (
 from .tool_permissions import permission_options_for_chat
 
 TERMINAL_ASSIGNMENT_STATES = frozenset({"completed", "blocked", "cancelled"})
+_RELEASABLE_OWNER_TASK_STATES = frozenset({"done", "cancelled", "failed"})
+
+
+def _owning_task_release_state(task_id: str) -> str | None:
+    """Terminal state name of the owning task, ``"archived"`` when the task file
+    has left the live store, or None when the task is live (or unreadable)."""
+    try:
+        path = paths.task_path(task_id)
+        if not path.exists():
+            return "archived"
+        state = str(json.loads(path.read_text(encoding="utf-8")).get("state") or "").strip().lower()
+    except Exception:
+        return None
+    return state if state in _RELEASABLE_OWNER_TASK_STATES else None
+
+
+def _persona_instance_owner_release_state(instance: PersonaInstance) -> str | None:
+    owners = {
+        owner
+        for owner in (
+            safe_optional_token(instance.current_task_id),
+            safe_optional_token(instance.goal_id),
+        )
+        if owner
+    }
+    if not owners:
+        return "taskless"
+    states: list[str] = []
+    for owner in owners:
+        state = _owning_task_release_state(owner)
+        if state is None:
+            return None
+        states.append(state)
+    if "done" in states:
+        return "done"
+    if "cancelled" in states:
+        return "cancelled"
+    if "failed" in states:
+        return "failed"
+    return "archived"
 ACTIVE_ASSIGNMENT_STATES = frozenset({"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"})
 ACTIVE_PERSONA_WORKER_STATES = frozenset(
     {
@@ -48,12 +89,101 @@ LIVE_RUN_STATES = frozenset(
 )
 
 
+def _worker_carries_live_binding(worker: WorkerSession) -> bool:
+    """Whether a worker may stamp its ``task_bound`` binding onto the persona
+    instance during snapshot derivation.
+
+    The binding follows the TASK's life, not the worker's: an idle worker
+    between ticks of a live task keeps the persona attached (agents must not
+    flicker off the goal topology between runs), but once the owning task is
+    terminal or archived the worker is history — it must not resurrect the
+    binding. Dead workers used to be picked as ``latest_by_persona`` and
+    re-stamp a settled mission's task/session onto the instance on every
+    snapshot build (undoing the terminal-task reaper and orphan sweep), so
+    Mission Control opened the persona's console on an empty dead mission
+    session instead of the latest chat (2026-07-08). A persona whose latest
+    worker is dead now falls through to the configured/idle reset below
+    instead. Precedence mirrors ``sweep_orphaned_task_bound_instances``: an
+    actively working session always carries (even mid-setup before its task
+    file lands); a non-active worker carries only while its task is live."""
+    if worker.state in ACTIVE_PERSONA_WORKER_STATES:
+        return True
+    task_id = safe_optional_token(worker.task_id)
+    return bool(task_id) and _owning_task_release_state(task_id) is None
+
+
 class ChatBusyError(AgentRuntimeError):
     def __init__(self, instance: PersonaInstance, *, active_run_id: str | None, active_worker_session_id: str | None):
         super().__init__("chat_busy")
         self.instance = instance
         self.active_run_id = active_run_id
         self.active_worker_session_id = active_worker_session_id
+
+
+class StaleModelOverrideWrite(AgentRuntimeError):
+    """A model-override write carried an ``issued_at`` older than (or equal to)
+    the last applied model write for the instance. The newer value wins; the
+    stale intent must never be applied silently (supersede guard, mirroring the
+    Stage 13 scope-flip fix)."""
+
+    def __init__(self, instance: PersonaInstance, *, issued_at: datetime, applied_issued_at: datetime):
+        super().__init__("model_override_write_superseded")
+        self.instance = instance
+        self.issued_at = issued_at
+        self.applied_issued_at = applied_issued_at
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def _safe_model_override_text(value: str, *, field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_name} must not be empty")
+    if len(text) > 200:
+        raise ValueError(f"{field_name} exceeds 200 characters")
+    if any(ord(ch) < 0x20 for ch in text):
+        raise ValueError(f"{field_name} contains control characters")
+    return text
+
+
+def _model_supports_reasoning_effort(model_id: str | None) -> bool:
+    """True when the model exposes reasoning-effort control (offline id-heuristic).
+
+    Reuses the canonical Copilot/GPT-5/o-series id heuristic with no catalog or
+    api_key so this stays a cheap, network-free check safe to run for every
+    instance in a snapshot. A resolution failure degrades to ``False`` (control
+    hidden) rather than raising inside the projection.
+    """
+    if not str(model_id or "").strip():
+        return False
+    try:
+        from hermes_cli.models import github_model_reasoning_efforts
+
+        return bool(github_model_reasoning_efforts(model_id))
+    except Exception:
+        return False
+
+
+def _normalize_reasoning_effort_override(value: str) -> str | None:
+    """Normalize a reasoning-effort override to a stored value or ``None``.
+
+    Empty clears the override (inherit the runtime default). ``"none"`` (thinking
+    off) and every level in ``hermes_constants.VALID_REASONING_EFFORTS`` are
+    accepted; anything else raises ``ValueError``.
+    """
+    from hermes_constants import VALID_REASONING_EFFORTS
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text == "none" or text in VALID_REASONING_EFFORTS:
+        return text
+    raise ValueError(
+        f"invalid reasoning_effort: {value!r} (expected one of none, "
+        f"{', '.join(VALID_REASONING_EFFORTS)})"
+    )
 
 
 @dataclass(slots=True)
@@ -257,6 +387,13 @@ class PersonaInstanceStore:
         goal_id: str | None = None,
         skills: list[str] | None = None,
         clear_skills: bool = False,
+        provider: str | None = None,
+        model: str | None = None,
+        api_mode: str | None = None,
+        reasoning_effort: str | None = None,
+        clear_model_override: bool = False,
+        model_issued_at: datetime | None = None,
+        requested_by: str | None = None,
     ) -> PersonaInstance:
         """Persist operator-editable runtime profile overrides.
 
@@ -264,9 +401,56 @@ class PersonaInstanceStore:
         Hermes profile template. Editing ``Alice Agent`` therefore updates the
         live ``personainst_*`` record while leaving the lower ``alice`` profile
         untouched for future default instances.
+
+        ``provider``/``model``/``api_mode`` form the instance model-override
+        tier (None = inherit the backing persona live; see
+        ``models.apply_instance_model_overrides``). ``clear_model_override``
+        resets all three. A ``model_issued_at`` older than the last applied
+        model write raises :class:`StaleModelOverrideWrite` instead of
+        clobbering the newer value.
         """
         instance = self.get(persona_instance_id)
         changed = False
+        model_lane_touched = clear_model_override or any(
+            value is not None for value in (provider, model, api_mode, reasoning_effort)
+        )
+        if clear_model_override and any(value is not None for value in (provider, model, api_mode, reasoning_effort)):
+            raise ValueError("clear_model_override conflicts with provider/model/api_mode/reasoning_effort values")
+        if model_lane_touched:
+            if model_issued_at is not None and instance.model_override_issued_at is not None:
+                issued = _as_utc(model_issued_at)
+                applied = _as_utc(instance.model_override_issued_at)
+                if issued <= applied:
+                    raise StaleModelOverrideWrite(instance, issued_at=issued, applied_issued_at=applied)
+            if clear_model_override:
+                if (
+                    instance.model is not None
+                    or instance.provider is not None
+                    or instance.api_mode is not None
+                    or instance.reasoning_effort is not None
+                ):
+                    instance.model = None
+                    instance.provider = None
+                    instance.api_mode = None
+                    instance.reasoning_effort = None
+                    changed = True
+            else:
+                for field_name, raw in (("provider", provider), ("model", model), ("api_mode", api_mode)):
+                    if raw is None:
+                        continue
+                    value = _safe_model_override_text(raw, field_name=field_name)
+                    if getattr(instance, field_name) != value:
+                        setattr(instance, field_name, value)
+                        changed = True
+                # Reasoning effort rides the model lane but is a validated enum
+                # (or "none"/empty-clear), not free text — normalize separately.
+                if reasoning_effort is not None:
+                    new_reasoning = _normalize_reasoning_effort_override(reasoning_effort)
+                    if instance.reasoning_effort != new_reasoning:
+                        instance.reasoning_effort = new_reasoning
+                        changed = True
+            if changed:
+                instance.model_override_issued_at = _as_utc(model_issued_at) if model_issued_at is not None else now()
         if display_name is not None:
             value = safe_assignment_text(display_name, limit=120)
             if not value:
@@ -295,16 +479,19 @@ class PersonaInstanceStore:
         if changed:
             instance.updated_at = now()
             self._write(instance)
-            self._event(
-                "persona_instance.profile_updated",
-                instance,
-                {
-                    "display_name": instance.display_name,
-                    "current_chat_goal": instance.current_chat_goal,
-                    "goal_id": instance.goal_id,
-                    "skill_overrides": list(instance.skill_overrides or []),
-                },
-            )
+            payload: dict[str, Any] = {
+                "display_name": instance.display_name,
+                "current_chat_goal": instance.current_chat_goal,
+                "goal_id": instance.goal_id,
+                "skill_overrides": list(instance.skill_overrides or []),
+                "provider": instance.provider,
+                "model": instance.model,
+                "api_mode": instance.api_mode,
+                "reasoning_effort": instance.reasoning_effort,
+            }
+            if requested_by:
+                payload["requested_by"] = str(requested_by)[:80]
+            self._event("persona_instance.profile_updated", instance, payload)
         return self.get(instance.id)
 
     def _validate_no_steering_cycle(self, persona_instance_id: str, parent_instance_id: str) -> None:
@@ -323,6 +510,110 @@ class PersonaInstanceStore:
     def get(self, persona_instance_id: str) -> PersonaInstance:
         raw = json.loads(paths.persona_instance_path(persona_instance_id).read_text(encoding="utf-8"))
         return from_jsonable(PersonaInstance, raw)
+
+    def list_for_task(self, task_id: str, *, goal_id: str | None = None) -> list[PersonaInstance]:
+        normalized = safe_optional_token(task_id)
+        normalized_goal = safe_optional_token(goal_id)
+        wanted = {item for item in (normalized, normalized_goal) if item}
+        if not wanted:
+            return []
+        return [
+            instance
+            for instance in self.list_all()
+            if instance.mode == "task_bound"
+            and (
+                safe_optional_token(instance.current_task_id) in wanted
+                or safe_optional_token(instance.goal_id) in wanted
+            )
+        ]
+
+    def close_for_task(
+        self,
+        task_id: str,
+        *,
+        goal_id: str | None = None,
+        reason: str = "task terminal",
+    ) -> dict[str, Any]:
+        """Remove task-bound persona instances from the live graph.
+
+        Task-bound persona instances are a live projection of worker/goal
+        membership, not an archive of completed work. Leaving them in the live
+        store after terminal transition makes snapshots and the Launcher graph
+        render old workers as live agents. Never reap an instance while its
+        active run or worker still resolves to a live record.
+        """
+        reaped: list[str] = []
+        skipped_active: list[str] = []
+        for instance in self.list_for_task(task_id, goal_id=goal_id):
+            if self._has_live_binding(instance):
+                skipped_active.append(instance.id)
+                continue
+            if self._delete(instance):
+                reaped.append(instance.id)
+                self._event(
+                    "persona_instance.reaped",
+                    instance,
+                    {
+                        "task_id": safe_optional_token(task_id),
+                        "goal_id": safe_optional_token(goal_id),
+                        "reason": safe_assignment_text(reason, limit=240),
+                    },
+                )
+        remaining = self.list_for_task(task_id, goal_id=goal_id)
+        return {
+            "task_id": safe_optional_token(task_id),
+            "goal_id": safe_optional_token(goal_id),
+            "reaped_persona_instance_ids": reaped,
+            "skipped_active_persona_instance_ids": skipped_active,
+            "remaining_task_bound_persona_instance_ids": [instance.id for instance in remaining],
+            "reaped_count": len(reaped),
+            "skipped_active_count": len(skipped_active),
+            "remaining_count": len(remaining),
+        }
+
+    def sweep_orphaned_task_bound_instances(self, *, reason: str = "persona instance janitor") -> dict[str, Any]:
+        """Reap stale task-bound instances whose owner is terminal or gone.
+
+        Free-floating/profile chat instances are preserved. Instances with a
+        genuinely live active worker or run are reported but never touched.
+        """
+        before = [instance for instance in self.list_all() if instance.mode == "task_bound"]
+        reaped: list[str] = []
+        skipped_active: list[str] = []
+        preserved_live_owner: list[str] = []
+        for instance in before:
+            if self._has_live_binding(instance):
+                skipped_active.append(instance.id)
+                continue
+            owner_state = _persona_instance_owner_release_state(instance)
+            if owner_state is None:
+                preserved_live_owner.append(instance.id)
+                continue
+            if self._delete(instance):
+                reaped.append(instance.id)
+                self._event(
+                    "persona_instance.reaped",
+                    instance,
+                    {
+                        "task_id": safe_optional_token(instance.current_task_id),
+                        "goal_id": safe_optional_token(instance.goal_id),
+                        "reason": safe_assignment_text(reason, limit=240),
+                        "owner_state": owner_state,
+                    },
+                )
+        after = [instance for instance in self.list_all() if instance.mode == "task_bound"]
+        return {
+            "before_task_bound_count": len(before),
+            "after_task_bound_count": len(after),
+            "reaped_persona_instance_ids": reaped,
+            "skipped_active_persona_instance_ids": skipped_active,
+            "preserved_live_owner_persona_instance_ids": preserved_live_owner,
+            "remaining_task_bound_persona_instance_ids": [instance.id for instance in after],
+            "reaped_count": len(reaped),
+            "skipped_active_count": len(skipped_active),
+            "preserved_live_owner_count": len(preserved_live_owner),
+            "remaining_count": len(after),
+        }
 
     def update(self, instance: PersonaInstance) -> PersonaInstance:
         instance.updated_at = now()
@@ -354,7 +645,11 @@ class PersonaInstanceStore:
         if not normalized_session:
             raise ValueError("session_id is required")
 
-        normalized_instance = safe_assignment_token(persona_instance_id) if persona_instance_id else None
+        normalized_instance = (
+            canonical_persona_instance_id(persona_instance_id, persona_id=normalized_persona)
+            if persona_instance_id
+            else None
+        )
         instance_id = normalized_instance or persona_instance_id_for(normalized_persona)
         safe_display_name = safe_assignment_text(display_name, limit=120) if display_name is not None else None
         safe_profile_id = safe_assignment_token(profile_id) if profile_id is not None else None
@@ -483,7 +778,7 @@ class PersonaInstanceStore:
         instance.mode = "task_bound"
         instance.current_assignment_id = worker.current_assignment_id
         instance.current_task_id = worker.task_id
-        instance.goal_id = instance.goal_id or worker.task_id
+        instance.goal_id = self._goal_id_for_worker(worker) or worker.task_id
         instance.active_worker_session_id = worker.id if worker.state in ACTIVE_PERSONA_WORKER_STATES else None
         instance.active_run_id = worker.active_run_id
         instance.session_id = worker.session_id
@@ -496,6 +791,16 @@ class PersonaInstanceStore:
         instance.watchdog_warning_count = worker.watchdog_warning_count
         instance.last_heartbeat_at = worker.last_heartbeat_at
         return self.update(instance)
+
+    def _goal_id_for_worker(self, worker: WorkerSession) -> str | None:
+        assignment_id = safe_optional_token(worker.current_assignment_id)
+        if not assignment_id:
+            return None
+        try:
+            assignment = PersonaAssignmentStore().get(assignment_id)
+        except Exception:
+            return None
+        return safe_optional_token(assignment.goal_id or assignment.task_id)
 
     def list_all(self) -> list[PersonaInstance]:
         directory = paths.persona_instances_dir()
@@ -514,6 +819,8 @@ class PersonaInstanceStore:
             self.ensure_for_persona(persona)
         latest_by_persona: dict[str, WorkerSession] = {}
         for worker in workers:
+            if not _worker_carries_live_binding(worker):
+                continue
             existing = latest_by_persona.get(worker.persona_id)
             if existing is None or (worker.last_heartbeat_at or worker.opened_at) >= (existing.last_heartbeat_at or existing.opened_at):
                 latest_by_persona[worker.persona_id] = worker
@@ -553,6 +860,36 @@ class PersonaInstanceStore:
                 self.update(instance)
         return self.list_all()
 
+    def _delete(self, instance: PersonaInstance) -> bool:
+        path = paths.persona_instance_path(instance.id)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    def _has_live_binding(self, instance: PersonaInstance) -> bool:
+        worker_id = safe_optional_token(instance.active_worker_session_id)
+        if worker_id:
+            try:
+                from .worker_sessions import ACTIVE_WORKER_STATES, WorkerSessionStore
+
+                worker = WorkerSessionStore(event_log=self.event_log).get(worker_id)
+                if worker.state in ACTIVE_WORKER_STATES:
+                    return True
+            except Exception:
+                pass
+        run_id = safe_optional_token(instance.active_run_id)
+        if run_id:
+            try:
+                from .store import ACTIVE_RUN_STATES, RunStore
+
+                run = RunStore(event_log=self.event_log).get(run_id)
+                if run.state in ACTIVE_RUN_STATES:
+                    return True
+            except Exception:
+                pass
+        return False
+
     def _write(self, instance: PersonaInstance) -> None:
         path = paths.persona_instance_path(instance.id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -578,7 +915,7 @@ class PersonaAssignmentStore:
     def create_or_resume(self, spec: PersonaAssignmentSpec) -> PersonaAssignment:
         persona_id = safe_assignment_token(spec.persona_id)
         goal_id = safe_optional_token(spec.goal_id or spec.task_id)
-        instance_id = spec.persona_instance_id or (
+        instance_id = canonical_persona_instance_id(spec.persona_instance_id, persona_id=persona_id) or (
             persona_instance_id_for_placement(f"{goal_id}:{persona_id}") if goal_id else persona_instance_id_for(persona_id)
         )
         signal_hash = assignment_signal_hash_from_parts(
@@ -656,6 +993,12 @@ class PersonaAssignmentStore:
             existing_goal = safe_optional_token(assignment.goal_id or assignment.task_id)
             if wanted_goal and existing_goal == wanted_goal:
                 continue
+            if self._release_if_owning_goal_terminal(assignment):
+                # Self-heal instead of warn: an assignment held by a goal that is
+                # already terminal (or archived out of the live store) is stale
+                # state, not real contention. Release it so the warning stays an
+                # honest signal of genuinely concurrent goals.
+                continue
             warnings.append(
                 {
                     "code": "agent_already_assigned",
@@ -668,6 +1011,26 @@ class PersonaAssignmentStore:
                 }
             )
         return warnings
+
+    def _release_if_owning_goal_terminal(self, assignment: PersonaAssignment) -> bool:
+        """Release an active assignment whose owning goal is terminal/archived.
+
+        Returns True when the assignment was released. Free-floating assignments
+        (no owning task/goal) are never touched — their staleness cannot be
+        inferred from task state.
+        """
+        owner = safe_optional_token(assignment.task_id or assignment.goal_id)
+        if not owner:
+            return False
+        owner_state = _owning_task_release_state(owner)
+        if owner_state is None:
+            return False
+        self.complete(
+            assignment.id,
+            state="completed" if owner_state in {"done", "archived"} else "cancelled",
+            error=f"released stale assignment; owning goal is {owner_state}",
+        )
+        return True
 
     def get(self, assignment_id: str) -> PersonaAssignment:
         raw = json.loads(paths.persona_assignment_path(assignment_id).read_text(encoding="utf-8"))
@@ -763,6 +1126,30 @@ class PersonaAssignmentStore:
         self._event("persona_assignment.closed", updated, {"state": updated.state})
         return updated
 
+    def close_for_task(self, task_id: str, *, state: str = "completed", reason: str | None = None) -> list[str]:
+        """Close every still-active assignment bound to a task/goal.
+
+        Persona-instance assignments are otherwise only released on *archival*
+        (the files are moved out of the live dir). A task that reaches a
+        terminal state but is not archived keeps its slots ``active``, so
+        ``find_active``/``contention_warnings`` keep emitting
+        ``agent_already_assigned`` and a fresh goal can never claim the persona
+        — the "graveyard starvation" that wedges new goals at finalization.
+        Closing on the terminal transition prevents that.
+        """
+        normalized = safe_optional_token(task_id)
+        if not normalized:
+            return []
+        closed: list[str] = []
+        for assignment in self.list_all():
+            if assignment.state in TERMINAL_ASSIGNMENT_STATES:
+                continue
+            if safe_optional_token(assignment.task_id) != normalized and safe_optional_token(assignment.goal_id) != normalized:
+                continue
+            self.complete(assignment.id, state=state, error=reason)
+            closed.append(assignment.id)
+        return closed
+
     def _write(self, assignment: PersonaAssignment) -> None:
         path = paths.persona_assignment_path(assignment.id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -782,17 +1169,66 @@ class PersonaAssignmentStore:
                     "persona_instance_id": assignment.persona_instance_id,
                     "kind": assignment.kind,
                     "client_message_id": assignment.client_message_id,
+                    "title": assignment.title,
+                    "message": assignment.message,
+                    "stage_id": assignment.stage_id,
+                    "goal_id": assignment.goal_id,
+                    "repo": assignment.repo,
+                    "affected_paths": list(assignment.affected_paths or []),
+                    "proof_targets": list(assignment.proof_targets or []),
+                    "acceptance": list(assignment.acceptance or []),
+                    "non_goals": list(assignment.non_goals or []),
+                    "allowed_decisions": list(assignment.allowed_decisions or []),
                 },
             )
         )
 
 
+PERSONA_INSTANCE_ID_PREFIX = "personainst_"
+
+# An operator-channel actor token ('persona_' + instance id) that leaked into
+# a store row id. Live evidence 2026-07-10: persona_personainst_neko_supervisor
+# persisted beside personainst_neko_supervisor for the same channel.
+_ACTOR_TOKEN_DRIFT_PREFIX = f"persona_{PERSONA_INSTANCE_ID_PREFIX}"
+
+
 def persona_instance_id_for(persona_id: str) -> str:
-    return f"personainst_{safe_assignment_token(persona_id) or 'persona'}"
+    return f"{PERSONA_INSTANCE_ID_PREFIX}{safe_assignment_token(persona_id) or 'persona'}"
 
 
 def persona_instance_id_for_placement(placement_id: str) -> str:
-    return f"personainst_{safe_assignment_token(placement_id) or 'persona'}"
+    return f"{PERSONA_INSTANCE_ID_PREFIX}{safe_assignment_token(placement_id) or 'persona'}"
+
+
+def canonical_persona_instance_id(raw_id: Any, *, persona_id: str | None = None) -> str | None:
+    """SINGLE derivation authority for a caller-supplied persona-instance id.
+
+    Every path that accepts an instance id from outside the store (operator
+    chat opens, assignment specs, CLI verbs) must resolve it through here
+    before minting or joining a row. The store historically persisted the
+    same logical channel under four id schemes because callers' tokens were
+    written through verbatim; this collapses the two schemes that are
+    structurally recognizable:
+
+    - ``persona_personainst_x`` (actor-token drift) -> ``personainst_x``
+    - ``persona:<persona_id>`` selector tokens (launcher idle-row ids,
+      mangled to ``persona_<persona_id>``) -> the persona's canonical
+      operator-channel id.
+
+    The legacy ``personainst_operator_<hash>`` scheme is not structurally
+    derivable; the store reconciler (persona_instance_identity.py) retires
+    those rows and records their aliases.
+    """
+    token = safe_assignment_token(raw_id)
+    if not token:
+        return None
+    while token.startswith(_ACTOR_TOKEN_DRIFT_PREFIX):
+        token = token[len("persona_") :]
+    if persona_id:
+        persona_token = safe_assignment_token(persona_id)
+        if persona_token and token == f"persona_{persona_token}":
+            return persona_instance_id_for(persona_id)
+    return token
 
 
 def persona_chat_session_id_for(persona_instance_id: str) -> str:
@@ -917,6 +1353,23 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "repo_scope_label": getattr(persona, "repo_scope_label", None),
         "skills": skills,
         "skill_overrides": list(instance.skill_overrides) if instance.skill_overrides is not None else None,
+        # Instance model-override tier (None = inherit persona live). The
+        # effective_* pair is the agent-level value (override or persona
+        # default); the config-default tier below persona resolves at runtime.
+        "model": instance.model,
+        "provider": instance.provider,
+        "api_mode": instance.api_mode,
+        "model_is_override": bool(instance.model or instance.provider or instance.reasoning_effort),
+        "effective_model": instance.model or getattr(visibility_persona, "model", None),
+        "effective_provider": instance.provider or getattr(visibility_persona, "provider", None),
+        # Per-instance reasoning-effort override (None = inherit runtime default)
+        # plus whether the effective model supports reasoning effort at all, so
+        # the Launcher only offers the effort control for reasoning-capable
+        # models (no fake affordance). Computed offline from the model id.
+        "reasoning_effort": instance.reasoning_effort,
+        "reasoning_supported": _model_supports_reasoning_effort(
+            instance.model or getattr(visibility_persona, "model", None)
+        ),
         "toolsets": list(getattr(visibility_persona, "toolsets", []) or []),
         "runtime_root": instance.runtime_root,
         "state": state,
@@ -924,6 +1377,7 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "mode": instance.mode,
         "goal_id": instance.goal_id,
         "spawned_by": instance.spawned_by,
+        "returned_to": instance.returned_to,
         "current_chat_goal": instance.current_chat_goal,
         "current_work_assignment_id": instance.current_assignment_id,
         "current_assignment_id": instance.current_assignment_id,
@@ -952,6 +1406,46 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         summary["blocked_tools_count"] = len(summary["blocked_tools"])
         summary["effective_toolsets"] = summary["tool_resolution"]["effective_toolsets"]
     return summary
+
+
+def active_persona_instance_agent_summaries(
+    instances: list[PersonaInstance],
+    personas_by_id: dict[str, AgentPersona] | None = None,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    personas_by_id = personas_by_id or {}
+    for instance in instances:
+        instance_id = safe_assignment_token(getattr(instance, "id", None))
+        if not instance_id or instance_id in seen:
+            continue
+        if not _persona_instance_is_active_lane(instance):
+            continue
+        persona_id = safe_assignment_token(getattr(instance, "persona_id", None)) or instance_id
+        row = persona_instance_summary(instance, personas_by_id.get(persona_id))
+        row["runtime_agent_kind"] = "persona_instance"
+        row["source_persona_id"] = persona_id
+        row["persona_id"] = instance_id
+        row["agent_profile_id"] = instance_id
+        row["persona_instance_id"] = instance_id
+        row["base_persona_id"] = persona_id
+        row["display_name"] = row.get("display_name") or instance_id
+        row["agent_hud_state"] = row.get("agent_hud_state") or {}
+        row["tool_resolution"] = row.get("tool_resolution") or {}
+        seen.add(instance_id)
+        rows.append(row)
+    return rows
+
+
+def _persona_instance_is_active_lane(instance: PersonaInstance) -> bool:
+    state = getattr(instance, "state", None)
+    state_text = state.value if hasattr(state, "value") else str(state or "")
+    if state_text in {"running", "assigned", "waiting_on_tool", "waiting_on_proof", "self_healing", "waiting_on_human", "possessed"}:
+        return True
+    return any(
+        bool(getattr(instance, attr, None))
+        for attr in ("current_task_id", "goal_id", "current_assignment_id", "active_worker_session_id", "active_run_id")
+    )
 
 
 def _profile_visibility_persona(instance: PersonaInstance) -> AgentPersona | None:

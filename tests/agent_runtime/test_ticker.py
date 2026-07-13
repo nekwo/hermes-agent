@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,20 +7,189 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_time import now
-from agent_runtime.actions import HarnessActionType
+from agent_runtime.actions import HarnessAction, HarnessActionType
 from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.events import EventLog
 from agent_runtime.recovery_flags import NEKO_BLOCK_RECOVERY_ATTEMPTED_FLAG
-from agent_runtime.ticker import TickEngine, _emit_decision_process_summary, _validate_request_test_run_targets_current_stage
+from agent_runtime.ticker import TickEngine, _emit_decision_process_summary, _handoff_diff_weakens_tests, _validate_observed_trace_requirement, _validate_request_test_run_targets_current_stage
 from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.errors import NotFound
-from agent_runtime.models import Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
+from agent_runtime.models import Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, RepoBundle, Task, TaskStage
 from agent_runtime.proof_rules import ProofType
-from agent_runtime.runtime_config import ContinuousRoleSessionConfig, MissionPlanConfig, NormalWorkerFlowConfig, RuntimeConfig
+from agent_runtime.repo_bundles import RepoBundleStore
+from agent_runtime.runtime_config import ContinuousRoleSessionConfig, MissionPlanConfig, NormalWorkerFlowConfig, RuntimeConfig, SwarmConfig
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.profile_runner import RunBudgetExceeded
+
+
+def test_handoff_diff_test_tampering_detector_fails_closed():
+    task = make_task_with_id("task_test_tamper")
+    task.harness_self_heal = {
+        "stage_observations": {
+            "stage_1": {
+                "repo_diff": {
+                    "diff": "\n".join(
+                        [
+                            "diff --git a/tests/test_example.py b/tests/test_example.py",
+                            "-    assert result == 42",
+                            "+    assert True",
+                        ]
+                    )
+                }
+            },
+            "stage_product": {
+                "repo_diff": {
+                    "diff": "\n".join(
+                        [
+                            "diff --git a/app/example.py b/app/example.py",
+                            "-    assert result == 42",
+                        ]
+                    )
+                }
+            },
+        }
+    }
+
+    assert _handoff_diff_weakens_tests(task, "stage_1") is True
+    assert _handoff_diff_weakens_tests(task, "stage_product") is False
+
+
+def test_handoff_observation_links_same_stage_observed_proof_from_earlier_turn(isolate_agent_runtime_root):
+    # R1 regression: dev work is multi-turn — the self-test command runs in an
+    # earlier turn (run A) than the handoff turn (run B). The observed lane must
+    # link a same-stage agent_tool_trace proof even when its run_id differs from
+    # the handoff run; keying on run_id alone left observed_proof_ids empty.
+    from agent_runtime.ticker import _record_handoff_observation
+    from agent_runtime.decision_schema import AgentDecision, DecisionType
+    from agent_runtime.models import Proof
+    from agent_runtime.proof_rules import ProofType
+
+    ts = TaskStore()
+    task = make_task_with_id("task_obs_link")
+    task.affected_repos = []
+    task.current_stage_id = "implement"
+    ts.create(task)
+    proofs = ProofStore()
+    proofs.attach(
+        Proof(
+            id="proof_observed_earlier_turn",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="Observed agent proof: flutter analyze",
+            path_or_value="observed.json",
+            created_by="dev",
+            created_at=now(),
+            metadata={"source": "agent_tool_trace", "authoritative": False, "run_id": "run_earlier_turn", "status": "passed"},
+            redaction_status="safe",
+        )
+    )
+    handoff_run = RunStore().open_run("dev", task.id, stage_id="implement")  # a DIFFERENT run id
+    _record_handoff_observation(
+        task,
+        AgentDecision(type=DecisionType.PROPOSE_PATCH, summary="hand off", rationale="done", payload={"stage_id": "implement"}),
+        run=handoff_run,
+        actor="dev",
+        proof_store=proofs,
+        command_workdir=None,
+        task_store=ts,
+    )
+
+    obs = (ts.get(task.id).harness_self_heal or {}).get("stage_observations") or {}
+    assert obs["implement"]["observed_proof_ids"] == ["proof_observed_earlier_turn"]
+
+
+def test_handoff_observation_fires_on_legacy_request_test_run_delivery(isolate_agent_runtime_root):
+    # Contract-parity gap: under the simplified flag a collapsed hand_off projects
+    # onto PROPOSE_PATCH (observed), but on the legacy/rollback path a no-edit dev
+    # delivers via REQUEST_TEST_RUN. The harness observe-the-work lane must fire for
+    # it too, so the HUD diff/trace surface is populated regardless of contract mode.
+    from agent_runtime.ticker import _record_handoff_observation
+    from agent_runtime.decision_schema import AgentDecision, DecisionType
+
+    ts = TaskStore()
+    task = make_task_with_id("task_legacy_observe")
+    task.affected_repos = []
+    task.current_stage_id = "implement"
+    ts.create(task)
+    run = RunStore().open_run("dev", task.id, stage_id="implement")
+    decision = AgentDecision(
+        type=DecisionType.REQUEST_TEST_RUN,
+        summary="Legacy no-edit delivery via gate request.",
+        rationale="Rollback path: dev requests the authoritative gate.",
+        payload={"stage_id": "implement", "commands": ["flutter analyze"]},
+    )
+
+    _record_handoff_observation(
+        task,
+        decision,
+        run=run,
+        actor="dev",
+        proof_store=ProofStore(),
+        command_workdir=None,
+        task_store=ts,
+    )
+
+    observations = (ts.get(task.id).harness_self_heal or {}).get("stage_observations") or {}
+    assert "implement" in observations
+    assert observations["implement"]["source"] == "harness_observed_handoff"
+
+
+def test_observed_trace_requirement_rejects_handoff_without_agent_tool_trace(isolate_agent_runtime_root):
+    task = make_task_with_id("task_observed_required")
+    task.current_stage_id = "implement"
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title="Observed lane", objective="Require observed proof."),
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Implement",
+                objective="Run a real self-test before handoff.",
+                owner="dev",
+                repo="EterniaLauncher",
+                kind="proof_only",
+                status=StageStatus.IMPLEMENTING,
+                proof_gate={
+                    "required": True,
+                    "minimum_status": "passed",
+                    "required_proof_types": ["test_run"],
+                    "observed_lane_required": True,
+                    "observed_lane_requirement": "agent_tool_trace required",
+                },
+            )
+        ],
+    )
+    run = RunStore().open_run("dev", task.id, stage_id="implement")
+    decision = AgentDecision(
+        type=DecisionType.PROPOSE_PATCH,
+        summary="handoff",
+        rationale="done",
+        payload={"stage_id": "implement"},
+    )
+    proofs = ProofStore()
+
+    with pytest.raises(DecisionPayloadInvalid, match="observed agent_tool_trace proof required"):
+        _validate_observed_trace_requirement(task, decision, run=run, proof_store=proofs)
+
+    proofs.attach(
+        Proof(
+            id="proof_observed_live",
+            task_id=task.id,
+            stage_id="implement",
+            type=ProofType.TEST_RUN,
+            title="Observed self-test",
+            path_or_value="self_tests/task/selftest.json",
+            created_by="dev",
+            created_at=now(),
+            metadata={"source": "agent_tool_trace", "run_id": run.id, "status": "passed"},
+            redaction_status="safe",
+        )
+    )
+
+    _validate_observed_trace_requirement(task, decision, run=run, proof_store=proofs)
 
 
 def test_request_test_run_allows_typed_current_stage_when_legacy_current_stage_is_stale():
@@ -506,6 +676,169 @@ def make_task_with_id(task_id: str):
     return task
 
 
+def test_assignment_spec_exact_goal_proof_targets_outrank_stage_plan():
+    from agent_runtime.ticker import _assignment_spec_for_action
+
+    task = make_task_with_id("task_exact_proof_assignment")
+    task.state = TaskState.RUNNING
+    task.description = "Write docs. Exact proof: `echo e2e-trust-probe`; no Flutter tests."
+    task.affected_repos = ["EterniaLauncher"]
+    task.current_stage_id = "implement"
+    task.stages = [
+        TaskStage(
+            id="implement",
+            title="Launcher Implementation",
+            objective="Patch launcher docs.",
+            status=StageStatus.IMPLEMENTING,
+            test_plan=["flutter analyze lib/features/mission_control", "flutter test test/features/mission_control"],
+        )
+    ]
+
+    spec = _assignment_spec_for_action(
+        HarnessAction(HarnessActionType.RUN_SLOT, task.id, slot_id="dev"),
+        task,
+        persona_id="dev",
+    )
+
+    assert spec.proof_targets == ["echo e2e-trust-probe"]
+
+
+def test_assignment_spec_exact_prose_goal_proof_targets_outrank_stage_plan():
+    from agent_runtime.ticker import _assignment_spec_for_action
+
+    task = make_task_with_id("task_exact_prose_proof_assignment")
+    task.state = TaskState.RUNNING
+    task.description = (
+        "Write docs/scratch/e2e_trust_probe.md. "
+        "The final Harness-owned command proof must run exactly: echo e2e-trust-probe. "
+        "Do not run Flutter analyze/tests."
+    )
+    task.affected_repos = ["EterniaLauncher"]
+    task.current_stage_id = "implement"
+    task.stages = [
+        TaskStage(
+            id="implement",
+            title="Launcher Implementation",
+            objective="Patch launcher docs.",
+            status=StageStatus.IMPLEMENTING,
+            test_plan=["flutter analyze lib/features/mission_control", "flutter test test/features/mission_control"],
+        )
+    ]
+
+    spec = _assignment_spec_for_action(
+        HarnessAction(HarnessActionType.RUN_SLOT, task.id, slot_id="dev"),
+        task,
+        persona_id="dev",
+    )
+
+    assert spec.proof_targets == ["echo e2e-trust-probe"]
+
+
+def test_assignment_spec_bundle_proof_targets_outrank_stage_plan(isolate_agent_runtime_root):
+    from agent_runtime.ticker import _assignment_spec_for_action
+
+    task = make_task_with_id("task_bundle_proof_assignment")
+    task.state = TaskState.RUNNING
+    task.current_stage_id = "implement"
+    task.stages = [
+        TaskStage(
+            id="implement",
+            title="Harness Implementation",
+            objective="Patch harness docs.",
+            status=StageStatus.IMPLEMENTING,
+            test_plan=["python -m pytest tests/agent_runtime -q"],
+        )
+    ]
+    bundle = RepoBundle(
+        id="bundle_harness",
+        task_id=task.id,
+        repo="hermes-agent",
+        owner_persona_id="dev",
+        state="assigned",
+        title="Harness bundle",
+        objective="Patch harness docs.",
+        stage_ids=["implement"],
+        proof_targets=["python -m pytest tests/agent_runtime/test_stream.py -q"],
+        created_at=now(),
+        updated_at=now(),
+    )
+    RepoBundleStore().update(bundle)
+
+    spec = _assignment_spec_for_action(
+        HarnessAction(HarnessActionType.RUN_SLOT, task.id, slot_id="dev"),
+        task,
+        persona_id="dev",
+        repo_bundle_id=bundle.id,
+    )
+
+    assert spec.proof_targets == ["python -m pytest tests/agent_runtime/test_stream.py -q"]
+
+
+def test_assignment_spec_carries_upstream_handoff_steer_to_receiver_chat(isolate_agent_runtime_root):
+    from agent_runtime.context_builder import build_context
+    from agent_runtime.persona_assignments import PersonaAssignmentStore
+    from agent_runtime.ticker import _assignment_spec_for_action
+
+    task = make_task_with_id("task_handoff_steer_assignment")
+    task.state = TaskState.RUNNING
+    task.current_stage_id = "qa_release"
+    task.proof_ids = ["proof_impl_gate"]
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title="Handoff steer", objective="Verify the receiver gets upstream context."),
+        current_stage_id="qa_release",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Implementation",
+                objective="Patch the scoped file.",
+                owner="dev",
+                repo="hermes-agent",
+                kind="implementation",
+                status=StageStatus.PASSED,
+                proof_ids=["proof_impl_gate"],
+            ),
+            MissionPlanStage(
+                id="qa_release",
+                title="QA Release",
+                objective="Verify the implementation proof.",
+                owner="qa",
+                owner_slot="qa",
+                repo="hermes-agent",
+                kind="qa_verdict",
+                status=StageStatus.READY,
+            ),
+        ],
+    )
+    runs = RunStore()
+    dev_run = runs.open_run("dev", task.id, stage_id="implement")
+    runs.close_run(
+        dev_run.id,
+        state=RunState.COMPLETED,
+        final_decision={"type": "hand_off", "summary": "Changed the scoped file and ran focused proof."},
+    )
+
+    spec = _assignment_spec_for_action(
+        HarnessAction(HarnessActionType.RUN_SLOT, task.id, slot_id="qa", stage_id="qa_release"),
+        task,
+        persona_id="qa",
+    )
+
+    assert "Upstream handoff steer:" in spec.message
+    assert "from: dev / stage implement / decision hand_off" in spec.message
+    assert "proof_refs: proof_impl_gate" in spec.message
+    assert "emit qa_verdict" in spec.message
+
+    assignment = PersonaAssignmentStore().create_or_resume(spec)
+    qa_run = runs.open_run("qa", task.id, stage_id="qa_release")
+    qa_run.progress = {"assignment_id": assignment.id}
+    runs.update(qa_run)
+    hud = build_context(task, qa_run).mission_hud
+
+    current_assignment = hud["agent_hud"]["current_assignment"]
+    assert current_assignment["assignment_message"] == spec.message
+    assert "Upstream handoff steer:" in current_assignment["assignment_message"]
+
+
 def attach_blueprint(task: Task, blueprint_id: str, bindings: dict[str, str]) -> Task:
     bp = BlueprintStore().get(blueprint_id)
     task.mission_plan = instantiate_blueprint(bp, goal=task.description or task.title, bindings=bindings)
@@ -573,7 +906,7 @@ def test_tick_persists_active_run_provider_model_metadata_before_runtime_call():
     assert runtime.llm_seen["provider"] == "openai-codex"
     assert runtime.llm_seen["model"] == "gpt-5.5"
     assert runtime.llm_seen["retry_attempt"] == 1
-    assert runtime.llm_seen["retry_max_attempts"] == 3
+    assert runtime.llm_seen["retry_max_attempts"] == 1
 
 
 def test_tick_uses_persona_specific_live_budget_for_dev_runs():
@@ -719,14 +1052,19 @@ def test_blueprint_tick_runs_slot_collects_proof_and_completes():
     assert saved.proof_ids
 
 
-def test_invalid_persona_output_opens_incident_and_routes_to_intervention():
+def test_invalid_persona_output_closes_incident_without_intervention_loop():
     ts=TaskStore(); ts.create(make_task())
     engine=TickEngine(task_store=ts, persona_runtime=BadRuntime())
     res=engine.tick_once()
     assert not res.actions_taken[0].ok
     task = ts.get("task_1")
     assert task.state == TaskState.RUNNING
-    assert task.open_incident_ids == [engine.incident_store.list_open()[0].id]
+    assert task.open_incident_ids == []
+    assert engine.incident_store.list_open() == []
+    incidents = engine.incident_store.list_all()
+    assert len(incidents) == 1
+    assert incidents[0].kind == "model_invalid_output"
+    assert incidents[0].closed_at is not None
 
 
 def test_live_dev_tick_emits_preflight_started_before_dispatch():
@@ -925,11 +1263,10 @@ class DuplicateScreenshotThenVerdictRuntime:
                 },
             )
         return AgentDecision(
-            type=DecisionType.REPORT_QA_VERDICT,
+            type=DecisionType.QA_VERDICT,
             summary="QA approved existing visual proof",
             rationale="The existing command and screenshot proof IDs cover the implementation claim.",
             payload={
-                "review_scope": "implementation",
                 "verdict": "approved",
                 "proof_ids": list(ctx.proof_ids),
                 "findings": [],
@@ -1023,7 +1360,7 @@ def test_duplicate_visual_request_repairs_to_verdict_instead_of_recapturing():
     run = runs.list_for_task(task.id)[0]
     assert run.state == RunState.COMPLETED
     assert run.llm["schema_repair_attempts"] == 1
-    assert run.final_decision["type"] == "report_qa_verdict"
+    assert run.final_decision["type"] == "qa_verdict"
     saved = ts.get(task.id)
     assert saved.state == TaskState.RUNNING
     assert saved.stages[0].status == StageStatus.PASSED
@@ -1070,9 +1407,11 @@ def test_repeated_invalid_packet_contract_escalates_after_bounded_repair():
     assert run.error["class"] == "DecisionPayloadInvalid"
     assert run.error["message"] == "delivery.next_owner is invalid"
     assert run.llm["validation_status"] == "invalid"
-    open_incidents = incidents.list_open()
-    assert len(open_incidents) == 1
-    assert open_incidents[0].summary == "delivery.next_owner is invalid"
+    assert incidents.list_open() == []
+    all_incidents = incidents.list_all()
+    assert len(all_incidents) == 1
+    assert all_incidents[0].summary == "delivery.next_owner is invalid"
+    assert all_incidents[0].closed_at is not None
     assert ts.get("task_1").state == TaskState.RUNNING
 
 
@@ -1180,7 +1519,8 @@ def test_dev_missing_proof_handoff_routes_to_neko_repair_instead_of_dead_skip():
     assert not res.actions_taken[0].ok
     task = ts.get("task_1")
     assert task.state == TaskState.RUNNING
-    assert task.open_incident_ids == [engine.incident_store.list_open()[0].id]
+    assert task.open_incident_ids == []
+    assert engine.incident_store.list_open() == []
     assert engine.state_machine.next_action(task).type == HarnessActionType.RUN_SLOT
 
 
@@ -1209,22 +1549,24 @@ def test_missing_provider_dependency_opens_runtime_dependency_incident():
     assert ts.get("task_1").state == TaskState.CREATED
 
 
-def test_transient_provider_ttfb_retries_once_and_records_attempt_visibility():
+def test_transient_provider_ttfb_records_single_attempt_incident():
     ts = TaskStore(); ts.create(make_task())
     runtime = TransientProviderRuntime()
     engine = TickEngine(task_store=ts, persona_runtime=runtime)
 
     res = engine.tick_once()
 
-    assert res.actions_taken[0].ok
-    assert runtime.calls == 2
-    assert engine.incident_store.list_open() == []
-    assert ts.get("task_1").state == TaskState.RUNNING
+    assert not res.actions_taken[0].ok
+    assert runtime.calls == 1
+    incidents = engine.incident_store.list_open()
+    assert len(incidents) == 1
+    assert incidents[0].kind == "provider_failure"
+    assert ts.get("task_1").state == TaskState.CREATED
     runs = sorted(engine.run_store.list_for_task("task_1"), key=lambda run: run.started_at)
-    assert [run.state.value for run in runs] == ["failed", "completed"]
-    assert runs[0].error["retryable"] is True
-    assert runs[1].llm["retry_attempt"] == 2
-    assert res.actions_taken[0].payload["attempts"] == 2
+    assert [run.state.value for run in runs] == ["failed"]
+    assert runs[0].error["retryable"] is False
+    assert runs[0].llm["retry_attempt"] == 1
+    assert res.actions_taken[0].payload["attempts"] == 1
 
 
 def test_tick_skips_mission_with_open_incident():
@@ -1240,7 +1582,7 @@ def test_tick_skips_mission_with_open_incident():
     assert runtime.personas == []
 
 
-def test_run_until_settled_allows_neko_to_repair_blocked_incident():
+def test_run_until_settled_closes_model_invalid_output_without_neko_loop():
     ts = TaskStore()
     task = make_task()
     task.state = TaskState.BLOCKED
@@ -1252,11 +1594,14 @@ def test_run_until_settled_allows_neko_to_repair_blocked_incident():
 
     res = engine.run_until_settled(task_id="task_1", max_actions=1)
 
-    assert res.actions_taken[0].ok
-    assert res.stop_reason == "max_actions"
+    assert res.actions_taken == []
+    assert res.stop_reason == "no_eligible_action"
     assert incidents.list_open() == []
+    assert incidents.get("inc_1").closed_at is not None
     assert ts.get("task_1").state == TaskState.RUNNING
     assert ts.get("task_1").open_incident_ids == []
+    closed_events = [event for event in EventLog().for_task("task_1", limit=0) if event.type == "incident.closed"]
+    assert closed_events[-1].payload["reason"] == "contract_simplification_normalized_model_invalid_output"
 
 
 def test_run_until_settled_stops_on_open_environment_blocker_without_neko_retry():
@@ -1342,7 +1687,7 @@ def test_run_until_settled_does_not_treat_blocked_task_as_boundary_when_recovery
     assert engine._settled_boundary(task_id="task_1") is None
 
 
-def test_neko_incident_steering_receives_open_incident_details():
+def test_model_invalid_output_incident_closes_before_neko_steering():
     ts = TaskStore()
     task = make_task()
     task.state = TaskState.BLOCKED
@@ -1354,8 +1699,11 @@ def test_neko_incident_steering_receives_open_incident_details():
 
     res = TickEngine(task_store=ts, incident_store=incidents, persona_runtime=runtime).tick_once(task_id="task_1")
 
-    assert res.actions_taken[0].ok
-    assert runtime.incident_records == [{"id": "inc_1", "kind": "model_invalid_output", "summary": "proof_ids are required", "run_id": "run_bad"}]
+    assert res.actions_taken == []
+    assert runtime.incident_records is None
+    assert incidents.list_open() == []
+    assert incidents.get("inc_1").closed_at is not None
+    assert ts.get("task_1").open_incident_ids == []
 
 
 def test_tick_skips_task_with_existing_active_run():
@@ -1553,6 +1901,21 @@ class NormalFlowPatchRuntime:
     def run_tick(self, persona, ctx, *, run):
         self.contexts.append(ctx)
         from agent_runtime.decision_schema import AgentDecision, DecisionType
+
+        # Mirror production `_attach_repo_baseline`: capture a per-run baseline so
+        # the harness handoff-diff observation attributes only this run's delta and
+        # excludes any pre-existing dirt in the resolved product repo. Without this
+        # the tamper check (`_handoff_diff_weakens_tests`) reads the developer's
+        # live working tree and the test becomes non-deterministic (a stray
+        # uncommitted assertion edit in the product repo would trip the gate).
+        try:
+            from agent_runtime.repo_context import capture_repo_baseline, command_workdir_for_task
+            from agent_runtime.store import RunStore
+
+            run.progress = {**(run.progress or {}), "repo_baseline": capture_repo_baseline(command_workdir_for_task(ctx.task))}
+            RunStore().update(run)
+        except Exception:
+            pass
 
         return AgentDecision(
             type=DecisionType.PROPOSE_PATCH,
@@ -1903,7 +2266,7 @@ def test_normal_worker_flow_auto_runs_final_gate_after_patch_delivery():
 
     assert res.actions_taken[0].ok
     assert runtime.contexts[0].mission_hud["decision_contract_mode"] == "normal_worker_flow"
-    assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "deliver_patch"
+    assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "hand_off"
     assert "dev.request_test_run" not in runtime.contexts[0].mission_hud["decision_shape_index"]
     assert len(runner.calls) == 1
     assert runner.calls[0]["stage_id"] == "mc_terminal_dm_bubble_rows"
@@ -1917,7 +2280,7 @@ def test_normal_worker_flow_auto_runs_final_gate_after_patch_delivery():
     proof = proofs.get(stored.proof_ids[0])
     assert proof.metadata["proof_intent"] == "auto_final_gate_after_delivery"
     events = EventLog().for_task("task_1", limit=0)
-    assert any(event.type == "patch.proposed" and event.payload.get("normal_worker_flow") is True for event in events)
+    assert any(event.type == "delivery.intent" and event.payload.get("normal_worker_flow") is True for event in events)
     assert any(event.type == "proof.gate_checked" and event.payload.get("gate_source") == "auto_after_delivery" for event in events)
 
 
@@ -1976,6 +2339,96 @@ def test_normal_worker_flow_auto_runs_repo_default_final_gate_when_stage_test_pl
     assert stored.state == TaskState.RUNNING
     assert stored.stages[0].status == StageStatus.READY_FOR_QA
     assert stored.proof_ids == ["proof_auto_task_1_backend_implementation"]
+
+
+def test_normal_worker_flow_auto_runs_handoff_exact_final_gate_before_launcher_default():
+    ts = TaskStore()
+    task = make_task()
+    task.title = "E2E trust probe exact-gate"
+    task.description = (
+        "Create docs/scratch/e2e_trust_probe.md in the Launcher repo. "
+        "Exact proof command: echo e2e-trust-probe. Do not run Flutter analyze/tests."
+    )
+    task.state = TaskState.RUNNING
+    task.affected_repos = ["EterniaLauncher"]
+    task.current_stage_id = "implement"
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title="E2E trust probe exact-gate", objective="Patch one Launcher scratch file."),
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Launcher Implementation",
+                objective="Create the requested scratch proof file and deliver with exact proof.",
+                owner="dev",
+                repo="EterniaLauncher",
+                kind="implementation",
+                status=StageStatus.IMPLEMENTING,
+                requires_product_edit=True,
+            )
+        ],
+    )
+    task.stages = [
+        TaskStage(
+            id="implement",
+            title="Launcher Implementation",
+            objective="Create docs/scratch/e2e_trust_probe.md.",
+            status=StageStatus.IMPLEMENTING,
+            affected_paths=["docs/scratch/e2e_trust_probe.md"],
+            acceptance_criteria=["Harness runs only echo e2e-trust-probe as the final command proof."],
+            test_plan=[],
+            created_at=task.created_at,
+            updated_at=task.updated_at,
+        )
+    ]
+    ts.create(task)
+    EventLog().append(
+        Event(
+            ts=now(),
+            type="packet.recorded",
+            task_id=task.id,
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={
+                "packet_id": "packet_handoff_launcher_exact",
+                "packet_type": "handoff_packet",
+                "stage_id": "implement",
+                "body": {
+                    "packet_kind": "fresh_scope",
+                    "mission_phase": "scope_route",
+                    "handoff_mode": "single_specialist",
+                    "target_owner": "dev",
+                    "target_repo": "EterniaLauncher",
+                    "proof_gate": {
+                        "required": True,
+                        "commands": ["echo e2e-trust-probe"],
+                        "forbidden_commands": ["flutter analyze", "flutter test"],
+                        "required_proof_types": ["test_run"],
+                        "minimum_status": "passed",
+                        "visual_required": False,
+                    },
+                },
+            },
+        )
+    )
+    proofs = ProofStore()
+    runtime = NormalFlowPatchRuntime()
+    runner = CapturingAutoGateProofRunner(proofs)
+    cfg = AgentRuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=True))
+    engine = TickEngine(task_store=ts, proof_store=proofs, persona_runtime=runtime, proof_runner=runner, config=cfg)
+
+    res = engine.tick_once(task_id=task.id)
+
+    assert res.actions_taken[0].ok
+    assert len(runner.calls) == 1
+    assert runner.calls[0]["stage_id"] == "implement"
+    assert runner.calls[0]["commands"] == ["echo e2e-trust-probe"]
+    assert all("flutter " not in command for command in runner.calls[0]["commands"])
+    assert runner.calls[0]["proof_intent"] == "auto_final_gate_after_delivery"
+    stored = ts.get(task.id)
+    assert stored.state == TaskState.RUNNING
+    assert stored.stages[0].status == StageStatus.READY_FOR_QA
+    assert stored.proof_ids == ["proof_auto_task_1_implement"]
 
 
 def test_normal_worker_flow_reuses_existing_passed_final_gate_after_handoff_repair():
@@ -2176,7 +2629,7 @@ def test_normal_worker_flow_no_edit_investigation_delivery_advances_to_qa_withou
     assert stored.state == TaskState.RUNNING
     assert stored.mission_plan.stages[0].status == StageStatus.PASSED
     assert engine.state_machine.next_action(stored).type == HarnessActionType.RUN_SLOT
-    assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "deliver_findings"
+    assert runtime.contexts[0].mission_hud["primary_worker_action"]["action_id"] == "hand_off"
 
 
 def test_run_until_settled_drives_neko_dev_qa_and_deterministic_complete():
@@ -2465,6 +2918,50 @@ def test_settled_boundary_allows_neko_scope_recovery_for_read_search_budget_loop
     assert engine._settled_boundary(task_id="task_1") is None
 
 
+def test_settled_boundary_untargeted_daemon_allows_neko_incident_recovery(isolate_agent_runtime_root):
+    """An UNTARGETED daemon (task_id=None) must apply the per-task
+    Neko-owns-recovery carve-out instead of hard-stopping on any open
+    incident (observed live: settle_stop_reason=incident_opened, actions=0
+    across daemon loops while a running task waited on adjudication)."""
+
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    task.current_stage_id = "backend_implementation"
+    task.open_incident_ids = ["inc_untargeted"]
+    ts.create(task)
+    waiting = runs.open_run("backend_dev", "task_1", stage_id="backend_implementation", session_id="session_budget")
+    waiting.progress = {
+        "loop_warning": "read_search_without_patch_threshold",
+        "read_search_count": 6,
+        "read_search_limit": 6,
+        "patch_count": 0,
+        "proof_count": 0,
+    }
+    waiting.state = RunState.WAITING_ON_APPROVAL
+    waiting.error = {"type": "run_budget_exceeded"}
+    runs.update(waiting)
+    incidents.open(
+        Incident(
+            id="inc_untargeted",
+            task_id="task_1",
+            run_id=waiting.id,
+            kind="run_budget_exceeded",
+            summary="budget",
+            detail_path=None,
+            opened_at=now(),
+        )
+    )
+    engine = TickEngine(task_store=ts, run_store=runs, incident_store=incidents, persona_runtime=CapturingFailureRuntime())
+
+    # The same fixture stops the tick when targeted at a task with a hard
+    # environment blocker; here the untargeted boundary must proceed so the
+    # incident reaches Neko adjudication.
+    assert engine._settled_boundary(task_id=None) is None
+
+
 def test_run_until_settled_honors_max_actions_without_runaway_loop():
     ts = TaskStore()
     ts.create(make_task())
@@ -2591,6 +3088,29 @@ class RequestTestThenHandoffRuntime:
         )
 
 
+class RequestTestThenQaVerdictRuntime:
+    def run_tick(self, persona, ctx, *, run):
+        from agent_runtime.decision_schema import AgentDecision, DecisionType
+
+        if persona.id == "qa":
+            return AgentDecision(
+                type=DecisionType.QA_VERDICT,
+                summary="QA approved attached proof",
+                rationale="Implementation proof is attached and passed.",
+                payload={
+                    "verdict": "approved",
+                    "proof_ids": list(ctx.proof_ids),
+                    "findings": ["command proof passed"],
+                },
+            )
+        return AgentDecision(
+            type=DecisionType.REQUEST_TEST_RUN,
+            summary="collect smoke proof",
+            rationale="Need deterministic proof before QA.",
+            payload={"stage_id": "implement", "commands": ["printf 'smoke-ok\\n'"]},
+        )
+
+
 def test_tick_collects_command_proof_for_request_test_run(tmp_path):
     ts = TaskStore()
     task = attach_blueprint(
@@ -2618,6 +3138,42 @@ def test_tick_collects_command_proof_for_request_test_run(tmp_path):
     assert proof.type.value == "test_run"
     assert proof.metadata["exit_code"] == 0
     assert proof.metadata["commands_requested"] == 1
+
+
+def test_tick_attaches_qa_verdict_proof_and_closes_blueprint(tmp_path):
+    ts = TaskStore()
+    task = attach_blueprint(
+        make_task(),
+        "two_agent_build_verify",
+        {
+            "builder": "persona:dev",
+            "verifier": "persona:qa",
+        },
+    )
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    engine = TickEngine(
+        task_store=ts,
+        persona_runtime=RequestTestThenQaVerdictRuntime(),
+    )
+    engine.command_workdir = tmp_path
+
+    result = engine.run_until_settled(task_id="task_1", max_actions=4)
+
+    assert result.stop_reason == "task_terminal"
+    assert [action.payload.get("decision") for action in result.actions_taken[:2]] == [
+        "request_test_run",
+        "qa_verdict",
+    ]
+    saved = ts.get("task_1")
+    assert saved.state == TaskState.DONE
+    assert saved.current_stage_id is None
+    assert graph_stage_status(saved, "implement") == StageStatus.PASSED
+    assert graph_stage_status(saved, "verify") == StageStatus.PASSED
+    proof_types = [engine.proof_store.get(proof_id).type for proof_id in saved.proof_ids]
+    assert proof_types == [ProofType.TEST_RUN, ProofType.QA_VERDICT]
+    verify_stage = next(stage for stage in saved.mission_plan.stages if stage.id == "verify")
+    assert verify_stage.proof_ids == [saved.proof_ids[-1]]
 
 
 def test_tick_injects_autonomy_packet_before_persona_runtime():
@@ -2696,7 +3252,8 @@ def test_tick_collects_launcher_stage_command_proof_in_launcher_repo_when_scope_
     backend_repo.mkdir()
     launcher_repo.mkdir()
     ts = TaskStore()
-    task = make_task_with_id("task_launcher_stage_scope")
+    task_id = f"task_launcher_stage_scope_{uuid.uuid4().hex[:8]}"
+    task = make_task_with_id(task_id)
     task.state = TaskState.RUNNING
     task.current_stage_id = "launcher_contract_smoke"
     task.affected_repos = [str(backend_repo), str(launcher_repo)]
@@ -2715,16 +3272,16 @@ def test_tick_collects_launcher_stage_command_proof_in_launcher_repo_when_scope_
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestLauncherStageTestRunRuntime())
 
-    res = engine.tick_once()
+    res = engine.tick_once(task_id=task_id)
 
     assert res.actions_taken[0].ok
-    saved = ts.get("task_launcher_stage_scope")
+    saved = ts.get(task_id)
     proof = engine.proof_store.get(saved.proof_ids[0])
     from agent_runtime import paths
 
     artifact = paths.store_root() / proof.path_or_value
     text = artifact.read_text(encoding="utf-8")
-    assert saved.proof_ids[0].startswith("test_task_launcher_stage_scope_launcher_contract_smoke_")
+    assert saved.proof_ids[0].startswith(f"test_{task_id}_launcher_contract_smoke_")
     assert "workdir: <workdir:EterniaLauncher>" in text
     assert "launcher-proof-ok" in text
     assert proof.metadata["exit_code"] == 0
@@ -2760,7 +3317,8 @@ def test_tick_collects_backend_stage_command_proof_in_backend_repo_despite_launc
     backend_repo.mkdir()
     launcher_repo.mkdir()
     ts = TaskStore()
-    task = make_task_with_id("task_backend_stage_scope")
+    task_id = f"task_backend_stage_scope_{uuid.uuid4().hex[:8]}"
+    task = make_task_with_id(task_id)
     task.state = TaskState.RUNNING
     task.current_stage_id = "backend_no_op_route_proof"
     task.affected_repos = [str(backend_repo), str(launcher_repo)]
@@ -2779,10 +3337,10 @@ def test_tick_collects_backend_stage_command_proof_in_backend_repo_despite_launc
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestBackendStageTestRunRuntime())
 
-    res = engine.tick_once()
+    res = engine.tick_once(task_id=task_id)
 
     assert res.actions_taken[0].ok
-    saved = ts.get("task_backend_stage_scope")
+    saved = ts.get(task_id)
     proof = engine.proof_store.get(saved.proof_ids[0])
     from agent_runtime import paths
 
@@ -2791,6 +3349,31 @@ def test_tick_collects_backend_stage_command_proof_in_backend_repo_despite_launc
     assert "workdir: <workdir:EterniaBackend>" in text
     assert proof.metadata["workdir_label"] == "EterniaBackend"
     assert proof.metadata["exit_code"] == 0
+
+
+def test_command_proof_scope_prefers_typed_stage_repo_over_task_repo_list():
+    task = make_task_with_id("task_stage_repo_authority")
+    task.affected_repos = ["EterniaBackend"]
+    task.current_stage_id = "implement"
+    task.mission_plan = MissionPlan(
+        mission_intent=MissionIntent(title="Cross-stack", objective="Launcher consumes backend contract."),
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Implementation",
+                objective="Consume the no-change backend contract.",
+                owner="dev",
+                repo="EterniaLauncher",
+                kind="implementation",
+                status=StageStatus.IMPLEMENTING,
+            )
+        ],
+    )
+
+    from agent_runtime.ticker import _command_proof_repo_scope
+
+    assert _command_proof_repo_scope(task, actor="dev", stage_id="implement") == "EterniaLauncher"
 
 
 class MismatchedWorkdirProofRunner:
@@ -3195,7 +3778,9 @@ def test_tick_collects_command_proof_in_harness_repo_alias_when_no_explicit_work
     artifact = paths.store_root() / proof.path_or_value
     text = artifact.read_text(encoding="utf-8")
     repo_root = Path(__file__).resolve().parents[2]
-    assert f"workdir: <workdir:{repo_root.name}>" in text
+    assert f"workdir: <workdir:{repo_root.name}_" in text
+    assert proof.metadata["workdir_is_harness_worktree"] is True
+    assert proof.metadata["workdir_head_state"] == "detached"
     assert proof.metadata["exit_code"] == 0
 
 
@@ -3217,7 +3802,9 @@ def test_tick_collects_command_proof_in_hermes_agent_alias_when_no_explicit_work
     artifact = paths.store_root() / proof.path_or_value
     text = artifact.read_text(encoding="utf-8")
     repo_root = Path(__file__).resolve().parents[2]
-    assert f"workdir: <workdir:{repo_root.name}>" in text
+    assert f"workdir: <workdir:{repo_root.name}_" in text
+    assert proof.metadata["workdir_is_harness_worktree"] is True
+    assert proof.metadata["workdir_head_state"] == "detached"
     assert proof.metadata["exit_code"] == 0
 
 
@@ -3944,6 +4531,155 @@ def test_budget_approval_continuation_gets_incremental_token_headroom():
     assert retry.actions_taken[0].ok
     assert runtime.seen_session_ids == [("dev", "session_budget")]
     assert runtime.seen_run_limits == [("dev", "session_budget", 200)]
+
+
+def test_mission_token_ceiling_blocks_new_run_and_logs_event(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    prior = runs.open_run("dev", "task_1", stage_id=None)
+    prior.llm = {"total_tokens": 101}
+    runs.update(prior)
+    runs.close_run(prior.id, state=RunState.COMPLETED, final_decision={"type": "hand_off"})
+
+    result = TickEngine(
+        task_store=ts,
+        run_store=runs,
+        incident_store=incidents,
+        persona_runtime=RuntimeMustNotRun(),
+        config=AgentRuntimeConfig(mission_max_total_tokens=100),
+    ).tick_once(task_id="task_1")
+
+    action = result.actions_taken[0]
+    assert action.ok is False
+    assert action.payload["budget_kind"] == "mission"
+    assert len(runs.list_for_task("task_1")) == 1
+    incident = incidents.list_open()[0]
+    assert incident.kind == "mission_budget_exceeded"
+    assert incident.id in ts.get("task_1").open_incident_ids
+    assert ts.get("task_1").state == TaskState.BLOCKED
+    events = EventLog().for_task("task_1", limit=10)
+    assert any(event.type == "mission_budget_exceeded" and event.payload["limit"] == 100 for event in events)
+
+
+def test_mission_budget_incident_dedupes_across_ticks(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    prior = runs.open_run("dev", "task_1", stage_id=None)
+    prior.llm = {"total_tokens": 101}
+    runs.update(prior)
+    runs.close_run(prior.id, state=RunState.COMPLETED, final_decision={"type": "hand_off"})
+    engine = TickEngine(
+        task_store=ts,
+        run_store=runs,
+        incident_store=incidents,
+        persona_runtime=RuntimeMustNotRun(),
+        config=AgentRuntimeConfig(mission_max_total_tokens=100),
+    )
+
+    first = engine.tick_once(task_id="task_1")
+    assert len(first.incidents_opened) == 1
+
+    # Re-arm the task the way live re-entry does and tick again: the open
+    # incident must be reused, never re-minted.
+    rearmed = ts.get("task_1")
+    rearmed.state = TaskState.RUNNING
+    ts.update(rearmed, actor="test", reason="re-arm")
+    second = engine.tick_once(task_id="task_1")
+    assert second.incidents_opened == []
+
+    block = {
+        "kind": "mission",
+        "event_type": "mission_budget_exceeded",
+        "summary": "Mission token budget exceeded: total_tokens=101/100",
+        "task_id": "task_1",
+        "persona_id": "dev",
+        "stage_id": None,
+        "total_tokens": 101,
+        "limit": 100,
+    }
+    incident, newly_opened = engine._open_runtime_budget_incident(ts.get("task_1"), block)
+    assert newly_opened is False
+
+    open_budget = [item for item in incidents.list_open() if item.kind == "mission_budget_exceeded"]
+    assert len(open_budget) == 1
+    assert open_budget[0].id == incident.id
+    events = [event for event in EventLog().for_task("task_1", limit=50) if event.type == "mission_budget_exceeded"]
+    assert len(events) == 1
+
+
+def test_mission_budget_does_not_starve_neko_budget_adjudication(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    runtime = BudgetThenNekoApprovalRuntime()
+    engine = TickEngine(
+        task_store=ts,
+        run_store=runs,
+        incident_store=incidents,
+        persona_runtime=runtime,
+        config=AgentRuntimeConfig(mission_max_total_tokens=100),
+    )
+
+    engine.tick_once(task_id="task_1")
+    waiting = next(run for run in runs.list_for_task("task_1") if run.persona_id in {"dev", "backend_dev"})
+    assert waiting.state == RunState.WAITING_ON_APPROVAL
+    assert any(item.kind == "run_budget_exceeded" for item in incidents.list_open())
+    # Push the mission total over its ceiling: the adjudication slot must still
+    # run instead of deadlocking behind a mission_budget_exceeded incident.
+    waiting.llm = {"total_tokens": 500}
+    runs.update(waiting)
+
+    engine.tick_once(task_id="task_1")
+
+    assert "neko_supervisor" in runtime.seen
+    assert not [item for item in incidents.list_open() if item.kind == "mission_budget_exceeded"]
+    approved = runs.get(waiting.id)
+    assert approved.progress.get("approved_for_continuation") is True
+
+
+def test_swarm_token_hard_limit_blocks_new_run_and_logs_event(isolate_agent_runtime_root):
+    ts = TaskStore()
+    runs = RunStore()
+    incidents = IncidentStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    ts.create(task)
+    other = runs.open_run("dev", "task_other", stage_id=None)
+    other.llm = {"total_tokens": 150}
+    runs.update(other)
+    runs.close_run(other.id, state=RunState.COMPLETED, final_decision={"type": "hand_off"})
+
+    cfg = AgentRuntimeConfig(
+        mission_max_total_tokens=1_000,
+        swarm=SwarmConfig(enabled=True, global_token_hard_limit=100, global_token_soft_limit=50),
+    )
+    result = TickEngine(
+        task_store=ts,
+        run_store=runs,
+        incident_store=incidents,
+        persona_runtime=RuntimeMustNotRun(),
+        config=cfg,
+    ).tick_once(task_id="task_1")
+
+    action = result.actions_taken[0]
+    assert action.ok is False
+    assert action.payload["budget_kind"] == "swarm"
+    assert len(runs.list_for_task("task_1")) == 0
+    incident = incidents.list_open()[0]
+    assert incident.kind == "swarm_budget_exceeded"
+    events = EventLog().for_task("task_1", limit=10)
+    assert any(event.type == "swarm_budget_exceeded" and event.payload["total_tokens"] == 150 for event in events)
 
 
 def test_dev_continuation_carries_prior_stage_progress_flags():

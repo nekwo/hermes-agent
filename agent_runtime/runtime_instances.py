@@ -12,7 +12,6 @@ from .events import EventLog
 from .models import Event, GoalRuntimeInstance
 from .serde import from_jsonable, to_jsonable
 
-FOREGROUND_LANE = "foreground"
 BACKGROUND_LANE = "background"
 ACTIVE_STATE = "active"
 PARKED_STATE = "parked"
@@ -57,16 +56,6 @@ _ALLOWED_TRANSITIONS = {
 class GoalRuntimeInstanceStore:
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
-
-    def create_foreground(self, *, task_id: str, started_by: str = "cli") -> GoalRuntimeInstance:
-        # Deprecated compatibility path: every goal is now a lane, so activating
-        # a goal must not park any other open goal.
-        existing = self.active_for_task(task_id)
-        if existing:
-            instance = replace(existing, state="running", updated_at=now(), parked_reason=None, state_reason="lane reactivated")
-            self.save(instance, event_type="lane.activated", reason="reactivated existing lane")
-            return instance
-        return self.create_lane(task_id=task_id, started_by=started_by, state="running")
 
     def create_lane(
         self,
@@ -217,6 +206,33 @@ class GoalRuntimeInstanceStore:
         return None
 
     def active_foreground(self) -> GoalRuntimeInstance | None:
+        """Most recent foreground lane actively driving an OPEN task.
+
+        The lane registered at goal-create is the operator's declared target.
+        An untargeted daemon start adopts it instead of scanning the stale
+        open-task backlog — the lane IS the targeting directive.
+        """
+
+        from .states import TaskState
+        from .store import NotFound, TaskStore
+
+        active_states = {ACTIVE_STATE, WAITING_STATE, "queued", "activating", "running"}
+        task_store = TaskStore(event_log=self.event_log)
+        for item in reversed(self.list_all()):
+            # Post lane-pivot, ``lane`` holds the instance id; production
+            # lane_kind + active state is what marks a live operator-declared lane.
+            if getattr(item, "lane_kind", "production") != "production" or item.state not in active_states:
+                continue
+            if not item.task_id:
+                continue
+            try:
+                task = task_store.get(item.task_id)
+            except NotFound:
+                continue
+            except Exception:
+                continue
+            if task.state in {TaskState.CREATED, TaskState.RUNNING}:
+                return item
         return None
 
 

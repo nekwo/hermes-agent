@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 
 import pytest
@@ -7,8 +8,8 @@ from hermes_time import now
 
 from agent_runtime import paths
 from agent_runtime.errors import AlreadyExists, NotFound
-from agent_runtime.events import EventLog
-from agent_runtime.models import AgentPersona, AgentRun, Incident, Proof, Task
+from agent_runtime.events import EventLog, compact_archived_task_events
+from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, Proof, Task
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.self_test_evidence import record_self_test_from_progress
 from agent_runtime.states import RunState, TaskState
@@ -34,6 +35,9 @@ def test_task_store_create_update_round_trip_and_records_events():
     store = TaskStore()
     task = store.create(make_task())
 
+    assert paths.goal_path("task_abc").exists()
+    assert not paths.legacy_task_path("task_abc").exists()
+
     apply_transition(task, TaskState.RUNNING, actor="pm", reason="triage")
     store.update(task, actor="pm", reason="triage")
 
@@ -41,6 +45,23 @@ def test_task_store_create_update_round_trip_and_records_events():
     events = EventLog().tail(10)
     assert [evt.type for evt in events] == ["task.created", "task.transition"]
     assert events[-1].payload == {"from": "created", "to": "running", "actor": "pm", "reason": "triage"}
+
+
+def test_task_store_dual_reads_legacy_tasks_directory(isolate_agent_runtime_root):
+    legacy = make_task("task_legacy", TaskState.BLOCKED)
+    store_module._write_model(paths.legacy_task_path(legacy.id), legacy)
+
+    store = TaskStore()
+
+    assert store.get("task_legacy").state == TaskState.BLOCKED
+    assert [task.id for task in store.list_all()] == ["task_legacy"]
+
+    legacy.state = TaskState.RUNNING
+    store.update(legacy, actor="test", reason="legacy compatibility")
+
+    assert paths.legacy_task_path("task_legacy").exists()
+    assert not paths.goal_path("task_legacy").exists()
+    assert store.get("task_legacy").state == TaskState.RUNNING
 
 
 def test_task_store_invalid_get_raises_not_found():
@@ -210,13 +231,52 @@ def test_archive_preserves_incidents_and_removes_live_blocker(tmp_path, monkeypa
 
     archive_dir = tmp_path / "runtime" / "deleted_archive" / result["archive_batch"]
     assert result["archived_tasks"][0]["incident_ids"] == ["inc_archive"]
-    assert (archive_dir / "incidents" / "inc_archive.json").exists()
+    archived_incident = archive_dir / "incidents" / "inc_archive.json"
+    assert archived_incident.exists()
+    archived_incident_data = json.loads(archived_incident.read_text(encoding="utf-8"))
+    assert archived_incident_data["closed_at"]
     assert (archive_dir / "incident_details" / "inc_archive.txt").exists()
     assert not paths.incident_path("inc_archive").exists()
     assert incident_store.list_open() == []
+    closed_event = [event for event in EventLog().tail(10) if event.type == "incident.closed"][-1]
+    assert closed_event.payload["reason"] == "task_archived"
     event = EventLog().tail(1)[0]
     assert event.type == "task.archived"
     assert event.payload["incident_count"] == 1
+
+
+def test_archive_writes_task_event_slice_and_compaction_preserves_unarchived_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    task_store = TaskStore()
+    task = make_task("task_done_events", TaskState.DONE)
+    task_store.create(task)
+    other = make_task("task_live_events", TaskState.RUNNING)
+    task_store.create(other)
+    log = EventLog()
+    log.append(Event(now(), "run.progress", task.id, "run_archived", "dev", {"phase": "proof", "step": "test", "status": "passed"}))
+    log.append(Event(now(), "run.progress", other.id, "run_live", "dev", {"phase": "proof", "step": "test", "status": "running"}))
+
+    result = task_store.archive(task.id, actor="cli", reason="cleanup terminal task")
+
+    archive_dir = tmp_path / "runtime" / "deleted_archive" / result["archive_batch"]
+    archived_task = result["archived_tasks"][0]
+    assert archived_task["event_count"] >= 2
+    archived_events = archive_dir / archived_task["events_path"]
+    assert archived_events.exists()
+    archived_lines = archived_events.read_text(encoding="utf-8").splitlines()
+    assert any('"task_id":"task_done_events"' in line for line in archived_lines)
+
+    dry = compact_archived_task_events(dry_run=True)
+    assert dry["removed_event_count"] == archived_task["event_count"]
+    assert paths.events_path().exists()
+    before_size = paths.events_path().stat().st_size
+    fixed = compact_archived_task_events(dry_run=False)
+    assert fixed["removed_event_count"] == archived_task["event_count"]
+    assert fixed["watermark_reset"] is True
+    assert paths.events_path().stat().st_size < before_size
+    remaining = paths.events_path().read_text(encoding="utf-8")
+    assert '"task_id":"task_live_events"' in remaining
+    assert '"task_id":"task_done_events"' in remaining  # archive tombstone stays live; archived rows were copied first.
 
 
 def test_archive_preserves_self_test_evidence(tmp_path, monkeypatch):

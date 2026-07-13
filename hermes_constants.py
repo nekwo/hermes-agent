@@ -223,6 +223,36 @@ def get_bundled_skills_dir(default: Path | None = None) -> Path:
     return get_hermes_home() / "skills"
 
 
+def get_shared_skills_dir(default: Path | None = None) -> Path:
+    """Return the canonical shared skills root every persona references.
+
+    This is the single physical skills directory that all persona-profiles
+    read/write and that realm sync publishes. It lives under the Hermes
+    *root* (beside ``profiles/``), not inside any one profile — so it is
+    shared across every persona AND addressed relative to the root, which
+    makes it portable across machines/OSes (no hard-coded ``~/.claude`` or
+    per-machine home path).
+
+    The default resolves the same way for every profile: because
+    ``get_default_hermes_root()`` maps ``<root>/profiles/<name>`` back to
+    ``<root>``, ``alice``, ``neko``, ``base``, … all compute the *same*
+    ``<root>/shared/skills`` from their own ``HERMES_HOME`` with no env
+    injection or per-profile config. Cross-machine, each host resolves its
+    own root and realm sync git-carries the contents between them.
+
+    Resolution order:
+        1. ``HERMES_SHARED_SKILLS`` env var (explicit override / MC-injected)
+        2. Caller-supplied ``default``
+        3. ``<hermes_root>/shared/skills``  (default — the canon path)
+    """
+    override = os.getenv("HERMES_SHARED_SKILLS", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if default is not None:
+        return default
+    return get_default_hermes_root() / "shared" / "skills"
+
+
 def get_hermes_dir(new_subpath: str, old_name: str) -> Path:
     """Resolve a Hermes subdirectory with backward compatibility.
 
@@ -317,11 +347,14 @@ def node_tool_runnable(path: str | None) -> bool:
     import subprocess
 
     try:
+        from hermes_cli._subprocess_compat import windows_hide_flags
+
         result = subprocess.run(
             [path, "--version"],
             capture_output=True,
             timeout=10,
             env=with_hermes_node_path(),
+            creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return False
@@ -562,11 +595,14 @@ def agent_browser_runnable(path: str | None) -> bool:
     import subprocess
 
     try:
+        from hermes_cli._subprocess_compat import windows_hide_flags
+
         result = subprocess.run(
             [path, "--version"],
             capture_output=True,
             timeout=10,
             env=with_hermes_node_path(),
+            creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
         return False
@@ -785,21 +821,29 @@ def apply_subprocess_home_env(env: dict[str, str]) -> None:
         env["HOME"] = home
 
 
-VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 
-def parse_reasoning_effort(effort: str) -> dict | None:
+def parse_reasoning_effort(effort) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
-    Valid levels: "none", "minimal", "low", "medium", "high", "xhigh".
+    Valid levels: "none", "minimal", "low", "medium", "high", "xhigh", "max".
     Returns None when the input is empty or unrecognized (caller uses default).
-    Returns {"enabled": False} for "none".
+    Returns {"enabled": False} for "none" (aliases: "false", "disabled", and
+    YAML boolean False — users write ``reasoning_effort: false``/``off``/``no``
+    in config.yaml and YAML hands us a bool, which must mean disabled, not
+    "fall back to the default and keep thinking").
     Returns {"enabled": True, "effort": <level>} for valid effort levels.
     """
-    if not effort or not effort.strip():
+    if effort is False:
+        return {"enabled": False}
+    if effort is None or effort is True:
+        return None
+    effort = str(effort)
+    if not effort.strip():
         return None
     effort = effort.strip().lower()
-    if effort == "none":
+    if effort in {"none", "false", "disabled"}:
         return {"enabled": False}
     if effort in VALID_REASONING_EFFORTS:
         return {"enabled": True, "effort": effort}

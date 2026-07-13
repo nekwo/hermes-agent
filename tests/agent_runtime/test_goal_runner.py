@@ -197,6 +197,62 @@ def test_goal_runner_creates_graph_routed_task_from_birth(tmp_path, monkeypatch)
     assert action.slot_id == "lead"
 
 
+def test_goal_runner_filters_default_bindings_for_explicit_blueprint(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    task_store = TaskStore()
+
+    result = MissionRuntimeController(
+        config=RuntimeConfig(),
+        task_store=task_store,
+        engine_factory=MaxActionsEngine,
+    ).run_goal(
+        GoalRunOptions(
+            title="Visual proof",
+            description="Capture and verify visual proof.",
+            blueprint_id="visual_ui_qa",
+            bindings={"builder": "persona:dev", "verifier": "persona:qa"},
+            max_actions=1,
+        )
+    )
+
+    task = task_store.get(result.task_id)
+    assert task.mission_plan is not None
+    assert task.mission_plan.blueprint_id == "visual_ui_qa"
+    assert task.mission_plan.bindings == {"builder": "dev", "verifier": "qa"}
+    assert task.current_stage_id == "implement_ui"
+
+
+def test_goal_runner_explicit_no_edit_cross_stack_blueprint_uses_recipe_gates(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    task_store = TaskStore()
+
+    result = MissionRuntimeController(
+        config=RuntimeConfig(),
+        task_store=task_store,
+        engine_factory=MaxActionsEngine,
+    ).run_goal(
+        GoalRunOptions(
+            title="No-edit cross-stack proof",
+            description="No-edit cross-stack proof for Backend and Launcher; do not modify product files.",
+            acceptance_criteria=["Backend and Launcher no-product-edit proofs pass."],
+            affected_repos=["EterniaBackend", "EterniaLauncher"],
+            blueprint_id="neko_two_dev_default",
+            max_actions=1,
+        )
+    )
+
+    task = task_store.get(result.task_id)
+    backend = next(stage for stage in task.mission_plan.stages if stage.id == "backend_implementation")
+    launcher = next(stage for stage in task.mission_plan.stages if stage.id == "implement")
+
+    assert backend.kind == "proof_only"
+    assert backend.proof_recipe_id == "backend_contract_smoke"
+    assert backend.proof_gate["proof_recipe_id"] == "backend_contract_smoke"
+    assert launcher.kind == "proof_only"
+    assert launcher.proof_recipe_id == "launcher_contract_smoke"
+    assert launcher.proof_gate["proof_recipe_id"] == "launcher_contract_smoke"
+
+
 def test_goal_runner_does_not_create_duplicate_task_when_tick_lock_busy(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
 

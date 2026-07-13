@@ -12,7 +12,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from hermes_constants import get_config_path, get_skills_dir, is_termux
+from hermes_constants import (
+    get_config_path,
+    get_shared_skills_dir,
+    get_skills_dir,
+    is_termux,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -497,14 +502,83 @@ def get_external_skills_dirs() -> List[Path]:
 
 
 def get_all_skills_dirs() -> List[Path]:
-    """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
+    """Return all skill directories: local profile ``skills/`` first, then the
+    shared canonical root, then config ``external_dirs``.
 
-    The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    Index 0 is always the local profile skills dir (always included even if it
+    doesn't exist yet — callers handle that; some callers slice ``[1:]`` to get
+    the non-primary dirs). The shared canonical root
+    (:func:`hermes_constants.get_shared_skills_dir`) follows — one physical dir
+    every persona-profile shares and that realm sync publishes — then external
+    dirs in config order. Duplicates are dropped so a shared root that equals
+    the local dir (or an external entry) appears only once.
     """
-    dirs = [get_skills_dir()]
-    dirs.extend(get_external_skills_dirs())
+    dirs: List[Path] = [get_skills_dir()]
+    seen: Set[Path] = {dirs[0].expanduser()}
+    for candidate in [get_shared_skills_dir(), *get_external_skills_dirs()]:
+        key = candidate.expanduser()
+        if key in seen:
+            continue
+        seen.add(key)
+        dirs.append(candidate)
     return dirs
+
+
+def normalize_skill_lookup_name(identifier: str) -> str:
+    """Normalize a skill identifier to a ``skill_view()``-safe relative path.
+
+    Slash commands and cron jobs may store absolute paths to skills that live
+    under ``~/.hermes/skills/`` (including via symlinks) or configured
+    ``skills.external_dirs``. ``skill_view()`` rejects absolute names for
+    security, so callers must translate trusted absolute paths to their
+    relative form first.
+    """
+    raw_identifier = (identifier or "").strip()
+    if not raw_identifier:
+        return raw_identifier
+
+    identifier_path = Path(raw_identifier).expanduser()
+    if not identifier_path.is_absolute():
+        return raw_identifier.lstrip("/")
+
+    # Look the primary skills root up on tools.skills_tool at CALL time
+    # (not via get_skills_dir()): callers and tests patch
+    # ``tools.skills_tool.SKILLS_DIR`` and skill_view() itself resolves
+    # against that module attribute, so normalization must agree with the
+    # exact root skill_view() will enforce.  Import deferred to avoid a
+    # module cycle (tools.skills_tool imports agent.skill_utils).
+    try:
+        from tools import skills_tool as _skills_tool
+        primary_root = Path(_skills_tool.SKILLS_DIR)
+    except Exception:
+        primary_root = get_skills_dir()
+
+    trusted_roots = [primary_root]
+    try:
+        trusted_roots.extend(get_external_skills_dirs())
+    except Exception:
+        pass
+
+    # Prefer the lexical path under a trusted skill root before resolving
+    # symlinks. Slash-command discovery can legitimately find a skill via
+    # ~/.hermes/skills/<name> where <name> is a symlink to a checked-out
+    # skill elsewhere. Resolving first turns that trusted visible path into
+    # an arbitrary absolute path that skill_view() refuses to load.
+    for root in trusted_roots:
+        try:
+            return str(identifier_path.relative_to(root))
+        except ValueError:
+            continue
+
+    try:
+        return str(identifier_path.resolve().relative_to(primary_root.resolve()))
+    except Exception:
+        logger.debug(
+            "Skill identifier %r is an absolute path outside trusted skills "
+            "roots — passing through unchanged (skill_view will reject it)",
+            raw_identifier,
+        )
+        return raw_identifier
 
 
 def _resolve_for_skill_ownership(path) -> Path:

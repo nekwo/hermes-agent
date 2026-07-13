@@ -4,13 +4,14 @@ import pytest
 
 from hermes_time import now
 from agent_runtime.actions import HarnessActionType
+from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.dev_discipline import needs_supervisor_slicing, validate_dev_progress_gate
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, Event, Task
 from agent_runtime.progress import RunProgressSink
 from agent_runtime.state_machine import MissionStateMachine
-from agent_runtime.states import RunState, TaskState
+from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import RunStore
 
 
@@ -127,6 +128,78 @@ def test_recorded_backend_first_handoff_packet_routes_broad_task_to_dev():
     assert MissionStateMachine().next_action(task).type == HarnessActionType.RUN_SLOT
 
 
+def test_recorded_single_specialist_handoff_packet_stops_repeat_slicing():
+    task = make_task(risk_flags=["cross_stack_routing"])
+    EventLog().append(
+        Event(
+            ts=now(),
+            type="packet.recorded",
+            task_id=task.id,
+            run_id="run_neko",
+            persona_id="neko_supervisor",
+            payload={
+                "packet_id": "packet_handoff_launcher_exact",
+                "packet_type": "handoff_packet",
+                "body": {
+                    "packet_kind": "fresh_scope",
+                    "mission_phase": "scope_route",
+                    "handoff_mode": "single_specialist",
+                    "target_owner": "dev",
+                    "target_repo": "EterniaLauncher",
+                    "proof_gate": {
+                        "required": True,
+                        "commands": ["echo e2e-trust-probe"],
+                        "required_proof_types": ["test_run"],
+                        "minimum_status": "passed",
+                        "visual_required": False,
+                    },
+                    "join_gate": {
+                        "release_condition": "Launcher Dev completes the typed stage with exact proof.",
+                    },
+                },
+            },
+        )
+    )
+
+    assert needs_supervisor_slicing(task) is False
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert "slice" not in action.reason.lower()
+
+
+def test_released_default_blueprint_specialist_stage_does_not_repeat_slicing():
+    blueprint = BlueprintStore().get("neko_two_dev_default")
+    plan = instantiate_blueprint(
+        blueprint,
+        goal="Prove Neko Mission Lead, Backend Dev, and Launcher Dev default routing without product edits.",
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        },
+    )
+    task = make_task(
+        id="task_blueprint_slice_released",
+        title="Stage 47 no-op orchestration burn-in",
+        description="Prove Neko Mission Lead, Backend Dev, and Launcher Dev default routing without product edits.",
+        affected_repos=["hermes-agent", "EterniaBackend", "EterniaLauncher"],
+        mission_plan=plan,
+        current_stage_id="backend_implementation",
+    )
+    plan.current_stage_id = "backend_implementation"
+    for stage in plan.stages:
+        if stage.id == "scope":
+            stage.status = StageStatus.PASSED
+        elif stage.id == "backend_implementation":
+            stage.status = StageStatus.IMPLEMENTING
+
+    assert needs_supervisor_slicing(task) is False
+    action = MissionStateMachine().next_action(task)
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id in {"backend_builder", "backend_dev"}
+    assert "slice" not in action.reason.lower()
+
+
 def test_progress_sink_aggregates_tool_loop_patch_test_and_proof_telemetry():
     runs = RunStore()
     run = runs.open_run("dev", "task_progress")
@@ -180,6 +253,24 @@ def test_progress_sink_preserves_autonomy_and_self_heal_fields_across_tool_event
     assert progress["skill_load_limit"] == 1
     assert progress["last_failed_proof_ids"] == ["proof_failed"]
     assert progress["read_search_count"] == 1
+
+
+def test_progress_sink_preserves_internal_repo_execution_metadata_across_events():
+    runs = RunStore()
+    run = runs.open_run("dev", "task_progress_repo")
+    run.progress = {
+        "repo_execution": {"workdir": "X:/runtime/wt/repo_123", "isolated": True},
+        "repo_baseline": {"git_head": "abc123", "dirty_paths": ["preexisting.txt"]},
+    }
+    runs.update(run)
+    sink = RunProgressSink(run_store=runs, run_id=run.id)
+
+    sink.emit("run.progress", {"type": "run.progress", "phase": "timing", "step": "provider_call", "status": "started"})
+
+    progress = runs.get(run.id).progress or {}
+    assert progress["repo_execution"]["workdir"] == "X:/runtime/wt/repo_123"
+    assert progress["repo_baseline"]["dirty_paths"] == ["preexisting.txt"]
+    assert progress["step"] == "provider_call"
 
 
 def test_progress_sink_uses_autonomy_read_search_limit_for_loop_warning():

@@ -5,7 +5,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from model_tools import get_tool_definitions, get_toolset_for_tool
+from model_tools import get_toolset_for_tool
+from tools.registry import registry
 
 from .models import AgentPersona
 from .personas import (
@@ -96,6 +97,7 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
         "profile_candidate_tools": candidate_tools,
         "final_model_tools": final_tools,
         "final_tool_count": len(final_tools),
+        "model_tool_tokens": _estimate_model_tool_tokens(final_tools),
         "blocked_tool_names": [entry["name"] for entry in blocked_entries],
         "blocked_tools": blocked_entries,
         "requirement_failures": [],
@@ -145,6 +147,20 @@ def permission_state_for_persona(persona: AgentPersona, options: ToolVisibilityO
 
 
 def agent_hud_state_for_persona(persona: AgentPersona, options: ToolVisibilityOptions | None = None) -> dict[str, Any]:
+    """DEPRECATED — legacy per-persona tools/permissions HUD.
+
+    This is the "Agent HUD" surface the launcher's `showAgentHudStateDialog`
+    reads off `instance.agentHudState`. It predates the runtime situational HUD
+    and is **due for migration to the injected situational-HUD fed path** — the
+    single projection (`agent_runtime/runtime_hud.py`) that the operator's
+    Mission Control runtime HUD strip and the agent's chat turn now both render
+    ("parity so the AI and I are on the same page").
+
+    Retained (emission unchanged) only until the launcher Agent-HUD dialog is
+    migrated/removed; do not build new consumers on it — extend the situational
+    HUD instead so operator and agent stay on one authority.
+    """
+
     visibility = resolve_tool_visibility(persona, options)
     return {
         "schema_version": TOOL_VISIBILITY_SCHEMA_VERSION,
@@ -159,6 +175,7 @@ def agent_hud_state_for_persona(persona: AgentPersona, options: ToolVisibilityOp
         "task_id": visibility.get("task_id"),
         "goal_id": visibility.get("goal_id"),
         "tool_count": visibility["final_tool_count"],
+        "model_tool_tokens": visibility["model_tool_tokens"],
         "toolsets": visibility["effective_toolsets"],
         "blocked_tools": visibility["blocked_tools"],
         "mutation_boundary": visibility["mutation_boundary"],
@@ -167,6 +184,12 @@ def agent_hud_state_for_persona(persona: AgentPersona, options: ToolVisibilityOp
 
 def _tool_names_for_toolsets(toolsets: list[str], *, blocked_tool_names: list[str]) -> list[str]:
     return list(_cached_tool_names_for_toolsets(tuple(toolsets), tuple(blocked_tool_names)))
+
+
+def _estimate_model_tool_tokens(tool_names: list[str]) -> int:
+    # Cheap HUD estimate: each name implies a schema envelope even when we do
+    # not materialize the full provider payload on this path.
+    return sum(max(8, (len(name) + 96) // 4) for name in tool_names)
 
 
 def _profile_readiness_for_visibility(persona: AgentPersona) -> dict[str, Any]:
@@ -211,18 +234,13 @@ def _cached_profile_readiness_for_visibility(
 
 @lru_cache(maxsize=128)
 def _cached_tool_names_for_toolsets(toolsets: tuple[str, ...], blocked_tool_names: tuple[str, ...]) -> tuple[str, ...]:
-    tools = get_tool_definitions(
-        enabled_toolsets=list(toolsets),
-        blocked_tool_names=list(blocked_tool_names),
-        quiet_mode=True,
-    )
-    return tuple(sorted(_tool_name(tool) for tool in tools if _tool_name(tool)))
-
-
-def _tool_name(tool: dict[str, Any]) -> str:
-    function = tool.get("function") if isinstance(tool, dict) else None
-    name = function.get("name") if isinstance(function, dict) else None
-    return str(name or "").strip()
+    blocked = set(blocked_tool_names)
+    names = [
+        name
+        for name in registry.get_all_tool_names()
+        if name not in blocked and str(get_toolset_for_tool(name) or "") in set(toolsets)
+    ]
+    return tuple(sorted(names))
 
 
 def _blocked_tool_entries(

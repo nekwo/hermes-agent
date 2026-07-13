@@ -96,6 +96,46 @@ STAGE47_CASES: dict[str, dict[str, Any]] = {
         "acceptance_criteria": ["Environment blocker proof is attached.", "Task does not false-pass."],
         "expected_persona_sequence": ["neko_supervisor", "dev", "neko_supervisor"],
     },
+    "custom-backend-proof": {
+        "title": "Stage 46 custom backend proof burn-in",
+        "description": "Run an authored non-default Neko-to-Backend proof-only blueprint with no product edits.",
+        "acceptance_criteria": ["Backend Dev receives the custom backend proof stage.", "The custom blueprint reaches done with backend_contract_smoke proof."],
+        "affected_repos": ["EterniaBackend", "hermes-agent"],
+        "suggested_roles": ["neko_supervisor", "backend_dev"],
+        "risk_flags": ["stage46_custom_blueprint", "no_product_edits", "backend_contract_first"],
+        "non_goals": ["No product code edits.", "No Launcher stage.", "No QA stage."],
+        "expected_persona_sequence": ["neko_supervisor", "backend_dev"],
+        "custom_blueprint": True,
+        "blueprint": "stage46_custom_backend_proof",
+    },
+    "custom-launcher-proof": {
+        "title": "Stage 46 custom Launcher proof burn-in",
+        "description": "Run an authored non-default Neko-to-Launcher proof-only blueprint with no product edits.",
+        "acceptance_criteria": ["Launcher Dev receives the custom Launcher proof stage.", "The custom blueprint reaches done with launcher_contract_smoke proof."],
+        "affected_repos": ["EterniaLauncher", "hermes-agent"],
+        "suggested_roles": ["neko_supervisor", "dev"],
+        "risk_flags": ["stage46_custom_blueprint", "no_product_edits"],
+        "non_goals": ["No product code edits.", "No Backend stage.", "No QA stage."],
+        "expected_persona_sequence": ["neko_supervisor", "dev"],
+        "custom_blueprint": True,
+        "blueprint": "stage46_custom_launcher_proof",
+    },
+    "custom-cross-stack-proof": {
+        "title": "Stage 46 custom cross-stack proof burn-in",
+        "description": "Run an authored non-default backend-first Launcher-second blueprint with no product edits.",
+        "acceptance_criteria": [
+            "Backend Dev completes backend_contract_smoke before Launcher Dev starts.",
+            "Launcher Dev completes launcher_contract_smoke after backend proof exists.",
+            "The custom blueprint reaches done without QA.",
+        ],
+        "affected_repos": ["EterniaBackend", "EterniaLauncher", "hermes-agent"],
+        "suggested_roles": ["neko_supervisor", "backend_dev", "dev"],
+        "risk_flags": ["stage46_custom_blueprint", "no_product_edits", "backend_contract_first", "cross_stack_sequential_handoff"],
+        "non_goals": ["No product code edits.", "No QA stage.", "No visual proof."],
+        "expected_persona_sequence": ["neko_supervisor", "backend_dev", "dev"],
+        "custom_blueprint": True,
+        "blueprint": "stage46_custom_cross_stack_proof",
+    },
 }
 
 
@@ -336,6 +376,17 @@ def swarm_certification_allows_production(
     return summary.get("state") == "green", summary
 
 
+def recursive_supervision_certification_allows_production(
+    *,
+    allow_uncertified_recursive_supervision: bool = False,
+    requires_certification: bool = True,
+) -> tuple[bool, dict[str, Any]]:
+    summary = certification_summary()
+    if not requires_certification or allow_uncertified_recursive_supervision:
+        return True, {**summary, "override": bool(allow_uncertified_recursive_supervision)}
+    return summary.get("state") == "green", summary
+
+
 def burn_in_root() -> Path:
     return paths.store_root() / "burn_in"
 
@@ -497,13 +548,163 @@ def _create_case_task(case_id: str, case: dict[str, Any], *, hygiene: dict[str, 
         non_goals=list(case.get("non_goals") or []),
         requires_visual_proof=bool(case.get("requires_visual_proof", False)),
     )
-    ensure_default_mission_plan(task)
+    blueprint_id = str(case.get("blueprint") or "").strip()
+    if blueprint_id:
+        _apply_stage46_custom_blueprint(task, blueprint_id)
+    else:
+        ensure_default_mission_plan(task)
     # Same baseline capture as `harness task create`: pre-existing operator dirt
     # must not preflight-block a burn-in case (observed live: case 1 blocked on
     # repo_clean for unrelated EterniaBackend edits).
     task.harness_self_heal["repo_clean_baseline"] = repo_clean_baseline_from_hygiene(hygiene)
     TaskStore().create(task)
     return task
+
+
+def _apply_stage46_custom_blueprint(task: Task, blueprint_id: str) -> None:
+    from .blueprints import instantiate_blueprint
+    from .blueprints.schema import blueprint_from_dict
+
+    blueprint = blueprint_from_dict(_stage46_custom_blueprint_raw(blueprint_id))
+    bindings = {
+        key: value
+        for key, value in {
+            "lead": "persona:neko_supervisor",
+            "backend_builder": "persona:backend_dev",
+            "builder": "persona:dev",
+        }.items()
+        if key in {slot.id for slot in blueprint.slots}
+    }
+    plan = instantiate_blueprint(
+        blueprint,
+        goal=task.description or task.title,
+        bindings=bindings,
+    )
+    task.mission_plan = plan
+    task.current_stage_id = plan.current_stage_id
+
+
+def _stage46_custom_blueprint_raw(blueprint_id: str) -> dict[str, Any]:
+    common_scope = {
+        "id": "scope",
+        "title": "Scope",
+        "objective": "Confirm the proof-only stage, owner, repository, and stop condition, then release the custom graph.",
+        "owner_slot": "lead",
+        "repo": "hermes-agent",
+        "kind": "scope",
+        "blocks_qa_until": False,
+        "proof_gate": {"required": False},
+    }
+    backend_stage = {
+        "id": "backend_implementation",
+        "title": "Backend Proof",
+        "objective": "Attach deterministic backend_contract_smoke proof without product edits.",
+        "owner_slot": "backend_builder",
+        "repo": "EterniaBackend",
+        "kind": "implementation",
+        "depends_on": ["scope"],
+        "blocks_qa_until": False,
+        "proof_recipe_id": "backend_contract_smoke",
+        "proof_gate": {
+            "required": True,
+            "minimum_status": "passed",
+            "required_proof_types": ["test_run"],
+            "proof_recipe_id": "backend_contract_smoke",
+        },
+    }
+    launcher_stage = {
+        "id": "implement",
+        "title": "Launcher Proof",
+        "objective": "Attach deterministic launcher_contract_smoke proof without product edits.",
+        "owner_slot": "builder",
+        "repo": "EterniaLauncher",
+        "kind": "implementation",
+        "depends_on": ["scope"],
+        "blocks_qa_until": False,
+        "proof_recipe_id": "launcher_contract_smoke",
+        "proof_gate": {
+            "required": True,
+            "minimum_status": "passed",
+            "required_proof_types": ["test_run"],
+            "proof_recipe_id": "launcher_contract_smoke",
+        },
+    }
+    if blueprint_id == "stage46_custom_backend_proof":
+        return {
+            "id": blueprint_id,
+            "version": 1,
+            "title": "Stage 46 Custom Backend Proof",
+            "description": "Neko releases one Backend Dev proof-only stage.",
+            "slots": [
+                {"id": "lead", "role": "neko", "required": True},
+                {"id": "backend_builder", "role": "backend_dev", "required": True},
+            ],
+            "stages": [common_scope, backend_stage],
+            "edges": [
+                {"source": "scope", "outcome": "ready", "target": "backend_implementation"},
+                {"source": "scope", "outcome": "missing_input", "target": "intervention"},
+                {"source": "backend_implementation", "outcome": "passed", "target": "done"},
+                {"source": "backend_implementation", "outcome": "needs_fixes", "target": "backend_implementation"},
+                {"source": "backend_implementation", "outcome": "blocked", "target": "scope"},
+            ],
+            "agent_topology": {"root": "lead", "edges": [{"source": "lead", "target": "backend_builder", "kind": "steers"}]},
+            "limits": {"max_attempts_per_stage": 3, "max_total_stages": 8},
+        }
+    if blueprint_id == "stage46_custom_launcher_proof":
+        return {
+            "id": blueprint_id,
+            "version": 1,
+            "title": "Stage 46 Custom Launcher Proof",
+            "description": "Neko releases one Launcher Dev proof-only stage.",
+            "slots": [
+                {"id": "lead", "role": "neko", "required": True},
+                {"id": "builder", "role": "dev", "required": True},
+            ],
+            "stages": [common_scope, launcher_stage],
+            "edges": [
+                {"source": "scope", "outcome": "ready", "target": "implement"},
+                {"source": "scope", "outcome": "missing_input", "target": "intervention"},
+                {"source": "implement", "outcome": "passed", "target": "done"},
+                {"source": "implement", "outcome": "needs_fixes", "target": "implement"},
+                {"source": "implement", "outcome": "blocked", "target": "scope"},
+            ],
+            "agent_topology": {"root": "lead", "edges": [{"source": "lead", "target": "builder", "kind": "steers"}]},
+            "limits": {"max_attempts_per_stage": 3, "max_total_stages": 8},
+        }
+    if blueprint_id == "stage46_custom_cross_stack_proof":
+        launcher_after_backend = dict(launcher_stage)
+        launcher_after_backend["depends_on"] = ["backend_implementation"]
+        return {
+            "id": blueprint_id,
+            "version": 1,
+            "title": "Stage 46 Custom Cross-Stack Proof",
+            "description": "Neko releases Backend Dev first, then Launcher Dev after backend proof.",
+            "slots": [
+                {"id": "lead", "role": "neko", "required": True},
+                {"id": "backend_builder", "role": "backend_dev", "required": True},
+                {"id": "builder", "role": "dev", "required": True},
+            ],
+            "stages": [common_scope, backend_stage, launcher_after_backend],
+            "edges": [
+                {"source": "scope", "outcome": "ready", "target": "backend_implementation"},
+                {"source": "scope", "outcome": "missing_input", "target": "intervention"},
+                {"source": "backend_implementation", "outcome": "passed", "target": "implement"},
+                {"source": "backend_implementation", "outcome": "needs_fixes", "target": "backend_implementation"},
+                {"source": "backend_implementation", "outcome": "blocked", "target": "scope"},
+                {"source": "implement", "outcome": "passed", "target": "done"},
+                {"source": "implement", "outcome": "needs_fixes", "target": "implement"},
+                {"source": "implement", "outcome": "blocked", "target": "scope"},
+            ],
+            "agent_topology": {
+                "root": "lead",
+                "edges": [
+                    {"source": "lead", "target": "backend_builder", "kind": "steers"},
+                    {"source": "lead", "target": "builder", "kind": "steers"},
+                ],
+            },
+            "limits": {"max_attempts_per_stage": 3, "max_total_stages": 12},
+        }
+    raise ValueError(f"unknown Stage 46 custom blueprint: {blueprint_id}")
 
 
 def _new_burn_id(suite: str, case_id: str | None) -> str:

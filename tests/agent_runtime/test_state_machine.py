@@ -4,6 +4,7 @@ from hermes_time import now
 
 from agent_runtime.actions import HarnessActionType
 from agent_runtime.decision_schema import AgentDecision, DecisionType
+from agent_runtime.default_plan import ensure_default_mission_plan
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event
 from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Task, TaskStage
@@ -11,6 +12,7 @@ from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import MissionPlanConfig, RuntimeConfig
 from agent_runtime.recovery_flags import mark_block_recovery_attempt, mark_incident_closed_for_recovery
 from agent_runtime.state_machine import MissionStateMachine
+from agent_runtime.store import ProofStore
 from agent_runtime.states import StageStatus, TaskState
 
 
@@ -130,6 +132,101 @@ def test_open_incident_routes_neko_even_when_task_not_blocked():
 
     assert action.type == HarnessActionType.RUN_SLOT
     assert "open incidents" in action.reason
+
+
+def test_launcher_only_default_plan_dispatches_launcher_not_backend_after_scope():
+    mission = make_mission(TaskState.RUNNING)
+    mission.title = "Launcher-only trust probe"
+    mission.description = "Write the Launcher-side proof note only."
+    mission.affected_repos = ["EterniaLauncher"]
+    plan = ensure_default_mission_plan(mission)
+    stages = {stage.id: stage for stage in plan.stages}
+    stages["scope"].status = StageStatus.PASSED
+    mission.current_stage_id = None
+    plan.current_stage_id = None
+
+    actions = MissionStateMachine(config=typed_config()).next_actions(mission)
+
+    run_slots = [(action.slot_id, action.stage_id) for action in actions if action.type == HarnessActionType.RUN_SLOT]
+    assert run_slots == [("dev", "implement")]
+
+
+def test_running_open_incident_adjudication_is_one_pass_per_signal(isolate_agent_runtime_root):
+    """A RUNNING mission with open incidents gets ONE Neko adjudication pass
+    per evidence signal (observed live: a supervisor answering adjudication
+    with `block` was re-dispatched every ~30-60s forever). Closing an
+    incident changes the signal and re-arms recovery."""
+
+    import uuid
+
+    from agent_runtime.models import Incident
+    from agent_runtime.store import IncidentStore
+
+    incidents = IncidentStore()
+    incident = Incident(
+        id=f"inc_{uuid.uuid4().hex[:8]}",
+        task_id="mission_1",
+        run_id=None,
+        kind="run_hung",
+        summary="hung",
+        detail_path=None,
+        opened_at=now(),
+    )
+    incidents.open(incident)
+
+    mission = make_mission(TaskState.RUNNING)
+    mission.open_incident_ids = [incident.id]
+    machine = MissionStateMachine(config=typed_config())
+
+    first = machine.next_action(mission)
+    assert first.type == HarnessActionType.RUN_SLOT
+    assert "open incidents" in first.reason
+
+    # The harness marks the bounded pass when it dispatches Neko.
+    mark_block_recovery_attempt(mission)
+    second = machine.next_action(mission)
+    assert second.type == HarnessActionType.NOOP
+    assert "waiting on intervention" in second.reason
+
+    # Real progress (incident close) changes the signal and re-arms; the
+    # prune also unlinks the now-closed incident so routing moves on.
+    incidents.close(incident.id, reason="adjudicated")
+    third = machine.next_action(mission)
+    assert mission.open_incident_ids == []
+    assert "open incidents" not in (third.reason or "")
+
+
+def test_closed_store_incident_link_is_pruned_not_neko_looped(isolate_agent_runtime_root):
+    """A stale open_incident_ids link whose incident is CLOSED in the store
+    must not route Neko adjudication forever (observed live: an in-flight
+    engine turn persisted a stale task copy over the operator's incident-close
+    unlink). Unknown ids with no store record stay linked, fail-safe."""
+
+    import uuid
+
+    from agent_runtime.models import Incident
+    from agent_runtime.store import IncidentStore
+
+    incidents = IncidentStore()
+    incident = Incident(
+        id=f"inc_{uuid.uuid4().hex[:8]}",
+        task_id="mission_1",
+        run_id=None,
+        kind="run_budget_exceeded",
+        summary="budget",
+        detail_path=None,
+        opened_at=now(),
+    )
+    incidents.open(incident)
+    incidents.close(incident.id, reason="operator recovery")
+
+    mission = make_mission(TaskState.RUNNING)
+    mission.open_incident_ids = [incident.id]
+
+    action = MissionStateMachine(config=typed_config()).next_action(mission)
+
+    assert mission.open_incident_ids == []
+    assert "open incidents" not in (action.reason or "")
 
 
 def test_legacy_qa_stage_does_not_count_as_remaining_dev_work():
@@ -778,6 +875,47 @@ def test_state_machine_closes_APPROVED_mission_with_existing_proof_without_pm_mo
 
     assert action.type == HarnessActionType.COMPLETE_TASK
     assert "no remaining stages" in action.reason
+
+
+def test_blueprint_terminal_close_reopens_unfinished_stage_instead_of_completing():
+    mission = mark_graph_complete(make_mission(TaskState.RUNNING))
+    mission.mission_plan.stages.append(
+        MissionPlanStage(
+            id="launcher_contract",
+            title="Launcher Contract",
+            objective="Collect launcher proof.",
+            owner="dev",
+            owner_slot="dev",
+            repo="EterniaLauncher",
+            kind="proof_only",
+            status=StageStatus.IMPLEMENTING,
+            proof_gate={"required": True, "minimum_status": "passed", "required_proof_types": ["test_run"]},
+        )
+    )
+
+    action = MissionStateMachine(proof_store=ProofStore()).next_action(mission)
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "dev"
+    assert mission.current_stage_id == "launcher_contract"
+    assert "launcher_contract" in action.reason
+
+
+def test_blueprint_terminal_close_blocks_passed_stage_with_missing_required_proof():
+    mission = mark_graph_complete(make_mission(TaskState.RUNNING))
+    mission.mission_plan.stages[0].proof_gate = {
+        "required": True,
+        "minimum_status": "passed",
+        "required_proof_types": ["test_run"],
+    }
+
+    action = MissionStateMachine(proof_store=ProofStore()).next_action(mission)
+
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.slot_id == "neko_supervisor"
+    assert mission.current_stage_id == "qa_release"
+    assert mission.mission_plan.stages[0].status == StageStatus.BLOCKED
+    assert "proof gate unsatisfied" in action.reason
 
 
 def test_cross_stack_backend_only_qa_state_routes_to_neko_launcher_release():

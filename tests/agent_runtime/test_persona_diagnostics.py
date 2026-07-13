@@ -139,6 +139,29 @@ def test_persona_diagnostic_records_assignment_when_enabled(tmp_path, monkeypatc
     assert assignment.run_ids == result.run_ids
 
 
+def test_persona_diagnostic_auto_archives_task_unless_preserved(tmp_path, monkeypatch):
+    # State-hygiene: a standalone diagnostic must not linger in the live runtime
+    # (open/done-but-unarchived) where it accumulates and gates the scheduler.
+    # preserve_open_task=False (the CLI default) auto-archives it; True keeps it.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    task_store = TaskStore()
+    controller = PersonaDiagnosticController(
+        config=RuntimeConfig(),
+        task_store=task_store,
+        run_store=RunStore(),
+        proof_store=ProofStore(),
+        incident_store=IncidentStore(),
+        engine_factory=OnePersonaEngine,
+    )
+
+    kept = controller.diagnose(PersonaDiagnosticOptions(persona_id="dev", title="keep", message="m", preserve_open_task=True))
+    assert task_store.get(kept.task_id).id == kept.task_id  # preserved in the live store
+
+    archived = controller.diagnose(PersonaDiagnosticOptions(persona_id="dev", title="drop", message="m", preserve_open_task=False))
+    with pytest.raises(Exception):
+        task_store.get(archived.task_id)  # auto-archived out of the live store
+
+
 def test_persona_diagnostic_records_repo_clean_baseline_from_hygiene(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     task_store = TaskStore()

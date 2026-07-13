@@ -7,6 +7,9 @@ from typing import Any
 NEKO_ACTIONS = ("assign", "report_blocker", "request_missing_input")
 DEV_ACTIONS = ("deliver", "report_blocker", "request_missing_input")
 QA_ACTIONS = ("approve", "reject", "request_missing_proof")
+SIMPLIFIED_NEKO_ACTIONS = ("scope_route", "block", "escalate")
+SIMPLIFIED_DEV_ACTIONS = ("hand_off", "block", "escalate")
+SIMPLIFIED_QA_ACTIONS = ("qa_verdict", "block", "escalate")
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,16 +31,16 @@ class SimplifiedRoleContract:
         }
 
 
-def contract_for_persona(persona_id: str | None, role: str | None = None) -> dict[str, Any]:
+def contract_for_persona(persona_id: str | None, role: str | None = None, *, simplified: bool = False) -> dict[str, Any]:
     key = (persona_id or role or "").lower()
     role_key = (role or "").lower()
     if "qa" in key or role_key == "qa":
-        return qa_contract().manifest()
+        return (simplified_qa_contract() if simplified else qa_contract()).manifest()
     if "backend" in key:
-        return backend_dev_contract().manifest()
+        return (simplified_backend_dev_contract() if simplified else backend_dev_contract()).manifest()
     if "dev" in key or role_key == "dev":
-        return launcher_dev_contract().manifest()
-    return neko_contract().manifest()
+        return (simplified_launcher_dev_contract() if simplified else launcher_dev_contract()).manifest()
+    return (simplified_neko_contract() if simplified else neko_contract()).manifest()
 
 
 def neko_contract() -> SimplifiedRoleContract:
@@ -46,7 +49,7 @@ def neko_contract() -> SimplifiedRoleContract:
         display_name="Neko Mission Lead",
         allowed_actions=NEKO_ACTIONS,
         delivery_template={
-            "action": "assign",
+            "action": "scope_route",
             "owner": "launcher_dev | backend_dev | qa",
             "objective": "specific next outcome",
             "acceptance": ["observable finish criteria"],
@@ -119,3 +122,63 @@ def qa_contract() -> SimplifiedRoleContract:
         ),
     )
 
+
+def simplified_neko_contract() -> SimplifiedRoleContract:
+    base = neko_contract()
+    return SimplifiedRoleContract(
+        role_id=base.role_id,
+        display_name=base.display_name,
+        allowed_actions=SIMPLIFIED_NEKO_ACTIONS,
+        delivery_template={**base.delivery_template, "action": "scope_route"},
+        hud_rules=base.hud_rules,
+    )
+
+
+def simplified_launcher_dev_contract() -> SimplifiedRoleContract:
+    return SimplifiedRoleContract(
+        role_id="dev",
+        display_name="Launcher Dev Agent",
+        allowed_actions=SIMPLIFIED_DEV_ACTIONS,
+        delivery_template={
+            "action": "hand_off",
+            "summary": "what is ready for Harness attribution/proof",
+        },
+        hud_rules=(
+            "Use hand_off when your slice is ready; Harness captures diff and runs the authoritative gate.",
+            "Use block for exact missing prerequisites.",
+            "Use escalate only for out-of-scope or systemic issues.",
+        ),
+    )
+
+
+def simplified_backend_dev_contract() -> SimplifiedRoleContract:
+    return SimplifiedRoleContract(
+        role_id="backend_dev",
+        display_name="Backend Dev Agent",
+        allowed_actions=SIMPLIFIED_DEV_ACTIONS,
+        delivery_template={
+            "action": "hand_off",
+            "summary": "backend slice ready for Harness attribution/proof",
+        },
+        hud_rules=(
+            "Use hand_off when your slice is ready; Harness captures diff and runs the authoritative gate.",
+            "Use block for exact missing prerequisites.",
+            "Use escalate only for out-of-scope or systemic issues.",
+        ),
+    )
+
+
+def simplified_qa_contract() -> SimplifiedRoleContract:
+    return SimplifiedRoleContract(
+        role_id="qa",
+        display_name="QA Agent",
+        allowed_actions=SIMPLIFIED_QA_ACTIONS,
+        delivery_template={
+            "action": "qa_verdict",
+            "proofs_reviewed": ["proof_id"],
+            "verdict": "passed | failed | needs_fixes",
+            "summary": "final outcome evidence",
+            "follow_up": "none | specific required fix",
+        },
+        hud_rules=qa_contract().hud_rules,
+    )

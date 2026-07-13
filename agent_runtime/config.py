@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,15 +10,65 @@ import yaml
 from hermes_constants import get_config_path
 from hermes_cli.profiles import profile_exists
 
-from .personas import DEFAULT_PERSONA_IDS, default_personas, validate_toolsets, AgentRole
+from .personas import DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SwarmConfig
+from .redaction_mode import normalize_redaction_mode
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
 
 @dataclass(slots=True)
 class AgentRuntimeConfig(RuntimeConfig):
     store_root: str | None = None
     head_agent_profile: str | None = None
     personas: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Provenance of the resolved runtime default: which YAML key actually
+    # supplied ``default_model`` / ``default_provider``. The top-level ``model:``
+    # block is the surface ``hermes model`` / ``hermes status`` own and the user
+    # treats as truth; ``agent_runtime.default_*`` is an explicit harness-wide
+    # override (and, when absent, silence — the runtime follows the top-level
+    # default). These labels let the launcher and ``hermes harness config show``
+    # report which authority won without re-deriving it.
+    default_model_source: str = "unset"
+    default_provider_source: str = "unset"
+
+
+def _clean_config_str(value: Any) -> str | None:
+    """Return a stripped non-empty string, else None (empty/whitespace == unset)."""
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _top_level_model_authority(top: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Read the top-level ``model:`` block — the authority the user sets via
+    ``hermes model`` and reads back via ``hermes status``.
+
+    Tolerates ``model:`` as a mapping (``default``/``name`` + ``provider``) or as
+    a bare string model id, mirroring ``hermes_cli/status.py``'s tolerance.
+    """
+    model_block = top.get("model")
+    if isinstance(model_block, dict):
+        model = _clean_config_str(model_block.get("default")) or _clean_config_str(model_block.get("name"))
+        return (model, _clean_config_str(model_block.get("provider")))
+    if isinstance(model_block, str):
+        return (_clean_config_str(model_block), None)
+    return (None, None)
+
+
+def _resolve_default_authority(
+    override_value: Any,
+    top_value: str | None,
+    override_source: str,
+    top_source: str,
+) -> tuple[str | None, str]:
+    """Resolve a runtime default: an explicit ``agent_runtime.*`` override wins;
+    otherwise the top-level ``model.*`` authority; otherwise unset."""
+    override = _clean_config_str(override_value)
+    if override is not None:
+        return (override, override_source)
+    if top_value is not None:
+        return (top_value, top_source)
+    return (None, "unset")
 
 
 def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeConfig:
@@ -27,7 +78,18 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     # mtime-cached parse: this is called many times per snapshot build (and across
     # the runtime) and was re-parsing the full config.yaml each time.
     loaded = cached_yaml_file(config_path, default=None)
-    raw = (loaded.get("agent_runtime", {}) or {}) if isinstance(loaded, dict) else {}
+    top = loaded if isinstance(loaded, dict) else {}
+    raw = top.get("agent_runtime", {}) or {}
+    # Single runtime-default authority: the harness follows the top-level
+    # ``model.default`` the user sets, unless ``agent_runtime.default_*`` is
+    # explicitly pinned as a harness-wide override.
+    top_model, top_provider = _top_level_model_authority(top)
+    resolved_model, default_model_source = _resolve_default_authority(
+        raw.get("default_model"), top_model, "agent_runtime.default_model", "model.default"
+    )
+    resolved_provider, default_provider_source = _resolve_default_authority(
+        raw.get("default_provider"), top_provider, "agent_runtime.default_provider", "model.provider"
+    )
     enterprise_worker_sessions = _enterprise_worker_sessions_config(raw.get("enterprise_worker_sessions") or {})
     continuous_role_sessions = _continuous_role_sessions_config(raw.get("continuous_role_sessions") or {})
     normal_worker_flow = _normal_worker_flow_config(raw.get("normal_worker_flow") or {})
@@ -35,7 +97,9 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     role_envelope = _role_envelope_config(raw.get("role_envelope") or {})
     repo_bundle_routing = _repo_bundle_routing_config(raw.get("repo_bundle_routing") or {})
     simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
+    read_model = _read_model_config(raw.get("read_model") or {})
     swarm = _swarm_config(raw.get("swarm") or {})
+    supervision = _supervision_config(raw.get("supervision") or {})
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
     continuous_role_sessions = _apply_enterprise_role_session_compat(
         continuous_role_sessions,
@@ -46,28 +110,34 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         schema_version=int(raw.get("schema_version", 1)),
         store_root=raw.get("store_root"),
         head_agent_profile=raw.get("head_agent_profile") or raw.get("head_profile"),
-        default_provider=raw.get("default_provider"),
-        default_model=raw.get("default_model"),
+        default_provider=resolved_provider,
+        default_model=resolved_model,
         default_api_mode=raw.get("default_api_mode", "codex_responses"),
+        redaction_mode=normalize_redaction_mode(raw.get("redaction_mode") or os.environ.get("HERMES_REDACTION_MODE", "strict")),
+        open_incident_warning_threshold=_positive_int(raw.get("open_incident_warning_threshold"), 100),
         heartbeat_ttl_seconds=int(raw.get("heartbeat_ttl_seconds", 900)),
         max_actions_per_tick=int(raw.get("max_actions_per_tick", 1)),
         daemon_enabled=bool((raw.get("daemon") or {}).get("enabled", raw.get("daemon_enabled", False))),
-        execution_mode=str(raw.get("execution_mode") or ("daemon" if bool((raw.get("daemon") or {}).get("enabled", raw.get("daemon_enabled", False))) else "manual")),
         daemon_interval_seconds=int((raw.get("daemon") or {}).get("interval_seconds", raw.get("daemon_interval_seconds", 10))),
         daemon_idle_interval_seconds=int((raw.get("daemon") or {}).get("idle_interval_seconds", raw.get("daemon_idle_interval_seconds", 30))),
         daemon_heartbeat_seconds=int((raw.get("daemon") or {}).get("heartbeat_seconds", raw.get("daemon_heartbeat_seconds", 5))),
-        daemon_stale_run_seconds=int((raw.get("daemon") or {}).get("stale_run_seconds", raw.get("daemon_stale_run_seconds", 600))),
-        daemon_retry_cooldown_seconds=int((raw.get("daemon") or {}).get("retry_cooldown_seconds", raw.get("daemon_retry_cooldown_seconds", 120))),
-        daemon_max_retries_per_state=int((raw.get("daemon") or {}).get("max_retries_per_state", raw.get("daemon_max_retries_per_state", 3))),
         task_create_auto_start_daemon=bool(raw.get("task_create_auto_start_daemon", False)),
+        root_node_mode=bool(raw.get("root_node_mode", False)),
         preferred_goal_execution_mode=str(raw.get("preferred_goal_execution_mode", "in_process_controller") or "in_process_controller"),
         live_run_max_wall_seconds=float(raw.get("live_run_max_wall_seconds", 300.0)),
         live_run_max_api_calls=int(raw.get("live_run_max_api_calls", 20)),
         live_run_max_total_tokens=int(raw.get("live_run_max_total_tokens", 750_000)),
         live_run_iteration_budget=int(raw.get("live_run_iteration_budget", 60)),
         scope_wait_deadline_seconds=int(raw.get("scope_wait_deadline_seconds", 900)),
-        run_lease_seconds=int(raw.get("run_lease_seconds", raw.get("daemon_stale_run_seconds", 600))),
+        run_lease_seconds=int(raw.get("run_lease_seconds", 600)),
         tool_wait_timeout_seconds=int(raw.get("tool_wait_timeout_seconds", 300)),
+        liveness_enabled=bool(raw.get("liveness_enabled", True)),
+        liveness_poll_seconds=_clamped_positive_int(raw.get("liveness_poll_seconds"), 60, minimum=30, maximum=120),
+        liveness_quiet_strikes=_positive_int(raw.get("liveness_quiet_strikes"), 2),
+        liveness_hung_seconds=_positive_int(raw.get("liveness_hung_seconds"), 300),
+        child_progress_min_interval_seconds=_positive_int(raw.get("child_progress_min_interval_seconds"), 30),
+        deploy_timeout_seconds=_positive_int(raw.get("deploy_timeout_seconds"), 120),
+        lock_acquire_timeout_seconds=_positive_int(raw.get("lock_acquire_timeout_seconds"), 15),
         mission_max_total_tokens=int(raw.get("mission_max_total_tokens", 1_000_000)),
         mission_wall_clock_deadline_seconds=int(raw.get("mission_wall_clock_deadline_seconds", 86_400)),
         neko_recovery_attempt_cap=int(raw.get("neko_recovery_attempt_cap", 2)),
@@ -82,15 +152,101 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         role_envelope=role_envelope,
         repo_bundle_routing=repo_bundle_routing,
         simplified_agent_contract=simplified_agent_contract,
+        read_model=read_model,
         swarm=swarm,
+        supervision=supervision,
         coordinator_permissions=coordinator_permissions,
         personas=raw.get("personas", {}) or {},
+        default_model_source=default_model_source,
+        default_provider_source=default_provider_source,
     )
     return cfg
 
 
+def _override_state(override: str | None, top_value: str | None) -> str:
+    """Classify an ``agent_runtime.default_*`` value against the top-level authority.
+
+    - ``absent``: no override (the healthy state — the runtime follows the user default).
+    - ``override_only``: override set but no top-level authority to compare against.
+    - ``redundant``: override equals the top-level default (an unmaintained duplicate;
+      recommend removal so the single authority stays single).
+    - ``shadowing``: override diverges from the top-level default (the stale-pin bug —
+      agents silently run something other than what the user set).
+    """
+    if override is None:
+        return "absent"
+    if top_value is None:
+        return "override_only"
+    return "redundant" if override == top_value else "shadowing"
+
+
+def describe_runtime_default_authority(config_path: Path | None = None) -> dict[str, Any]:
+    """Pure, redaction-safe provenance report comparing the top-level ``model:``
+    authority against any ``agent_runtime.*`` override and per-persona pins.
+
+    Single source of truth for the migrations warning and the harness-doctor
+    ``model_authority`` block, so the "shadowing vs redundant vs stale pin"
+    classification is never re-derived divergently.
+    """
+    from .parse_cache import cached_yaml_file
+
+    config_path = config_path or get_config_path()
+    loaded = cached_yaml_file(config_path, default=None)
+    top = loaded if isinstance(loaded, dict) else {}
+    raw = top.get("agent_runtime", {}) or {}
+    top_model, top_provider = _top_level_model_authority(top)
+    override_model = _clean_config_str(raw.get("default_model"))
+    override_provider = _clean_config_str(raw.get("default_provider"))
+    resolved_model, model_source = _resolve_default_authority(
+        raw.get("default_model"), top_model, "agent_runtime.default_model", "model.default"
+    )
+    resolved_provider, provider_source = _resolve_default_authority(
+        raw.get("default_provider"), top_provider, "agent_runtime.default_provider", "model.provider"
+    )
+
+    persona_pins: list[dict[str, Any]] = []
+    personas = raw.get("personas", {}) or {}
+    if isinstance(personas, dict):
+        for pid, overrides in personas.items():
+            if not isinstance(overrides, dict):
+                continue
+            pin_model = _clean_config_str(overrides.get("model"))
+            pin_provider = _clean_config_str(overrides.get("provider"))
+            if pin_model is None and pin_provider is None:
+                continue
+            persona_pins.append({
+                "persona_id": "neko_supervisor" if pid == "alice_supervisor" else pid,
+                "model": pin_model,
+                "provider": pin_provider,
+                # None when the pin sets no model (provider-only pin); otherwise
+                # whether the pin duplicates the resolved runtime default (redundant).
+                "matches_runtime_default": (pin_model == resolved_model) if pin_model is not None else None,
+                "provider_pinned_without_model": pin_provider is not None and pin_model is None,
+            })
+
+    return {
+        "resolved": {
+            "model": resolved_model,
+            "provider": resolved_provider,
+            "model_source": model_source,
+            "provider_source": provider_source,
+        },
+        "top_level": {"model": top_model, "provider": top_provider},
+        "harness_override": {
+            "model": override_model,
+            "provider": override_provider,
+            "model_state": _override_state(override_model, top_model),
+            "provider_state": _override_state(override_provider, top_provider),
+        },
+        "persona_pins": persona_pins,
+    }
+
+
 def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
+    # Full resolvable catalog: the typed pipeline personas remain here (dormant, so the
+    # mothballed pipeline can still resolve dev/qa), plus any profile-backed agents declared
+    # in config. Only ``seed_personas()`` (base) is actually seeded into the running store.
     personas = {p.id: p for p in default_personas()}
     head_profile = _head_agent_profile(cfg)
     for p in personas.values():
@@ -102,7 +258,9 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         if persona_id not in personas:
             default_role = AgentRole.PM.value if persona_id == AgentRole.PM.value else AgentRole.DEV.value
             role = str(overrides.get("role", default_role))
-            if role not in {item.value for item in AgentRole}:
+            # Typed roles resolve as before (dormant catalog); profile-backed agents
+            # (role: profile) may also be declared for the base-profile world.
+            if role not in {item.value for item in AgentRole} and role != PROFILE_ROLE_SENTINEL:
                 continue
             personas[persona_id] = _persona_from_overrides(persona_id, role, overrides, cfg)
         p = personas[persona_id]
@@ -128,7 +286,7 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         if "required_mcp_servers" in overrides:
             p.required_mcp_servers = _string_list(overrides["required_mcp_servers"])
         if "toolsets" in overrides:
-            p.toolsets = validate_toolsets(AgentRole(p.role), list(overrides["toolsets"]))
+            p.toolsets = validate_toolsets(coerce_agent_role(p.role), list(overrides["toolsets"]))
     supervisor = personas.get("neko_supervisor")
     if supervisor is not None:
         explicit_supervisor = _explicit_supervisor_profile_override(cfg)
@@ -153,9 +311,12 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
     store = AgentStore()
     stored = {persona.id: persona for persona in store.list_all()}
-    resolved = {persona.id: persona for persona in persona_records_from_config(cfg)}
+    # Base-profile foundation: seed ONLY the base profile into the store. AgentStore is
+    # what Mission Control surfaces (snapshot reads store.list_all()), so the store stays
+    # base-only. The typed pipeline personas are NOT persisted/shown.
+    seed = {persona.id: persona for persona in seed_personas()}
     changed = False
-    for persona_id, persona in resolved.items():
+    for persona_id, persona in seed.items():
         if persona_id not in stored:
             stored[persona_id] = store.save(persona)
             changed = True
@@ -171,7 +332,13 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
                 changed = True
     if changed:
         stored = {persona.id: persona for persona in store.list_all()}
-    return list(stored.values())
+    # Return the seeded store PLUS the dormant resolvable catalog: only base is
+    # seeded/shown, but every persona resolver (get_persisted_persona, blueprint slot
+    # binding, CLI persona lookup) must still find the typed pipeline personas so the
+    # mothballed pipeline keeps functioning. Seeded (base) wins on id collision.
+    catalog = {persona.id: persona for persona in persona_records_from_config(cfg)}
+    merged = {**catalog, **stored}
+    return list(merged.values())
 
 
 def get_persisted_persona(persona_id: str, cfg: AgentRuntimeConfig | None = None):
@@ -221,7 +388,7 @@ def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any
         model=overrides.get("model") or cfg.default_model,
         provider=overrides.get("provider") or cfg.default_provider,
         api_mode=overrides.get("api_mode") or cfg.default_api_mode,
-        toolsets=validate_toolsets(AgentRole(role), list(overrides.get("toolsets") or [])),
+        toolsets=validate_toolsets(coerce_agent_role(role), list(overrides.get("toolsets") or [])),
         system_prompt_path=str(overrides.get("system_prompt_path") or f"personas/{role}/system.md"),
         include_core_context_files=bool(overrides.get("include_core_context_files", False)),
     )
@@ -345,8 +512,20 @@ def _simplified_agent_contract_config(raw: dict[str, Any]) -> SimplifiedAgentCon
         enabled=bool(raw.get("enabled", defaults.enabled)),
         expose_only_simplified_actions=bool(raw.get("expose_only_simplified_actions", defaults.expose_only_simplified_actions)),
         keep_internal_state_machine=bool(raw.get("keep_internal_state_machine", defaults.keep_internal_state_machine)),
-        allow_legacy_decision_aliases=bool(raw.get("allow_legacy_decision_aliases", defaults.allow_legacy_decision_aliases)),
         terminal_feedback_enabled=bool(raw.get("terminal_feedback_enabled", defaults.terminal_feedback_enabled)),
+    )
+
+
+def _read_model_config(raw: dict[str, Any]) -> ReadModelConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = ReadModelConfig()
+    filename = str(raw.get("db_filename", defaults.db_filename) or defaults.db_filename).strip()
+    if not filename or "/" in filename or "\\" in filename:
+        filename = defaults.db_filename
+    return ReadModelConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        serve_snapshot_from_db=bool(raw.get("serve_snapshot_from_db", defaults.serve_snapshot_from_db)),
+        db_filename=filename,
     )
 
 
@@ -364,6 +543,17 @@ def _swarm_config(raw: dict[str, Any]) -> SwarmConfig:
         global_api_call_hard_limit=_positive_int(raw.get("global_api_call_hard_limit"), defaults.global_api_call_hard_limit),
         per_lane_token_limit=_positive_int(raw.get("per_lane_token_limit"), defaults.per_lane_token_limit),
         per_lane_api_call_limit=_positive_int(raw.get("per_lane_api_call_limit"), defaults.per_lane_api_call_limit),
+    )
+
+
+def _supervision_config(raw: dict[str, Any]) -> SupervisionConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = SupervisionConfig()
+    return SupervisionConfig(
+        child_events_enabled=bool(raw.get("child_events_enabled", defaults.child_events_enabled)),
+        recursive_enabled=bool(raw.get("recursive_enabled", defaults.recursive_enabled)),
+        hierarchical_budget_enabled=bool(raw.get("hierarchical_budget_enabled", defaults.hierarchical_budget_enabled)),
+        deploy_verification_enabled=bool(raw.get("deploy_verification_enabled", defaults.deploy_verification_enabled)),
     )
 
 
@@ -418,6 +608,11 @@ def _positive_int(value: Any, default: int) -> int:
     return number if number > 0 else default
 
 
+def _clamped_positive_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
+    number = _positive_int(value, default)
+    return max(minimum, min(maximum, number))
+
+
 
 
 def _optional_int(value: Any) -> int | None:
@@ -438,4 +633,3 @@ def _optional_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
-

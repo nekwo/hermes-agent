@@ -19,7 +19,23 @@ class AutonomyLevel(StrEnum):
     AUTONOMOUS = "autonomous"
 
 
-DEFAULT_PERSONA_IDS = frozenset({"neko_supervisor", "dev", "backend_dev", "qa"})
+# Base-profile foundation (2026-07): every agent is a free Hermes profile. The typed
+# pipeline personas (neko/dev/backend_dev/qa) are mothballed as dormant templates in
+# ``default_personas()`` and are no longer seeded. The running store seeds ONE base
+# profile; other on-disk profiles surface as available personas and are chattable on demand.
+BASE_PERSONA_ID = "base"
+DEFAULT_PERSONA_IDS = frozenset({BASE_PERSONA_ID})
+
+
+# Roles/personas retired from the product flow. A persona instance persisted under one
+# of these — historically the legacy ``pm`` slot (``shared_harness_overlay.md``: "Treat
+# PM names ... as legacy compatibility only; do not present PM as the product flow") —
+# must never render as a live product agent. The persona-instance reconciler prunes such
+# rows (archive, never delete). Single-sourced here so liveness/roster checks resolve a
+# mothballed role through this set instead of hand-rolling ``role == "pm"`` string tests.
+MOTHBALLED_ROLES: frozenset[AgentRole] = frozenset({AgentRole.PM})
+MOTHBALLED_ROLE_TOKENS: frozenset[str] = frozenset(role.value for role in MOTHBALLED_ROLES)
+MOTHBALLED_PERSONA_IDS: frozenset[str] = frozenset({AgentRole.PM.value})
 
 
 # Synthetic operator-channel personas built from a raw Hermes profile carry the
@@ -51,9 +67,9 @@ def coerce_agent_role(role: AgentRole | str | None) -> AgentRole:
 
 
 ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
-    AgentRole.PM: frozenset({"file", "session_search", "todo", "skills"}),
-    AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills"}),
-    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills"}),
+    AgentRole.PM: frozenset({"file", "session_search", "todo", "skills", "agent_chat"}),
+    AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills", "agent_chat"}),
+    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills", "agent_chat"}),
     AgentRole.ALICE_SUPERVISOR: frozenset(
         {
             "file",
@@ -67,6 +83,7 @@ ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
             "todo",
             "skills",
             "mission_goal",
+            "agent_chat",
         }
     ),
 }
@@ -78,13 +95,10 @@ PROFILE_CHAT_FALLBACK_TOOLSETS = (
     "search",
     "terminal",
     "code_execution",
-    "web",
-    "browser",
-    "vision",
     "session_search",
-    "todo",
     "skills",
     "mission_goal",
+    "agent_chat",
 )
 
 
@@ -155,7 +169,7 @@ def profile_chat_toolsets(profile_id: str, personas: list[AgentPersona] | tuple[
     )
     toolsets = list(getattr(matching, "toolsets", []) or []) if matching is not None else list(PROFILE_CHAT_FALLBACK_TOOLSETS)
     for toolset in PROFILE_CHAT_FALLBACK_TOOLSETS:
-        if toolset == "mission_goal" and toolset not in toolsets:
+        if toolset in ("mission_goal", "agent_chat") and toolset not in toolsets:
             toolsets.append(toolset)
     return [toolset for toolset in toolsets if toolset]
 
@@ -178,7 +192,7 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills", "mission_goal"],
             system_prompt_path="personas/neko_supervisor/system.md",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
-            skills=["harness-mission-lead", "harness-runtime-model"],
+            skills=["harness-mission-lead", "harness-continuity", "harness-runtime-model"],
         ),
         AgentPersona(
             id="dev",
@@ -201,6 +215,7 @@ def default_personas() -> list[AgentPersona]:
                 "frontend-backend-contract-handoff",
                 "launcher-stagec-mcp-screenshot",
                 "harness-handoff-recovery",
+                "harness-continuity",
                 "harness-dev-delivery",
                 "launcher-analyze-proof",
             ],
@@ -227,6 +242,7 @@ def default_personas() -> list[AgentPersona]:
                 "eternia-backend-tests",
                 "frontend-backend-contract-handoff",
                 "harness-handoff-recovery",
+                "harness-continuity",
                 "harness-dev-delivery",
             ],
             repo_scope="X:/Unreal Engine/Engine/EterniaBackend/eternia-backend",
@@ -244,6 +260,44 @@ def default_personas() -> list[AgentPersona]:
             autonomy=AutonomyLevel.AUTONOMOUS.value,
             skills=["harness-qa-verdict"],
         ),
+    ]
+
+
+def seed_personas() -> list[AgentPersona]:
+    """The personas actually materialized into the running store.
+
+    Base-profile foundation: seed exactly ONE free base profile as the default
+    agent. Other on-disk Hermes profiles surface as available personas and are
+    chattable on demand; they are not seeded here. ``default_personas()`` is
+    retained as dormant typed-pipeline templates for the eventual pipeline
+    rebuild and is intentionally unused by the seed.
+
+    ``mission_goal`` is deliberately excluded from the base toolset: with no
+    pipeline personas seeded, a created goal would route to dev/qa slots that
+    resolve to nothing, so exposing goal-creation would be a broken affordance.
+    Re-add it when the autonomous pipeline is rebuilt on profiles.
+    """
+
+    base_toolsets = [toolset for toolset in PROFILE_CHAT_FALLBACK_TOOLSETS if toolset != "mission_goal"]
+    return [
+        AgentPersona(
+            id=BASE_PERSONA_ID,
+            display_name="Base Agent",
+            role=PROFILE_ROLE_SENTINEL,
+            model=None,
+            provider=None,
+            api_mode="codex_responses",
+            toolsets=base_toolsets,
+            system_prompt_path="",
+            autonomy=AutonomyLevel.PROPOSE_ONLY.value,
+            hermes_profile=BASE_PERSONA_ID,
+            # Base is the operator's default agent, so it carries the Mission Control
+            # runtime-model skill (view/operate goals + graphs, incl. agent_topology),
+            # installed into the base profile so its chat can load it on demand. It is NOT
+            # a typed pipeline worker, so it does not carry harness-dev/qa delivery skills.
+            skills=["harness-runtime-model"],
+            include_profile_memory=True,
+        )
     ]
 
 

@@ -49,6 +49,25 @@ from utils import env_var_enabled
 
 logger = logging.getLogger(__name__)
 
+_HARNESS_NETWORK_ALLOWLIST = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+_HARNESS_BLOCK_PATTERNS = (
+    (re.compile(r"\bgit\s+push\b", re.IGNORECASE), "git_push_requires_operator_approval"),
+    (re.compile(r"\bgit\s+reset\s+--hard\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bgit\s+reset\s+--(?:merge|keep)\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bgit\s+clean\b[^\n;&|]*(?:-[^\s]*[xdf]|/[xdf])", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bgit\s+checkout\b[^\n;&|]*\s(?:--force|-f)\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bgit\s+checkout\b[^\n;&|]*(?:\s--(?:\s|$)|\s--(?:pathspec-from-file|pathspec-file-nul)\b)", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bgit\s+checkout\b[^\n;&|]*\s(?:\.|:/|:\\)(?:\s|$)", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bgit\s+switch\b[^\n;&|]*\s(?:--force|-f)\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bgit\s+restore\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bgit\s+stash\s+(?:drop|clear)\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\brm\s+-[^\n;&|]*r[^\n;&|]*f\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\bRemove-Item\b[^\n;&|]*(?:-Recurse|-r)\b", re.IGNORECASE), "tree_wipe_blocked"),
+    (re.compile(r"\b(?:cat|type|Get-Content)\b[^\n;&|]*(?:\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)", re.IGNORECASE), "credential_read_blocked"),
+    (re.compile(r"\b(?:kubectl|helm)\s+(?:apply|delete|rollout|scale|patch)\b", re.IGNORECASE), "prod_operation_requires_operator_approval"),
+    (re.compile(r"\bterraform\s+(?:apply|destroy)\b", re.IGNORECASE), "prod_operation_requires_operator_approval"),
+)
+
 
 # ---------------------------------------------------------------------------
 # Global interrupt event: set by the agent when a user interrupt arrives.
@@ -257,10 +276,33 @@ from tools.approval import (
 )
 
 
-def _check_all_guards(command: str, env_type: str) -> dict:
+def _docker_volume_uses_host_path(volume_spec: str) -> bool:
+    """Return True when a docker volume spec bind-mounts a host path."""
+    if not isinstance(volume_spec, str):
+        return False
+
+    vol = volume_spec.strip()
+    return bool(vol) and (
+        vol.startswith(("/", "~", "./", "../")) or
+        (len(vol) >= 3 and vol[1] == ":" and vol[2] in ("/", "\\"))
+    )
+
+
+def _docker_has_host_access(config: Dict[str, Any]) -> bool:
+    """Return True when a Docker sandbox exposes host paths through bind mounts."""
+    if config.get("env_type") != "docker":
+        return False
+    if config.get("host_cwd") and config.get("docker_mount_cwd_to_workspace"):
+        return True
+    return any(_docker_volume_uses_host_path(vol) for vol in config.get("docker_volumes", []))
+
+
+def _check_all_guards(command: str, env_type: str,
+                      has_host_access: bool = False) -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
     return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_get_approval_callback())
+                                  approval_callback=_get_approval_callback(),
+                                  has_host_access=has_host_access)
 
 
 # Allowlist: characters that can legitimately appear in directory paths.
@@ -1193,6 +1235,22 @@ _HOST_CWD_PREFIXES = ("/Users/", "/home/", "C:\\", "C:/")
 _CONTAINER_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona"})
 
 
+def _is_ssh_remote_tilde_cwd(backend: str, cwd: str) -> bool:
+    """Return True when *cwd* is a tilde path that the remote SSH shell must
+    expand itself, so the Hermes host/container must NOT ``expanduser`` it.
+
+    SSH ``cwd`` is interpreted by the *remote* shell (``cd ~`` / ``cd ~/x``
+    over ``ssh ... bash -c``). Expanding ``~`` locally would rewrite it to the
+    Hermes host HOME (often ``/opt/data`` under Docker) and inject a
+    nonexistent path into the remote session. Only ``~`` / ``~/...`` on the
+    ``ssh`` backend qualify; absolute remote paths still pass through
+    unchanged, and every other backend keeps expanding locally.
+    """
+    if (backend or "").strip().lower() != "ssh":
+        return False
+    return cwd == "~" or cwd.startswith("~/")
+
+
 def _is_unusable_container_cwd(cwd: str) -> bool:
     """Return True if *cwd* is a host/relative path that won't work as the
     working directory inside a container sandbox.
@@ -1263,7 +1321,7 @@ def _get_env_config() -> Dict[str, Any]:
     # /workspace and track the original host path separately. Otherwise keep the
     # normal sandbox behavior and discard host paths.
     cwd = os.getenv("TERMINAL_CWD", default_cwd)
-    if cwd:
+    if cwd and not _is_ssh_remote_tilde_cwd(env_type, cwd):
         cwd = os.path.expanduser(cwd)
     host_cwd = None
     if env_type == "docker" and mount_docker_cwd:
@@ -1318,6 +1376,7 @@ def _get_env_config() -> Dict[str, Any]:
         "docker_volumes": docker_volumes,
         "docker_env": docker_env,
         "docker_run_as_host_user": os.getenv("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false").lower() in {"true", "1", "yes"},
+        "docker_network": os.getenv("TERMINAL_DOCKER_NETWORK", "true").lower() in {"true", "1", "yes"},
         "docker_extra_args": docker_extra_args,
         # Cross-process container reuse (issue #20561).  The docs claim
         # "ONE long-lived container shared across sessions" — this toggle
@@ -1378,6 +1437,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     docker_forward_env = cc.get("docker_forward_env", [])
     docker_env = cc.get("docker_env", {})
     docker_extra_args = cc.get("docker_extra_args", [])
+    docker_network = cc.get("docker_network", True)
 
     if env_type == "local":
         return _LocalEnvironment(cwd=cwd, timeout=timeout)
@@ -1400,6 +1460,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
             forward_env=docker_forward_env,
             env=docker_env,
             run_as_host_user=cc.get("docker_run_as_host_user", False),
+            network=docker_network,
             extra_args=docker_extra_args,
             persist_across_processes=cc.get("docker_persist_across_processes", True),
         )
@@ -1995,6 +2056,56 @@ def _resolve_command_cwd(
     return default_cwd
 
 
+def _harness_safety_block(command: str) -> str | None:
+    if not os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip():
+        return None
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized:
+        return None
+    for pattern, reason in _HARNESS_BLOCK_PATTERNS:
+        if pattern.search(normalized):
+            return reason
+    network_reason = _harness_network_block_reason(normalized)
+    if network_reason:
+        return network_reason
+    return None
+
+
+def _harness_network_block_reason(command: str) -> str | None:
+    lowered = command.lower()
+    if not re.search(r"\b(curl|wget|iwr|Invoke-WebRequest|Invoke-RestMethod)\b", command, re.IGNORECASE):
+        return None
+    urls = re.findall(r"https?://([^/\s'\"`]+)", command, flags=re.IGNORECASE)
+    if not urls:
+        return "network_command_requires_allowlist"
+    for host in urls:
+        clean_host = host.split(":", 1)[0].strip("[]").lower()
+        if clean_host not in _HARNESS_NETWORK_ALLOWLIST:
+            return "network_command_requires_allowlist"
+    if re.search(r"(secret|token|password|credential|api[_-]?key|authorization|bearer)", lowered):
+        return "credential_exfil_blocked"
+    return None
+
+
+def _log_harness_blocked_attempt(command: str, reason: str) -> None:
+    root = os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()
+    if not root:
+        return
+    try:
+        path = Path(root).expanduser() / "blocked_tool_attempts.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "ts": time.time(),
+            "tool": "terminal",
+            "reason": reason,
+            "command_preview": command[:500],
+        }
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception:
+        logger.warning("Failed to write Harness blocked-command audit", exc_info=True)
+
+
 def terminal_tool(
     command: str,
     background: bool = False,
@@ -2049,6 +2160,17 @@ def terminal_tool(
                 "exit_code": -1,
                 "error": f"Invalid command: expected string, got {type(command).__name__}",
                 "status": "error",
+            }, ensure_ascii=False)
+        harness_block = _harness_safety_block(command)
+        if harness_block is not None:
+            _log_harness_blocked_attempt(command, harness_block)
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": f"BLOCKED by Harness execution safety envelope: {harness_block}",
+                "status": "blocked",
+                "blocked_by": "harness_execution_safety",
+                "block_reason": harness_block,
             }, ensure_ascii=False)
 
         # Get configuration
@@ -2208,6 +2330,7 @@ def terminal_tool(
                                 "docker_env": config.get("docker_env", {}),
                                 "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
                                 "docker_extra_args": config.get("docker_extra_args", []),
+                                "docker_network": config.get("docker_network", True),
                                 "docker_persist_across_processes": config.get("docker_persist_across_processes", True),
                                 "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
                             }
@@ -2269,8 +2392,16 @@ def terminal_tool(
         # Pre-exec security checks (tirith + dangerous command detection)
         # Skip check if force=True (user has confirmed they want to run it)
         approval_note = None
+        # True when the user explicitly approved this run (or pre-confirmed via
+        # force).  Drives the clean-interrupt-slate clear before env.execute so
+        # an approved command can't be SIGINT-killed by a bit that landed during
+        # the approval-wait (see clear_current_thread_interrupt).
+        _approved_run = bool(force)
         if not force:
-            approval = _check_all_guards(command, env_type)
+            approval = _check_all_guards(
+                command, env_type,
+                has_host_access=_docker_has_host_access(config),
+            )
             if not approval["approved"]:
                 # Check if this is an approval_required (gateway ask mode)
                 if approval.get("status") == "pending_approval":
@@ -2300,6 +2431,7 @@ def terminal_tool(
             if approval.get("user_approved"):
                 desc = approval.get("description", "flagged as dangerous")
                 approval_note = f"Command required approval ({desc}) and was approved by the user."
+                _approved_run = True
             elif approval.get("smart_approved"):
                 desc = approval.get("description", "flagged as dangerous")
                 approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
@@ -2381,6 +2513,9 @@ def terminal_tool(
                     "exit_code": 0,
                     "error": None,
                 }
+                # Background spawns detached and returns exit_code 0 immediately;
+                # it never inline-polls is_interrupted(), so the stale-bit kill
+                # cannot occur here and this note never co-occurs with rc=130.
                 if approval_note:
                     result_data["approval"] = approval_note
                 if pty_disabled_reason:
@@ -2594,7 +2729,17 @@ def terminal_tool(
             retry_count = 0
             result = None
             command_cwd = None
-            
+
+            # Clean interrupt slate for an approved command, ONCE before the
+            # retry loop: drop a stale bit that landed on this thread during the
+            # approval-wait so it can't SIGINT the just-approved run.  Do NOT
+            # re-clear inside the loop -- a genuine interrupt arriving during the
+            # backoff sleep between retries must survive and abort the command
+            # (caught by the next attempt's _wait_for_process poll loop -> 130).
+            if _approved_run:
+                from tools.interrupt import clear_current_thread_interrupt
+                clear_current_thread_interrupt()
+
             while retry_count <= max_retries:
                 try:
                     command_cwd = _resolve_command_cwd(
@@ -2695,9 +2840,17 @@ def terminal_tool(
             from tools.ansi_strip import strip_ansi
             output = strip_ansi(output)
 
-            # Redact secrets from command output (catches env/printenv leaking keys)
-            from agent.redact import redact_sensitive_text
-            output = redact_sensitive_text(output.strip()) if output else ""
+            # Redact secrets from command output. For source/config dumps
+            # (MAX_TOKENS=100, "apiKey": "x" fixtures, postgresql:// f-string
+            # templates) the ENV/JSON/template passes are skipped to avoid
+            # false positives (code_file=True). But for env-dump commands
+            # (env/printenv/set/export/declare) the output IS a KEY=value
+            # credential dump, so redact_terminal_output runs the ENV pass
+            # (code_file=False) to mask opaque tokens with no vendor prefix.
+            # Real prefixes, auth headers, JWTs, private keys are masked in
+            # both modes. See issue #43025.
+            from agent.redact import redact_terminal_output
+            output = redact_terminal_output(output.strip(), command) if output else ""
 
             # Interpret non-zero exit codes that aren't real errors
             # (e.g. grep=1 means "no matches", diff=1 means "files differ")
@@ -2728,7 +2881,19 @@ def terminal_tool(
             except Exception:
                 logger.debug("verification evidence recording failed", exc_info=True)
             if approval_note:
-                result_dict["approval"] = approval_note
+                # Treat rc=130 as an interrupt only when the executor's marker is
+                # present.  A command can legitimately exit 130 on its own
+                # (e.g. `bash -c 'exit 130'`); _wait_for_process returns the
+                # child's natural returncode there with no marker, and that must
+                # NOT be relabelled as a user interrupt in the audit note.
+                if returncode == 130 and "[Command interrupted]" in output:
+                    # Approved command was interrupted mid-run by a genuine Stop.
+                    # Keep the audit trail but never imply success: the bare
+                    # "...approved by the user." note must not co-occur with the
+                    # interrupt exit code (satisfies the 3-part-signature DONE).
+                    result_dict["approval"] = approval_note.rstrip(".") + ", then interrupted."
+                else:
+                    result_dict["approval"] = approval_note
             if exit_note:
                 result_dict["exit_code_meaning"] = exit_note
             if sudo_auth_failed:

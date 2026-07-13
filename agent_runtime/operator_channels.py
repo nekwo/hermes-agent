@@ -1,15 +1,43 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Iterable
 
-from .models import PersonaInstance
+from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .persona_chat_history import _canonical_persona_id
+from .simplified_contract import public_decision_type_value
 
 OPERATOR_CHANNELS_SCHEMA_VERSION = 1
+# v2: goal-run turn flow — thinking_summary / turn / tool_call / turns_collapsed
+# message kinds projected from run summaries + the task trace lane, so a live
+# goal reads as a conversation instead of a lone goal_input bubble.
+OPERATOR_CONVERSATION_SCHEMA_VERSION = 2
+
+# Hard per-channel message budget. Flow kinds (turn/tool/thinking/progress) are
+# trimmed oldest-first past this cap; operator/reply/proof/blocker/handoff/final
+# and goal_input are protected. A turns_collapsed marker records the trim.
+_CONVERSATION_MESSAGE_CAP = 200
+_CONVERSATION_TRIMMABLE_KINDS = {"thinking_summary", "turn", "tool_call", "agent_update"}
+_TOOL_OK_STATUSES = {"passed", "ok", "completed", "success", "succeeded", "done"}
+_TOOL_FAILED_STATUSES = {"failed", "error", "blocked", "crashed", "timeout"}
 
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
+_SECRET_RE = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
+)
+_TELEMETRY_SUMMARY_RE = re.compile(
+    r"(?i)\b("
+    r"agent init|provider client|provider responses|provider stream|provider call|"
+    r"agent thinking process|agent decision process|"
+    r"persona runtime|profile conversation call|profile runtime|profile agent|profile result normalize|"
+    r"profile budget checks|conversation request build|conversation provider dispatch|"
+    r"conversation response validate|conversation pre api hook|context build|autonomy packet|prompt render|"
+    r"api mode setup|core state setup|tool setup|session setup|memory skill setup|"
+    r"final state setup|decision apply"
+    r")\b"
+)
 
 
 def operator_channel_summary(
@@ -17,6 +45,9 @@ def operator_channel_summary(
     persona_instances: Iterable[PersonaInstance],
     persona_chat_history: list[dict[str, Any]],
     persona_chat_trace: list[dict[str, Any]],
+    tasks: Iterable[Task] | None = None,
+    run_summaries: list[dict[str, Any]] | None = None,
+    accountant: Any = None,
 ) -> list[dict[str, Any]]:
     """Project the Agent Console's single render contract.
 
@@ -24,8 +55,14 @@ def operator_channel_summary(
     diagnostics, but the Launcher console must not have to join them in widget
     code. This projection owns that join and emits loud warnings when the raw
     sources disagree.
+
+    ``run_summaries`` (the snapshot's already-built ``runs`` rows) feeds the
+    conversation's goal-turn flow: per-run thinking/decision messages. Optional
+    so the status-page caller keeps its cheaper v1 shape.
     """
 
+    task_lookup = _TaskLookup(tasks or [])
+    run_lookup = _RunLookup(run_summaries or [])
     channels: dict[str, _OperatorChannelBuilder] = {}
     by_session: dict[str, _OperatorChannelBuilder] = {}
     by_instance: dict[str, _OperatorChannelBuilder] = {}
@@ -76,9 +113,14 @@ def operator_channel_summary(
             )
         builder.add_trace(row)
 
+    _mirror_child_assignment_trace_to_roots(channels.values(), persona_chat_trace)
+
     return [
         channel
-        for channel in (builder.build() for builder in channels.values())
+        for channel in (
+            builder.build(task_lookup=task_lookup, run_lookup=run_lookup, accountant=accountant)
+            for builder in channels.values()
+        )
         if channel is not None
     ]
 
@@ -106,8 +148,42 @@ class _OperatorChannelBuilder:
             warning["entity_id"] = entity_id
         self.warnings.append(warning)
 
-    def build(self) -> dict[str, Any] | None:
-        history = _latest_history(self.history_rows)
+    def _bound_history(self) -> dict[str, Any] | None:
+        """History row for an instance's BOUND session, when present.
+
+        ``persona.instance.open_chat`` rebinds an instance to an arbitrary
+        saved session; the channel must project that binding, not whichever
+        curated row happens to carry the newest timestamp. Observed live
+        2026-07-07: rebinding Alice to an older chat left her channel on the
+        newest session, so the Launcher console never switched chats.
+        """
+        bound = {
+            session
+            for session in (
+                _safe_session(getattr(instance, "session_id", None))
+                for instance in self.instances
+            )
+            if session
+        }
+        if not bound:
+            return None
+        matches = [
+            row
+            for row in self.history_rows
+            if _safe_session(row.get("session_id")) in bound
+        ]
+        if not matches:
+            return None
+        return _latest_history(matches)
+
+    def build(
+        self,
+        *,
+        task_lookup: "_TaskLookup",
+        run_lookup: "_RunLookup | None" = None,
+        accountant: Any = None,
+    ) -> dict[str, Any] | None:
+        history = self._bound_history() or _latest_history(self.history_rows)
         trace = _merged_trace(self.trace_rows)
         canonical = _canonical_instance(self.instances, history=history)
         persona_id = _first_text(
@@ -142,13 +218,19 @@ class _OperatorChannelBuilder:
                     *(
                         safe_assignment_text(row.get("persona_instance_id"), limit=160)
                         for row in self.trace_rows
+                        if not row.get("_mirrored_to_root")
                     ),
                 ]
                 if item
             }
         )
         warnings = list(self.warnings)
-        if len(source_instance_ids) > 1:
+        if _source_instance_ids_conflict(
+            source_instance_ids,
+            instances=self.instances,
+            history_rows=self.history_rows,
+            trace_rows=self.trace_rows,
+        ):
             warnings.append(
                 {
                     "code": "duplicate_instances_same_channel",
@@ -169,16 +251,79 @@ class _OperatorChannelBuilder:
             history.get("task_id") if history else None,
             trace.get("task_id") if trace else None,
         )
-        if trace is None and (history is None or task_id):
+
+        entries = list(trace.get("entries") or []) if trace else []
+        channel_id = f"{persona_id}::{session_id or canonical_id}"
+        goal_id = _first_text(
+            getattr(canonical, "goal_id", None) if canonical is not None else None,
+            history.get("goal_id") if history else None,
+        )
+        task = task_lookup.get(task_id=task_id, goal_id=goal_id)
+        # Instances are sometimes keyed on the goal id instead of the task id
+        # (duplicate goal-keyed lifecycle rows); the resolved task's real id is
+        # the one runs are recorded under.
+        run_task_id = safe_assignment_text(getattr(task, "id", None), limit=160) or task_id
+        channel_runs = (
+            run_lookup.runs_for(task_id=run_task_id, persona_id=persona_id) if run_lookup is not None else []
+        )
+        conversation = _conversation_contract(
+            channel_id=channel_id,
+            persona_id=persona_id,
+            persona_instance_id=canonical_id,
+            session_id=session_id,
+            task_id=task_id,
+            goal_id=goal_id,
+            title=_first_text(
+                history.get("title") if history else None,
+                getattr(canonical, "current_chat_goal", None) if canonical is not None else None,
+                getattr(task, "title", None) if task is not None else None,
+                "Mission run",
+            )
+            or "Mission run",
+            state=safe_assignment_token(getattr(canonical, "state", None)) if canonical is not None else "unknown",
+            task=task,
+            history=history,
+            trace=trace,
+            runs=channel_runs,
+            accountant=accountant,
+        )
+        if _turn_identity_dropped(entries, conversation.get("messages") or []):
+            warnings.append(
+                {
+                    "code": "operator_conversations.turn_identity_dropped",
+                    "detail": "trace entries carry turn_id but projected tool/thinking conversation rows dropped it",
+                    "entity_id": channel_id,
+                }
+            )
+        # trace_empty is evaluated AFTER the conversation: a channel whose goal
+        # turns already flow as canonical messages is not an empty channel, even
+        # when the legacy trace lane happens to be null.
+        has_flow_messages = any(
+            message.get("kind") in {"thinking_summary", "turn", "tool_call"}
+            for message in conversation.get("messages") or []
+        )
+        # A dormant instance channel — no session, no history, no task binding,
+        # and an empty conversation — has never had anything to trace; flagging
+        # it would emit a permanent false-positive parity warning for every
+        # idle seeded/probe persona instance.
+        dormant_channel = (
+            history is None
+            and session_id is None
+            and task_id is None
+            and not (conversation.get("messages") or [])
+        )
+        if (
+            trace is None
+            and not has_flow_messages
+            and (history is None or task_id)
+            and not dormant_channel
+        ):
             warnings.append(
                 {
                     "code": "trace_empty",
                     "detail": "operator channel has no tool/progress trace rows",
                 }
             )
-
-        entries = list(trace.get("entries") or []) if trace else []
-        channel_id = f"{persona_id}::{session_id or canonical_id}"
         return {
             "schema_version": OPERATOR_CHANNELS_SCHEMA_VERSION,
             "channel_id": channel_id,
@@ -186,10 +331,7 @@ class _OperatorChannelBuilder:
             "persona_instance_id": canonical_id,
             "session_id": session_id,
             "task_id": task_id,
-            "goal_id": _first_text(
-                getattr(canonical, "goal_id", None) if canonical is not None else None,
-                history.get("goal_id") if history else None,
-            ),
+            "goal_id": goal_id,
             "display_name": _first_text(
                 getattr(canonical, "display_name", None) if canonical is not None else None,
                 _display_name_from_history(history),
@@ -200,11 +342,1032 @@ class _OperatorChannelBuilder:
             "source_instance_ids": source_instance_ids,
             "history": history,
             "trace": trace,
+            "conversation": conversation,
+            "conversation_status": conversation.get("status"),
             "message_count": int(history.get("message_count") or len(history.get("messages") or [])) if history else 0,
             "trace_count": len(entries),
             "tool_trace_count": len([entry for entry in entries if entry.get("tool_name")]),
             "warnings": warnings,
         }
+
+
+def _mirror_child_assignment_trace_to_roots(
+    builders: Iterable["_OperatorChannelBuilder"],
+    persona_chat_trace: list[dict[str, Any]],
+) -> None:
+    builders_list = list(builders)
+    roots_by_id: dict[str, list[_OperatorChannelBuilder]] = {}
+    for builder in builders_list:
+        if not _builder_is_neko_root(builder):
+            continue
+        for runtime_id in _builder_runtime_ids(builder):
+            roots_by_id.setdefault(runtime_id, []).append(builder)
+
+    for row in persona_chat_trace:
+        entries = [
+            entry
+            for entry in list(row.get("entries") or [])
+            if isinstance(entry, dict)
+            and safe_assignment_token(entry.get("event")) in {"assignment_created", "assignment_closed"}
+            and safe_assignment_token(entry.get("persona_id")) != "neko_supervisor"
+        ]
+        if not entries:
+            continue
+        runtime_ids = set(_row_runtime_ids(row))
+        for entry in entries:
+            runtime_ids.update(_entry_runtime_ids(entry))
+        targets: list[_OperatorChannelBuilder] = []
+        for runtime_id in runtime_ids:
+            for builder in roots_by_id.get(runtime_id, []):
+                if builder not in targets:
+                    targets.append(builder)
+        for builder in targets:
+            builder.add_trace({**row, "entries": entries, "_mirrored_to_root": True})
+
+
+def _builder_is_neko_root(builder: "_OperatorChannelBuilder") -> bool:
+    for instance in builder.instances:
+        if safe_assignment_token(getattr(instance, "persona_id", None)) == "neko_supervisor":
+            return True
+    for row in [*builder.history_rows, *builder.trace_rows]:
+        if safe_assignment_token(row.get("persona_id")) == "neko_supervisor":
+            return True
+    return False
+
+
+def _builder_runtime_ids(builder: "_OperatorChannelBuilder") -> set[str]:
+    ids: set[str] = set()
+    for instance in builder.instances:
+        for value in (
+            getattr(instance, "goal_id", None),
+            getattr(instance, "current_task_id", None),
+            getattr(instance, "assignment_task_id", None),
+        ):
+            normalized = safe_assignment_text(value, limit=160)
+            if normalized:
+                ids.add(normalized)
+    for row in [*builder.history_rows, *builder.trace_rows]:
+        ids.update(_row_runtime_ids(row))
+        for entry in list(row.get("entries") or []):
+            if isinstance(entry, dict):
+                ids.update(_entry_runtime_ids(entry))
+    return ids
+
+
+def _row_runtime_ids(row: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for key in ("goal_id", "task_id"):
+        normalized = safe_assignment_text(row.get(key), limit=160)
+        if normalized:
+            ids.add(normalized)
+    return ids
+
+
+def _turn_identity_dropped(entries: list[Any], messages: list[Any]) -> bool:
+    has_trace_turn_id = any(
+        isinstance(entry, dict)
+        and bool(safe_assignment_text(entry.get("turn_id"), limit=160))
+        for entry in entries
+    )
+    if not has_trace_turn_id:
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if safe_assignment_token(message.get("kind")) not in {"tool_call", "thinking_summary"}:
+            continue
+        refs = message.get("refs")
+        if not isinstance(refs, dict) or refs.get("source") != "persona_chat_trace":
+            continue
+        if not safe_assignment_text(message.get("turn_id"), limit=160):
+            return True
+    return False
+
+
+def _entry_runtime_ids(entry: dict[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for key in ("goal_id", "task_id"):
+        normalized = safe_assignment_text(entry.get(key), limit=160)
+        if normalized:
+            ids.add(normalized)
+    return ids
+
+
+class _TaskLookup:
+    def __init__(self, tasks: Iterable[Task]):
+        self.by_task_id: dict[str, Task] = {}
+        self.by_goal_id: dict[str, Task] = {}
+        for task in tasks:
+            task_id = safe_assignment_text(getattr(task, "id", None), limit=160)
+            goal_id = safe_assignment_text(getattr(task, "goal_id", None), limit=160)
+            if task_id:
+                self.by_task_id[task_id] = task
+            if goal_id:
+                self.by_goal_id[goal_id] = task
+
+    def get(self, *, task_id: str | None, goal_id: str | None) -> Task | None:
+        if task_id and task_id in self.by_task_id:
+            return self.by_task_id[task_id]
+        if goal_id and goal_id in self.by_goal_id:
+            return self.by_goal_id[goal_id]
+        # Goal-keyed lifecycle rows store the goal id in current_task_id.
+        if task_id and task_id in self.by_goal_id:
+            return self.by_goal_id[task_id]
+        return None
+
+
+class _RunLookup:
+    """Index the snapshot's run summaries by (task_id, canonical persona_id).
+
+    Reuses the rows already built for ``data["runs"]`` — the goal-turn flow
+    costs no extra store reads or event-log scans.
+    """
+
+    def __init__(self, run_summaries: Iterable[dict[str, Any]]):
+        self.by_task_persona: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for run in run_summaries:
+            if not isinstance(run, dict):
+                continue
+            task_id = safe_assignment_text(run.get("task_id"), limit=160)
+            persona_id = _canonical_persona_id(run.get("persona_id"))
+            run_id = safe_assignment_text(run.get("run_id"), limit=160)
+            if not task_id or not persona_id or not run_id:
+                continue
+            self.by_task_persona.setdefault((task_id, persona_id), []).append(run)
+
+    def runs_for(self, *, task_id: str | None, persona_id: str | None) -> list[dict[str, Any]]:
+        if not task_id or not persona_id:
+            return []
+        canonical = _canonical_persona_id(persona_id) or persona_id
+        runs = self.by_task_persona.get((task_id, canonical), [])
+        return sorted(runs, key=_run_sort_key)
+
+
+def _run_sort_key(run: dict[str, Any]) -> tuple[int, str, str]:
+    parsed = _parse_time(run.get("started_at"))
+    if parsed is not None:
+        return (1, parsed.isoformat(), str(run.get("run_id") or ""))
+    return (0, str(run.get("started_at") or ""), str(run.get("run_id") or ""))
+
+
+def _conversation_contract(
+    *,
+    channel_id: str,
+    persona_id: str,
+    persona_instance_id: str | None,
+    session_id: str | None,
+    task_id: str | None,
+    goal_id: str | None,
+    title: str,
+    state: str | None,
+    task: Task | None,
+    history: dict[str, Any] | None,
+    trace: dict[str, Any] | None,
+    runs: list[dict[str, Any]] | None = None,
+    accountant: Any = None,
+) -> dict[str, Any]:
+    messages: list[dict[str, Any]] = []
+    if task is not None:
+        messages.append(
+            _conversation_goal_input(
+                task,
+                channel_id=channel_id,
+                persona_id=persona_id,
+                persona_instance_id=persona_instance_id,
+            )
+        )
+    for index, row in enumerate(list((history or {}).get("messages") or [])):
+        if isinstance(row, dict):
+            message = _conversation_history_message(
+                row,
+                channel_id=channel_id,
+                index=index,
+                persona_id=persona_id,
+                persona_instance_id=persona_instance_id,
+            )
+            if message is not None:
+                messages.append(message)
+    for index, entry in enumerate(list((trace or {}).get("entries") or [])):
+        if isinstance(entry, dict):
+            message = _conversation_trace_message(
+                entry,
+                channel_id=channel_id,
+                index=index,
+                persona_id=persona_id,
+                persona_instance_id=persona_instance_id,
+            )
+            if message is not None:
+                messages.append(message)
+    messages.extend(
+        _conversation_turn_messages(
+            runs or [],
+            channel_id=channel_id,
+            persona_id=persona_id,
+            persona_instance_id=persona_instance_id,
+            accountant=accountant,
+        )
+    )
+    messages.extend(
+        _conversation_tool_call_messages(
+            list((trace or {}).get("entries") or []),
+            channel_id=channel_id,
+            persona_id=persona_id,
+            persona_instance_id=persona_instance_id,
+            accountant=accountant,
+        )
+    )
+
+    _settle_interrupted_tool_calls(messages, history=history)
+
+    messages.sort(key=_conversation_message_sort_key)
+    messages = _dedupe_conversation_messages(messages)
+    messages = _apply_conversation_cap(messages, channel_id=channel_id, accountant=accountant)
+    for seq, message in enumerate(messages, start=1):
+        message["seq"] = seq
+
+    # "incomplete" is a contract breach: source rows existed but nothing
+    # projected. A brand-new chat with no sources at all is simply "empty" —
+    # it must NOT surface an intervention row in Mission Control.
+    had_sources = bool(
+        task is not None
+        or (history or {}).get("messages")
+        or (trace or {}).get("entries")
+        or runs
+    )
+    if messages:
+        status = "complete"
+    elif had_sources:
+        status = "incomplete"
+    else:
+        status = "empty"
+    reason = None
+    if status == "incomplete":
+        reason = "No canonical conversation messages were projected for this operator channel."
+    return {
+        "schema_version": OPERATOR_CONVERSATION_SCHEMA_VERSION,
+        "thread_id": channel_id,
+        "goal_id": goal_id or safe_assignment_text(getattr(task, "goal_id", None), limit=160),
+        "task_id": task_id or safe_assignment_text(getattr(task, "id", None), limit=160),
+        "owner_persona_id": persona_id,
+        "persona_instance_id": persona_instance_id,
+        "session_id": session_id,
+        "root_thread_id": channel_id if persona_id == "neko_supervisor" else (f"task:{task_id}:neko_supervisor" if task_id else channel_id),
+        "parent_thread_id": None if persona_id == "neko_supervisor" else (f"task:{task_id}:neko_supervisor" if task_id else None),
+        "title": title,
+        "state": state or "unknown",
+        "updated_at": _latest_message_timestamp(messages) or (history or {}).get("updated_at") or _task_time(task),
+        "status": status,
+        "incomplete_reason": reason,
+        "messages": messages,
+    }
+
+
+def _settle_interrupted_tool_calls(
+    messages: list[dict[str, Any]],
+    *,
+    history: dict[str, Any] | None,
+) -> None:
+    """Flip still-``running`` tool_call rows of interrupted turns to ``interrupted``.
+
+    A turn killed mid-flight leaves ``tool_started`` trace entries with no
+    finish row, so the paired tool_call projects ``running`` forever. The
+    turn store's terminal marker (surfaced as ``turn_interrupted`` history
+    rows) is the truth that those calls will never finish; settle them at the
+    contract source so every consumer stops rendering a live spinner.
+    Interrupted turn ids come from the history SOURCE rows, not the projected
+    messages, so a capped/deduped marker still settles its tools.
+    """
+
+    interrupted_turn_ids: set[str] = set()
+    for row in (history or {}).get("messages") or []:
+        if not isinstance(row, dict):
+            continue
+        if safe_assignment_token(row.get("kind")) != "turn_interrupted":
+            continue
+        turn_id = safe_assignment_token(row.get("turn_id")) or safe_assignment_token(
+            row.get("client_message_id")
+        )
+        if turn_id:
+            interrupted_turn_ids.add(turn_id)
+    if not interrupted_turn_ids:
+        return
+    for message in messages:
+        if message.get("kind") != "tool_call" or message.get("status") != "running":
+            continue
+        if safe_assignment_token(message.get("turn_id")) not in interrupted_turn_ids:
+            continue
+        message["status"] = "interrupted"
+        tool = message.get("tool")
+        if isinstance(tool, dict):
+            tool["status"] = "interrupted"
+
+
+def _conversation_goal_input(
+    task: Task,
+    *,
+    channel_id: str,
+    persona_id: str,
+    persona_instance_id: str | None,
+) -> dict[str, Any]:
+    parts = [
+        f"Goal: {_safe_conversation_text(getattr(task, 'title', None), limit=500) or 'Untitled goal'}",
+    ]
+    objective = _safe_conversation_text(getattr(task, "description", None), limit=4000)
+    if objective:
+        parts.append(f"Objective: {objective}")
+    acceptance = [
+        item
+        for item in (
+            _safe_conversation_text(value, limit=500)
+            for value in (getattr(task, "acceptance_criteria", None) or [])
+        )
+        if item
+    ]
+    if acceptance:
+        parts.append("Acceptance:\n" + "\n".join(f"- {item}" for item in acceptance))
+    return {
+        "id": f"{channel_id}:goal_input:{getattr(task, 'id', 'task')}",
+        "seq": 0,
+        "timestamp": _task_time(task),
+        "actor_persona_id": "operator",
+        "actor_instance_id": None,
+        "target_persona_id": persona_id,
+        "target_persona_instance_id": persona_instance_id,
+        "role": "operator",
+        "kind": "goal_input",
+        "status": "delivered",
+        "display_title": "",
+        "display_text": "\n\n".join(parts),
+        "redaction_status": "safe",
+        "refs": {"task_id": getattr(task, "id", None), "goal_id": getattr(task, "goal_id", None)},
+    }
+
+
+def _conversation_history_message(
+    row: dict[str, Any],
+    *,
+    channel_id: str,
+    index: int,
+    persona_id: str,
+    persona_instance_id: str | None,
+) -> dict[str, Any] | None:
+    text = _safe_conversation_text(row.get("text"), limit=20000)
+    if not text:
+        return None
+    role = safe_assignment_token(row.get("role")) or "system"
+    if role == "user":
+        role = "operator"
+    if role == "assistant":
+        role = "agent"
+    if role not in {"operator", "agent", "system", "proof", "blocker"}:
+        role = "system"
+    redaction_status = safe_assignment_token(row.get("redaction_status")) or "safe"
+    if redaction_status in {"redacted", "unsafe"}:
+        text = "Message hidden by redaction boundary."
+    client_message_id = safe_assignment_text(row.get("client_message_id"), limit=240)
+    if safe_assignment_token(row.get("kind")) == "turn_interrupted":
+        # Terminal turn-status marker synthesized by persona_chat_history for a
+        # turn that died without a recorded reply. Keep the typed kind + turn
+        # identity so the Launcher can render a retry affordance and settle any
+        # still-"running" tool rows of the same turn.
+        turn_id = safe_assignment_token(row.get("turn_id")) or safe_assignment_token(client_message_id)
+        message = {
+            "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
+            "seq": 0,
+            "timestamp": row.get("timestamp"),
+            "actor_persona_id": persona_id,
+            "actor_instance_id": persona_instance_id,
+            "role": "system",
+            "kind": "turn_interrupted",
+            "status": "interrupted",
+            "display_title": "Turn interrupted",
+            "display_text": text,
+            "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
+            "refs": {"source": "persona_chat_history"},
+        }
+        if client_message_id:
+            message["client_message_id"] = client_message_id
+        if turn_id:
+            message["turn_id"] = turn_id
+        return message
+    message = {
+        "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
+        "seq": 0,
+        "timestamp": row.get("timestamp"),
+        "actor_persona_id": "operator" if role == "operator" else persona_id,
+        "actor_instance_id": None if role == "operator" else persona_instance_id,
+        "role": role,
+        "kind": "reply" if role == "agent" else "operator_message" if role == "operator" else "system_message",
+        "status": "delivered",
+        "display_title": "",
+        "display_text": text,
+        "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
+        "refs": {"source": "persona_chat_history"},
+    }
+    if role == "operator" and client_message_id:
+        message["client_message_id"] = client_message_id
+    if role == "agent" and client_message_id:
+        message["turn_id"] = safe_assignment_token(client_message_id) or client_message_id
+        message["client_message_id"] = client_message_id
+    return message
+
+
+def _conversation_trace_message(
+    entry: dict[str, Any],
+    *,
+    channel_id: str,
+    index: int,
+    persona_id: str,
+    persona_instance_id: str | None,
+) -> dict[str, Any] | None:
+    event = safe_assignment_token(entry.get("event"))
+    if event in {"assignment_created", "assignment_closed"}:
+        return _conversation_assignment_message(
+            entry,
+            channel_id=channel_id,
+            index=index,
+            parent_persona_id=persona_id,
+        )
+    if event != "progress":
+        return None
+    if entry.get("tool_name"):
+        return None
+    # Per-step reasoning renders as a first-class Thinking message — this is
+    # the streamed think→act loop, one message per thinking callback, distinct
+    # from the per-run summary emitted by _conversation_turn_messages.
+    reasoning = _safe_conversation_text(entry.get("reasoning_summary"), limit=1200)
+    if reasoning:
+        refs: dict[str, Any] = {"source": "persona_chat_trace"}
+        for key in ("task_id", "run_id", "stage_id"):
+            value = safe_assignment_text(entry.get(key), limit=160)
+            if value:
+                refs[key] = value
+        turn_id = safe_assignment_text(entry.get("turn_id"), limit=160)
+        message = {
+            "id": f"{channel_id}:thinking:{refs.get('run_id', 'run')}:{index}",
+            "seq": 0,
+            "timestamp": entry.get("ts"),
+            "actor_persona_id": safe_assignment_token(entry.get("persona_id")) or persona_id,
+            "actor_instance_id": persona_instance_id,
+            "role": "agent",
+            "kind": "thinking_summary",
+            "status": safe_assignment_token(entry.get("status")) or "running",
+            "display_title": "Thinking",
+            "display_text": reasoning,
+            "redaction_status": "safe",
+            "refs": refs,
+        }
+        if turn_id:
+            message["turn_id"] = turn_id
+        return message
+    summary = _safe_conversation_text(
+        entry.get("summary") or entry.get("rationale"),
+        limit=1200,
+    )
+    if not summary or _TELEMETRY_SUMMARY_RE.search(summary):
+        return None
+    status = safe_assignment_token(entry.get("status")) or "running"
+    role = "blocker" if status in {"blocked", "failed", "needs_input"} else "proof" if "proof" in summary.lower() else "agent"
+    kind = "blocker" if role == "blocker" else "proof" if role == "proof" else _conversation_kind_from_status(status)
+    refs: dict[str, Any] = {"source": "persona_chat_trace"}
+    for key in ("task_id", "run_id", "stage_id"):
+        value = safe_assignment_text(entry.get(key), limit=160)
+        if value:
+            refs[key] = value
+    turn_id = safe_assignment_text(entry.get("turn_id"), limit=160)
+    message = {
+        "id": f"{channel_id}:progress:{refs.get('run_id', 'run')}:{index}",
+        "seq": 0,
+        "timestamp": entry.get("ts"),
+        "actor_persona_id": safe_assignment_token(entry.get("persona_id")) or persona_id,
+        "actor_instance_id": persona_instance_id,
+        "role": role,
+        "kind": kind,
+        "status": status,
+        "display_title": _conversation_title_for_kind(kind),
+        "display_text": summary,
+        "redaction_status": "safe",
+        "refs": refs,
+    }
+    if turn_id:
+        message["turn_id"] = turn_id
+    return message
+
+
+def _conversation_assignment_message(
+    entry: dict[str, Any],
+    *,
+    channel_id: str,
+    index: int,
+    parent_persona_id: str,
+) -> dict[str, Any] | None:
+    target_persona_id = safe_assignment_token(entry.get("persona_id")) or "agent"
+    title = _safe_conversation_text(entry.get("title"), limit=240)
+    message = _safe_conversation_text(entry.get("message"), limit=1200)
+    if not title and not message:
+        return None
+    parts = [f"Prompted {target_persona_id}."]
+    if title:
+        parts.append(f"Stage: {title}")
+    if message:
+        parts.append(f"Prompt: {message}")
+    proof_targets = _safe_conversation_list(entry.get("proof_targets"), limit=160)
+    if proof_targets:
+        parts.append("Proof expected: " + "; ".join(proof_targets))
+    allowed_decisions = _safe_conversation_list(entry.get("allowed_decisions"), limit=80)
+    if allowed_decisions:
+        parts.append("Allowed decisions: " + ", ".join(allowed_decisions))
+    refs: dict[str, Any] = {"source": "persona_assignment"}
+    event = safe_assignment_token(entry.get("event"))
+    if event:
+        refs["event"] = event
+    for key in ("task_id", "stage_id", "assignment_id", "persona_instance_id", "repo"):
+        value = safe_assignment_text(entry.get(key), limit=160)
+        if value:
+            refs[key] = value
+    return {
+        "id": f"{channel_id}:assignment:{refs.get('assignment_id', index)}",
+        "seq": 0,
+        "timestamp": entry.get("ts"),
+        "actor_persona_id": parent_persona_id,
+        "actor_instance_id": None,
+        "target_persona_id": target_persona_id,
+        "target_persona_instance_id": safe_assignment_text(entry.get("persona_instance_id"), limit=160),
+        "role": "agent",
+        "kind": "handoff",
+        "status": "delivered",
+        "display_title": "Subagent prompt",
+        "display_text": "\n".join(parts),
+        "redaction_status": "safe",
+        "refs": refs,
+    }
+
+
+def _conversation_turn_messages(
+    runs: list[dict[str, Any]],
+    *,
+    channel_id: str,
+    persona_id: str,
+    persona_instance_id: str | None,
+    accountant: Any = None,
+) -> list[dict[str, Any]]:
+    """Per-run thinking + decision-boundary messages for the goal-turn flow.
+
+    A run is one model turn: its redaction-safe ``reasoning_summary`` becomes a
+    ``thinking_summary`` message and its decision boundary becomes a ``turn``
+    message. Ids are keyed on ``run_id`` so they are stable across snapshot
+    rebuilds — the launcher dedupes on id between polls.
+    """
+
+    messages: list[dict[str, Any]] = []
+    for run in runs:
+        run_id = safe_assignment_text(run.get("run_id"), limit=160)
+        if not run_id:
+            continue
+        if accountant is not None:
+            accountant.consider(1)
+        refs: dict[str, Any] = {"source": "run_summary", "run_id": run_id}
+        for key in ("task_id", "stage_id"):
+            value = safe_assignment_text(run.get(key), limit=160)
+            if value:
+                refs[key] = value
+        state = safe_assignment_token(run.get("state")) or "unknown"
+        has_error = bool(run.get("has_error"))
+        decision_summary = _safe_conversation_text(run.get("decision_summary"), limit=4000)
+        thinking = _safe_conversation_text(
+            run.get("reasoning_summary") or run.get("decision_rationale"), limit=4000
+        )
+        emitted = 0
+        if thinking and thinking != decision_summary:
+            messages.append(
+                {
+                    "id": f"{channel_id}:turn:{run_id}:thinking",
+                    "seq": 0,
+                    "timestamp": run.get("started_at") or run.get("finished_at"),
+                    "actor_persona_id": persona_id,
+                    "actor_instance_id": persona_instance_id,
+                    "role": "agent",
+                    "kind": "thinking_summary",
+                    "status": state,
+                    "display_title": "Thinking",
+                    "display_text": thinking,
+                    "redaction_status": "safe",
+                    "refs": dict(refs),
+                }
+            )
+            emitted += 1
+        decision_type = _public_turn_decision_type(run.get("decision_type"), persona_id=persona_id)
+        if decision_summary or decision_type or has_error:
+            turn_message: dict[str, Any] = {
+                "id": f"{channel_id}:turn:{run_id}",
+                "seq": 0,
+                "timestamp": run.get("finished_at") or run.get("started_at"),
+                "actor_persona_id": persona_id,
+                "actor_instance_id": persona_instance_id,
+                "role": "blocker" if has_error else "agent",
+                "kind": "turn",
+                "status": "failed" if has_error else state,
+                "display_title": _turn_title(decision_type, has_error=has_error),
+                "display_text": decision_summary
+                or ("Turn ended with an error." if has_error else "Turn completed."),
+                "redaction_status": "safe",
+                "refs": {**refs, **({"decision_type": decision_type} if decision_type else {})},
+            }
+            llm = run.get("llm")
+            if isinstance(llm, dict) and llm:
+                # Already allowlisted by the snapshot's _safe_llm.
+                turn_message["llm"] = llm
+            duration_ms = run.get("duration_ms")
+            if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
+                turn_message["duration_ms"] = int(duration_ms)
+            messages.append(turn_message)
+            emitted += 1
+        if accountant is not None:
+            if emitted:
+                accountant.include(emitted)
+            else:
+                accountant.drop("run_without_turn_signal", entity_id=run_id)
+    return messages
+
+
+def _turn_title(decision_type: str | None, *, has_error: bool) -> str:
+    if has_error:
+        return "Turn failed"
+    if not decision_type:
+        return "Turn"
+    if decision_type == "hand_off":
+        return "Turn"
+    label = decision_type.replace("_", " ").strip()
+    return f"Turn · {label[:1].upper()}{label[1:]}" if label else "Turn"
+
+
+def _public_turn_decision_type(decision_type: Any, *, persona_id: str) -> str | None:
+    value = safe_assignment_token(decision_type)
+    public_value = public_decision_type_value(value)
+    if persona_id in {"dev", "backend_dev"} and public_value == "hand_off":
+        return "hand_off"
+    if persona_id == "qa" and public_value == "qa_verdict":
+        return "qa_verdict"
+    if persona_id == "neko_supervisor" and public_value == "scope_route":
+        return "scope_route"
+    return public_value or value
+
+
+def _conversation_tool_call_messages(
+    entries: list[Any],
+    *,
+    channel_id: str,
+    persona_id: str,
+    persona_instance_id: str | None,
+    accountant: Any = None,
+) -> list[dict[str, Any]]:
+    """Collapse tool_started/tool_finished trace pairs into one tool_call each.
+
+    The trace lane already carries redaction-safe tool rows; this pairs them by
+    ``(run_id, tool_name)`` in timestamp order so the conversation shows one
+    compact row per call — running until its finish row lands, then ok/failed
+    with a duration. Ids are ``{channel}:tool:{run}:{ordinal}`` (ordinal = the
+    call's index within its run), stable across polls.
+    """
+
+    messages: list[dict[str, Any]] = []
+    open_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    ordinals: dict[str, int] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        event = safe_assignment_token(entry.get("event"))
+        if event not in {"tool_started", "tool_finished"}:
+            continue
+        turn_id = safe_assignment_text(entry.get("turn_id"), limit=160)
+        real_run_id = safe_assignment_text(entry.get("run_id"), limit=160)
+        bucket_id = turn_id or real_run_id or "run"
+        tool_name = safe_assignment_text(entry.get("tool_name"), limit=120) or "tool"
+        key = (bucket_id, tool_name)
+        summary = _safe_conversation_text(entry.get("summary"), limit=1200)
+        files = _safe_conversation_list(entry.get("files"), limit=200)
+        if event == "tool_started":
+            if accountant is not None:
+                accountant.consider(1)
+            ordinal = ordinals.get(bucket_id, 0)
+            ordinals[bucket_id] = ordinal + 1
+            message = _tool_call_message(
+                channel_id=channel_id,
+                persona_id=persona_id,
+                persona_instance_id=persona_instance_id,
+                bucket_id=bucket_id,
+                run_id=real_run_id,
+                turn_id=turn_id,
+                ordinal=ordinal,
+                tool_name=tool_name,
+                status="running",
+                timestamp=entry.get("ts"),
+                summary=summary,
+                files=files,
+                stage_id=safe_assignment_text(entry.get("stage_id"), limit=160),
+                task_id=safe_assignment_text(entry.get("task_id"), limit=160),
+                entry=entry,
+            )
+            message["_started_ts"] = entry.get("ts")
+            open_by_key.setdefault(key, []).append(message)
+            messages.append(message)
+            continue
+        status = _tool_status_token(entry.get("status"))
+        pending = open_by_key.get(key)
+        if pending:
+            message = pending.pop(0)
+            message["status"] = status
+            message["tool"]["status"] = status
+            if summary:
+                message["display_text"] = summary
+            if files:
+                message["tool"]["files"] = files
+            _merge_tool_detail(message["tool"], entry)
+            started = _parse_time(message.pop("_started_ts", None))
+            finished = _parse_time(entry.get("ts"))
+            if "duration_ms" not in message["tool"] and started is not None and finished is not None and finished >= started:
+                message["tool"]["duration_ms"] = int((finished - started).total_seconds() * 1000)
+            continue
+        if accountant is not None:
+            accountant.consider(1)
+        ordinal = ordinals.get(bucket_id, 0)
+        ordinals[bucket_id] = ordinal + 1
+        messages.append(
+            _tool_call_message(
+                channel_id=channel_id,
+                persona_id=persona_id,
+                persona_instance_id=persona_instance_id,
+                bucket_id=bucket_id,
+                run_id=real_run_id,
+                turn_id=turn_id,
+                ordinal=ordinal,
+                tool_name=tool_name,
+                status=status,
+                timestamp=entry.get("ts"),
+                summary=summary,
+                files=files,
+                stage_id=safe_assignment_text(entry.get("stage_id"), limit=160),
+                task_id=safe_assignment_text(entry.get("task_id"), limit=160),
+                entry=entry,
+            )
+        )
+    for message in messages:
+        message.pop("_started_ts", None)
+    if accountant is not None and messages:
+        accountant.include(len(messages))
+    return messages
+
+
+def _tool_call_message(
+    *,
+    channel_id: str,
+    persona_id: str,
+    persona_instance_id: str | None,
+    bucket_id: str,
+    run_id: str | None,
+    turn_id: str | None,
+    ordinal: int,
+    tool_name: str,
+    status: str,
+    timestamp: Any,
+    summary: str | None,
+    files: list[str],
+    stage_id: str | None,
+    task_id: str | None,
+    entry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    refs: dict[str, Any] = {"source": "persona_chat_trace", "tool_name": tool_name}
+    if run_id:
+        refs["run_id"] = run_id
+    if stage_id:
+        refs["stage_id"] = stage_id
+    if task_id:
+        refs["task_id"] = task_id
+    tool: dict[str, Any] = {"tool_name": tool_name, "status": status}
+    if files:
+        tool["files"] = files
+    if entry is not None:
+        _merge_tool_detail(tool, entry)
+    message = {
+        "id": f"{channel_id}:tool:{bucket_id}:{ordinal}",
+        "seq": 0,
+        "timestamp": timestamp,
+        "actor_persona_id": persona_id,
+        "actor_instance_id": persona_instance_id,
+        "role": "agent",
+        "kind": "tool_call",
+        "status": status,
+        "display_title": f"Tool · {tool_name}",
+        "display_text": summary or f"Tool {tool_name}",
+        "redaction_status": "safe",
+        "refs": refs,
+        "tool": tool,
+    }
+    if turn_id:
+        message["turn_id"] = turn_id
+    return message
+
+
+# Operator-detail fields carried from a trace entry onto the tool_call payload.
+# The values were already operator-sanitized (secret-scrubbed, bounded) when the
+# trace entry was rendered; this is a straight, newest-wins merge.
+_TOOL_DETAIL_STR_FIELDS = ("command", "target", "detail", "output")
+_TOOL_DETAIL_INT_FIELDS = ("duration_ms", "exit_code")
+
+
+def _merge_tool_detail(tool: dict[str, Any], entry: dict[str, Any]) -> None:
+    for field in _TOOL_DETAIL_STR_FIELDS:
+        value = entry.get(field)
+        if isinstance(value, str) and value.strip():
+            tool[field] = value
+    for field in _TOOL_DETAIL_INT_FIELDS:
+        value = entry.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            tool[field] = value
+    paths = entry.get("paths")
+    if isinstance(paths, list) and paths:
+        tool["paths"] = [str(item) for item in paths if str(item or "").strip()][:12]
+    skill_id = entry.get("skill_id")
+    if isinstance(skill_id, str) and skill_id.strip():
+        tool["skill_id"] = skill_id.strip()
+
+
+def _tool_status_token(value: Any) -> str:
+    status = safe_assignment_token(value) or ""
+    if status in _TOOL_FAILED_STATUSES:
+        return "failed"
+    if status in _TOOL_OK_STATUSES or not status:
+        return "ok"
+    return status
+
+
+def _apply_conversation_cap(
+    messages: list[dict[str, Any]],
+    *,
+    channel_id: str,
+    accountant: Any = None,
+) -> list[dict[str, Any]]:
+    """Bound the per-channel message count without dropping load-bearing rows.
+
+    Flow kinds trim oldest-first; goal_input / operator / reply / proof /
+    blocker / handoff / final always survive. A ``turns_collapsed`` marker
+    replaces the trimmed span so the launcher can render an honest divider.
+    """
+
+    if len(messages) <= _CONVERSATION_MESSAGE_CAP:
+        return messages
+    protected = [m for m in messages if m.get("kind") not in _CONVERSATION_TRIMMABLE_KINDS]
+    trimmable = [m for m in messages if m.get("kind") in _CONVERSATION_TRIMMABLE_KINDS]
+    budget = max(_CONVERSATION_MESSAGE_CAP - len(protected) - 1, 0)
+    dropped = trimmable[: len(trimmable) - budget] if budget else trimmable
+    kept = trimmable[len(trimmable) - budget :] if budget else []
+    if not dropped:
+        return messages
+    marker = {
+        "id": f"{channel_id}:turns_collapsed",
+        "seq": 0,
+        "timestamp": dropped[-1].get("timestamp"),
+        "actor_persona_id": "system",
+        "actor_instance_id": None,
+        "role": "system",
+        "kind": "turns_collapsed",
+        "status": "delivered",
+        "display_title": "Earlier activity collapsed",
+        "display_text": f"Earlier activity collapsed ({len(dropped)} messages). Newest turns are shown.",
+        "redaction_status": "safe",
+        "refs": {"collapsed_count": len(dropped)},
+    }
+    if accountant is not None:
+        accountant.drop("turn_cap_trimmed", count=len(dropped), entity_id=channel_id)
+        accountant.mark_truncated()
+    result = [*protected, marker, *kept]
+    result.sort(key=_conversation_message_sort_key)
+    return result
+
+
+def _conversation_kind_from_status(status: str) -> str:
+    if status in {"handoff", "ready_for_qa", "next_stage_ready", "backend_join_ready"}:
+        return "handoff"
+    if status in {"done", "completed", "passed", "approved"}:
+        return "final"
+    return "agent_update"
+
+
+def _conversation_title_for_kind(kind: str) -> str:
+    return {
+        "handoff": "Handoff",
+        "proof": "Proof update",
+        "blocker": "Blocked",
+        "final": "Final update",
+    }.get(kind, "Neko update")
+
+
+def _safe_conversation_text(value: Any, *, limit: int) -> str | None:
+    text = str(value or "").replace("\x00", " ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Mask secret-bearing lines in place instead of dropping the whole message —
+    # a dev rationale that quotes one env assignment must not vanish wholesale.
+    # Preserve intra-line whitespace on the survivors: conversation text carries
+    # code blocks and aligned output whose indentation must reach the display.
+    lines = [
+        "[redacted line — contained a secret]"
+        if _SECRET_RE.search(line)
+        else line.rstrip()
+        for line in text.split("\n")
+    ]
+    normalized = "\n".join(lines).strip()
+    normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
+    if not normalized:
+        return None
+    if len(normalized) > limit:
+        # Truncation must be visible, never silent. Single-line marker: this
+        # sanitizer also feeds single-line fields (titles, list items).
+        normalized = normalized[:limit].rstrip() + " … [truncated]"
+    return normalized
+
+
+def _safe_conversation_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    safe: list[str] = []
+    for item in value:
+        text = _safe_conversation_text(item, limit=limit)
+        if text:
+            safe.append(text)
+    return safe[:8]
+
+
+def _conversation_message_sort_key(message: dict[str, Any]) -> tuple[int, str, str]:
+    if message.get("kind") == "goal_input":
+        return (0, "", str(message.get("id") or ""))
+    parsed = _parse_time(message.get("timestamp"))
+    if parsed is not None:
+        return (1, parsed.isoformat(), str(message.get("id") or ""))
+    return (2, str(message.get("timestamp") or ""), str(message.get("id") or ""))
+
+
+def _dedupe_conversation_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen_assignments: set[str] = set()
+    seen_thinking_texts: set[str] = set()
+    # A run's reasoning often lands twice: once as the run-summary flow message
+    # (thinking_summary/turn) and once as a trace progress row (agent_update).
+    # The flow message wins; the duplicate progress row is curated out.
+    flow_texts = {
+        message.get("display_text")
+        for message in messages
+        if message.get("kind") in {"thinking_summary", "turn"} and message.get("display_text")
+    }
+    # The model's final text segment is often captured as a trailing "thinking"
+    # step whose text IS the reply verbatim. Rendering both paints the reply
+    # twice (an untimestamped Thinking bubble above the real one) — the reply
+    # wins, the echo is curated out.
+    reply_texts = {
+        str(message.get("display_text") or "").strip()
+        for message in messages
+        if message.get("kind") == "reply" and message.get("display_text")
+    }
+    deduped: list[dict[str, Any]] = []
+    for message in messages:
+        refs = message.get("refs")
+        assignment_id = (
+            safe_assignment_text(refs.get("assignment_id"), limit=160)
+            if isinstance(refs, dict)
+            else None
+        )
+        if (
+            assignment_id
+            and message.get("kind") == "handoff"
+            and message.get("display_title") == "Subagent prompt"
+        ):
+            if assignment_id in seen_assignments:
+                continue
+            seen_assignments.add(assignment_id)
+        if message.get("kind") == "agent_update" and message.get("display_text") in flow_texts:
+            continue
+        # Per-step trace thinking and the per-run summary can carry the same
+        # text (the final reasoning step often IS the decision rationale).
+        # Keep the first occurrence in timeline order; drop later repeats.
+        if message.get("kind") == "thinking_summary":
+            text = message.get("display_text")
+            if text and str(text).strip() in reply_texts:
+                continue
+            if text and text in seen_thinking_texts:
+                continue
+            if text:
+                seen_thinking_texts.add(text)
+        deduped.append(message)
+    return deduped
+
+
+def _latest_message_timestamp(messages: list[dict[str, Any]]) -> Any:
+    dated = [message.get("timestamp") for message in messages if message.get("timestamp")]
+    return dated[-1] if dated else None
+
+
+def _task_time(task: Task | None) -> Any:
+    if task is None:
+        return None
+    return getattr(task, "created_at", None) or getattr(task, "updated_at", None)
 
 
 def _channel_key_for_instance(instance: PersonaInstance) -> str:
@@ -247,6 +1410,47 @@ def _newest_instance(instances: list[PersonaInstance]) -> PersonaInstance:
     return sorted(instances, key=_instance_recency, reverse=True)[0]
 
 
+def _source_instance_ids_conflict(
+    source_instance_ids: list[str],
+    *,
+    instances: list[PersonaInstance],
+    history_rows: list[dict[str, Any]],
+    trace_rows: list[dict[str, Any]],
+) -> bool:
+    if len(source_instance_ids) <= 1:
+        return False
+    rows = [
+        *history_rows,
+        *(row for row in trace_rows if not row.get("_mirrored_to_root")),
+    ]
+    sessions = {
+        session
+        for session in [
+            *(_safe_session(getattr(instance, "session_id", None)) for instance in instances),
+            *(_safe_session(row.get("session_id")) for row in rows),
+        ]
+        if session
+    }
+    if len(sessions) > 1:
+        return True
+    personas = {
+        persona
+        for persona in [
+            *(
+                _canonical_persona_id(getattr(instance, "persona_id", None))
+                for instance in instances
+            ),
+            *(_canonical_persona_id(row.get("persona_id")) for row in rows),
+        ]
+        if persona
+    }
+    if len(personas) > 1:
+        return True
+    if any(item.startswith("personainst_operator_") for item in source_instance_ids):
+        return False
+    return True
+
+
 def _instance_recency(instance: PersonaInstance) -> tuple[int, str]:
     for value in (
         getattr(instance, "updated_at", None),
@@ -275,7 +1479,7 @@ def _row_recency(row: dict[str, Any]) -> tuple[int, str]:
 def _merged_trace(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not rows:
         return None
-    first = rows[0]
+    first = next((row for row in rows if not row.get("_mirrored_to_root")), rows[0])
     entries_by_key: dict[str, dict[str, Any]] = {}
     for row in rows:
         for entry in list(row.get("entries") or []):

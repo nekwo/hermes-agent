@@ -46,6 +46,8 @@ _GIT_PUSH_MARKERS = ("git push",)
 _GIT_SYNC_MARKERS = ("git pull --rebase", "git fetch", "git rebase")
 _STAGING_WORD = re.compile(r"(?<![a-z0-9])(?:staging|stagec|test[-_ ]?staging)(?![a-z0-9])", re.I)
 _PROD_WORD = re.compile(r"(?<![a-z0-9])(?:prod|production)(?![a-z0-9])", re.I)
+_NON_RELEASE_PATH_PREFIXES = ("docs/", "doc/", "documentation/")
+_NON_RELEASE_PATH_NAMES = {"readme.md", "changelog.md"}
 
 
 def product_promotion_required(task: Task) -> bool:
@@ -54,13 +56,29 @@ def product_promotion_required(task: Task) -> bool:
     stages = list(getattr(getattr(task, "mission_plan", None), "stages", []) or [])
     for stage in stages:
         repo = str(getattr(stage, "repo", "") or "").strip()
-        if repo in _PRODUCT_REPOS and bool(getattr(stage, "requires_product_edit", False)):
+        if (
+            repo in _PRODUCT_REPOS
+            and bool(getattr(stage, "requires_product_edit", False))
+            and not _stage_is_non_release_path_only(stage)
+        ):
             return True
     for stage in list(task_stage_records(task)):
-        if stage_requires_product_edit(task, stage):
+        if stage_requires_product_edit(task, stage) and not _stage_is_non_release_path_only(stage):
             repos = {str(repo).strip() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()}
             return not repos or bool(repos.intersection(_PRODUCT_REPOS))
     return False
+
+
+def _stage_is_non_release_path_only(stage: Any) -> bool:
+    paths = [str(path).strip() for path in (getattr(stage, "affected_paths", []) or []) if str(path).strip()]
+    return bool(paths) and all(_is_non_release_path(path) for path in paths)
+
+
+def _is_non_release_path(path: str) -> bool:
+    normalized = str(path or "").replace("\\", "/").strip().lower().lstrip("./")
+    if normalized in _NON_RELEASE_PATH_NAMES:
+        return True
+    return any(normalized.startswith(prefix) for prefix in _NON_RELEASE_PATH_PREFIXES)
 
 
 def validate_product_promotion_gate(task: Task, proof_ids: Iterable[str], *, proof_store=None) -> None:

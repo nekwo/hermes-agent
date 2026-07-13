@@ -82,6 +82,15 @@ def test_specialist_agents_snapshot_is_collection_based_redaction_safe_and_repo_
         },
     )
 
+    # Base-profile foundation: only `base` is seeded into the store now, so persist the
+    # typed specialist personas into this test's isolated store to exercise the snapshot
+    # specialist projection (repo scoping, display names). They remain resolvable via the
+    # dormant catalog in production but are not seeded/shown by default.
+    from agent_runtime.store import AgentStore
+
+    for _persona in persona_records_from_config():
+        AgentStore().save(_persona)
+
     snapshot = build_snapshot()
     agents = {agent["persona_id"]: agent for agent in snapshot["agents"]}
 

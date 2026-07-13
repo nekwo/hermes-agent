@@ -56,6 +56,58 @@ def test_handoff_packet_validates_underivable_core():
     )
 
 
+def test_handoff_backend_self_test_command_adapted_to_venv_interpreter():
+    """A naked `python manage.py …` self-test cannot run in an isolated worktree
+    (no venv on PATH); packet acceptance must hand the dev the canonical repo
+    interpreter instead of letting every backend goal burn a discovery turn."""
+    packet = handoff_packet()
+    packet["proof_gate"]["self_test_command"] = "python manage.py check"
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["self_test_command"] == (
+        ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"
+    )
+    assert "self_test_command adapted" in str(packet.get("operator_note") or "")
+
+
+def test_handoff_backend_self_test_command_already_canonical_untouched():
+    packet = handoff_packet()
+    packet["proof_gate"]["self_test_command"] = ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["self_test_command"] == (
+        ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"
+    )
+    assert "self_test_command adapted" not in str(packet.get("operator_note") or "")
+
+
+def test_handoff_launcher_self_test_command_not_adapted():
+    packet = handoff_packet(
+        handoff_mode="single_specialist",
+        target_owner="dev",
+        target_repo="EterniaLauncher",
+    )
+    packet.pop("next_owner", None)
+    packet.pop("next_repo", None)
+    packet.pop("join_gate", None)
+    packet["proof_gate"]["self_test_command"] = "flutter analyze lib/main.dart"
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["self_test_command"] == "flutter analyze lib/main.dart"
+
+
 def test_handoff_packet_accepts_compact_harness_rules_metadata():
     validate_planning_decision(
         decision(
@@ -329,20 +381,21 @@ def test_handoff_packet_drops_unknown_metadata_values_before_redaction_scan():
         )
 
 
-def test_delivery_work_status_must_match_decision_type():
+def test_delivery_work_status_is_derived_from_decision_type():
+    payload = {"stage_id": "stage_1", "commands": ["pytest -q"], "delivery": {"work_status": "ready_for_qa"}}
+    validate_planning_decision(decision(DecisionType.REQUEST_TEST_RUN, payload))
+    assert payload["delivery"]["work_status"] == "proof_requested"
+    assert payload["delivery"]["_normalization"]["renamed_fields"] == ["work_status"]
+    assert "delivery.work_status" in payload["delivery"]["operator_note"]
+
+    omitted = {"stage_id": "stage_1", "commands": ["pytest -q"], "delivery": {}}
     validate_planning_decision(
         decision(
             DecisionType.REQUEST_TEST_RUN,
-            {"stage_id": "stage_1", "commands": ["pytest -q"], "delivery": {"work_status": "proof_requested"}},
+            omitted,
         )
     )
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_planning_decision(
-            decision(
-                DecisionType.REQUEST_TEST_RUN,
-                {"stage_id": "stage_1", "commands": ["pytest -q"], "delivery": {"work_status": "ready_for_qa"}},
-            )
-        )
+    assert omitted["delivery"]["work_status"] == "proof_requested"
 
 
 def test_top_level_payload_keys_are_closed_per_decision_type():
@@ -679,9 +732,9 @@ def test_harness_qa_skill_documents_exact_packet_keys():
 
     text = Path("docs/agent-runtime-harness/harness-skills/harness-qa-verdict/SKILL.md").read_text(encoding="utf-8")
 
-    assert "Allowed `qa_review` keys only" in text
+    assert "Allowed `qa_verdict` payload keys only" in text
     assert "Do not add `notes`" in text
-    assert '"type": "report_qa_verdict"' in text
+    assert '"type": "qa_verdict"' in text
 
 
 def test_visual_proof_requests_require_safe_launch_pins():
@@ -725,3 +778,51 @@ def test_persona_message_reply_contract_accepts_conversational_payload():
             },
         )
     )
+
+
+def test_handoff_backend_focused_self_test_alias_adapted():
+    """Live 2026-07-03: neko keyed the self-test as `focused_self_test`; every
+    known self-test key must get the venv-interpreter adaptation."""
+    packet = handoff_packet()
+    packet["proof_gate"]["focused_self_test"] = "python manage.py check"
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["focused_self_test"] == (
+        ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"
+    )
+
+
+def test_handoff_proof_gate_defaults_required_and_visual_required():
+    """Live 2026-07-03 (task_1b102976): neko omitted proof_gate.required on a
+    fresh_scope handoff and the retryable=false contract failure killed the
+    goal driver. Derivable booleans must default (with an operator note), not
+    hard-fail — same normalization qa_coordination_release already gets."""
+    packet = handoff_packet()
+    packet["proof_gate"].pop("required")
+    packet["proof_gate"].pop("visual_required")
+    validate_planning_decision(
+        decision(
+            DecisionType.PROPOSE_ACCEPTANCE,
+            {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+        )
+    )
+    assert packet["proof_gate"]["required"] is True
+    assert packet["proof_gate"]["visual_required"] is False
+    note = str(packet.get("operator_note") or "")
+    assert "proof_gate.required defaulted" in note
+
+
+def test_handoff_proof_gate_without_any_proof_expectation_still_requires_required():
+    packet = handoff_packet()
+    packet["proof_gate"] = {"minimum_status": "passed"}
+    with pytest.raises(DecisionPayloadInvalid):
+        validate_planning_decision(
+            decision(
+                DecisionType.PROPOSE_ACCEPTANCE,
+                {"objective": "ship", "acceptance_criteria": ["proved"], "handoff_packet": packet},
+            )
+        )

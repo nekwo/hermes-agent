@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shlex
+import subprocess
 import time
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from hermes_time import now
 
 from agent_runtime.decision_schema import DecisionPayloadInvalid
+from agent_runtime.events import EventLog
 from agent_runtime.models import Proof, Task
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.proof_runner import (
@@ -102,7 +104,7 @@ def test_command_proof_runner_attaches_redacted_test_run_proof(tmp_path):
     assert event.payload["exit_code"] == 0
     assert event.payload["duration_ms"] >= 0
     assert event.payload["proof_id"] == proof.id
-    assert event.payload["next_expected"] == "request_qa_review"
+    assert event.payload["next_expected"] == "hand_off"
     assert "Command proof passed" in event.payload["summary"]
 
 
@@ -204,7 +206,7 @@ def test_proof_store_attach_sanitizes_metadata_promoted_to_event():
     assert event.persona_id == "dev"
     assert event.payload["status"] == "passed"
     assert event.payload["severity"] == "info"
-    assert event.payload["next_expected"] == "request_qa_review"
+    assert event.payload["next_expected"] == "hand_off"
     assert event.payload["exit_code"] == -9
     assert "duration_ms" not in event.payload
     assert "C:/Users" not in str(event)
@@ -461,6 +463,47 @@ def test_command_proof_runner_records_django_settings_adapter_metadata(tmp_path)
     assert proof.metadata["command_adapter"] == "eternia_backend_django_settings_export"
     artifact = runner.artifact_root / proof.path_or_value
     assert "command_adapter: eternia_backend_django_settings_export" in artifact.read_text(encoding="utf-8")
+
+
+def test_backend_release_gate_fails_closed_when_docker_is_down(tmp_path, monkeypatch, isolate_agent_runtime_root):
+    import agent_runtime.proof_runner as proof_runner
+
+    backend_root = tmp_path / "eternia-backend"
+    backend_root.mkdir()
+    docker_calls = []
+
+    def fake_docker_probe(argv, **_kwargs):
+        docker_calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Cannot connect to Docker daemon")
+
+    def fail_if_authoritative_command_launches(*_args, **_kwargs):
+        raise AssertionError("backend release command launched despite failed Docker readiness")
+
+    monkeypatch.setattr(proof_runner.subprocess, "run", fake_docker_probe)
+    monkeypatch.setattr(proof_runner, "_run_bounded_process", fail_if_authoritative_command_launches)
+
+    task = make_task()
+    runner = CommandProofRunner(proof_store=ProofStore(), workdir=backend_root, timeout_seconds=10)
+
+    proofs = runner.run_commands(
+        task,
+        stage_id="backend_release",
+        run_id="run_1",
+        actor="backend_dev",
+        commands=["./scripts/test.sh"],
+    )
+
+    proof = proofs[0]
+    assert docker_calls == [["docker", "version"]]
+    assert proof.metadata["status"] == "failed"
+    assert proof.metadata["exit_code"] is None
+    assert proof.metadata["backend_release_gate_fail_closed"] is True
+    assert proof.metadata["environment_readiness_check_id"] == "docker_version"
+    assert "docker_unavailable" in proof.metadata["environment_readiness_reason"]
+    artifact = runner.artifact_root / proof.path_or_value
+    assert "environment_readiness_status: failed" in artifact.read_text(encoding="utf-8")
+    events = EventLog().for_task(task.id, limit=10)
+    assert any(event.type == "backend_release_gate_environment_failed" for event in events)
 
 
 def test_redacted_workdir_prefix_is_removed_before_command_proof(tmp_path):

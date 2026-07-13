@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -62,6 +62,7 @@ class MissionPlan:
     bindings: dict[str, str] = field(default_factory=dict)
     binding_sources: dict[str, str] = field(default_factory=dict)
     edges: list[dict[str, str]] = field(default_factory=list)
+    agent_topology: dict[str, Any] = field(default_factory=dict)
     limits: dict[str, int] = field(default_factory=dict)
     stage_attempts: dict[str, int] = field(default_factory=dict)
     on_unhandled: str = "intervention"
@@ -77,7 +78,11 @@ class Task:
     updated_at: datetime
     requested_by: str
     requires_visual_proof: bool = False
+    # Declared delivery directive (promote / preserve_diff / worktree). None
+    # means the contract default; resolved via delivery_directive.task_delivery_directive.
+    delivery_directive: dict[str, Any] | None = None
     acceptance_criteria: list[str] = field(default_factory=list)
+    proof_expectations: list[str] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
     affected_repos: list[str] = field(default_factory=list)
     suggested_roles: list[str] = field(default_factory=list)
@@ -89,6 +94,9 @@ class Task:
     waiver: dict[str, str] | None = None
     parent_task_id: str | None = None
     risk_flags: list[str] = field(default_factory=list)
+    # Neko/supervisor may narrow a goal into the current routing slice. Keep
+    # that scope separate so operator-authored goal fields remain stable.
+    routing_scope: dict[str, Any] = field(default_factory=dict)
     operator_notes: list[str] = field(default_factory=list)
     harness_self_heal: dict[str, Any] = field(default_factory=dict)
     context_requests: list[dict[str, Any]] = field(default_factory=list)
@@ -134,6 +142,11 @@ class Realm:
     created_at: datetime
     updated_at: datetime
     server_id: str | None = None
+    # Stable identity minted by the membership backend. This is a pointer,
+    # never a copy of a member's local/stale default workspace contents.
+    default_workspace_id: str | None = None
+    default_workspace_name: str = "Default"
+    default_workspace_version: int = 0
     workspace_ids: list[str] = field(default_factory=list)
     sync_manifest_ref: str | None = None
     archived: bool = False
@@ -210,6 +223,9 @@ class AgentPersona:
     max_api_calls: int | None = None
     max_total_tokens: int | None = None
     readiness: dict[str, Any] = field(default_factory=dict)
+    # issued_at of the last applied model-default write; stale writes are
+    # superseded (same guard as PersonaInstance.model_override_issued_at).
+    model_override_issued_at: datetime | None = None
     schema_version: int = 1
 
 
@@ -291,8 +307,22 @@ class PersonaInstance:
     mode: str = "configured"
     goal_id: str | None = None
     spawned_by: str | None = None
+    returned_to: str | None = None
     current_chat_goal: str | None = None
     skill_overrides: list[str] | None = None
+    # Instance-level model override tier: None = inherit the backing persona
+    # live (cascade: chat-session override > instance > persona > cfg default).
+    model: str | None = None
+    provider: str | None = None
+    api_mode: str | None = None
+    # Per-instance reasoning-effort override (None = inherit the runtime default;
+    # applies only for models that support reasoning effort). One of
+    # hermes_constants.VALID_REASONING_EFFORTS or "none". Rides the same
+    # model-override lane as model/provider/api_mode so a set-model write can
+    # move all four together and use_profile_default clears them together.
+    reasoning_effort: str | None = None
+    # issued_at of the last applied model write; stale writes are superseded.
+    model_override_issued_at: datetime | None = None
     current_assignment_id: str | None = None
     current_task_id: str | None = None
     active_worker_session_id: str | None = None
@@ -305,9 +335,34 @@ class PersonaInstance:
     token_budget_used: int = 0
     tool_budget_used: int = 0
     watchdog_warning_count: int = 0
+    child_events_offset: int = 0
     last_heartbeat_at: datetime | None = None
     updated_at: datetime | None = None
     schema_version: int = 1
+
+
+def apply_instance_model_overrides(
+    persona: AgentPersona, instance: PersonaInstance | None
+) -> AgentPersona:
+    """Overlay a persona instance's model override tier onto its backing persona.
+
+    Pure: returns a copy, never mutates. ``None`` on the instance means inherit
+    the persona value live. Both the chat lane and the run/tick lane must
+    resolve model/provider/api_mode through this single overlay so two
+    instances of one persona can run different models without drift between
+    the lanes.
+    """
+
+    if instance is None:
+        return persona
+    if instance.model is None and instance.provider is None and instance.api_mode is None:
+        return persona
+    return replace(
+        persona,
+        model=instance.model if instance.model is not None else persona.model,
+        provider=instance.provider if instance.provider is not None else persona.provider,
+        api_mode=instance.api_mode if instance.api_mode is not None else persona.api_mode,
+    )
 
 
 @dataclass(slots=True)
@@ -375,6 +430,10 @@ class RepoBundle:
     verified_at: datetime | None = None
     rejected_at: datetime | None = None
     last_terminal_feedback: dict[str, Any] = field(default_factory=dict)
+    # Delivery-time capture facts (delivering run id, patch name, changed
+    # files) recorded by the delivery directive so the diff and worktree stay
+    # recoverable after ``active_run_id`` is cleared.
+    delivery_capture: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
     schema_version: int = 1
@@ -409,6 +468,12 @@ class Event:
     # projection can surface them per chat session. Optional + trailing keeps the
     # JSONL envelope backward compatible: older event rows decode with ``None``.
     session_id: str | None = None
+    # Canonical chat-turn identity: the turn key derived from the operator's
+    # ``client_message_id``. This is THE reconciliation key clients use to match
+    # a projected trace/conversation row to their locally streamed copy of the
+    # same turn — it is minted once at the send boundary and never re-derived.
+    # Task-run events leave this ``None`` (their identity is ``run_id``).
+    turn_id: str | None = None
 
 
 @dataclass(slots=True)

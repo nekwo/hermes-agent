@@ -88,3 +88,27 @@ def test_build_snapshot_carries_parity_envelope(isolate_agent_runtime_root):
     assert isinstance(parity["completeness"], dict)
     assert isinstance(parity["warnings"], list)
     assert isinstance(parity["drops"], list)
+
+
+def test_build_snapshot_carries_redaction_mode_from_env(isolate_agent_runtime_root, monkeypatch):
+    monkeypatch.setenv("HERMES_REDACTION_MODE", "observe")
+
+    snapshot = build_snapshot()
+
+    assert snapshot["parity"]["redaction_mode"] == "observe"
+
+
+def test_parity_warnings_flags_open_incident_budget(monkeypatch):
+    monkeypatch.delenv("HERMES_REDACTION_MODE", raising=False)
+    warnings = _parity_warnings(
+        {
+            "persona_instance_runtime": {"enabled": True},
+            "persona_instances": [],
+            "persona_chat_trace": [],
+            "operator_channels": [],
+            "summary": {"open_tasks": 0, "open_incidents": 101},
+            "tasks": [],
+        }
+    )
+
+    assert "open_incident_budget_exceeded" in [warning["code"] for warning in warnings]

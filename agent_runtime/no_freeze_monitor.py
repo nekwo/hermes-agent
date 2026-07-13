@@ -19,6 +19,9 @@ from .store import IncidentStore, ProofStore, TaskStore
 class NoFreezeThresholds:
     active_run_heartbeat_stale_seconds: int = 120
     no_progress_seconds: int = 300
+    liveness_poll_seconds: int = 60
+    liveness_quiet_strikes: int = 2
+    liveness_hung_seconds: int = 300
     same_next_action_repeated: int = 3
     same_persona_stage_retries: int = 2
     neko_scope_updates: int = 2
@@ -134,11 +137,12 @@ def record_freeze_findings(
         )
         proof_store.attach(proof)
         recorded_proofs.append(proof.id)
+        incident_kind = "run_hung" if str(finding.get("kind") or "") == "run_hung" else "runtime_freeze"
         incident = Incident(
             id=f"inc_{uuid.uuid4().hex[:8]}",
             task_id=task_id or finding.get("task_id"),
             run_id=finding.get("run_id"),
-            kind="runtime_freeze",
+            kind=incident_kind,
             summary=f"{finding['kind']}: {finding['summary']}",
             detail_path=None,
             opened_at=now(),

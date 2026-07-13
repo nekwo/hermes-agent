@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import replace
 from typing import Any
 
@@ -9,9 +10,12 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
+from .delivery_directive import read_bundle_promotion_record
 from .events import EventLog
-from .models import Event, MissionPlanStage, RepoBundle, Task
+from .models import Event, Incident, MissionPlanStage, RepoBundle, Task
 from .serde import from_jsonable, to_jsonable
+from .states import TaskState
+from .store import IncidentStore, ProofStore, TaskStore
 
 REPO_BUNDLE_STATES = frozenset(
     {
@@ -32,6 +36,11 @@ TERMINAL_REPO_BUNDLE_STATES = frozenset({"verified", "blocked", "cancelled", "ar
 DELIVERED_REPO_BUNDLE_STATES = frozenset({"delivered_waiting_for_qa", "delivered", "verified"})
 REPO_BUNDLE_OWNER_PERSONAS = frozenset({"dev", "backend_dev"})
 REPO_LOCK_MODES = frozenset({"read", "write", "exclusive_maintenance"})
+REPO_BUNDLE_DELIVERY_CONTRACT = "staged_bundle_not_applied"
+REPO_BUNDLE_CHECKOUT_STATUS = "not_applied"
+PATCH_LANDED_NOWHERE = "patch_landed_nowhere"
+STAGE_NO_PROGRESS = "stage_no_progress"
+EMPTY_DELIVERY_THRESHOLD = 2
 
 SIMPLIFIED_PHASES = frozenset({"created", "planning", "working", "verifying", "repair", "blocked", "done"})
 
@@ -151,10 +160,148 @@ class RepoBundleStore:
             safe = safe_token(proof_id)
             if safe and safe not in bundle.proof_ids:
                 bundle.proof_ids.append(safe)
+        # Capture the worktree patch BEFORE active_run_id is cleared — after
+        # this point the delivering run's worktree is otherwise unrecoverable.
+        delivering_run_id = bundle.active_run_id
+        try:
+            from .delivery_directive import capture_bundle_patch
+
+            capture = capture_bundle_patch(bundle, event_log=self.event_log)
+        except Exception as exc:
+            capture = {"captured": False, "reason": f"capture_error_{type(exc).__name__}"}
+        bundle.delivery_capture = {
+            "run_id": delivering_run_id,
+            "captured": bool(capture.get("captured")),
+            "patch_name": f"{bundle.id}.patch" if capture.get("captured") else None,
+            "patch_bytes": int(capture.get("patch_bytes") or 0),
+            "changed_files": list(capture.get("changed_files") or [])[:50],
+            "reason": capture.get("reason"),
+        }
+        self._record_empty_delivery_guard(bundle)
         bundle.state = "delivered_waiting_for_qa"
         bundle.active_run_id = None
         bundle.delivered_at = now()
-        return self.update(bundle, event_type="repo_bundle.delivered", payload={"proof_count": len(bundle.proof_ids)})
+        return self.update(
+            bundle,
+            event_type="repo_bundle.delivered",
+            payload={
+                "proof_count": len(bundle.proof_ids),
+                "diff_captured": bool(capture.get("captured")),
+                "changed_file_count": len(capture.get("changed_files") or []),
+            },
+        )
+
+    def _record_empty_delivery_guard(self, bundle: RepoBundle) -> None:
+        capture = dict(getattr(bundle, "delivery_capture", None) or {})
+        if capture.get("captured"):
+            return
+        reason = str(capture.get("reason") or "").strip()
+        if reason not in {"worktree_missing_or_clean", "worktree_clean"}:
+            return
+        run_id = str(capture.get("run_id") or "").strip() or None
+        if not _patch_was_proposed_for_delivery(
+            self.event_log,
+            task_id=bundle.task_id,
+            run_id=run_id,
+            persona_id=bundle.owner_persona_id,
+        ):
+            return
+
+        task_store = TaskStore()
+        stage_id = _bundle_stage_key(bundle)
+        if _empty_delivery_is_proof_only_no_product_edit(bundle, task_store=task_store, stage_id=stage_id):
+            return
+
+        incident_store = IncidentStore(event_log=self.event_log)
+        patch_incident = _open_delivery_incident_once(
+            incident_store,
+            task_id=bundle.task_id,
+            run_id=run_id,
+            kind=PATCH_LANDED_NOWHERE,
+            summary=f"Proposed patch for {safe_text(bundle.repo, limit=80)} landed nowhere; delivery capture was empty ({reason}).",
+            metadata={
+                "repo_bundle_id": bundle.id,
+                "repo": safe_text(bundle.repo, limit=160),
+                "stage_id": stage_id,
+                "delivery_capture": capture,
+            },
+        )
+        try:
+            task = task_store.get(bundle.task_id)
+        except Exception:
+            return
+
+        heal = task.harness_self_heal if isinstance(task.harness_self_heal, dict) else {}
+        guard = heal.setdefault("delivery_no_progress_guard", {})
+        previous = guard.get(stage_id) if isinstance(guard.get(stage_id), dict) else {}
+        previous_proof_ids = _safe_string_set(previous.get("proof_ids"))
+        current_proof_ids = sorted(_safe_string_set(bundle.proof_ids))
+        previous_empty = bool((previous.get("delivery_capture") or {}).get("captured") is False)
+        no_new_proof = set(current_proof_ids).issubset(previous_proof_ids)
+        count = int(previous.get("empty_capture_count") or 0)
+        count = count + 1 if previous_empty and no_new_proof else 1
+        cited_evidence_ids = _dedupe_preserve_order(
+            [*current_proof_ids, f"delivery_capture:{bundle.id}:{reason}"]
+        )
+        guard[stage_id] = {
+            "schema_version": 1,
+            "stage_id": stage_id,
+            "repo_bundle_id": bundle.id,
+            "repo": safe_text(bundle.repo, limit=160),
+            "empty_capture_count": count,
+            "proof_ids": current_proof_ids,
+            "delivery_capture": capture,
+            "patch_landed_nowhere_incident_id": patch_incident.id,
+            "cited_evidence_ids": cited_evidence_ids,
+            "updated_at": now().isoformat(),
+        }
+        task.harness_self_heal = heal
+
+        if count >= EMPTY_DELIVERY_THRESHOLD:
+            stage_incident = _open_delivery_incident_once(
+                incident_store,
+                task_id=task.id,
+                run_id=run_id,
+                kind=STAGE_NO_PROGRESS,
+                summary="Stage repeated an empty delivery with no new proof evidence; Harness stopped the loop.",
+                metadata={
+                    "repo_bundle_id": bundle.id,
+                    "repo": safe_text(bundle.repo, limit=160),
+                    "stage_id": stage_id,
+                    "empty_capture_count": count,
+                    "cited_evidence_ids": cited_evidence_ids,
+                    "delivery_capture": capture,
+                },
+            )
+            task.state = TaskState.BLOCKED
+            task.open_incident_ids = _dedupe_preserve_order(
+                [*list(task.open_incident_ids or []), stage_incident.id],
+            )
+            task.risk_flags = _dedupe_preserve_order(
+                [*list(task.risk_flags or []), "stage_no_progress"],
+            )
+            self.event_log.append(
+                Event(
+                    ts=now(),
+                    type="run.progress",
+                    task_id=task.id,
+                    run_id=run_id,
+                    persona_id=bundle.owner_persona_id,
+                    payload={
+                        "phase": "self_heal",
+                        "step": STAGE_NO_PROGRESS,
+                        "status": "waiting_for_operator",
+                        "severity": "high",
+                        "summary": "Repeated empty delivery with no new proof; Harness stopped before another blind retry.",
+                        "stage_id": stage_id,
+                        "repo_bundle_id": bundle.id,
+                        "proof_count": len(current_proof_ids),
+                        "next_expected": "operator_rescope_or_cancel",
+                    },
+                )
+            )
+        task.updated_at = now()
+        task_store.update(task, actor="harness", reason="record empty delivery capture guard")
 
     def mark_verified(self, bundle: RepoBundle, *, proof_ids: list[str] | None = None) -> RepoBundle:
         for proof_id in proof_ids or []:
@@ -248,6 +395,7 @@ def desired_bundles_for_task(task: Task) -> list[RepoBundle]:
                 objective=task.description,
                 acceptance=list(getattr(task, "acceptance_criteria", None) or []),
                 non_goals=list(getattr(task, "non_goals", None) or []),
+                proof_targets=list(getattr(task, "proof_expectations", None) or []),
                 proof_requirements=["final_gate"],
                 visual_requirements=["visual_proof"] if getattr(task, "requires_visual_proof", False) else [],
                 created_at=created_at,
@@ -330,6 +478,8 @@ def _bundles_from_mission_plan(task: Task, stages: list[MissionPlanStage]) -> li
         owner = safe_token(getattr(stage, "owner", None))
         if owner not in REPO_BUNDLE_OWNER_PERSONAS:
             continue
+        if _stage_is_out_of_scope_noop(stage):
+            continue
         repo = safe_text(getattr(stage, "repo", None) or _fallback_repo_for_stage(task, stage), limit=160)
         if not repo:
             continue
@@ -342,7 +492,7 @@ def _bundles_from_mission_plan(task: Task, stages: list[MissionPlanStage]) -> li
         bundle_id = bundle_id_for(task.id, repo, stage_ids=stage_ids)
         stage_to_bundle.update({stage_id: bundle_id for stage_id in stage_ids})
         requires_visual = any(bool(getattr(stage, "requires_visual_proof", False)) for stage in repo_stages) or bool(getattr(task, "requires_visual_proof", False))
-        proof_targets = []
+        proof_targets = list(getattr(task, "proof_expectations", None) or [])
         for stage in repo_stages:
             recipe_id = getattr(stage, "proof_recipe_id", None)
             if recipe_id:
@@ -382,6 +532,24 @@ def _bundles_from_mission_plan(task: Task, stages: list[MissionPlanStage]) -> li
         if bundle.id not in by_id:
             continue
     return sorted(bundles, key=lambda item: (item.repo.lower(), item.id))
+
+
+def _stage_is_out_of_scope_noop(stage: MissionPlanStage) -> bool:
+    if getattr(stage, "status", None) != "passed" and getattr(getattr(stage, "status", None), "value", None) != "passed":
+        return False
+    notes = " ".join(str(item) for item in (getattr(stage, "audit_notes", None) or [])).lower()
+    if "out of scope" not in notes:
+        return False
+    gate = getattr(stage, "proof_gate", None) or {}
+    return not (
+        gate.get("required")
+        or gate.get("required_proof_types")
+        or gate.get("proof_recipe_id")
+        or gate.get("commands")
+        or getattr(stage, "proof_recipe_id", None)
+        or getattr(stage, "requires_product_edit", False)
+        or getattr(stage, "requires_visual_proof", False)
+    )
 
 
 def merge_desired_bundle(existing: RepoBundle, desired: RepoBundle) -> RepoBundle:
@@ -469,6 +637,7 @@ def bundle_queue_summary(bundles: list[RepoBundle]) -> list[dict[str, Any]]:
 
 
 def repo_bundle_summary(bundle: RepoBundle) -> dict[str, Any]:
+    promotion = read_bundle_promotion_record(bundle.task_id, bundle.id)
     return {
         "repo_bundle_id": bundle.id,
         "task_id": bundle.task_id,
@@ -490,6 +659,12 @@ def repo_bundle_summary(bundle: RepoBundle) -> dict[str, Any]:
         "assignment_id": bundle.assignment_id,
         "active_run_id": bundle.active_run_id,
         "proof_ids": list(bundle.proof_ids or []),
+        "delivery_contract": _bundle_delivery_contract(promotion),
+        "checkout_applied": _promotion_applied(promotion),
+        "checkout_status": _bundle_checkout_status(promotion),
+        "closeout_label": _repo_bundle_closeout_label(bundle, promotion),
+        "delivery_capture": dict(getattr(bundle, "delivery_capture", None) or {}),
+        "promotion": _promotion_summary(promotion),
         "queue_reason": bundle.queue_reason,
         "wake_condition": bundle.wake_condition,
         "delivered_at": bundle.delivered_at,
@@ -499,6 +674,95 @@ def repo_bundle_summary(bundle: RepoBundle) -> dict[str, Any]:
         "created_at": bundle.created_at,
         "updated_at": bundle.updated_at,
     }
+
+
+def repo_bundle_delivery_summary(bundles: list[RepoBundle]) -> dict[str, Any]:
+    bundle_list = list(bundles or [])
+    states = {bundle.state for bundle in bundle_list}
+    delivered_ids = [
+        bundle.id
+        for bundle in bundle_list
+        if bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"}
+    ]
+    promotions = {
+        bundle.id: read_bundle_promotion_record(bundle.task_id, bundle.id)
+        for bundle in bundle_list
+    }
+    promoted_ids = [bundle_id for bundle_id, record in promotions.items() if _promotion_applied(record)]
+    any_promoted = bool(promoted_ids)
+    return {
+        "delivery_contract": "delivery_directive" if any_promoted else REPO_BUNDLE_DELIVERY_CONTRACT,
+        "checkout_applied": any_promoted,
+        "checkout_status": "promoted" if any_promoted else REPO_BUNDLE_CHECKOUT_STATUS,
+        "repo_bundle_ids": [bundle.id for bundle in bundle_list],
+        "delivered_repo_bundle_ids": delivered_ids,
+        "promoted_repo_bundle_ids": promoted_ids,
+        "state_counts": {state: len([bundle for bundle in bundle_list if bundle.state == state]) for state in sorted(states)},
+        "closeout_label": _repo_bundle_task_closeout_label(bundle_list, promotions),
+    }
+
+
+def _promotion_applied(promotion: dict[str, Any] | None) -> bool:
+    status = str(((promotion or {}).get("promote") or {}).get("status") or "")
+    return status in {"promoted", "already_applied"}
+
+
+def _promotion_summary(promotion: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not promotion:
+        return None
+    promote = promotion.get("promote") or {}
+    worktree = promotion.get("worktree") or {}
+    return {
+        "status": promote.get("status"),
+        "reason": promote.get("reason"),
+        "commit": promote.get("commit"),
+        "worktree_status": worktree.get("status"),
+        "recorded_at": promotion.get("recorded_at"),
+    }
+
+
+def _bundle_delivery_contract(promotion: dict[str, Any] | None) -> str:
+    return "delivery_directive" if promotion else REPO_BUNDLE_DELIVERY_CONTRACT
+
+
+def _bundle_checkout_status(promotion: dict[str, Any] | None) -> str:
+    if _promotion_applied(promotion):
+        return "promoted"
+    if promotion and str((promotion.get("promote") or {}).get("status")) == "failed":
+        return "promotion_failed"
+    return REPO_BUNDLE_CHECKOUT_STATUS
+
+
+def _repo_bundle_closeout_label(bundle: RepoBundle, promotion: dict[str, Any] | None = None) -> str:
+    if _promotion_applied(promotion):
+        commit = ((promotion or {}).get("promote") or {}).get("commit")
+        suffix = f" as commit {commit}" if commit else ""
+        return f"Repo bundle promoted to the checkout by the delivery directive{suffix}."
+    if promotion and str((promotion.get("promote") or {}).get("status")) == "failed":
+        return "Delivery directive could not promote this bundle; see the bundle_promotion_failed incident."
+    if bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"}:
+        return "Staged repo bundle delivered; checkout not modified by bundle delivery."
+    if bundle.state in {"blocked", "rejected", "cancelled"}:
+        return "Repo bundle remained staged; checkout not modified by bundle delivery."
+    return "Repo bundle is staged; checkout not modified by bundle delivery."
+
+
+def _repo_bundle_task_closeout_label(
+    bundles: list[RepoBundle], promotions: dict[str, dict[str, Any] | None] | None = None
+) -> str:
+    if not bundles:
+        return "No repo bundles are attached to this task."
+    promotions = promotions or {}
+    promoted = [bundle for bundle in bundles if _promotion_applied(promotions.get(bundle.id))]
+    if promoted and len(promoted) == len(bundles):
+        return "All repo bundles promoted to the checkout by the delivery directive."
+    if promoted:
+        return "Some repo bundles promoted by the delivery directive; others remain staged."
+    if all(bundle.state in {"delivered_waiting_for_qa", "delivered", "verified"} for bundle in bundles):
+        return "Task repo bundles are staged/delivered only; checkout not modified by bundle delivery."
+    if any(bundle.state in {"blocked", "rejected"} for bundle in bundles):
+        return "One or more repo bundles need repair; checkout not modified by bundle delivery."
+    return "Task repo bundles are staged only; checkout not modified by bundle delivery."
 
 
 def bundle_id_for(task_id: str, repo: str, *, stage_ids: list[str]) -> str:
@@ -532,6 +796,123 @@ def find_best_bundle_for_action(task: Task, *, persona_id: str, stage_id: str | 
         if safe_token(bundle.owner_persona_id) == wanted_persona:
             return bundle
     return bundles[0] if bundles else None
+
+
+def _patch_was_proposed_for_delivery(
+    event_log: EventLog,
+    *,
+    task_id: str,
+    run_id: str | None,
+    persona_id: str | None,
+) -> bool:
+    events = event_log.for_task(task_id, limit=200, types={"delivery.intent", "patch.proposed"})
+    for event in reversed(events):
+        if run_id and event.run_id not in {None, run_id}:
+            continue
+        if persona_id and event.persona_id not in {None, persona_id}:
+            continue
+        if event.type == "delivery.intent":
+            payload = event.payload if isinstance(event.payload, dict) else {}
+            if payload.get("no_edit") or str(payload.get("mode") or "") in {"no_edit", "proof_only"}:
+                continue
+        return True
+    return False
+
+
+def _empty_delivery_is_proof_only_no_product_edit(bundle: RepoBundle, *, task_store: TaskStore, stage_id: str) -> bool:
+    if not bundle.proof_ids:
+        return False
+    try:
+        task = task_store.get(bundle.task_id)
+    except Exception:
+        return False
+    stage = _stage_for_bundle(task, stage_id)
+    if stage is not None and getattr(stage, "requires_product_edit", False):
+        return False
+    if stage is None and not _task_declares_no_product_edits(task):
+        return False
+    proof_store = ProofStore()
+    for proof_id in bundle.proof_ids:
+        try:
+            proof = proof_store.get(str(proof_id))
+        except Exception:
+            continue
+        metadata = getattr(proof, "metadata", None) or {}
+        if str(metadata.get("status") or "").strip().lower() not in {"passed", "approved", "safe"}:
+            continue
+        if str(metadata.get("proof_recipe_mode") or "").strip() == "no_product_edit":
+            return True
+        recipe = metadata.get("proof_recipe") if isinstance(metadata.get("proof_recipe"), dict) else {}
+        if str(recipe.get("mode") or "").strip() == "no_product_edit":
+            return True
+    return False
+
+
+def _stage_for_bundle(task: Task, stage_id: str) -> MissionPlanStage | None:
+    plan = getattr(task, "mission_plan", None)
+    for stage in list(getattr(plan, "stages", None) or []):
+        if str(getattr(stage, "id", "") or "") == stage_id:
+            return stage
+    return None
+
+
+def _task_declares_no_product_edits(task: Task) -> bool:
+    flags = {str(flag or "").strip().lower() for flag in list(getattr(task, "risk_flags", None) or [])}
+    if "no_product_edits" in flags:
+        return True
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(item) for item in list(getattr(task, "acceptance_criteria", None) or [])),
+            " ".join(str(item) for item in list(getattr(task, "non_goals", None) or [])),
+        ]
+    ).lower()
+    return "no product edit" in text or "without product edits" in text
+
+
+def _open_delivery_incident_once(
+    incident_store: IncidentStore,
+    *,
+    task_id: str,
+    run_id: str | None,
+    kind: str,
+    summary: str,
+    metadata: dict[str, Any],
+) -> Incident:
+    repo_bundle_id = str(metadata.get("repo_bundle_id") or "")
+    stage_id = str(metadata.get("stage_id") or "")
+    for incident in incident_store.list_open():
+        if incident.task_id != task_id or incident.kind != kind:
+            continue
+        existing = incident.metadata if isinstance(incident.metadata, dict) else {}
+        if str(existing.get("repo_bundle_id") or "") == repo_bundle_id and str(existing.get("stage_id") or "") == stage_id:
+            return incident
+    incident = Incident(
+        id=f"inc_{uuid.uuid4().hex[:12]}",
+        task_id=task_id,
+        run_id=run_id,
+        kind=kind,
+        summary=summary,
+        detail_path=None,
+        opened_at=now(),
+        metadata=metadata,
+    )
+    return incident_store.open(incident)
+
+
+def _bundle_stage_key(bundle: RepoBundle) -> str:
+    for stage_id in list(getattr(bundle, "stage_ids", None) or []):
+        safe = safe_token(stage_id)
+        if safe:
+            return safe
+    return safe_token(bundle.id) or "_bundle"
+
+
+def _safe_string_set(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    return {safe_token(item) for item in value if safe_token(item)}
 
 
 def safe_bundle_state(value: str | None) -> str:

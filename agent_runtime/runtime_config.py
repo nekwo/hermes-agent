@@ -85,8 +85,14 @@ class SimplifiedAgentContractConfig:
     enabled: bool = False
     expose_only_simplified_actions: bool = True
     keep_internal_state_machine: bool = True
-    allow_legacy_decision_aliases: bool = True
     terminal_feedback_enabled: bool = True
+
+
+@dataclass(slots=True)
+class ReadModelConfig:
+    enabled: bool = False
+    serve_snapshot_from_db: bool = True
+    db_filename: str = "read_model.db"
 
 
 @dataclass(slots=True)
@@ -104,6 +110,14 @@ class SwarmConfig:
 
 
 @dataclass(slots=True)
+class SupervisionConfig:
+    child_events_enabled: bool = False
+    recursive_enabled: bool = False
+    hierarchical_budget_enabled: bool = False
+    deploy_verification_enabled: bool = False
+
+
+@dataclass(slots=True)
 class CoordinatorPermissionConfig:
     max_spawns: int = 0
     may_kill_own: bool = True
@@ -118,15 +132,14 @@ class RuntimeConfig:
     default_provider: str | None = None
     default_model: str | None = None
     default_api_mode: str = "codex_responses"
+    redaction_mode: str = "strict"
+    open_incident_warning_threshold: int = 100
     daemon_enabled: bool = False
-    execution_mode: str = "manual"
     daemon_interval_seconds: int = 10
     daemon_idle_interval_seconds: int = 30
     daemon_heartbeat_seconds: int = 5
-    daemon_stale_run_seconds: int = 600
-    daemon_retry_cooldown_seconds: int = 120
-    daemon_max_retries_per_state: int = 3
     task_create_auto_start_daemon: bool = False
+    root_node_mode: bool = False
     preferred_goal_execution_mode: str = "in_process_controller"
     live_run_max_wall_seconds: float = 300.0
     live_run_max_api_calls: int = 20
@@ -135,6 +148,13 @@ class RuntimeConfig:
     scope_wait_deadline_seconds: int = 900
     run_lease_seconds: int = 600
     tool_wait_timeout_seconds: int = 300
+    liveness_enabled: bool = True
+    liveness_poll_seconds: int = 60
+    liveness_quiet_strikes: int = 2
+    liveness_hung_seconds: int = 300
+    child_progress_min_interval_seconds: int = 30
+    deploy_timeout_seconds: int = 120
+    lock_acquire_timeout_seconds: int = 15
     mission_max_total_tokens: int = 1_000_000
     mission_wall_clock_deadline_seconds: int = 86_400
     neko_recovery_attempt_cap: int = 2
@@ -149,6 +169,8 @@ class RuntimeConfig:
     role_envelope: RoleEnvelopeConfig = field(default_factory=RoleEnvelopeConfig)
     repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)
+    read_model: ReadModelConfig = field(default_factory=ReadModelConfig)
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
+    supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
 

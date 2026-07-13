@@ -19,7 +19,7 @@ class CapturingRunner:
         return AgentRunResult(
             final_response=json.dumps(
                 {
-                    "type": "report_qa_verdict",
+                    "type": "qa_verdict",
                     "summary": "QA approved from proof packet.",
                     "rationale": "Proof IDs were present and sufficient for this code-only acceptance criterion.",
                     "payload": {
@@ -87,7 +87,7 @@ def test_qa_prompt_is_proof_first_and_verdict_bounded():
     assert "Inspect the supplied proof IDs/artifacts/log summaries first" in prompt
     assert "not a second implementation investigator" in prompt
     assert "Repeated `search_files`, `read_file`, `session_search`, or `browser_snapshot` means you are looping" in prompt
-    assert "return `report_qa_verdict`" in prompt
+    assert "return `qa_verdict`" in prompt
     assert "do not demand screenshots just to avoid making a decision" in prompt
 
 
@@ -102,7 +102,7 @@ def test_qa_runs_use_repeated_read_search_hard_stop(monkeypatch):
 
     decision = runtime.run_tick(_persona("qa"), build_context(_task(), run), run=run)
 
-    assert decision.type.value == "report_qa_verdict"
+    assert decision.type.value == "qa_verdict"
     assert runner.requests[-1].stop_on_repeated_read_search is True
 
 

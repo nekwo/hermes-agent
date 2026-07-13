@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
@@ -15,6 +16,82 @@ from .serde import to_jsonable
 
 SAFE_PREVIEW_LIMIT = 1200
 DEFAULT_CHAT_HISTORY_LIMIT = 8
+MAX_WORKSPACE_AGENTS_BYTES = 128 * 1024
+
+
+def _mission_chat_memory_loaded(persona: Any) -> bool:
+    """Whether the mission-chat lane loads this persona's bound-profile memory.
+
+    Mirrors ``GPTPersonaRuntime.mission_chat_reply`` (skip_memory is gated on
+    ``include_profile_memory``); kept here so the observability report reflects
+    the real prompt flag instead of a hardcoded assumption."""
+    return bool(getattr(persona, "include_profile_memory", False))
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceAgentsContext:
+    """One explicitly selected workspace ``AGENTS.md`` and its safe receipt."""
+
+    content: str | None
+    receipt: dict[str, Any]
+
+
+def load_workspace_agents_context(value: str | None) -> WorkspaceAgentsContext | None:
+    """Load a Launcher-selected ``AGENTS.md`` without changing process CWD.
+
+    Invalid, missing, unreadable, and oversized files produce an honest receipt
+    and no injected content. Mission chat remains available in every case.
+    """
+
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    requested = Path(raw_value).expanduser()
+    receipt: dict[str, Any] = {
+        "path": str(requested),
+        "name": requested.name or "AGENTS.md",
+        "kind": "workspace_context",
+        "source": "workspace",
+        "included": False,
+        "status": "invalid_path",
+    }
+    if not requested.is_absolute():
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    if requested.name.lower() != "agents.md":
+        receipt["status"] = "invalid_name"
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    try:
+        resolved = requested.resolve(strict=True)
+    except (OSError, RuntimeError):
+        receipt["status"] = "missing"
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    receipt["path"] = str(resolved)
+    if not resolved.is_file():
+        receipt["status"] = "not_a_file"
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    try:
+        size = resolved.stat().st_size
+    except OSError as exc:
+        receipt.update(status="unreadable", error=type(exc).__name__)
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    receipt["bytes"] = size
+    if size > MAX_WORKSPACE_AGENTS_BYTES:
+        receipt.update(status="too_large", max_bytes=MAX_WORKSPACE_AGENTS_BYTES)
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    try:
+        raw = resolved.read_bytes()
+    except OSError as exc:
+        receipt.update(status="unreadable", error=type(exc).__name__)
+        return WorkspaceAgentsContext(content=None, receipt=receipt)
+    content = raw.decode("utf-8", errors="replace")
+    receipt.update(
+        included=True,
+        status="loaded",
+        sha256=hashlib.sha256(raw).hexdigest().upper(),
+        bytes=len(raw),
+        preview=_safe_preview(content),
+    )
+    return WorkspaceAgentsContext(content=content, receipt=receipt)
 
 
 def mission_chat_prompt_observability(
@@ -33,6 +110,11 @@ def mission_chat_prompt_observability(
     model_selection: dict[str, Any] | None = None,
     trace_events: Iterable[dict[str, Any]] | None = None,
     prompt_mode: str = "normal_hermes_profile_chat",
+    workspace_id: str | None = None,
+    workspace_name: str | None = None,
+    workspace_agents: WorkspaceAgentsContext | None = None,
+    mission_hud: dict[str, Any] | None = None,
+    situational_hud: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
 
@@ -54,13 +136,21 @@ def mission_chat_prompt_observability(
                 goal_id,
                 turn_id,
                 current_message,
+                workspace_id,
+                workspace_name,
+                (
+                    workspace_agents.receipt.get("sha256")
+                    if workspace_agents is not None
+                    else None
+                ),
             )
         ).encode("utf-8", errors="replace")
     ).hexdigest()[:16]
     surface = safe_assignment_text(surface_prompt, limit=4000) or ""
     history = _chat_history_context(session_db=session_db, session_id=session_id)
-    chat = _chat_metadata(session_db=session_db, session_id=session_id)
+    chat = _chat_metadata(session_db=session_db, session_id=session_id, task_id=task_id)
     accessible_skills = _accessible_skills_context(persona, profile)
+    available_skills = available_skills_context(accessible_skills=accessible_skills)
     used_skills = used_skills_context(
         final_model_input=final_model_input,
         trace_events=trace_events,
@@ -80,11 +170,34 @@ def mission_chat_prompt_observability(
         "chat": chat,
         "task_id": safe_assignment_token(task_id),
         "goal_id": safe_assignment_token(goal_id),
+        # The run-independent slice of the ``## Mission HUD`` the harness injects
+        # each turn (typed plan / stage / QA gate). Empty for personas with no
+        # bound task; Mission Control's runtime-HUD peek renders it verbatim.
+        "mission_hud": mission_hud if isinstance(mission_hud, dict) else {},
+        # The full runtime situational HUD (runtime · scope · mission · lane ·
+        # roster · mission_hud) — the single projection the operator's runtime
+        # HUD strip and the agent's mission-chat turn both render, so operator
+        # and agent share one view. Empty until threaded (snapshot path); the
+        # chat lane feeds the same projection into the model. See runtime_hud.py.
+        "situational_hud": situational_hud if isinstance(situational_hud, dict) else {},
+        "workspace_id": safe_assignment_token(workspace_id),
+        "workspace_name": safe_assignment_text(workspace_name, limit=120),
         "turn_id": safe_assignment_token(turn_id),
         "surface_prompt": surface,
         "surface_prompt_is_blank": surface == "",
         "limiting_wrapper_active": bool(limiting_wrapper_active),
         "prompt_layers": [
+            {
+                "name": "Persona identity",
+                "kind": "persona_identity",
+                "status": "loaded",
+                "summary": (
+                    "First-person 'you are "
+                    + (safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id)
+                    + "' identity block; the isolated chat lane does not load the profile SOUL, so this "
+                    "names the persona and forbids self-relay."
+                ),
+            },
             {
                 "name": "Hermes core prompt",
                 "kind": "system_core",
@@ -99,11 +212,31 @@ def mission_chat_prompt_observability(
                 "preview": surface[:SAFE_PREVIEW_LIMIT],
             },
             {
-                "name": "Profile SOUL and memory",
+                "name": "Profile memory",
                 "kind": "profile_context",
-                "status": "loaded",
-                "summary": "Loaded through normal Hermes profile context files and memory.",
+                "status": "loaded" if _mission_chat_memory_loaded(persona) else "skipped",
+                "summary": (
+                    "Profile MEMORY.md / USER.md loaded (persona opts in via include_profile_memory)."
+                    if _mission_chat_memory_loaded(persona)
+                    else "Profile memory skipped; this persona does not opt into its bound profile's memory."
+                ),
             },
+            *(
+                [
+                    {
+                        "name": "Workspace AGENTS.md",
+                        "kind": "workspace_context",
+                        "status": workspace_agents.receipt.get("status", "unknown"),
+                        "summary": (
+                            "Injected from the operator-selected workspace directory."
+                            if workspace_agents.content is not None
+                            else "Workspace instructions were not injected; see the file receipt."
+                        ),
+                    }
+                ]
+                if workspace_agents is not None
+                else []
+            ),
             {
                 "name": "Chat history context",
                 "kind": "conversation",
@@ -111,9 +244,14 @@ def mission_chat_prompt_observability(
                 "summary": f"{len(history)} prior redaction-safe chat message(s) supplied before this turn.",
             },
         ],
-        "context_files": _profile_context_files(profile),
+        "context_files": [
+            *_profile_context_files(profile),
+            *([workspace_agents.receipt] if workspace_agents is not None else []),
+        ],
         "used_skills": used_skills,
         "accessible_skills": accessible_skills,
+        "available_skills": available_skills,
+        "skills_catalog": available_skills,
         "skills": accessible_skills,
         "chat_history_context": history,
         "retrieval_context": [],
@@ -121,11 +259,17 @@ def mission_chat_prompt_observability(
         "model_selection": _safe_model_selection(model_selection),
         "context_budget": _context_budget(model_selection, final_model_input),
         "prompt_flags": {
-            "skip_context_files": False,
-            "skip_memory": False,
-            "load_soul_identity": True,
+            "skip_context_files": not bool(getattr(persona, "include_core_context_files", False)),
+            "skip_memory": not _mission_chat_memory_loaded(persona),
+            # The isolated chat lane runs with skip_context_files=True and never
+            # sets load_soul_identity, so the profile SOUL is NOT the identity —
+            # the first-person persona-identity layer is. Report that honestly.
+            "load_soul_identity": False,
             "surface_prompt_blank": surface == "",
             "limiting_wrapper_active": bool(limiting_wrapper_active),
+            "workspace_agents_injected": bool(
+                workspace_agents is not None and workspace_agents.content is not None
+            ),
         },
         "redaction": {
             "status": "safe",
@@ -175,28 +319,80 @@ def snapshot_prompt_observability(
     personas: Iterable[Any],
     persona_instances: Iterable[Any],
     session_db: Any | None = None,
+    tasks: Iterable[Any] | None = None,
+    proof_store: Any | None = None,
+    daemon: dict[str, Any] | None = None,
+    realm: str | None = None,
+    workspace: str | None = None,
 ) -> dict[str, Any]:
+    # Deferred import: context_builder pulls a large dependency graph, and this
+    # module is imported very early. A function-local import keeps module load
+    # order robust while still giving the preview a single-authority HUD builder.
+    from .context_builder import mission_hud_preview
+    from .runtime_hud import resolve_situational_hud
+
+    tasks_by_id = {
+        safe_assignment_token(getattr(task, "id", None)): task
+        for task in (tasks or [])
+        if safe_assignment_token(getattr(task, "id", None))
+    }
+    # Materialize once: the roster is reused for every lane's situational HUD
+    # (thread count + on-level list) and the input may be a one-shot iterable.
+    roster = list(persona_instances)
+
+    def _preview_for(task_id: str | None) -> dict[str, Any]:
+        task = tasks_by_id.get(safe_assignment_token(task_id) or "")
+        if task is None:
+            return {}
+        try:
+            return mission_hud_preview(task, proof_store=proof_store)
+        except Exception:
+            # The peek is diagnostic; never let a HUD preview failure break the
+            # snapshot that carries everything else Mission Control renders.
+            return {}
+
+    def _situational_for(instance: Any, task_id: str | None) -> dict[str, Any]:
+        try:
+            goal_id = getattr(instance, "goal_id", None)
+            return resolve_situational_hud(
+                instance,
+                daemon=daemon,
+                realm=realm,
+                workspace=workspace,
+                roster=roster,
+                task=tasks_by_id.get(safe_assignment_token(task_id) or ""),
+                goal_task=tasks_by_id.get(safe_assignment_token(goal_id) or ""),
+                proof_store=proof_store,
+            )
+        except Exception:
+            # Same guarantee as the preview: a situational-HUD failure degrades
+            # to {} rather than breaking the snapshot.
+            return {}
+
     contexts: list[dict[str, Any]] = []
     by_persona = {
         safe_assignment_token(getattr(persona, "id", None)): persona
         for persona in personas
         if safe_assignment_token(getattr(persona, "id", None))
     }
-    for instance in persona_instances:
+    for instance in roster:
         persona_id = safe_assignment_token(getattr(instance, "persona_id", None))
         persona = by_persona.get(persona_id) or _profile_persona_from_instance(instance)
         if persona is None:
             continue
+        task_id = getattr(instance, "current_task_id", None)
         contexts.append(
             mission_chat_prompt_observability(
                 persona=persona,
                 persona_instance_id=_persona_instance_id(instance),
                 session_id=getattr(instance, "session_id", None),
-                task_id=getattr(instance, "current_task_id", None),
+                task_id=task_id,
                 goal_id=getattr(instance, "goal_id", None),
                 surface_prompt="",
                 limiting_wrapper_active=False,
                 session_db=session_db,
+                mission_hud=_preview_for(task_id),
+                situational_hud=_situational_for(instance, task_id),
             )
         )
     if not contexts:
@@ -306,9 +502,22 @@ def _backfill_derived_fields(
     recompute the budget from the row's own model selection + final input.
     """
     if built:
+        # Persisted rows are written at chat time and never carry the typed
+        # mission-HUD preview (chat turns don't compute one). Prefer the freshly
+        # built preview so the persisted row exposes the same upcoming-turn HUD.
+        built_hud = built.get("mission_hud")
+        if isinstance(built_hud, dict) and built_hud and not item.get("mission_hud"):
+            item["mission_hud"] = built_hud
+        # Same rationale for the runtime situational HUD: persisted chat rows
+        # never compute one, so prefer the freshly built projection.
+        built_situational = built.get("situational_hud")
+        if isinstance(built_situational, dict) and built_situational and not item.get("situational_hud"):
+            item["situational_hud"] = built_situational
         for key in (
             "used_skills",
             "accessible_skills",
+            "available_skills",
+            "skills_catalog",
             "skills",
             "chat_id",
             "chat_title",
@@ -322,6 +531,7 @@ def _backfill_derived_fields(
         chat = _chat_metadata(
             session_db=session_db,
             session_id=safe_assignment_text(item.get("session_id"), limit=200),
+            task_id=safe_assignment_text(item.get("task_id"), limit=160),
         )
         if chat:
             item["chat_id"] = chat.get("id")
@@ -349,8 +559,17 @@ def _backfill_derived_fields(
                 for name in names[:80]
             ]
             item["skills"] = item["accessible_skills"]
+            item["available_skills"] = available_skills_context(
+                accessible_skills=item["accessible_skills"]
+            )
+            item["skills_catalog"] = item["available_skills"]
     elif item.get("skills") is None:
         item["skills"] = item["accessible_skills"]
+    if item.get("available_skills") is None:
+        item["available_skills"] = available_skills_context(
+            accessible_skills=item.get("accessible_skills") or item.get("skills") or []
+        )
+        item["skills_catalog"] = item["available_skills"]
     if _context_budget_needs_refresh(item):
         budget = _context_budget(item.get("model_selection"), item.get("final_model_input"))
         if budget is not None:
@@ -559,17 +778,32 @@ def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any
     tracked: set[str] = set()
     mismatched: set[str] = set()
     missing: set[str] = set()
+    # Resolve the persona's OWN profile home so skill hash/missing checks run against
+    # the profile the persona actually runs on — mirroring profile_readiness (the
+    # authoritative surface). Without hermes_home these checks fall back to the active
+    # HERMES_HOME, so an isolated persona (e.g. base, whose home differs from the active
+    # profile) shows a false hash_mismatch in the HUD while `harness status` reports
+    # clean. Keep the None fallback (legacy behavior) when the home can't be resolved.
+    profile_home = None
+    try:
+        from .profile_context import resolve_persona_profile
+
+        binding = resolve_persona_profile(persona)
+        profile_home = getattr(binding, "profile_home", None)
+    except Exception:
+        profile_home = None
     try:
         from .skill_install import HARNESS_SKILLS, harness_skill_hash_mismatches
 
         tracked = {name for name in declared if name in HARNESS_SKILLS}
-        mismatched = set(harness_skill_hash_mismatches(sorted(tracked)))
+        mismatched = set(harness_skill_hash_mismatches(sorted(tracked), hermes_home=profile_home))
     except Exception:
         pass
     try:
         from .profile_readiness import _missing_skill_names
 
-        missing = set(_missing_skill_names(sorted(tracked)))
+        skill_root = (profile_home / "skills") if profile_home is not None else None
+        missing = set(_missing_skill_names(sorted(tracked), skill_root=skill_root))
     except Exception:
         pass
     skills: list[dict[str, Any]] = []
@@ -593,10 +827,126 @@ def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any
     return skills
 
 
+# The installed-skill catalog walk parses every SKILL.md frontmatter (~1k
+# YAML loads across one snapshot core, measured 2026-07-09), and the core
+# asks once per persona chat session (15+ times per build). A short TTL memo
+# collapses that to one walk per build. Observability rows only — never
+# authority — so a skill installed/removed mid-window simply appears on the
+# first core built after the TTL lapses.
+_SKILL_CATALOG_TTL_SECONDS = 15.0
+_skill_catalog_memo: dict[str, Any] = {"at": 0.0, "rows": None, "walker": None}
+
+
+def _resolve_skill_walker():
+    try:
+        from tools.skills_tool import _find_all_skills
+
+        return _find_all_skills
+    except Exception:
+        return None
+
+
+def _installed_skill_catalog() -> list:
+    """Memo keyed on BOTH the TTL and the walker's identity: a monkeypatched
+    or hot-reloaded `skills_tool._find_all_skills` invalidates the memo
+    immediately instead of being masked for a TTL window."""
+    import time
+
+    walker = _resolve_skill_walker()
+    now = time.monotonic()
+    if (
+        _skill_catalog_memo["rows"] is not None
+        and _skill_catalog_memo["walker"] is walker
+        and now - _skill_catalog_memo["at"] < _SKILL_CATALOG_TTL_SECONDS
+    ):
+        return _skill_catalog_memo["rows"]
+    rows: list = []
+    if walker is not None:
+        try:
+            installed = walker()
+            if isinstance(installed, list):
+                rows = installed
+        except Exception:
+            rows = []
+    _skill_catalog_memo["rows"] = rows
+    _skill_catalog_memo["at"] = now
+    _skill_catalog_memo["walker"] = walker
+    return rows
+
+
+def available_skills_context(
+    *,
+    accessible_skills: list[dict[str, Any]] | None = None,
+    limit: int = 160,
+) -> list[dict[str, Any]]:
+    """Redaction-safe installed skill catalog for Mission Control.
+
+    This deliberately exposes names and frontmatter descriptions only. It never
+    returns SKILL.md bodies or referenced files.
+    """
+
+    accessible_by_name = {
+        safe_assignment_token(item.get("name")): item
+        for item in accessible_skills or []
+        if isinstance(item, dict) and safe_assignment_token(item.get("name"))
+    }
+    rows: list[dict[str, Any]] = []
+    installed = _installed_skill_catalog()
+    if isinstance(installed, list):
+        for skill in installed:
+            if not isinstance(skill, dict):
+                continue
+            name = safe_assignment_token(skill.get("name"))
+            if not name:
+                continue
+            accessible = accessible_by_name.get(name)
+            status = "accessible" if accessible else "available"
+            if accessible and isinstance(accessible.get("status"), str):
+                status = safe_assignment_token(accessible.get("status")) or status
+            rows.append(
+                {
+                    "name": name,
+                    "kind": "skill",
+                    "status": status,
+                    "hash_tracked": bool(accessible.get("hash_tracked")) if accessible else False,
+                    "source": "installed_skill_catalog",
+                    "category": safe_assignment_token(skill.get("category")) or "skills",
+                    "description": safe_assignment_text(skill.get("description"), limit=220) or "",
+                    "loadable": True,
+                }
+            )
+    if not rows:
+        for name, item in accessible_by_name.items():
+            rows.append(
+                {
+                    "name": name,
+                    "kind": "skill",
+                    "status": safe_assignment_token(item.get("status")) or "accessible",
+                    "hash_tracked": bool(item.get("hash_tracked")),
+                    "source": safe_assignment_token(item.get("source")) or "accessible_skills",
+                    "category": "skills",
+                    "description": "",
+                    "loadable": True,
+                }
+            )
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda item: str(item.get("name", "")).lower()):
+        name = safe_assignment_token(row.get("name"))
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        deduped.append(row)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
 def used_skills_context(
     *,
     final_model_input: dict[str, Any] | None = None,
     trace_events: Iterable[dict[str, Any]] | None = None,
+    queued_skills: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Redaction-safe list of skills actually loaded/read during this turn."""
     names: list[str] = []
@@ -611,7 +961,7 @@ def used_skills_context(
         if not _skill_trace_event_counts_as_used(entry):
             continue
         _append_used_skill_name(names, _extract_skill_name(entry))
-    return [
+    rows = [
         {
             "name": name,
             "kind": "skill",
@@ -621,6 +971,20 @@ def used_skills_context(
         }
         for name in names
     ]
+    for skill in queued_skills or ():
+        token = safe_assignment_token(skill)
+        if not token or token in names:
+            continue
+        rows.append(
+            {
+                "name": token,
+                "kind": "skill",
+                "status": "used",
+                "hash_tracked": False,
+                "source": "queued_next_turn_skill",
+            }
+        )
+    return rows
 
 
 def _list_used_skill_entries(final_model_input: dict[str, Any] | None) -> list[Any]:
@@ -675,7 +1039,12 @@ def _extract_skill_name(entry: Any) -> str | None:
     return None
 
 
-def _chat_metadata(*, session_db: Any | None, session_id: str | None) -> dict[str, Any]:
+def _chat_metadata(
+    *,
+    session_db: Any | None,
+    session_id: str | None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
     safe_id = safe_assignment_text(session_id, limit=200)
     if not safe_id:
         return {}
@@ -694,6 +1063,9 @@ def _chat_metadata(*, session_db: Any | None, session_id: str | None) -> dict[st
             if not title:
                 title = safe_assignment_text(raw.get("title"), limit=160)
             source = safe_assignment_token(raw.get("source"))
+    if not title and safe_assignment_text(task_id, limit=160):
+        title = "Mission run"
+        source = source or "task_bound"
     data: dict[str, Any] = {
         "id": safe_id,
         "title": title,
@@ -716,7 +1088,6 @@ def _profile_context_files(profile: str) -> list[dict[str, Any]]:
         profile_dir / "SOUL.md",
         profile_dir / "memories" / "MEMORY.md",
         profile_dir / "memories" / "USER.md",
-        profile_dir / "AGENTS.md",
         profile_dir / ".skills_prompt_snapshot.json",
         profile_dir / "config.yaml",
     ]

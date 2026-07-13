@@ -102,7 +102,7 @@ def test_payload_contract_facade_matches_registry():
 def test_role_aliases_support_runtime_persona_ids():
     assert canonical_role_value("neko_supervisor") == AgentRole.ALICE_SUPERVISOR.value
     assert canonical_role_value("backend_dev") == AgentRole.DEV.value
-    assert "propose_acceptance" in contract_manifest()["roles"][canonical_role_value("neko_supervisor")]
+    assert "scope_route" in contract_manifest()["roles"][canonical_role_value("neko_supervisor")]
 
 
 def test_registry_hud_shapes_drive_context_builder_menu():
@@ -125,11 +125,12 @@ def test_qa_menu_exposes_nested_and_enum_choices():
     ctx = build_context(task, _run("qa"))
 
     screenshot = next(item for item in ctx.mission_hud["decision_menu"] if item["shape_id"] == "qa.request_screenshot")
-    verdict = next(item for item in ctx.mission_hud["decision_menu"] if item["shape_id"] == "qa.report_qa_verdict")
+    verdict = next(item for item in ctx.mission_hud["decision_menu"] if item["shape_id"] == "qa.verdict")
 
     assert screenshot["nested_required"]["required_launch_pins"] == ["hermes_profile", "runtime_root_id"]
     assert screenshot["enum_choices"]["mcp_server"] == ["launcher_qa"]
-    assert verdict["nested_required"]["qa_review"] == ["coverage", "decision_basis", "remaining_gaps", "next_owner"]
+    assert verdict["enum_choices"]["verdict"] == ["approved", "needs_fixes", "blocked"]
+    assert "coverage" in verdict["allowed_payload_keys"]
 
 
 def test_prompt_contract_includes_registry_hash():
@@ -186,7 +187,7 @@ def test_contract_cli_dump_and_verify_examples():
     )
     neko_payload = json.loads(neko_dump.stdout)
     assert neko_payload["role"] == "alice_supervisor"
-    assert "neko.scoped_handoff" in neko_payload["decision_menu_shape_ids"]
+    assert "neko.scope_route" in neko_payload["decision_menu_shape_ids"]
 
     verify = subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "harness", "contracts", "verify-examples", "--json"],
@@ -206,9 +207,13 @@ def test_harness_skill_examples_validate_against_live_contracts():
 
     assert result["ok"] is True
     assert result["failure_count"] == 0
+    # Rationale (doc-08 v4 / N1): the root-node rewrite of harness-mission-lead no
+    # longer emits AgentDecision JSON examples (the skill's explicit contract is
+    # "Do not emit AgentDecision JSON"), so it is intentionally no longer part of
+    # the decision-contract example-validation set. Dropped here, not weakened
+    # elsewhere. See tests/agent_runtime/test_root_node_mode.py for the new coverage.
     assert {item["skill"] for item in result["checked"]} >= {
         "harness-dev-delivery",
-        "harness-mission-lead",
         "harness-qa-verdict",
         "launcher-analyze-proof",
     }

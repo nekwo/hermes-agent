@@ -7,6 +7,7 @@ from pathlib import Path
 
 from hermes_time import now
 from hermes_cli.harness import build_parser
+from agent_runtime import paths
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.goal_runner import GoalRunResult
 from agent_runtime.models import AgentRun, Incident, Proof, Task
@@ -159,6 +160,59 @@ def test_harness_goal_run_returns_controller_exit_code(tmp_path, monkeypatch, ca
     assert data["stop_reason"] == "max_actions"
 
 
+def test_harness_goal_run_json_survives_archive_on_done(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    class Controller:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def run_goal(self, options):
+            assert options.archive_on_done is True
+            task = Task(
+                id="task_archived_goal",
+                title="T",
+                description="D",
+                state=TaskState.DONE,
+                created_at=now(),
+                updated_at=now(),
+                requested_by="cli",
+                goal_id="goal_archived",
+            )
+            TaskStore().create(task)
+            archive_result = TaskStore().archive(task.id, actor="harness", reason="goal runner archive-on-done")
+            return GoalRunResult(
+                ok=True,
+                task_id=task.id,
+                title=task.title,
+                final_task_state="done",
+                stop_reason="task_done",
+                tick_stop_reason="task_terminal",
+                exit_code=0,
+                elapsed_seconds=0.0,
+                actions_taken=1,
+                ticks=1,
+                run_ids=[],
+                proof_ids=[],
+                open_incident_ids=[],
+                all_incident_ids=[],
+                hygiene={},
+                archive_result=archive_result,
+            )
+
+    monkeypatch.setattr("hermes_cli.harness.MissionRuntimeController", Controller)
+
+    args = parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--archive-on-done", "--json"])
+
+    assert args.func(args) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["task_id"] == "task_archived_goal"
+    assert data["archived"] is True
+    assert data["archive_result"]["archived_task_ids"] == ["task_archived_goal"]
+    assert data["archive_batch"]
+    assert data["stop_reason"] == "task_done"
+
+
 def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     ts = TaskStore()
@@ -187,8 +241,8 @@ def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(
     assert (archive_dir / "tasks" / "task_done.json").exists()
     assert (archive_dir / "runs" / "run_done.json").exists()
     assert (archive_dir / "proofs" / "task_done" / "proof_proof_done.json").exists()
-    assert not (tmp_path / "runtime" / "tasks" / "task_done.json").exists()
-    assert (tmp_path / "runtime" / "tasks" / "task_active.json").exists()
+    assert not paths.existing_task_path("task_done").exists()
+    assert paths.existing_task_path("task_active").exists()
     assert [task.id for task in ts.list_open()] == ["task_active"]
 
 
@@ -205,7 +259,7 @@ def test_harness_task_archive_refuses_active_task_id(tmp_path, monkeypatch, caps
     assert data["skipped_task_ids"] == ["task_active"]
     assert data["archive_batch"] is None
     assert data["skipped_tasks"][0]["reason"] == "not_terminal"
-    assert (tmp_path / "runtime" / "tasks" / "task_active.json").exists()
+    assert paths.existing_task_path("task_active").exists()
     assert not (tmp_path / "runtime" / "deleted_archive").exists()
 
 
@@ -295,6 +349,73 @@ def test_harness_parser_exposes_daemon_start_status_stop():
     assert p.parse_args(["harness", "daemon", "status", "--json"]).daemon_command == "status"
     assert p.parse_args(["harness", "daemon", "stop", "--json"]).daemon_command == "stop"
     assert p.parse_args(["harness", "daemon", "run-once", "--json"]).daemon_command == "run-once"
+
+
+def test_harness_status_and_daemon_status_share_daemon_schema(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    status_path = paths.daemon_status_path()
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "state": "idle",
+                "pid": None,
+                "heartbeat_at": "2026-07-06T12:00:00Z",
+                "target_task_id": "task_1",
+                "settle_stop_reason": "idle",
+                "loops": 7,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    daemon_args = parser().parse_args(["harness", "daemon", "status", "--json"])
+    assert daemon_args.func(daemon_args) == 0
+    daemon_data = json.loads(capsys.readouterr().out)
+
+    status_args = parser().parse_args(["harness", "status", "--json"])
+    assert status_args.func(status_args) == 0
+    status_data = json.loads(capsys.readouterr().out)
+
+    assert status_data["daemon"] == daemon_data
+    assert set(daemon_data) >= {
+        "schema_version",
+        "field_set_version",
+        "state",
+        "pid",
+        "heartbeat_at",
+        "target_task_id",
+        "settle_stop_reason",
+        "loops",
+    }
+
+
+def test_harness_parser_exposes_doctor_fix_flags():
+    args = parser().parse_args(["harness", "doctor", "--fix", "--dry-run", "--json"])
+
+    assert args.harness_command == "doctor"
+    assert args.fix is True
+    assert args.dry_run is True
+    assert args.stale_incident_days == 7
+    assert args.stale_incident_hours is None
+
+
+def test_harness_parser_accepts_doctor_stale_incident_overrides():
+    days = parser().parse_args(["harness", "doctor", "--stale-incident-days", "3", "--json"])
+    hours = parser().parse_args(["harness", "doctor", "--stale-incident-hours", "12", "--json"])
+
+    assert days.stale_incident_days == 3
+    assert days.stale_incident_hours is None
+    assert hours.stale_incident_hours == 12
+
+
+def test_harness_doctor_fix_requires_confirmation(capsys):
+    args = parser().parse_args(["harness", "doctor", "--fix", "--json"])
+
+    assert args.func(args) == 8
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is False
+    assert data["error"] == "confirmation_required"
 
 
 def test_harness_parser_exposes_config_migrate_and_verify():

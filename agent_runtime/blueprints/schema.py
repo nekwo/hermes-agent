@@ -49,6 +49,19 @@ class BlueprintLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class BlueprintAgentTopologyEdge:
+    source: str
+    target: str
+    kind: str = "steers"
+
+
+@dataclass(frozen=True, slots=True)
+class BlueprintAgentTopology:
+    root: str | None = None
+    edges: list[BlueprintAgentTopologyEdge] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
 class ProofGate:
     required: bool = False
     minimum_status: str = "passed"
@@ -83,6 +96,7 @@ class Blueprint:
     slots: list[BlueprintSlot] = field(default_factory=list)
     stages: list[BlueprintStage] = field(default_factory=list)
     edges: list[BlueprintEdge] = field(default_factory=list)
+    agent_topology: BlueprintAgentTopology = field(default_factory=BlueprintAgentTopology)
     limits: BlueprintLimits = field(default_factory=BlueprintLimits)
     on_unhandled: str = "intervention"
 
@@ -105,6 +119,7 @@ def blueprint_from_dict(raw: dict[str, Any]) -> Blueprint:
     slots = [_slot_from_dict(item) for item in raw.get("slots", []) if isinstance(item, dict)]
     stages = [_stage_from_dict(item) for item in raw.get("stages", []) if isinstance(item, dict)]
     edges = [_edge_from_dict(item) for item in raw.get("edges", []) if isinstance(item, dict)]
+    agent_topology = _agent_topology_from_dict(raw.get("agent_topology"))
     limits_raw = raw.get("limits") if isinstance(raw.get("limits"), dict) else {}
     limits = BlueprintLimits(
         max_attempts_per_stage=int(limits_raw.get("max_attempts_per_stage", 2)),
@@ -118,6 +133,7 @@ def blueprint_from_dict(raw: dict[str, Any]) -> Blueprint:
         slots=slots,
         stages=stages,
         edges=edges,
+        agent_topology=agent_topology,
         limits=limits,
         on_unhandled=str(raw.get("on_unhandled") or "intervention").strip(),
     )
@@ -157,11 +173,14 @@ def validate_blueprint(bp: Blueprint) -> list[str]:
             if dep not in stage_ids:
                 errors.append(f"stage {stage.id} depends on unknown stage {dep!r}")
         errors.extend(_validate_proof_gate(stage))
+    if not bp.stages and bp.edges:
+        errors.append("edges require at least one stage")
     for edge in bp.edges:
         if edge.source not in stage_ids:
             errors.append(f"edge source {edge.source!r} is not a known stage")
         if edge.target not in stage_ids and edge.target not in _RESERVED_TARGETS:
             errors.append(f"edge target {edge.target!r} is not a known stage or terminal target")
+    errors.extend(_validate_agent_topology(bp, slot_ids))
     errors.extend(_dependency_cycle_errors(bp))
     if bp.on_unhandled not in stage_ids and bp.on_unhandled not in _RESERVED_TARGETS:
         errors.append("on_unhandled must be a stage id, done, or intervention")
@@ -290,6 +309,65 @@ def _edge_from_dict(raw: dict[str, Any]) -> BlueprintEdge:
         outcome=StageOutcome(str(raw.get("outcome") or "passed").strip()),
         target=str(raw.get("target") or "").strip(),
     )
+
+
+def _agent_topology_from_dict(raw: Any) -> BlueprintAgentTopology:
+    if not isinstance(raw, dict):
+        return BlueprintAgentTopology()
+    edges = [
+        BlueprintAgentTopologyEdge(
+            source=str(item.get("source") or item.get("source_slot") or "").strip(),
+            target=str(item.get("target") or item.get("target_slot") or "").strip(),
+            kind=str(item.get("kind") or "steers").strip() or "steers",
+        )
+        for item in raw.get("edges", []) or []
+        if isinstance(item, dict)
+    ]
+    return BlueprintAgentTopology(
+        root=str(raw.get("root") or raw.get("root_slot") or "").strip() or None,
+        edges=edges,
+    )
+
+
+def _validate_agent_topology(bp: Blueprint, slot_ids: list[str]) -> list[str]:
+    errors: list[str] = []
+    slot_set = set(slot_ids)
+    topology = bp.agent_topology
+    if topology.root and topology.root not in slot_set:
+        errors.append(f"agent_topology root {topology.root!r} is not a declared slot")
+    adjacency: dict[str, list[str]] = {}
+    for edge in topology.edges:
+        if edge.kind != "steers":
+            errors.append(f"agent_topology edge kind {edge.kind!r} is not allowed")
+        if edge.source not in slot_set:
+            errors.append(f"agent_topology source {edge.source!r} is not a declared slot")
+        if edge.target not in slot_set:
+            errors.append(f"agent_topology target {edge.target!r} is not a declared slot")
+        adjacency.setdefault(edge.source, []).append(edge.target)
+    errors.extend(_topology_cycle_errors(adjacency))
+    return errors
+
+
+def _topology_cycle_errors(adjacency: dict[str, list[str]]) -> list[str]:
+    errors: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node: str, trail: list[str]) -> None:
+        if node in visiting:
+            errors.append("agent_topology cycle: " + " -> ".join(trail + [node]))
+            return
+        if node in visited:
+            return
+        visiting.add(node)
+        for target in adjacency.get(node, []):
+            visit(target, trail + [node])
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in adjacency:
+        visit(node, [])
+    return errors
 
 
 def _dependency_cycle_errors(bp: Blueprint) -> list[str]:

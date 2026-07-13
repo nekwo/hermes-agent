@@ -18,17 +18,21 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert len(ids) == len(set(ids))
     assert "mission.chat.message" in ids
     assert "mission.chat.steer" in ids
+    assert "mission.chat.queue_skill_for_next_turn" in ids
     assert "persona.profile.instantiate" in ids
     assert "persona.instance.create" in ids
     assert "persona.instance.open_chat" in ids
     assert "persona.instance.message" not in ids
     assert "persona.instance.run_once" not in ids
+    assert "persona.instance.return_summary" in ids
     assert "persona.profile.create" in ids
     assert "persona.profile.promote" in ids
     assert "persona.permission_preview" in ids
     assert "persona.permission_override" in ids
     assert "persona.elevate_tools_once" in ids
-    assert "task.run_until_settled" in ids
+    assert "goal.run_until_settled" in ids
+    assert "goal.steer" in ids
+    assert "task.run_until_settled" not in ids
     assert "daemon.start" in ids
     assert "shell.anything" not in ids
     assert all("command" not in item for item in descriptors)
@@ -56,6 +60,28 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert by_id["mission.chat.steer"]["execution_semantics"] == "control_state_change"
     assert by_id["mission.chat.steer"]["args_schema"]["required"] == ["session_id", "message"]
     assert "client_message_id" in by_id["mission.chat.steer"]["allowed_args"]
+    assert by_id["mission.chat.queue_skill_for_next_turn"]["args_schema"]["required"] == [
+        "persona_id",
+        "session_id",
+        "skill",
+    ]
+    assert by_id["mission.chat.queue_skill_for_next_turn"]["execution_semantics"] == "control_state_change"
+    assert by_id["goal.steer"]["group"] == "steer"
+    assert by_id["goal.steer"]["execution_semantics"] == "control_state_change"
+    assert by_id["goal.steer"]["args_schema"]["required"] == ["goal_id"]
+    assert {"action_id", "verb", "source_node_id", "target_node_id", "reason", "requested_by"}.issubset(
+        set(by_id["goal.steer"]["allowed_args"])
+    )
+    assert by_id["persona.instance.return_summary"]["group"] == "steer"
+    assert by_id["persona.instance.return_summary"]["execution_semantics"] == "control_state_change"
+    assert by_id["persona.instance.return_summary"]["args_schema"]["required"] == ["parent_session_id", "summary"]
+    assert by_id["persona.instance.return_summary"]["args_schema"]["properties"]["proof_ids"]["type"] == "array"
+    assert by_id["persona.instance.return_summary"]["args_schema"]["properties"]["artifact_refs"]["type"] == "array"
+    assert by_id["worker.takeover"]["danger"] == "warning"
+    assert by_id["worker.takeover"]["execution_semantics"] == "control_state_change"
+    assert by_id["worker.takeover"]["args_schema"]["required"] == ["worker_session_id", "reason"]
+    assert by_id["worker.takeover"]["args_schema"]["properties"]["approve_destructive"]["type"] == "boolean"
+    assert by_id["worker.takeover"]["args_schema"]["properties"]["cancel_active_run"]["type"] == "boolean"
     assert by_id["persona.permission_preview"]["execution_semantics"] == "read_only"
     assert by_id["persona.permission_override"]["danger"] == "warning"
     assert by_id["persona.permission_override"]["args_schema"]["properties"]["turns"]["type"] == "integer"
@@ -70,7 +96,6 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
         set(by_id["run.cancel"]["allowed_args"])
     )
     for capability_id in (
-        "persona.message_task",
         "mission.chat.message",
         "persona.diagnose",
     ):
@@ -105,7 +130,9 @@ def test_snapshot_emits_callable_capability_descriptors(isolate_agent_runtime_ro
     assert capability_ids().issubset(ids)
     assert "mission.chat.message" in ids
     assert "mission.chat.steer" in ids
+    assert "mission.chat.queue_skill_for_next_turn" in ids
     assert "persona.instance.message" not in ids
+    assert "persona.instance.return_summary" in ids
     assert "daemon.start" in ids
 
 
@@ -122,5 +149,6 @@ def test_observability_emits_same_capability_descriptors(isolate_agent_runtime_r
 
     assert envelope["capabilities"]["schema_version"] == 1
     assert capability_ids().issubset(ids)
-    assert "task.archive" in ids
+    assert "goal.archive" in ids
+    assert "task.archive" not in ids
     assert "run.cancel" in ids

@@ -1,5 +1,7 @@
 from agent_runtime.events import EventLog
-from agent_runtime.progress import ChatProgressSink, _safe_progress_payload
+from agent_runtime.models import Event
+from agent_runtime.progress import ChatProgressSink, _append_bounded_event, _safe_progress_payload
+from hermes_time import now
 
 
 def test_safe_progress_payload_preserves_dev_work_file_summary_but_not_paths():
@@ -91,6 +93,44 @@ def test_chat_progress_sink_records_session_keyed_tool_events(isolate_agent_runt
     assert rows[0].payload["command_label"] == "echo PARITY_OK_2026"
 
 
+def test_chat_progress_sink_stamps_turn_id_on_events_and_retry(isolate_agent_runtime_root):
+    log = EventLog()
+    sink = ChatProgressSink(
+        session_id="chat_1",
+        persona_id="neko_supervisor",
+        event_log=log,
+        turn_id="agent-chat-send-1",
+    )
+
+    sink.emit("run.tool.started", {"type": "run.tool.started", "tool_name": "terminal"})
+    sink.emit("run.tool.finished", {"type": "run.tool.finished", "tool_name": "terminal", "status": "passed"})
+
+    rows = log.for_session("chat_1")
+    assert [event.turn_id for event in rows] == ["agent-chat-send-1", "agent-chat-send-1"]
+
+    _append_bounded_event(
+        log,
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id=None,
+            run_id=None,
+            persona_id="neko_supervisor",
+            session_id="chat_1",
+            turn_id="agent-chat-send-1",
+            payload={
+                "type": "run.tool.finished",
+                "tool_name": "terminal",
+                "status": "passed",
+                "output": "x" * 5000,
+            },
+        ),
+    )
+    retried = log.for_session("chat_1")[-1]
+    assert retried.turn_id == "agent-chat-send-1"
+    assert retried.payload["output_truncated"] is True
+
+
 def test_chat_progress_sink_drops_noise_and_secrets(isolate_agent_runtime_root):
     log = EventLog()
     sink = ChatProgressSink(session_id="chat_1", persona_id="dev", event_log=log)
@@ -150,3 +190,79 @@ def test_chat_progress_sink_without_session_can_emit_safe_observer(isolate_agent
             "command_label": "echo ok",
         }
     ]
+
+
+def test_safe_progress_payload_passes_operator_detail_lane():
+    payload = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "terminal",
+            "status": "passed",
+            "summary": "Finished tool terminal: passed",
+            "command_full": "flutter test test/features/library/petdex_menu_test.dart",
+            "target_label": "PetdexTile in lib/features/library",
+            "output": "00:05 +12: All tests passed!\napi_key=SECRET-VALUE\nlast line",
+            "changed_paths": ["lib/features/library/petdex_menu.dart", "test/a_test.dart"],
+            "skill_name": "harness-dev-delivery",
+        },
+    )
+
+    # Operator lane keeps real paths in commands/targets/changed paths.
+    assert payload["command_full"] == "flutter test test/features/library/petdex_menu_test.dart"
+    assert payload["target_label"] == "PetdexTile in lib/features/library"
+    assert payload["changed_paths"] == [
+        "lib/features/library/petdex_menu.dart",
+        "test/a_test.dart",
+    ]
+    assert payload["skill_name"] == "harness-dev-delivery"
+    # Output keeps line structure; the secret LINE is redacted, not the field.
+    assert "All tests passed!" in payload["output"]
+    assert "last line" in payload["output"]
+    assert "SECRET-VALUE" not in payload["output"]
+    assert "[redacted line" in payload["output"]
+
+
+def test_safe_progress_payload_bounds_operator_output_tail():
+    long_output = "\n".join(f"line {index}" for index in range(400))
+    payload = _safe_progress_payload(
+        "run.tool.finished",
+        {"type": "run.tool.finished", "tool_name": "terminal", "output": long_output},
+    )
+
+    assert len(payload["output"]) <= 1300
+    assert payload["output"].startswith("…(earlier output truncated)…")
+    assert "line 399" in payload["output"]
+
+
+def test_append_bounded_event_degrades_oversized_output(isolate_agent_runtime_root):
+    from hermes_time import now
+
+    from agent_runtime.models import Event
+    from agent_runtime.progress import _append_bounded_event
+
+    log = EventLog()
+    oversized = {
+        "type": "run.tool.finished",
+        "tool_name": "terminal",
+        "status": "passed",
+        "output": "x" * 5000,
+    }
+    _append_bounded_event(
+        log,
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_big",
+            run_id="run_big",
+            persona_id="dev",
+            payload=oversized,
+        ),
+    )
+
+    rows = log.for_task("task_big")
+    assert len(rows) == 1
+    # The event survived; only the oversized output was shed.
+    assert "output" not in rows[0].payload
+    assert rows[0].payload["output_truncated"] is True
+    assert rows[0].payload["tool_name"] == "terminal"

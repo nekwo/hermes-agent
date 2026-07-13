@@ -1,31 +1,24 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-from hermes_constants import get_config_path, get_default_hermes_root
-
-from .parse_cache import cached_yaml_file
+from .resolution import assert_probe_isolation, resolve_runtime
 
 
 def store_root() -> Path:
-    override = os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()
-    if override:
-        return Path(override)
-    # store_root() is on the hot path of *every* path helper and was re-parsing
-    # the (large) Hermes config.yaml on each call — 500+ YAML parses per snapshot
-    # build (~50s). The mtime-keyed cache collapses that to a single parse.
-    config_path = get_config_path()
-    raw = cached_yaml_file(config_path, default=None)
-    if isinstance(raw, dict):
-        configured = str((raw.get("agent_runtime") or {}).get("store_root") or "").strip()
-        if configured:
-            return Path(configured).expanduser()
-    return get_default_hermes_root() / "agent-runtime"
+    resolution = resolve_runtime()
+    # Probe-isolation gate: a no-op unless HERMES_REQUIRE_ISOLATED_ROOT is set, in which
+    # case a run that would resolve the live/default root fails fast before any store I/O.
+    assert_probe_isolation(resolution)
+    return resolution.store_root
 
 
 def tasks_dir() -> Path:
     return store_root() / "tasks"
+
+
+def goals_dir() -> Path:
+    return store_root() / "goals"
 
 
 def runs_dir() -> Path:
@@ -38,6 +31,19 @@ def worker_sessions_dir() -> Path:
 
 def persona_instances_dir() -> Path:
     return store_root() / "persona_instances"
+
+
+def persona_instances_archive_dir() -> Path:
+    return store_root() / "persona_instances_archive"
+
+
+def persona_instance_aliases_path() -> Path:
+    """Durable legacy-id -> canonical-id registry written by the reconciler.
+
+    Emitted as ``identity_map`` on the snapshot/stream so consumers can
+    collapse rows persisted under retired id schemes without heuristics.
+    """
+    return store_root() / "persona_instance_aliases.json"
 
 
 def persona_assignments_dir() -> Path:
@@ -106,6 +112,10 @@ def context_dir() -> Path:
 
 def prompt_observability_dir() -> Path:
     return store_root() / "prompt_observability"
+
+
+def queued_skills_dir() -> Path:
+    return store_root() / "queued_skills"
 
 
 def proof_sandbox_root() -> Path:
@@ -198,7 +208,27 @@ def worker_context_dir(task_id: str, persona_id: str) -> Path:
 
 
 def task_path(task_id: str) -> Path:
+    return goal_path(task_id)
+
+
+def legacy_task_path(task_id: str) -> Path:
     return tasks_dir() / f"{task_id}.json"
+
+
+def goal_path(goal_id: str) -> Path:
+    return goals_dir() / f"{_safe_path_token(goal_id)}.json"
+
+
+def task_storage_candidates(task_id: str) -> list[Path]:
+    return [goal_path(task_id), legacy_task_path(task_id)]
+
+
+def existing_task_path(task_id: str) -> Path:
+    for path in task_storage_candidates(task_id):
+        if path.exists():
+            return path
+    return goal_path(task_id)
+
 
 
 def worker_session_path(worker_session_id: str) -> Path:

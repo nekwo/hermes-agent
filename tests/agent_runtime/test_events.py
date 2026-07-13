@@ -182,6 +182,137 @@ def test_cached_event_log_matches_base_and_reads_once(isolate_agent_runtime_root
     assert reads["n"] == 1
 
 
+def test_event_log_for_task_type_filter_counts_matches_not_raw_rows(isolate_agent_runtime_root):
+    # Live failure shape (task_bd98d444, 2026-07-05): a budget-incident loop
+    # floods the newest task events with hundreds of non-trace rows, starving
+    # any fetch window that counts raw rows before type filtering.
+    log = EventLog()
+    trace_types = {"run.tool.started", "run.tool.finished", "run.progress"}
+    for index in range(10):
+        log.append(
+            Event(
+                ts=now(),
+                type="run.tool.started",
+                task_id="task_flooded",
+                run_id=f"run_{index}",
+                persona_id="dev",
+                payload={"tool_name": "read_file", "summary": f"tool {index}"},
+            )
+        )
+    for _ in range(300):
+        log.append(Event(ts=now(), type="incident.opened", task_id="task_flooded", run_id=None, persona_id="dev"))
+
+    # Untyped fetch: the window is consumed by the flood (documents the trap).
+    untyped = log.for_task("task_flooded", limit=10)
+    assert all(event.type == "incident.opened" for event in untyped)
+
+    # Typed fetch: limit counts matched trace rows, so the flood cannot starve it.
+    typed = log.for_task("task_flooded", limit=10, types=trace_types)
+    assert [event.run_id for event in typed] == [f"run_{index}" for index in range(10)]
+    assert all(event.type == "run.tool.started" for event in typed)
+
+    # A tighter typed limit still returns the newest matches, oldest-first.
+    newest_two = log.for_task("task_flooded", limit=2, types=trace_types)
+    assert [event.run_id for event in newest_two] == ["run_8", "run_9"]
+
+
+def test_event_log_for_session_type_filter_counts_matches_not_raw_rows(isolate_agent_runtime_root):
+    log = EventLog()
+    trace_types = {"run.tool.started", "run.tool.finished", "run.progress"}
+    for index in range(4):
+        log.append(
+            Event(
+                ts=now(),
+                type="run.tool.finished",
+                task_id=None,
+                run_id=None,
+                persona_id="base",
+                payload={"tool_name": "terminal", "status": "passed", "summary": f"turn {index}"},
+                session_id="chat_flooded",
+            )
+        )
+    for _ in range(50):
+        log.append(
+            Event(
+                ts=now(),
+                type="run.opened",
+                task_id=None,
+                run_id=None,
+                persona_id="base",
+                session_id="chat_flooded",
+            )
+        )
+
+    typed = log.for_session("chat_flooded", limit=4, types=trace_types)
+    assert [event.payload["summary"] for event in typed] == [f"turn {index}" for index in range(4)]
+
+
+def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_root):
+    log = EventLog()
+    samples = [
+        Event(now(), "patch.proposed", "task_1", "run_1", "dev", {"changed_files": ["a.py"]}),
+        Event(now(), "repo_bundle.assigned", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "assigned"}),
+        Event(now(), "repo_bundle.updated", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "running"}),
+        Event(now(), "repo_bundle.delivered", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "delivered_waiting_for_qa", "proof_count": 0, "diff_captured": False}),
+        Event(now(), "role_session.closed", "task_1", "run_1", "qa", {"close_reason": "proof_passed"}),
+        Event(now(), "run.opened", "task_1", "run_1", "dev", {"stage_id": "impl"}),
+        Event(now(), "run.closed", "task_1", "run_1", "dev", {"state": "completed", "decision_type": "deliver"}),
+    ]
+
+    for event in samples:
+        log.append(event)
+
+    events = list(log.iter_all())
+    assert all(str(event.payload.get("summary") or "").strip() for event in events)
+    delivered = next(event for event in events if event.type == "repo_bundle.delivered")
+    assert "captured:false" in delivered.payload["summary"]
+
+
+def test_run_progress_receives_stable_event_id(isolate_agent_runtime_root):
+    log = EventLog()
+
+    log.append(
+        Event(
+            now(),
+            "run.progress",
+            "task_1",
+            "run_1",
+            "dev",
+            {"phase": "proof", "step": "proof_command_running", "status": "running", "command_index": 1},
+        )
+    )
+
+    event = list(log.iter_all())[0]
+    assert event.payload["event_id"] == "progress:run_1:proof:proof_command_running:1"
+    assert event.payload["summary"] == "Progress: proof proof_command_running running."
+
+
+def test_cached_event_log_type_filter_matches_base(isolate_agent_runtime_root):
+    from agent_runtime.events import CachedEventLog
+
+    base = EventLog()
+    trace_types = {"run.tool.started", "run.tool.finished", "run.progress"}
+    for index in range(6):
+        base.append(
+            Event(
+                ts=now(),
+                type="run.progress",
+                task_id="task_typed",
+                run_id=f"run_{index}",
+                persona_id="dev",
+                payload={"summary": f"progress {index}"},
+            )
+        )
+        base.append(Event(ts=now(), type="incident.opened", task_id="task_typed", run_id=None, persona_id="dev"))
+
+    cached = CachedEventLog()
+    for limit in (0, 3, 6):
+        assert [e.run_id for e in cached.for_task("task_typed", limit=limit, types=trace_types)] == [
+            e.run_id for e in base.for_task("task_typed", limit=limit, types=trace_types)
+        ]
+    assert all(e.type == "run.progress" for e in cached.for_task("task_typed", limit=0, types=trace_types))
+
+
 def test_event_log_rejects_payloads_over_4kb_and_does_not_write(isolate_agent_runtime_root):
     log = EventLog()
     event = Event(

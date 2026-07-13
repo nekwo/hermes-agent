@@ -18,6 +18,8 @@ from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+from agent_runtime.continuity import return_summary_to_parent_session
+from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
     authorize_coordinator_action,
@@ -27,7 +29,7 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.default_plan import ensure_default_mission_plan
-from agent_runtime.daemon import MissionDaemon, read_daemon_status, start_daemon, stop_daemon
+from agent_runtime.daemon import MissionDaemon, daemon_status_schema, read_daemon_status, start_daemon, stop_daemon
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
@@ -35,18 +37,29 @@ from agent_runtime.errors import (
     InvalidTransition,
     NotFound,
     ProofMissing,
+    RuntimeRootMismatch,
     StaleRun,
     StoreCorrupt,
 )
 from agent_runtime.events import EventLog
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
+from agent_runtime.harness_doctor import (
+    DEFAULT_STALE_INCIDENT_DAYS,
+    DEFAULT_STALE_INCIDENT_HOURS,
+    DEFAULT_STALE_RUN_HOURS,
+    DEFAULT_STALE_TASK_DAYS,
+    DEFAULT_STALE_WORKER_HOURS,
+    DEFAULT_WORKTREE_MIN_AGE_SECONDS,
+    run_harness_doctor,
+)
 from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
 from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
-from agent_runtime.models import AgentPersona, Event, Task
+from agent_runtime.models import AgentPersona, Event, Task, apply_instance_model_overrides
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     ChatBusyError,
     PersonaAssignmentSpec,
+    StaleModelOverrideWrite,
     PersonaAssignmentStore,
     PersonaInstanceStore,
     persona_assignment_store_enabled,
@@ -68,14 +81,16 @@ from agent_runtime.realm_sync import (
     realm_sync_status,
     sync_artifacts_for_workspace_agent,
 )
+from agent_runtime.resolution import resolution_table, resolve_runtime
 from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
-from agent_runtime.mission_chat_turns import persist_mission_chat_turn
+from agent_runtime.mission_chat_turns import MissionChatTurnPersistOutcome, mark_stale_running_turns_interrupted, persist_mission_chat_turn
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
-from agent_runtime.personas import profile_chat_toolsets
-from agent_runtime.prompt_observability import mission_chat_prompt_observability, persist_prompt_observability_context
+from agent_runtime.personas import profile_chat_toolsets, seed_personas
+from agent_runtime.prompt_observability import load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context
+from agent_runtime.queued_skills import consume_skills_for_next_turn, queue_skill_for_next_turn
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
@@ -84,6 +99,7 @@ from agent_runtime.scope_control import find_discovery_task
 from agent_runtime.planning import apply_planning_decision
 from agent_runtime.states import TaskState, RunState, WorkerSessionState
 from agent_runtime.status import build_status
+from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.store import RealmStore, WorkspaceStore
 from agent_runtime.ticker import TickEngine
@@ -252,6 +268,7 @@ def build_parser(parent_subparsers) -> None:
     goal_run.add_argument("--blueprint", default="neko_two_dev_default", help="Blueprint id for graph-routed goal creation")
     goal_run.add_argument("--bind", action="append", default=[], help="Bind a blueprint slot, e.g. builder=persona:dev")
     goal_run.add_argument("--workspace", default=None)
+    goal_run.add_argument("--runtime-root", default=None, help="Pin the expected resolved Harness runtime root")
     _add_stage42_global_args(goal_run, mutation=True)
     goal_run.set_defaults(func=_cmd_goal_run)
     goal_unblock = goal_subs.add_parser("unblock", help="Operator-unblock a Harness goal")
@@ -270,6 +287,9 @@ def build_parser(parent_subparsers) -> None:
     goal_archive.add_argument("goal_id")
     _add_stage42_global_args(goal_archive, mutation=True)
     goal_archive.set_defaults(func=_cmd_goal_archive)
+    goal_archive_ready = goal_subs.add_parser("archive-ready", help="Archive terminal ready/done Harness goals while preserving evidence")
+    _add_stage42_global_args(goal_archive_ready, mutation=True)
+    goal_archive_ready.set_defaults(func=_cmd_task_archive_ready)
 
     blueprint = subs.add_parser("blueprint", help="Validate and run Agent Runtime blueprints headlessly")
     blueprint_subs = blueprint.add_subparsers(dest="blueprint_command", required=True)
@@ -309,6 +329,12 @@ def build_parser(parent_subparsers) -> None:
     create.add_argument("--description")
     create.add_argument("--request-json", help="Path to a Stage 38 canonical goal-create request JSON file")
     create.add_argument("--requested-by", default="cli")
+    create.add_argument(
+        "--affected-repo",
+        action="append",
+        default=[],
+        help="Pin the goal's repo scope (EterniaLauncher, EterniaBackend, hermes-agent, or an alias like launcher/backend). Repeatable.",
+    )
     create.add_argument("--start-daemon", dest="start_daemon", action="store_true", default=None, help="Start the Mission Daemon after creating the task")
     create.add_argument("--no-start-daemon", dest="start_daemon", action="store_false", help="Create the task without starting the Mission Daemon")
     create.add_argument("--json", action="store_true")
@@ -342,6 +368,16 @@ def build_parser(parent_subparsers) -> None:
     task_unblock.add_argument("--foreground", action="store_true", help="Reactivate this task as the foreground runtime lane")
     task_unblock.add_argument("--json", action="store_true")
     task_unblock.set_defaults(func=_cmd_task_unblock)
+    task_steer = task_subs.add_parser("steer", help="Execute a live topology steer action")
+    task_steer.add_argument("task_id")
+    task_steer.add_argument("--action-id", default=None, help="Snapshot steer action id, e.g. steer:slot_lead:slot_builder:route")
+    task_steer.add_argument("--verb", choices=["route", "spawn", "re-scope", "resolve", "verdict-back"], default=None)
+    task_steer.add_argument("--source-node", dest="source_node_id", default=None)
+    task_steer.add_argument("--target-node", dest="target_node_id", default=None)
+    task_steer.add_argument("--reason", default="operator steer")
+    task_steer.add_argument("--requested-by", default="operator")
+    task_steer.add_argument("--json", action="store_true")
+    task_steer.set_defaults(func=_cmd_task_steer)
     task_archive_ready = task_subs.add_parser("archive-ready", help="Archive terminal ready/done harness tasks while preserving evidence")
     task_archive_ready.add_argument("--json", action="store_true")
     task_archive_ready.set_defaults(func=_cmd_task_archive_ready)
@@ -370,6 +406,12 @@ def build_parser(parent_subparsers) -> None:
     workspace_create.set_defaults(func=_cmd_workspace_create)
     workspace_use = workspace_subs.add_parser("use", help="Set active workspace")
     workspace_use.add_argument("workspace_id")
+    workspace_use.add_argument(
+        "--issued-at",
+        dest="issued_at",
+        default=None,
+        help="ISO-8601 UTC instant the operator issued this switch; a pointer already owned by a strictly newer intent rejects this one as superseded (transport replay guard)",
+    )
     _add_stage42_global_args(workspace_use, mutation=True)
     workspace_use.set_defaults(func=_cmd_workspace_use)
     workspace_actors = workspace_subs.add_parser("actors", help="List typed actors in a workspace")
@@ -411,6 +453,11 @@ def build_parser(parent_subparsers) -> None:
     realm_create.add_argument("--server", default=None)
     _add_stage42_global_args(realm_create, mutation=True)
     realm_create.set_defaults(func=_cmd_realm_create)
+    realm_adopt = realm_subs.add_parser("adopt", help="Adopt server-granted realms from the Eternia backend")
+    realm_adopt.add_argument("--server", default=None, help="Only adopt realms bound to this Eternia server id")
+    realm_adopt.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
+    _add_stage42_global_args(realm_adopt, mutation=True)
+    realm_adopt.set_defaults(func=_cmd_realm_adopt)
     realm_bind = realm_subs.add_parser("bind-server", help="Bind a realm to an Eternia server id")
     realm_bind.add_argument("realm_id")
     realm_bind.add_argument("server_id")
@@ -418,20 +465,29 @@ def build_parser(parent_subparsers) -> None:
     realm_bind.set_defaults(func=_cmd_realm_bind_server)
     realm_use = realm_subs.add_parser("use", help="Set active realm")
     realm_use.add_argument("realm_id")
+    realm_use.add_argument(
+        "--issued-at",
+        dest="issued_at",
+        default=None,
+        help="ISO-8601 UTC instant the operator issued this switch; a pointer already owned by a strictly newer intent rejects this one as superseded (transport replay guard)",
+    )
     _add_stage42_global_args(realm_use, mutation=True)
     realm_use.set_defaults(func=_cmd_realm_use)
     realm_sync = realm_subs.add_parser("sync", help="Git-backed selective sync for non-source-controlled realm artifacts")
     realm_sync_subs = realm_sync.add_subparsers(dest="realm_sync_command", required=True)
     realm_sync_status_cmd = realm_sync_subs.add_parser("status", help="Show realm sync state")
     realm_sync_status_cmd.add_argument("realm_id")
+    realm_sync_status_cmd.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
     _add_stage42_global_args(realm_sync_status_cmd)
     realm_sync_status_cmd.set_defaults(func=_cmd_realm_sync_status)
     realm_sync_pull = realm_sync_subs.add_parser("pull", help="Pull and materialize realm sync artifacts")
     realm_sync_pull.add_argument("realm_id")
+    realm_sync_pull.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
     _add_stage42_global_args(realm_sync_pull, mutation=True)
     realm_sync_pull.set_defaults(func=_cmd_realm_sync_pull)
     realm_sync_publish = realm_sync_subs.add_parser("publish", help="Publish allowlisted realm sync artifacts")
     realm_sync_publish.add_argument("realm_id")
+    realm_sync_publish.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
     _add_stage42_global_args(realm_sync_publish, mutation=True)
     realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
 
@@ -481,12 +537,12 @@ def build_parser(parent_subparsers) -> None:
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=_cmd_lane_control)
 
-    tick = subs.add_parser("tick", help="Run one harness tick")
+    tick = subs.add_parser("tick", help="Diagnostic only: run one harness tick")
     tick.add_argument("--task", dest="task_id", default=None, help="Run one tick for a specific task id")
     tick.add_argument("--json", action="store_true")
     tick.set_defaults(func=_cmd_tick)
 
-    settle = subs.add_parser("run-until-settled", help="Run bounded mission ticks until done, blocked, waiting, or incident")
+    settle = subs.add_parser("run-until-settled", help="Diagnostic only: run bounded mission ticks until done, blocked, waiting, or incident")
     settle.add_argument("--task", dest="task_id", default=None, help="Settle a specific task id")
     settle.add_argument("--max-actions", type=int, default=10)
     settle.add_argument("--max-seconds", type=float, default=None)
@@ -558,6 +614,15 @@ def build_parser(parent_subparsers) -> None:
         command.add_argument("--lease-seconds", type=int, default=900)
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=_cmd_worker_control)
+    worker_takeover = worker_subs.add_parser("takeover", help="Audited human takeover: freeze peers, possess worker, and optionally cancel active run with approval")
+    worker_takeover.add_argument("worker_session_id")
+    worker_takeover.add_argument("--reason", default="operator takeover")
+    worker_takeover.add_argument("--actor", default="operator")
+    worker_takeover.add_argument("--lease-seconds", type=int, default=900)
+    worker_takeover.add_argument("--cancel-active-run", action="store_true")
+    worker_takeover.add_argument("--approve-destructive", action="store_true")
+    worker_takeover.add_argument("--json", action="store_true")
+    worker_takeover.set_defaults(func=_cmd_worker_control)
 
     persona = subs.add_parser("persona", help="Run bounded live-token diagnostics for one persona")
     persona_subs = persona.add_subparsers(dest="persona_command")
@@ -616,6 +681,12 @@ def build_parser(parent_subparsers) -> None:
     persona_diagnose.add_argument("--affected-repo", action="append", default=[])
     persona_diagnose.add_argument("--acceptance", action="append", default=[])
     persona_diagnose.add_argument("--non-goal", action="append", default=[])
+    persona_diagnose.add_argument(
+        "--keep-task",
+        action="store_true",
+        help="Preserve the standalone diagnostic task in the live runtime instead of auto-archiving it. "
+        "By default a diagnostic auto-archives on completion so throwaway probes do not accumulate and gate the scheduler.",
+    )
     persona_diagnose.add_argument("--json", action="store_true")
     persona_diagnose.set_defaults(func=_cmd_persona_diagnose)
 
@@ -629,6 +700,15 @@ def build_parser(parent_subparsers) -> None:
     persona_chat_delete.add_argument("--json", action="store_true")
     persona_chat_delete.set_defaults(func=_cmd_persona_chat_delete)
 
+    persona_set_model = persona_subs.add_parser("set-model", help="Persist a persona's default provider/model (profile-default lane; future instances inherit it)")
+    persona_set_model.add_argument("persona_id", help="Persona id, alias, or profile:<name>")
+    persona_set_model.add_argument("--provider", default=None, help="Provider lane (canonical name or alias; api_mode is derived from it)")
+    persona_set_model.add_argument("--model", default=None, help="Model id for the provider lane")
+    persona_set_model.add_argument("--use-default", action="store_true", help="Clear the persona's model/provider/api_mode so the runtime default cascade applies")
+    persona_set_model.add_argument("--issued-at", default=None, help="ISO-8601 issue timestamp; stale writes are superseded instead of applied")
+    persona_set_model.add_argument("--requested-by", default="operator")
+    persona_set_model.add_argument("--json", action="store_true")
+    persona_set_model.set_defaults(func=_cmd_persona_set_model)
     persona_instance = persona_subs.add_parser("instance", help="Create, message, run, close, and archive free-floating persona instances")
     persona_instance_subs = persona_instance.add_subparsers(dest="persona_instance_command")
     persona_instance_create = persona_instance_subs.add_parser("create", help="Create an Agent Profile or queue a free-floating persona assignment")
@@ -694,6 +774,10 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_archive.add_argument("--requested-by", default="cli")
     persona_instance_archive.add_argument("--json", action="store_true")
     persona_instance_archive.set_defaults(func=_cmd_persona_instance_archive)
+    persona_instance_sweep = persona_instance_subs.add_parser("sweep-orphans", help="Reap stale task-bound persona instances with no live worker/run")
+    persona_instance_sweep.add_argument("--reason", default="operator persona instance janitor")
+    persona_instance_sweep.add_argument("--json", action="store_true")
+    persona_instance_sweep.set_defaults(func=_cmd_persona_instance_sweep_orphans)
     persona_instance_steer = persona_instance_subs.add_parser("steer", help="Re-route a persona instance's living-graph wiring (Stage 77 steering edge)")
     persona_instance_steer.add_argument("persona_instance_id")
     persona_instance_steer.add_argument("--parent", dest="parent_instance_id", default=None, help="Owner/coordinator instance id that steers this sub-agent")
@@ -703,6 +787,16 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_steer)
     persona_instance_steer.add_argument("--json", action="store_true")
     persona_instance_steer.set_defaults(func=_cmd_persona_instance_steer)
+    persona_instance_return = persona_instance_subs.add_parser("return-summary", help="Post a bounded child summary back into a parent chat session")
+    persona_instance_return.add_argument("persona_instance_id")
+    persona_instance_return.add_argument("--parent-session-id", required=True)
+    persona_instance_return.add_argument("--summary", required=True)
+    persona_instance_return.add_argument("--proof-id", dest="proof_ids", action="append", default=[])
+    persona_instance_return.add_argument("--artifact-ref", dest="artifact_refs", action="append", default=[])
+    persona_instance_return.add_argument("--task", dest="task_id", default=None)
+    persona_instance_return.add_argument("--stage", dest="stage_id", default=None)
+    persona_instance_return.add_argument("--json", action="store_true")
+    persona_instance_return.set_defaults(func=_cmd_persona_instance_return_summary)
     persona_instance_update = persona_instance_subs.add_parser("update-profile", help="Update runtime persona-instance profile overrides without editing the backing Hermes profile")
     persona_instance_update.add_argument("persona_instance_id")
     persona_instance_update.add_argument("--display-name", default=None)
@@ -714,6 +808,17 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_update)
     persona_instance_update.add_argument("--json", action="store_true")
     persona_instance_update.set_defaults(func=_cmd_persona_instance_update_profile)
+    persona_instance_set_model = persona_instance_subs.add_parser("set-model", help="Persist an instance-level provider/model override (this agent only; duplicates keep theirs)")
+    persona_instance_set_model.add_argument("persona_instance_id")
+    persona_instance_set_model.add_argument("--provider", default=None, help="Provider lane (canonical name or alias; api_mode is derived from it)")
+    persona_instance_set_model.add_argument("--model", default=None, help="Model id for the provider lane")
+    persona_instance_set_model.add_argument("--reasoning-effort", dest="reasoning_effort", default=None, help="Per-instance reasoning effort for reasoning-capable models (none, minimal, low, medium, high, xhigh); empty string clears it")
+    persona_instance_set_model.add_argument("--use-profile-default", action="store_true", help="Clear the instance override so the backing profile default applies live")
+    persona_instance_set_model.add_argument("--issued-at", default=None, help="ISO-8601 issue timestamp; stale writes are superseded instead of applied")
+    persona_instance_set_model.add_argument("--requested-by", default="operator")
+    _add_coordinator_permission_args(persona_instance_set_model)
+    persona_instance_set_model.add_argument("--json", action="store_true")
+    persona_instance_set_model.set_defaults(func=_cmd_persona_instance_set_model)
 
     mission_chat = subs.add_parser("mission-chat", help="Canonical Mission Control chat path")
     mission_chat_subs = mission_chat.add_subparsers(dest="mission_chat_command")
@@ -729,13 +834,25 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--model", default=None, help="Model override for this persona chat session only")
     mission_chat_message.add_argument("--use-agent-default", action="store_true", help="Clear the chat-scoped provider/model override before sending")
     mission_chat_message.add_argument("--surface-prompt", default="")
+    mission_chat_message.add_argument("--agents-file", default=None, help="Absolute path to one operator-selected workspace AGENTS.md to inject for this turn")
+    mission_chat_message.add_argument("--workspace-id", default=None)
+    mission_chat_message.add_argument("--workspace-name", default=None)
     mission_chat_message.add_argument("--intent-hint", default="chat")
     mission_chat_message.add_argument("--requested-by", default="cli")
     mission_chat_message.add_argument("--client-message-id", default=None)
     mission_chat_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
+    mission_chat_message.add_argument("--relay-chain", default=None, help="Comma-separated canonical persona ids already on the agent-relay chain (envelope provenance for chained agent_chat_send hops)")
+    mission_chat_message.add_argument("--relay-deadline-epoch", type=float, default=None, help="Absolute unix-epoch deadline shared by every hop on the relay chain")
     mission_chat_message.add_argument("--json", action="store_true")
     mission_chat_message.set_defaults(func=_cmd_mission_chat_message)
+    mission_chat_queue_skill = mission_chat_subs.add_parser("queue-skill", help="Load a skill on the next Mission Control chat turn")
+    mission_chat_queue_skill.add_argument("--persona", dest="persona_id", required=True)
+    mission_chat_queue_skill.add_argument("--persona-instance-id", default=None)
+    mission_chat_queue_skill.add_argument("--session-id", required=True)
+    mission_chat_queue_skill.add_argument("--skill", required=True)
+    mission_chat_queue_skill.add_argument("--json", action="store_true")
+    mission_chat_queue_skill.set_defaults(func=_cmd_mission_chat_queue_skill)
     mission_chat_steer = mission_chat_subs.add_parser("steer", help="Steer an active streamed Mission Control chat turn")
     mission_chat_steer.add_argument("--session-id", required=True)
     mission_chat_steer.add_argument("--message", required=True)
@@ -748,6 +865,27 @@ def build_parser(parent_subparsers) -> None:
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=_cmd_status)
+
+    providers = subs.add_parser(
+        "providers",
+        help="List credential pools with typed auth health (machine-readable via --json)",
+    )
+    providers.add_argument("--json", action="store_true")
+    providers.set_defaults(func=_cmd_providers)
+
+    doctor = subs.add_parser("doctor", help="Show Harness runtime diagnostics and stale-state report")
+    doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--fix", action="store_true", help="Repair stale Harness runtime rows and reap orphan worktrees")
+    doctor.add_argument("--dry-run", action="store_true", help="Preview --fix repairs without mutating runtime state")
+    doctor.add_argument("--yes", "-y", action="store_true", help="Confirm --fix repairs")
+    doctor.add_argument("--stale-run-hours", type=int, default=DEFAULT_STALE_RUN_HOURS)
+    doctor.add_argument("--stale-worker-hours", type=int, default=DEFAULT_STALE_WORKER_HOURS)
+    doctor.add_argument("--stale-task-days", type=int, default=DEFAULT_STALE_TASK_DAYS)
+    doctor.add_argument("--stale-incident-days", type=int, default=DEFAULT_STALE_INCIDENT_DAYS)
+    doctor.add_argument("--stale-incident-hours", type=int, default=None, help="Compatibility override for sub-day incident sweeps")
+    doctor.add_argument("--worktree-min-age-seconds", type=int, default=DEFAULT_WORKTREE_MIN_AGE_SECONDS)
+    doctor.add_argument("--compact-events", action="store_true", help="Compact archived task rows out of events.jsonl; use with --fix --dry-run to preview")
+    doctor.set_defaults(func=_cmd_doctor)
 
     health = subs.add_parser("health", help="Check Harness runtime/provider dependencies before live ticks")
     health.add_argument("--json", action="store_true")
@@ -818,6 +956,35 @@ def build_parser(parent_subparsers) -> None:
     daemon_foreground.set_defaults(func=_cmd_daemon)
     daemon_run_once.set_defaults(func=_cmd_daemon)
 
+    worktree = subs.add_parser("worktree", help="Manage harness-managed git worktrees")
+    worktree_subs = worktree.add_subparsers(dest="worktree_command", required=True)
+    worktree_reap = worktree_subs.add_parser(
+        "reap",
+        help="Capture-then-reap orphan worktrees not owned by any open task run",
+    )
+    worktree_reap.add_argument("--min-age-seconds", type=int, default=3600)
+    worktree_reap.add_argument("--json", action="store_true")
+    worktree_reap.set_defaults(func=_cmd_worktree_reap)
+
+    persona_instance = subs.add_parser(
+        "persona-instance", help="Manage durable persona-instance store rows"
+    )
+    persona_instance_subs = persona_instance.add_subparsers(
+        dest="persona_instance_command", required=True
+    )
+    persona_instance_reconcile = persona_instance_subs.add_parser(
+        "reconcile",
+        help=(
+            "Archive-and-fold legacy-id persona-instance rows onto their canonical "
+            "channel (duplicate agent cards repair); records identity_map aliases"
+        ),
+    )
+    persona_instance_reconcile.add_argument(
+        "--dry-run", action="store_true", help="Report actions without mutating the store"
+    )
+    persona_instance_reconcile.add_argument("--json", action="store_true")
+    persona_instance_reconcile.set_defaults(func=_cmd_persona_instance_reconcile)
+
     agent = subs.add_parser("agent", help="List harness agent definitions")
     agent_subs = agent.add_subparsers(dest="agent_command", required=True)
     agent_list = agent_subs.add_parser("list", help="List persisted/configured agent definitions")
@@ -873,7 +1040,8 @@ def build_parser(parent_subparsers) -> None:
     inc = subs.add_parser("incident", help="Manage incidents")
     inc_subs = inc.add_subparsers(dest="incident_command")
     inc_list = inc_subs.add_parser("list")
-    inc_list.add_argument("--open", action="store_true")
+    inc_list.add_argument("--open", action="store_true", help="(default) show only open incidents")
+    inc_list.add_argument("--all", action="store_true", help="include closed incidents")
     inc_list.add_argument("--json", action="store_true")
     inc_list.set_defaults(func=_cmd_incident_list)
     inc_close = inc_subs.add_parser("close")
@@ -885,6 +1053,23 @@ def build_parser(parent_subparsers) -> None:
     snap = subs.add_parser("snapshot", help="Write redaction-safe snapshot.json")
     snap.add_argument("--json", action="store_true")
     snap.set_defaults(func=_cmd_snapshot)
+    stream = subs.add_parser("stream", help="Emit Mission Control hydrate/delta frames as NDJSON")
+    stream.add_argument("--poll-interval", type=float, default=0.25)
+    stream.add_argument("--heartbeat-interval", type=float, default=5.0)
+    stream.add_argument("--max-frames", type=int, default=None, help=argparse.SUPPRESS)
+    stream.set_defaults(func=_cmd_stream)
+    serve = subs.add_parser("serve", help="Persistent NDJSON stdio bridge: dispatch harness argv requests in one warm process (Mission Control serve lane)")
+    serve.add_argument("--ndjson", action="store_true", help="NDJSON frame transport over stdio (the only v1 transport)")
+    serve.add_argument("--pool-size", type=int, default=4, help=argparse.SUPPRESS)
+    serve.set_defaults(func=_cmd_serve)
+    rebuild_read_model = subs.add_parser("rebuild-read-model", help="Rebuild read_model.db from the current event-sourced store")
+    rebuild_read_model.add_argument("--json", action="store_true")
+    rebuild_read_model.set_defaults(func=_cmd_rebuild_read_model)
+    read_projection = subs.add_parser("read", help="Read one projection from read_model.db")
+    read_projection.add_argument("--projection", required=True)
+    read_projection.add_argument("--since-offset", type=int, default=None)
+    read_projection.add_argument("--json", action="store_true")
+    read_projection.set_defaults(func=_cmd_read_projection)
 
     pets = subs.add_parser("pets", help="Mission Control Petdex bridge")
     pets_subs = pets.add_subparsers(dest="pets_command", required=True)
@@ -952,6 +1137,7 @@ def _error_code_for_exception(exc: BaseException) -> str:
         (ProofMissing, "proof_missing"),
         (StoreCorrupt, "store_corrupt"),
         (EventPayloadTooLarge, "event_payload_too_large"),
+        (RuntimeRootMismatch, "wrong_runtime_root"),
     ):
         if isinstance(exc, exc_type):
             return code
@@ -992,7 +1178,7 @@ def _error_hint(code: str) -> str:
         "sync_behind": "Run `hermes harness realm sync pull <realm> --json` before publishing.",
         "sync_secret_excluded": "Remove secrets/state from the realm sync allowlist source before retrying.",
         "sync_remote_unreachable": "Check network/git remote availability and retry.",
-        "sync_auth_failed": "Reconnect realm sync credentials through the backend-authorized provider flow.",
+        "sync_auth_failed": "Provide a fresh launcher-brokered credential via --credential-file or HERMES_REALM_SYNC_CREDENTIAL.",
     }.get(code, "Inspect safe_details and retry after correcting the request.")
 
 
@@ -1155,6 +1341,47 @@ def _goal_row(task: Task, *, full: bool = False) -> dict:
     return row
 
 
+def _archived_goal_row(task_id: str, result) -> dict | None:
+    archived = _archived_task_summary(task_id)
+    if not archived:
+        return None
+    task_data = archived.get("task") if isinstance(archived.get("task"), dict) else {}
+    archived_task = archived.get("archived_task") if isinstance(archived.get("archived_task"), dict) else {}
+    goal_id = task_data.get("goal_id") or task_id
+    row = {
+        "id": goal_id,
+        "task_id": task_id,
+        "title": task_data.get("title") or getattr(result, "title", ""),
+        "state": task_data.get("state") or getattr(result, "final_task_state", ""),
+        "workspace_id": task_data.get("workspace_id"),
+        "realm_id": None,
+        "stage": (task_data.get("mission_plan") or {}).get("current_stage_id") or task_data.get("current_stage_id"),
+        "updated_at": task_data.get("updated_at"),
+        "archived": True,
+        "archive_batch": archived.get("archive_batch"),
+        "archive_dir": archived.get("archive_dir"),
+        "manifest_path": archived.get("manifest_path"),
+        "archived_run_ids": list(archived_task.get("run_ids") or []),
+        "archived_proof_ids": list(archived_task.get("proof_ids") or []),
+    }
+    return row
+
+
+def _result_goal_row(result) -> dict:
+    return {
+        "id": getattr(result, "task_id", "") or "",
+        "task_id": getattr(result, "task_id", "") or "",
+        "title": getattr(result, "title", ""),
+        "state": getattr(result, "final_task_state", ""),
+        "workspace_id": None,
+        "realm_id": None,
+        "stage": None,
+        "updated_at": None,
+        "archived": False,
+        "source": "goal_run_result",
+    }
+
+
 def _resolve_goal(value: str) -> Task:
     try:
         return TaskStore().get_goal(value)
@@ -1237,7 +1464,11 @@ def _cmd_goal_create(args) -> int:
 
     if getattr(args, "request_json", None):
         request = _load_request_json(args.request_json)
-        data = create_mission_goal_from_request(request)
+        data = create_mission_goal_from_request(
+            request,
+            start_daemon_mode=getattr(args, "start_daemon", None),
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
     else:
         if not args.title or not args.description:
             return emit_harness_error(ValueError("--title and --description are required unless --request-json is provided"), args=args, code="invalid_request")
@@ -1392,15 +1623,65 @@ def _cmd_workspace_create(args) -> int:
         if item.id not in realm.workspace_ids:
             realm.workspace_ids.append(item.id)
             RealmStore().save(realm)
+    # A workspace created inside the ACTIVE realm becomes active
+    # immediately — the operator expects to land in the workspace they
+    # just created, not to run a second `workspace use` by hand.
+    # (workspace.created / workspace.activated are emitted by the store
+    # chokepoint — Stage 12.)
+    if item.realm_id and item.realm_id == RealmStore().active_id():
+        WorkspaceStore().set_active(item.id)
     _print_stage42(_object_envelope("workspace", _workspace_row(item), warnings=[]), args=args, default_output="json")
     return 0
 
 
 def _cmd_workspace_use(args) -> int:
-    WorkspaceStore().set_active(args.workspace_id)
-    item = WorkspaceStore().get(args.workspace_id)
-    _print_stage42(_object_envelope("workspace", _workspace_row(item)), args=args, default_output="json")
+    store = WorkspaceStore()
+    outcome = store.set_active(args.workspace_id, issued_at=getattr(args, "issued_at", None))
+    if not outcome.get("applied", True):
+        _print_stage42(
+            _object_envelope("workspace", _activation_outcome_row(store, _workspace_row, outcome, "workspace_id")),
+            args=args,
+            default_output="json",
+        )
+        return 0
+    item = store.get(args.workspace_id)
+    row = _workspace_row(item)
+    row["applied"] = True
+    _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
     return 0
+
+
+def _activation_outcome_row(store, row_builder, outcome: dict, key: str) -> dict:
+    """Envelope row for a set_active call the store declined. The row shows
+    the pointer's CURRENT owner (what stays active); `applied`/`reason` tell
+    the client why its request did not take. `superseded` = a strictly newer
+    intent owns the pointer (client should drop its optimistic state);
+    `duplicate` = this exact intent already applied (client treats as
+    success). Exit code stays 0 — both are valid protocol outcomes, not
+    errors."""
+    current_id = outcome.get(key)
+    try:
+        row = row_builder(store.get(current_id)) if current_id else {"id": None, "name": None}
+    except Exception:
+        row = {"id": current_id, "name": None}
+    row["applied"] = False
+    row["reason"] = outcome.get("reason")
+    row["superseded"] = outcome.get("reason") == "superseded"
+    row[f"requested_{key}"] = outcome.get(f"requested_{key}")
+    return row
+
+
+def _append_scope_event(event_type: str, **payload) -> None:
+    """Advance the EventLog watermark after a verb-layer mutation with no
+    evented store chokepoint. Stage 12 moved scope emission into the stores
+    (agent_runtime/store.py); this helper remains for catalog writes like
+    `blueprint save`. Payload values of None are dropped. Best effort: a
+    broken event log must not fail the verb."""
+    try:
+        body = {key: value for key, value in payload.items() if value is not None}
+        EventLog().append(Event(now(), event_type, None, None, None, body))
+    except Exception:
+        pass
 
 
 def _cmd_workspace_actors(args) -> int:
@@ -1494,7 +1775,10 @@ def _cmd_workspace_remove_agent(args) -> int:
 
 
 def _cmd_workspace_rename(args) -> int:
-    item = WorkspaceStore().get(args.workspace_id) if getattr(args, "dry_run", False) else WorkspaceStore().rename(args.workspace_id, args.name)
+    if getattr(args, "dry_run", False):
+        item = WorkspaceStore().get(args.workspace_id)
+    else:
+        item = WorkspaceStore().rename(args.workspace_id, args.name)
     row = _workspace_row(item)
     if getattr(args, "dry_run", False):
         row["name"] = args.name
@@ -1505,7 +1789,10 @@ def _cmd_workspace_rename(args) -> int:
 def _cmd_workspace_archive(args) -> int:
     if not _require_yes(args):
         return 8
-    item = WorkspaceStore().get(args.workspace_id) if getattr(args, "dry_run", False) else WorkspaceStore().archive(args.workspace_id)
+    if getattr(args, "dry_run", False):
+        item = WorkspaceStore().get(args.workspace_id)
+    else:
+        item = WorkspaceStore().archive(args.workspace_id)
     _print_stage42(_object_envelope("workspace", _workspace_row(item, full=True)), args=args, default_output="json")
     return 0
 
@@ -1517,12 +1804,14 @@ def _realm_row(realm, *, full: bool = False) -> dict:
         "id": realm.id,
         "name": realm.name,
         "server_id": realm.server_id,
+        "default_workspace_id": getattr(realm, "default_workspace_id", None),
+        "default_workspace_version": getattr(realm, "default_workspace_version", 0),
         "workspaces": len(workspace_ids),
         "sync": "in_sync",
         "updated_at": realm.updated_at,
     }
     if full:
-        row.update({"kind": "realm", "slug": realm.slug, "workspace_ids": workspace_ids, "sync_manifest_ref": realm.sync_manifest_ref, "archived": bool(realm.archived), "created_at": realm.created_at})
+        row.update({"kind": "realm", "slug": realm.slug, "workspace_ids": workspace_ids, "default_workspace_name": getattr(realm, "default_workspace_name", "Default"), "default_workspace_version": getattr(realm, "default_workspace_version", 0), "sync_manifest_ref": realm.sync_manifest_ref, "archived": bool(realm.archived), "created_at": realm.created_at})
     return row
 
 
@@ -1549,7 +1838,10 @@ def _cmd_realm_create(args) -> int:
 
 
 def _cmd_realm_bind_server(args) -> int:
-    item = RealmStore().get(args.realm_id) if getattr(args, "dry_run", False) else RealmStore().bind_server(args.realm_id, args.server_id)
+    if getattr(args, "dry_run", False):
+        item = RealmStore().get(args.realm_id)
+    else:
+        item = RealmStore().bind_server(args.realm_id, args.server_id)
     row = _realm_row(item)
     if getattr(args, "dry_run", False):
         row["server_id"] = args.server_id
@@ -1558,15 +1850,89 @@ def _cmd_realm_bind_server(args) -> int:
 
 
 def _cmd_realm_use(args) -> int:
-    RealmStore().set_active(args.realm_id)
-    item = RealmStore().get(args.realm_id)
-    _print_stage42(_object_envelope("realm", _realm_row(item)), args=args, default_output="json")
+    store = RealmStore()
+    issued_at = getattr(args, "issued_at", None)
+    outcome = store.set_active(args.realm_id, issued_at=issued_at)
+    if not outcome.get("applied", True):
+        _print_stage42(
+            _object_envelope("realm", _activation_outcome_row(store, _realm_row, outcome, "realm_id")),
+            args=args,
+            default_output="json",
+        )
+        return 0
+    item = store.get(args.realm_id)
+    _reconcile_active_workspace_to_realm(item, issued_at=issued_at)
+    row = _realm_row(item)
+    row["applied"] = True
+    _print_stage42(_object_envelope("realm", row), args=args, default_output="json")
+    return 0
+
+
+def _reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None) -> None:
+    """Switching realms must not leave the active workspace pointing into
+    another realm. Keep it when it already belongs; otherwise fall to the
+    realm's declared default, then its configured order, then listing order,
+    choosing only unarchived workspaces; clear it when the realm has none."""
+    store = WorkspaceStore()
+    active_id = store.active_id()
+    if active_id:
+        try:
+            active = store.get(active_id)
+        except Exception:
+            active = None
+        if active is not None and getattr(active, "realm_id", None) == realm.id:
+            return
+    candidates = [
+        workspace
+        for workspace in store.list_all()
+        if getattr(workspace, "realm_id", None) == realm.id and not workspace.archived
+    ]
+    configured_order = {wid: index for index, wid in enumerate(getattr(realm, "workspace_ids", None) or [])}
+    default_workspace_id = getattr(realm, "default_workspace_id", None)
+    candidates.sort(
+        key=lambda workspace: (
+            0 if workspace.id == default_workspace_id else 1,
+            configured_order.get(workspace.id, len(configured_order)),
+            workspace.id,
+        )
+    )
+    next_workspace = candidates[0] if candidates else None
+    # set_active emits workspace.activated (or {"cleared": true}) at the
+    # store chokepoint — Stage 12. The realm intent's basis rides along so a
+    # late-delivered realm switch cannot clobber a newer explicit workspace
+    # selection through its reconcile.
+    store.set_active(next_workspace.id if next_workspace else None, issued_at=issued_at)
+
+
+def _realm_sync_credential(args):
+    """Parse the launcher-brokered credential from --credential-file or the
+    HERMES_REALM_SYNC_CREDENTIAL env fallback; None when neither is set."""
+    from agent_runtime.realm_membership import load_realm_sync_credential
+
+    return load_realm_sync_credential(getattr(args, "credential_file", None))
+
+
+def _cmd_realm_adopt(args) -> int:
+    from agent_runtime.realm_membership import adopt_realms
+
+    try:
+        credential = _realm_sync_credential(args)
+        if credential is None:
+            raise RealmSyncError(
+                "sync_auth_failed",
+                "realm adopt requires a launcher-brokered credential; pass --credential-file or set HERMES_REALM_SYNC_CREDENTIAL.",
+            )
+        adopted = adopt_realms(credential, server_id=getattr(args, "server", None), dry_run=bool(getattr(args, "dry_run", False)))
+    except RealmSyncError as exc:
+        return emit_harness_error(exc, args=args)
+    rows = [_realm_row(item) for item in adopted]
+    _print_stage42(_list_envelope("realm", _sort_rows(rows, getattr(args, "sort", None))), args=args, default_output="json")
     return 0
 
 
 def _cmd_realm_sync_status(args) -> int:
     try:
-        data = realm_sync_status(args.realm_id)
+        data = realm_sync_status(args.realm_id, credential=_realm_sync_credential(args))
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")
@@ -1575,7 +1941,7 @@ def _cmd_realm_sync_status(args) -> int:
 
 def _cmd_realm_sync_pull(args) -> int:
     try:
-        data = pull_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)))
+        data = pull_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)), credential=_realm_sync_credential(args))
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")
@@ -1586,7 +1952,7 @@ def _cmd_realm_sync_publish(args) -> int:
     if not _require_yes(args):
         return 8
     try:
-        data = publish_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)))
+        data = publish_realm_sync(args.realm_id, dry_run=bool(getattr(args, "dry_run", False)), credential=_realm_sync_credential(args))
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")
@@ -1875,6 +2241,10 @@ def _cmd_blueprint_save(args) -> int:
         data = {"ok": False, "error": str(exc)}
         print(emit_json(data) if args.json else data["error"])
         return 2
+    # The blueprint catalog is client-visible snapshot state (snapshot
+    # `blueprints[]`); a save without an event is invisible to the
+    # watermark-gated stream/read-model pipeline (Stage 12).
+    _append_scope_event("blueprint.saved", blueprint_id=bp.id, version=bp.version, title=bp.title)
     data = {"ok": True, "blueprint_id": bp.id, "version": bp.version, "path": str(path), "blueprint": blueprint_summary(bp)}
     print(emit_json(data) if args.json else f"saved blueprint {bp.id} -> {path}")
     return 0
@@ -2082,6 +2452,181 @@ def _cmd_install_harness_skills(args) -> int:
     return 0 if data["ok"] else 1
 
 
+def _credential_health(entry) -> dict:
+    """Typed health for one pooled credential, derived from the SAME upstream
+    classification the human `hermes auth list` uses — reused, never
+    re-implemented, so there is exactly one authority on what "401 vs 429 vs
+    dead" means. A healthy credential carries no annotation; an exhausted one
+    is split into auth_failed / rate_limited / exhausted with the retry window;
+    a dead credential (which the human list renders with NO marker — a latent
+    "looks healthy" bug) is surfaced explicitly.
+    """
+    from agent.credential_pool import STATUS_DEAD, STATUS_EXHAUSTED, _exhausted_until
+    from hermes_cli.auth_commands import (
+        _classify_exhausted_status,
+        _format_exhausted_status,
+    )
+
+    last_status = getattr(entry, "last_status", None)
+    if last_status not in {STATUS_EXHAUSTED, STATUS_DEAD}:
+        return {"state": "healthy"}
+
+    message = _format_exhausted_status(entry).strip()
+    if last_status == STATUS_DEAD:
+        return {
+            "state": "dead",
+            "code": getattr(entry, "last_error_code", None),
+            "reason": getattr(entry, "last_error_reason", None),
+            "retry_at": None,
+            "message": message or "credential dead (re-auth required)",
+        }
+
+    label, retryable = _classify_exhausted_status(entry)
+    state = {"auth failed": "auth_failed", "rate-limited": "rate_limited"}.get(
+        label, "exhausted"
+    )
+    return {
+        "state": state,
+        "code": getattr(entry, "last_error_code", None),
+        "reason": getattr(entry, "last_error_reason", None),
+        "retry_at": _exhausted_until(entry) if retryable else None,
+        "message": message,
+    }
+
+
+def build_provider_visibility() -> dict:
+    """Typed, machine-readable snapshot of every credential pool — the contract
+    the Launcher's provider/model surfaces consume instead of scraping the
+    human `hermes auth list` table. Mirrors that command's provider iteration
+    (skips empty pools, marks the selected credential) but emits structure, not
+    prose, so a present-but-failing credential is never indistinguishable from
+    an absent one.
+    """
+    from agent.credential_pool import list_custom_pool_providers, load_pool
+    from hermes_cli.auth import PROVIDER_REGISTRY
+    from hermes_cli.auth_commands import _display_source
+
+    provider_ids = sorted(
+        {*PROVIDER_REGISTRY.keys(), "openrouter", *list_custom_pool_providers()}
+    )
+    providers_out = []
+    for provider in provider_ids:
+        pool = load_pool(provider)
+        entries = pool.entries()
+        if not entries:
+            continue
+        current = pool.peek()
+        credentials = []
+        for idx, entry in enumerate(entries, start=1):
+            credentials.append(
+                {
+                    "index": idx,
+                    "label": entry.label,
+                    "auth_type": entry.auth_type,
+                    "source": _display_source(entry.source),
+                    "selected": current is not None and entry.id == current.id,
+                    "health": _credential_health(entry),
+                }
+            )
+        providers_out.append({"id": provider, "credentials": credentials})
+    return {"schema": "hermes.provider_visibility/v1", "providers": providers_out}
+
+
+def _cmd_providers(args) -> int:
+    payload = build_provider_visibility()
+    if getattr(args, "json", False):
+        print(emit_json(payload))
+        return 0
+    if not payload["providers"]:
+        print("No credential pools configured.")
+        return 0
+    for provider in payload["providers"]:
+        print(f"{provider['id']} ({len(provider['credentials'])} credentials):")
+        for credential in provider["credentials"]:
+            health = credential["health"]
+            tag = "" if health["state"] == "healthy" else f"  [{health['state']}]"
+            marker = " ←" if credential["selected"] else ""
+            print(
+                f"  #{credential['index']}  {credential['label']:<20} "
+                f"{credential['auth_type']:<7} {credential['source']}{tag}{marker}"
+            )
+    return 0
+
+
+def _cmd_doctor(args) -> int:
+    resolution = resolve_runtime()
+    if getattr(args, "fix", False) and not getattr(args, "dry_run", False) and not getattr(args, "yes", False):
+        data = {
+            "ok": False,
+            "error": "confirmation_required",
+            "summary": "harness doctor --fix requires --yes, or use --dry-run to preview repairs",
+        }
+        print(emit_json(data) if args.json else data["summary"])
+        return ERROR_EXIT_CODES["confirmation_required"]
+    hygiene = run_harness_doctor(
+        fix=bool(getattr(args, "fix", False)),
+        dry_run=bool(getattr(args, "dry_run", False)),
+        stale_run_hours=int(getattr(args, "stale_run_hours", DEFAULT_STALE_RUN_HOURS) or DEFAULT_STALE_RUN_HOURS),
+        stale_worker_hours=int(getattr(args, "stale_worker_hours", DEFAULT_STALE_WORKER_HOURS) or DEFAULT_STALE_WORKER_HOURS),
+        stale_task_days=int(getattr(args, "stale_task_days", DEFAULT_STALE_TASK_DAYS) or DEFAULT_STALE_TASK_DAYS),
+        stale_incident_hours=int(getattr(args, "stale_incident_hours", None) or DEFAULT_STALE_INCIDENT_HOURS),
+        stale_incident_days=(
+            None
+            if getattr(args, "stale_incident_hours", None) is not None
+            else int(getattr(args, "stale_incident_days", DEFAULT_STALE_INCIDENT_DAYS) or DEFAULT_STALE_INCIDENT_DAYS)
+        ),
+        worktree_min_age_seconds=int(
+            getattr(args, "worktree_min_age_seconds", DEFAULT_WORKTREE_MIN_AGE_SECONDS)
+            or DEFAULT_WORKTREE_MIN_AGE_SECONDS
+        ),
+        compact_events=bool(getattr(args, "compact_events", False)),
+    )
+    data = {
+        "ok": True,
+        "runtime_resolution": {
+            "store_root": str(resolution.store_root),
+            "layer": resolution.layer,
+            "hermes_home": resolution.hermes_home,
+            "config_path": resolution.config_path,
+            "trace": list(resolution.trace),
+            "layers": resolution_table(),
+        },
+        "hygiene": hygiene,
+    }
+    if args.json:
+        print(emit_json(data))
+    else:
+        print("Harness runtime resolution")
+        print(f"resolved: {resolution.store_root} ({resolution.layer})")
+        for row in data["runtime_resolution"]["layers"]:
+            marker = "*" if row["winner"] else " "
+            print(
+                f"{marker} {row['layer']:<7} value={row['value'] or '<unset>'} "
+                f"exists={row['exists']} tasks={row['tasks']}"
+            )
+        counts = hygiene["summary"]["finding_counts"]
+        event_log = hygiene["findings"]["event_log"]
+        print("Harness doctor")
+        print(
+            "findings: "
+            f"runs={counts['stale_runs']} workers={counts['stale_workers']} "
+            f"tasks={counts['stale_open_tasks']} incidents={counts['stale_incidents']} "
+            f"worktrees={counts['orphan_worktrees']} "
+            f"snapshot_null_ids={counts['snapshot_null_id_rows']} "
+            f"event_compactable_rows={counts['event_log_compactable_rows']}"
+        )
+        print(
+            "event log: "
+            f"size={event_log['size_bytes']} bytes lines={event_log['line_count']} "
+            f"archive_slices={event_log['archived_event_slices']} "
+            f"index={event_log['index_health']}"
+        )
+        if getattr(args, "fix", False):
+            mode = "dry run" if getattr(args, "dry_run", False) else "applied"
+            print(f"repairs: {mode}")
+    return 0
+
+
 def _cmd_goal_run(args) -> int:
     cfg = load_agent_runtime_config()
     os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
@@ -2112,11 +2657,20 @@ def _cmd_goal_run(args) -> int:
             blueprint_id=args.blueprint,
             bindings=bindings,
             workspace_id=getattr(args, "workspace", None),
+            runtime_root=getattr(args, "runtime_root", None),
         )
     )
     if getattr(args, "json", False) or getattr(args, "output", None):
-        task = TaskStore().get(result.task_id)
-        row = _goal_row(task)
+        task = None
+        try:
+            task = TaskStore().get(result.task_id)
+            row = _goal_row(task)
+            warnings = _goal_contention_warnings(task)
+        except NotFound:
+            row = _archived_goal_row(result.task_id, result)
+            if row is None:
+                row = _result_goal_row(result)
+            warnings = []
         row.update(
             {
                 "stop_reason": result.stop_reason,
@@ -2126,3495 +2680,29 @@ def _cmd_goal_run(args) -> int:
                 "open_incident_ids": list(result.open_incident_ids),
             }
         )
-        _print_stage42(_object_envelope("goal", row, warnings=_goal_contention_warnings(task)), args=args, default_output="json")
+        if result.archive_result is not None:
+            row["archive_result"] = result.archive_result
+            row["archived"] = bool(row.get("archived") or result.archive_result.get("archived_count"))
+        _print_stage42(_object_envelope("goal", row, warnings=warnings), args=args, default_output="json")
     else:
         print(f"goal {result.task_id}: stop={result.stop_reason} state={result.final_task_state} actions={result.actions_taken}")
     return result.exit_code
 
 
-def _cmd_persona_list(args) -> int:
-    cfg = load_agent_runtime_config()
-    store = PersonaInstanceStore()
-    workers = WorkerSessionStore().list_all()
-    personas = ensure_persisted_personas(cfg)
-    personas_by_id = {str(getattr(persona, "id", "") or ""): persona for persona in personas}
-    enabled = persona_instance_runtime_enabled(cfg)
-    instances = store.derive_from_workers(personas, workers) if enabled else []
-    data = {
-        "feature_enabled": enabled,
-        "assignment_store_enabled": persona_assignment_store_enabled(cfg),
-        "persona_instances": [
-            persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
-            for instance in instances
-        ],
-    }
-    if args.json:
-        print(emit_json(data))
-    else:
-        if not enabled:
-            print("Persona instance runtime is disabled.")
-        for instance in data["persona_instances"]:
-            print(f"{instance['persona_instance_id']}: {instance['display_name']} state={instance['state']} assignment={instance['current_assignment_id'] or '-'}")
-    return 0
 
+def _cmd_serve(args) -> int:
+    # serve is a real module (not an exec'd part): it is the process's main
+    # loop, owns sys.stdout/sys.stderr swaps, and is imported by tests.
+    from hermes_cli.harness_parts.serve import _cmd_serve as _run_serve
 
-def _cmd_persona_show(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_instance_runtime_enabled(cfg):
-        data = {"ok": False, "feature_enabled": False, "error": "persona instance runtime is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    store = PersonaInstanceStore()
-    personas = ensure_persisted_personas(cfg)
-    personas_by_id = {str(getattr(persona, "id", "") or ""): persona for persona in personas}
-    store.derive_from_workers(personas, WorkerSessionStore().list_all())
-    value = str(args.persona_id_or_instance_id or "").strip()
-    instance_id = value if value.startswith("personainst_") else persona_instance_id_for(_normalize_cli_persona_id(value))
-    try:
-        instance = store.get(instance_id)
-    except Exception:
-        data = {"ok": False, "feature_enabled": True, "error": f"persona instance not found: {value}"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    assignments = PersonaAssignmentStore().list_for_persona(instance.persona_id) if persona_assignment_store_enabled(cfg) else []
-    data = {
-        "ok": True,
-        "feature_enabled": True,
-        "persona_instance": persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or ""))),
-        "assignments": [persona_assignment_summary(item) for item in assignments[-25:]],
-    }
-    if args.json:
-        print(emit_json(data))
-    else:
-        summary = data["persona_instance"]
-        print(f"{summary['persona_instance_id']}: {summary['display_name']} state={summary['state']}")
-    return 0
+    return _run_serve(args)
 
 
-def _cmd_persona_tool_diff(args) -> int:
-    cfg = load_agent_runtime_config()
-    persona = _persona_by_id(cfg, str(args.persona_id or ""))
-    if persona is None:
-        data = {"ok": False, "error": f"persona not found: {args.persona_id}"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    visibility = resolve_tool_visibility(
-        persona,
-        ToolVisibilityOptions(
-            permission_mode=str(args.permission_mode or "profile_default"),
-            permission_source="cli_preview",
-            repo_scope=args.repo_scope,
-            workdir=args.workdir,
-            session_id=args.session_id,
-            task_id=args.task_id,
-            goal_id=args.goal_id,
-        ),
-    )
-    data = {"ok": True, "tool_visibility": visibility}
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"{visibility['persona_id']}: {visibility['final_tool_count']} tools")
-        if visibility["blocked_tools"]:
-            print("blocked:")
-            for item in visibility["blocked_tools"]:
-                print(f"  {item['name']} ({item['reason']})")
-    return 0
+def _load_command_parts() -> None:
+    parts_dir = Path(__file__).with_name("harness_parts")
+    for filename in ("persona_commands.py", "runtime_commands.py"):
+        path = parts_dir / filename
+        exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), globals())
 
 
-def _cmd_persona_permission_set(args) -> int:
-    cfg = load_agent_runtime_config()
-    persona = _persona_by_id(cfg, str(args.persona_id or ""))
-    if persona is None:
-        data = {"ok": False, "error": f"persona not found: {args.persona_id}"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    expires_at = str(args.expires_at or "").strip() or None
-    ttl_seconds = getattr(args, "ttl_seconds", None)
-    if expires_at is None and ttl_seconds is not None and ttl_seconds > 0:
-        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z")
-    record = ChatToolPermissionStore().set(
-        persona_id=persona.id,
-        session_id=str(args.session_id or ""),
-        mode=str(args.mode or "profile_default"),
-        reason=str(args.reason or ""),
-        source="operator",
-        expires_at=expires_at,
-        turns_remaining=getattr(args, "turns", None),
-    )
-    data = {
-        "ok": True,
-        "permission": {
-            "persona_id": record.persona_id,
-            "session_id": record.session_id,
-            "mode": record.mode,
-            "reason": record.reason,
-            "source": record.source,
-            "updated_at": record.updated_at,
-            "expires_at": record.expires_at or None,
-            "turns_remaining": record.turns_remaining,
-        },
-        "permission_state": permission_state_for_chat(persona, session_id=record.session_id),
-    }
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"{record.persona_id}: {record.session_id} mode={record.mode}")
-    return 0
-
-
-def _cmd_persona_assignments(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    store = PersonaAssignmentStore()
-    goal_id = getattr(args, "goal_id", None) or getattr(args, "task_id", None)
-    if goal_id:
-        assignments = store.list_for_goal(goal_id)
-    elif args.persona_id:
-        assignments = store.list_for_persona(_normalize_cli_persona_id(args.persona_id))
-    else:
-        assignments = store.list_all()
-    data = {
-        "ok": True,
-        "feature_enabled": persona_instance_runtime_enabled(cfg),
-        "assignment_store_enabled": True,
-        "assignments": [persona_assignment_summary(item) for item in assignments],
-    }
-    if args.json:
-        print(emit_json(data))
-    else:
-        for item in data["assignments"]:
-            print(f"{item['assignment_id']}: {item['persona_id']} {item['kind']} state={item['state']} task={item['task_id'] or '-'}")
-    return 0
-
-
-def _cmd_persona_message(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
-    try:
-        task = TaskStore().get(args.task_id)
-    except Exception:
-        data = {"ok": False, "error": f"task not found: {args.task_id}"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    PersonaInstanceStore().derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
-    assignment = PersonaAssignmentStore().create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id=persona_id,
-            kind="operator_message",
-            title=args.title,
-            message=args.message,
-            created_by=args.requested_by,
-            task_id=task.id,
-            stage_id=task.current_stage_id,
-        )
-    )
-    data = {
-        "ok": True,
-        "assignment_id": assignment.id,
-        "persona_instance_id": assignment.persona_instance_id,
-        "persona_id": assignment.persona_id,
-        "task_id": assignment.task_id,
-        "state": assignment.state,
-        "kind": assignment.kind,
-    }
-    print(emit_json(data) if args.json else f"queued {assignment.id} for {assignment.persona_id}")
-    return 0
-
-
-def _cmd_persona_instance_create(args) -> int:
-    display_name = safe_assignment_text(getattr(args, "display_name", None), limit=120)
-    kill_active = bool(getattr(args, "kill_active", False))
-    add_instance = bool(getattr(args, "add_instance", False))
-    placement_id = safe_assignment_token(getattr(args, "placement_id", None))
-    cfg = load_agent_runtime_config()
-    persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
-    persona = _persona_by_id(cfg, persona_id)
-    coordinator_id = _coordinator_actor_id(args)
-    coordinator_scope = None
-    if coordinator_id and (display_name or add_instance):
-        coordinator_scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action(
-            "persona.instance.create",
-            coordinator_scope,
-            actor=coordinator_id,
-            coordinator_id=coordinator_id,
-        )
-        if not auth.ok:
-            data = _coordinator_confirm_payload("persona.instance.create", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
-            return 2
-        coordinator_scope = auth.scope
-    if display_name:
-        if not persona_assignment_store_enabled(cfg):
-            data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-            print(emit_json(data) if args.json else data["error"])
-            return 2
-        try:
-            if add_instance:
-                if not placement_id:
-                    data = {"ok": False, "error": "placement_id is required when add_instance is true"}
-                    print(emit_json(data) if args.json else data["error"])
-                    return 2
-                instance = PersonaInstanceStore().add_instance(
-                    persona_id=persona_id,
-                    placement_id=placement_id,
-                    display_name=display_name or safe_assignment_text(args.title, limit=120) or persona_id,
-                    session_id=getattr(args, "session_id", None),
-                )
-            else:
-                instance = PersonaInstanceStore().create_operator_chat(
-                    persona_id=persona_id,
-                    display_name=display_name or safe_assignment_text(args.title, limit=120) or persona_id,
-                    session_id=getattr(args, "session_id", None),
-                    kill_active=kill_active,
-                )
-            if add_instance or coordinator_id:
-                instance = _maybe_stamp_spawned_by(instance, coordinator_id=coordinator_id)
-        except ChatBusyError as exc:
-            data = _chat_busy_payload(exc)
-            print(emit_json(data) if args.json else data["error"])
-            return 2
-        _ensure_persona_chat_session(
-            session_db=_default_persona_session_db(),
-            session_id=instance.session_id,
-            persona_id=instance.persona_id,
-            title=f"{instance.display_name} chat",
-        )
-        data = {
-            "ok": True,
-            "agent_profile_id": instance.id,
-            "persona_instance_id": instance.id,
-            "source_persona_id": instance.persona_id,
-            "persona_id": instance.persona_id,
-            "source_profile_id": instance.profile_id,
-            "agent_profile_display_name": instance.display_name,
-            "display_name": instance.display_name,
-            "lifecycle_mode": instance.mode,
-            "mode": instance.mode,
-            "chat_session_id": instance.session_id,
-            "session_id": instance.session_id,
-            "chat_busy": False,
-            "killed_previous": bool(kill_active),
-            "add_instance": add_instance,
-            "placement_id": placement_id or None,
-            "coordinator_permission_scope": asdict(coordinator_scope) if coordinator_scope is not None else None,
-            "next_expected": "agent profile created; refresh Harness snapshot for the profile, chat, and scene placement state",
-        }
-        print(emit_json(data) if args.json else f"created {instance.id} on chat {instance.session_id}")
-        return 0
-    return _queue_free_floating_assignment(
-        persona_id=args.persona_id,
-        title=args.title,
-        message=args.message,
-        requested_by=args.requested_by,
-        json_output=args.json,
-        auto_run=getattr(args, "auto_run", False),
-        max_actions=getattr(args, "max_actions", 1),
-        max_seconds=getattr(args, "max_seconds", 240.0),
-        client_message_id=getattr(args, "client_message_id", None),
-        session_id=getattr(args, "session_id", None),
-        stream=getattr(args, "stream", False),
-        kill_active=kill_active,
-        add_instance=add_instance,
-        placement_id=placement_id,
-        spawned_by=coordinator_id if coordinator_id else ("operator" if add_instance else None),
-        coordinator_permission_scope=coordinator_scope,
-    )
-
-
-def _cmd_persona_instance_open_chat(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
-    persona = _persona_by_id(cfg, persona_id)
-    coordinator_id = _coordinator_actor_id(args)
-    coordinator_scope = None
-    if coordinator_id and bool(getattr(args, "add_instance", False)):
-        coordinator_scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action(
-            "persona.instance.open_chat",
-            coordinator_scope,
-            actor=coordinator_id,
-            coordinator_id=coordinator_id,
-        )
-        if not auth.ok:
-            data = _coordinator_confirm_payload("persona.instance.open_chat", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
-            return 2
-        coordinator_scope = auth.scope
-    elif coordinator_id and bool(getattr(args, "kill_active", False)):
-        coordinator_scope = _coordinator_scope_from_args(args, cfg, persona)
-        try:
-            target = PersonaInstanceStore().get(persona_instance_id_for(persona_id))
-        except Exception:
-            target = None
-        auth = authorize_coordinator_action(
-            "persona.instance.close",
-            coordinator_scope,
-            target,
-            actor=coordinator_id,
-            coordinator_id=coordinator_id,
-        )
-        if not auth.ok:
-            data = _coordinator_confirm_payload("persona.instance.close", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
-            return 2
-    try:
-        if bool(getattr(args, "add_instance", False)):
-            placement_id = safe_assignment_token(getattr(args, "placement_id", None))
-            if not placement_id:
-                data = {"ok": False, "error": "placement_id is required when add_instance is true"}
-                print(emit_json(data) if args.json else data["error"])
-                return 2
-            instance = PersonaInstanceStore().add_instance(
-                persona_id=persona_id,
-                placement_id=placement_id,
-                session_id=args.session_id,
-            )
-            instance = _maybe_stamp_spawned_by(instance, coordinator_id=coordinator_id)
-        else:
-            if not safe_assignment_text(getattr(args, "session_id", None), limit=200):
-                data = {"ok": False, "error": "session_id is required unless add_instance is true"}
-                print(emit_json(data) if args.json else data["error"])
-                return 2
-            instance = PersonaInstanceStore().open_chat(
-                persona_id=persona_id,
-                session_id=args.session_id,
-                kill_active=bool(getattr(args, "kill_active", False)),
-            )
-    except ChatBusyError as exc:
-        data = _chat_busy_payload(exc)
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    data = {
-        "ok": True,
-        "persona_instance_id": instance.id,
-        "persona_id": instance.persona_id,
-        "mode": instance.mode,
-        "session_id": instance.session_id,
-        "chat_busy": False,
-        "killed_previous": bool(getattr(args, "kill_active", False)),
-        "add_instance": bool(getattr(args, "add_instance", False)),
-        "placement_id": safe_assignment_token(getattr(args, "placement_id", None)) or None,
-        "coordinator_permission_scope": asdict(coordinator_scope) if coordinator_scope is not None else None,
-        "next_expected": "resume or send on this chat session to boot the persona instance history",
-    }
-    print(emit_json(data) if args.json else f"opened {instance.id} on chat {instance.session_id}")
-    return 0
-
-
-def _cmd_persona_chat_delete(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-
-    session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
-    if not session_id:
-        data = {"ok": False, "error": "session_id is required"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-
-    requested_persona = None
-    raw_persona = safe_assignment_text(getattr(args, "persona_id", None), limit=160)
-    if raw_persona:
-        try:
-            requested_persona = _normalize_cli_persona_or_template_id(raw_persona)
-        except Exception:
-            requested_persona = safe_assignment_token(raw_persona)
-    requested_instance = safe_assignment_token(getattr(args, "persona_instance_id", None))
-
-    deleted_session = False
-    session_db = _default_persona_session_db()
-    if session_db is not None:
-        try:
-            deleted_session = bool(session_db.delete_session(session_id, sessions_dir=get_hermes_home() / "sessions"))
-        except TypeError:
-            deleted_session = bool(session_db.delete_session(session_id))
-        except Exception as exc:
-            data = {
-                "ok": False,
-                "session_id": session_id,
-                "error": f"failed to delete persona chat session: {exc}",
-            }
-            print(emit_json(data) if args.json else data["error"])
-            return 2
-
-    instance_store = PersonaInstanceStore()
-    assignment_store = PersonaAssignmentStore()
-    cleared_bindings: list[str] = []
-    closed_assignment_ids: list[str] = []
-    for instance in instance_store.list_all():
-        if safe_assignment_text(getattr(instance, "session_id", None), limit=200) != session_id:
-            continue
-        if requested_instance and instance.id != requested_instance:
-            continue
-        if requested_persona and instance.persona_id != requested_persona:
-            continue
-
-        assignment_id = safe_assignment_token(getattr(instance, "current_assignment_id", None))
-        if assignment_id:
-            try:
-                assignment = assignment_store.get(assignment_id)
-                if (
-                    assignment.task_id is None
-                    and assignment.evidence_kind == "free_floating"
-                    and assignment.state not in {"completed", "blocked", "cancelled"}
-                ):
-                    closed = assignment_store.complete(
-                        assignment.id,
-                        state="cancelled",
-                        error=f"deleted persona chat session {session_id}",
-                    )
-                    closed_assignment_ids.append(closed.id)
-            except Exception:
-                pass
-
-        instance.session_id = None
-        instance.current_assignment_id = None
-        instance.active_worker_session_id = None
-        instance.active_run_id = None
-        if instance.mode in {"chat", "free_floating"}:
-            instance.mode = "configured"
-        instance_store.update(instance)
-        cleared_bindings.append(instance.id)
-
-    if not deleted_session and not cleared_bindings:
-        data = {
-            "ok": False,
-            "status": "not_found",
-            "session_id": session_id,
-            "deleted_session": False,
-            "cleared_bindings": [],
-            "error": f"persona chat session not found: {session_id}",
-            "next_expected": "refresh Harness snapshot; if the row is still visible, inspect SessionDB source and persona_instance.session_id",
-        }
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-
-    try:
-        EventLog().append(
-            Event(
-                id=f"evt_{uuid.uuid4().hex[:12]}",
-                type="persona_chat.deleted",
-                persona_id=requested_persona or "persona",
-                task_id=None,
-                run_id=None,
-                ts=now(),
-                payload={
-                    "session_id": session_id,
-                    "deleted_session": deleted_session,
-                    "cleared_bindings": cleared_bindings,
-                    "closed_assignment_ids": closed_assignment_ids,
-                    "requested_by": safe_assignment_text(getattr(args, "requested_by", None), limit=120) or "cli",
-                },
-            )
-        )
-    except Exception:
-        pass
-
-    data = {
-        "ok": True,
-        "session_id": session_id,
-        "deleted_session": deleted_session,
-        "cleared_bindings": cleared_bindings,
-        "cleared_binding_count": len(cleared_bindings),
-        "closed_assignment_ids": closed_assignment_ids,
-        "next_expected": "refresh Harness snapshot; deleted persona chat should be absent and active bindings should be cleared",
-    }
-    print(emit_json(data) if args.json else f"deleted persona chat {session_id}")
-    return 0
-
-
-def _chat_busy_payload(exc: ChatBusyError) -> dict[str, object]:
-    return {
-        "ok": False,
-        "status": "chat_busy",
-        "chat_busy": True,
-        "error": "chat_busy",
-        "persona_instance_id": exc.instance.id,
-        "persona_id": exc.instance.persona_id,
-        "active_run_id": exc.active_run_id,
-        "active_worker_session_id": exc.active_worker_session_id,
-        "next_expected": "choose add_instance to keep the current chat, or retry with kill_active to cancel the current run/worker and replace it",
-    }
-
-
-def _coordinator_actor_id(args) -> str | None:
-    raw = str(getattr(args, "requested_by", "") or "").strip()
-    if raw.lower().startswith("coordinator:"):
-        return safe_assignment_token(raw.split(":", 1)[1])
-    if raw.lower() == "coordinator":
-        return safe_assignment_token(getattr(args, "coordinator_id", "neko_supervisor"))
-    return None
-
-
-def _coordinator_scope_from_args(args, cfg, persona: AgentPersona | None) -> CoordinatorPermissionScope:
-    scope = scope_for_persona(
-        persona,
-        config=getattr(cfg, "coordinator_permissions", None),
-        spawns_used=int(getattr(args, "coordinator_spawns_used", 0) or 0),
-    )
-    max_spawns = getattr(args, "coordinator_max_spawns", None)
-    if max_spawns is not None:
-        scope.max_spawns = max(0, int(max_spawns))
-    may_kill_own = getattr(args, "coordinator_may_kill_own", None)
-    no_kill_own = getattr(args, "coordinator_no_kill_own", None)
-    if may_kill_own is not None:
-        scope.may_kill_own = bool(may_kill_own)
-    if no_kill_own is not None:
-        scope.may_kill_own = not bool(no_kill_own)
-    may_kill_others = getattr(args, "coordinator_may_kill_others", None)
-    if may_kill_others is not None:
-        scope.may_kill_others = bool(may_kill_others)
-    return scope
-
-
-def _coordinator_confirm_payload(action: str, coordinator_id: str, auth) -> dict[str, object]:
-    return {
-        "ok": False,
-        "status": "needs_operator_confirm",
-        "needs_operator_confirm": True,
-        "action": action,
-        "coordinator_id": coordinator_id,
-        "reason": auth.reason,
-        "permission_scope": asdict(auth.scope) if auth.scope is not None else None,
-        "next_expected": "operator confirmation or a wider coordinator permission scope is required before this warning/destructive action can run",
-    }
-
-
-def _maybe_stamp_spawned_by(instance, *, coordinator_id: str | None, operator_source: str = "operator"):
-    source = safe_assignment_token(coordinator_id) if coordinator_id else operator_source
-    if not source:
-        return instance
-    instance.spawned_by = source
-    return PersonaInstanceStore().update(instance)
-
-
-def _cmd_persona_instance_message(args) -> int:
-    return _queue_free_floating_assignment(
-        persona_id=_persona_id_from_instance_id(args.persona_instance_id),
-        title=args.title,
-        message=args.message,
-        requested_by=args.requested_by,
-        json_output=args.json,
-        persona_instance_id=args.persona_instance_id,
-        auto_run=getattr(args, "auto_run", False),
-        max_actions=getattr(args, "max_actions", 1),
-        max_seconds=getattr(args, "max_seconds", 240.0),
-        client_message_id=getattr(args, "client_message_id", None),
-        session_id=getattr(args, "session_id", None),
-        stream=getattr(args, "stream", False),
-    )
-
-
-def _cmd_mission_chat_steer(args) -> int:
-    session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
-    client_message_id = safe_assignment_text(getattr(args, "client_message_id", None), limit=200)
-    message = safe_assignment_text(getattr(args, "message", None), limit=12000)
-    if not session_id or not client_message_id or not message:
-        data = {
-            "ok": False,
-            "capability_id": "mission.chat.steer",
-            "execution_state": "rejected",
-            "session_id": session_id,
-            "client_message_id": client_message_id,
-            "error_kind": "invalid_request",
-            "error": "session_id, client_message_id, and non-empty message are required",
-        }
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    try:
-        data = submit_mission_chat_steer(
-            runtime_root=paths.store_root(),
-            session_id=session_id,
-            message=message,
-            client_message_id=client_message_id,
-            persona_id=safe_assignment_token(getattr(args, "persona_id", None)) or None,
-            persona_instance_id=safe_assignment_token(getattr(args, "persona_instance_id", None)) or None,
-        )
-    except ValueError as exc:
-        data = {
-            "ok": False,
-            "capability_id": "mission.chat.steer",
-            "execution_state": "rejected",
-            "session_id": session_id,
-            "client_message_id": client_message_id,
-            "error_kind": "invalid_request",
-            "error": safe_assignment_text(str(exc), limit=240),
-        }
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    print(emit_json(data) if args.json else (data.get("error") or data.get("execution_state") or "accepted"))
-    return 0
-
-
-def _cmd_mission_chat_message(args) -> int:
-    cfg = load_agent_runtime_config()
-    normalized_persona = _normalize_cli_persona_or_template_id(args.persona_id)
-    persona = _persona_by_id(cfg, normalized_persona)
-    if persona is None:
-        data = {"ok": False, "error": f"unknown persona {safe_assignment_token(args.persona_id)}"}
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
-        return 2
-
-    session_db = _default_persona_session_db()
-    instance_store = PersonaInstanceStore()
-    instance_store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
-    persona_instance_id = safe_assignment_token(getattr(args, "persona_instance_id", None))
-    session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
-    if not session_id:
-        session_id = _persona_chat_session_id(persona_instance_id or persona_instance_id_for(normalized_persona))
-    display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or _display_name_for_profile(normalized_persona)
-    try:
-        instance = instance_store.open_chat(
-            persona_id=normalized_persona,
-            persona_instance_id=persona_instance_id or None,
-            session_id=session_id,
-            display_name=display_name,
-            profile_id=safe_assignment_token(getattr(persona, "hermes_profile", None)),
-            kill_active=False,
-        )
-    except ChatBusyError as exc:
-        data = _chat_busy_payload(exc)
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
-        return 2
-    except ValueError as exc:
-        data = {"ok": False, "error": safe_assignment_text(str(exc), limit=240)}
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
-        return 2
-
-    task_id = safe_assignment_token(getattr(args, "task_id", None))
-    goal_id = safe_assignment_token(getattr(args, "goal_id", None))
-    if task_id or goal_id:
-        instance.current_task_id = task_id or instance.current_task_id
-        instance.goal_id = goal_id or task_id or instance.goal_id
-        instance.mode = "task_bound"
-        instance = instance_store.update(instance)
-
-    _ensure_persona_chat_session(
-        session_db=session_db,
-        session_id=session_id,
-        persona_id=normalized_persona,
-        title=f"{instance.display_name} chat",
-    )
-    try:
-        requested_override = _requested_chat_model_override(args)
-        chat_override = _resolve_chat_model_override(
-            session_db=session_db,
-            session_id=session_id,
-            requested_override=requested_override,
-        )
-        model_selection = _chat_effective_model_payload(
-            persona=persona,
-            config=cfg,
-            override=chat_override,
-        )
-    except ValueError as exc:
-        data = {
-            "ok": False,
-            "error_kind": "invalid_chat_model_override",
-            "error": safe_assignment_text(str(exc), limit=320),
-            "persona_instance_id": instance.id,
-            "persona_id": normalized_persona,
-            "session_id": session_id,
-            "chat_session_id": session_id,
-            "next_expected": "choose a valid provider/model id or clear the chat-scoped override; Hermes profile defaults were not changed",
-        }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
-        return 2
-    except Exception as exc:
-        data = {
-            "ok": False,
-            "error_kind": "chat_model_override_persist_failed",
-            "error": safe_assignment_text(str(exc), limit=320) or type(exc).__name__,
-            "persona_instance_id": instance.id,
-            "persona_id": normalized_persona,
-            "session_id": session_id,
-            "chat_session_id": session_id,
-            "next_expected": "inspect Harness session metadata storage; chat-scoped model override was not applied and Hermes profile defaults were not changed",
-        }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
-        return 2
-    message = safe_assignment_text(getattr(args, "message", None), limit=12000)
-    if not message:
-        data = {"ok": False, "error": "message is required"}
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
-        return 2
-
-    client_message_id = safe_assignment_text(
-        getattr(args, "client_message_id", None), limit=200
-    )
-    replay = _persona_chat_existing_turn(
-        session_db=session_db,
-        session_id=session_id,
-        client_message_id=client_message_id,
-    )
-    if replay.get("assistant"):
-        reply_text = _redact_persona_chat_text(
-            replay["assistant"].get("content"), limit=8000
-        )
-        data = {
-            "ok": True,
-            "capability_id": "mission.chat.message",
-            "agent_profile_id": instance.id,
-            "persona_instance_id": instance.id,
-            "persona_id": normalized_persona,
-            "session_id": session_id,
-            "chat_session_id": session_id,
-            "task_id": task_id,
-            "goal_id": goal_id,
-            "client_message_id": client_message_id,
-            "execution_state": "completed",
-            "kind": "mission_chat_message",
-            "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None))
-            or "chat",
-            "surface_prompt": safe_assignment_text(
-                getattr(args, "surface_prompt", ""), limit=4000
-            )
-            or "",
-            "limiting_wrapper_active": False,
-            "reply": reply_text,
-            "turn_id": safe_assignment_token(client_message_id),
-            "run_ids": [],
-            "model_selection": model_selection,
-            "idempotent_replay": True,
-            "next_expected": "duplicate client message id replayed from the canonical Mission Control chat transcript",
-        }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(
-                emit_json(data)
-                if args.json
-                else f"mission chat reply for {normalized_persona}"
-            )
-        return 0
-
-    _append_persona_operator_turn(
-        session_db=session_db,
-        session_id=session_id,
-        message=message,
-        client_message_id=client_message_id,
-        skip_if_present=bool(replay.get("operator")),
-    )
-    chat_message = _persona_chat_message_with_history(
-        session_db=session_db,
-        session_id=session_id,
-        message=message,
-    )
-    prompt_context = mission_chat_prompt_observability(
-        persona=persona,
-        persona_instance_id=instance.id,
-        session_id=session_id,
-        task_id=task_id,
-        goal_id=goal_id,
-        turn_id=safe_assignment_token(client_message_id),
-        surface_prompt=getattr(args, "surface_prompt", "") or "",
-        limiting_wrapper_active=False,
-        session_db=session_db,
-        current_message=message,
-        model_selection=model_selection,
-    )
-    stream_emitter = (
-        _ChatProtocolV2Emitter(
-            turn_id=safe_assignment_token(client_message_id),
-            client_message_id=client_message_id,
-            on_update=lambda emitter: persist_mission_chat_turn(
-                session_id=session_id,
-                client_message_id=client_message_id,
-                turn_id=emitter.turn_id,
-                elements=emitter.elements,
-            ),
-        )
-        if getattr(args, "stream", False)
-        else None
-    )
-
-    def _stream_delta(delta: str | None) -> None:
-        _emit_chat_delta(delta)
-        if stream_emitter is not None:
-            stream_emitter.delta(delta)
-
-    trace_payloads: list[dict[str, object]] = []
-
-    def _stream_progress(payload: dict[str, object] | None) -> None:
-        if payload:
-            trace_payloads.append(payload)
-        if stream_emitter is not None:
-            stream_emitter.progress(payload)
-
-    def _agent_ready_for_steer(agent):
-        if not getattr(args, "stream", False):
-            return None
-        handle = start_active_mission_chat_turn(
-            runtime_root=paths.store_root(),
-            session_id=session_id,
-            agent=agent,
-            persona_id=normalized_persona,
-            persona_instance_id=instance.id,
-            client_message_id=client_message_id,
-        )
-        return handle.close
-
-    try:
-        chat_result = GPTPersonaRuntime(
-            default_provider=cfg.default_provider,
-            default_model=cfg.default_model,
-            session_db=session_db,
-            persist_agent_session=False,
-        ).mission_chat_reply(
-            persona,
-            chat_message,
-            session_id=None,
-            permission_session_id=session_id,
-            provider_override=model_selection.get("effective_provider"),
-            model_override=model_selection.get("effective_model"),
-            surface_prompt=getattr(args, "surface_prompt", "") or "",
-            max_wall_seconds=getattr(args, "max_seconds", 240.0),
-            stream_callback=_stream_delta if getattr(args, "stream", False) else None,
-            pre_trace_callback=lambda payload: _append_persona_pre_trace_ack(
-                session_db=session_db,
-                session_id=session_id,
-                trace_payload=payload,
-            ),
-            trace_callback=_stream_progress,
-            agent_ready_callback=_agent_ready_for_steer,
-        )
-        final_model_input = (getattr(chat_result, "raw", {}) or {}).get("model_input_observability")
-        prompt_context = mission_chat_prompt_observability(
-            persona=persona,
-            persona_instance_id=instance.id,
-            session_id=session_id,
-            task_id=task_id,
-            goal_id=goal_id,
-            turn_id=safe_assignment_token(client_message_id),
-            surface_prompt=getattr(args, "surface_prompt", "") or "",
-            limiting_wrapper_active=False,
-            session_db=session_db,
-            current_message=message,
-            final_model_input=final_model_input,
-            model_selection=model_selection,
-            trace_events=trace_payloads,
-        )
-        persist_tool_turn_actual(
-            persona_id=normalized_persona,
-            session_id=session_id,
-            task_id=task_id,
-            goal_id=goal_id,
-            turn_id=safe_assignment_token(client_message_id),
-            model_input=prompt_context.get("final_model_input"),
-        )
-        try:
-            persist_prompt_observability_context(prompt_context)
-        except Exception as persist_exc:
-            prompt_context = {
-                **prompt_context,
-                "observability_persist_error": safe_assignment_text(type(persist_exc).__name__, limit=80),
-            }
-    except Exception as exc:
-        if stream_emitter is not None:
-            stream_emitter.finish(state="failed")
-        data = {
-            "ok": False,
-            "persona_instance_id": instance.id,
-            "persona_id": normalized_persona,
-            "session_id": session_id,
-            "blocker": safe_assignment_text(str(exc), limit=240),
-            "prompt_context_id": prompt_context["context_id"],
-            "prompt_observability": prompt_context,
-            "model_selection": model_selection,
-            "next_expected": "fix the runtime blocker and retry the mission chat turn",
-        }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["blocker"])
-        return 2
-
-    reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=8000)
-    _append_persona_assistant_text(
-        session_db=session_db,
-        session_id=session_id,
-        text=reply_text,
-        client_message_id=client_message_id,
-    )
-    if stream_emitter is not None:
-        persist_mission_chat_turn(
-            session_id=session_id,
-            client_message_id=client_message_id,
-            turn_id=stream_emitter.turn_id,
-            elements=stream_emitter.elements,
-        )
-    _update_persona_chat_token_counts(
-        session_db=session_db,
-        session_id=session_id,
-        result=chat_result,
-    )
-    _maybe_auto_title_persona_chat(
-        session_db=session_db,
-        session_id=session_id,
-        user_message=message,
-        assistant_response=reply_text,
-    )
-    try:
-        instance.active_run_id = None
-        instance.current_assignment_id = None
-        instance.state = WorkerSessionState.IDLE
-        instance.session_id = session_id
-        instance_store.update(instance)
-    except Exception:
-        pass
-
-    data = {
-        "ok": True,
-        "protocol_version": 2 if stream_emitter is not None else None,
-        "capability_id": "mission.chat.message",
-        "agent_profile_id": instance.id,
-        "persona_instance_id": instance.id,
-        "persona_id": normalized_persona,
-        "session_id": session_id,
-        "chat_session_id": session_id,
-        "task_id": task_id,
-        "goal_id": goal_id,
-        "client_message_id": client_message_id,
-        "execution_state": "completed",
-        "kind": "mission_chat_message",
-        "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None)) or "chat",
-        "surface_prompt": safe_assignment_text(getattr(args, "surface_prompt", ""), limit=4000) or "",
-        "limiting_wrapper_active": False,
-        "reply": reply_text,
-        "turn_id": safe_assignment_token(client_message_id),
-        "run_ids": [],
-        "input_tokens": getattr(chat_result, "input_tokens", None),
-        "output_tokens": getattr(chat_result, "output_tokens", None),
-        "total_tokens": getattr(chat_result, "total_tokens", None),
-        "prompt_context_id": prompt_context["context_id"],
-        "prompt_observability": prompt_context,
-        "model_selection": model_selection,
-        "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
-    }
-    if getattr(args, "stream", False):
-        if stream_emitter is not None:
-            data["turn_elements"] = stream_emitter.elements
-            stream_emitter.finish(
-                state="completed",
-                input_tokens=data.get("input_tokens"),
-                output_tokens=data.get("output_tokens"),
-                total_tokens=data.get("total_tokens"),
-            )
-        _emit_chat_final(data)
-    else:
-        print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
-    return 0
-
-
-def _cmd_persona_instance_close(args) -> int:
-    cfg = load_agent_runtime_config()
-    coordinator_id = _coordinator_actor_id(args)
-    if coordinator_id:
-        try:
-            target = PersonaInstanceStore().get(args.persona_instance_id)
-            persona = _persona_by_id(cfg, target.persona_id)
-        except Exception:
-            target = None
-            persona = None
-        scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action(
-            "persona.instance.close",
-            scope,
-            target,
-            actor=coordinator_id,
-            coordinator_id=coordinator_id,
-        )
-        if not auth.ok:
-            data = _coordinator_confirm_payload("persona.instance.close", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
-            return 2
-    return _close_free_floating_assignments(args.persona_instance_id, reason=args.reason, json_output=args.json, terminal_state="cancelled")
-
-
-def _cmd_persona_instance_archive(args) -> int:
-    return _close_free_floating_assignments(args.persona_instance_id, reason=args.reason, json_output=args.json, terminal_state="completed")
-
-
-def _cmd_persona_instance_steer(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    persona_instance_id = safe_assignment_token(args.persona_instance_id)
-    if not persona_instance_id:
-        data = {"ok": False, "error": "persona_instance_id is required"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    detach = bool(getattr(args, "detach", False))
-    parent_instance_id = None if detach else safe_optional_token(getattr(args, "parent_instance_id", None))
-    goal_id = None if detach else safe_optional_token(getattr(args, "goal_id", None))
-    if not detach and not parent_instance_id:
-        data = {"ok": False, "error": "--parent is required unless --detach is set"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    if not detach and parent_instance_id == persona_instance_id:
-        data = {"ok": False, "error": "a persona instance cannot steer itself"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    store = PersonaInstanceStore()
-    try:
-        target = store.get(persona_instance_id)
-    except Exception:
-        data = {"ok": False, "error": f"persona instance not found: {persona_instance_id}"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    # 76D.3: re-routing a steering edge is a STEER verb (ungated); operator
-    # actors bypass entirely. Coordinators still pass through the authorizer so
-    # the contract stays uniform with create/kill paths.
-    coordinator_id = _coordinator_actor_id(args)
-    if coordinator_id:
-        persona = _persona_by_id(cfg, target.persona_id)
-        scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action("re_route", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
-        if not auth.ok:
-            data = _coordinator_confirm_payload("re_route", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
-            return 2
-    try:
-        updated = store.steer(persona_instance_id, parent_instance_id=parent_instance_id, goal_id=goal_id, detach=detach)
-    except ValueError as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    try:
-        persona = _persona_by_id(cfg, updated.persona_id)
-    except Exception:
-        persona = None
-    data = {"ok": True, "detached": detach, "instance": persona_instance_summary(updated, persona)}
-    print(emit_json(data) if args.json else f"steered {persona_instance_id}: parent={updated.spawned_by} goal={updated.goal_id}")
-    return 0
-
-
-def _cmd_persona_instance_update_profile(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    persona_instance_id = safe_assignment_token(args.persona_instance_id)
-    if not persona_instance_id:
-        data = {"ok": False, "error": "persona_instance_id is required"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    store = PersonaInstanceStore()
-    try:
-        target = store.get(persona_instance_id)
-    except Exception:
-        data = {"ok": False, "error": f"persona instance not found: {persona_instance_id}"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    coordinator_id = _coordinator_actor_id(args)
-    if coordinator_id:
-        persona = _persona_by_id(cfg, target.persona_id)
-        scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action("persona.instance.update_profile", scope, target, actor=coordinator_id, coordinator_id=coordinator_id)
-        if not auth.ok:
-            data = _coordinator_confirm_payload("persona.instance.update_profile", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
-            return 2
-    try:
-        updated = store.update_profile(
-            persona_instance_id,
-            display_name=getattr(args, "display_name", None),
-            current_chat_goal=getattr(args, "current_chat_goal", None),
-            goal_id=getattr(args, "goal_id", None),
-            skills=list(getattr(args, "skills", None) or []),
-            clear_skills=bool(getattr(args, "clear_skills", False)),
-        )
-    except ValueError as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    try:
-        persona = _persona_by_id(cfg, updated.persona_id)
-    except Exception:
-        persona = None
-    data = {
-        "ok": True,
-        "persona_instance_id": updated.id,
-        "persona_id": updated.persona_id,
-        "backing_profile": updated.profile_id,
-        "updated_instance": persona_instance_summary(updated, persona),
-        "next_expected": "refresh Harness snapshot; runtime instance overrides should be visible without modifying the backing Hermes profile",
-    }
-    print(emit_json(data) if args.json else f"updated runtime profile {updated.id}")
-    return 0
-
-
-def _cmd_persona_instance_run_once(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    persona_instance_id = safe_assignment_token(args.persona_instance_id)
-    persona_id = _persona_id_from_instance_id(persona_instance_id)
-    active = [
-        item
-        for item in PersonaAssignmentStore().find_active(persona_id=persona_id, kind="free_floating_message")
-        if item.persona_instance_id == persona_instance_id and item.task_id is None
-    ]
-    seed = active[-1] if active else None
-    message = args.message or (seed.message if seed else "Run one bounded free-floating persona sandbox turn.")
-    title = args.title or (seed.title if seed else "Free-floating persona run")
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-    try:
-        result = PersonaDiagnosticController(
-            config=cfg,
-            engine_factory=lambda **kwargs: TickEngine(
-                **kwargs,
-                persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-            ),
-        ).diagnose(
-            PersonaDiagnosticOptions(
-                persona_id=persona_id,
-                title=title,
-                message=message,
-                requested_by=args.requested_by,
-                operation_kind="free_floating",
-                operation_mode="sandbox_task",
-                max_actions=args.max_actions,
-                max_seconds=args.max_seconds,
-                non_goals=["Not production proof"],
-            )
-        )
-    except ValueError as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else str(exc))
-        return 2
-    if seed is not None:
-        store = PersonaAssignmentStore()
-        for run_id in result.run_ids:
-            store.attach_run(seed.id, run_id)
-        store.complete(seed.id, state="completed")
-    data = {
-        **asdict(result),
-        "ok": result.ok,
-        "persona_instance_id": persona_instance_id,
-        "production_proof_eligible": False,
-        "evidence_kind": "free_floating",
-        "archive_scope": "assignment",
-    }
-    print(emit_json(data) if args.json else f"free-floating persona run {result.task_id}: stop={result.stop_reason}")
-    return result.exit_code
-
-
-def _queue_free_floating_assignment(
-    *,
-    persona_id: str,
-    title: str,
-    message: str,
-    requested_by: str,
-    json_output: bool,
-    persona_instance_id: str | None = None,
-    auto_run: bool = False,
-    max_actions: int = 1,
-    max_seconds: float = 240.0,
-    client_message_id: str | None = None,
-    session_id: str | None = None,
-    stream: bool = False,
-    kill_active: bool = False,
-    add_instance: bool = False,
-    placement_id: str | None = None,
-    spawned_by: str | None = None,
-    coordinator_permission_scope: CoordinatorPermissionScope | None = None,
-) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        if stream:
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if json_output else data["error"])
-        return 2
-    normalized_persona = _normalize_cli_persona_or_template_id(persona_id)
-    instance_store = PersonaInstanceStore()
-    instance_store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
-    if persona_instance_id is None:
-        if add_instance:
-            if not placement_id:
-                data = {"ok": False, "error": "placement_id is required when add_instance is true"}
-                if stream:
-                    _emit_chat_final(data)
-                else:
-                    print(emit_json(data) if json_output else data["error"])
-                return 2
-            instance = instance_store.add_instance(
-                persona_id=normalized_persona,
-                placement_id=placement_id,
-                display_name=safe_assignment_text(title, limit=120) or None,
-            )
-            instance = _maybe_stamp_spawned_by(instance, coordinator_id=spawned_by, operator_source="operator")
-            persona_instance_id = instance.id
-        else:
-            persona_instance_id = instance_store.create_free_floating(normalized_persona).id
-    assignment_store = PersonaAssignmentStore()
-    assignment = assignment_store.create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id=normalized_persona,
-            persona_instance_id=persona_instance_id,
-            kind="free_floating_message",
-            title=title,
-            message=message,
-            created_by=requested_by,
-            task_id=None,
-            evidence_kind="free_floating",
-            production_proof_eligible=False,
-            archive_scope="assignment",
-            client_message_id=client_message_id,
-        )
-    )
-    session_db = _default_persona_session_db()
-    try:
-        session_id = _bind_free_floating_chat_session(
-            instance_store=instance_store,
-            session_db=session_db,
-            persona_id=normalized_persona,
-            persona_instance_id=assignment.persona_instance_id,
-            assignment_id=assignment.id,
-            session_id=session_id,
-            kill_active=kill_active,
-        )
-    except ChatBusyError as exc:
-        data = _chat_busy_payload(exc)
-        if stream:
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if json_output else data["error"])
-        return 2
-    data = {
-        "ok": True,
-        "agent_profile_id": assignment.persona_instance_id,
-        "assignment_id": assignment.id,
-        "persona_instance_id": assignment.persona_instance_id,
-        "persona_id": normalized_persona,
-        "task_id": assignment.task_id,
-        "state": assignment.state,
-        "kind": assignment.kind,
-        "evidence_kind": assignment.evidence_kind,
-        "production_proof_eligible": assignment.production_proof_eligible,
-        "archive_scope": assignment.archive_scope,
-        "client_message_id": assignment.client_message_id,
-        "execution_state": "queued",
-        "lifecycle_mode": "free_floating",
-        "auto_run": bool(auto_run),
-        "chat_session_id": session_id,
-        "session_id": session_id,
-        "chat_busy": False,
-        "killed_previous": bool(kill_active),
-        "add_instance": bool(add_instance),
-        "placement_id": placement_id or None,
-        "coordinator_permission_scope": asdict(coordinator_permission_scope) if coordinator_permission_scope is not None else None,
-        "turn_id": None,
-        "run_ids": [],
-        "next_expected": "agent turn queued; run harness persona instance run-once if auto_run is false",
-    }
-    exit_code = 0
-    if auto_run:
-        run_exit, run_payload = _run_free_floating_assignment_once(
-            cfg=cfg,
-            assignment_id=assignment.id,
-            persona_instance_id=assignment.persona_instance_id,
-            persona_id=normalized_persona,
-            title=title,
-            message=message,
-            requested_by=requested_by,
-            max_actions=max_actions,
-            max_seconds=max_seconds,
-            client_message_id=assignment.client_message_id,
-            stream=stream,
-        )
-        data.update(run_payload)
-        try:
-            updated_assignment = assignment_store.get(assignment.id)
-            data["state"] = updated_assignment.state
-            data["run_ids"] = list(updated_assignment.run_ids or data.get("run_ids") or [])
-        except Exception:
-            pass
-        exit_code = run_exit
-    if stream:
-        _emit_chat_final(data)
-    else:
-        print(emit_json(data) if json_output else f"queued free-floating {assignment.id} for {assignment.persona_id}")
-    return exit_code
-
-
-def _emit_chat_delta(delta: str | None) -> None:
-    if not delta:
-        return
-    sys.stdout.write(json.dumps({"type": "chat.delta", "text": str(delta)}, ensure_ascii=False, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
-
-
-def _emit_chat_final(payload: dict[str, object]) -> None:
-    data = dict(payload)
-    data["type"] = "chat.final"
-    sys.stdout.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
-
-
-def _emit_chat_frame(payload: dict[str, object]) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
-
-
-class _ChatProtocolV2Emitter:
-    """Additive Mission Control chat stream protocol.
-
-    Legacy ``chat.delta``/``chat.final`` frames are still emitted by callers.
-    These v2 frames give the Launcher stable ids and per-turn sequence order.
-    """
-
-    def __init__(self, *, turn_id: str | None, client_message_id: str | None, on_update=None):
-        safe_turn = safe_assignment_token(turn_id) or f"turn_{uuid.uuid4().hex[:12]}"
-        self.turn_id = safe_turn
-        self.client_message_id = safe_assignment_text(client_message_id, limit=200) or None
-        self._on_update = on_update
-        self._seq = 0
-        self._started_at = time.monotonic()
-        self._current_segment: dict[str, object] | None = None
-        self._segment_count = 0
-        self._tool_count = 0
-        self._active_tools: dict[str, list[dict[str, object]]] = {}
-        self.elements: list[dict[str, object]] = []
-        _emit_chat_frame(
-            {
-                "type": "turn.start",
-                "protocol_version": 2,
-                "turn_id": self.turn_id,
-                "client_message_id": self.client_message_id,
-            }
-        )
-
-    def delta(self, delta: str | None) -> None:
-        if not delta:
-            return
-        segment = self._ensure_segment()
-        text = str(delta)
-        segment["text"] = str(segment.get("text") or "") + text
-        _emit_chat_frame(
-            {
-                "type": "segment.delta",
-                "protocol_version": 2,
-                "turn_id": self.turn_id,
-                "seq": segment["seq"],
-                "id": segment["id"],
-                "text": text,
-            }
-        )
-        self._notify_update()
-
-    def progress(self, payload: dict[str, object] | None) -> None:
-        if not isinstance(payload, dict):
-            return
-        event_type = str(payload.get("type") or "run.progress")
-        if event_type not in {"run.tool.started", "run.tool.finished"}:
-            return
-        self.end_segment(state="settled")
-        if event_type == "run.tool.started":
-            self._tool_started(payload)
-        else:
-            self._tool_finished(payload)
-        self._notify_update()
-
-    def end_segment(self, *, state: str = "settled") -> None:
-        segment = self._current_segment
-        if segment is None:
-            return
-        segment["state"] = state
-        segment["duration_ms"] = _elapsed_ms(segment.get("started_at"))
-        _emit_chat_frame(
-            {
-                "type": "segment.end",
-                "protocol_version": 2,
-                "turn_id": self.turn_id,
-                "seq": segment["seq"],
-                "id": segment["id"],
-                "state": state,
-                "duration_ms": segment["duration_ms"],
-            }
-        )
-        self._current_segment = None
-        self._notify_update()
-
-    def finish(
-        self,
-        *,
-        state: str,
-        input_tokens: object = None,
-        output_tokens: object = None,
-        total_tokens: object = None,
-    ) -> None:
-        self.end_segment(state="settled" if state == "completed" else state)
-        _emit_chat_frame(
-            {
-                "type": "turn.end",
-                "protocol_version": 2,
-                "turn_id": self.turn_id,
-                "state": state,
-                "duration_ms": _elapsed_ms(self._started_at),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens,
-            }
-        )
-        self._notify_update()
-
-    def _ensure_segment(self) -> dict[str, object]:
-        if self._current_segment is not None:
-            return self._current_segment
-        self._seq += 1
-        self._segment_count += 1
-        segment = {
-            "turn_id": self.turn_id,
-            "seq": self._seq,
-            "id": f"{self.turn_id}_seg_{self._segment_count}",
-            "kind": "segment",
-            "seg_type": "answer" if self._tool_count else "plan",
-            "state": "streaming",
-            "text": "",
-            "started_at": time.monotonic(),
-        }
-        segment["ttft_ms"] = _elapsed_ms(self._started_at)
-        self._current_segment = segment
-        self.elements.append(segment)
-        _emit_chat_frame(
-            {
-                "type": "segment.start",
-                "protocol_version": 2,
-                "turn_id": self.turn_id,
-                "seq": segment["seq"],
-                "id": segment["id"],
-                "seg_type": segment["seg_type"],
-                "ttft_ms": segment["ttft_ms"],
-            }
-        )
-        self._notify_update()
-        return segment
-
-    def _tool_started(self, payload: dict[str, object]) -> None:
-        self._seq += 1
-        self._tool_count += 1
-        name = _tool_name_from_progress(payload)
-        command = _safe_stream_text(payload.get("command_full")) or _safe_stream_text(
-            payload.get("command_label")
-        )
-        tool = {
-            "turn_id": self.turn_id,
-            "seq": self._seq,
-            "id": f"{self.turn_id}_tool_{self._tool_count}",
-            "kind": "tool",
-            "name": name,
-            "state": "started",
-            "args": _safe_stream_text(payload.get("summary")),
-            "command": command,
-            "status": _safe_stream_text(payload.get("status")),
-            "summary": _safe_stream_text(payload.get("summary")),
-        }
-        self.elements.append(tool)
-        self._active_tools.setdefault(name, []).append(tool)
-        _emit_chat_frame(
-            {
-                "type": "tool.started",
-                "protocol_version": 2,
-                "turn_id": self.turn_id,
-                "seq": tool["seq"],
-                "id": tool["id"],
-                "name": name,
-                "args": _safe_stream_text(payload.get("summary")),
-                "command": command,
-            }
-        )
-
-    def _tool_finished(self, payload: dict[str, object]) -> None:
-        name = _tool_name_from_progress(payload)
-        stack = self._active_tools.get(name) or []
-        tool = stack.pop() if stack else None
-        if tool is None:
-            self._seq += 1
-            self._tool_count += 1
-            tool = {
-                "turn_id": self.turn_id,
-                "seq": self._seq,
-                "id": f"{self.turn_id}_tool_{self._tool_count}",
-                "kind": "tool",
-                "name": name,
-            }
-            self.elements.append(tool)
-        tool["state"] = "finished"
-        tool["status"] = _safe_stream_text(payload.get("status")) or "ok"
-        tool["duration_ms"] = payload.get("duration_ms")
-        files = payload.get("changed_files") or payload.get("files_touched") or []
-        if isinstance(files, list):
-            tool["files"] = [safe_assignment_text(item, limit=240) for item in files if safe_assignment_text(item, limit=240)]
-        # Carry-through started command if the finished payload omits it.
-        command = (
-            _safe_stream_text(payload.get("command_full"))
-            or _safe_stream_text(payload.get("command_label"))
-            or tool.get("command")
-        )
-        if command:
-            tool["command"] = command
-        detail = _safe_stream_text(payload.get("detail"))
-        if detail:
-            tool["detail"] = detail
-        output = _safe_stream_text(payload.get("output"), limit=8000)
-        if output:
-            tool["output"] = output
-        exit_code = _safe_exit_code_value(payload.get("exit_code"))
-        if exit_code is not None:
-            tool["exit_code"] = exit_code
-        _emit_chat_frame(
-            {
-                "type": "tool.finished",
-                "protocol_version": 2,
-                "turn_id": self.turn_id,
-                "seq": tool["seq"],
-                "id": tool["id"],
-                "name": name,
-                "status": tool["status"],
-                "duration_ms": tool.get("duration_ms"),
-                "files": tool.get("files") or [],
-                "command": tool.get("command"),
-                "detail": tool.get("detail"),
-                "output": tool.get("output"),
-                "exit_code": tool.get("exit_code"),
-            }
-        )
-
-    def _notify_update(self) -> None:
-        if self._on_update is None:
-            return
-        try:
-            self._on_update(self)
-        except Exception:
-            pass
-
-
-def _safe_stream_text(value: object, *, limit: int = 800) -> str | None:
-    return safe_assignment_text(value, limit=limit) or None
-
-
-def _safe_exit_code_value(value: object) -> int | None:
-    try:
-        return int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-
-
-def _elapsed_ms(started_at: object) -> int | None:
-    try:
-        started = float(started_at)
-    except Exception:
-        return None
-    return max(0, int((time.monotonic() - started) * 1000))
-
-
-def _tool_name_from_progress(payload: dict[str, object]) -> str:
-    return safe_assignment_token(payload.get("tool_name") or payload.get("tool")) or "tool"
-
-
-def _default_persona_session_db():
-    try:
-        from hermes_state import SessionDB
-
-        return SessionDB()
-    except Exception:
-        return None
-
-
-_CHAT_MODEL_OVERRIDE_CONFIG_KEY = "mission_control_chat_model_override"
-_CHAT_PROVIDER_MODEL_RE = re.compile(r"^[A-Za-z0-9_.:/@+-]{1,200}$")
-
-
-def _safe_chat_model_override_value(value, *, field: str) -> str | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    if not _CHAT_PROVIDER_MODEL_RE.fullmatch(text):
-        raise ValueError(
-            f"{field} contains unsupported characters; only letters, numbers, '.', '_', '-', '+', '/', ':', and '@' are allowed"
-        )
-    return text
-
-
-def _requested_chat_model_override(args) -> dict[str, object] | None:
-    use_default = bool(getattr(args, "use_agent_default", False))
-    provider = _safe_chat_model_override_value(getattr(args, "provider", None), field="provider")
-    model = _safe_chat_model_override_value(getattr(args, "model", None), field="model")
-    if use_default and (provider or model):
-        raise ValueError("use_agent_default cannot be combined with provider or model")
-    if use_default:
-        return {
-            "schema_version": 1,
-            "clear": True,
-            "source": "operator",
-            "scope": "mission_control_chat_session",
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-    if not provider and not model:
-        return None
-    return {
-        "schema_version": 1,
-        "provider": provider,
-        "model": model,
-        "source": "operator",
-        "scope": "mission_control_chat_session",
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-def _session_model_config(session_db, session_id: str | None) -> dict[str, object]:
-    if session_db is None or not session_id:
-        return {}
-    try:
-        raw = session_db.get_session(session_id)
-    except Exception:
-        return {}
-    if not isinstance(raw, dict):
-        return {}
-    model_config = raw.get("model_config")
-    if isinstance(model_config, dict):
-        return dict(model_config)
-    if isinstance(model_config, str) and model_config.strip():
-        try:
-            decoded = json.loads(model_config)
-        except Exception:
-            return {}
-        if isinstance(decoded, dict):
-            return decoded
-    return {}
-
-
-def _persist_chat_model_override(
-    *,
-    session_db,
-    session_id: str | None,
-    override: dict[str, object] | None,
-) -> dict[str, object]:
-    current = _session_model_config(session_db, session_id)
-    if override is not None:
-        if override.get("clear") is True:
-            current.pop(_CHAT_MODEL_OVERRIDE_CONFIG_KEY, None)
-        else:
-            current[_CHAT_MODEL_OVERRIDE_CONFIG_KEY] = override
-    if session_db is None or not session_id:
-        return current
-    try:
-        session_db.update_session_meta(
-            session_id,
-            json.dumps(current, sort_keys=True, separators=(",", ":")),
-            model=(override or {}).get("model") if override else None,
-        )
-    except AttributeError:
-        if hasattr(session_db, "sessions"):
-            session = session_db.sessions.setdefault(session_id, {})
-            session["model_config"] = json.dumps(current, sort_keys=True, separators=(",", ":"))
-            if override and override.get("model"):
-                session["model"] = override.get("model")
-    return current
-
-
-def _chat_model_override_from_config(model_config: dict[str, object]) -> dict[str, object] | None:
-    raw = model_config.get(_CHAT_MODEL_OVERRIDE_CONFIG_KEY)
-    if not isinstance(raw, dict):
-        return None
-    provider = _safe_chat_model_override_value(raw.get("provider"), field="provider")
-    model = _safe_chat_model_override_value(raw.get("model"), field="model")
-    if not provider and not model:
-        return None
-    return {
-        "schema_version": 1,
-        "provider": provider,
-        "model": model,
-        "source": safe_assignment_text(raw.get("source"), limit=80) or "session",
-        "scope": "mission_control_chat_session",
-        "updated_at": safe_assignment_text(raw.get("updated_at"), limit=80) or None,
-    }
-
-
-def _resolve_chat_model_override(
-    *,
-    session_db,
-    session_id: str | None,
-    requested_override: dict[str, object] | None,
-) -> dict[str, object] | None:
-    model_config = _persist_chat_model_override(
-        session_db=session_db,
-        session_id=session_id,
-        override=requested_override,
-    )
-    return _chat_model_override_from_config(model_config)
-
-
-def _chat_effective_model_payload(
-    *,
-    persona,
-    config,
-    override: dict[str, object] | None,
-) -> dict[str, object]:
-    default_provider = getattr(persona, "provider", None) or getattr(config, "default_provider", None)
-    default_model = getattr(persona, "model", None) or getattr(config, "default_model", None)
-    provider = (override or {}).get("provider") or default_provider
-    model = (override or {}).get("model") or default_model
-    return {
-        "default_provider": default_provider,
-        "default_model": default_model,
-        "chat_provider": (override or {}).get("provider"),
-        "chat_model": (override or {}).get("model"),
-        "effective_provider": provider,
-        "effective_model": model,
-        "model_is_default": not bool(override and ((override.get("provider") or "") or (override.get("model") or ""))),
-        "scope": "mission_control_chat_session",
-    }
-
-
-def _ensure_persona_chat_session(
-    *,
-    session_db,
-    session_id: str | None,
-    persona_id: str | None,
-    title: str | None = None,
-) -> None:
-    if session_db is None or not session_id:
-        return
-    try:
-        normalized_persona = _normalize_cli_persona_or_template_id(persona_id or "persona")
-    except Exception:
-        normalized_persona = safe_assignment_token(persona_id) or "persona"
-    try:
-        session_db.create_session(
-            session_id=session_id,
-            source=PERSONA_CHAT_SESSION_SOURCE,
-            model=None,
-            system_prompt=f"Mission Control persona chat for {normalized_persona}",
-        )
-    except Exception:
-        pass
-
-    safe_title = safe_assignment_text(title, limit=120)
-    if not safe_title:
-        return
-    try:
-        existing_title = session_db.get_session_title(session_id)
-    except Exception:
-        existing_title = None
-    if existing_title:
-        return
-    try:
-        session_db.set_session_title(session_id, safe_title)
-    except Exception:
-        pass
-
-
-def _persona_chat_session_id(persona_instance_id: str) -> str:
-    return persona_chat_session_id_for(persona_instance_id)
-
-
-def _bind_free_floating_chat_session(
-    *,
-    instance_store: PersonaInstanceStore,
-    session_db,
-    persona_id: str,
-    persona_instance_id: str,
-    assignment_id: str | None = None,
-    session_id: str | None = None,
-    kill_active: bool = False,
-) -> str:
-    requested_persona = _normalize_cli_persona_or_template_id(persona_id)
-    normalized_persona = requested_persona
-    normalized_instance = safe_assignment_token(persona_instance_id) or persona_instance_id_for(requested_persona)
-    requested_session_id = safe_assignment_text(session_id, limit=200)
-    session_id = requested_session_id or ""
-    previous_mode = None
-    try:
-        instance = instance_store.get(normalized_instance)
-        normalized_persona = instance.persona_id
-        previous_mode = safe_assignment_token(getattr(instance, "mode", None))
-        existing_session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
-        existing_assignment_id = safe_assignment_token(getattr(instance, "current_assignment_id", None))
-        if not session_id and existing_session_id and (not existing_assignment_id or existing_assignment_id == safe_assignment_token(assignment_id)):
-            session_id = existing_session_id
-    except Exception:
-        instance = None
-    if not session_id:
-        session_id = _persona_chat_session_id(normalized_instance)
-    instance = instance_store.open_chat(
-        persona_id=normalized_persona,
-        persona_instance_id=normalized_instance,
-        session_id=session_id,
-        kill_active=kill_active,
-    )
-    instance.mode = "chat" if previous_mode == "chat" else "free_floating"
-    instance.current_task_id = None
-    instance.active_worker_session_id = None
-    instance.active_run_id = None
-    instance.current_assignment_id = assignment_id
-    instance_store.update(instance)
-    if session_db is not None:
-        _ensure_persona_chat_session(
-            session_db=session_db,
-            session_id=session_id,
-            persona_id=normalized_persona,
-        )
-    return session_id
-
-
-# Redaction-on-write boundary (audit doc Stage 2B). Persona chat turns are now
-# persisted to the shared SessionDB and recall is enabled for them, so any
-# secret must be stripped *before* it is written — otherwise it becomes
-# cross-session reachable. The read projection sanitizes too, but the write
-# boundary is the authoritative one.
-_PERSONA_CHAT_SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
-)
-
-
-def _redact_persona_chat_text(value, *, limit: int) -> str:
-    safe = _safe_persona_chat_body_text(value, limit=limit)
-    if not safe:
-        return ""
-    return _PERSONA_CHAT_SECRET_RE.sub(r"\1: [redacted]", safe)
-
-
-def _safe_persona_chat_body_text(value, *, limit: int) -> str:
-    text = str(value or "").replace("\x00", " ")
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [" ".join(line.split()) for line in text.split("\n")]
-    normalized = "\n".join(lines).strip()
-    normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
-    return normalized[:limit].rstrip()
-
-
-def _persona_chat_existing_turn(
-    *,
-    session_db,
-    session_id: str | None,
-    client_message_id: str | None,
-) -> dict[str, object]:
-    if session_db is None or not session_id or not client_message_id:
-        return {}
-    try:
-        messages = session_db.get_messages(session_id)
-    except Exception:
-        return {}
-
-    result: dict[str, object] = {}
-    for item in messages or []:
-        if not isinstance(item, dict):
-            continue
-        message_id = safe_assignment_text(
-            item.get("platform_message_id"), limit=200
-        )
-        if message_id != client_message_id:
-            continue
-        role = str(item.get("role") or "").strip().lower()
-        if role == "user" and "operator" not in result:
-            result["operator"] = item
-        elif role == "assistant":
-            result["assistant"] = item
-    return result
-
-
-def _append_persona_operator_turn(
-    *,
-    session_db,
-    session_id: str,
-    message: str,
-    client_message_id: str | None = None,
-    skip_if_present: bool = False,
-) -> None:
-    if session_db is None or not session_id:
-        return
-    if skip_if_present:
-        return
-    safe_message = _redact_persona_chat_text(message, limit=12000)
-    if not safe_message:
-        return
-    try:
-        session_db.append_message(
-            session_id=session_id,
-            role="user",
-            content=safe_message,
-            platform_message_id=safe_assignment_text(client_message_id, limit=200)
-            or None,
-        )
-    except Exception:
-        return
-
-
-def _append_persona_assistant_text(
-    *,
-    session_db,
-    session_id: str,
-    text: str,
-    client_message_id: str | None = None,
-) -> None:
-    if session_db is None or not session_id:
-        return
-    safe = _redact_persona_chat_text(text, limit=8000)
-    if not safe:
-        return
-    safe_client_message_id = safe_assignment_text(client_message_id, limit=200)
-    if _persona_chat_existing_turn(
-        session_db=session_db,
-        session_id=session_id,
-        client_message_id=safe_client_message_id,
-    ).get("assistant"):
-        return
-    try:
-        session_db.append_message(
-            session_id=session_id,
-            role="assistant",
-            content=safe,
-            platform_message_id=safe_client_message_id or None,
-        )
-    except Exception:
-        return
-
-
-def _append_persona_pre_trace_ack(
-    *,
-    session_db,
-    session_id: str,
-    trace_payload: dict,
-) -> None:
-    text = _persona_pre_trace_ack_text(trace_payload)
-    _append_persona_assistant_text(
-        session_db=session_db,
-        session_id=session_id,
-        text=text,
-        client_message_id=None,
-    )
-
-
-def _persona_pre_trace_ack_text(trace_payload: dict) -> str:
-    tool_name = safe_assignment_token(
-        trace_payload.get("tool_name") or trace_payload.get("tool")
-    )
-    command_label = safe_assignment_text(
-        trace_payload.get("command_label"), limit=160
-    )
-    if tool_name in {"skill_view", "skills_list", "skill_search"}:
-        return "I'll load the relevant guidance first, then report back with the useful part."
-    if tool_name in {"terminal", "shell_command", "execute_code"}:
-        if command_label:
-            return f"I'll run `{command_label}` now, then report back with the result."
-        return "I'll run the check now, then report back with the result."
-    if tool_name in {"read_file", "search_files", "find_files", "session_search"}:
-        return "I'll inspect the relevant context now, then report back with what I find."
-    if tool_name in {"mission_goal_create", "mission_goal"}:
-        return "I'll create the real Mission Control goal now, then report back with the task details."
-    return "I'll check that now and report back with what I find."
-
-
-def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:
-    if session_db is None or not session_id or result is None:
-        return
-    input_tokens = _positive_int_or_zero(getattr(result, "input_tokens", None))
-    output_tokens = _positive_int_or_zero(getattr(result, "output_tokens", None))
-    api_calls = _positive_int_or_zero(getattr(result, "api_calls", None))
-    if input_tokens == 0 and output_tokens == 0 and api_calls == 0:
-        return
-    try:
-        session_db.update_token_counts(
-            session_id,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            api_call_count=api_calls,
-            model=getattr(result, "model", None),
-        )
-    except Exception:
-        return
-
-
-def _positive_int_or_zero(value) -> int:
-    try:
-        parsed = int(value)
-    except Exception:
-        return 0
-    return max(parsed, 0)
-
-
-def _persona_by_id(cfg, persona_id: str):
-    raw = str(persona_id or "").strip()
-    personas = list(ensure_persisted_personas(cfg))
-    if raw.lower().startswith("profile:"):
-        profile_id = safe_assignment_token(raw.split(":", 1)[1])
-        if not profile_id:
-            return None
-        matching_profile_persona = next(
-            (
-                persona
-                for persona in personas
-                if str(getattr(persona, "hermes_profile", "") or "") == profile_id
-            ),
-            None,
-        )
-        default_model = getattr(matching_profile_persona, "model", None) if matching_profile_persona is not None else None
-        default_provider = getattr(matching_profile_persona, "provider", None) if matching_profile_persona is not None else None
-        default_api_mode = getattr(matching_profile_persona, "api_mode", None) if matching_profile_persona is not None else None
-        default_autonomy = getattr(matching_profile_persona, "autonomy", None) if matching_profile_persona is not None else None
-        default_include_core = (
-            bool(getattr(matching_profile_persona, "include_core_context_files", False))
-            if matching_profile_persona is not None
-            else False
-        )
-        default_readiness = (
-            dict(getattr(matching_profile_persona, "readiness", {}) or {})
-            if matching_profile_persona is not None
-            else {}
-        )
-        return AgentPersona(
-            id=f"profile:{profile_id}",
-            display_name=f"{_display_name_for_profile(profile_id)} Agent",
-            role="profile",
-            model=default_model or getattr(cfg, "default_model", None),
-            provider=default_provider or getattr(cfg, "default_provider", None),
-            api_mode=default_api_mode or getattr(cfg, "default_api_mode", None),
-            toolsets=profile_chat_toolsets(profile_id, personas),
-            system_prompt_path="",
-            autonomy=str(default_autonomy or "review"),
-            hermes_profile=profile_id,
-            skills=[],
-            include_profile_memory=True,
-            include_core_context_files=default_include_core,
-            readiness=default_readiness,
-        )
-    normalized = _normalize_cli_persona_id(raw)
-    for persona in personas:
-        if getattr(persona, "id", None) == normalized:
-            return persona
-    return None
-
-
-def _display_name_for_profile(profile_id: str) -> str:
-    return " ".join(part.capitalize() for part in profile_id.replace("_", "-").split("-") if part) or "Profile"
-
-
-def _persona_chat_message_with_history(*, session_db, session_id: str, message: str) -> str:
-    safe_message = _redact_persona_chat_text(message, limit=12000)
-    if session_db is None or not session_id:
-        return safe_message
-    try:
-        history = session_db.get_messages(session_id)
-    except Exception:
-        return safe_message
-    prior = []
-    for item in (history or [])[-8:]:
-        role = str(item.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = _redact_persona_chat_text(item.get("content"), limit=500)
-        if not content or content == safe_message:
-            continue
-        label = "Operator" if role == "user" else "Agent"
-        prior.append(f"{label}: {content}")
-    if not prior:
-        return safe_message
-    return (
-        "Prior persona chat context (oldest to newest):\n"
-        + "\n".join(prior)
-        + "\n\nCurrent operator message:\n"
-        + safe_message
-    )
-
-
-def _maybe_auto_title_persona_chat(*, session_db, session_id: str, user_message: str, assistant_response: str) -> None:
-    if session_db is None or not session_id or not assistant_response:
-        return
-    try:
-        from agent.title_generator import auto_title_session
-
-        auto_title_session(
-            session_db,
-            session_id,
-            user_message,
-            assistant_response,
-        )
-    except Exception:
-        return
-
-
-def _run_free_floating_assignment_once(
-    *,
-    cfg,
-    assignment_id: str,
-    persona_instance_id: str,
-    persona_id: str,
-    title: str,
-    message: str,
-    requested_by: str,
-    max_actions: int,
-    max_seconds: float,
-    client_message_id: str | None = None,
-    stream: bool = False,
-) -> tuple[int, dict[str, object]]:
-    """Run one bounded sandbox turn for an already-queued persona chat message."""
-
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-    session_db = _default_persona_session_db()
-    session_id = _bind_free_floating_chat_session(
-        instance_store=PersonaInstanceStore(),
-        session_db=session_db,
-        persona_id=persona_id,
-        persona_instance_id=persona_instance_id,
-        assignment_id=assignment_id,
-    )
-    _append_persona_operator_turn(
-        session_db=session_db,
-        session_id=session_id,
-        message=message,
-        client_message_id=client_message_id,
-    )
-    persona = _persona_by_id(cfg, persona_id)
-    if persona is None:
-        PersonaAssignmentStore().complete(assignment_id, state="blocked", error="unknown persona")
-        return 2, {
-            "ok": False,
-            "execution_state": "blocked",
-            "session_id": session_id,
-            "blocker": f"unknown persona {safe_assignment_token(persona_id)}",
-            "next_expected": "configure the persona before chatting",
-        }
-
-    # Chat-first: run a plain conversational turn (no decision contract, no task
-    # scoping). Continuity comes from the prepended session history; the agent
-    # returns free text which we persist as the assistant turn.
-    chat_message = _persona_chat_message_with_history(
-        session_db=session_db,
-        session_id=session_id,
-        message=message,
-    )
-    stream_emitter = (
-        _ChatProtocolV2Emitter(
-            turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
-            client_message_id=client_message_id,
-            on_update=lambda emitter: persist_mission_chat_turn(
-                session_id=session_id,
-                client_message_id=client_message_id,
-                turn_id=emitter.turn_id,
-                elements=emitter.elements,
-            ),
-        )
-        if stream
-        else None
-    )
-
-    def _stream_delta(delta: str | None) -> None:
-        _emit_chat_delta(delta)
-        if stream_emitter is not None:
-            stream_emitter.delta(delta)
-
-    def _stream_progress(payload: dict[str, object] | None) -> None:
-        if stream_emitter is not None:
-            stream_emitter.progress(payload)
-
-    try:
-        # Keep the model run out of SessionDB. The canonical operator transcript
-        # is written below; persisting the internal run as a second hidden
-        # session creates orphaned final answers when copy-back is interrupted.
-        chat_result = GPTPersonaRuntime(
-            default_provider=cfg.default_provider,
-            default_model=cfg.default_model,
-            session_db=session_db,
-            persist_agent_session=False,
-        ).chat_reply(
-            persona,
-            chat_message,
-            session_id=None,
-            max_wall_seconds=max_seconds,
-            stream_callback=_stream_delta if stream else None,
-            trace_callback=_stream_progress if stream_emitter is not None else None,
-        )
-    except Exception as exc:
-        if stream_emitter is not None:
-            stream_emitter.finish(state="failed")
-        PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
-        return 2, {
-            "ok": False,
-            "execution_state": "blocked",
-            "session_id": session_id,
-            "blocker": safe_assignment_text(str(exc), limit=240),
-            "next_expected": "fix the runtime blocker and retry the persona chat turn",
-        }
-
-    reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=8000)
-    _append_persona_assistant_text(
-        session_db=session_db,
-        session_id=session_id,
-        text=reply_text,
-        client_message_id=client_message_id,
-    )
-    if stream_emitter is not None:
-        persist_mission_chat_turn(
-            session_id=session_id,
-            client_message_id=client_message_id,
-            turn_id=stream_emitter.turn_id,
-            elements=stream_emitter.elements,
-        )
-    _update_persona_chat_token_counts(
-        session_db=session_db,
-        session_id=session_id,
-        result=chat_result,
-    )
-
-    PersonaAssignmentStore().complete(assignment_id, state="completed")
-    try:
-        instance_store = PersonaInstanceStore()
-        instance = instance_store.get(persona_instance_id)
-        instance.active_run_id = None
-        instance.current_assignment_id = None
-        instance.state = WorkerSessionState.IDLE
-        if instance.mode != "chat":
-            instance.mode = "free_floating"
-        instance.session_id = session_id
-        instance_store.update(instance)
-    except Exception:
-        pass
-
-    _maybe_auto_title_persona_chat(
-        session_db=session_db,
-        session_id=session_id,
-        user_message=message,
-        assistant_response=reply_text,
-    )
-    data = {
-        "ok": True,
-        "execution_state": "completed",
-        "session_id": session_id,
-        "reply": reply_text,
-        "turn_id": stream_emitter.turn_id if stream_emitter is not None else None,
-        "client_message_id": client_message_id,
-        "run_ids": [],
-        "task_id": None,
-        "input_tokens": getattr(chat_result, "input_tokens", None),
-        "output_tokens": getattr(chat_result, "output_tokens", None),
-        "total_tokens": getattr(chat_result, "total_tokens", None),
-        "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
-    }
-    if stream_emitter is not None:
-        data["protocol_version"] = 2
-        data["turn_elements"] = stream_emitter.elements
-        stream_emitter.finish(
-            state="completed",
-            input_tokens=data.get("input_tokens"),
-            output_tokens=data.get("output_tokens"),
-            total_tokens=data.get("total_tokens"),
-        )
-    return 0, data
-
-
-def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, json_output: bool, terminal_state: str) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if json_output else data["error"])
-        return 2
-    normalized_instance = safe_assignment_token(persona_instance_id)
-    store = PersonaAssignmentStore()
-    matches = [
-        item
-        for item in store.list_all()
-        if item.persona_instance_id == normalized_instance
-        and item.evidence_kind == "free_floating"
-        and item.task_id is None
-        and item.state not in {"completed", "blocked", "cancelled"}
-    ]
-    if not matches:
-        data = {"ok": False, "error": f"no active free-floating assignments for {persona_instance_id}"}
-        print(emit_json(data) if json_output else data["error"])
-        return 2
-    closed = [store.complete(item.id, state=terminal_state, error=reason) for item in matches]
-    try:
-        instance_store = PersonaInstanceStore()
-        instance = instance_store.get(normalized_instance)
-        if instance.current_assignment_id in {item.id for item in closed}:
-            instance.current_assignment_id = None
-            instance.mode = "configured"
-            instance_store.update(instance)
-    except Exception:
-        pass
-    data = {
-        "ok": True,
-        "persona_instance_id": normalized_instance,
-        "closed_assignment_ids": [item.id for item in closed],
-        "state": terminal_state,
-        "production_proof_eligible": False,
-    }
-    print(emit_json(data) if json_output else f"closed {len(closed)} free-floating assignments for {normalized_instance}")
-    return 0
-
-
-def _persona_id_from_instance_id(persona_instance_id: str) -> str:
-    token = safe_assignment_token(persona_instance_id)
-    try:
-        return PersonaInstanceStore().get(token).persona_id
-    except Exception:
-        pass
-    if token.startswith("personainst_"):
-        raw = token.removeprefix("personainst_")
-        if raw.startswith("profile_"):
-            profile = safe_assignment_token(raw.removeprefix("profile_"))
-            if profile:
-                return f"profile:{profile}"
-        return _normalize_cli_persona_id(raw)
-    try:
-        return _normalize_cli_persona_id(token)
-    except ValueError as exc:
-        raise ValueError(f"unsupported persona instance {persona_instance_id!r}") from exc
-
-
-def _cmd_persona_diagnose(args) -> int:
-    cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-    try:
-        result = PersonaDiagnosticController(
-            config=cfg,
-            engine_factory=lambda **kwargs: TickEngine(
-                **kwargs,
-                persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-            ),
-        ).diagnose(
-            PersonaDiagnosticOptions(
-                persona_id=args.persona_id,
-                title=args.title,
-                message=args.message,
-                requested_by=args.requested_by,
-                operation_kind=args.operation_kind,
-                operation_mode=args.operation_mode,
-                max_actions=args.max_actions,
-                max_seconds=args.max_seconds,
-                affected_repos=list(args.affected_repo or []),
-                acceptance_criteria=list(args.acceptance or []),
-                non_goals=list(args.non_goal or []),
-            )
-        )
-    except ValueError as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else str(exc))
-        return 2
-    if args.json:
-        print(emit_json(result))
-    else:
-        print(
-            f"persona diagnostic {result.task_id}: persona={result.persona_id} "
-            f"stop={result.stop_reason} decision={result.latest_decision_type or 'none'} "
-            f"tokens={result.latest_total_tokens if result.latest_total_tokens is not None else 'unknown'}"
-        )
-    return result.exit_code
-
-
-def _normalize_cli_persona_id(persona_id: str) -> str:
-    value = safe_assignment_token(persona_id)
-    aliases = {
-        "neko": "neko_supervisor",
-        "launcher_dev": "dev",
-        "launcher-dev": "dev",
-        "backend-dev": "backend_dev",
-        "backend": "backend_dev",
-    }
-    value = aliases.get(value, value)
-    if value not in {"neko_supervisor", "dev", "backend_dev", "qa", "pm"}:
-        raise ValueError(f"unsupported persona {persona_id!r}")
-    return value
-
-
-def _normalize_cli_persona_or_template_id(persona_id: str) -> str:
-    raw = str(persona_id or "").strip()
-    if raw.lower().startswith("profile:"):
-        profile = safe_assignment_token(raw.split(":", 1)[1])
-        if not profile:
-            raise ValueError(f"unsupported persona {persona_id!r}")
-        return f"profile:{profile}"
-    return _normalize_cli_persona_id(raw)
-
-
-def _cmd_task_create(args) -> int:
-    from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
-
-    if getattr(args, "request_json", None):
-        try:
-            request = _load_request_json(args.request_json)
-        except Exception as exc:
-            data = {
-                "schema_version": 1,
-                "error": {
-                    "code": "invalid_payload",
-                    "message": _redact_paths("Could not parse goal-create request JSON."),
-                    "retryable": False,
-                    "safe_details": {"error_class": type(exc).__name__},
-                },
-            }
-        else:
-            data = create_mission_goal_from_request(request)
-    else:
-        if not args.title or not args.description:
-            data = {
-                "schema_version": 1,
-                "error": {
-                    "code": "invalid_request",
-                    "message": "--title and --description are required unless --request-json is provided.",
-                    "retryable": False,
-                    "safe_details": {},
-                },
-            }
-        else:
-            data = create_mission_goal(
-                title=args.title,
-                description=args.description,
-                requested_by=args.requested_by,
-                start_daemon_mode=getattr(args, "start_daemon", None),
-            )
-    if args.json:
-        print(emit_json(data))
-    else:
-        if data.get("error"):
-            print((data["error"] or {}).get("message") or "goal create failed")
-            return 1
-        daemon_summary = (data.get("daemon_start") or {}).get("summary", "daemon start not attempted")
-        dirty_summary = (((data.get("new_goal_hygiene") or {}).get("dirty_state_after_cleanup") or {}).get("summary"))
-        print(f"{data.get('task_id')} [{data.get('state')}] {data.get('title')} dirty={dirty_summary} daemon={daemon_summary}")
-    return 1 if data.get("error") else 0
-
-
-def _cmd_task_list(args) -> int:
-    store=TaskStore()
-    if args.state == "all": tasks=store.list_all()
-    elif args.state == "done": tasks=store.list_by_state(TaskState.DONE)
-    elif args.state == "blocked": tasks=store.list_by_state(TaskState.BLOCKED)
-    else: tasks=store.list_open()
-    print(emit_json([task_summary(t) for t in tasks]) if args.json else "\n".join(human_task_line(t) for t in tasks))
-    return 0
-
-
-def _cmd_task_show(args) -> int:
-    try:
-        task = TaskStore().get(args.task_id)
-    except NotFound:
-        archived = _archived_task_summary(args.task_id)
-        if archived:
-            event_limit = max(0, int(getattr(args, "events", 0) or 0))
-            since_text = getattr(args, "since", None)
-            data = {"archived": True, **archived}
-            if args.json and (event_limit or since_text):
-                data["events"] = _task_events(args.task_id, limit=event_limit, since_text=since_text)
-            print(emit_json(data) if args.json else f"archived {args.task_id}: {archived['archive_batch']}")
-            return 0
-        data = {"ok": False, "error": "task_not_found", "task_id": args.task_id, "message": f"Task not found: {args.task_id}"}
-        print(emit_json(data) if args.json else data["message"])
-        return 1
-    event_limit = max(0, int(getattr(args, "events", 0) or 0))
-    since_text = getattr(args, "since", None)
-    if args.json and (event_limit or since_text):
-        data = {"task": task, "events": _task_events(task.id, limit=event_limit, since_text=since_text)}
-        print(emit_json(data))
-    else:
-        print(emit_json(task) if args.json else human_task_line(task))
-    return 0
-
-
-def _cmd_task_history(args) -> int:
-    try:
-        task = TaskStore().get(args.task_id)
-        archived = False
-        task_state = task.state.value
-    except NotFound:
-        archive = _archived_task_summary(args.task_id)
-        if not archive:
-            data = {"ok": False, "error": "task_not_found", "task_id": args.task_id, "message": f"Task not found: {args.task_id}"}
-            print(emit_json(data) if args.json else data["message"])
-            return 1
-        archived = True
-        task_data = archive.get("task") if isinstance(archive, dict) else None
-        task_state = task_data.get("state") if isinstance(task_data, dict) else None
-
-    limit = max(1, min(500, int(getattr(args, "limit", 50) or 50)))
-    events = _task_events(args.task_id, limit=limit, since_text=getattr(args, "since", None))
-    data = {
-        "ok": bool(events.get("ok", True)),
-        "task_id": args.task_id,
-        "task_state": task_state,
-        "archived": archived,
-        "event_count": events.get("count", 0),
-        "limit": limit,
-        "events": events.get("items", []),
-    }
-    if not data["ok"]:
-        data["error"] = events.get("error")
-        data["message"] = events.get("message")
-    if args.json:
-        print(emit_json(data))
-    else:
-        lines = [f"{_event_value(item, 'ts')} {_event_value(item, 'type')} run={_event_value(item, 'run_id') or '-'} persona={_event_value(item, 'persona_id') or '-'}" for item in data["events"]]
-        print("\n".join(lines))
-    return 0 if data["ok"] else 1
-
-
-def _event_value(event, key: str):
-    if isinstance(event, dict):
-        return event.get(key)
-    return getattr(event, key, None)
-
-
-def _archived_task_summary(task_id: str) -> dict | None:
-    root = paths.deleted_archive_dir()
-    if not root.exists():
-        return None
-    for manifest_path in sorted(root.glob("*/manifest.json"), reverse=True):
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        for item in manifest.get("archived_tasks") or []:
-            if not isinstance(item, dict) or item.get("task_id") != task_id:
-                continue
-            task_path = manifest_path.parent / str(item.get("task_path") or "")
-            task_data = None
-            if task_path.exists():
-                try:
-                    task_data = json.loads(task_path.read_text(encoding="utf-8"))
-                except Exception:
-                    task_data = None
-            return {
-                "ok": True,
-                "task_id": task_id,
-                "archive_batch": manifest_path.parent.name,
-                "archive_dir": str(manifest_path.parent),
-                "manifest_path": str(manifest_path),
-                "archived_task": item,
-                "task": task_data,
-            }
-    return None
-
-
-def _task_events(task_id: str, *, limit: int, since_text: str | None) -> dict:
-    since = None
-    if since_text:
-        try:
-            since = datetime.fromisoformat(since_text.replace("Z", "+00:00"))
-        except ValueError:
-            return {"ok": False, "error": "invalid_since", "message": "--since must be an ISO-8601 timestamp", "items": []}
-    items = EventLog().for_task(task_id, limit=limit or 50, since=since)
-    return {
-        "ok": True,
-        "task_id": task_id,
-        "limit": limit or 50,
-        "since": since.isoformat() if since else None,
-        "count": len(items),
-        "items": items,
-    }
-
-
-def _cmd_task_cancel(args) -> int:
-    task = TaskStore().cancel(args.task_id, reason=args.reason, actor="cli")
-    cancelled_run_ids = _cancel_task_active_runs(task.id, reason=args.reason)
-    closed_worker_ids = _close_task_active_workers(task.id, reason=args.reason)
-    data = {"task_id": task.id, "state": task.state.value, "reason_recorded": True, "cancelled_run_ids": cancelled_run_ids, "closed_worker_session_ids": closed_worker_ids}
-    print(emit_json(data) if args.json else f"cancelled {task.id}")
-    return 0
-
-
-def _cmd_task_unblock(args) -> int:
-    store = TaskStore()
-    incident_store = IncidentStore()
-    try:
-        task = store.get(args.task_id)
-    except NotFound:
-        archived = _archived_task_summary(args.task_id)
-        if archived:
-            data = {"ok": False, "error": "task_archived", "task_id": args.task_id, "archive_batch": archived["archive_batch"], "message": "Archived tasks cannot be unblocked; create a new task or inspect the archive evidence."}
-        else:
-            data = {"ok": False, "error": "task_not_found", "task_id": args.task_id}
-        print(emit_json(data) if args.json else data.get("message", data["error"]))
-        return 1
-    if task.state in {TaskState.DONE, TaskState.CANCELLED}:
-        data = {"ok": False, "error": "task_terminal", "task_id": task.id, "state": task.state.value}
-        print(emit_json(data) if args.json else f"{task.id} is terminal: {task.state.value}")
-        return 1
-    previous_state = task.state.value
-    open_incident_ids = {
-        incident.id
-        for incident in incident_store.list_open()
-        if getattr(incident, "task_id", None) == task.id
-    }
-    open_incident_ids.update(task.open_incident_ids or [])
-    closed_incident_ids: list[str] = []
-    for incident_id in sorted(open_incident_ids):
-        try:
-            incident_store.close(incident_id, reason=f"operator unblock: {_safe_operator_text(args.reason)}")
-            closed_incident_ids.append(incident_id)
-        except Exception:
-            pass
-    task = store.get(task.id)
-    task.state = TaskState(args.state)
-    task.open_incident_ids = []
-    task.risk_flags = [flag for flag in list(task.risk_flags or []) if flag != "neko_block_recovery_attempted"]
-    cleared_recovery_keys = _clear_task_recovery_markers(task)
-    if args.rescope:
-        task.current_stage_id = None
-        task.stages = []
-        task.affected_repos = []
-        task.assigned_persona_ids = {}
-        ensure_default_mission_plan(task)
-    task.updated_at = now()
-    store.update(task, actor="cli", reason=f"operator unblock: {_safe_operator_text(args.reason)}")
-    foreground = activate_foreground_runtime(task.id, started_by="cli") if args.foreground else None
-    data = {
-        "ok": True,
-        "task_id": task.id,
-        "from": previous_state,
-        "to": task.state.value,
-        "rescope": bool(args.rescope),
-        "foreground_runtime": foreground,
-        "closed_incident_ids": closed_incident_ids,
-        "cleared_recovery_keys": cleared_recovery_keys,
-    }
-    print(emit_json(data) if args.json else f"unblocked {task.id}: {previous_state} -> {task.state.value}")
-    return 0
-
-
-def _clear_task_recovery_markers(task: Task) -> list[str]:
-    cleared: list[str] = []
-    data = task.harness_self_heal if isinstance(task.harness_self_heal, dict) else {}
-    stages = data.get("stages")
-    if not isinstance(stages, dict):
-        return cleared
-    for stage_id, stage_data in list(stages.items()):
-        if not isinstance(stage_data, dict):
-            continue
-        for key in (
-            "last_block_recovery_signal",
-            "last_closed_incident_id",
-            "incident_close_counter",
-            "block_recovery_attempted",
-            "last_budget_recovery_signal",
-        ):
-            if key in stage_data:
-                stage_data.pop(key, None)
-                cleared.append(f"stages.{stage_id}.{key}")
-        if not stage_data:
-            stages.pop(stage_id, None)
-    if not stages:
-        data.pop("stages", None)
-    task.harness_self_heal = data
-    return cleared
-
-
-def _safe_operator_text(value: str) -> str:
-    return " ".join(str(value or "").split())[:160] or "operator requested"
-
-
-def _cancel_task_active_runs(task_id: str, *, reason: str) -> list[str]:
-    runs = RunStore()
-    cancelled = []
-    for run in runs.list_for_task(task_id):
-        if run.state not in ACTIVE_RUN_STATES:
-            continue
-        cancelled.append(runs.cancel(run.id, reason=reason).id)
-    return cancelled
-
-
-def _close_task_active_workers(task_id: str, *, reason: str) -> list[str]:
-    store = WorkerSessionStore()
-    closed = []
-    for worker in store.find_active(task_id=task_id):
-        closed.append(store.close(worker.id, reason=reason).id)
-    return closed
-
-
-def _cmd_task_archive_ready(args) -> int:
-    data = TaskStore().archive_ready(actor="cli", reason="operator archive-ready command")
-    if args.json:
-        print(emit_json(data))
-    else:
-        batch = data["archive_batch"] or "no archive batch"
-        print(f"archived {data['archived_count']} task(s), skipped {data['skipped_count']} task(s): {batch}")
-    return 0
-
-
-def _cmd_task_archive(args) -> int:
-    data = TaskStore().archive(args.task_id, actor="cli", reason="operator archive task command")
-    if args.json:
-        print(emit_json(data))
-    else:
-        batch = data["archive_batch"] or "no archive batch"
-        print(f"archived {data['archived_count']} task(s), skipped {data['skipped_count']} task(s): {batch}")
-    return 0 if data.get("archived_count") else 1
-
-
-def _cmd_playground_list(args) -> int:
-    from agent_runtime.replay_scenarios import list_scenarios
-
-    records = list_scenarios()
-    if args.json:
-        print(emit_json(records))
-    else:
-        for record in records:
-            print(f"{record.get('scenario_id')} [{record.get('status')}] origin={record.get('failure_origin', 'unknown')} {record.get('decision_type')} task={record.get('task_id')} {record.get('error_message', '')[:80]}")
-        if not records:
-            print("no replay scenarios captured")
-    return 0
-
-
-def _cmd_playground_show(args) -> int:
-    from agent_runtime.replay_scenarios import get_scenario
-
-    record = get_scenario(args.scenario_id)
-    if record is None:
-        data = {"ok": False, "error": "scenario_not_found", "scenario_id": args.scenario_id}
-        print(emit_json(data) if args.json else f"scenario not found: {args.scenario_id}")
-        return 1
-    print(emit_json(record) if args.json else emit_json(record))
-    return 0
-
-
-def _cmd_playground_replay(args) -> int:
-    from agent_runtime.replay_scenarios import replay_all, replay_scenario
-
-    if args.scenario_id:
-        result = replay_scenario(args.scenario_id)
-        print(emit_json(result) if args.json else f"{result.get('scenario_id')}: {result.get('verdict', result.get('error'))}")
-        return 0 if result.get("ok") else 1
-    summary = replay_all()
-    if args.json:
-        print(emit_json(summary))
-    else:
-        print(f"total={summary['total']} passing={len(summary['passes_current_contract'])} still_failing={len(summary['still_failing'])} not_replayable={len(summary['not_replayable'])}")
-        for sid in summary["still_failing"]:
-            print(f"  still failing: {sid}")
-    return 0
-
-
-def _swarm_state_path() -> Path:
-    return paths.store_root() / "swarm_state.json"
-
-
-def _read_swarm_state() -> dict:
-    path = _swarm_state_path()
-    if not path.exists():
-        return {"enabled": False, "max_active_lanes": 0}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"enabled": False, "max_active_lanes": 0, "error": "invalid_swarm_state"}
-    return data if isinstance(data, dict) else {"enabled": False, "max_active_lanes": 0, "error": "invalid_swarm_state"}
-
-
-def _write_swarm_state(data: dict) -> None:
-    from utils import atomic_json_write
-    from agent_runtime.serde import to_jsonable
-
-    path = _swarm_state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_json_write(path, to_jsonable(data), indent=2, sort_keys=True)
-
-
-def _cmd_swarm_status(args) -> int:
-    cfg = load_agent_runtime_config()
-    swarm_cfg = getattr(cfg, "swarm", None)
-    allowed, certification = swarm_certification_allows_production(
-        requires_certification=bool(getattr(swarm_cfg, "requires_certification", True)),
-        allow_uncertified_dev_swarm=bool(getattr(swarm_cfg, "allow_uncertified_dev_swarm", False)),
-    )
-    state = _read_swarm_state()
-    data = {"enabled": bool(state.get("enabled")), "certification_allows_production": allowed, "certification": certification, "state": state}
-    print(emit_json(data) if args.json else f"swarm enabled={data['enabled']} certification={certification.get('state')}")
-    return 0
-
-
-def _cmd_swarm_enable(args) -> int:
-    cfg = load_agent_runtime_config()
-    swarm_cfg = getattr(cfg, "swarm", None)
-    allowed, certification = swarm_certification_allows_production(
-        requires_certification=bool(getattr(swarm_cfg, "requires_certification", True)),
-        allow_uncertified_dev_swarm=bool(getattr(args, "allow_uncertified_dev_swarm", False)),
-    )
-    lanes = max(1, int(getattr(args, "lanes", 2) or 2))
-    if not allowed:
-        data = {"ok": False, "enabled": False, "reason": "certification_required", "certification": certification}
-        print(emit_json(data) if args.json else "swarm enable refused: certification_required")
-        return 2
-    data = {
-        "ok": True,
-        "enabled": True,
-        "max_active_lanes": lanes,
-        "updated_at": now(),
-        "unsafe_dev_override": bool(getattr(args, "allow_uncertified_dev_swarm", False)),
-        "certification": certification,
-    }
-    _write_swarm_state(data)
-    print(emit_json(data) if args.json else f"swarm enabled lanes={lanes}")
-    return 0
-
-
-def _cmd_swarm_disable(args) -> int:
-    state = _read_swarm_state()
-    data = {**state, "ok": True, "enabled": False, "updated_at": now()}
-    _write_swarm_state(data)
-    print(emit_json(data) if args.json else "swarm disabled")
-    return 0
-
-
-def _cmd_lane_list(args) -> int:
-    from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
-
-    lanes = [runtime_instance_summary(item) for item in GoalRuntimeInstanceStore().list_all()]
-    _print_stage42(_list_envelope("lane", _sort_rows(lanes, getattr(args, "sort", None))), args=args, default_output="json")
-    return 0
-
-
-def _cmd_lane_show(args) -> int:
-    from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
-
-    try:
-        lane = runtime_instance_summary(GoalRuntimeInstanceStore().get(args.lane_id))
-    except (NotFound, FileNotFoundError):
-        return emit_harness_error(
-            NotFound(f"lane not found: {args.lane_id}"),
-            args=args,
-            code="lane_not_found",
-        )
-    _print_stage42(_object_envelope("lane", lane), args=args, default_output="json")
-    return 0
-
-
-def _cmd_lane_control(args) -> int:
-    from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
-
-    store = GoalRuntimeInstanceStore()
-    command = str(getattr(args, "lane_command", ""))
-    try:
-        if command in {"pause", "park"}:
-            lane = store.park_lane(args.lane_id, reason=args.reason, state="parked_by_operator")
-        elif command == "resume":
-            lane = store.resume_lane(args.lane_id, reason=args.reason)
-        elif command == "drain":
-            lane = store.transition(args.lane_id, "done", reason=args.reason, active_run_ids=[])
-        else:
-            raise ValueError("unknown lane command")
-    except Exception as exc:
-        data = {"ok": False, "error": type(exc).__name__, "message": str(exc), "lane_id": args.lane_id}
-        print(emit_json(data) if args.json else f"lane {command} failed: {data['message']}")
-        return 1
-    data = {"ok": True, "lane": runtime_instance_summary(lane)}
-    print(emit_json(data) if args.json else f"{lane.id} {command} -> {lane.state}")
-    return 0
-
-
-def _cmd_tick(args) -> int:
-    cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-    result = TickEngine(
-        config=cfg,
-        persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-    ).tick_once(task_id=args.task_id)
-    print(emit_json(result) if args.json else f"tick {result.tick_id}: {len(result.actions_taken)} actions")
-    return 0
-
-
-def _cmd_run_until_settled(args) -> int:
-    cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-    result = TickEngine(
-        config=cfg,
-        persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-    ).run_until_settled(task_id=args.task_id, max_actions=args.max_actions, max_seconds=args.max_seconds)
-    if args.json:
-        print(emit_json(result))
-    else:
-        print(f"settle {result.settle_id}: {len(result.actions_taken)} actions stop={result.stop_reason}")
-    return 0
-
-
-def _cmd_burn_in_create(args) -> int:
-    manifest = create_burn_in(suite=args.suite, case_id=getattr(args, "case_id", None), rerun_of=getattr(args, "rerun_of", None))
-    if args.json:
-        print(emit_json(manifest))
-    else:
-        print(f"burn-in {manifest['burn_id']}: created")
-    return 0
-
-
-def _cmd_burn_in_run(args) -> int:
-    cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-    manifest = run_burn_in_case(
-        args.case_id,
-        burn_id=getattr(args, "burn_id", None),
-        max_actions=getattr(args, "max_actions", 12),
-        engine=TickEngine(
-            config=cfg,
-            persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-        ),
-    )
-    if args.json:
-        print(emit_json(manifest))
-    else:
-        print(f"burn-in {manifest['burn_id']}: {manifest['status']}")
-    return 0 if manifest.get("status") == "passed" else 2
-
-
-def _cmd_burn_in_status(args) -> int:
-    try:
-        data = burn_in_status(args.burn_id)
-    except (FileNotFoundError, ValueError) as exc:
-        data = {"burn_id": args.burn_id, "ok": False, "error": type(exc).__name__, "message": "burn-in ledger was not found or is invalid"}
-        if args.json:
-            print(emit_json(data))
-        else:
-            print(f"burn-in {args.burn_id}: not found")
-        return 2
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"burn-in {args.burn_id}: {data['manifest'].get('status')}")
-    return 0
-
-
-def _cmd_burn_in_summarize(args) -> int:
-    try:
-        data = summarize_burn_in(args.burn_id)
-    except (FileNotFoundError, ValueError) as exc:
-        data = {"burn_id": args.burn_id, "ok": False, "error": type(exc).__name__, "message": "burn-in ledger was not found or is invalid"}
-        if args.json:
-            print(emit_json(data))
-        else:
-            print(f"burn-in {args.burn_id}: not found")
-        return 2
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"burn-in {args.burn_id}: ok={data['ok']} status={data['status']}")
-    return 0 if data.get("ok") else 2
-
-
-def _cmd_run_cancel(args) -> int:
-    worker_store = WorkerSessionStore()
-    run_store = RunStore()
-    run = run_store.get(args.run_id)
-    coordinator_id = _coordinator_actor_id(args)
-    if coordinator_id:
-        target = None
-        for worker in worker_store.find_active(task_id=run.task_id, persona_id=run.persona_id):
-            if worker.active_run_id == run.id:
-                try:
-                    target = PersonaInstanceStore().get(persona_instance_id_for(worker.persona_id))
-                except Exception:
-                    target = None
-                break
-        cfg = load_agent_runtime_config()
-        persona = _persona_by_id(cfg, run.persona_id)
-        scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action(
-            "run.cancel",
-            scope,
-            target,
-            actor=coordinator_id,
-            coordinator_id=coordinator_id,
-        )
-        if not auth.ok:
-            data = _coordinator_confirm_payload("run.cancel", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
-            return 2
-    run = run_store.cancel(args.run_id, reason=args.reason)
-    updated_workers = []
-    for worker in worker_store.find_active(task_id=run.task_id, persona_id=run.persona_id):
-        if worker.active_run_id == run.id:
-            updated = worker_store.update_after_run(worker.id, run, close_reason="run_cancelled", count_decision=False)
-            updated_workers.append(updated.id)
-    data = {"run_id": run.id, "state": run.state.value, "reason_recorded": True, "updated_worker_session_ids": updated_workers}
-    print(emit_json(data) if args.json else f"cancelled {run.id}")
-    return 0
-
-
-def _cmd_run_show(args) -> int:
-    run_store = RunStore()
-    proof_store = ProofStore()
-    try:
-        run = run_store.get(args.run_id)
-    except (NotFound, FileNotFoundError):
-        return emit_harness_error(
-            NotFound(f"run not found: {args.run_id}"),
-            args=args,
-            code="run_not_found",
-        )
-    proof_records = [
-        proof
-        for proof in proof_store.list_for_task(run.task_id)
-        if isinstance(proof.metadata, dict) and proof.metadata.get("run_id") == run.id
-    ]
-    events = _task_events(run.task_id, limit=max(1, min(250, int(getattr(args, "events", 25) or 25))), since_text=None)
-    scoped_events = [
-        item
-        for item in events.get("items", [])
-        if _event_value(item, "run_id") == run.id or _event_value(item, "persona_id") == run.persona_id
-    ]
-    data = {
-        "ok": True,
-        "run": run,
-        "proofs": proof_records,
-        "events": {
-            "ok": events.get("ok", True),
-            "count": len(scoped_events),
-            "items": scoped_events,
-        },
-    }
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"{run.id} {run.persona_id} {run.state.value} task={run.task_id} proofs={len(proof_records)} events={len(scoped_events)}")
-    return 0
-
-
-def _cmd_run_approve(args) -> int:
-    run_store = RunStore()
-    incident_store = IncidentStore()
-    run = run_store.approve_continuation(args.run_id)
-    closed_incidents = []
-    for incident in incident_store.list_open():
-        if incident.run_id == run.id and incident.kind == "run_budget_exceeded":
-            incident_store.close(incident.id, reason="operator approved same-session continuation")
-            closed_incidents.append(incident.id)
-    data = {
-        "run_id": run.id,
-        "state": run.state.value,
-        "approved_for_continuation": True,
-        "session_id": run.session_id,
-        "closed_incidents": closed_incidents,
-        "next_expected": "run harness tick to continue same session",
-    }
-    print(emit_json(data) if args.json else f"approved {run.id} for same-session continuation")
-    return 0
-
-
-def _cmd_worker_list(args) -> int:
-    store = WorkerSessionStore()
-    if getattr(args, "active", False):
-        workers = store.find_active(task_id=getattr(args, "task_id", None), persona_id=getattr(args, "persona_id", None))
-    else:
-        workers = store.list_all()
-        if getattr(args, "task_id", None):
-            workers = [worker for worker in workers if worker.task_id == args.task_id]
-        if getattr(args, "persona_id", None):
-            workers = [worker for worker in workers if worker.persona_id == args.persona_id]
-    data = [worker_session_summary(worker) for worker in workers]
-    _print_stage42(_list_envelope("worker", _sort_rows(data, getattr(args, "sort", None))), args=args, default_output="json")
-    return 0
-
-
-def _cmd_worker_show(args) -> int:
-    try:
-        worker = WorkerSessionStore().get(args.worker_session_id)
-    except (NotFound, FileNotFoundError):
-        return emit_harness_error(
-            NotFound(f"worker not found: {args.worker_session_id}"),
-            args=args,
-            code="worker_not_found",
-        )
-    data = worker_session_summary(worker)
-    _print_stage42(_object_envelope("worker", data), args=args, default_output="json")
-    return 0
-
-
-def _cmd_worker_control(args) -> int:
-    store = WorkerSessionStore()
-    command = getattr(args, "worker_command", "")
-    reason = getattr(args, "reason", "") or getattr(args, "note", "") or f"operator {command}"
-    if command == "pause":
-        worker = store.pause(args.worker_session_id, actor=args.actor, reason=reason)
-    elif command == "resume":
-        worker = store.resume(args.worker_session_id, actor=args.actor, reason=reason)
-    elif command == "interrupt":
-        worker = store.interrupt(args.worker_session_id, actor=args.actor, reason=reason)
-    elif command == "nudge":
-        worker = store.nudge(args.worker_session_id, actor=args.actor, note=reason)
-    elif command == "possess":
-        worker = store.possess(args.worker_session_id, actor=args.actor, lease_seconds=args.lease_seconds)
-    elif command == "release":
-        worker = store.release(args.worker_session_id, actor=args.actor, handback=reason)
-    else:
-        print("Use `hermes harness worker --help`.")
-        return 2
-    data = worker_session_summary(worker)
-    print(emit_json(data) if args.json else f"{data['worker_session_id']} {command} -> {data['state']}")
-    return 0
-
-
-def _cmd_status(args) -> int:
-    data=build_status()
-    print(emit_json(data) if args.json else f"open_tasks={data['open_tasks']} running_runs={data['running_runs']} open_incidents={data['open_incidents']} dirty={data['dirty_summary']} runtime_health={data['runtime_health']['ok']}")
-    return 0
-
-
-def _cmd_health(args) -> int:
-    personas = ensure_persisted_personas(load_agent_runtime_config())
-    data = provider_health_for_personas(personas)
-    if args.json:
-        print(emit_json(data))
-    else:
-        issue_count = len(data.get("issues") or [])
-        print(f"runtime_health={data['ok']} interpreter={data['interpreter']} issues={issue_count}")
-    return 0
-
-
-def _cmd_config(args) -> int:
-    data = effective_config_summary(load_agent_runtime_config())
-    print(emit_json(data) if args.json else f"config valid={data['validation']['ok']} schema={data['schema_version']}")
-    return 0 if data["validation"]["ok"] else 2
-
-
-def _cmd_migrate(args) -> int:
-    data = migration_status()
-    data["check_only"] = bool(getattr(args, "check", False))
-    print(emit_json(data) if args.json else f"migrations pending={data['pending']} schema={data['current_schema_version']}")
-    return 0 if not data.get("pending") else 2
-
-
-def _cmd_verify(args) -> int:
-    cfg = load_agent_runtime_config()
-    started = datetime.now(timezone.utc)
-    repo_root = Path(__file__).resolve().parents[1]
-    packet = {
-        "schema_version": 1,
-        "proof_packet_id": f"mission_control_verify_{started.strftime('%Y%m%dT%H%M%SZ')}",
-        "generated_at_utc": started.isoformat().replace("+00:00", "Z"),
-        "mode": args.mode,
-        "runtime_root": str(paths.store_root()),
-        "hermes_profile": active_profile_name(),
-        "hermes_home": os.environ.get("HERMES_HOME"),
-        "harness_repo": _git_summary(repo_root),
-        "runtime_config": effective_config_summary(cfg),
-        "migration": migration_status(),
-        "commands": [],
-        "tests": [],
-        "final_status": {},
-    }
-    commands = [
-        ("harness status", [sys.executable, "-m", "hermes_cli.main", "harness", "status", "--json"]),
-        ("harness snapshot", [sys.executable, "-m", "hermes_cli.main", "harness", "snapshot", "--json"]),
-        ("harness task archive help", [sys.executable, "-m", "hermes_cli.main", "harness", "task", "archive", "--help"]),
-        ("harness task archive-ready help", [sys.executable, "-m", "hermes_cli.main", "harness", "task", "archive-ready", "--help"]),
-        ("harness config show", [sys.executable, "-m", "hermes_cli.main", "harness", "config", "show", "--json"]),
-        ("harness migrate check", [sys.executable, "-m", "hermes_cli.main", "harness", "migrate", "--check", "--json"]),
-    ]
-    ok = True
-    for label, command in commands:
-        result = _run_verify_command(label, command, cwd=repo_root)
-        packet["commands"].append(result)
-        ok = ok and result["exit_code"] == 0
-    if not args.skip_tests:
-        test_result = _run_verify_command(
-            "harness focused tests",
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-o",
-                "addopts=",
-                "-q",
-                "tests/agent_runtime/test_proof_runner.py",
-                "tests/agent_runtime/test_daemon.py",
-                "tests/agent_runtime/test_store.py",
-                "tests/agent_runtime/test_snapshot.py",
-                "tests/agent_runtime/test_status.py",
-            ],
-            cwd=repo_root,
-        )
-        packet["tests"].append(test_result)
-        ok = ok and test_result["exit_code"] == 0
-    try:
-        packet["final_status"] = build_status()
-    except Exception as exc:
-        ok = False
-        packet["final_status"] = {"error": type(exc).__name__}
-    if args.mode == "live-tony" and str(paths.store_root()).replace("/", "\\").lower() != r"x:\eternia\.hermes\agent-runtime":
-        ok = False
-        packet.setdefault("issues", []).append({"kind": "runtime_root_mismatch", "expected": r"X:\Eternia\.hermes\agent-runtime"})
-    print(emit_json(packet) if args.json else f"verify ok={ok} commands={len(packet['commands'])} tests={len(packet['tests'])}")
-    return 0 if ok else 2
-
-
-def _cmd_observe(args) -> int:
-    tasks = TaskStore().list_all()
-    runs = RunStore().list_all()
-    incidents = IncidentStore().list_all()
-    worker_store = WorkerSessionStore()
-    workers = worker_store.list_all()
-    proofs = []
-    proof_store = ProofStore()
-    for task in tasks:
-        proofs.extend(proof_store.list_for_task(task.id))
-    data = build_observability(
-        tasks=tasks,
-        runs=runs,
-        incidents=incidents,
-        proofs=proofs,
-        daemon_status=read_daemon_status(),
-        events=EventLog().tail(20),
-        execution_mode=load_agent_runtime_config().execution_mode,
-        worker_sessions=workers,
-    )
-    print(emit_json(data) if args.json else f"observability={data['health']['status']} interventions={len(data['interventions'])}")
-    return 0
-
-
-def _cmd_contracts_dump(args) -> int:
-    manifest = contract_manifest()
-    role = str(getattr(args, "role", "") or "").strip()
-    decision = str(getattr(args, "decision", "") or "").strip()
-    data = manifest
-    if role:
-        canonical_role = canonical_role_value(role)
-        data = {
-            "schema_version": manifest["schema_version"],
-            "contract_hash": manifest["contract_hash"],
-            "role": canonical_role,
-            "requested_role": role,
-            "allowed_decisions": manifest["roles"].get(canonical_role, []),
-            "decision_menu_shape_ids": manifest["role_shape_ids"].get(canonical_role, []),
-            "context_expansion_shape_ids": manifest["context_expansion_shape_ids"].get(canonical_role, []),
-            "hud_shapes": hud_shape_index_for_stage(canonical_role),
-        }
-    if decision:
-        data = {
-            "schema_version": manifest["schema_version"],
-            "contract_hash": manifest["contract_hash"],
-            "decision": decision,
-            "contract": manifest["decisions"].get(decision),
-        }
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"contracts schema={manifest['schema_version']} hash={manifest['contract_hash'][:16]}")
-    return 0 if (not decision or data.get("contract")) else 2
-
-
-def _cmd_contracts_verify_examples(args) -> int:
-    data = verify_registry()
-    skill_examples = verify_harness_skill_examples()
-    data["skill_examples"] = skill_examples
-    data["ok"] = bool(data.get("ok")) and bool(skill_examples.get("ok"))
-    print(emit_json(data) if args.json else f"contracts ok={data['ok']} hash={data['contract_hash'][:16]}")
-    return 0 if data.get("ok") else 2
-
-
-def _run_verify_command(label: str, command: list[str], *, cwd: Path) -> dict:
-    started = time.monotonic()
-    try:
-        completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=120)
-        stdout = completed.stdout or ""
-        stderr = completed.stderr or ""
-        exit_code = completed.returncode
-    except subprocess.TimeoutExpired as exc:
-        stdout = str(exc.stdout or "")
-        stderr = str(exc.stderr or "") + "\n[verify command timed out]"
-        exit_code = 124
-    return {
-        "label": label,
-        "command": " ".join(command),
-        "cwd": str(cwd),
-        "exit_code": exit_code,
-        "duration_ms": int((time.monotonic() - started) * 1000),
-        "stdout_summary": _safe_output_summary(stdout),
-        "stderr_summary": _safe_output_summary(stderr),
-    }
-
-
-def _safe_output_summary(text: str) -> str:
-    text = " ".join(str(text or "").split())
-    lowered = text.lower()
-    if any(marker in lowered for marker in ("secret", "token", "password", "credential", "authorization")):
-        return "<redacted>"
-    return text[:500]
-
-
-def _git_summary(root: Path) -> dict:
-    def run(args: list[str]) -> str | None:
-        try:
-            completed = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=10)
-        except Exception:
-            return None
-        return completed.stdout.strip() if completed.returncode == 0 else None
-
-    status = run(["status", "--short"])
-    return {"path": str(root), "git_head": run(["rev-parse", "HEAD"]), "dirty": bool(status)}
-
-
-def _cmd_daemon(args) -> int:
-    cfg = load_agent_runtime_config()
-    command = getattr(args, "daemon_command", None)
-    if command == "start":
-        data = start_daemon(task_id=getattr(args, "task", None), interval_seconds=args.interval, idle_interval_seconds=args.idle_interval)
-        print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')} pid={data.get('pid', '')}")
-        return 0
-    if command == "stop":
-        data = stop_daemon()
-        print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')}")
-        return 0
-    if command == "status" or (not command and not args.foreground):
-        data = read_daemon_status()
-        print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')}")
-        return 0
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-
-    def engine_factory():
-        return TickEngine(
-            config=cfg,
-            persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-        )
-
-    daemon = MissionDaemon(
-        engine_factory=engine_factory,
-        target_task_id=getattr(args, "task", None),
-        interval_seconds=args.interval if args.interval is not None else cfg.daemon_interval_seconds,
-        idle_interval_seconds=args.idle_interval if args.idle_interval is not None else cfg.daemon_idle_interval_seconds,
-        heartbeat_seconds=cfg.daemon_heartbeat_seconds,
-    )
-    max_loops = 1 if command == "run-once" else getattr(args, "max_loops", None)
-    result = daemon.run_foreground(max_loops=max_loops)
-    print(emit_json(result) if args.json else f"daemon stopped after {result['loops']} loops")
-    return 0
-
-
-def _cmd_agents(args) -> int:
-    personas = ensure_persisted_personas(load_agent_runtime_config())
-    print(emit_json(personas) if args.json else "\n".join(f"{p.id} ({p.role})" for p in personas))
-    return 0
-
-
-def _cmd_smoke(args) -> int:
-    data = run_smoke(temp_root=args.temp_root, no_model=args.no_model)
-    if args.json:
-        print(emit_json(data))
-    else:
-        task = data.get("task_id", "-")
-        state = data.get("final_state", data.get("failure_class", "unknown"))
-        print(f"smoke={data['ok']} task={task} state={state}")
-    return 0
-
-
-def _cmd_proof_list(args) -> int:
-    proofs=ProofStore().list_for_task(args.task_id)
-    print(emit_json(proofs) if args.json else "\n".join(f"{p.id} {p.type} {p.title}" for p in proofs))
-    return 0
-
-
-def _safe_issue_summary(item: dict) -> dict:
-    return {
-        "discovery_id": item.get("id"),
-        "parent_task_id": item.get("parent_task_id"),
-        "title": item.get("title"),
-        "severity": item.get("severity"),
-        "relationship_hint": item.get("relationship_hint"),
-        "triage_status": item.get("triage_status"),
-        "triage_decision": item.get("triage_decision"),
-        "child_task_id": item.get("child_task_id"),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-    }
-
-
-def _cmd_issue_list(args) -> int:
-    task = TaskStore().get(args.task_id)
-    items = [_safe_issue_summary(item) for item in getattr(task, "issue_discoveries", []) or []]
-    if args.json:
-        print(emit_json(items))
-    else:
-        print("\n".join(f"{item['discovery_id']} [{item['triage_status']}] {item['severity']} {item['title']}" for item in items))
-    return 0
-
-
-def _cmd_issue_show(args) -> int:
-    _task, item = find_discovery_task(TaskStore(), args.discovery_id)
-    data = _safe_issue_summary(item)
-    data["summary"] = item.get("summary")
-    data["evidence_count"] = len(item.get("evidence", []) or [])
-    data["affected_path_count"] = len(item.get("affected_paths", []) or [])
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"{data['discovery_id']} [{data['triage_status']}] {data['title']}\nsummary: {data['summary']}")
-    return 0
-
-
-def _cmd_issue_triage(args) -> int:
-    task_store = TaskStore(); incident_store = IncidentStore()
-    task, _item = find_discovery_task(task_store, args.discovery_id)
-    payload = {
-        "discovery_id": args.discovery_id,
-        "decision": args.decision,
-        "rationale": args.rationale,
-        "priority": args.priority,
-    }
-    if args.decision == "fork_child":
-        payload.update({
-            "child_title": args.child_title,
-            "child_description": args.child_description,
-            "child_acceptance_criteria": list(args.acceptance or []),
-        })
-    decision = AgentDecision(type=DecisionType.TRIAGE_ISSUE_DISCOVERY, summary=f"CLI triage {args.decision}", rationale=args.rationale, payload=payload)
-    apply_planning_decision(task, decision, actor="cli", task_store=task_store, incident_store=incident_store)
-    task_store.update(task, actor="cli", reason=f"issue triaged {args.decision}")
-    item = next(item for item in getattr(task, "issue_discoveries", []) or [] if item.get("id") == args.discovery_id)
-    data = _safe_issue_summary(item)
-    print(emit_json(data) if args.json else f"triaged {data['discovery_id']} as {data['triage_status']} child_task_id={data.get('child_task_id')}")
-    return 0
-
-
-def _cmd_incident_list(args) -> int:
-    store=IncidentStore(); incidents=store.list_open() if args.open else store.list_all()
-    print(emit_json(incidents) if args.json else "\n".join(f"{i.id} {i.kind} {i.summary}" for i in incidents))
-    return 0
-
-
-def _cmd_incident_close(args) -> int:
-    incident = IncidentStore().close(args.incident_id, reason=args.reason)
-    data = {"incident_id": incident.id, "closed": incident.closed_at is not None, "reason": args.reason}
-    print(emit_json(data) if args.json else f"closed {incident.id}: {args.reason}")
-    return 0
-
-
-def _cmd_snapshot(args) -> int:
-    snap=write_snapshot(build_snapshot())
-    print(emit_json(snap) if args.json else "snapshot written")
-    return 0
+_load_command_parts()

@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -250,6 +251,51 @@ def test_chat_reply_routes_tool_calls_into_session_keyed_trace(tmp_path, monkeyp
     assert events[1].payload.get("status") == "passed"
 
 
+def test_reasoning_summary_does_not_fire_pre_trace_ack(tmp_path, monkeypatch):
+    # gpt-5.5 (codex) emits a reasoning-summary run.progress event on EVERY
+    # turn, including tool-less "Hi" turns. It belongs in the Trace lane but
+    # must NOT latch before_first_trace: doing so persisted a canned
+    # "I'll check that now…" acknowledgment row on every conversational turn
+    # (a phantom transcript row with no client_message_id that reordered the
+    # Agent Console at snapshot reconcile). The ack hook fires on the first
+    # run.tool.started only.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime.progress import ChatProgressSink
+
+    fired = []
+    sink = ChatProgressSink(
+        session_id="session_reasoning_no_ack",
+        persona_id="neko_supervisor",
+        before_first_trace=fired.append,
+    )
+
+    sink.emit(
+        "run.progress",
+        {
+            "type": "run.progress",
+            "phase": "thinking_process",
+            "step": "reasoning_summary",
+            "status": "running",
+            "reasoning_summary": "Hi Master — I'm here.",
+        },
+    )
+    assert fired == []  # reasoning trace recorded, ack hook untouched
+
+    sink.emit(
+        "run.tool.started",
+        {"type": "run.tool.started", "tool_name": "terminal", "status": "running"},
+    )
+    assert len(fired) == 1
+    assert fired[0]["type"] == "run.tool.started"
+
+    # Latched: a second tool start must not re-fire the ack.
+    sink.emit(
+        "run.tool.started",
+        {"type": "run.tool.started", "tool_name": "terminal", "status": "running"},
+    )
+    assert len(fired) == 1
+
+
 def test_persona_chat_prompt_allows_real_tools_and_forbids_fabrication():
     from agent_runtime.persona_runtime import _persona_chat_system_prompt
 
@@ -264,21 +310,93 @@ def test_persona_chat_prompt_allows_real_tools_and_forbids_fabrication():
     # Hard anti-fabrication invariant.
     assert "Never fabricate" in prompt
     assert "inventing output" in prompt
+    # Embodiment context: office + HUD state the operator can see.
+    assert "Mission Control office" in prompt
+    assert "steer handle" in prompt
+    # Operator channel is the ask-when-ambiguous surface (vs act_dont_ask on the
+    # autonomous goal path): clarify underspecified orders via the clarify tool
+    # instead of guessing.
+    assert "use the `clarify` tool to ask before acting" in prompt
+
+
+def test_clarify_enabled_and_unblocked_on_chat_lane_but_blocked_on_runs():
+    from agent_runtime.persona_runtime import (
+        _blocked_tool_names_for_chat,
+        _enabled_toolsets_for_chat,
+    )
+    from agent_runtime.personas import blocked_tool_names
+
+    personas = {p.id: p for p in default_personas()}
+    for pid in ("neko_supervisor", "dev", "qa"):
+        persona = personas[pid]
+        # Chat lane: clarify toolset is offered and the tool is not blocked, so
+        # the non-blocking clarify bridge can record a question.
+        assert "clarify" in _enabled_toolsets_for_chat(persona, session_id=None)
+        assert "clarify" not in _blocked_tool_names_for_chat(persona, session_id=None)
+        # Autonomous run lane still blocks clarify — no interactive answer there.
+        assert "clarify" in blocked_tool_names(persona)
 
 
 def test_mission_chat_surface_message_always_carries_operative_rules():
-    from agent_runtime.persona_runtime import _mission_chat_operative_rules, _mission_chat_surface_message
+    from agent_runtime.persona_runtime import (
+        _mission_chat_identity_prompt,
+        _mission_chat_operative_rules,
+        _mission_chat_surface_message,
+    )
 
-    # Blank operator surface still injects the operative rules (so the
-    # anti-fabrication invariant holds on the default operator channel).
-    assert _mission_chat_surface_message("") == _mission_chat_operative_rules()
-    assert _mission_chat_surface_message(None) == _mission_chat_operative_rules()
-    assert "Never fabricate" in _mission_chat_surface_message("")
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+
+    # Blank operator surface still injects the identity block THEN the operative
+    # rules (so the "you are <persona>" hat and the anti-fabrication invariant
+    # both hold on the default operator channel).
+    identity = _mission_chat_identity_prompt(neko)
+    rules = _mission_chat_operative_rules()
+    assert _mission_chat_surface_message(neko, "") == identity + "\n\n" + rules
+    assert _mission_chat_surface_message(neko, None) == identity + "\n\n" + rules
+    # Identity comes first; rules follow.
+    assert _mission_chat_surface_message(neko, "").startswith(identity)
+    assert "Never fabricate" in _mission_chat_surface_message(neko, "")
+    # Ambiguous-order clarify norm rides the always-injected operative rules,
+    # and names the clarify tool + the answer-threads-back contract.
+    assert "use the `clarify` tool to ask before acting" in rules
+    assert "answer arrives as their next message" in rules
+    # Relay lane: answer a briefed agent's clarify instead of dropping/guessing.
+    assert "answer it by sending the choice back" in rules
 
     # An operator-supplied surface prompt is layered after the rules, not instead.
-    composed = _mission_chat_surface_message("Focus on the auth refresh path.")
+    composed = _mission_chat_surface_message(neko, "Focus on the auth refresh path.")
+    assert composed.startswith(identity)
     assert "Never fabricate" in composed
     assert composed.endswith("Focus on the auth refresh path.")
+
+    workspace_composed = _mission_chat_surface_message(
+        neko,
+        "",
+        workspace_agents_content="# Selected workspace\nUse its conventions.",
+    )
+    assert "operator-selected AGENTS.md" in workspace_composed
+    assert workspace_composed.endswith("Use its conventions.")
+
+
+def test_mission_chat_identity_prompt_names_persona_and_forbids_self_relay():
+    # Root-cause guard for the "Neko messages itself" incident: the isolated
+    # chat lane does not load the profile SOUL, so this block is the ONLY place
+    # the model learns which persona it is. It must name the persona, name the
+    # persona id (so a self-directed agent_chat_send is recognizable), and
+    # forbid relaying to itself.
+    from agent_runtime.persona_runtime import _mission_chat_identity_prompt
+
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    identity = _mission_chat_identity_prompt(neko)
+
+    assert "You are Neko Mission Lead" in identity
+    assert "`neko_supervisor`" in identity
+    assert "agent_chat_send" in identity
+    assert "that persona is you" in identity
+    assert "already the persona speaking in this channel" in identity
+    # No leaked Alice-identity / third-person "deploy Neko" framing.
+    assert "Alice" not in identity
+    assert "catgirl" not in identity.lower()
 
 
 def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path, monkeypatch):
@@ -310,14 +428,67 @@ def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path
         "run echo PARITY_OK_2026",
         permission_session_id="session_mission_chat",
         agent_ready_callback=agent_ready,
+        workspace_agents_content="# Workspace rules\nUse the selected conventions.",
     )
 
     system_message = captured["request"].system_message
+    # Identity block leads the system message (the "you ARE Neko" hat) so the
+    # isolated chat lane never externalizes the persona and relays to itself.
+    assert system_message.startswith("You are Neko Mission Lead")
+    assert "that persona is you" in system_message
     assert "Never fabricate" in system_message
     assert "actually use your tools" in system_message
+    assert "# Workspace rules" in system_message
     # And the chat-trace callback is wired on the canonical operator path too.
     assert captured["request"].progress_callback is not None
     assert captured["request"].agent_ready_callback is agent_ready
+
+
+def test_mission_chat_reply_honors_include_profile_memory(tmp_path, monkeypatch):
+    # A persona bound to a profile for CAPABILITIES must not also inherit that
+    # profile's MEMORY.md/USER.md worldview unless it opts in. skip_memory now
+    # tracks include_profile_memory instead of being hardcoded False (which had
+    # loaded Alice's "goal->Neko->Dev" memory into every Neko turn).
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime.models import AgentPersona
+
+    def _persona(include_memory: bool) -> AgentPersona:
+        return AgentPersona(
+            id="neko_supervisor",
+            display_name="Neko Mission Lead",
+            role="alice_supervisor",
+            model="gpt-5.5",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            toolsets=["file", "search", "skills"],
+            system_prompt_path="",
+            hermes_profile=None,
+            include_profile_memory=include_memory,
+        )
+
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="s",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.mission_chat_reply(_persona(False), "hi", permission_session_id="s")
+    assert captured["request"].skip_memory is True
+
+    runtime.mission_chat_reply(_persona(True), "hi", permission_session_id="s")
+    assert captured["request"].skip_memory is False
 
 
 def test_profile_role_sentinel_resolves_to_supervisor_capabilities():
@@ -401,6 +572,106 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
     assert set(["file", "search", "session_search", "todo", "skills"]).issubset(
         set(request.enabled_toolsets)
     )
+
+
+def test_mission_chat_reply_has_no_api_call_cap_and_keeps_iteration_failsafe(
+    tmp_path, monkeypatch
+):
+    # Chat lane matches base Hermes: a turn is bounded by the tool-calling loop
+    # (max_iterations=90) + wall clock, NOT a hard api-call count. The old
+    # max_api_calls=8 also throttled the operator's own multi-step chat requests
+    # (operator chat and agent_chat_send relays share this path), so it was
+    # lifted. Guard against a silent re-introduction of the cap.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime.models import AgentPersona
+
+    profile = AgentPersona(
+        id="profile:alice",
+        display_name="Alice Agent",
+        role="profile",
+        model="gpt-5.5",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        toolsets=["file", "search"],
+        system_prompt_path="",
+        hermes_profile=None,
+    )
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="s",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex",
+        default_model="gpt-5.5",
+        agent_runner=CapturingRunner(),
+    )
+    runtime.mission_chat_reply(
+        profile, "read three files and summarize", permission_session_id="s"
+    )
+
+    request = captured["request"]
+    assert request.max_api_calls is None
+    assert request.max_iterations == 90
+
+
+def test_mission_chat_reply_honors_core_context_file_opt_in(tmp_path, monkeypatch):
+    # Regression: the operator chat path used to hardcode skip_context_files=False,
+    # forcing the process-cwd repo project docs (e.g. the 72KB hermes-agent
+    # AGENTS.md, truncated to ~65K chars) into EVERY conversational turn — ~20K
+    # tokens of fixed overhead regardless of persona. Operator chat must honor the
+    # persona's include_core_context_files opt-in exactly like the mission-run
+    # (skip_context_files) and free-chat paths. Isolated personas (the default)
+    # stay lean; only an explicit opt-in loads repo docs.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime.models import AgentPersona
+
+    def _capture_skip(include_core: bool) -> bool:
+        persona = AgentPersona(
+            id="profile:alice",
+            display_name="Alice Agent",
+            role="profile",
+            model="gpt-5.5",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            toolsets=["file", "search", "skills"],
+            system_prompt_path="",
+            hermes_profile=None,
+            include_core_context_files=include_core,
+        )
+        captured = {}
+
+        class CapturingRunner:
+            def run(self, request):
+                captured["request"] = request
+                return AgentRunResult(
+                    final_response="ok",
+                    session_id="s",
+                    provider="openai-codex",
+                    model="gpt-5.5",
+                    base_url=None,
+                    messages=[],
+                )
+
+        runtime = GPTPersonaRuntime(
+            default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+        )
+        runtime.mission_chat_reply(persona, "hi", permission_session_id="s")
+        return captured["request"].skip_context_files
+
+    # Default isolated persona -> context files skipped (lean turn).
+    assert _capture_skip(False) is True
+    # Explicit opt-in -> context files loaded (parity with the mission-run path).
+    assert _capture_skip(True) is False
 
 
 def test_chat_reply_without_session_records_no_trace(tmp_path, monkeypatch):
@@ -510,6 +781,28 @@ def test_dev_core_context_files_require_explicit_opt_in():
     assert fake.kwargs["skip_context_files"] is False
 
 
+def test_dev_grounds_in_current_stage_repo_not_lagging_affected_repos(monkeypatch):
+    # Regression: task.affected_repos lags the active stage in a graph blueprint (it
+    # holds the previous stage's repo), so grounding MUST use the current mission-plan
+    # stage's repo. Here affected_repos points at the "wrong" repo; grounding must
+    # ignore it and use the stage repo (hermes-agent always resolves to the harness
+    # root, so this stays platform-independent).
+    from agent_runtime import persona_runtime as pr
+
+    task, run = make_task_and_run()
+    task.affected_repos = ["EterniaBackend"]  # stale/lagging value from the previous stage
+    dev = next(persona for persona in default_personas() if persona.id == "dev")
+    dev.repo_scope = None  # no scope -> stage repo is used directly
+    ctx = build_context(task, run)
+    monkeypatch.setattr(pr, "current_plan_stage", lambda _task: type("S", (), {"repo": "hermes-agent"})())
+
+    repo_ctx = pr._repo_context_for_persona(dev, ctx)
+
+    harness_root = Path(pr.__file__).resolve().parents[1]
+    assert repo_ctx is not None
+    assert repo_ctx.workdir == harness_root  # stage repo won, not affected_repos[0]
+
+
 def test_dev_persona_run_is_grounded_in_resolved_repo_and_loads_project_context(tmp_path, monkeypatch):
     FakeAIAgent.instances.clear()
     runtime_root = tmp_path / "runtime"
@@ -519,6 +812,11 @@ def test_dev_persona_run_is_grounded_in_resolved_repo_and_loads_project_context(
     (repo / "AGENTS.md").write_text("# Agent instructions\nUse repo-local tests.\n", encoding="utf-8")
     (repo / "CLAUDE.md").write_text("# Claude instructions\nStay scoped.\n", encoding="utf-8")
     (repo / ".hermes.md").write_text("# Hermes project rules\nUse all repo guidance.\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     task, run = make_task_and_run()
     task.affected_repos = [str(repo)]
     dev = next(persona for persona in default_personas() if persona.id == "dev")
@@ -538,15 +836,55 @@ def test_dev_persona_run_is_grounded_in_resolved_repo_and_loads_project_context(
 
     fake = FakeAIAgent.instances[0]
     assert fake.kwargs["skip_context_files"] is True
-    assert seen["cwd"] == repo
-    assert seen["TERMINAL_CWD"] == str(repo)
+    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
+    assert seen["TERMINAL_CWD"] == str(seen["cwd"])
+    assert seen["cwd"] != repo
+    assert subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=seen["cwd"], text=True, stdout=subprocess.PIPE, check=True).stdout.strip() == "HEAD"
     assert "Repo-Grounded Execution" in seen["user_message"]
-    assert "repo_label: repo" in seen["user_message"]
+    assert "repo_label: repo_" in seen["user_message"]
     assert "context_loaded: .hermes.md, AGENTS.md, CLAUDE.md" in seen["user_message"]
     assert "Repo Context Excerpts (Harness-Controlled)" in seen["user_message"]
     assert "Use repo-local tests." in seen["user_message"]
     assert "Stay scoped." in seen["user_message"]
-    assert "Use all repo guidance." in seen["user_message"]
+
+
+def test_backend_dev_persona_run_is_isolated_in_detached_worktree(tmp_path, monkeypatch):
+    FakeAIAgent.instances.clear()
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
+    repo = tmp_path / "backend"
+    repo.mkdir()
+    (repo / "manage.py").write_text("print('ok')\n", encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    (repo / "live-only.txt").write_text("pre-existing live dirt\n", encoding="utf-8")
+    task, run = make_task_and_run()
+    task.affected_repos = [str(repo)]
+    backend_dev = next(persona for persona in default_personas() if persona.id == "backend_dev")
+    backend_dev.hermes_profile = None
+    backend_dev.repo_scope = None
+    ctx = build_context(task, run)
+    seen = {}
+
+    class CwdAwareAgent(FakeAIAgent):
+        def run_conversation(self, *, user_message, system_message, task_id):
+            seen["cwd"] = Path.cwd()
+            seen["user_message"] = user_message
+            return super().run_conversation(user_message=user_message, system_message=system_message, task_id=task_id)
+
+    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=CwdAwareAgent)
+
+    runtime.run_tick(backend_dev, ctx, run=run)
+
+    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
+    assert seen["cwd"] != repo
+    assert not (seen["cwd"] / "live-only.txt").exists()
+    assert subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=seen["cwd"], text=True, stdout=subprocess.PIPE, check=True).stdout.strip() == "HEAD"
+    assert run.progress["repo_execution"]["isolated"] is True
+    assert run.progress["repo_execution"]["detached_head"] is True
     assert str(repo) not in seen["user_message"]
     assert "Use session_search only when task context is insufficient" in seen["user_message"]
 
@@ -559,6 +897,18 @@ def test_backend_dev_uses_persona_repo_scope_instead_of_first_task_repo(tmp_path
     backend_repo = tmp_path / "backend"
     harness_repo.mkdir()
     backend_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=harness_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=harness_repo, check=True)
+    (harness_repo / "README.md").write_text("harness\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=harness_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "init"], cwd=backend_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=backend_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=backend_repo, check=True)
+    (backend_repo / "README.md").write_text("backend\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=backend_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=backend_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     task, run = make_task_and_run()
     task.affected_repos = [str(harness_repo), str(backend_repo)]
     backend_dev = next(persona for persona in default_personas() if persona.id == "backend_dev")
@@ -577,8 +927,9 @@ def test_backend_dev_uses_persona_repo_scope_instead_of_first_task_repo(tmp_path
 
     runtime.run_tick(backend_dev, ctx, run=run)
 
-    assert seen["cwd"] == backend_repo
-    assert "repo_label: backend" in seen["user_message"]
+    assert seen["cwd"] != backend_repo
+    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
+    assert "repo_label: backend_" in seen["user_message"]
 
 
 def test_dev_persona_repo_scope_does_not_override_mismatched_task_repo(tmp_path, monkeypatch):
@@ -589,6 +940,18 @@ def test_dev_persona_repo_scope_does_not_override_mismatched_task_repo(tmp_path,
     harness_repo = tmp_path / "hermes-agent"
     launcher_repo.mkdir()
     harness_repo.mkdir()
+    subprocess.run(["git", "init"], cwd=launcher_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=launcher_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=launcher_repo, check=True)
+    (launcher_repo / "README.md").write_text("launcher\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=launcher_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=launcher_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "init"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=harness_repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=harness_repo, check=True)
+    (harness_repo / "README.md").write_text("harness\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=harness_repo, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     task, run = make_task_and_run()
     task.affected_repos = [str(harness_repo)]
     dev = next(persona for persona in default_personas() if persona.id == "dev")
@@ -607,8 +970,9 @@ def test_dev_persona_repo_scope_does_not_override_mismatched_task_repo(tmp_path,
 
     runtime.run_tick(dev, ctx, run=run)
 
-    assert seen["cwd"] == harness_repo
-    assert "repo_label: hermes-agent" in seen["user_message"]
+    assert seen["cwd"] != harness_repo
+    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
+    assert "repo_label: hermes-agent_" in seen["user_message"]
 
 
 def test_dev_persona_can_use_latest_handoff_repo_when_affected_repos_empty(monkeypatch, tmp_path):
@@ -651,7 +1015,8 @@ def test_dev_persona_can_use_latest_handoff_repo_when_affected_repos_empty(monke
 
     runtime.run_tick(dev, ctx, run=run)
 
-    assert seen["cwd"] == Path(__file__).resolve().parents[2]
+    assert seen["cwd"] != Path(__file__).resolve().parents[2]
+    assert (seen["cwd"] / ".git").exists()
     assert "repo_label: hermes-agent" in seen["user_message"]
 
 
@@ -679,3 +1044,45 @@ def test_dev_persona_missing_affected_repo_fails_closed_before_home_cwd_fallback
         runtime.run_tick(dev, build_context(task, run), run=run)
 
     assert FakeAIAgent.instances == []
+
+
+def test_dev_grounding_overrides_default_blueprint_placeholder_repo(isolate_agent_runtime_root):
+    """Live regression 2026-07-03 (task_8e1e0832): on the default two-dev
+    blueprint a hermes-agent goal's backend_dev grounded in the
+    backend_implementation placeholder repo (EterniaBackend), so the
+    goal-named gate command ran file-not-found in the wrong tree."""
+
+    from hermes_time import now as _now
+
+    from agent_runtime.default_plan import ensure_default_mission_plan
+    from agent_runtime.models import AgentPersona, Task
+    from agent_runtime.persona_runtime import _stage_repo_scope_for_persona
+    from agent_runtime.states import TaskState
+
+    ts = _now()
+    task = Task(
+        id="task_ground",
+        title="Audit",
+        description="In the hermes-agent repo, audit and report.",
+        state=TaskState.RUNNING,
+        created_at=ts,
+        updated_at=ts,
+        requested_by="test",
+        affected_repos=["hermes-agent"],
+    )
+    plan = ensure_default_mission_plan(task)
+    plan.current_stage_id = "backend_implementation"
+    task.current_stage_id = "backend_implementation"
+    persona = AgentPersona(
+        id="backend_dev",
+        display_name="Backend Dev",
+        role="backend_dev",
+        model="stub",
+        provider="stub",
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="",
+    )
+    ctx = type("Ctx", (), {"task": task, "current_stage": None})()
+
+    assert _stage_repo_scope_for_persona(persona, ctx) == "hermes-agent"

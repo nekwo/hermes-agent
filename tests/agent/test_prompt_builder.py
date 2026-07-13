@@ -926,6 +926,43 @@ class TestFindHermesMd:
         (repo / ".git").mkdir()
         assert _find_hermes_md(repo) is None
 
+    def test_no_git_root_checks_cwd_only(self, tmp_path):
+        """Outside a git repo, only cwd is checked — parents are NOT walked.
+
+        Walking parents with no git root to stop the loop would climb all
+        the way to / and pick up a .hermes.md planted in /tmp, /home, or /
+        on a shared system — a cross-user prompt-injection vector.
+        """
+        from unittest.mock import patch
+
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        (parent / ".hermes.md").write_text("planted by another user")
+        cwd = parent / "work"
+        cwd.mkdir()
+        # No git root anywhere up the tree.
+        with patch("agent.prompt_builder._find_git_root", return_value=None):
+            assert _find_hermes_md(cwd) is None
+
+    def test_no_git_root_finds_in_cwd(self, tmp_path):
+        """Outside a git repo, a .hermes.md in cwd itself is still found."""
+        from unittest.mock import patch
+
+        (tmp_path / ".hermes.md").write_text("local rules")
+        with patch("agent.prompt_builder._find_git_root", return_value=None):
+            assert _find_hermes_md(tmp_path) == tmp_path / ".hermes.md"
+
+    def test_walks_parents_inside_git_repo(self, tmp_path):
+        """Inside a git repo, parent walk up to the git root still works."""
+        from unittest.mock import patch
+
+        (tmp_path / ".hermes.md").write_text("repo root rules")
+        sub = tmp_path / "a" / "b"
+        sub.mkdir(parents=True)
+        # Simulate cwd being inside a repo rooted at tmp_path.
+        with patch("agent.prompt_builder._find_git_root", return_value=tmp_path):
+            assert _find_hermes_md(sub) == tmp_path / ".hermes.md"
+
 
 class TestFindGitRoot:
     def test_finds_git_dir(self, tmp_path):
@@ -1216,6 +1253,46 @@ class TestEnvironmentHints:
         assert "Terminal backend: modal" in result
         assert "Linux 6.8.0" in result
         assert "/workspace" in result
+
+    def test_probe_remote_backend_imports_real_factory(self, monkeypatch):
+        """Regression for #53667: the probe imported a nonexistent
+        ``get_environment`` from ``tools.environments`` and always died with
+        ``ImportError: cannot import name 'get_environment'`` (cosmetic — it
+        only dropped the live backend description to a static fallback). The
+        real factory is ``_create_environment`` in ``tools.terminal_tool``;
+        the probe must import and call THAT, returning a parsed line instead
+        of None."""
+        import agent.prompt_builder as _pb
+
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        _pb._clear_backend_probe_cache()
+
+        class _FakeEnv:
+            def execute(self, cmd, timeout=None):
+                return {
+                    "returncode": 0,
+                    "output": (
+                        "os=Linux\nkernel=6.8.0\nhome=/root\n"
+                        "cwd=/workspace\nuser=root\n"
+                    ),
+                }
+
+        created = {}
+
+        def _fake_create_environment(*, env_type, **kwargs):
+            created["env_type"] = env_type
+            return _FakeEnv()
+
+        # Patch the REAL factory in tools.terminal_tool — the probe imports it
+        # locally, so the import itself must succeed (the bug was here).
+        import tools.terminal_tool as _tt
+        monkeypatch.setattr(_tt, "_create_environment", _fake_create_environment)
+
+        line = _pb._probe_remote_backend("docker")
+        assert created.get("env_type") == "docker"
+        assert line is not None
+        assert "Linux 6.8.0" in line
+        assert "root" in line
 
     def test_remote_backend_list_covers_known_sandboxes(self):
         """Regression guard: if someone adds a remote backend, they must list it here."""
@@ -1567,3 +1644,39 @@ class TestParallelToolCallGuidance:
 # =========================================================================
 
 
+
+
+class TestWindowsNativeToolingHint:
+    """The Windows-native tooling addendum must ship ALONGSIDE the upstream
+    bash hint (additive), telling the agent it can reach PowerShell/cmd from
+    its bash terminal — without editing or replacing the upstream statement."""
+
+    def _win_hints(self, monkeypatch):
+        import sys as _sys
+
+        import agent.prompt_builder as pb
+        # build_environment_hints() does a local `import sys`, which returns the
+        # same cached module object — patching sys.platform here reaches it.
+        monkeypatch.setattr(_sys, "platform", "win32")
+        monkeypatch.setattr(pb, "is_wsl", lambda: False)
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+        return pb.build_environment_hints()
+
+    def test_addendum_ships_with_upstream_hint(self, monkeypatch):
+        from agent.prompt_builder import (
+            _WINDOWS_BASH_SHELL_HINT,
+            _WINDOWS_NATIVE_TOOLING_HINT,
+        )
+        out = self._win_hints(monkeypatch)
+        # Upstream statement is still present verbatim (not replaced).
+        assert _WINDOWS_BASH_SHELL_HINT in out
+        # Fork addendum is appended.
+        assert _WINDOWS_NATIVE_TOOLING_HINT in out
+        assert "powershell.exe" in out
+        assert "cmd.exe /c" in out
+
+    def test_upstream_hint_string_unchanged(self):
+        """Guard: the upstream string must merge cleanly — keep it byte-stable."""
+        from agent.prompt_builder import _WINDOWS_BASH_SHELL_HINT
+        assert "NOT PowerShell or cmd.exe" in _WINDOWS_BASH_SHELL_HINT
+        assert "will NOT work" in _WINDOWS_BASH_SHELL_HINT

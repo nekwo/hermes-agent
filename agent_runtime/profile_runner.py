@@ -38,6 +38,11 @@ class AgentRunRequest:
     provider: str | None = None
     model: str | None = None
     api_mode: str | None = None
+    # Optional per-run reasoning-effort override (one of
+    # hermes_constants.VALID_REASONING_EFFORTS or "none"). None = inherit the
+    # global config default at the transport. Threaded into the agent's
+    # reasoning_config so a per-agent-instance choice actually takes effect.
+    reasoning_effort: str | None = None
     enabled_toolsets: list[str] | None = None
     disabled_toolsets: list[str] | None = None
     blocked_tool_names: list[str] | None = None
@@ -57,6 +62,11 @@ class AgentRunRequest:
     progress_callback: Callable[[dict[str, Any]], None] | None = None
     stream_callback: Callable[[str | None], None] | None = None
     agent_ready_callback: Callable[[Any], Callable[[], None] | None] | None = None
+    # Interactive clarify bridge: ``callback(question, choices) -> str``. On the
+    # operator/relay chat lane this is a NON-blocking capture (records the
+    # question and ends the turn) rather than the CLI's blocking human prompt;
+    # unset on autonomous runs so ``clarify`` stays inert there.
+    clarify_callback: Callable[[str, list[str] | None], str] | None = None
     runtime_root: Path | None = None
     workdir: Path | None = None
     stop_on_repeated_read_search: bool = False
@@ -75,6 +85,15 @@ class AgentRunResult:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+    # Canonical cache/reasoning buckets. ``input_tokens`` is already the uncached,
+    # full-price remainder (canonical usage subtracts these; see
+    # agent/usage_pricing.CanonicalUsage). Carrying them here keeps the accounting
+    # object complete end-to-end so downstream writers never have to reconstruct
+    # a lossy subset — the persona-chat bound-session record and the Launcher
+    # cache indicator both read from these.
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    reasoning_tokens: int | None = None
     latency_ms: int | None = None
     profile_timing: dict[str, int] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -170,12 +189,24 @@ class ProfileAgentRunner:
             )
             status_callback = _profile_status_callback(request, timing)
             construct_started = time.perf_counter()
+            # Per-run reasoning override → agent reasoning_config. Only passed
+            # when explicitly requested so an unset run keeps the current
+            # behavior (transport reads the global agent.reasoning_effort). The
+            # transport reads params["reasoning_config"] = {"enabled": .., "effort": ..}.
+            reasoning_kwargs: dict[str, Any] = {}
+            if request.reasoning_effort:
+                from hermes_constants import parse_reasoning_effort
+
+                reasoning_config = parse_reasoning_effort(request.reasoning_effort)
+                if reasoning_config is not None:
+                    reasoning_kwargs["reasoning_config"] = reasoning_config
             agent = self._agent_factory(
                 provider=runtime.get("provider") or request.provider,
                 model=runtime.get("model") or request.model or "",
                 api_mode=request.api_mode or runtime.get("api_mode"),
                 base_url=runtime.get("base_url"),
                 api_key=runtime.get("api_key"),
+                **reasoning_kwargs,
                 enabled_toolsets=request.enabled_toolsets,
                 disabled_toolsets=request.disabled_toolsets,
                 blocked_tool_names=request.blocked_tool_names,
@@ -191,6 +222,7 @@ class ProfileAgentRunner:
                 tool_progress_callback=_progress_adapter(request.progress_callback, "run.progress", guard=budget_guard),
                 tool_start_callback=_progress_adapter(request.progress_callback, "run.tool.started", guard=budget_guard),
                 tool_complete_callback=_progress_adapter(request.progress_callback, "run.tool.finished", guard=budget_guard),
+                clarify_callback=request.clarify_callback,
             )
             timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
             budget_guard.set_interrupt_callback(lambda reason: _interrupt_agent_for_budget(agent, reason))
@@ -693,6 +725,24 @@ def _progress_payload_from_callback(event_type: str, args: tuple[Any, ...], kwar
     return {"type": event_type, "phase": "tool", "step": "progress", "status": "running", "summary": "Run progress update"}
 
 
+def _agent_chat_target_label(tool_name: str | None, invocation: Any) -> str | None:
+    """Operator label for an agent-to-agent relay: who was messaged plus a
+    bounded excerpt of the briefing. Secret-bearing text is dropped whole —
+    the relay stays legible, never leaky."""
+
+    if tool_name != "agent_chat_send" or not isinstance(invocation, dict):
+        return None
+    persona = str(invocation.get("persona_id") or "").strip()
+    if not persona or _line_has_secret(persona):
+        return None
+    excerpt = " ".join(str(invocation.get("message") or "").split())
+    if excerpt and _line_has_secret(excerpt):
+        excerpt = ""
+    if len(excerpt) > 90:
+        excerpt = excerpt[:89] + "…"
+    return f"→ {persona}: {excerpt}" if excerpt else f"→ {persona}"
+
+
 def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation: Any = None) -> dict[str, Any]:
     payload = {"type": event_type, "phase": "tool", "step": "tool_started", "status": "started"}
     if tool_name:
@@ -700,6 +750,11 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
         payload["summary"] = f"Started tool {tool_name}"
     else:
         payload["summary"] = "Started tool"
+    agent_chat_label = _agent_chat_target_label(tool_name, invocation)
+    if agent_chat_label:
+        payload["target_label"] = agent_chat_label
+        payload["summary"] = f"Started tool {tool_name}: {agent_chat_label}"
+        return payload
     command_label = _safe_command_label(invocation)
     if command_label:
         payload["command_label"] = command_label
@@ -708,6 +763,11 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
     command_full = _safe_operator_command(invocation)
     if command_full:
         payload["command_full"] = command_full
+    target_label = _safe_operator_target(invocation)
+    if target_label:
+        payload["target_label"] = target_label
+        if tool_name and not command_label:
+            payload["summary"] = f"Started tool {tool_name}: {target_label}"
     skill_name = _safe_skill_tool_name(tool_name, invocation)
     if skill_name:
         payload["skill_name"] = skill_name
@@ -730,8 +790,15 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
         payload["skill_name"] = skill_name
     dev_work_payload = _dev_work_payload(tool_name, status=status, result=result, invocation=invocation)
     if dev_work_payload:
+        # No target echo for dev-work tools: changed_paths/changed_files ARE
+        # the target, and the raw invocation path may be machine-absolute.
         payload.update(dev_work_payload)
         return payload
+    target_label = (
+        _agent_chat_target_label(tool_name, invocation) or _safe_operator_target(invocation)
+    )
+    if target_label:
+        payload["target_label"] = target_label
     subject = f"tool {tool_name}" if tool_name else "tool"
     if duration_ms is not None:
         payload["summary"] = f"Finished {subject}: {status} in {duration_ms}ms"
@@ -755,8 +822,14 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
 def _dev_work_payload(tool_name: str | None, *, status: str, result: Any, invocation: Any) -> dict[str, Any] | None:
     normalized_tool = (tool_name or "").lower()
     if normalized_tool in {"patch", "apply_patch"}:
-        labels = _safe_file_labels(_candidate_file_values(result, None))
+        # The tool RESULT often returns no file list; the diff headers in the
+        # INVOCATION are the reliable record of what an edit call touched.
+        candidates = _candidate_file_values(result, None) or _patch_paths_from_invocation(invocation)
+        labels = _safe_file_labels(candidates)
+        operator_paths = _safe_operator_paths(candidates)
         payload: dict[str, Any] = {"phase": "dev_work", "step": "patch"}
+        if operator_paths:
+            payload["changed_paths"] = operator_paths
         if labels:
             joined = ", ".join(labels[:4]) + ("…" if len(labels) > 4 else "")
             payload["changed_files"] = labels
@@ -772,8 +845,12 @@ def _dev_work_payload(tool_name: str | None, *, status: str, result: Any, invoca
             payload["patch_summary"] = "Patch failed"
         return payload
     if normalized_tool in {"write_file", "edit_file", "file.write", "file.edit"}:
-        labels = _safe_file_labels(_candidate_file_values(result, invocation))
+        candidates = _candidate_file_values(result, invocation)
+        labels = _safe_file_labels(candidates)
+        operator_paths = _safe_operator_paths(candidates)
         payload = {"phase": "dev_work", "step": "write_file" if normalized_tool == "write_file" else "code_edit"}
+        if operator_paths:
+            payload["changed_paths"] = operator_paths
         if labels:
             joined = ", ".join(labels[:4]) + ("…" if len(labels) > 4 else "")
             payload["changed_files"] = labels
@@ -944,6 +1021,143 @@ def _safe_operator_output(tool_name: str | None, result: Any) -> str | None:
     return text
 
 
+_OPERATOR_TARGET_MAX = 300
+_OPERATOR_TARGET_PATH_KEYS = ("path", "file_path", "target_path", "file", "filename", "directory", "dir")
+_OPERATOR_TARGET_QUERY_KEYS = ("pattern", "query", "glob", "regex", "search", "name")
+# Diff/patch header forms the runner sees in the wild: the OpenAI apply_patch
+# envelope (*** Update|Add|Delete File: path), unified diff (+++ b/path), and
+# git headers (diff --git a/p b/p).
+_PATCH_HEADER_RE = re.compile(
+    r"^\*\*\* (?:Update|Add|Delete) File: (.+?)\s*$"
+    r"|^\+\+\+ b/(.+?)\s*$"
+    r"|^diff --git a/\S+ b/(\S+)\s*$",
+    re.MULTILINE,
+)
+
+
+# Bare-word markers for operator path/target scrubbing: stricter than
+# _OPERATOR_SECRET_MARKERS (bare "token", not just " token=") because a path
+# named private_token.dart must never surface, even relative.
+_OPERATOR_PATH_SENSITIVE_MARKERS = (
+    "secret", "token", "password", "passwd", "api_key", "apikey",
+    "authorization", "bearer", "credential", "cookie", "private_key", "sk-",
+)
+_ABSOLUTE_PATHISH_RE = re.compile(r"^([A-Za-z]:/|//|/|~)")
+
+
+def _operator_path_sensitive(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _OPERATOR_PATH_SENSITIVE_MARKERS)
+
+
+def _safe_operator_target(invocation: Any) -> str | None:
+    """Operator-console label for what a read/search/list tool acted on.
+
+    Operator-grade but path-disciplined: repo-relative paths surface verbatim;
+    absolute paths are trimmed to their trailing segments; anything carrying a
+    secret-looking token is dropped. Do NOT route into untrusted surfaces; the
+    Telegram-safe lane stays ``command_label``.
+    """
+
+    if not isinstance(invocation, dict):
+        return None
+
+    def _clean(value: Any) -> str | None:
+        text = " ".join(str(value).strip().split()).replace("\\", "/")
+        if not text or _line_has_secret(text) or _operator_path_sensitive(text):
+            return None
+        if _ABSOLUTE_PATHISH_RE.match(text):
+            segments = [segment for segment in text.split("/") if segment]
+            if len(segments) < 2:
+                return None
+            text = "…/" + "/".join(segments[-3:])
+        return text
+
+    path = next(
+        (
+            cleaned
+            for key in _OPERATOR_TARGET_PATH_KEYS
+            if isinstance(invocation.get(key), str) and invocation.get(key).strip()
+            if (cleaned := _clean(invocation.get(key))) is not None
+        ),
+        None,
+    )
+    query = next(
+        (
+            cleaned
+            for key in _OPERATOR_TARGET_QUERY_KEYS
+            if isinstance(invocation.get(key), str) and invocation.get(key).strip()
+            if (cleaned := _clean(invocation.get(key))) is not None
+        ),
+        None,
+    )
+    if query and path:
+        label = f"{query} in {path}"
+    else:
+        label = query or path
+    if not label:
+        return None
+    return f"{label[: _OPERATOR_TARGET_MAX - 1]}…" if len(label) > _OPERATOR_TARGET_MAX else label
+
+
+def _patch_paths_from_invocation(invocation: Any) -> list[str]:
+    """Changed-file paths recovered from the patch text itself.
+
+    The patch tool's RESULT frequently returns no file list ("changed-file
+    list unavailable"), but the file paths are right there in the diff headers
+    of the INVOCATION. Parsing them makes edit calls legible to the operator.
+    """
+
+    if not isinstance(invocation, dict):
+        return []
+    text = next(
+        (
+            invocation.get(key)
+            for key in ("patch", "diff", "patch_text", "input", "content")
+            if isinstance(invocation.get(key), str) and invocation.get(key).strip()
+        ),
+        None,
+    )
+    if not text:
+        return []
+    paths: list[str] = []
+    for match in _PATCH_HEADER_RE.finditer(text):
+        raw = next((group for group in match.groups() if group), None)
+        if not raw:
+            continue
+        cleaned = raw.strip().replace("\\", "/")
+        if not cleaned or cleaned == "/dev/null" or _line_has_secret(cleaned):
+            continue
+        if cleaned not in paths:
+            paths.append(cleaned)
+        if len(paths) >= 20:
+            break
+    return paths
+
+
+def _safe_operator_paths(values: list[Any]) -> list[str]:
+    """Operator-grade changed-path list: RELATIVE paths only, bounded.
+
+    Absolute paths never surface (machine-identifying); their basenames still
+    reach the operator through ``changed_files``. Secret-looking names drop.
+    """
+
+    paths: list[str] = []
+    for item in values:
+        text = " ".join(str(item or "").strip().split()).replace("\\", "/")
+        if not text or _line_has_secret(text) or _operator_path_sensitive(text):
+            continue
+        if _ABSOLUTE_PATHISH_RE.match(text):
+            continue
+        if len(text) > 200:
+            text = f"…{text[-199:]}"
+        if text not in paths:
+            paths.append(text)
+        if len(paths) >= 12:
+            break
+    return paths
+
+
 def _safe_tool_result_detail(tool_name: str | None, result: Any) -> str | None:
     if not isinstance(result, dict):
         return None
@@ -1017,18 +1231,30 @@ def _safe_label(value: Any) -> str | None:
 
 
 def _safe_reasoning_summary(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str | None:
-    candidates = [
+    """Reasoning text from a thinking callback, operator-grade.
+
+    Two positional shapes reach this: the subagent relay
+    ``("_thinking", first_line)`` and the structured emission
+    ``("reasoning.available", "_thinking", text, None)`` — ``"_thinking"`` is
+    the channel placeholder in both, never content. Paths are allowed
+    (operator console); secret-bearing lines are masked in place.
+    """
+
+    candidates: list[Any] = [
         kwargs.get("reasoning_summary"),
         kwargs.get("summary"),
         kwargs.get("reasoning"),
     ]
-    if len(args) > 1:
-        candidates.append(args[1])
+    candidates.extend(arg for arg in args[1:4] if arg != "_thinking")
     for value in candidates:
         if not isinstance(value, str):
             continue
-        text = " ".join(value.strip().split())
-        if not text or _looks_sensitive_or_pathish(text):
+        masked = " ".join(
+            "[redacted line — contained a secret]" if _line_has_secret(line) else line
+            for line in value.strip().splitlines()
+        )
+        text = " ".join(masked.split())
+        if not text:
             continue
         if len(text) > 500:
             text = f"{text[:497]}…"
@@ -1149,6 +1375,9 @@ def _normalize_result(result: Any, *, agent) -> AgentRunResult:
             input_tokens=result.get("input_tokens") or result.get("prompt_tokens"),
             output_tokens=result.get("output_tokens") or result.get("completion_tokens"),
             total_tokens=result.get("total_tokens"),
+            cache_read_tokens=result.get("cache_read_tokens"),
+            cache_write_tokens=result.get("cache_write_tokens"),
+            reasoning_tokens=result.get("reasoning_tokens"),
             raw=dict(result),
         )
     return AgentRunResult(

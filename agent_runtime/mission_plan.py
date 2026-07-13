@@ -7,6 +7,7 @@ from typing import Any, Iterable
 from hermes_time import now
 
 from .decision_schema import DecisionPayloadInvalid, DecisionType
+from .final_gate import goal_demands_exact_proof, goal_named_gate_commands
 from .models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
 from .proof_recipes import resolve_proof_recipe
 from .proof_rules import ProofType
@@ -128,6 +129,7 @@ def _plan_stage_from_task_stage(task: Task, stage: MissionPlanStage | TaskStage)
 
 
 def _task_stage_from_plan_stage(task: Task, stage: MissionPlanStage) -> TaskStage:
+    visual_gate = _plan_stage_has_visual_gate(stage)
     return TaskStage(
         id=stage.id,
         title=stage.title,
@@ -135,7 +137,7 @@ def _task_stage_from_plan_stage(task: Task, stage: MissionPlanStage) -> TaskStag
         status=stage.status,
         affected_paths=list(getattr(stage, "affected_paths", []) or []),
         acceptance_criteria=list(getattr(stage, "acceptance_criteria", []) or []),
-        test_plan=list(getattr(stage, "test_plan", []) or []),
+        test_plan=[] if visual_gate else list(getattr(stage, "test_plan", []) or []),
         audit_notes=list(getattr(stage, "audit_notes", []) or []),
         corrections=list(getattr(stage, "corrections", []) or []),
         requires_visual_proof=stage.requires_visual_proof,
@@ -200,6 +202,7 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
         from .default_plan import build_default_mission_plan
 
         plan = build_default_mission_plan(task)
+    _merge_handoff_observed_lane_requirement(plan, payload)
     release_stage_id = str(payload.get("release_stage_id") or "").strip()
     if release_stage_id:
         _set_current_stage(plan, release_stage_id)
@@ -207,6 +210,45 @@ def ensure_mission_plan(task: Task, payload: dict[str, Any] | None = None, *, ac
     task.mission_plan = plan
     _sync_task_stage_compat_from_plan(task)
     return plan
+
+
+def _merge_handoff_observed_lane_requirement(plan: MissionPlan, payload: dict[str, Any]) -> None:
+    handoff = payload.get("handoff_packet")
+    if not isinstance(handoff, dict):
+        return
+    proof_gate = handoff.get("proof_gate") if isinstance(handoff.get("proof_gate"), dict) else {}
+    observed: dict[str, Any] = {}
+    for key in ("observed_lane_required", "observed_lane_requirement", "observed_lane_expectation"):
+        if key in proof_gate:
+            observed[key] = proof_gate[key]
+    if not observed:
+        return
+    target = _stage_for_handoff(plan, handoff)
+    if target is None:
+        return
+    merged = dict(target.proof_gate or {})
+    merged.update(observed)
+    target.proof_gate = merged
+    target.updated_at = now()
+
+
+def _stage_for_handoff(plan: MissionPlan, handoff: dict[str, Any]) -> MissionPlanStage | None:
+    target_repo = _canonical_repo(str(handoff.get("target_repo") or ""))
+    target_owner = _canonical_owner(str(handoff.get("target_owner") or handoff.get("target_dev_persona") or ""))
+    proof_gate = handoff.get("proof_gate") if isinstance(handoff.get("proof_gate"), dict) else {}
+    recipe = str(proof_gate.get("proof_recipe_id") or proof_gate.get("recipe_id") or "").strip()
+    candidates = [
+        stage
+        for stage in plan.stages
+        if (not target_repo or stage.repo == target_repo)
+        and (not target_owner or _canonical_owner(stage.owner) == target_owner)
+    ]
+    if recipe:
+        recipe_match = next((stage for stage in candidates if stage.proof_recipe_id == recipe), None)
+        if recipe_match is not None:
+            return recipe_match
+    return next((stage for stage in candidates if stage.status in INCOMPLETE_STATUSES), None) or (candidates[0] if candidates else None)
+
 
 def validate_mission_plan(plan: MissionPlan) -> list[str]:
     errors: list[str] = []
@@ -266,8 +308,9 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
     projected: list[TaskStage] = []
     for typed in plan.stages:
         existing = by_id.get(typed.id)
+        visual_gate = _plan_stage_has_visual_gate(typed)
         test_plan = []
-        if typed.proof_recipe_id:
+        if typed.proof_recipe_id and not visual_gate:
             test_plan.append(f"proof_recipe:{typed.proof_recipe_id}")
         defaults = _legacy_stage_defaults(task, typed, plan)
         if existing is None:
@@ -278,7 +321,7 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
                 status=typed.status,
                 affected_paths=list(defaults.get("affected_paths") or []),
                 acceptance_criteria=list((plan.mission_intent.acceptance_criteria if plan.mission_intent else []) or []),
-                test_plan=test_plan or list(defaults.get("test_plan") or []),
+                test_plan=[] if visual_gate else test_plan or list(defaults.get("test_plan") or []),
                 requires_visual_proof=typed.requires_visual_proof,
                 created_at=typed.created_at or now(),
                 updated_at=typed.updated_at or now(),
@@ -292,7 +335,10 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
             existing.objective = typed.objective
             existing.status = typed.status
             existing.requires_visual_proof = typed.requires_visual_proof
-            if test_plan:
+            if visual_gate:
+                existing.test_plan = []
+                typed.test_plan = []
+            elif test_plan:
                 existing.test_plan = list(test_plan)
             elif defaults.get("test_plan") and not existing.test_plan:
                 existing.test_plan = list(defaults["test_plan"])
@@ -300,6 +346,10 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
                 existing.affected_paths = list(defaults["affected_paths"])
             existing.updated_at = typed.updated_at or existing.updated_at or now()
             for field in ("affected_paths", "acceptance_criteria", "test_plan", "audit_notes", "corrections"):
+                if field == "test_plan" and visual_gate:
+                    existing.test_plan = []
+                    typed.test_plan = []
+                    continue
                 typed_value = list(getattr(typed, field, []) or [])
                 if typed_value:
                     setattr(existing, field, typed_value)
@@ -310,6 +360,15 @@ def _sync_task_stage_compat_from_plan(task: Task) -> None:
     task.current_stage_id = plan.current_stage_id
     if plan.mission_intent:
         task.requires_visual_proof = bool(task.requires_visual_proof or any(stage.requires_visual_proof for stage in plan.stages))
+
+
+def _plan_stage_has_visual_gate(stage: MissionPlanStage) -> bool:
+    gate = getattr(stage, "proof_gate", {}) or {}
+    required = {str(item).strip().lower() for item in (gate.get("required_proof_types") or []) if str(item).strip()}
+    return bool(
+        getattr(stage, "requires_product_edit", None) is not True
+        and (getattr(stage, "requires_visual_proof", False) or gate.get("visual_required") is True or required & {"screenshot", "video"})
+    )
 
 
 def current_plan_stage(task: Task) -> MissionPlanStage | None:
@@ -428,7 +487,7 @@ def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_sto
     stage = current_plan_stage(task)
     if stage is None:
         return
-    if decision.type == DecisionType.PROPOSE_PATCH and actor in {"dev", "backend_dev"}:
+    if decision.type in {DecisionType.HAND_OFF, DecisionType.PROPOSE_PATCH} and actor in {"dev", "backend_dev"}:
         if stage.kind == "implementation" and stage.status in {StageStatus.READY, StageStatus.DRAFT, StageStatus.BLOCKED, StageStatus.REWORK}:
             stage.status = StageStatus.IMPLEMENTING
             stage.updated_at = now()
@@ -441,7 +500,7 @@ def mark_plan_stage_from_decision(task: Task, decision, *, actor: str, proof_sto
         if target.status in {StageStatus.DRAFT, StageStatus.READY, StageStatus.BLOCKED, StageStatus.REWORK}:
             target.status = StageStatus.IMPLEMENTING
             target.updated_at = now()
-    elif decision.type == DecisionType.REPORT_QA_VERDICT:
+    elif decision.type in {DecisionType.QA_VERDICT, DecisionType.REPORT_QA_VERDICT}:
         verdict = str(decision.payload.get("verdict") or "").strip()
         if verdict == "approved":
             ready, missing = blocking_stages_ready_for_qa(task, proof_store=proof_store)
@@ -499,6 +558,7 @@ def mission_plan_summary(task: Task) -> dict[str, Any] | None:
         "bindings": dict(plan.bindings),
         "binding_sources": dict(plan.binding_sources),
         "edges": list(plan.edges),
+        "agent_topology": dict(plan.agent_topology),
         "limits": dict(plan.limits),
         "stage_attempts": dict(plan.stage_attempts),
         "on_unhandled": plan.on_unhandled,
@@ -523,6 +583,9 @@ def mission_plan_summary(task: Task) -> dict[str, Any] | None:
                 "proof_gate": dict(getattr(stage, "proof_gate", {}) or {}),
                 "requires_product_edit": stage.requires_product_edit,
                 "requires_visual_proof": stage.requires_visual_proof,
+                "affected_paths": list(stage.affected_paths),
+                "acceptance_criteria": list(stage.acceptance_criteria),
+                "test_plan": list(stage.test_plan),
                 "depends_on": list(stage.depends_on),
                 "blocks_qa_until": stage.blocks_qa_until,
                 "proof_ids": list(stage.proof_ids),
@@ -575,6 +638,7 @@ def _plan_from_payload(task: Task, raw: dict[str, Any], *, existing: MissionPlan
         bindings={str(k): str(v) for k, v in (raw.get("bindings") if isinstance(raw.get("bindings"), dict) else existing.bindings).items()},
         binding_sources={str(k): str(v) for k, v in (raw.get("binding_sources") if isinstance(raw.get("binding_sources"), dict) else existing.binding_sources).items()},
         edges=list(raw.get("edges") if isinstance(raw.get("edges"), list) else existing.edges),
+        agent_topology=dict(raw.get("agent_topology") if isinstance(raw.get("agent_topology"), dict) else existing.agent_topology),
         limits=dict(raw.get("limits") if isinstance(raw.get("limits"), dict) else existing.limits),
         stage_attempts={str(k): int(v) for k, v in (raw.get("stage_attempts") if isinstance(raw.get("stage_attempts"), dict) else existing.stage_attempts).items()},
         on_unhandled=str(raw.get("on_unhandled") or existing.on_unhandled or "intervention"),
@@ -716,6 +780,9 @@ def _default_launcher_and_qa_stages(task: Task, intent: MissionIntent, *, depend
 
 
 def _legacy_stage_defaults(task: Task, typed: MissionPlanStage, plan: MissionPlan) -> dict[str, list[str]]:
+    exact = _exact_goal_proof_stage_defaults(task, typed)
+    if exact is not None:
+        return exact
     if _is_hermes_agent_no_edit_proof_stage(task, typed, plan):
         return _hermes_agent_no_edit_proof_defaults(task, typed, plan)
     if _is_hermes_agent_implementation(task, typed, plan):
@@ -734,6 +801,83 @@ def _legacy_stage_defaults(task: Task, typed: MissionPlanStage, plan: MissionPla
             "flutter test test/features/mission_control",
         ],
     }
+
+
+def _exact_goal_proof_stage_defaults(task: Task, typed: MissionPlanStage) -> dict[str, list[str]] | None:
+    if typed.owner not in {"dev", "backend_dev"} or typed.kind not in {"implementation", "proof_only"}:
+        return None
+    if not goal_demands_exact_proof(task):
+        return None
+    if not _exact_goal_proof_applies_to_repo(task, typed.repo):
+        return None
+    commands = goal_named_gate_commands(task, typed.repo)
+    if not commands:
+        return None
+    return {
+        "affected_paths": _extract_goal_repo_relative_paths(task),
+        "test_plan": commands,
+    }
+
+
+def _exact_goal_proof_applies_to_repo(task: Task, repo: str) -> bool:
+    stage_repo = _canonical_repo(repo)
+    if stage_repo not in {"EterniaLauncher", "EterniaBackend", "hermes-agent"}:
+        return False
+    pinned = _canonical_task_pinned_repos(task)
+    if pinned:
+        return len(set(pinned)) == 1 and stage_repo in pinned
+    repos = [
+        _canonical_repo(str(item))
+        for item in (getattr(task, "affected_repos", []) or [])
+        if str(item or "").strip()
+    ]
+    repos = [item for item in repos if item != "none"]
+    if repos and stage_repo not in repos:
+        return False
+    if len(set(repos)) > 1:
+        return False
+    return True
+
+
+def _extract_goal_repo_relative_paths(task: Task) -> list[str]:
+    intent = getattr(getattr(task, "mission_plan", None), "mission_intent", None)
+    text = " ".join(
+        [
+            str(getattr(task, "title", "") or ""),
+            str(getattr(task, "description", "") or ""),
+            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "non_goals", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "operator_notes", []) or [])),
+            str(getattr(intent, "title", "") or "") if intent is not None else "",
+            str(getattr(intent, "objective", "") or "") if intent is not None else "",
+            " ".join(str(item) for item in (getattr(intent, "acceptance_criteria", []) or [])) if intent is not None else "",
+            " ".join(str(item) for item in (getattr(intent, "non_goals", []) or [])) if intent is not None else "",
+        ]
+    )
+    found: list[str] = []
+    for match in re.findall(r"(?<![\w:/\\.-])(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+", text):
+        path = match.replace("\\", "/").rstrip(".,;:)]}")
+        first = path.split("/", 1)[0].lower()
+        if first in {"http", "https", "python", "pytest", "flutter", "dart", "npm", "pnpm"}:
+            continue
+        leaf = path.rsplit("/", 1)[-1]
+        if "." not in leaf and first not in {"agent_runtime", "assets", "docs", "integration_test", "lib", "scripts", "src", "test", "tests"}:
+            continue
+        if path and path not in found:
+            found.append(path)
+    return found[:8]
+
+
+def _canonical_task_pinned_repos(task: Task) -> list[str]:
+    meta = (getattr(task, "harness_self_heal", None) or {}).get("mission_goal_create")
+    if not isinstance(meta, dict):
+        return []
+    result: list[str] = []
+    for item in meta.get("repo_scope_pinned") or []:
+        repo = _canonical_repo(str(item))
+        if repo != "none" and repo not in result:
+            result.append(repo)
+    return result
 
 
 def _is_mission_control_launcher_implementation(task: Task, typed: MissionPlanStage, plan: MissionPlan) -> bool:

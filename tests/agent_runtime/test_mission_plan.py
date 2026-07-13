@@ -3,6 +3,7 @@ import pytest
 from hermes_time import now
 
 from agent_runtime.decision_schema import DecisionPayloadInvalid
+from agent_runtime.default_plan import build_default_mission_plan, ensure_default_mission_plan
 from agent_runtime.mission_plan import (
     attach_proofs_to_plan_stage,
     blocking_stages_ready_for_qa,
@@ -34,12 +35,133 @@ def make_task(**overrides):
 
 def assert_default_blueprint_plan(plan, task):
     assert plan.blueprint_id == "neko_two_dev_default"
+    # Graph-driven fork: scope, then two parallel dev branches. No Neko join stage —
+    # the harness waits for both branches (task done only when all stages pass).
     assert [stage.id for stage in plan.stages] == ["scope", "backend_implementation", "implement"]
+    by_id = {stage.id: stage for stage in plan.stages}
+    assert by_id["backend_implementation"].depends_on == ["scope"]
+    assert by_id["implement"].depends_on == ["scope"]
     assert plan.current_stage_id == "scope"
     assert task.current_stage_id == "scope"
     assert plan.bindings["neko_supervisor"] == "neko_supervisor"
     assert plan.bindings["backend_dev"] == "backend_dev"
     assert plan.bindings["dev"] == "dev"
+
+
+def test_running_default_plan_dispatches_from_graph_root_without_prepassing():
+    # De-hardwired: a RUNNING default goal is NOT pre-advanced by stage id. Dispatch
+    # starts at the graph root (scope); nothing is auto-passed, and the parallel dev
+    # branches are released by the dispatcher when scope passes.
+    task = make_task(state=TaskState.RUNNING)
+
+    plan = ensure_default_mission_plan(task)
+
+    stages = {stage.id: stage for stage in plan.stages}
+    assert plan.current_stage_id == "scope"
+    assert stages["scope"].status != StageStatus.PASSED
+    assert stages["backend_implementation"].status != StageStatus.PASSED
+    assert stages["implement"].status != StageStatus.PASSED
+
+
+def test_default_plan_skips_backend_branch_for_launcher_only_scope():
+    task = make_task(
+        title="Launcher-only trust probe",
+        description="Write the Launcher-side proof note only.",
+        affected_repos=["EterniaLauncher"],
+    )
+
+    plan = ensure_default_mission_plan(task)
+
+    stages = {stage.id: stage for stage in plan.stages}
+    assert stages["backend_implementation"].status == StageStatus.PASSED
+    assert stages["backend_implementation"].requires_product_edit is False
+    assert stages["backend_implementation"].proof_gate == {"required": False}
+    assert "out of scope" in " ".join(stages["backend_implementation"].audit_notes)
+    assert stages["implement"].status != StageStatus.PASSED
+
+
+def test_launcher_only_default_scope_pass_releases_launcher_without_resurrecting_backend():
+    from agent_runtime.blueprints.routing import apply_stage_outcome
+    from agent_runtime.blueprints.schema import StageOutcome
+
+    task = make_task(
+        title="Launcher-only trust probe",
+        description="Write the Launcher-side proof note only.",
+        affected_repos=["EterniaLauncher"],
+    )
+    plan = ensure_default_mission_plan(task)
+
+    target = apply_stage_outcome(task, "scope", StageOutcome.READY, reason="scope accepted")
+
+    stages = {stage.id: stage for stage in plan.stages}
+    assert target == "implement"
+    assert task.current_stage_id == "implement"
+    assert stages["backend_implementation"].status == StageStatus.PASSED
+    assert stages["implement"].status == StageStatus.IMPLEMENTING
+
+
+def test_launcher_only_default_plan_does_not_create_backend_repo_bundle():
+    from agent_runtime.repo_bundles import desired_bundles_for_task
+
+    task = make_task(
+        title="Launcher-only trust probe",
+        description="Write the Launcher-side proof note only.",
+        affected_repos=["EterniaLauncher"],
+    )
+    ensure_default_mission_plan(task)
+
+    bundles = desired_bundles_for_task(task)
+
+    assert [bundle.repo for bundle in bundles] == ["EterniaLauncher"]
+
+
+def test_default_plan_adds_qa_stage_when_goal_requires_qa_approval():
+    task = make_task(
+        title="Launcher trust probe with QA",
+        description="Write the Launcher-side proof note only. QA must approve the final evidence.",
+        acceptance_criteria=["QA must approve the exact command proof before closeout."],
+        affected_repos=["EterniaLauncher"],
+    )
+
+    plan = ensure_default_mission_plan(task)
+
+    stages = {stage.id: stage for stage in plan.stages}
+    assert [stage.id for stage in plan.stages] == ["scope", "backend_implementation", "implement", "qa_release"]
+    assert stages["backend_implementation"].status == StageStatus.PASSED
+    assert stages["implement"].blocks_qa_until is True
+    assert stages["qa_release"].owner == "qa"
+    assert stages["qa_release"].repo == "EterniaLauncher"
+    assert stages["qa_release"].depends_on == ["backend_implementation", "implement"]
+    assert stages["qa_release"].proof_gate == {
+        "required": True,
+        "minimum_status": "approved",
+        "required_proof_types": ["qa_verdict"],
+    }
+    assert plan.bindings["qa"] == "qa"
+
+
+def test_explicit_basic_blueprint_visual_no_edit_task_uses_screenshot_gate():
+    task = make_task(
+        title="Stage 46 visual proof certification",
+        description="Capture a fullscreen Mission Control screenshot proof through the launcher_qa MCP provider without product edits.",
+        acceptance_criteria=["A screenshot proof with type=screenshot is attached to the visual stage."],
+        non_goals=["Do not invoke an operator-side PowerShell proof script."],
+        requires_visual_proof=True,
+    )
+
+    plan = build_default_mission_plan(
+        task,
+        blueprint_id="neko_dev_qa_basic",
+        bindings={"lead": "persona:neko_supervisor", "builder": "persona:dev", "verifier": "persona:qa"},
+    )
+
+    stages = {stage.id: stage for stage in plan.stages}
+    implement = stages["implement"]
+    assert implement.kind == "proof_only"
+    assert implement.requires_visual_proof is True
+    assert implement.test_plan == []
+    assert implement.proof_gate["required_proof_types"] == ["screenshot"]
+    assert implement.proof_gate["visual_required"] is True
 
 
 def test_mission_lead_actor_resolves_blueprint_slot_binding():
@@ -88,6 +210,43 @@ def test_handoff_payload_does_not_synthesize_per_task_plan():
     assert not any(stage.id == "backend_contract_smoke" for stage in plan.stages)
 
 
+def test_handoff_payload_merges_observed_lane_requirement_into_existing_stage():
+    task = make_task(
+        title="Observed lane no-edit proof",
+        description="Run a no-product-edit cross-stack observed-lane proof.",
+        affected_repos=["EterniaBackend", "EterniaLauncher"],
+    )
+
+    plan = ensure_mission_plan(
+        task,
+        {
+            "objective": "Run backend observed-lane proof.",
+            "acceptance_criteria": [
+                "Backend observed_proof_ids must come from agent_tool_trace.",
+            ],
+            "affected_repos": ["EterniaBackend"],
+            "handoff_packet": {
+                "target_owner": "backend_dev",
+                "target_repo": "EterniaBackend",
+                "proof_gate": {
+                    "required": True,
+                    "recipe_id": "backend_contract_smoke",
+                    "observed_lane_required": True,
+                    "observed_lane_requirement": "agent_tool_trace/run.tool.finished must populate observed_proof_ids",
+                },
+            },
+        },
+        actor="neko_supervisor",
+    )
+
+    backend = next(stage for stage in plan.stages if stage.id == "backend_implementation")
+    # The explicit handoff packet's observed-lane requirement still merges onto the
+    # existing stage (generic packet merge). The proof_recipe_id assertion was dropped
+    # with the de-hardwiring: recipes are no longer injected by goal-text specialization.
+    assert backend.proof_gate["observed_lane_required"] is True
+    assert "agent_tool_trace" in backend.proof_gate["observed_lane_requirement"]
+
+
 def test_backend_no_product_edit_investigation_uses_default_blueprint_without_implicit_route():
     task = make_task(
         title="Investigate NSFW filter leakage hardening plan",
@@ -117,6 +276,13 @@ def test_backend_no_product_edit_investigation_uses_default_blueprint_without_im
 
     assert_default_blueprint_plan(plan, task)
     assert not any(stage.id == "backend_investigation" for stage in plan.stages)
+
+
+# Removed with the de-hardwiring: _specialize_default_no_edit_cross_stack_plan rewrote
+# the backend/launcher stages by id (kind=proof_only, harness-owned recipes) for
+# no-edit cross-stack goals. That stage-id specialization is gone — the graph carries
+# both dev nodes and each assigned agent runs and self-reports; proof recipes are not
+# injected by goal-text inference.
 
 
 def test_backend_product_hardening_nongoal_keeps_blueprint_authority():
@@ -261,6 +427,85 @@ def test_mission_control_launcher_plan_projects_focused_worker_hud_defaults():
         "flutter analyze lib/features/mission_control test/features/mission_control",
         "flutter test test/features/mission_control",
     ]
+
+
+def test_exact_proof_goal_projects_exact_stage_defaults_not_mission_control_flutter():
+    task = make_task(
+        title="Mission Control Harness exact proof trust probe",
+        description=(
+            "Write docs/scratch/e2e_trust_probe.md. "
+            "The final Harness-owned command proof must run exactly: echo e2e-trust-probe."
+        ),
+        acceptance_criteria=["Preserve Mission Control/Harness snapshots and archive evidence."],
+        non_goals=["Do not run Flutter analyze/tests."],
+        affected_repos=["EterniaLauncher"],
+    )
+
+    ensure_mission_plan(
+        task,
+        {
+            "mission_plan": {
+                "current_stage_id": "launcher_implementation",
+                "stages": [
+                    {
+                        "id": "launcher_implementation",
+                        "title": "Launcher Implementation",
+                        "objective": "Implement the narrow Mission Control trust probe file.",
+                        "owner": "dev",
+                        "repo": "EterniaLauncher",
+                        "kind": "implementation",
+                        "requires_product_edit": True,
+                    }
+                ],
+            }
+        },
+        actor="neko_supervisor",
+    )
+
+    stage = task.stages[0]
+    assert stage.affected_paths == ["docs/scratch/e2e_trust_probe.md"]
+    assert stage.test_plan == ["echo e2e-trust-probe"]
+
+
+def test_exact_proof_projection_reads_locked_mission_intent_after_description_rewrite():
+    task = make_task(
+        title="Mission Control Harness exact proof trust probe",
+        description="Create the concise Launcher trust-probe artifact.",
+        acceptance_criteria=["Launcher Dev attaches focused evidence and QA reviews it."],
+        affected_repos=["EterniaLauncher"],
+    )
+    task.mission_plan = MissionPlan(
+        enabled=True,
+        mission_intent=MissionIntent(
+            title="Mission Control Harness exact proof trust probe",
+            objective=(
+                "Write docs/scratch/e2e_trust_probe_qa.md. "
+                "The final Harness-owned command proof must run exactly: echo e2e-trust-probe-qa. "
+                "Do not run Flutter analyze/tests."
+            ),
+            acceptance_criteria=[],
+            source_task_id=task.id,
+        ),
+        current_stage_id="implement",
+        stages=[
+            MissionPlanStage(
+                id="implement",
+                title="Launcher Implementation",
+                objective="Implement the Launcher trust probe.",
+                owner="dev",
+                owner_slot="dev",
+                repo="EterniaLauncher",
+                kind="implementation",
+                requires_product_edit=True,
+            )
+        ],
+    )
+
+    ensure_mission_plan(task, {}, actor="neko_supervisor")
+
+    stage = task.stages[0]
+    assert stage.affected_paths == ["docs/scratch/e2e_trust_probe_qa.md"]
+    assert stage.test_plan == ["echo e2e-trust-probe-qa"]
 
 
 def test_launcher_post_media_plan_projects_focused_worker_hud_defaults():

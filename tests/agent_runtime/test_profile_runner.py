@@ -437,6 +437,61 @@ def test_progress_adapter_does_not_surface_output_for_non_terminal_tools():
     assert "output" not in events[0]
 
 
+def test_progress_adapter_records_target_for_read_and_search_tools():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.started")
+
+    cb("call_1", "read_file", {"path": "lib/features/library/petdex_menu.dart"})
+    cb("call_2", "search_files", {"pattern": "PetdexTile", "path": "lib/features/library"})
+
+    read_payload, search_payload = events
+    assert read_payload["target_label"] == "lib/features/library/petdex_menu.dart"
+    assert read_payload["summary"] == "Started tool read_file: lib/features/library/petdex_menu.dart"
+    assert search_payload["target_label"] == "PetdexTile in lib/features/library"
+    assert search_payload["summary"] == "Started tool search_files: PetdexTile in lib/features/library"
+
+
+def test_progress_adapter_recovers_patch_files_from_diff_headers():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.finished")
+
+    patch_text = (
+        "*** Begin Patch\n"
+        "*** Update File: lib/features/library/petdex_menu.dart\n"
+        "@@\n-old\n+new\n"
+        "*** Add File: test/features/library/petdex_menu_test.dart\n"
+        "+content\n"
+        "*** End Patch\n"
+    )
+    # Result carries NO file list — the live failure shape ("changed-file list
+    # unavailable"); the diff headers are the only record of the edit.
+    cb("call_1", "patch", {"patch": patch_text}, {"success": True})
+
+    payload = events[0]
+    assert payload["changed_paths"] == [
+        "lib/features/library/petdex_menu.dart",
+        "test/features/library/petdex_menu_test.dart",
+    ]
+    assert payload["changed_files"] == ["petdex_menu.dart", "petdex_menu_test.dart"]
+    assert payload["summary"].startswith("Patched 2 files:")
+
+
+def test_progress_adapter_recovers_patch_files_from_unified_diff():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.finished")
+
+    diff_text = (
+        "diff --git a/lib/a.dart b/lib/a.dart\n"
+        "--- a/lib/a.dart\n"
+        "+++ b/lib/a.dart\n"
+        "@@ -1 +1 @@\n-x\n+y\n"
+    )
+    cb("call_1", "apply_patch", {"diff": diff_text}, {"success": True})
+
+    assert events[0]["changed_paths"] == ["lib/a.dart"]
+    assert events[0]["changed_files"] == ["a.dart"]
+
+
 def test_progress_adapter_marks_string_error_lifecycle_result_failed():
     events = []
     cb = _progress_adapter(events.append, "run.tool.finished")
@@ -486,6 +541,12 @@ def test_progress_adapter_summarizes_patch_tool_result_without_raw_diff():
             "detail": "Changed files: mission_control_page.dart, mission_control_page_test.dart",
             "patch_summary": "Patched 2 files",
             "changed_files": ["mission_control_page.dart", "mission_control_page_test.dart"],
+            # Operator lane keeps the repo-RELATIVE paths (absolute paths and
+            # secret-looking names never make it in — see the write_file test).
+            "changed_paths": [
+                "lib/features/mission_control/mission_control_page.dart",
+                "test/features/mission_control/mission_control_page_test.dart",
+            ],
             "files_touched": 2,
         }
     ]
@@ -665,9 +726,30 @@ def test_progress_adapter_summarizes_reasoning_progress_without_raw_private_text
             "reasoning_summary": "Comparing proof gaps before QA handoff.",
         }
     ]
-    encoded = repr(events)
-    assert "C:/Users" not in encoded
-    assert "private_token" not in encoded
+
+
+def test_progress_adapter_reads_reasoning_text_from_structured_callback_shape():
+    """The conversation loop emits ("reasoning.available", "_thinking", text,
+    None) — args[1] is the channel placeholder, args[2] is the reasoning. The
+    adapter must record the text (paths included), never the placeholder, and
+    must mask secret-bearing lines in place instead of dropping the summary."""
+
+    events = []
+    cb = _progress_adapter(events.append, "run.progress")
+
+    cb(
+        "reasoning.available",
+        "_thinking",
+        "Reviewing docs/scratch/goal_turn_probe.md before the echo proof.\nexport api_key=sk-live-12345",
+        None,
+    )
+
+    assert len(events) == 1
+    summary = events[0]["reasoning_summary"]
+    assert "_thinking" not in summary
+    assert "docs/scratch/goal_turn_probe.md" in summary
+    assert "sk-live-12345" not in repr(events)
+    assert "[redacted line — contained a secret]" in summary
 
 
 class SlowInterruptibleAgent(FakeAgent):
@@ -875,3 +957,38 @@ def test_tool_lifecycle_finished_marks_timeout_exit_code_as_failed():
             "command_full": "pytest",
         }
     ]
+
+
+def test_normalize_result_carries_canonical_cache_and_reasoning():
+    # finalize_turn emits the full canonical usage in the run result dict; the
+    # normalizer must carry the cache/reasoning buckets through so downstream
+    # accounting (persona-chat bound session, Launcher cache indicator) reads a
+    # complete record rather than a lossy input/output-only subset.
+    from agent_runtime.profile_runner import AgentRunResult, _normalize_result
+
+    class _Agent:
+        session_id = "scratch_1"
+        provider = "openai-codex"
+        model = "gpt-5.6-luna"
+        base_url = "https://example.invalid/v1"
+
+    result = _normalize_result(
+        {
+            "final_response": "hi",
+            "messages": [],
+            "api_calls": 2,
+            "input_tokens": 25225,
+            "output_tokens": 36,
+            "total_tokens": 25261,
+            "cache_read_tokens": 1432576,
+            "cache_write_tokens": 300,
+            "reasoning_tokens": 128,
+        },
+        agent=_Agent(),
+    )
+
+    assert isinstance(result, AgentRunResult)
+    assert result.input_tokens == 25225  # uncached, full-price remainder
+    assert result.cache_read_tokens == 1432576
+    assert result.cache_write_tokens == 300
+    assert result.reasoning_tokens == 128

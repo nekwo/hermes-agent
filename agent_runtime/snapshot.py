@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
+import threading
 import time
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 
 from hermes_cli.profiles import available_profile_templates
 from hermes_time import now
@@ -16,40 +18,56 @@ from .blueprints.store import BlueprintStore, blueprint_summary
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .capabilities import capability_descriptors
 from .config import ensure_persisted_personas, load_agent_runtime_config
-from .daemon import read_daemon_status
+from .daemon import daemon_status_schema
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash, event_catalog
+from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
-from .events import CachedEventLog, EventLog
+from .events import CachedEventLog, EventLog, event_summary_missing, operator_event_summary
 from .migrations import effective_config_summary, migration_status
 from .mission_plan import mission_plan_summary, task_stage_records
 from .observability import build_observability
-from .operator_channels import operator_channel_summary
+from .operator_channels import (
+    OPERATOR_CHANNELS_SCHEMA_VERSION,
+    OPERATOR_CONVERSATION_SCHEMA_VERSION,
+    operator_channel_summary,
+)
 from .persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    active_persona_instance_agent_summaries,
     persona_assignment_store_enabled,
     persona_assignment_summary,
     persona_instance_runtime_enabled,
     persona_instance_summary,
 )
-from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
+from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _SECRET_RE, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
+from .persona_instance_identity import (
+    backed_persona_identity,
+    classify_orphan_persona_instances,
+    duplicate_persona_instance_groups,
+    identity_aliases_for_rows,
+)
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
-from .personas import blocked_tool_names, effective_toolsets
+from .resolution import resolution_payload, resolve_runtime, suspect_default_root
+from .personas import blocked_tool_names, effective_toolsets, seed_personas
 from .prompt_observability import snapshot_prompt_observability
 from .profile_readiness import profile_readiness_for_persona
 from .proof_gates import task_verdict_proof_satisfied
-from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_summary, simplified_phase_for_task
+from .realm_sync import read_realm_sync_sidecar
+from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary, runtime_instances_summary
 from .repo_context import resolve_affected_repo_workdir
 from .role_checklists import RoleChecklist, RoleChecklistStore, checklist_summary
 from .role_envelopes import RoleEnvelope, RoleEnvelopeStore, role_envelope_summary
 from .proof_batches import ProofBatch, ProofBatchStore, proof_batch_summary
 from .scope_control import issue_discovery_counts, untriaged_issue_discoveries
+from .simplified_contract import public_decision_type_value
 from .state_machine import MissionStateMachine
 from .serde import from_jsonable, to_jsonable
 from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
+from .steering import build_steer_actions
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RealmStore, RunStore, TaskStore, WorkspaceStore
 from .tool_visibility import (
     agent_hud_state_for_persona,
@@ -58,6 +76,14 @@ from .tool_visibility import (
     turn_tool_context_for_persona,
 )
 from .worker_sessions import WorkerSessionStore, worker_session_summary
+
+AGENT_TOPOLOGY_NODE_ID_CAP = 20
+STAGE_VERIFICATION_STAGE_CAP = 12
+STAGE_VERIFICATION_PROOF_ID_CAP = 8
+STAGE_VERIFICATION_PATH_CAP = 6
+_ARCHIVED_CONVERSATION_SECRET_RE = re.compile(
+    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
+)
 
 
 def _runtime_paths_diagnostic(available_personas: list) -> dict:
@@ -88,7 +114,97 @@ def _runtime_paths_diagnostic(available_personas: list) -> dict:
     return out
 
 
+# Concurrent core builds are strictly additive under the GIL — measured
+# 2026-07-09 on the live store: one warm build 3.3s, three concurrent builds
+# 8.8s EACH (the launcher's "snapshot build 9050ms" chip). Mission Control
+# boot fires hydrate + status polls together, so without coalescing every
+# boot request pays the whole storm. Builds on the default-store path are
+# therefore serialized and coalesced: a caller arriving while a build runs
+# waits and shares the NEXT build (never the in-flight one — its state may
+# predate the caller's arrival), so N concurrent requests cost at most two
+# sequential fast builds. Sharing copies via copy.deepcopy, NOT a JSON
+# round-trip: the core carries datetime objects, and a json.dumps here
+# raised TypeError and silently disabled sharing on the live store (found
+# 2026-07-09 — the unit fakes were JSON-safe). The builder deep-copies once
+# into the share slot and every waiter deep-copies out, so no two callers
+# ever alias one snapshot dict.
+_BUILD_COALESCE = threading.Condition()
+_build_coalesce_state: dict = {
+    "running": False,
+    "started": 0,
+    "done": 0,
+    "result": None,
+    "waiters": 0,
+}
+
+
 def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
+    custom_stores = any(
+        value is not None
+        for value in (
+            task_store,
+            run_store,
+            agent_store,
+            proof_store,
+            incident_store,
+            event_log,
+            worker_session_store,
+        )
+    )
+    if custom_stores:
+        # Injected stores (tests, doctors) must observe exactly their own
+        # fixtures — never a coalesced result built from the default stores.
+        return _build_snapshot_uncoalesced(
+            task_store=task_store,
+            run_store=run_store,
+            agent_store=agent_store,
+            proof_store=proof_store,
+            incident_store=incident_store,
+            event_log=event_log,
+            worker_session_store=worker_session_store,
+        )
+    state = _build_coalesce_state
+    with _BUILD_COALESCE:
+        # The first build STARTED at/after arrival is the one that satisfies
+        # this caller; an in-flight build began earlier and may miss writes
+        # this caller has already observed.
+        target = state["started"] + 1
+        while True:
+            if state["done"] >= target and state["result"] is not None:
+                payload = copy.deepcopy(state["result"])
+                if state["waiters"] == 0:
+                    state["result"] = None
+                return payload
+            if not state["running"]:
+                state["running"] = True
+                state["started"] += 1
+                generation = state["started"]
+                break
+            state["waiters"] += 1
+            _BUILD_COALESCE.wait()
+            state["waiters"] -= 1
+    result = None
+    try:
+        result = _build_snapshot_uncoalesced()
+        return result
+    finally:
+        with _BUILD_COALESCE:
+            state["running"] = False
+            if result is not None:
+                state["done"] = generation
+                state["result"] = None
+                if state["waiters"]:
+                    try:
+                        state["result"] = copy.deepcopy(result)
+                    except Exception:
+                        # Uncopyable core: waiters fall back to building
+                        # their own — never raise from finally (it would
+                        # replace the builder's own return value).
+                        state["result"] = None
+            _BUILD_COALESCE.notify_all()
+
+
+def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
     _build_started = time.perf_counter()
     task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
@@ -103,7 +219,12 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     cfg = load_agent_runtime_config()
-    agents = agent_store.list_all() or ensure_persisted_personas(cfg)
+    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
+    # Base-profile foundation: Mission Control shows the seeded store (base only). On a
+    # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
+    # also returns the dormant typed catalog for resolution and would surface mothballed
+    # pipeline personas that are not meant to be shown.
+    agents = agent_store.list_all() or seed_personas()
     incidents = incident_store.list_all()
     role_envelope_store = RoleEnvelopeStore(event_log=event_log)
     role_checklist_store = RoleChecklistStore(event_log=event_log)
@@ -116,19 +237,30 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     proof_batches = proof_batch_store.list_all()
     repo_bundles = repo_bundle_store.list_all()
     runtime_instances = runtime_instance_store.list_all()
+    archived_tasks = _archived_task_summaries()
     workspace_store = WorkspaceStore()
     realm_store = RealmStore()
     workspaces = workspace_store.list_all(include_archived=True)
     realms = realm_store.list_all(include_archived=True)
+    # Active scope names for the runtime situational HUD (the same realm/ws the
+    # launcher scope line renders); resolved once and fed to every lane's HUD.
+    active_workspace_name = next(
+        (getattr(w, "name", None) for w in workspaces if getattr(w, "id", None) == workspace_store.active_id()),
+        None,
+    )
+    active_realm_name = next(
+        (getattr(r, "name", None) for r in realms if getattr(r, "id", None) == realm_store.active_id()),
+        None,
+    )
     blueprint_runs = blueprint_run_store.list_all()
-    agent_summaries = [_agent_summary(a) for a in agents]
+    agent_summaries = [_agent_summary(a, include_tool_details=True) for a in agents]
     available_personas = _available_persona_summary(agents)
     proofs = []
     self_tests = []
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
         self_tests.extend(SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id))
-    daemon_status = read_daemon_status()
+    daemon_status = daemon_status_schema()
     recent_events = event_log.tail(20)
     active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
     active_workers = worker_session_store.find_active()
@@ -138,10 +270,17 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
     dirty_state = build_dirty_state(tasks=tasks, runs=runs, incidents=incidents, workers=workers, runtime_instances=runtime_instances)
     persona_assignments = []
     persona_instances = []
+    topology_persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
+    stage_verification_accountant = ProjectionAccountant("stage_verification")
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         persona_instances = instance_store.derive_from_workers(agents, workers)
+        topology_persona_instances = persona_instances
+        agent_summaries = [
+            *agent_summaries,
+            *active_persona_instance_agent_summaries(persona_instances, personas_by_id),
+        ]
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     session_db = _default_persona_session_db()
@@ -166,7 +305,18 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         "dirty_state": dirty_state,
         "daemon": daemon_status,
         "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "execution_mode": cfg.execution_mode,
+        "execution_mode": execution_mode,
+        # Single runtime-default authority, resolved + provenance-stamped, as a
+        # typed top-level block so surfaces (launcher model-switcher caption,
+        # `hermes harness config show`) report what agents actually follow
+        # without re-deriving the top-level-vs-agent_runtime precedence.
+        "runtime_default": {
+            "model": _safe_model_label(cfg.default_model),
+            "provider": _safe_model_label(cfg.default_provider),
+            "api_mode": cfg.default_api_mode,
+            "model_source": getattr(cfg, "default_model_source", "unset"),
+            "provider_source": getattr(cfg, "default_provider_source", "unset"),
+        },
         "runtime_config": effective_config_summary(cfg),
         "migration": migration_status(),
         "capabilities": capability_descriptors(),
@@ -174,8 +324,13 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             personas=agents,
             persona_instances=persona_instances,
             session_db=session_db,
+            tasks=tasks,
+            proof_store=proof_store,
+            daemon=daemon_status,
+            realm=active_realm_name,
+            workspace=active_workspace_name,
         ),
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=cfg.execution_mode, worker_sessions=workers),
+        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
         "tasks": [
             _task_summary(
@@ -194,6 +349,8 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
                 persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
                 repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
                 runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
+                persona_instances=topology_persona_instances,
+                stage_verification_accountant=stage_verification_accountant,
             )
             for t in tasks
         ],
@@ -210,16 +367,26 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
                 persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
                 repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
                 runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
+                persona_instances=topology_persona_instances,
                 workspaces=workspaces,
             )
             for t in tasks
         ],
-        "workspaces": [_workspace_summary(item, tasks=tasks) for item in workspaces],
-        "realms": [_realm_summary(item, workspaces=workspaces) for item in realms],
+        # Rows carry a resolved ``active`` flag alongside the top-level
+        # ``active_*_id`` keys — consumers (launcher scope switcher) key
+        # selection off the row flag and must not re-derive it.
+        "workspaces": [
+            _workspace_summary(item, tasks=tasks, active_id=workspace_store.active_id())
+            for item in workspaces
+        ],
+        "realms": [
+            _realm_summary(item, workspaces=workspaces, active_id=realm_store.active_id())
+            for item in realms
+        ],
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
-        "archived_tasks": _archived_task_summaries(),
+        "archived_tasks": archived_tasks,
         "agents": agent_summaries,
         "available_personas": available_personas,
         "blueprints": [blueprint_summary(bp) for bp in BlueprintStore().list()],
@@ -247,6 +414,10 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
             for instance in persona_instances
         ]
+        # Legacy persona-instance id -> canonical id aliases (durable
+        # reconciler registry + structurally derivable drift still live in
+        # this snapshot). Consumers key dedup on this instead of heuristics.
+        data["identity_map"] = identity_aliases_for_rows(data["persona_instances"])
         history_accountant = ProjectionAccountant("persona_chat_history")
         trace_accountant = ProjectionAccountant("persona_chat_trace")
         data["persona_chat_history"] = persona_chat_history_summary(
@@ -254,6 +425,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=history_accountant,
+            persona_assignments=persona_assignments,
         )
         data["persona_chat_trace"] = persona_chat_trace_summary(
             persona_instances=persona_instances,
@@ -261,11 +433,27 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=trace_accountant,
         )
-        data["operator_channels"] = operator_channel_summary(
+        conversation_accountant = ProjectionAccountant("operator_conversation")
+        live_operator_channels = operator_channel_summary(
             persona_instances=persona_instances,
             persona_chat_history=data["persona_chat_history"],
             persona_chat_trace=data["persona_chat_trace"],
+            tasks=tasks,
+            run_summaries=data["runs"],
+            accountant=conversation_accountant,
         )
+        live_channel_task_ids = {
+            str(channel.get("task_id") or "")
+            for channel in live_operator_channels
+            if channel.get("task_id")
+        }
+        data["operator_channels"] = [
+            *live_operator_channels,
+            *_archived_operator_channels(
+                archived_tasks,
+                live_task_ids=live_channel_task_ids,
+            ),
+        ]
         data["persona_assignments"] = {
             "active": [persona_assignment_summary(item) for item in persona_assignments if item.state in ACTIVE_ASSIGNMENT_STATES],
             "recent": [persona_assignment_summary(item) for item in persona_assignments[-50:]],
@@ -273,23 +461,31 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
         completeness = {
             "persona_chat_history": history_accountant.summary(),
             "persona_chat_trace": trace_accountant.summary(),
+            "operator_conversation": conversation_accountant.summary(),
         }
-        drop_samples = history_accountant.drop_samples() + trace_accountant.drop_samples()
+        drop_samples = (
+            history_accountant.drop_samples()
+            + trace_accountant.drop_samples()
+            + conversation_accountant.drop_samples()
+        )
     else:
         data["persona_instance_runtime"] = {"enabled": False}
         completeness = {}
         drop_samples = []
+    completeness["stage_verification"] = stage_verification_accountant.summary()
+    drop_samples.extend(stage_verification_accountant.drop_samples())
     data["parity"] = _parity_envelope(
         data,
         build_started=_build_started,
         last_event=recent_events[-1] if recent_events else None,
+        recent_events=recent_events,
         completeness=completeness,
         drop_samples=drop_samples,
     )
     return data
 
 
-def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples):
+def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples, recent_events=None):
     """The S0 observability envelope: provenance + completeness + parity warnings.
 
     Additive and self-describing — turns the snapshot's silent drops into reported
@@ -298,19 +494,39 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
     """
 
     last_ts = getattr(last_event, "ts", None) if last_event is not None else None
+    watermark = events_watermark(last_event_ts=last_ts)
+    resolution = resolve_runtime()
+    cfg = load_agent_runtime_config()
+    warnings = _parity_warnings(data)
+    warnings.extend(_event_summary_warnings(recent_events or []))
+    if suspect_default_root(resolution):
+        warnings.append(
+            {
+                "code": "suspect_default_root",
+                "detail": "runtime root resolved through the default layer, but no tasks/ directory exists; check runtime-root pins",
+            }
+        )
     return {
         "envelope_version": PARITY_ENVELOPE_VERSION,
         "contract_version": 38,
         "generated_at": data.get("generated_at"),
+        "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
+        "redaction_observed": _redaction_observed(data),
         "build_ms": int(max(0.0, (time.perf_counter() - build_started)) * 1000),
-        "watermark": events_watermark(last_event_ts=last_ts),
+        "snapshot_bytes": _snapshot_payload_size(data),
+        "event_log_bytes": int(watermark.get("event_offset") or 0),
+        "projection_age_ms": _projection_age_ms(last_ts),
+        "watermark": watermark,
         "runtime_root": _runtime_root_identity(),
+        "resolution": resolution_payload(resolution),
         "profile": _runtime_profile_identity(),
         "capabilities": [
             "goal_create",
             "mission_level_state",
+            "agent_topology",
             "mission_flow_timeline",
             "proof_gate_state",
+            "stage_verification",
             "operator_capabilities",
         ],
         "freshness": {
@@ -320,8 +536,32 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         },
         "completeness": completeness,
         "drops": drop_samples,
-        "warnings": _parity_warnings(data),
+        "warnings": warnings,
     }
+
+
+def _snapshot_payload_size(data) -> int:
+    try:
+        return len(json.dumps(to_jsonable(data), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    except Exception:
+        return 0
+
+
+def _projection_age_ms(last_event_ts) -> int | None:
+    if last_event_ts is None:
+        return None
+    try:
+        if isinstance(last_event_ts, datetime):
+            ts = last_event_ts
+        else:
+            text = str(last_event_ts)
+            ts = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        current = now()
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=current.tzinfo)
+        return max(0, int((current - ts.astimezone(current.tzinfo)).total_seconds() * 1000))
+    except Exception:
+        return None
 
 
 def _runtime_root_identity() -> dict:
@@ -359,6 +599,65 @@ def _parity_warnings(data) -> list[dict]:
         return warnings
 
     instances = data.get("persona_instances") or []
+    for group in duplicate_persona_instance_groups(instances):
+        warnings.append(
+            {
+                "code": "duplicate_persona_instance",
+                "entity_id": group["canonical_id"],
+                "detail": (
+                    f"{len(group['instance_ids'])} live persona-instance rows alias to one canonical id; "
+                    "run `harness persona-instance reconcile`"
+                ),
+                "instance_ids": group["instance_ids"],
+            }
+        )
+
+    # Orphan / held persona-instance accounting: rows whose backing persona/profile is
+    # absent (or a mothballed role) project as phantom "on level" agents. Surface them
+    # the same way duplicate rows are surfaced so nothing is silently dropped — the
+    # reconciler prunes (archives) the prunable ones; held rows are protected and shown.
+    template_names = [
+        name
+        for row in (data.get("available_personas") or [])
+        if isinstance(row, dict)
+        for name in (str((row or {}).get("hermes_profile") or "").strip(),)
+        if name
+    ]
+    backed_ids, backed_profiles = backed_persona_identity(
+        agents=data.get("agents") or [],
+        profile_names=template_names,
+    )
+    orphan_classes = classify_orphan_persona_instances(
+        instances,
+        backed_persona_ids=backed_ids,
+        backed_profile_names=backed_profiles,
+        profile_catalog_authoritative=bool(template_names),
+    )
+    for entry in orphan_classes["prunable"]:
+        warnings.append(
+            {
+                "code": "orphaned_persona_instance",
+                "entity_id": entry["persona_instance_id"],
+                "reason": entry["reason"],
+                "detail": (
+                    f"persona instance '{entry['persona_instance_id']}' has no backing persona/profile "
+                    f"({entry['reason']}) and renders as a phantom agent; "
+                    "run `harness persona-instance reconcile [--dry-run]`"
+                ),
+            }
+        )
+    for entry in orphan_classes["held"]:
+        warnings.append(
+            {
+                "code": "held_orphan_persona_instance",
+                "entity_id": entry["persona_instance_id"],
+                "reason": entry["reason"],
+                "detail": (
+                    f"persona instance '{entry['persona_instance_id']}' is orphan-shaped but protected "
+                    f"from prune ({entry['reason']})"
+                ),
+            }
+        )
     instance_personas = {
         _canonical_persona_id(inst.get("persona_id")) for inst in instances if isinstance(inst, dict)
     }
@@ -380,6 +679,60 @@ def _parity_warnings(data) -> list[dict]:
                     "detail": "trace row has no matching persona_instance; the launcher may orphan it",
                 }
             )
+
+    chat_rows = [
+        row for row in data.get("persona_chat_history") or [] if isinstance(row, dict)
+    ]
+    for row in chat_rows:
+        for field in ("created_at", "updated_at"):
+            value = row.get(field)
+            if value is not None and _parse_iso_timestamp(value) is None:
+                warnings.append(
+                    {
+                        "code": "persona_chat_history.non_iso_timestamp",
+                        "entity_id": row.get("session_id"),
+                        "detail": f"persona_chat_history.{field} is not an ISO-8601 timestamp",
+                    }
+                )
+                break
+
+    chat_latest_by_persona: dict[str, datetime] = {}
+    mission_latest_by_persona: dict[str, tuple[datetime, str | None]] = {}
+    for row in chat_rows:
+        persona_id = _canonical_persona_id(row.get("persona_id")) or ""
+        if not persona_id:
+            continue
+        timestamp = _parse_iso_timestamp(row.get("updated_at")) or _parse_iso_timestamp(row.get("created_at"))
+        if timestamp is None:
+            continue
+        if row.get("kind") == "mission" or row.get("live_mission") is True:
+            current = mission_latest_by_persona.get(persona_id)
+            if current is None or timestamp > current[0]:
+                mission_latest_by_persona[persona_id] = (timestamp, row.get("session_id"))
+        else:
+            current = chat_latest_by_persona.get(persona_id)
+            if current is None or timestamp > current:
+                chat_latest_by_persona[persona_id] = timestamp
+    build_moment = data.get("generated_at")
+    if not isinstance(build_moment, datetime):
+        build_moment = _parse_iso_timestamp(build_moment)
+    for persona_id, (mission_time, session_id) in mission_latest_by_persona.items():
+        chat_time = chat_latest_by_persona.get(persona_id)
+        if chat_time is None or mission_time <= chat_time:
+            continue
+        # Mission rows anchor to the persisted assignment created_at, which is
+        # legitimately newer than every chat right after a mission is assigned.
+        # The regression this guard exists for is BUILD-TIME restamping — only a
+        # mission timestamp hugging the snapshot's own generated_at is drift.
+        if build_moment is not None and abs((mission_time - build_moment).total_seconds()) > _LIVE_MISSION_RESTAMP_EPSILON_SECONDS:
+            continue
+        warnings.append(
+            {
+                "code": "persona_chat_history.live_mission_shadow",
+                "entity_id": session_id,
+                "detail": "mission chat-history row tracks snapshot build time and shadows every real chat for the persona",
+            }
+        )
 
     channels = data.get("operator_channels")
     if channels is None:
@@ -420,12 +773,98 @@ def _parity_warnings(data) -> list[dict]:
                 "detail": "summary reports open tasks but no task rows were mapped",
             }
         )
+    try:
+        threshold = int(getattr(load_agent_runtime_config(), "open_incident_warning_threshold", 100))
+    except Exception:
+        threshold = 100
+    try:
+        open_incidents = int(summary.get("open_incidents") or 0)
+    except Exception:
+        open_incidents = 0
+    if threshold > 0 and open_incidents > threshold:
+        warnings.append(
+            {
+                "code": "open_incident_budget_exceeded",
+                "detail": f"summary reports {open_incidents} open incidents, above the configured budget of {threshold}",
+                "count": open_incidents,
+                "threshold": threshold,
+            }
+        )
+    return warnings
+
+
+# A mission row anchored to its assignment's persisted created_at only matches
+# the snapshot's own build moment in the transient poll right after assignment;
+# a timestamp that hugs generated_at on every build is the restamping regression.
+_LIVE_MISSION_RESTAMP_EPSILON_SECONDS = 10.0
+
+
+def _parse_iso_timestamp(value) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _redaction_observed(value) -> dict[str, int]:
+    counts: dict[str, int] = {}
+
+    def visit(item) -> None:
+        if isinstance(item, dict):
+            marker = item.get("would_redact")
+            if isinstance(marker, dict):
+                for reason in marker.values():
+                    key = str(reason or "unknown").strip() or "unknown"
+                    counts[key] = counts.get(key, 0) + 1
+            elif isinstance(marker, str) and marker.strip():
+                key = marker.strip()
+                counts[key] = counts.get(key, 0) + 1
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return counts
+
+
+def _event_summary_warnings(events) -> list[dict]:
+    warnings: list[dict] = []
+    for event in events:
+        try:
+            missing = event_summary_missing(event)
+        except Exception:
+            missing = False
+        if not missing:
+            continue
+        warnings.append(
+            {
+                "code": "event_summary_missing",
+                "event_type": getattr(event, "type", None),
+                "task_id": getattr(event, "task_id", None),
+                "run_id": getattr(event, "run_id", None),
+                "detail": "operator-visible event is missing a redaction-safe summary",
+            }
+        )
     return warnings
 
 
 def write_snapshot(snapshot: dict | None = None) -> dict:
     snapshot = snapshot or build_snapshot()
     atomic_json_write(paths.snapshot_path(), to_jsonable(snapshot), indent=2, sort_keys=True)
+    cfg = load_agent_runtime_config()
+    read_model_cfg = getattr(cfg, "read_model", None)
+    if bool(getattr(read_model_cfg, "enabled", False)):
+        from .read_model import ReadModel
+
+        watermark = (snapshot.get("parity") or {}).get("watermark") or {}
+        ReadModel().apply_full_rebuild(snapshot, watermark=watermark)
     return snapshot
 
 
@@ -504,16 +943,32 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
     persona_assignments = _archived_persona_assignment_summaries(batch_dir, task_id) if batch_dir is not None else []
     repo_bundles = _archived_repo_bundle_summaries(batch_dir, task_id) if batch_dir is not None else []
     incident_ids = raw.get("incident_ids") if isinstance(raw.get("incident_ids"), list) else raw.get("open_incident_ids") if isinstance(raw.get("open_incident_ids"), list) else []
-    recent_events = _archived_transcript_events(task_id, runs, proofs)
+    archive_events = _archived_event_log_events(batch_dir, task_id) if batch_dir is not None else []
+    recent_events = _dedupe_archived_events(
+        [
+            *_archived_transcript_events(task_id, runs, proofs),
+            *archive_events,
+        ]
+    )[-80:]
     persona_timing_summaries = _persona_timing_summaries(runs)
     return {
         "task_id": task_id,
+        "goal_id": str(raw.get("goal_id") or raw.get("mission_goal_id") or "").strip() or None,
         "title": str(raw.get("title") or "Archived mission"),
+        "description": str(raw.get("description") or "").strip() or None,
+        "routing_scope": raw.get("routing_scope") if isinstance(raw.get("routing_scope"), dict) else None,
+        "acceptance_criteria": [
+            str(item)
+            for item in (raw.get("acceptance_criteria") or [])
+            if isinstance(item, str) and item.strip()
+        ][:20],
         "state": "archived",
         "original_state": original_state,
         "archive_batch": archive_batch,
         "archive_reason": reason,
         "archived_at": archived_at,
+        "created_at": raw.get("created_at"),
+        "updated_at": raw.get("updated_at"),
         "runs": runs,
         "persona_timing_summaries": persona_timing_summaries,
         "proof_summaries": proofs,
@@ -544,6 +999,276 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
             proof_batches=proof_batches,
         ),
     }
+
+
+def _archived_operator_channels(archived_tasks: list[dict], *, live_task_ids: set[str] | None = None, limit: int = 25) -> list[dict]:
+    live_task_ids = live_task_ids or set()
+    channels: list[dict] = []
+    for archived in archived_tasks[:limit]:
+        task_id = str(archived.get("task_id") or "").strip()
+        if not task_id or task_id in live_task_ids:
+            continue
+        channel = _archived_operator_channel(archived)
+        if channel is not None:
+            channels.append(channel)
+    return channels
+
+
+def _archived_operator_channel(archived: dict) -> dict | None:
+    task_id = str(archived.get("task_id") or "").strip()
+    if not task_id:
+        return None
+    goal_id = str(archived.get("goal_id") or "").strip() or None
+    channel_id = f"neko_supervisor::archived:{task_id}"
+    messages: list[dict] = []
+    goal_message = _archived_goal_input_message(archived, channel_id=channel_id)
+    if goal_message is not None:
+        messages.append(goal_message)
+    for index, assignment in enumerate(archived.get("persona_assignments") or []):
+        if isinstance(assignment, dict):
+            message = _archived_assignment_message(assignment, channel_id=channel_id, index=index)
+            if message is not None:
+                messages.append(message)
+    for index, event in enumerate(archived.get("recent_events") or []):
+        if isinstance(event, dict):
+            message = _archived_event_message(event, channel_id=channel_id, index=index)
+            if message is not None:
+                messages.append(message)
+    messages.sort(key=_archived_conversation_message_sort_key)
+    messages = _dedupe_archived_conversation_messages(messages)
+    for seq, message in enumerate(messages, start=1):
+        message["seq"] = seq
+    updated_at = _latest_archived_message_timestamp(messages) or archived.get("updated_at") or archived.get("archived_at")
+    conversation_status = "complete" if messages else "incomplete"
+    incomplete_reason = None if messages else "Archived task did not contain projectable conversation messages."
+    conversation = {
+        "schema_version": OPERATOR_CONVERSATION_SCHEMA_VERSION,
+        "thread_id": channel_id,
+        "goal_id": goal_id,
+        "task_id": task_id,
+        "owner_persona_id": "neko_supervisor",
+        "persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "session_id": None,
+        "root_thread_id": channel_id,
+        "parent_thread_id": None,
+        "title": _archived_conversation_text(archived.get("title"), limit=240) or "Archived mission",
+        "state": "archived",
+        "updated_at": updated_at,
+        "status": conversation_status,
+        "incomplete_reason": incomplete_reason,
+        "messages": messages,
+    }
+    return {
+        "schema_version": OPERATOR_CHANNELS_SCHEMA_VERSION,
+        "channel_id": channel_id,
+        "persona_id": "neko_supervisor",
+        "persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "session_id": None,
+        "task_id": task_id,
+        "goal_id": goal_id,
+        "display_name": "Neko Supervisor",
+        "state": "archived",
+        "mode": "archived_goal",
+        "source_instance_ids": [],
+        "history": None,
+        "trace": None,
+        "conversation": conversation,
+        "conversation_status": conversation_status,
+        "message_count": len(messages),
+        "trace_count": 0,
+        "tool_trace_count": 0,
+        "warnings": [],
+        "archived": True,
+        "archive_batch": archived.get("archive_batch"),
+        "archive_reason": archived.get("archive_reason"),
+        "archived_at": archived.get("archived_at"),
+        "updated_at": updated_at,
+    }
+
+
+def _archived_goal_input_message(archived: dict, *, channel_id: str) -> dict | None:
+    task_id = str(archived.get("task_id") or "").strip()
+    title = _archived_conversation_text(archived.get("title"), limit=500) or "Archived mission"
+    parts = [f"Goal: {title}"]
+    description = _archived_conversation_text(archived.get("description"), limit=4000)
+    if description:
+        parts.append(f"Objective: {description}")
+    acceptance = [
+        item
+        for item in (
+            _archived_conversation_text(value, limit=500)
+            for value in (archived.get("acceptance_criteria") or [])
+        )
+        if item
+    ]
+    if acceptance:
+        parts.append("Acceptance:\n" + "\n".join(f"- {item}" for item in acceptance))
+    return {
+        "id": f"{channel_id}:goal_input:{task_id}",
+        "seq": 0,
+        "timestamp": archived.get("created_at") or archived.get("archived_at"),
+        "actor_persona_id": "operator",
+        "actor_instance_id": None,
+        "target_persona_id": "neko_supervisor",
+        "target_persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "role": "operator",
+        "kind": "goal_input",
+        "status": "delivered",
+        "display_title": "",
+        "display_text": "\n\n".join(parts),
+        "redaction_status": "safe",
+        "refs": {"task_id": task_id, "goal_id": archived.get("goal_id"), "source": "deleted_archive"},
+    }
+
+
+def _archived_assignment_message(assignment: dict, *, channel_id: str, index: int) -> dict | None:
+    target_persona_id = str(assignment.get("persona_id") or "agent").strip() or "agent"
+    title = _archived_conversation_text(assignment.get("title"), limit=240)
+    prompt = _archived_conversation_text(assignment.get("message"), limit=1200)
+    if not title and not prompt:
+        return None
+    parts = [f"Prompted {target_persona_id}."]
+    if title:
+        parts.append(f"Stage: {title}")
+    if prompt:
+        parts.append(f"Prompt: {prompt}")
+    proof_targets = _archived_conversation_list(assignment.get("proof_targets"), limit=160)
+    if proof_targets:
+        parts.append("Proof expected: " + "; ".join(proof_targets))
+    allowed_decisions = _archived_conversation_list(assignment.get("allowed_decisions"), limit=80)
+    if allowed_decisions:
+        parts.append("Allowed decisions: " + ", ".join(allowed_decisions))
+    refs = {"source": "persona_assignment"}
+    for key in ("id", "assignment_id", "task_id", "goal_id", "stage_id", "persona_instance_id"):
+        value = str(assignment.get(key) or "").strip()
+        if value:
+            refs["assignment_id" if key == "id" else key] = value
+    return {
+        "id": f"{channel_id}:assignment:{refs.get('assignment_id', index)}",
+        "seq": 0,
+        "timestamp": assignment.get("created_at") or assignment.get("updated_at"),
+        "actor_persona_id": "neko_supervisor",
+        "actor_instance_id": f"archived:{refs.get('task_id', 'task')}:neko_supervisor",
+        "target_persona_id": target_persona_id,
+        "target_persona_instance_id": assignment.get("persona_instance_id"),
+        "role": "agent",
+        "kind": "handoff",
+        "status": str(assignment.get("state") or "delivered"),
+        "display_title": "Subagent prompt",
+        "display_text": "\n".join(parts),
+        "redaction_status": "safe",
+        "refs": refs,
+    }
+
+
+def _archived_event_message(event: dict, *, channel_id: str, index: int) -> dict | None:
+    event_type = str(event.get("type") or "").strip()
+    if event_type == "proof.attached":
+        text = _archived_conversation_text(event.get("summary"), limit=1200)
+        kind = "proof"
+        title = "Proof update"
+        role = "proof"
+    elif event_type in {"run.progress", "run.decision"}:
+        text = _archived_conversation_text(
+            event.get("reasoning_summary") or event.get("rationale") or event.get("summary"),
+            limit=1200,
+        )
+        kind = "final" if event_type == "run.decision" or str(event.get("status") or "") in {"completed", "passed", "approved"} else "agent_update"
+        title = "Final update" if kind == "final" else "Neko update"
+        role = "agent"
+    else:
+        return None
+    if not text:
+        return None
+    persona_id = str(event.get("persona_id") or "neko_supervisor").strip() or "neko_supervisor"
+    refs = {"source": "deleted_archive", "event_type": event_type}
+    for key in ("task_id", "run_id", "proof_id", "stage_id"):
+        value = str(event.get(key) or "").strip()
+        if value:
+            refs[key] = value
+    return {
+        "id": f"{channel_id}:event:{event_type}:{refs.get('run_id') or refs.get('proof_id') or index}",
+        "seq": 0,
+        "timestamp": event.get("ts"),
+        "actor_persona_id": persona_id,
+        "actor_instance_id": None,
+        "role": role,
+        "kind": kind,
+        "status": str(event.get("status") or "recorded"),
+        "display_title": title,
+        "display_text": text,
+        "redaction_status": "safe",
+        "refs": refs,
+    }
+
+
+def _archived_conversation_text(value, *, limit: int) -> str | None:
+    text = str(value or "").replace("\x00", " ")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Mask secret-bearing lines in place instead of dropping the whole message —
+    # archived transcripts stay legible; only the offending line is withheld.
+    lines = [
+        "[redacted line — contained a secret]"
+        if _ARCHIVED_CONVERSATION_SECRET_RE.search(line)
+        else " ".join(line.split())
+        for line in text.split("\n")
+    ]
+    normalized = "\n".join(lines).strip()
+    normalized = re.sub(r"\n{4,}", "\n\n\n", normalized)
+    if not normalized:
+        return None
+    return normalized[:limit].rstrip()
+
+
+def _archived_conversation_list(value, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = [_archived_conversation_text(item, limit=limit) for item in value]
+    return [item for item in items if item][:8]
+
+
+def _archived_conversation_message_sort_key(message: dict) -> tuple[int, str, str]:
+    if message.get("kind") == "goal_input":
+        return (0, "", str(message.get("id") or ""))
+    parsed = _parse_archived_time(message.get("timestamp"))
+    if parsed is not None:
+        return (1, parsed.isoformat(), str(message.get("id") or ""))
+    return (2, str(message.get("timestamp") or ""), str(message.get("id") or ""))
+
+
+def _dedupe_archived_conversation_messages(messages: list[dict]) -> list[dict]:
+    seen: set[tuple[str, str]] = set()
+    seen_updates: set[str] = set()
+    deduped: list[dict] = []
+    for message in messages:
+        text = str(message.get("display_text") or "")
+        if message.get("kind") in {"agent_update", "final"}:
+            if text in seen_updates:
+                continue
+            seen_updates.add(text)
+        key = (str(message.get("kind") or ""), str(message.get("display_text") or ""))
+        if key in seen and message.get("kind") in {"agent_update", "final"}:
+            continue
+        seen.add(key)
+        deduped.append(message)
+    return deduped
+
+
+def _latest_archived_message_timestamp(messages: list[dict]):
+    dated = [message.get("timestamp") for message in messages if message.get("timestamp")]
+    return dated[-1] if dated else None
+
+
+def _parse_archived_time(value) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _archived_run_summaries(batch_dir, task_id: str) -> list[dict]:
@@ -636,8 +1361,14 @@ def _archived_persona_assignment_summaries(batch_dir, task_id: str) -> list[dict
                 "kind": raw.get("kind"),
                 "state": raw.get("state"),
                 "title": raw.get("title"),
+                "message": raw.get("message"),
                 "task_id": raw.get("task_id"),
+                "goal_id": raw.get("goal_id"),
                 "stage_id": raw.get("stage_id"),
+                "created_at": raw.get("created_at"),
+                "updated_at": raw.get("updated_at"),
+                "proof_targets": raw.get("proof_targets") if isinstance(raw.get("proof_targets"), list) else [],
+                "allowed_decisions": raw.get("allowed_decisions") if isinstance(raw.get("allowed_decisions"), list) else [],
                 "run_ids": raw.get("run_ids") if isinstance(raw.get("run_ids"), list) else [],
                 "proof_ids": raw.get("proof_ids") if isinstance(raw.get("proof_ids"), list) else [],
             }
@@ -694,6 +1425,87 @@ def _archived_persona_streams(task_id: str, assignments: list[dict], runs: list[
     return streams
 
 
+def _archived_event_log_events(batch_dir, task_id: str) -> list[dict]:
+    """Read archived events_<task>.jsonl rows for replay/projection."""
+
+    if batch_dir is None:
+        return []
+    path = batch_dir / f"events_{_safe_archive_task_filename(task_id)}.jsonl"
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    events: list[dict] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            raw = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(raw, dict) or str(raw.get("task_id") or "") != task_id:
+            continue
+        payload = raw.get("payload") if isinstance(raw.get("payload"), dict) else {}
+        event_type = str(raw.get("type") or "event")
+        event = {
+            "type": event_type,
+            "ts": raw.get("ts"),
+            "task_id": task_id,
+            "run_id": raw.get("run_id") or payload.get("run_id"),
+            "persona_id": raw.get("persona_id") or payload.get("persona_id"),
+            "summary": payload.get("summary") or payload.get("display_summary") or _archived_event_display_title(event_type, payload),
+            "event_id": payload.get("event_id") or raw.get("event_id"),
+            "phase": payload.get("phase"),
+            "severity": payload.get("severity"),
+            "step": payload.get("step"),
+            "status": payload.get("status"),
+            "tool_name": payload.get("tool_name") or payload.get("tool"),
+            "tool_id": payload.get("tool_id"),
+            "skill_id": payload.get("skill_id"),
+            "detail": payload.get("detail"),
+            "exit_code": payload.get("exit_code"),
+            "duration_ms": payload.get("duration_ms"),
+            "proof_id": payload.get("proof_id"),
+            "decision_type": payload.get("decision_type"),
+            "validation_status": payload.get("validation_status"),
+            "next_expected": payload.get("next_expected"),
+            "rationale": payload.get("rationale") or payload.get("decision_rationale"),
+            "reasoning_summary": payload.get("reasoning_summary"),
+            "display_kind": payload.get("display_kind") or _archived_event_display_kind(event_type),
+            "display_title": payload.get("display_title") or _archived_event_display_title(event_type, payload),
+            "display_summary": payload.get("display_summary") or payload.get("summary"),
+            "redaction_status": payload.get("redaction_status") or "safe",
+        }
+        events.append({key: value for key, value in event.items() if value is not None})
+    return events
+
+
+def _safe_archive_task_filename(task_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id).strip())[:80] or "task"
+
+
+def _dedupe_archived_events(events: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for event in events:
+        event_id = str(event.get("event_id") or "").strip()
+        if event_id:
+            key = ("event_id", event_id, "")
+        else:
+            key = (
+                str(event.get("type") or ""),
+                str(event.get("run_id") or ""),
+                str(event.get("ts") or ""),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(event)
+    return deduped
+
+
 def _run_summary_from_mapping(raw: dict) -> dict:
     final_decision = raw.get("final_decision") if isinstance(raw.get("final_decision"), dict) else {}
     llm = _safe_llm(raw.get("llm"))
@@ -709,7 +1521,7 @@ def _run_summary_from_mapping(raw: dict) -> dict:
         "started_at": raw.get("started_at"),
         "finished_at": raw.get("finished_at"),
         "duration_ms": _duration_ms(raw.get("started_at"), raw.get("finished_at")),
-        "decision_type": llm.get("decision_type") or final_decision.get("type"),
+        "decision_type": _public_decision_value(final_decision.get("type"), llm.get("public_decision_type"), llm.get("decision_type")),
         "decision_summary": decision_summary,
         "decision_rationale": decision_rationale,
         "reasoning_summary": reasoning_summary,
@@ -824,6 +1636,7 @@ def _archived_transcript_events(task_id: str, runs: list[dict], proofs: list[dic
                     "run_id": run.get("run_id"),
                     "persona_id": run.get("persona_id"),
                     "summary": "Agent decision process summarized",
+                    "event_id": f"progress:{run.get('run_id') or 'archived'}:thinking_process:decision_summary",
                     "phase": "thinking_process",
                     "step": "decision_summary",
                     "status": "completed",
@@ -909,7 +1722,7 @@ def _archived_role_streams(
         if not role_id or role_id in seen:
             continue
         seen.add(role_id)
-        role_events = [event for event in events if str(event.get("persona_id") or "") == role_id]
+        role_events = _coalesced_archived_progress_events([event for event in events if str(event.get("persona_id") or "") == role_id])
         stream_events = [_archived_event_stream_item(event) for event in role_events][-20:]
         stream_envelopes = [item for item in role_envelopes if str(item.get("role_id") or "") == role_id]
         stream_checklists = [item for item in role_checklists if str(item.get("role_id") or "") == role_id]
@@ -940,7 +1753,13 @@ def _archived_role_streams(
 
 def _archived_event_stream_item(event: dict) -> dict:
     event_type = str(event.get("type") or "event")
-    summary = _safe_text(event.get("summary"))
+    summary = _safe_text(
+        event.get("summary")
+        or event.get("display_summary")
+        or event.get("status")
+        or event.get("reasoning_summary")
+        or _archived_event_display_title(event_type, event)
+    )
     payload = {
         "display_kind": event.get("display_kind") or _archived_event_display_kind(event_type),
         "display_title": event.get("display_title") or _archived_event_display_title(event_type, event),
@@ -965,6 +1784,7 @@ def _archived_event_stream_item(event: dict) -> dict:
         "rationale",
         "reasoning_summary",
         "artifact_refs",
+        "event_id",
     ):
         if event.get(key) is not None:
             payload[key] = event.get(key)
@@ -977,6 +1797,21 @@ def _archived_event_stream_item(event: dict) -> dict:
         "persona_id": event.get("persona_id"),
         "payload": payload,
     }
+
+
+def _coalesced_archived_progress_events(events: list[dict]) -> list[dict]:
+    items: list[dict] = []
+    index_by_progress_id: dict[str, int] = {}
+    for event in events:
+        event_id = str(event.get("event_id") or "").strip()
+        if str(event.get("type") or "") == "run.progress" and event_id:
+            existing = index_by_progress_id.get(event_id)
+            if existing is not None:
+                items[existing] = event
+                continue
+            index_by_progress_id[event_id] = len(items)
+        items.append(event)
+    return items
 
 
 def _empty_archived_role_stream_item(raw: dict, persona_id: str) -> dict:
@@ -1037,7 +1872,7 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
-def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None):
+def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None):
     gate = task_verdict_proof_satisfied(task, proofs)
     current_stage_id = _task_current_stage_id(task)
     current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
@@ -1059,6 +1894,9 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "task_id": task.id,
         "goal_id": getattr(task, "goal_id", None) or task.id,
         "title": task.title,
+        "description": getattr(task, "description", None),
+        "acceptance_criteria": list(getattr(task, "acceptance_criteria", []) or []),
+        "routing_scope": getattr(task, "routing_scope", {}) or None,
         "state": str(task.state),
         "workspace_id": getattr(task, "workspace_id", None),
         "realm_id": None,
@@ -1071,6 +1909,7 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "active_assignment_id": next((assignment.id for assignment in assignments if assignment.state in ACTIVE_ASSIGNMENT_STATES), None),
         "repo_bundle_ids": [bundle.id for bundle in bundles],
         "repo_bundles": [repo_bundle_summary(bundle) for bundle in bundles],
+        "repo_bundle_closeout": repo_bundle_delivery_summary(bundles) if bundles else None,
         "bundle_queue": bundle_queue_summary(bundles),
         "runtime_lane": runtime_lane,
         "qa_waiting_on": qa_waiting_on(bundles),
@@ -1081,12 +1920,15 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "can_start_run": _can_start_run(task, active_runs, open_incidents),
         "run_blocked_reason": _run_blocked_reason(task, active_runs, open_incidents, run_store=run_store),
         "requires_visual_proof": task.requires_visual_proof,
+        "delivery_directive": task_delivery_directive(task),
         "missing_proof": gate.missing,
         "open_incident_count": len(task.open_incident_ids) or len(open_incidents),
         "issue_discovery_counts": issue_discovery_counts(task),
         "untriaged_issue_severities": sorted({str(item.get("severity", "medium")) for item in untriaged}),
         "proof_summaries": [_proof_visibility_summary(proof) for proof in proofs],
         "self_test_summaries": [self_test_summary(item) for item in (self_tests or [])],
+        "verification_status": _verification_status(task),
+        "stage_verification": _stage_verification(task, proofs or [], accountant=stage_verification_accountant),
         "timeline": _task_timeline(task.id, events or []),
         "next_action": next_action,
         "why_not_done": _why_not_done(task, gate, open_incidents, next_action),
@@ -1113,6 +1955,8 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
             active_runs=active_runs,
             active_workers=active_workers,
             events=events or [],
+            runtime_instances=runtime_instances or [],
+            persona_instances=persona_instances or [],
             role_streams=_role_streams(
                 task,
                 events or [],
@@ -1130,12 +1974,214 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
     }
 
 
+def _verification_status(task) -> dict:
+    root = getattr(task, "harness_self_heal", None)
+    observations = root.get("stage_observations") if isinstance(root, dict) else None
+    if not isinstance(observations, dict):
+        return {"stage_observations": []}
+    rows = []
+    for stage_id, item in list(observations.items())[-8:]:
+        if not isinstance(item, dict):
+            continue
+        diff = item.get("repo_diff") if isinstance(item.get("repo_diff"), dict) else {}
+        rows.append(
+            {
+                "stage_id": stage_id,
+                "repo_diff_chars": int(diff.get("diff_chars") or 0),
+                "baseline_dirty_count": int(diff.get("baseline_dirty_count") or 0),
+                "observed_proof_count": len(item.get("observed_proof_ids") or []),
+                "authoritative_gate_status": str(item.get("authoritative_gate_status") or "pending")[:40],
+                "authoritative_gate_proof_count": len(item.get("authoritative_gate_proof_ids") or []),
+            }
+        )
+    return {"stage_observations": rows}
+
+
+def _stage_verification(task, proofs: list, *, accountant: ProjectionAccountant | None = None) -> dict:
+    root = getattr(task, "harness_self_heal", None)
+    observations = root.get("stage_observations") if isinstance(root, dict) else None
+    if not isinstance(observations, dict):
+        return {
+            "schema_version": 1,
+            "stages": [],
+            "completeness": {
+                "stage_cap": STAGE_VERIFICATION_STAGE_CAP,
+                "proof_id_cap": STAGE_VERIFICATION_PROOF_ID_CAP,
+                "excluded_path_cap": STAGE_VERIFICATION_PATH_CAP,
+                "truncated": False,
+            },
+        }
+
+    items = [(str(stage_id or "_task"), item) for stage_id, item in observations.items() if isinstance(item, dict)]
+    items.sort(key=lambda pair: str(pair[1].get("captured_at") or pair[1].get("authoritative_gate_recorded_at") or pair[0]))
+    if accountant is not None:
+        accountant.consider(len(items))
+    selected = items[-STAGE_VERIFICATION_STAGE_CAP:]
+    if len(items) > len(selected):
+        if accountant is not None:
+            accountant.drop(
+                "stage_cap",
+                count=len(items) - len(selected),
+                entity_id=getattr(task, "id", None),
+                detail=f"kept latest {STAGE_VERIFICATION_STAGE_CAP} stage verification rows",
+            )
+            accountant.mark_truncated()
+
+    proof_by_id = {str(getattr(proof, "id", "") or ""): proof for proof in proofs}
+    owners = _stage_owner_by_id(task)
+    rows = []
+    truncated = len(items) > len(selected)
+    for stage_id, item in selected:
+        if accountant is not None:
+            accountant.include()
+        diff = item.get("repo_diff") if isinstance(item.get("repo_diff"), dict) else {}
+        observed_ids, observed_truncated = _bounded_projection_strings(
+            item.get("observed_proof_ids"),
+            cap=STAGE_VERIFICATION_PROOF_ID_CAP,
+            accountant=accountant,
+            drop_code="observed_proof_id_cap",
+            entity_id=stage_id,
+        )
+        authoritative_ids, authoritative_truncated = _bounded_projection_strings(
+            item.get("authoritative_gate_proof_ids"),
+            cap=STAGE_VERIFICATION_PROOF_ID_CAP,
+            accountant=accountant,
+            drop_code="authoritative_proof_id_cap",
+            entity_id=stage_id,
+        )
+        excluded_paths, excluded_truncated = _bounded_projection_strings(
+            diff.get("excluded_baseline_paths"),
+            cap=STAGE_VERIFICATION_PATH_CAP,
+            accountant=accountant,
+            drop_code="excluded_baseline_path_cap",
+            entity_id=stage_id,
+        )
+        source_diff_truncated = bool(diff.get("truncated"))
+        if source_diff_truncated and accountant is not None:
+            accountant.drop("source_diff_truncated", entity_id=stage_id)
+            accountant.mark_truncated()
+        lane_truncated = observed_truncated or authoritative_truncated or excluded_truncated
+        if lane_truncated and accountant is not None:
+            accountant.mark_truncated()
+        truncated = truncated or lane_truncated or source_diff_truncated
+        rows.append(
+            {
+                "stage_id": str(item.get("stage_id") or stage_id)[:128],
+                "owner": owners.get(stage_id) or str(item.get("actor") or "")[:128] or None,
+                "source": str(item.get("source") or "stage_observation")[:80],
+                "captured_at": str(item.get("captured_at") or "")[:80] or None,
+                "repo_diff": {
+                    "diff_chars": _safe_int(diff.get("diff_chars")),
+                    "truncated": source_diff_truncated,
+                    "baseline_dirty_count": _safe_int(diff.get("baseline_dirty_count")),
+                    "excluded_baseline_paths": excluded_paths,
+                    "excluded_baseline_path_count": _safe_int(diff.get("baseline_dirty_count"))
+                    if not isinstance(diff.get("excluded_baseline_paths"), list)
+                    else len(diff.get("excluded_baseline_paths") or []),
+                    "error": str(diff.get("error") or "")[:120] or None,
+                },
+                "observed": {
+                    "kind": "agent_run",
+                    "run_id": str(item.get("run_id") or "")[:128] or None,
+                    "status": _proof_lane_status(observed_ids, proof_by_id=proof_by_id, fallback="not_applicable"),
+                    "proof_ids": observed_ids,
+                    "proof": [_proof_ref(proof_id, proof_by_id=proof_by_id) for proof_id in observed_ids],
+                },
+                "authoritative": {
+                    "kind": "harness_run",
+                    "run_id": str(item.get("authoritative_gate_run_id") or "")[:128] or None,
+                    "status": str(item.get("authoritative_gate_status") or "pending")[:40],
+                    "proof_ids": authoritative_ids,
+                    "proof": [_proof_ref(proof_id, proof_by_id=proof_by_id) for proof_id in authoritative_ids],
+                    "recorded_at": str(item.get("authoritative_gate_recorded_at") or "")[:80] or None,
+                },
+                "tamper_flag": bool(item.get("tamper_flag") or item.get("test_tampering_detected")) or _stage_tamper_flag(task, stage_id),
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "stages": rows,
+        "completeness": {
+            "stage_cap": STAGE_VERIFICATION_STAGE_CAP,
+            "proof_id_cap": STAGE_VERIFICATION_PROOF_ID_CAP,
+            "excluded_path_cap": STAGE_VERIFICATION_PATH_CAP,
+            "truncated": truncated,
+        },
+    }
+
+
+def _stage_owner_by_id(task) -> dict[str, str]:
+    plan = getattr(task, "mission_plan", None)
+    owners: dict[str, str] = {}
+    for stage in list(getattr(plan, "stages", []) or []):
+        stage_id = str(getattr(stage, "id", "") or "").strip()
+        owner = str(getattr(stage, "owner", "") or "").strip()
+        if stage_id and owner:
+            owners[stage_id] = owner
+    return owners
+
+
+def _bounded_projection_strings(raw, *, cap: int, accountant: ProjectionAccountant | None, drop_code: str, entity_id: str) -> tuple[list[str], bool]:
+    values = [str(value).strip()[:160] for value in (raw or []) if str(value or "").strip()] if isinstance(raw, list) else []
+    if len(values) <= cap:
+        return values, False
+    if accountant is not None:
+        accountant.drop(drop_code, count=len(values) - cap, entity_id=entity_id, detail=f"kept {cap}")
+    return values[:cap], True
+
+
+def _proof_ref(proof_id: str, *, proof_by_id: dict[str, object]) -> dict:
+    proof = proof_by_id.get(proof_id)
+    metadata = getattr(proof, "metadata", None) if proof is not None else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return {
+        "proof_id": proof_id,
+        "status": _proof_status(proof),
+        "type": str(getattr(proof, "type", "") or metadata.get("type") or "proof")[:80],
+        "created_by": str(getattr(proof, "created_by", "") or metadata.get("created_by") or "")[:80] or None,
+    }
+
+
+def _proof_lane_status(proof_ids: list[str], *, proof_by_id: dict[str, object], fallback: str) -> str:
+    if not proof_ids:
+        return fallback
+    statuses = [_proof_status(proof_by_id.get(proof_id)) for proof_id in proof_ids]
+    if any(status == "failed" for status in statuses):
+        return "failed"
+    if statuses and all(status == "passed" for status in statuses):
+        return "passed"
+    if any(status == "running" for status in statuses):
+        return "running"
+    return "pending"
+
+
+def _proof_status(proof) -> str:
+    if proof is None:
+        return "unknown"
+    metadata = getattr(proof, "metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return str(metadata.get("status") or getattr(proof, "status", None) or "captured")[:40]
+
+
+def _stage_tamper_flag(task, stage_id: str) -> bool:
+    flags = {str(flag).strip() for flag in (getattr(task, "risk_flags", None) or [])}
+    return "test_tampering_detected" in flags
+
+
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _task_current_stage_id(task) -> str | None:
     plan = getattr(task, "mission_plan", None)
     return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
 
 
-def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, workspaces=None) -> dict:
+def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, workspaces=None) -> dict:
     row = _task_summary(
         task,
         proofs,
@@ -1148,6 +2194,7 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         persona_assignments=persona_assignments,
         repo_bundles=repo_bundles,
         runtime_instances=runtime_instances,
+        persona_instances=persona_instances,
     )
     workspace_id = getattr(task, "workspace_id", None)
     realm_id = None
@@ -1167,7 +2214,7 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
     return row
 
 
-def _workspace_summary(workspace, *, tasks) -> dict:
+def _workspace_summary(workspace, *, tasks, active_id: str | None = None) -> dict:
     goals = [task for task in tasks if getattr(task, "workspace_id", None) == workspace.id]
     return {
         "id": workspace.id,
@@ -1182,11 +2229,12 @@ def _workspace_summary(workspace, *, tasks) -> dict:
         "max_concurrent_lanes": workspace.max_concurrent_lanes,
         "default_blueprint_id": workspace.default_blueprint_id,
         "archived": bool(workspace.archived),
+        "active": workspace.id == active_id,
         "updated_at": workspace.updated_at,
     }
 
 
-def _realm_summary(realm, *, workspaces) -> dict:
+def _realm_summary(realm, *, workspaces, active_id: str | None = None) -> dict:
     workspace_ids = [workspace.id for workspace in workspaces if getattr(workspace, "realm_id", None) == realm.id]
     configured_ids = list(getattr(realm, "workspace_ids", []) or [])
     merged_ids = list(dict.fromkeys([*configured_ids, *workspace_ids]))
@@ -1196,10 +2244,18 @@ def _realm_summary(realm, *, workspaces) -> dict:
         "name": realm.name,
         "slug": realm.slug,
         "server_id": realm.server_id,
+        "default_workspace_id": getattr(realm, "default_workspace_id", None),
+        "default_workspace_name": getattr(realm, "default_workspace_name", "Default"),
+        "default_workspace_version": getattr(realm, "default_workspace_version", 0),
         "workspaces": len(merged_ids),
         "workspace_ids": merged_ids,
-        "sync": "in_sync",
+        # Stage 43 (Decision 7): sync state comes ONLY from the cached sidecar
+        # written by the `realm sync status|pull|publish` verbs — build_snapshot
+        # must never shell out to git or resolve artifacts. Absent sidecar →
+        # null so the launcher renders "not checked", not a fake in_sync.
+        "sync": read_realm_sync_sidecar(realm.id),
         "archived": bool(realm.archived),
+        "active": realm.id == active_id,
         "updated_at": realm.updated_at,
     }
 
@@ -1235,7 +2291,7 @@ def _mission_lifecycle_state(task, active_runs, open_incidents, gate) -> str:
     if task.state == TaskState.DONE:
         return "ready_for_tony" if not gate.missing else "blocked"
     if open_incidents:
-        return "waiting_for_operator" if any(getattr(item, "kind", "") in {"qa_intervention_required", "operator_intervention", "run_budget_exceeded"} for item in open_incidents) else "blocked"
+        return "waiting_for_operator" if any(getattr(item, "kind", "") in {"qa_intervention_required", "operator_intervention", "run_budget_exceeded", "patch_landed_nowhere", "stage_no_progress"} for item in open_incidents) else "blocked"
     if active_runs:
         return "running"
     if task.state == TaskState.BLOCKED:
@@ -1243,7 +2299,7 @@ def _mission_lifecycle_state(task, active_runs, open_incidents, gate) -> str:
     return "queued"
 
 
-def _mission_level_state(task, *, active_runs, active_workers, events, role_streams) -> dict:
+def _mission_level_state(task, *, active_runs, active_workers, events, runtime_instances, persona_instances, role_streams) -> dict:
     plan = getattr(task, "mission_plan", None)
     stages = list(getattr(plan, "stages", []) or [])
     stage_by_owner: dict[str, list] = {}
@@ -1306,8 +2362,331 @@ def _mission_level_state(task, *, active_runs, active_workers, events, role_stre
         "blueprint_version": getattr(plan, "blueprint_version", None),
         "active_stage_id": active_stage_id,
         "actors": actors,
+        "agent_topology": _agent_topology(
+            task,
+            active_runs=active_runs,
+            active_workers=active_workers,
+            runtime_instances=runtime_instances,
+            persona_instances=persona_instances,
+            role_streams=role_streams,
+        ),
         "updated_at": getattr(task, "updated_at", None),
     }
+
+
+def _agent_topology(task, *, active_runs, active_workers, runtime_instances, persona_instances, role_streams) -> dict:
+    plan = getattr(task, "mission_plan", None)
+    stages = list(getattr(plan, "stages", []) or [])
+    topology = getattr(plan, "agent_topology", None) if plan is not None else None
+    topology = topology if isinstance(topology, dict) else {}
+    plan_slots = dict(getattr(plan, "slots", {}) or {}) if plan is not None else {}
+    bindings = dict(getattr(plan, "bindings", {}) or {}) if plan is not None else {}
+    topology_edges = [
+        edge
+        for edge in topology.get("edges", []) or []
+        if isinstance(edge, dict)
+    ]
+    root_slot = str(topology.get("root") or "").strip()
+    if not root_slot and topology_edges:
+        root_slot = str(topology_edges[0].get("source") or "").strip()
+    if not root_slot and len(plan_slots) == 1:
+        root_slot = next(iter(plan_slots))
+
+    task_goal_id = str(getattr(task, "goal_id", None) or task.id)
+    runtime_instances = list(runtime_instances or [])
+    persona_instances = list(persona_instances or [])
+    related_instances = [
+        instance
+        for instance in [*runtime_instances, *persona_instances]
+        if _instance_matches_task(instance, task, task_goal_id)
+    ]
+    instances_by_id = {str(getattr(instance, "id", "") or ""): instance for instance in related_instances}
+    instances_by_persona: dict[str, list] = {}
+    for instance in related_instances:
+        persona_id = str(getattr(instance, "persona_id", "") or "").strip()
+        if persona_id:
+            instances_by_persona.setdefault(persona_id, []).append(instance)
+
+    stages_by_slot: dict[str, list] = {}
+    stages_by_persona: dict[str, list] = {}
+    for stage in stages:
+        slot = str(getattr(stage, "owner_slot", None) or getattr(stage, "owner", "") or "").strip()
+        owner = str(getattr(stage, "owner", "") or "").strip()
+        if slot:
+            stages_by_slot.setdefault(slot, []).append(stage)
+        if owner:
+            stages_by_persona.setdefault(owner, []).append(stage)
+
+    stream_by_id = {stream.get("persona_id"): stream for stream in role_streams if isinstance(stream, dict)}
+    nodes_by_id: dict[str, dict] = {}
+    slot_node_ids: dict[str, str] = {}
+    # Canonical node per persona. A persona that runs N turns (N re-instantiated
+    # persona_instances) is ONE agent, not N nodes — without this the topology
+    # grows O(runs/spawns) and floods the graph with duplicate "Backend Dev Agent"
+    # / "Launcher Dev Agent" nodes. Multi-turn instances collapse onto the canonical
+    # node; only a genuinely distinct persona (a spawned sub-agent of a new role)
+    # gets its own node.
+    persona_node_id: dict[str, str] = {}
+    collapsed_instances = 0
+
+    def add_node_for_slot(slot: str) -> str | None:
+        slot = str(slot or "").strip()
+        if not slot:
+            return None
+        persona_id = _topology_slot_persona_id(slot, bindings)
+        instance = _instance_for_persona(persona_id, instances_by_persona)
+        owned_stages = stages_by_slot.get(slot) or stages_by_persona.get(persona_id) or []
+        node_id = str(getattr(instance, "id", "") or "").strip() or f"slot_{slot}"
+        slot_node_ids[slot] = node_id
+        nodes_by_id[node_id] = _agent_topology_node(
+            node_id=node_id,
+            persona_id=persona_id or slot,
+            instance=instance,
+            owned_stages=owned_stages,
+            active_runs=active_runs,
+            active_workers=active_workers,
+            stream=stream_by_id.get(persona_id) or {},
+            fallback_display=_display_name_for_persona(persona_id or slot),
+            fallback_role=_actor_role_for_persona(persona_id or slot),
+        )
+        if persona_id:
+            persona_node_id.setdefault(persona_id, node_id)
+        return node_id
+
+    topology_slots: list[str] = []
+    if root_slot:
+        topology_slots.append(root_slot)
+    for edge in topology_edges:
+        for key in ("source", "target"):
+            slot = str(edge.get(key) or "").strip()
+            if slot and slot not in topology_slots:
+                topology_slots.append(slot)
+    if not topology_slots and plan_slots:
+        topology_slots.extend(plan_slots.keys())
+    for slot in topology_slots:
+        add_node_for_slot(slot)
+
+    for instance in related_instances:
+        instance_id = str(getattr(instance, "id", "") or "").strip()
+        if not instance_id or instance_id in nodes_by_id:
+            continue
+        persona_id = str(getattr(instance, "persona_id", "") or "").strip()
+        # Collapse a re-instantiated persona onto its canonical node instead of
+        # minting a duplicate node per turn. Only a persona that has no node yet
+        # (a genuinely distinct spawned sub-agent) earns its own node.
+        if persona_id and persona_id in persona_node_id:
+            collapsed_instances += 1
+            continue
+        owned_stages = stages_by_persona.get(persona_id) or []
+        nodes_by_id[instance_id] = _agent_topology_node(
+            node_id=instance_id,
+            persona_id=persona_id,
+            instance=instance,
+            owned_stages=owned_stages,
+            active_runs=active_runs,
+            active_workers=active_workers,
+            stream=stream_by_id.get(persona_id) or {},
+            fallback_display=_display_name_for_persona(persona_id),
+            fallback_role=_actor_role_for_persona(persona_id),
+        )
+        if persona_id:
+            persona_node_id[persona_id] = instance_id
+
+    def _canonical_node_for(instance) -> str:
+        pid = str(getattr(instance, "persona_id", "") or "").strip()
+        if pid and pid in persona_node_id:
+            return persona_node_id[pid]
+        return str(getattr(instance, "id", "") or "").strip()
+
+    edges: list[dict] = []
+    targets_with_runtime_parent: set[str] = set()
+    seen_spawn_edges: set[tuple[str, str]] = set()
+    for instance in related_instances:
+        parent_ref = str(getattr(instance, "spawned_by", "") or "").strip()
+        parent = _topology_parent_instance(parent_ref, related_instances)
+        if parent is None:
+            continue
+        # Map lineage onto canonical persona nodes so collapsed multi-turn instances
+        # don't drop the spawn edge; dedupe and skip self-edges (a persona spawning
+        # another turn of itself is not a distinct steer).
+        target_node = _canonical_node_for(instance)
+        parent_node = _canonical_node_for(parent)
+        if not target_node or not parent_node or parent_node == target_node:
+            continue
+        if target_node not in nodes_by_id or parent_node not in nodes_by_id:
+            continue
+        key = (parent_node, target_node)
+        if key in seen_spawn_edges:
+            continue
+        seen_spawn_edges.add(key)
+        targets_with_runtime_parent.add(target_node)
+        edges.append(
+            {
+                "source_node_id": parent_node,
+                "target_node_id": target_node,
+                "kind": "steers",
+                "source": "runtime_spawned_by",
+            }
+        )
+
+    if topology_edges:
+        for edge in topology_edges:
+            source_id = slot_node_ids.get(str(edge.get("source") or "").strip())
+            target_id = slot_node_ids.get(str(edge.get("target") or "").strip())
+            if not source_id or not target_id or target_id in targets_with_runtime_parent:
+                continue
+            edges.append(
+                {
+                    "source_node_id": source_id,
+                    "target_node_id": target_id,
+                    "kind": str(edge.get("kind") or "steers"),
+                    "source": "blueprint_agent_topology",
+                }
+            )
+
+    root_node_id = slot_node_ids.get(root_slot) if root_slot else None
+    if root_node_id is None and nodes_by_id:
+        child_ids = {edge["target_node_id"] for edge in edges}
+        root_node_id = next((node_id for node_id in nodes_by_id if node_id not in child_ids), next(iter(nodes_by_id)))
+    control_node_id = _topology_control_node_id(task, stages, slot_node_ids, root_node_id)
+    steer_actions, steer_action_drops = build_steer_actions(nodes_by_id, edges, control_node_id=control_node_id, task=task)
+    drop_samples: list[dict] = []
+    for node in nodes_by_id.values():
+        node_drops = node.pop("_drops", [])
+        if isinstance(node_drops, list):
+            drop_samples.extend(item for item in node_drops if isinstance(item, dict))
+    drop_samples.extend(steer_action_drops)
+    return {
+        "schema_version": 1,
+        "source": "runtime_spawned_by" if targets_with_runtime_parent else ("blueprint_agent_topology" if topology_edges or root_slot else "persona_instances"),
+        "root_node_id": root_node_id,
+        "control_node_id": control_node_id,
+        "nodes": list(nodes_by_id.values()),
+        "edges": edges,
+        "steer_actions": steer_actions,
+        "completeness": {
+            "node_count": len(nodes_by_id),
+            "edge_count": len(edges),
+            "collapsed_multi_turn_instances": collapsed_instances,
+            "stream_event_cap_per_node": 3,
+            "id_cap_per_node": AGENT_TOPOLOGY_NODE_ID_CAP,
+            "drops": drop_samples[:50],
+        },
+    }
+
+
+def _agent_topology_node(*, node_id: str, persona_id: str, instance, owned_stages, active_runs, active_workers, stream, fallback_display: str, fallback_role: str) -> dict:
+    runs = [run for run in active_runs if getattr(run, "persona_id", None) == persona_id]
+    workers = [worker for worker in active_workers if getattr(worker, "persona_id", None) == persona_id]
+    active_stage = next((stage for stage in owned_stages if getattr(stage, "status", None) in {StageStatus.IMPLEMENTING, StageStatus.READY}), None)
+    stage = active_stage or (owned_stages[0] if owned_stages else None)
+    stage_ids, stage_drops = _bounded_topology_ids(
+        [getattr(stage, "id", None) for stage in owned_stages if getattr(stage, "id", None)],
+        node_id=node_id,
+        field="stage_ids",
+    )
+    run_ids, run_drops = _bounded_topology_ids([run.id for run in runs], node_id=node_id, field="active_run_ids")
+    worker_ids, worker_drops = _bounded_topology_ids([worker.id for worker in workers], node_id=node_id, field="active_worker_session_ids")
+    return {
+        "node_id": node_id,
+        "persona_id": persona_id,
+        "persona_instance_id": str(getattr(instance, "id", "") or "").strip() or None,
+        "display_name": str(getattr(instance, "display_name", "") or "").strip() or fallback_display,
+        "role": str(getattr(instance, "role", "") or "").strip() or fallback_role,
+        "stage_ids": stage_ids,
+        "presence": _actor_presence(active_stage, owned_stages, runs, workers),
+        "state_label": _actor_state_label(active_stage, owned_stages, runs, workers),
+        "active_run_ids": run_ids,
+        "active_worker_session_ids": worker_ids,
+        "budget": _actor_budget_summary(runs, stream),
+        "current_stage_id": getattr(stage, "id", None),
+        "spawned_by": str(getattr(instance, "spawned_by", "") or "").strip() or None,
+        "returned_to": str(getattr(instance, "returned_to", "") or "").strip() or None,
+        "stream_event_count": len(stream.get("events") or []) if isinstance(stream, dict) else 0,
+        "progress_peek": _progress_peek(stream),
+        "_drops": [*stage_drops, *run_drops, *worker_drops],
+    }
+
+
+def _bounded_topology_ids(values: list, *, node_id: str, field: str) -> tuple[list[str], list[dict]]:
+    clean = [str(value).strip() for value in values if str(value or "").strip()]
+    if len(clean) <= AGENT_TOPOLOGY_NODE_ID_CAP:
+        return clean, []
+    return clean[:AGENT_TOPOLOGY_NODE_ID_CAP], [
+        {
+            "node_id": node_id,
+            "field": field,
+            "kept": AGENT_TOPOLOGY_NODE_ID_CAP,
+            "dropped": len(clean) - AGENT_TOPOLOGY_NODE_ID_CAP,
+            "reason": "topology_node_id_cap",
+        }
+    ]
+
+
+def _progress_peek(stream: dict) -> list[dict]:
+    events = stream.get("events") if isinstance(stream, dict) else None
+    if not isinstance(events, list):
+        return []
+    peek: list[dict] = []
+    for event in events[-3:]:
+        payload = event.get("payload") if isinstance(event, dict) else None
+        payload = payload if isinstance(payload, dict) else {}
+        summary = str(payload.get("display_summary") or payload.get("summary") or "").strip()
+        if not summary:
+            continue
+        peek.append(
+            {
+                "type": str(event.get("type") or "")[:80],
+                "run_id": str(event.get("run_id") or "")[:128] or None,
+                "summary": summary[:300],
+                "status": str(payload.get("status") or "")[:40] or None,
+            }
+        )
+    return peek
+
+
+def _topology_control_node_id(task, stages: list, slot_node_ids: dict[str, str], root_node_id: str | None) -> str | None:
+    current_id = str(getattr(getattr(task, "mission_plan", None), "current_stage_id", None) or getattr(task, "current_stage_id", "") or "").strip()
+    stage = next((item for item in stages if str(getattr(item, "id", "") or "") == current_id), None)
+    if stage is not None:
+        slot = str(getattr(stage, "owner_slot", "") or getattr(stage, "owner", "") or "").strip()
+        if slot and slot_node_ids.get(slot):
+            return slot_node_ids[slot]
+    return root_node_id
+
+
+def _instance_matches_task(instance, task, task_goal_id: str) -> bool:
+    return (
+        str(getattr(instance, "goal_id", "") or "") == task_goal_id
+        or str(getattr(instance, "current_task_id", "") or "") == task.id
+        or str(getattr(instance, "task_id", "") or "") == task.id
+    )
+
+
+def _topology_slot_persona_id(slot: str, bindings: dict) -> str:
+    bound = str(bindings.get(slot) or slot).strip()
+    if bound.startswith("persona:") or bound.startswith("profile:"):
+        return bound.split(":", 1)[1].strip()
+    return bound
+
+
+def _instance_for_persona(persona_id: str, instances_by_persona: dict[str, list]):
+    candidates = instances_by_persona.get(persona_id) or []
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: str(getattr(item, "updated_at", "") or ""), reverse=True)[0]
+
+
+def _topology_parent_instance(parent_ref: str, instances: list):
+    if not parent_ref:
+        return None
+    for instance in instances:
+        if str(getattr(instance, "id", "") or "") == parent_ref:
+            return instance
+    for instance in instances:
+        if str(getattr(instance, "persona_id", "") or "") == parent_ref or str(getattr(instance, "role", "") or "") == parent_ref:
+            return instance
+    return None
 
 
 def _mission_flow_timeline(task, events) -> dict:
@@ -1329,7 +2708,7 @@ def _mission_flow_timeline(task, events) -> dict:
                 "depends_on": list(getattr(stage, "depends_on", []) or []),
             }
         )
-    for event in [event for event in events if event.task_id == task.id][-20:]:
+    for event in [event for event in _coalesced_progress_events(events) if event.task_id == task.id][-20:]:
         display = _event_display_projection(event)
         items.append(
             {
@@ -1734,9 +3113,25 @@ def _task_timeline(task_id, events):
             "persona_id": event.persona_id,
             **_event_display_projection(event),
         }
-        for event in events
+        for event in _coalesced_progress_events(events)
         if event.task_id == task_id
     ][-20:]
+
+
+def _coalesced_progress_events(events):
+    items = []
+    index_by_progress_id: dict[str, int] = {}
+    for event in events or []:
+        payload = event.payload if isinstance(getattr(event, "payload", None), dict) else {}
+        event_id = str(payload.get("event_id") or "").strip()
+        if event.type == "run.progress" and event_id:
+            existing = index_by_progress_id.get(event_id)
+            if existing is not None:
+                items[existing] = event
+                continue
+            index_by_progress_id[event_id] = len(items)
+        items.append(event)
+    return items
 
 
 def _role_streams(task, events, runs, workers, *, persona_assignments=None, role_envelopes=None, role_checklists=None, proof_batches=None) -> list[dict]:
@@ -1764,7 +3159,7 @@ def _role_streams(task, events, runs, workers, *, persona_assignments=None, role
         if not role_id or role_id in seen:
             continue
         seen.add(role_id)
-        role_events = [event for event in events if event.task_id == task.id and event.persona_id == role_id]
+        role_events = _coalesced_progress_events([event for event in events if event.task_id == task.id and event.persona_id == role_id])
         role_runs = [run for run in runs if getattr(run, "task_id", None) == task.id and getattr(run, "persona_id", None) == role_id]
         role_workers = [worker for worker in workers if getattr(worker, "task_id", None) == task.id and getattr(worker, "persona_id", None) == role_id]
         role_assignments = [assignment for assignment in (persona_assignments or []) if assignment.task_id == task.id and assignment.persona_id == role_id]
@@ -1816,11 +3211,11 @@ def _stage_streams(task, events) -> list[dict]:
         stage_id = getattr(stage, "id", None)
         if not stage_id:
             continue
-        stage_events = [
+        stage_events = _coalesced_progress_events([
             event
             for event in events
             if event.task_id == task.id and (event.payload or {}).get("stage_id") == stage_id
-        ]
+        ])
         streams.append(
             {
                 "stage_id": stage_id,
@@ -1891,6 +3286,8 @@ def _event_display_projection(event) -> dict:
     kind = _event_display_kind(event.type, payload)
     title = _event_display_title(event.type, payload, kind)
     summary = _safe_text(str(payload.get("summary") or payload.get("status") or payload.get("reason") or ""))
+    if not summary:
+        summary = _safe_text(operator_event_summary(event) or "")
     refs = []
     for key in ("proof_id", "evidence_id", "packet_id"):
         value = payload.get(key)
@@ -1903,7 +3300,7 @@ def _event_display_projection(event) -> dict:
         "artifact_refs": refs,
         "redaction_status": payload.get("redaction_status"),
     }
-    for key in ("phase", "step", "status", "decision_type", "reasoning_summary"):
+    for key in ("event_id", "phase", "step", "status", "decision_type", "reasoning_summary"):
         value = payload.get(key)
         if isinstance(value, str):
             safe = _safe_text(value)
@@ -1951,10 +3348,10 @@ def _event_display_title(event_type: str, payload: dict, kind: str) -> str:
     return event_type
 
 
-def _agent_summary(agent):
+def _agent_summary(agent, *, include_tool_details: bool = False):
     readiness = profile_readiness_for_persona(agent)
     tool_resolution = resolve_tool_visibility(agent)
-    return {
+    summary = {
         "persona_id": agent.id,
         "display_name": agent.display_name,
         "role": agent.role,
@@ -1968,12 +3365,6 @@ def _agent_summary(agent):
         "missing_mcp_servers": readiness.get("missing_mcp_servers", []),
         "skill_hash_mismatches": readiness.get("skill_hash_mismatches", []),
         "toolsets": effective_toolsets(agent),
-        "blocked_tools_count": len(tool_resolution["blocked_tools"]),
-        "blocked_tools": tool_resolution["blocked_tools"],
-        "tool_resolution": tool_resolution,
-        "turn_tool_context": turn_tool_context_for_persona(agent),
-        "permission_state": permission_state_for_persona(agent),
-        "agent_hud_state": agent_hud_state_for_persona(agent),
         "model_configured": bool(agent.model),
         "provider_configured": bool(agent.provider),
         "default_model": _safe_model_label(getattr(agent, "model", None)),
@@ -1982,12 +3373,60 @@ def _agent_summary(agent):
         "core_context_files": "enabled" if getattr(agent, "include_core_context_files", False) else "isolated",
         "repo_scope_label": _safe_text(getattr(agent, "repo_scope_label", None)) or _safe_repo_scope_label(getattr(agent, "repo_scope", None)),
     }
+    if include_tool_details:
+        summary.update(
+            {
+                "blocked_tools_count": len(tool_resolution["blocked_tools"]),
+                "blocked_tools": tool_resolution["blocked_tools"],
+                "tool_resolution": tool_resolution,
+                "turn_tool_context": turn_tool_context_for_persona(agent),
+                "permission_state": permission_state_for_persona(agent),
+                # DEPRECATED: legacy per-persona tools/permissions HUD, due for
+                # migration to the situational-HUD fed path (see runtime_hud.py
+                # and agent_hud_state_for_persona's docstring). Emission kept
+                # until the launcher Agent-HUD dialog is retired.
+                "agent_hud_state": agent_hud_state_for_persona(agent),
+            }
+        )
+    return summary
+
+
+# Profile-template discovery re-parses every profile YAML (~0.7s of one
+# snapshot core, measured 2026-07-09) and the catalog changes only when the
+# operator installs/creates a profile. Same TTL-memo treatment as the skill
+# catalog in prompt_observability — observability rows, never authority; a
+# new profile appears on the first core built after the TTL lapses.
+_PROFILE_TEMPLATE_TTL_SECONDS = 15.0
+_profile_template_memo: dict = {"at": 0.0, "rows": None, "fn": None}
+
+
+def _profile_templates_cached() -> list:
+    """Memo keyed on BOTH the TTL and the fetcher's identity: a
+    monkeypatched `available_profile_templates` invalidates the memo
+    immediately instead of being masked for a TTL window."""
+    import time
+
+    fetcher = available_profile_templates
+    now = time.monotonic()
+    if (
+        _profile_template_memo["rows"] is not None
+        and _profile_template_memo["fn"] is fetcher
+        and now - _profile_template_memo["at"] < _PROFILE_TEMPLATE_TTL_SECONDS
+    ):
+        return _profile_template_memo["rows"]
+    try:
+        rows = list(fetcher())
+    except Exception:
+        rows = []
+    _profile_template_memo["rows"] = rows
+    _profile_template_memo["at"] = now
+    _profile_template_memo["fn"] = fetcher
+    return rows
 
 
 def _available_persona_summary(agents) -> list[dict]:
-    try:
-        templates = available_profile_templates()
-    except Exception:
+    templates = _profile_templates_cached()
+    if not templates:
         return []
     backs_by_profile = {
         str(getattr(agent, "hermes_profile", "") or ""): str(getattr(agent, "id", "") or "")
@@ -2078,7 +3517,7 @@ def _run_summary(run):
         "last_heartbeat_at": run.last_heartbeat_at,
         "finished_at": run.finished_at,
         "duration_ms": _duration_ms(run.started_at, run.finished_at),
-        "decision_type": llm.get("decision_type") or decision_type,
+        "decision_type": _public_decision_value(decision_type, llm.get("public_decision_type"), llm.get("decision_type")),
         "decision_summary": decision_summary,
         "decision_rationale": decision_rationale,
         "reasoning_summary": decision_rationale,
@@ -2094,7 +3533,8 @@ def _safe_llm(value):
     allowed = {
         "provider", "model", "base_url_host", "session_id", "api_calls", "tool_turns",
         "input_tokens", "output_tokens", "total_tokens", "latency_ms", "finish_reason",
-        "response_len", "validation_status", "decision_type",
+        "response_len", "validation_status", "decision_type", "public_decision_type",
+        "execution_decision_type", "raw_decision_type", "decision_contract_mode",
     }
     safe = {key: value.get(key) for key in allowed if value.get(key) is not None}
     timing = value.get("timing")
@@ -2117,26 +3557,34 @@ def _safe_llm(value):
     return safe
 
 
+def _public_decision_value(*candidates):
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        return public_decision_type_value(text) or text
+    return None
+
+
 def _safe_text(value):
+    """Operator-console text: paths allowed, secret assignments masked in place.
+
+    This used to drop the ENTIRE string when it looked path-ish, which silently
+    nulled dev decision rationales/summaries (any real dev rationale names a
+    file) and starved the conversation projection of thinking/turn detail.
+    Mission Control is an operator surface: repo paths are the content, not a
+    leak. Only secret-shaped assignments are redacted, and in place.
+    """
+
     if not isinstance(value, str):
         return None
     text = " ".join(value.strip().split())
-    if not text or _looks_sensitive_or_pathish(text):
+    if not text:
         return None
+    text = _SECRET_RE.sub("[redacted secret]", text)
     if len(text) > 500:
         return f"{text[:497]}…"
     return text
-
-
-def _looks_sensitive_or_pathish(value: str) -> bool:
-    lowered = value.lower()
-    if any(marker in lowered for marker in ("secret", "token", "password", "api_key", "apikey", "authorization", "bearer", "credential", "cookie", "private_key", "sk-")):
-        return True
-    if ":/" in value or "\\" in value or value.startswith(("/", "~")):
-        return True
-    if re.search(r"(^|\s)([A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+", value):
-        return True
-    return False
 
 
 def _incident_summary(incident):

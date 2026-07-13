@@ -6,23 +6,12 @@ CAPABILITY_SCHEMA_VERSION = 1
 
 _CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
-        "id": "task.create",
-        "target_kind": "task_collection",
+        "id": "goal.create",
+        "target_kind": "goal_collection",
         "label": "Create Goal",
         "group": "queue",
         "execution_semantics": "queues_only",
         "required_args": ["title", "description"],
-        "danger": "normal",
-    },
-    {
-        "id": "persona.message_task",
-        "target_kind": "task",
-        "label": "Queue Message",
-        "group": "queue",
-        "execution_semantics": "queues_only",
-        "required_args": ["persona_id", "message"],
-        "allowed_args": ["attachments"],
-        "default_args": {"title": "Operator message"},
         "danger": "normal",
     },
     {
@@ -61,6 +50,16 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
             "persona_instance_id",
         ],
         "default_args": {"title": "Steer active Mission Control chat turn"},
+        "danger": "normal",
+    },
+    {
+        "id": "mission.chat.queue_skill_for_next_turn",
+        "target_kind": "persona",
+        "label": "Load Skill Next Turn",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["persona_id", "session_id", "skill"],
+        "allowed_args": ["persona_instance_id"],
         "danger": "normal",
     },
     {
@@ -155,16 +154,16 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "destructive",
     },
     {
-        "id": "task.tick",
-        "target_kind": "task",
+        "id": "goal.tick",
+        "target_kind": "goal",
         "label": "Run Tick",
         "group": "run",
         "execution_semantics": "bounded_execution",
         "danger": "normal",
     },
     {
-        "id": "task.run_until_settled",
-        "target_kind": "task",
+        "id": "goal.run_until_settled",
+        "target_kind": "goal",
         "label": "Run Until Settled",
         "group": "run",
         "execution_semantics": "bounded_execution",
@@ -267,6 +266,16 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "normal",
     },
     {
+        "id": "worker.takeover",
+        "target_kind": "worker_session",
+        "label": "Take Over",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["worker_session_id", "reason"],
+        "allowed_args": ["actor", "lease_seconds", "cancel_active_run", "approve_destructive"],
+        "danger": "warning",
+    },
+    {
         "id": "run.cancel",
         "target_kind": "run",
         "label": "Cancel Run",
@@ -293,13 +302,23 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "normal",
     },
     {
-        "id": "task.unblock",
-        "target_kind": "task",
-        "label": "Unblock Task",
+        "id": "goal.unblock",
+        "target_kind": "goal",
+        "label": "Unblock Goal",
         "group": "steer",
         "execution_semantics": "control_state_change",
         "required_args": ["reason"],
         "default_args": {"state": "created", "rescope": False, "foreground": False},
+        "danger": "warning",
+    },
+    {
+        "id": "goal.steer",
+        "target_kind": "goal",
+        "label": "Execute Steer",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["goal_id"],
+        "allowed_args": ["action_id", "reason", "requested_by", "source_node_id", "target_node_id", "verb"],
         "danger": "warning",
     },
     *(
@@ -366,17 +385,27 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         "danger": "warning",
     },
     {
-        "id": "task.archive",
-        "target_kind": "task",
-        "label": "Archive Task",
+        "id": "persona.instance.return_summary",
+        "target_kind": "persona_instance",
+        "label": "Return Summary",
+        "group": "steer",
+        "execution_semantics": "control_state_change",
+        "required_args": ["parent_session_id", "summary"],
+        "allowed_args": ["artifact_refs", "proof_ids", "stage_id", "task_id"],
+        "danger": "normal",
+    },
+    {
+        "id": "goal.archive",
+        "target_kind": "goal",
+        "label": "Archive Goal",
         "group": "archive",
         "execution_semantics": "archive_or_close",
         "danger": "warning",
     },
     {
-        "id": "task.archive_ready",
-        "target_kind": "task_collection",
-        "label": "Archive Ready Tasks",
+        "id": "goal.archive_ready",
+        "target_kind": "goal_collection",
+        "label": "Archive Ready Goals",
         "group": "archive",
         "execution_semantics": "archive_or_close",
         "danger": "warning",
@@ -408,13 +437,13 @@ def _arg_schema_for(item: dict[str, Any]) -> dict[str, Any]:
                     },
                 },
             }
-        elif name == "tools":
+        elif name in {"tools", "proof_ids", "artifact_refs"}:
             properties[name] = {"type": "array", "items": {"type": "string", "minLength": 1}}
         elif name in {"max_actions", "max_seconds", "lease_seconds", "turns"}:
             properties[name] = {"type": "integer", "minimum": 1}
-        elif name in {"coordinator_max_spawns", "coordinator_spawns_used"}:
+        elif name in {"coordinator_max_spawns", "coordinator_spawns_used", "lease_seconds"}:
             properties[name] = {"type": "integer", "minimum": 0}
-        elif name in {"rescope", "foreground", "auto_run", "kill_active", "add_instance", "coordinator_may_kill_own", "coordinator_no_kill_own", "coordinator_may_kill_others", "use_agent_default"}:
+        elif name in {"rescope", "foreground", "auto_run", "kill_active", "add_instance", "cancel_active_run", "approve_destructive", "coordinator_may_kill_own", "coordinator_no_kill_own", "coordinator_may_kill_others", "use_agent_default"}:
             properties[name] = {"type": "boolean"}
         else:
             properties[name] = {"type": "string", "minLength": 1}
@@ -436,8 +465,8 @@ def _readback_for(item: dict[str, Any]) -> list[str]:
         return ["snapshot", "run.show"]
     if capability_id.startswith("daemon."):
         return ["snapshot", "status"]
-    if capability_id.startswith("task.archive"):
-        return ["snapshot", "task.history"]
+    if capability_id.startswith("goal.archive"):
+        return ["snapshot", "goal.history"]
     return ["snapshot"]
 
 

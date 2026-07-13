@@ -5,9 +5,10 @@ import re
 from typing import Any, Iterable
 
 from .models import PersonaInstance
-from .mission_chat_turns import mission_chat_turn_elements
+from .mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_records
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
+from .redaction_mode import redaction_observe_enabled
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
@@ -15,7 +16,14 @@ DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
 MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
 PERSONA_CHAT_MESSAGE_TEXT_LIMIT = 20000
 _CHAT_MODEL_OVERRIDE_CONFIG_KEY = "mission_control_chat_model_override"
-_TRACE_EVENT_TYPES = {"run.tool.started", "run.tool.finished", "run.progress"}
+_TRACE_EVENT_TYPES = {
+    "run.tool.started",
+    "run.tool.finished",
+    "run.progress",
+    "task.transition",
+    "persona_assignment.created",
+    "persona_assignment.closed",
+}
 # Per-task trace fetch sizing: headroom over tail*agents to survive dilution by
 # non-trace event rows, and a hard ceiling on the reverse log scan.
 _TRACE_FETCH_HEADROOM = 6
@@ -33,6 +41,7 @@ def persona_chat_history_summary(
     limit: int = 50,
     message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
     accountant: ProjectionAccountant | None = None,
+    persona_assignments: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Return redaction-safe persona chat-history rows for Harness snapshots.
 
@@ -40,7 +49,11 @@ def persona_chat_history_summary(
     projects sessions already bound to a persona instance; it includes a
     bounded redaction-safe message tail and never starts/ticks a model turn. The
     optional ``session_db`` parameter keeps tests hermetic and lets production
-    use the normal ``hermes_state.SessionDB`` lazily.
+    use the normal ``hermes_state.SessionDB`` lazily. ``persona_assignments``
+    is the already-loaded assignment list the snapshot/status builders hold —
+    synthetic live-mission rows anchor their timestamps to the bound
+    assignment's persisted ``created_at`` (R3); this helper never scans the
+    assignment store itself.
     """
 
     bound_by_session: dict[str, PersonaInstance] = {}
@@ -86,9 +99,16 @@ def persona_chat_history_summary(
         session_id = safe_assignment_text(raw.get("id"), limit=200)
         if not session_id or session_id in seen:
             continue
+        is_source_chat = safe_assignment_token(raw.get("source")) == PERSONA_CHAT_SESSION_SOURCE
+        # Only persona-chat sessions and sessions bound to a live instance are
+        # candidates for this projection. Unrelated SessionDB sources (cron,
+        # telegram, cli, scratch) can never render as chat rows — counting them
+        # as no_instance_match drops floods parity with by-design noise.
+        if not is_source_chat and session_id not in bound_by_session:
+            seen.add(session_id)
+            continue
         if accountant is not None:
             accountant.consider(1)
-        is_source_chat = safe_assignment_token(raw.get("source")) == PERSONA_CHAT_SESSION_SOURCE
         inferred_persona = _infer_persona_id(raw, session_id=session_id)
         instance = bound_by_session.get(session_id) or (
             instances_by_persona.get(inferred_persona) if is_source_chat and inferred_persona else None
@@ -96,6 +116,9 @@ def persona_chat_history_summary(
         if instance is None:
             if accountant is not None:
                 accountant.drop("no_instance_match", entity_id=session_id)
+            # A session id can appear in both the source and broad pools;
+            # mark it seen so a drop is only accounted once.
+            seen.add(session_id)
             continue
         row = _history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail)
         rows.append(row)
@@ -122,6 +145,61 @@ def persona_chat_history_summary(
                 accountant.drop("session_not_in_db", entity_id=session_id)
             continue
         rows.append(_history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail))
+        seen.add(session_id)
+        if accountant is not None:
+            accountant.consider(1)
+            accountant.include(1)
+        if len(rows) >= limit:
+            break
+
+    # Live mission sessions. A task-bound instance runs its mission turns in a
+    # session that lives in the run/event stream, not the operator SessionDB, so
+    # the loops above never surface it — leaving the console on a stale operator
+    # chat with nothing to switch to. Emit a minimal, live-marked row (no
+    # messages; the persona_chat_trace lane carries the actual mission activity)
+    # so the session is selectable and the console can switch to what is running.
+    # This is NOT resurrecting a deleted chat: it is an active mission, and the
+    # row only exists while the instance is bound to a task.
+    assignment_rows = [item for item in (persona_assignments or []) if item is not None]
+    assignments_by_id: dict[str, Any] = {}
+    for item in assignment_rows:
+        assignment_id = safe_assignment_text(getattr(item, "id", None), limit=160)
+        if assignment_id:
+            assignments_by_id[assignment_id] = item
+    for instance in persona_instances:
+        if safe_assignment_token(getattr(instance, "mode", None)) != "task_bound":
+            continue
+        session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
+        task_id = safe_assignment_text(getattr(instance, "current_task_id", None), limit=160)
+        if not session_id or not task_id or session_id in seen:
+            continue
+        goal = safe_assignment_text(getattr(instance, "current_chat_goal", None), limit=120)
+        # R3 anchor: PersonaInstance persists no assigned_at, and its updated_at
+        # restamps on every derive_from_workers pass — the bound assignment's
+        # created_at is the only byte-stable "assigned at" truth in reach. Both
+        # synthetic timestamps use it (never build time); unknown stays null so
+        # it sorts as unknown rather than newest.
+        assignment = _mission_assignment_for(instance, assignments_by_id, assignment_rows, task_id=task_id)
+        assigned = _iso_timestamp(getattr(assignment, "created_at", None)) if assignment is not None else None
+        if assigned is None:
+            assigned = _iso_timestamp(getattr(instance, "assigned_at", None))
+        synthetic = {
+            "id": session_id,
+            "title": goal or "Mission run",
+            "message_count": 0,
+            "started_at": assigned,
+            "last_active": assigned,
+        }
+        row = _history_row(
+            synthetic,
+            instance,
+            session_id=session_id,
+            session_db=db,
+            message_tail=message_tail,
+            kind="mission",
+        )
+        row["task_id"] = task_id
+        rows.append(row)
         seen.add(session_id)
         if accountant is not None:
             accountant.consider(1)
@@ -211,7 +289,7 @@ def persona_chat_trace_summary(
     for task_id, members in members_by_task.items():
         fetch_limit = _trace_fetch_limit(tail, len(members))
         trace_by_persona: dict[str, list[Any]] = {}
-        for event in log.for_task(task_id, limit=fetch_limit):
+        for event in _fetch_trace_events(log.for_task, task_id, limit=fetch_limit):
             if getattr(event, "type", None) not in _TRACE_EVENT_TYPES:
                 continue
             event_persona = _canonical_persona_id(getattr(event, "persona_id", None))
@@ -230,7 +308,7 @@ def persona_chat_trace_summary(
             break
         fetch_limit = _trace_fetch_limit(tail, 1)
         chat_events: list[Any] = []
-        for event in log.for_session(session_id, limit=fetch_limit):
+        for event in _fetch_trace_events(log.for_session, session_id, limit=fetch_limit):
             if getattr(event, "type", None) not in _TRACE_EVENT_TYPES:
                 continue
             event_persona = _canonical_persona_id(getattr(event, "persona_id", None))
@@ -264,6 +342,22 @@ def _supports_for_session(log: Any) -> bool:
     return callable(getattr(log, "for_session", None))
 
 
+def _fetch_trace_events(fetch: Any, key: str, *, limit: int) -> list[Any]:
+    """Fetch trace-lane events with a type-aware limit when the log supports it.
+
+    ``types=_TRACE_EVENT_TYPES`` makes ``limit`` count matched trace rows, so a
+    task whose recent event tail is flooded with non-trace rows (e.g. a
+    budget-incident loop) cannot starve the window. Test fakes (and any legacy
+    log) without the ``types`` keyword fall back to the untyped fetch — same
+    tolerance pattern as ``_list_sessions``.
+    """
+
+    try:
+        return list(fetch(key, limit=limit, types=_TRACE_EVENT_TYPES))
+    except TypeError:
+        return list(fetch(key, limit=limit))
+
+
 class _TraceAccumulator:
     """Collects a persona instance's trace events across lanes, then renders
     them chronologically into a bounded list of redaction-safe entry dicts."""
@@ -290,7 +384,7 @@ class _TraceAccumulator:
                 unrenderable += 1
                 continue
             rendered.append(entry)
-        kept = rendered[-tail:]
+        kept = _retain_trace_tail(rendered, tail=tail)
         if accountant is not None:
             accountant.consider(len(self._events))
             accountant.include(len(kept))
@@ -301,6 +395,33 @@ class _TraceAccumulator:
                 accountant.drop("tail_truncated", count=truncated, entity_id=self.instance_id)
                 accountant.mark_truncated()
         return kept
+
+
+def _retain_trace_tail(rendered: list[dict[str, Any]], *, tail: int) -> list[dict[str, Any]]:
+    if len(rendered) <= tail:
+        return rendered
+    latest_start = max(0, len(rendered) - tail)
+    keep = {index for index in range(latest_start, len(rendered))}
+    keep.update(
+        index
+        for index, entry in enumerate(rendered)
+        if _priority_trace_entry(entry)
+    )
+    while len(keep) > tail:
+        removable = [index for index in sorted(keep) if not _priority_trace_entry(rendered[index])]
+        if not removable:
+            break
+        keep.remove(removable[0])
+    if len(keep) > tail:
+        keep = set(sorted(keep)[-tail:])
+    return [entry for index, entry in enumerate(rendered) if index in keep]
+
+
+def _priority_trace_entry(entry: dict[str, Any]) -> bool:
+    return safe_assignment_token(entry.get("event")) in {
+        "assignment_created",
+        "assignment_closed",
+    }
 
 
 def _trace_event_sort_key(event: Any) -> tuple[int, float, str]:
@@ -369,6 +490,37 @@ def _default_session_db() -> Any | None:
         return None
 
 
+def _mission_assignment_for(
+    instance: Any,
+    assignments_by_id: dict[str, Any],
+    assignment_rows: list[Any],
+    *,
+    task_id: str,
+) -> Any | None:
+    """Resolve the assignment record a task-bound instance is running under.
+
+    Primary join is ``instance.current_assignment_id``; when that is unset the
+    newest assignment matching ``(persona_instance_id, task_id)`` vouches. Both
+    lookups stay inside the caller-provided list — no store scan.
+    """
+
+    assignment_id = safe_assignment_text(getattr(instance, "current_assignment_id", None), limit=160)
+    if assignment_id and assignment_id in assignments_by_id:
+        return assignments_by_id[assignment_id]
+    instance_id = safe_assignment_text(getattr(instance, "id", None), limit=160)
+    if not instance_id:
+        return None
+    candidates = [
+        item
+        for item in assignment_rows
+        if safe_assignment_text(getattr(item, "persona_instance_id", None), limit=160) == instance_id
+        and safe_assignment_text(getattr(item, "task_id", None), limit=160) == task_id
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: _iso_timestamp(getattr(item, "created_at", None)) or "")
+
+
 def _history_row(
     raw: dict[str, Any],
     instance: PersonaInstance,
@@ -376,6 +528,7 @@ def _history_row(
     session_id: str,
     session_db: Any | None = None,
     message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+    kind: str = "chat",
 ) -> dict[str, Any]:
     persona_id = _canonical_persona_id(getattr(instance, "persona_id", None)) or "unknown"
     raw_title = safe_assignment_text(raw.get("title"), limit=120)
@@ -389,8 +542,21 @@ def _history_row(
     )
     messages, messages_status = _safe_recent_messages(session_db, session_id=session_id, limit=message_tail)
     redaction_status = (
-        "redacted" if "redacted" in {title_status, preview_status, messages_status} else "safe"
+        "would_redact"
+        if "would_redact" in {title_status, preview_status, messages_status}
+        else "redacted"
+        if "redacted" in {title_status, preview_status, messages_status}
+        else "safe"
     )
+    would_redact = {
+        label: status
+        for label, status in {
+            "title": title_status,
+            "preview": preview_status,
+            "messages": messages_status,
+        }.items()
+        if status == "would_redact"
+    }
     return {
         "session_id": session_id,
         "persona_id": persona_id,
@@ -398,17 +564,46 @@ def _history_row(
             getattr(instance, "id", None) or persona_instance_id_for(persona_id),
             limit=160,
         ),
+        "kind": "mission" if kind == "mission" or bool(raw.get("live_mission")) else "chat",
+        "live_mission": bool(kind == "mission" or raw.get("live_mission")),
         "title": title,
         "last_message_preview": preview,
         "message_count": _safe_int(raw.get("message_count")),
-        "created_at": raw.get("started_at"),
-        "updated_at": raw.get("last_active") or raw.get("ended_at") or raw.get("started_at"),
+        "created_at": _iso_timestamp(raw.get("started_at")),
+        "updated_at": _iso_timestamp(raw.get("last_active") or raw.get("ended_at") or raw.get("started_at")),
         "state": "archived" if bool(raw.get("archived")) else "open",
         "redaction_status": redaction_status,
+        **({"would_redact": would_redact} if would_redact else {}),
         **_token_usage_fields(raw),
         **_chat_model_fields(raw),
+        **_cache_policy_fields(raw),
         "messages": messages,
     }
+
+
+def _cache_policy_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    """Emit the session's prompt-cache policy so the Launcher can render an
+    honest freshness/expiry indicator (see agent_runtime.cache_policy).
+
+    Provider/model are resolved the same way the token label picks its effective
+    identity: a chat-scoped model override wins over the session's own record.
+    """
+    from .cache_policy import resolve_cache_policy
+
+    model_fields = _chat_model_fields(raw)
+    provider = model_fields.get("effective_provider") or safe_assignment_text(
+        raw.get("provider"), limit=220
+    ) or None
+    model = model_fields.get("effective_model") or safe_assignment_text(
+        raw.get("model"), limit=220
+    ) or None
+    policy = resolve_cache_policy(
+        provider=provider,
+        model=model,
+        api_mode=safe_assignment_text(raw.get("api_mode"), limit=60) or None,
+        base_url=safe_assignment_text(raw.get("base_url"), limit=400) or None,
+    )
+    return policy.as_snapshot_fields()
 
 
 def _chat_model_fields(raw: dict[str, Any]) -> dict[str, Any]:
@@ -451,10 +646,21 @@ def _token_usage_fields(raw: dict[str, Any]) -> dict[str, int]:
     total_tokens = _safe_int(raw.get("total_tokens"))
     if total_tokens == 0 and (input_tokens or output_tokens):
         total_tokens = input_tokens + output_tokens
+    # Cache split (Launcher contract): ``input_tokens`` is already the UNCACHED,
+    # full-price input (canonical usage subtracts cache reads/writes; see
+    # agent/usage_pricing.CanonicalUsage). Forwarding the cache buckets lets the
+    # Launcher show a cache hit % and a full-price count so operators can tell a
+    # warm cache from a stale one that is being re-billed at full rate. The
+    # session DB already accumulates these columns per API call — this projection
+    # simply stops dropping them at the snapshot boundary.
+    cache_read_tokens = _safe_int(raw.get("cache_read_tokens"))
+    cache_write_tokens = _safe_int(raw.get("cache_write_tokens"))
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": total_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
     }
 
 
@@ -520,6 +726,7 @@ def _safe_recent_messages(
         return [], "safe"
     rows: list[dict[str, Any]] = []
     redacted = False
+    assistant_client_message_ids: set[str] = set()
     # Curate the agent's raw working transcript into an operator-facing one.
     # The bound session is the agent's internal session, so its raw rows are
     # verbose tick-context prompts (role=user) and serialized decision dicts
@@ -535,6 +742,8 @@ def _safe_recent_messages(
             raw.get("platform_message_id") or raw.get("client_message_id"),
             limit=240,
         )
+        if role == "agent" and client_message_id:
+            assistant_client_message_ids.add(client_message_id)
         curated = _curate_chat_message_text(
             role, raw.get("content") or raw.get("text")
         )
@@ -572,39 +781,119 @@ def _safe_recent_messages(
             if elements:
                 row["turn_elements"] = elements
         rows.append(row)
+    rows.extend(
+        _interrupted_turn_rows(
+            session_id=session_id,
+            assistant_client_message_ids=assistant_client_message_ids,
+        )
+    )
+    rows = _ordered_message_rows(rows)
     rows = rows[-_bounded_message_tail(limit):]
     return rows, "redacted" if redacted else "safe"
 
 
+def _interrupted_turn_rows(
+    *,
+    session_id: str,
+    assistant_client_message_ids: set[str],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for record in mission_chat_turn_records(session_id=session_id):
+        if safe_assignment_token(record.get("state")) != "interrupted":
+            continue
+        client_message_id = safe_assignment_text(record.get("client_message_id"), limit=240)
+        if not client_message_id or client_message_id in assistant_client_message_ids:
+            continue
+        turn_id = safe_assignment_token(record.get("turn_id")) or safe_assignment_token(client_message_id)
+        if not turn_id:
+            continue
+        rows.append(
+            {
+                "id": f"{session_id}:turn-interrupted:{client_message_id}",
+                "role": "system",
+                # Typed marker: downstream projections (operator conversation,
+                # Mission Control tiles) key on this instead of matching text.
+                "kind": "turn_interrupted",
+                "text": "Agent turn interrupted before a reply was recorded. Retry the message to run a fresh turn.",
+                "timestamp": _iso_timestamp(record.get("updated_at")),
+                "redaction_status": "safe",
+                "client_message_id": client_message_id,
+                "turn_id": turn_id,
+            }
+        )
+    return rows
+
+
+def _ordered_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # Merge synthesized rows into the transcript by timestamp, keeping the
+    # original order as the tie-breaker. A row without a parseable timestamp
+    # inherits the preceding row's, so it holds its transcript position instead
+    # of front-loading (where the tail bound would evict it first).
+    keyed: list[tuple[str, int, dict[str, Any]]] = []
+    last_timestamp = ""
+    for index, row in enumerate(rows):
+        timestamp = str(row.get("timestamp") or "") or last_timestamp
+        last_timestamp = timestamp
+        keyed.append((timestamp, index, row))
+    keyed.sort(key=lambda item: (item[0], item[1]))
+    return [row for _, _, row in keyed]
+
+
 def _iso_timestamp(value: Any) -> str | None:
-    """Normalize a message timestamp to the same ISO-8601 ``Z`` form as traces.
+    """Normalize SessionDB timestamps to the same ISO-8601 ``Z`` form as traces.
 
     SessionDB stores message timestamps as epoch-seconds floats (``time.time()``),
     while harness-trace rows carry ISO strings (``Event.ts`` via ``to_jsonable``).
     The Launcher merges the two channels by parsing each ``ts`` with
     ``DateTime.tryParse`` and orders them — an epoch float is unparseable there, so
-    without this the curated rows lose their time and the trace block jumps ahead
-    of them. Project both channels in one comparable format.
+    without this the curated rows lose their time and the trace block jumps
+    ahead of them. Project message and session timestamps in one comparable UTC
+    format, and never pass raw unparseable values through the snapshot contract.
     """
 
     if value is None:
         return None
     if isinstance(value, bool):
         return None
-    if isinstance(value, str):
-        text = value.strip()
-        return text or None
-    if isinstance(value, (int, float)):
-        from datetime import datetime, timezone
+    from datetime import datetime, timezone
 
+    def _format(moment: datetime) -> str:
+        return moment.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return _format(moment)
+    if isinstance(value, (int, float)):
         epoch = float(value)
         if epoch > 1e12:  # tolerate millisecond clocks
             epoch /= 1000.0
         try:
-            moment = datetime.fromtimestamp(epoch, tz=timezone.utc)
+            return _format(datetime.fromtimestamp(epoch, tz=timezone.utc))
         except (OverflowError, OSError, ValueError):
             return None
-        return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            epoch = float(text)
+        except ValueError:
+            pass
+        else:
+            if epoch > 1e12:  # tolerate millisecond clocks
+                epoch /= 1000.0
+            try:
+                return _format(datetime.fromtimestamp(epoch, tz=timezone.utc))
+            except (OverflowError, OSError, ValueError):
+                return None
+        parse_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+        try:
+            parsed = datetime.fromisoformat(parse_text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return _format(parsed)
     return None
 
 
@@ -617,26 +906,23 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "run.tool.started": "tool_started",
         "run.tool.finished": "tool_finished",
         "run.progress": "progress",
+        "task.transition": "progress",
+        "persona_assignment.created": "assignment_created",
+        "persona_assignment.closed": "assignment_closed",
     }.get(event_type)
     if trace_event is None:
         return None
 
     tool_name = _safe_trace_text(payload.get("tool_name") or payload.get("tool"), limit=120)
-    summary = _first_safe_trace_text(
-        payload.get("summary"),
-        payload.get("patch_summary"),
-        payload.get("code_summary"),
-        payload.get("command_label"),
-        payload.get("file_summary"),
-        limit=500,
-    )
-    status = _safe_trace_text(payload.get("status") or payload.get("exit_code"), limit=80)
+    summary = _trace_summary(event_type, payload)
+    status = _safe_trace_text(payload.get("status") or payload.get("to") or payload.get("exit_code"), limit=80)
     files = _safe_trace_file_labels(payload.get("changed_files") or payload.get("files_touched"))
     return {
         "kind": "harness_trace",
         "task_id": safe_assignment_text(getattr(event, "task_id", None), limit=160),
         "persona_id": safe_assignment_token(getattr(event, "persona_id", None)) or "unknown",
         "run_id": safe_assignment_text(getattr(event, "run_id", None), limit=160),
+        "turn_id": safe_assignment_text(getattr(event, "turn_id", None) or payload.get("turn_id"), limit=160),
         "stage_id": _safe_trace_text(payload.get("stage_id"), limit=120),
         "event": trace_event,
         "tool_name": tool_name,
@@ -644,6 +930,37 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "files": files,
         "status": status,
         "ts": getattr(event, "ts", None),
+        # Operator-console detail lane (Mission Control only): real command,
+        # tool target, bounded output tail, and full changed paths — the
+        # per-line secret scrub already ran at the progress sink. Key names
+        # mirror what the launcher's trace item parser already reads.
+        "command": _safe_trace_operator_line(
+            payload.get("command_full") or payload.get("command_label"), limit=500
+        ),
+        # Per-step reasoning from the thinking callback. "_thinking" is the
+        # legacy placeholder some historical events recorded — never content.
+        "reasoning_summary": (
+            None
+            if payload.get("reasoning_summary") == "_thinking"
+            else _safe_trace_operator_line(payload.get("reasoning_summary"), limit=500)
+        ),
+        "target": _safe_trace_operator_line(payload.get("target_label"), limit=300),
+        "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
+        "output": _safe_trace_operator_block(payload.get("output"), limit=1600),
+        "paths": _safe_trace_operator_paths(payload.get("changed_paths")),
+        "duration_ms": _safe_trace_int(payload.get("duration_ms")),
+        "exit_code": _safe_trace_int(payload.get("exit_code")),
+        "skill_id": _safe_trace_text(payload.get("skill_name"), limit=120),
+        "assignment_id": _safe_trace_text(payload.get("assignment_id"), limit=160),
+        "persona_instance_id": _safe_trace_text(payload.get("persona_instance_id"), limit=160),
+        "title": _safe_trace_text(payload.get("title"), limit=240),
+        "message": _safe_trace_text(payload.get("message"), limit=1200),
+        "repo": _safe_trace_text(payload.get("repo"), limit=160),
+        "affected_paths": _safe_trace_file_labels(payload.get("affected_paths")),
+        "proof_targets": _safe_trace_list_text(payload.get("proof_targets"), limit=240),
+        "acceptance": _safe_trace_list_text(payload.get("acceptance"), limit=500),
+        "non_goals": _safe_trace_list_text(payload.get("non_goals"), limit=500),
+        "allowed_decisions": _safe_trace_list_text(payload.get("allowed_decisions"), limit=80),
     }
 
 
@@ -655,6 +972,32 @@ def _first_safe_trace_text(*values: Any, limit: int) -> str | None:
     return None
 
 
+def _trace_summary(event_type: str, payload: dict[str, Any]) -> str | None:
+    if event_type.startswith("run.tool."):
+        return _first_safe_trace_text(
+            payload.get("command_label"),
+            payload.get("file_summary"),
+            payload.get("patch_summary"),
+            payload.get("code_summary"),
+            payload.get("summary"),
+            limit=500,
+        )
+    if event_type == "run.progress":
+        summary = _safe_trace_text(payload.get("summary"), limit=500)
+        if summary in {"Run progress update.", "Run progress update"}:
+            return None
+        return summary
+    return _first_safe_trace_text(
+        payload.get("reason") if event_type == "task.transition" else None,
+        payload.get("summary"),
+        payload.get("patch_summary"),
+        payload.get("code_summary"),
+        payload.get("command_label"),
+        payload.get("file_summary"),
+        limit=500,
+    )
+
+
 def _safe_trace_text(value: Any, *, limit: int) -> str | None:
     text = safe_assignment_text(value, limit=limit)
     if not text:
@@ -662,6 +1005,58 @@ def _safe_trace_text(value: Any, *, limit: int) -> str | None:
     if _SECRET_RE.search(text) or _looks_pathish(text):
         return None
     return text
+
+
+def _safe_trace_operator_line(value: Any, *, limit: int) -> str | None:
+    """Operator-console single line: paths allowed, secrets blocked, bounded."""
+
+    text = " ".join(str(value or "").strip().split())
+    if not text or _SECRET_RE.search(text):
+        return None
+    return f"{text[: limit - 1]}…" if len(text) > limit else text
+
+
+def _safe_trace_operator_block(value: Any, *, limit: int) -> str | None:
+    """Operator-console multi-line block (command output): keeps line structure,
+    redacts secret-bearing lines, tail-bounded."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    lines = [
+        "[redacted line — contained a secret]" if _SECRET_RE.search(line) else line
+        for line in text.split("\n")
+    ]
+    text = "\n".join(lines)
+    if len(text) > limit:
+        text = f"…(earlier output truncated)…\n{text[-limit:]}"
+    return text
+
+
+def _safe_trace_operator_paths(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    paths: list[str] = []
+    for item in value:
+        text = " ".join(str(item or "").strip().split()).replace("\\", "/")
+        if not text or _SECRET_RE.search(text):
+            continue
+        if len(text) > 200:
+            text = f"…{text[-199:]}"
+        if text not in paths:
+            paths.append(text)
+        if len(paths) >= 12:
+            break
+    return paths
+
+
+def _safe_trace_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_trace_file_labels(value: Any) -> list[str]:
@@ -681,6 +1076,18 @@ def _safe_trace_file_labels(value: Any) -> list[str]:
             continue
         labels.append(label)
     return labels[:12]
+
+
+def _safe_trace_list_text(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items: list[str] = []
+    for item in value:
+        text = safe_assignment_text(item, limit=limit)
+        if not text or _SECRET_RE.search(text):
+            continue
+        items.append(text)
+    return items[:12]
 
 
 def _looks_pathish(value: str) -> bool:
@@ -790,6 +1197,8 @@ def _safe_display_text(
     if not text:
         return fallback, "safe"
     if _SECRET_RE.search(text):
+        if redaction_observe_enabled():
+            return _mask_secret_lines(text, limit=limit), "would_redact"
         return redacted_fallback or fallback, "redacted"
     return text, "safe"
 
@@ -805,8 +1214,19 @@ def _safe_display_body_text(
     if not text:
         return fallback, "safe"
     if _SECRET_RE.search(text):
+        if redaction_observe_enabled():
+            return _mask_secret_lines(text, limit=limit), "would_redact"
         return redacted_fallback or fallback, "redacted"
     return text, "safe"
+
+
+def _mask_secret_lines(value: str, *, limit: int) -> str:
+    lines = [
+        "[redacted line — contained a secret]" if _SECRET_RE.search(line) else line
+        for line in str(value or "").split("\n")
+    ]
+    text = "\n".join(lines).strip()
+    return text[:limit].rstrip()
 
 
 def _safe_chat_body_text(value: Any, *, limit: int) -> str:

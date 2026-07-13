@@ -217,7 +217,7 @@ class StageCLauncherMcpVisualCaptureProvider:
             "scenario_label": scenario_label,
             "reap_stale": bool(metadata.get("reap_stale", True)),
             "force_relaunch": bool(metadata.get("force_relaunch", True)),
-            "browser_login": bool(metadata.get("browser_login", False)),
+            "browser_login": _metadata_bool(metadata, "browser_login", default=True),
             "screenshot_stabilize_ms": int(metadata.get("screenshot_stabilize_ms") or 750),
             "screenshot_max_retries": int(metadata.get("screenshot_max_retries") or 8),
             "screenshot_retry_delay_ms": int(metadata.get("screenshot_retry_delay_ms") or 750),
@@ -226,16 +226,17 @@ class StageCLauncherMcpVisualCaptureProvider:
         }
         if self.config.profile_home is not None:
             args["hermes_home"] = str(self.config.profile_home)
+        launch_pins = _launcher_qa_launch_pins(metadata, self.config)
 
         try:
-            envelope = self._open_app_tab(args)
+            envelope = self._open_app_tab(args, launch_pins=launch_pins)
         except StageCMcpError as exc:
             if not provider_metadata and _is_wrong_marionette_target_error(exc) and _auto_rebuild_enabled(metadata):
                 rebuild = _run_launcher_marionette_rebuild(request.task_id, reason="wrong_debug_target_retry")
                 provider_metadata["stagec_marionette_preflight"] = rebuild
                 if rebuild.get("status") != "applied":
                     raise StageCMcpError(f"{exc}; marionette rebuild failed: {_safe_summary(rebuild.get('summary'))}") from exc
-                envelope = self._open_app_tab(args)
+                envelope = self._open_app_tab(args, launch_pins=launch_pins)
             else:
                 raise
         if envelope.get("ok") is not True:
@@ -260,8 +261,9 @@ class StageCLauncherMcpVisualCaptureProvider:
     def capture_video(self, request: VideoRequest) -> CapturedArtifact:
         raise StageCMcpError("launcher_qa MCP video capture is not implemented; request screenshot proof")
 
-    def _open_app_tab(self, args: dict[str, Any]) -> dict[str, Any]:
-        with StageCMcpJsonRpcClient(self.config) as client:
+    def _open_app_tab(self, args: dict[str, Any], *, launch_pins: dict[str, str]) -> dict[str, Any]:
+        config = _config_with_launcher_qa_launch_pins(self.config, launch_pins)
+        with StageCMcpJsonRpcClient(config) as client:
             client.initialize()
             return client.call_tool("mcp_launcher_qa_open_app_tab", args)
 
@@ -356,6 +358,100 @@ def _marionette_preflight_enabled_for_config(metadata: dict[str, Any], config: S
         return True
     command_text = " ".join([str(config.command or ""), *[str(item) for item in config.args or []]]).lower().replace("\\", "/")
     return "stagec_qa_mcp_server" in command_text or "invoke-launcherqamcptool" in command_text
+
+
+def _launcher_qa_launch_pins(metadata: dict[str, Any], config: StageCMcpServerConfig) -> dict[str, str]:
+    repo_root = _first_nonempty(
+        metadata.get("repoRoot"),
+        metadata.get("repo_root"),
+        metadata.get("launcher_repo"),
+        metadata.get("launcher_repo_root"),
+        config.env.get("STAGEC_QA_REPO_ROOT"),
+        os.getenv("STAGEC_QA_REPO_ROOT"),
+        os.getenv("HERMES_STAGEC_LAUNCHER_REPO"),
+        os.getenv("HERMES_LAUNCHER_REPO"),
+        os.getenv("ETERNIA_LAUNCHER_ROOT"),
+    )
+    launch_helper = _first_nonempty(
+        metadata.get("launchHelperPath"),
+        metadata.get("launch_helper_path"),
+        config.env.get("STAGEC_LAUNCH_HELPER"),
+        os.getenv("STAGEC_LAUNCH_HELPER"),
+    )
+    screenshot_helper = _first_nonempty(
+        metadata.get("screenshotHelperPath"),
+        metadata.get("screenshot_helper_path"),
+        config.env.get("STAGEC_SCREENSHOT_HELPER"),
+        os.getenv("STAGEC_SCREENSHOT_HELPER"),
+    )
+    if repo_root:
+        launch_helper = launch_helper or _default_launch_helper(repo_root)
+        screenshot_helper = screenshot_helper or _default_screenshot_helper(repo_root)
+    pins: dict[str, str] = {}
+    if repo_root:
+        pins["repoRoot"] = repo_root
+    if launch_helper:
+        pins["launchHelperPath"] = launch_helper
+    if screenshot_helper:
+        pins["screenshotHelperPath"] = screenshot_helper
+    return pins
+
+
+def _config_with_launcher_qa_launch_pins(config: StageCMcpServerConfig, launch_pins: dict[str, str]) -> StageCMcpServerConfig:
+    env = dict(config.env)
+    for arg_key, env_key in (
+        ("repoRoot", "STAGEC_QA_REPO_ROOT"),
+        ("launchHelperPath", "STAGEC_LAUNCH_HELPER"),
+        ("screenshotHelperPath", "STAGEC_SCREENSHOT_HELPER"),
+    ):
+        value = str(launch_pins.get(arg_key) or "").strip()
+        if value and not env.get(env_key):
+            env[env_key] = value
+    if env == config.env:
+        return config
+    return StageCMcpServerConfig(
+        name=config.name,
+        command=config.command,
+        args=list(config.args),
+        env=env,
+        timeout_seconds=config.timeout_seconds,
+        connect_timeout_seconds=config.connect_timeout_seconds,
+        profile_home=config.profile_home,
+    )
+
+
+def _default_launch_helper(repo_root: str) -> str | None:
+    candidate = Path(repo_root) / "docs" / "stages" / "qa-reboot" / "scripts" / "Start-StageCDirectExe.ps1"
+    return str(candidate) if candidate.exists() else None
+
+
+def _default_screenshot_helper(repo_root: str) -> str | None:
+    candidate = Path(repo_root) / "docs" / "stages" / "qa-reboot" / "scripts" / "Capture-StageCWindowScreenshot.ps1"
+    return str(candidate) if candidate.exists() else None
+
+
+def _first_nonempty(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _metadata_bool(metadata: dict[str, Any], key: str, *, default: bool) -> bool:
+    if key not in metadata:
+        return default
+    raw = metadata.get(key)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    text = str(raw or "").strip().lower()
+    if text in {"0", "false", "no", "off"}:
+        return False
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    return default
 
 
 def _launcher_repo_from_metadata(metadata: dict[str, Any]) -> Path | None:

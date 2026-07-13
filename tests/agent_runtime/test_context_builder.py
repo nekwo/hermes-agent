@@ -8,7 +8,7 @@ from agent_runtime.models import AgentRun, MissionIntent, MissionPlan, MissionPl
 from agent_runtime.packets import make_packet, record_packet
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.repo_bundles import RepoBundleStore
-from agent_runtime.runtime_config import MissionPlanConfig, NormalWorkerFlowConfig, RoleEnvelopeConfig, RuntimeConfig
+from agent_runtime.runtime_config import MissionPlanConfig, NormalWorkerFlowConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import ProofStore
 from agent_runtime.role_checklists import RoleChecklistStore
@@ -76,8 +76,8 @@ def test_neko_closed_choice_hud_does_not_release_qa_for_default_graph():
 
     hud = build_context(task, run, config=cfg).mission_hud
 
-    assert hud["agent_hud"]["recommended_action"]["shape_id"] == "neko.scoped_handoff"
-    assert hud["next_required_move"]["shape_id"] == "neko.scoped_handoff"
+    assert hud["agent_hud"]["recommended_action"]["shape_id"] == "neko.scope_route"
+    assert hud["next_required_move"]["shape_id"] == "neko.scope_route"
 
 
 def test_rendered_context_uses_stage_output_template_instead_of_raw_description():
@@ -194,7 +194,8 @@ def test_agent_hud_current_assignment_is_stage_shaped_from_proof_gate():
     run = make_run()
     run.stage_id = "design_socket"
 
-    hud = build_context(task, run).mission_hud
+    cfg = RuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=True))
+    hud = build_context(task, run, config=cfg).mission_hud
     assignment = hud["agent_hud"]["current_assignment"]
 
     assert assignment["stage_id"] == "design_socket"
@@ -303,19 +304,20 @@ def test_neko_diagnostic_hud_recommends_valid_ack_packet():
         last_heartbeat_at=now(),
     )
 
-    hud = build_context(task, run).mission_hud
+    cfg = RuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=True))
+    hud = build_context(task, run, config=cfg).mission_hud
     next_move = hud["next_required_move"]
     payload = next_move["recommended_payload"]
 
-    assert next_move["shape_id"] == "neko.scoped_handoff"
-    assert payload["handoff_packet"]["target_owner"] == "neko_supervisor"
-    assert payload["handoff_packet"]["proof_gate"] == {
+    assert next_move["shape_id"] == "neko.scope_route"
+    assert payload["target_owner"] == "neko_supervisor"
+    assert payload["proof_gate"] == {
         "required": False,
         "required_proof_types": ["harness_observation"],
         "minimum_status": "passed",
         "visual_required": False,
     }
-    assert hud["decision_menu"][0]["recommended_payload"] == payload
+    assert hud["agent_hud"]["recommended_action"]["shape_id"] == "neko.scope_route"
 
 
 def test_simplified_agent_hud_actor_contracts_are_closed_choice():
@@ -367,6 +369,9 @@ def test_context_renders_repo_bundle_hud_with_datetime_fields(isolate_agent_runt
     rendered = render_context(ctx)
 
     assert "repo_bundles" in rendered
+    assert "staged_bundle_not_applied" in rendered
+    assert "checkout_applied" in rendered
+    assert "checkout not modified" in rendered
     assert "created_at" in rendered
     assert "Object of type datetime" not in rendered
 
@@ -826,6 +831,24 @@ def test_dev_mission_hud_exposes_closed_request_test_run_choice_and_commands():
     assert "common.request_file_reads" in [item["shape_id"] for item in hud["context_expansion_menu"]]
 
 
+def test_simplified_agent_contract_flag_exposes_worker_actions_with_rollback_metadata():
+    task = make_task()
+    task.stages[0].test_plan = ["pytest tests/agent_runtime/test_context_builder.py -q"]
+    cfg = RuntimeConfig(
+        normal_worker_flow=NormalWorkerFlowConfig(enabled=False),
+        simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True),
+    )
+
+    hud = build_context(task, make_run(), config=cfg).mission_hud
+
+    assert hud["decision_contract_mode"] == "simplified_agent_contract"
+    assert hud["decision_contract_migration"]["enabled"] is True
+    assert "legacy_aliases_allowed" not in hud["decision_contract_migration"]
+    assert hud["decision_contract_migration"]["internal_state_machine_retained"] is True
+    assert "disable simplified_agent_contract.enabled" in hud["decision_contract_migration"]["rollback"]
+    assert hud["worker_action_menu"]
+
+
 def test_dev_mission_hud_prefers_patch_before_proof_for_product_edit_stage():
     task = make_task()
     task.title = "Mission Control DM bubble terminal rows"
@@ -849,8 +872,8 @@ def test_dev_mission_hud_prefers_patch_before_proof_for_product_edit_stage():
     ctx = build_context(task, run, config=cfg)
 
     hud = ctx.mission_hud
-    assert hud["next_required_move"]["shape_id"] == "dev.propose_patch"
-    assert hud["decision_menu"][0]["shape_id"] == "dev.propose_patch"
+    assert hud["next_required_move"]["shape_id"] == "dev.hand_off"
+    assert hud["decision_menu"][0]["shape_id"] == "dev.hand_off"
 
 
 def test_normal_worker_flow_hides_request_gate_until_product_edit_delivery():
@@ -877,17 +900,21 @@ def test_normal_worker_flow_hides_request_gate_until_product_edit_delivery():
 
     hud = ctx.mission_hud
     assert hud["decision_contract_mode"] == "normal_worker_flow"
-    assert hud["primary_worker_action"]["action_id"] == "deliver_patch"
-    assert hud["next_required_move"]["worker_action_id"] == "deliver_patch"
+    assert hud["primary_worker_action"]["action_id"] == "hand_off"
+    assert hud["next_required_move"]["worker_action_id"] == "hand_off"
     assert [item["shape_id"] for item in hud["decision_menu"]] == [
-        "dev.propose_patch",
+        "dev.hand_off",
         "common.request_file_reads",
         "common.block",
         "dev.correct_stage",
     ]
     assert "dev.request_test_run" not in hud["decision_shape_index"]
     assert hud["not_allowed_yet"][0]["action_id"] == "request_gate"
-    assert "self_test_evidence_ids" in hud["decision_menu"][0]["recommended_payload"]["delivery"]
+    assert hud["decision_menu"][0]["recommended_payload"] == {
+        "stage_id": "mc_terminal_dm_bubble_rows",
+        "summary": "<short completion signal>",
+        "known_gaps": [],
+    }
 
 
 def test_normal_worker_flow_committed_verification_stage_prefers_request_gate():
@@ -1213,11 +1240,13 @@ def test_typed_plan_backend_investigation_hud_delivers_after_repeated_context():
 
     hud = build_context(task, run, config=cfg).mission_hud
 
-    assert hud["primary_worker_action"]["action_id"] == "deliver_findings"
-    assert hud["next_required_move"]["shape_id"] == "dev.propose_patch"
-    assert hud["decision_menu"][0]["recommended_payload"]["delivery"]["work_status"] == "patch_proposed"
-    assert "findings" in hud["decision_menu"][0]["recommended_payload"]["delivery"]
-    assert "recommendations" in hud["decision_menu"][0]["recommended_payload"]["delivery"]
+    assert hud["primary_worker_action"]["action_id"] == "hand_off"
+    assert hud["next_required_move"]["shape_id"] == "dev.hand_off"
+    delivery = hud["decision_menu"][0]["recommended_payload"]
+    assert delivery["stage_id"] == "backend_investigation"
+    assert "work_status" not in delivery
+    assert "summary" in delivery
+    assert "known_gaps" in delivery
     assert "common.request_file_reads" not in [item["shape_id"] for item in hud["decision_menu"]]
 
 
@@ -1375,10 +1404,10 @@ def test_neko_mission_hud_exposes_visual_recovery_choice_without_patch_options()
     ctx = build_context(task, run)
 
     hud = ctx.mission_hud
-    assert hud["next_required_move"]["shape_id"] == "neko.bounded_visual_proof_recovery"
-    assert hud["decision_menu"][0]["decision_type"] == "propose_acceptance"
-    assert "handoff_packet" in hud["decision_shape_index"]["neko.bounded_visual_proof_recovery"]["allowed_payload_keys"]
-    assert "request_test_run" in hud["forbidden_decisions"]
+    assert hud["next_required_move"]["shape_id"] == "neko.scope_route"
+    assert hud["decision_menu"][0]["decision_type"] == "scope_route"
+    assert "proof_gate" in hud["decision_shape_index"]["neko.scope_route"]["allowed_payload_keys"]
+    assert "request_test_run" not in hud.get("forbidden_decisions", [])
     assert all(item["forbid_unknown_payload_keys"] is True for item in hud["decision_menu"])
 
 
@@ -1396,7 +1425,7 @@ def test_qa_mission_hud_exposes_screenshot_and_verdict_choices():
     assert hud["next_required_move"]["shape_id"] == "qa.request_screenshot"
     shape_ids = [item["shape_id"] for item in hud["decision_menu"]]
     assert "qa.request_screenshot" in shape_ids
-    assert "qa.report_qa_verdict" in shape_ids
+    assert "qa.verdict" in shape_ids
     assert hud["decision_shape_index"]["qa.request_screenshot"]["allowed_payload_keys"][:6] == [
         "stage_id",
         "target",
@@ -1405,6 +1434,34 @@ def test_qa_mission_hud_exposes_screenshot_and_verdict_choices():
         "required_launch_pins",
         "qa_review",
     ]
+
+
+def test_dev_no_edit_visual_stage_prefers_screenshot_over_command_gate():
+    task = make_task()
+    task.title = "Stage 46 visual proof certification"
+    task.description = "Capture fullscreen Mission Control screenshot proof without product edits."
+    task.acceptance_criteria = ["Screenshot proof is attached."]
+    task.requires_visual_proof = True
+    task.stages[0] = TaskStage(
+        id="implement",
+        title="Visual proof certification",
+        objective="Capture fullscreen Mission Control screenshot proof without product edits.",
+        status=StageStatus.READY,
+        test_plan=["python -m pytest tests/agent_runtime -q"],
+        requires_visual_proof=False,
+    )
+    task.current_stage_id = "implement"
+    run = make_run()
+    run.stage_id = "implement"
+
+    cfg = RuntimeConfig(normal_worker_flow=NormalWorkerFlowConfig(enabled=True))
+    hud = build_context(task, run, config=cfg).mission_hud
+
+    assert hud["primary_worker_action"]["action_id"] == "request_visual_gate"
+    assert hud["next_required_move"]["shape_id"] == "dev.request_screenshot"
+    assert hud["decision_menu"][0]["shape_id"] == "dev.request_screenshot"
+    assert hud["decision_menu"][0]["recommended_payload"]["mcp_server"] == "launcher_qa"
+    assert hud["decision_shape_index"]["dev.request_screenshot"]["enum_choices"]["mcp_server"] == ["launcher_qa"]
 
 
 def test_render_context_includes_all_stages_and_proof_metadata_for_qa_review():

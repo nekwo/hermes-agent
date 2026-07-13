@@ -37,7 +37,7 @@ Use this skill after `harness-dev-delivery` when the current Launcher stage need
 - For Mission Control page/event-view rendering changes, use the focused page/widget proof: `flutter test test/features/mission_control/mission_control_page_test.dart`.
 - For Mission Control bridge/archive/snapshot stages, do not recycle the page/widget proof. Use the bridge regression proof: `flutter test test/features/mission_control/mission_control_snapshot_test.dart test/features/mission_control/mission_control_bridge_test.dart`.
 - Never use `flutter --version`, `flutter doctor`, `where flutter`, or `which flutter` as Launcher contract proof. Those are preflight signals only.
-- In normal worker flow for product-edit stages, run the narrow analyze/widget command in-session first, then deliver with `propose_patch`; Harness runs the final gate after delivery. Use Harness `request_test_run` only when the HUD exposes `request_gate`, for no-edit/certification proof, QA missing proof, or failed final-gate recovery. Missing proof should become explicit HUD evidence or a focused proof request, not a terminal block.
+- In normal worker flow for product-edit stages, run the narrow analyze/widget command in-session first, then emit `hand_off`; Harness runs the final gate after handoff. Use Harness `request_test_run` only when the HUD exposes `request_gate`, for no-edit/certification proof, QA missing proof, or failed final-gate recovery. Missing proof should become explicit HUD evidence or a focused proof request, not a terminal block.
 
 ## Stage C Mission Control Screenshot Command Shape
 
@@ -48,15 +48,18 @@ Use this skill after `harness-dev-delivery` when the current Launcher stage need
 
 ## Delivery Shape
 
-When delivering a product edit in normal worker flow, cite self-test evidence if the HUD exposes it:
+When delivering a product edit in normal worker flow, keep the handoff compact:
 
 ```json
 {
-  "work_status": "patch_proposed",
-  "self_test_evidence_ids": ["selftest_id_from_hud"],
-  "changed_files": ["lib/features/mission_control/mission_control_page.dart"],
-  "known_gaps": [],
-  "next_owner": "neko_supervisor"
+  "type": "hand_off",
+  "summary": "Mission Control Launcher patch is ready for proof review.",
+  "rationale": "The focused Launcher change is complete and the focused self-test ran in this session.",
+  "payload": {
+    "stage_id": "stage_example",
+    "summary": "Updated Mission Control Launcher behavior and ran the focused widget/analyze proof locally.",
+    "known_gaps": []
+  }
 }
 ```
 
@@ -64,10 +67,18 @@ When requesting an explicit proof gate, keep the delivery packet concise:
 
 ```json
 {
-  "work_status": "proof_requested",
-  "consumed_contract_packet_ids": ["packet_contract_id"],
-  "consumed_proof_ids": ["backend_proof_id"],
-  "known_gaps": [],
-  "next_owner": "neko_supervisor"
+  "type": "request_test_run",
+  "summary": "Run focused Launcher contract proof.",
+  "rationale": "Launcher consumed the backend contract packet and needs a deterministic proof gate.",
+  "payload": {
+    "stage_id": "stage_example",
+    "commands": ["flutter test test/features/mission_control/mission_control_page_test.dart"],
+    "delivery": {
+      "consumed_contract_packet_ids": ["packet_contract_id"],
+      "consumed_proof_ids": ["backend_proof_id"],
+      "known_gaps": [],
+      "next_owner": "neko_supervisor"
+    }
+  }
 }
 ```

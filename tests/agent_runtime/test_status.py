@@ -36,7 +36,7 @@ def test_status_lane_only_does_not_report_background_task_ids(isolate_agent_runt
     ts.create(Task(id="task_foreground", title="F", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
     ts.create(Task(id="task_background", title="B", description="d", state=TaskState.BLOCKED, created_at=n, updated_at=n, requested_by="tony"))
     runtimes = GoalRuntimeInstanceStore()
-    runtimes.create_foreground(task_id="task_foreground", started_by="test")
+    runtimes.create_lane(task_id="task_foreground", started_by="test", state="running")
     runtimes.park_open_task("task_background", reason="test parked")
 
     s = build_status(task_store=ts)
@@ -96,6 +96,8 @@ def test_status_surfaces_lanes_repo_locks_and_swarm_budget(isolate_agent_runtime
     assert s["lanes"][0]["lane_id"] == lane.id
     assert s["repo_locks"]["lock_count"] == 1
     assert s["swarm_budget"]["global"] == {"total_tokens": 12, "api_calls": 2}
+    assert s["production_envelope"]["production_ready"] is True
+    assert {item["id"] for item in s["production_envelope"]["items"]} >= {"H5", "H6", "H7", "H8", "H9", "H10"}
 
 
 def test_status_marks_next_action_blocked_by_open_incident():

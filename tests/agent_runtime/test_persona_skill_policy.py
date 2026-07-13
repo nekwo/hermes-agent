@@ -51,9 +51,12 @@ def test_harness_personas_expose_mission_dev_and_qa_skills():
     personas = {persona.id: persona for persona in default_personas()}
 
     assert "harness-mission-lead" in personas["neko_supervisor"].skills
+    assert "harness-continuity" in personas["neko_supervisor"].skills
     assert "harness-dev-delivery" in personas["dev"].skills
+    assert "harness-continuity" in personas["dev"].skills
     assert "launcher-analyze-proof" in personas["dev"].skills
     assert "harness-dev-delivery" in personas["backend_dev"].skills
+    assert "harness-continuity" in personas["backend_dev"].skills
     assert "launcher-analyze-proof" not in personas["backend_dev"].skills
     assert "harness-qa-verdict" in personas["qa"].skills
 
@@ -71,8 +74,9 @@ def test_harness_install_uses_persona_declared_skills_not_role_map():
 def test_stage59_hud_skill_sections_exist_in_role_skills():
     root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
     expected = {
-        "harness-mission-lead": {"Scoped Handoff", "Bounded Recovery", "QA Release", "Incident Resolution"},
-        "harness-dev-delivery": {"Deliver Patch", "Request Proof Recipe", "Request Context", "Stage Plan", "Report Blocker"},
+        "harness-mission-lead": {"Scope Route", "Bounded Recovery", "QA Release", "Incident Resolution"},
+        "harness-continuity": {"Spawn And Resume", "Return Command", "Progress Peek", "Never Slurp"},
+        "harness-dev-delivery": {"Hand Off", "Request Proof Recipe", "Request Context", "Stage Plan", "Report Blocker"},
         "harness-qa-verdict": {"QA Verdict", "Request Missing Proof", "Report Blocker"},
     }
 
@@ -83,6 +87,32 @@ def test_stage59_hud_skill_sections_exist_in_role_skills():
         assert "decision_menu[].shape_id" not in text
         assert "primary_worker_action" not in text
         assert "next_required_move" not in text
+
+
+def test_runtime_model_skill_documents_graph_and_level_agent_commands():
+    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
+    text = (root / "harness-runtime-model" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "hermes harness task show <id> --json" in text
+    assert "`.mission_plan`" in text
+    assert "mcp_launcher_qa_get_buttons" in text
+    assert "scope=mission_control.agent" in text
+    assert "mcp_launcher_qa_get_widget_state" in text
+    assert "widget=mission_control.graph" in text
+    assert "status.agents" in text
+    assert "configured/installed Harness agents" in text
+    assert "Neko scope → Backend Dev → Launcher Dev" in text
+    assert "QA is a node only if the selected blueprint binds it" in text
+
+
+def test_mission_lead_skill_answers_graph_from_supplied_task_plan():
+    root = Path(__file__).resolve().parents[2] / "docs" / "agent-runtime-harness" / "harness-skills"
+    text = (root / "harness-mission-lead" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert 'When asked "what graph/flow are you using?"' in text
+    assert "supplied active task's `mission_plan`" in text
+    assert "not from the most recent running goal" in text
+    assert "`blueprint_id`, active stage, stage order, owners, and outgoing edges" in text
 
 
 def test_harness_skill_install_allows_readiness_from_temp_home(tmp_path, monkeypatch):
@@ -98,6 +128,24 @@ def test_harness_skill_install_allows_readiness_from_temp_home(tmp_path, monkeyp
 
     assert readiness["missing_skills"] == []
     assert readiness["skill_hash_mismatches"] == []
+
+
+def test_harness_skill_install_repairs_hash_mismatch(tmp_path, monkeypatch):
+    from agent_runtime.skill_install import harness_skill_hash_mismatches, install_harness_skill
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    first = install_harness_skill("harness-runtime-model", hermes_home=tmp_path)
+    assert first.ok is True
+    assert first.changed is True
+
+    installed = Path(first.destination)
+    installed.write_text(installed.read_text(encoding="utf-8") + "\n# stale local edit\n", encoding="utf-8")
+    assert harness_skill_hash_mismatches(["harness-runtime-model"], hermes_home=tmp_path) == ["harness-runtime-model"]
+
+    repaired = install_harness_skill("harness-runtime-model", hermes_home=tmp_path)
+    assert repaired.ok is True
+    assert repaired.changed is True
+    assert harness_skill_hash_mismatches(["harness-runtime-model"], hermes_home=tmp_path) == []
 
 
 def test_harness_skill_cli_defaults_to_persona_profiles(monkeypatch, capsys):

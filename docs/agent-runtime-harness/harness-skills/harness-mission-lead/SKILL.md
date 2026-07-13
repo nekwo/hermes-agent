@@ -1,159 +1,142 @@
 ---
 name: harness-mission-lead
-description: Stable Neko Mission Lead steering for Agent Runtime Harness missions, typed handoff packets, beginning-only wait semantics, and self-heal recovery.
+description: Root-node Neko Mission Lead skill for authoring stages, running self-looped child nodes, judging harness-captured evidence, steering child sessions, and declaring goal completion.
 ---
 
 # Harness Mission Lead
 
-Use this skill when acting as Neko Mission Lead for an Agent Runtime Harness task.
+Use this skill when you are the root node for an Agent Runtime Harness goal.
 
-## Operating Contract
+## Root Node Contract
 
-- Emit exactly one normal AgentDecision JSON object.
-- Read Mission HUD before choosing an action. Treat `mission_hud.agent_hud` as the only live control panel.
-- Choose one visible `agent_hud.options[]` item. Prefer `agent_hud.recommended_action`; copy `decision_type`, `shape_id`, allowed keys, enum values, and `payload_skeleton` from that object. Do not invent payload fields, checklist item IDs, checklist statuses, packet fields, stage IDs, owners, or proof lanes.
-- If `validation_repair` is present, repair from `validation_repair.corrected_shape` and retry once. Do not repeat the same malformed payload. If repair is not possible from the corrected shape, emit `block` with a redaction-safe `log_ref`.
-- Treat Harness communication as first-class packets. Assignments, handoffs, missing input, blockers, and repair feedback must use supported HUD/packet fields only. If important mission content has no supported packet field, put it in a supported `operator_note` only as a temporary hint and request/record a Harness packet-protocol gap; do not invent a new field.
-- If Harness reports dropped, normalized, stale, or unsupported packet fields, repair the packet from the HUD choices before steering another role.
-- If Dev/QA reports no-progress or handoff repair, inspect first-class delivery fields before reassigning: `inspected_paths`, `changed_paths`, `dirty_baseline`, `coverage_claims`, `known_non_coverage`, `proof_reuse_basis`, `failed_proof_classification`, and `handoff_repair`. Route another Dev run only when those fields prove a product/code gap or changed evidence exists.
-- If QA blocks a single-repo product-edit goal by marking cross-stack lanes missing, route QA/verdict repair: non-required cross-stack lanes should be `not_required`; do not send back to Dev when `commit_refs` and Harness deploy proof are attached.
-- Treat every Harness response like terminal stdout/stderr. On the next prompt, read HUD, recent events, proof records, context feedback, and `next_expected` as the result of your prior route/release: accepted, rejected, ignored, proof attached, context unavailable, state changed, blocked, or retryable.
-- If an accepted route/release did not advance the mission, do not repeat it blindly. Use returned feedback to choose the next visible HUD action, repair the stage once, or block with exact evidence.
-- `checklist_updates` is optional. Use it only for Neko-owned checklist item IDs shown in the HUD. Do not mark Dev or QA checklist items `verified`; route or release stages through the supported handoff/mission-plan fields instead.
-- Use `context` stages for no-product-edit investigations/audits that require repo inspection and a plan. Use `proof_only` only for certification/smoke stages with a deterministic proof recipe or explicit test plan.
-- Treat `agent_hud` as the primary operating surface. Legacy/debug HUD fields are not valid action choices.
-- Treat `agent_hud.current_assignment` as stage-shaped, not role-shaped: `stage_id`, `owner_slot`, `output_type`, `proof_gate`, `required_proof_types`, and `outgoing_edges` describe the current node socket and should drive route/release decisions.
-- Read `agent_hud.evidence_stack` before every route/release. Missing proof, stale proof, failed proof, and `BLOCKED` entries are advisory evidence for Neko to adjudicate; they are not terminal dead-ends by themselves.
-- Treat the graph as living chats. You may steer existing nodes with normal verbs (`persona.instance.message`, `worker.nudge`, `worker.resume`, use output, re-prompt, re-scope, or re-route along existing edges) without a permission grant.
-- Treat create/kill as restructure verbs, not steering. Spawning a placement-backed instance (`persona.instance.create` or `persona.instance.open_chat` with `add_instance`) consumes `CoordinatorPermissionScope.max_spawns`; closing an instance or canceling a run requires kill scope. If Harness returns `needs_operator_confirm`, stop and surface the exact confirm need instead of retrying.
-- Kill scope is provenance-sensitive. Own-spawned instances are those with `spawned_by` equal to your coordinator id; operator-placed, unattributed, or other-spawned placements require an explicit operator grant even when you can keep steering them by message/nudge/resume.
-- When the HUD shows a blocked escalation without an open incident, choose a visible Neko action that either routes the smallest recovery owner, requests one exact missing input/proof lane, or reports the bounded blocker with evidence. Do not repeat a prior route blindly, and do not treat `TaskState.BLOCKED` as mission completion.
-- Use `agent_hud.repo_bundles` as the authoritative repo split when present. Do not create extra owners, stages, packet fields, or proof lanes outside those bundles unless the mission scope itself is invalid and you are repairing scope.
-- If a bundle is `queued_waiting_dependency`, steer the dependency owner first. If all dependency bundles are delivered but the bundle is still queued, emit one repair/release action naming `dependency_bundle_delivered`.
-- In Stage 53 simplified mode, Neko's only product actions are `assign`, `report_blocker`, and `request_missing_input`.
-- In Stage 53 simplified mode, assign the smallest complete next owner with objective, acceptance, repo candidate, and proof expectation; do not mutate stage status or invent packet/checklist fields.
-- Use `request_missing_input` for cross-role gaps before asking Tony. Route `frontend_usage` to Launcher Dev, `backend_contract` to Backend Dev, `visual_verification` to QA only when the active graph includes a QA/verifier node, and `scope_decision` to Neko.
-- Use beginning-only wait semantics: ask for preference/context only before implementation starts or when a human-only gate is genuinely required.
-- For large files, steer specialists to context windows such as `relative/path.py#L120-L220` instead of repeated whole-file reads.
-- After scoping, choose the best justified path from repo evidence, project brains, local architecture, and prior proof. Report alternatives after completion.
-- Prefer backend-first sequencing for backend plus Launcher contract work.
-- Do not patch code, run tests, approve QA, or claim proof from prose.
-- When `normal_worker_flow` is enabled, steer Dev as a worker: implement, self-test in-session, deliver, then let Harness run the final gate. Do not tell product-edit Dev to request Harness proof first unless the stage is no-edit/certification or a failed final gate needs bounded recovery.
-- For EterniaBackend or EterniaLauncher product-edit goals, scope the release path as a promotion chain: local deterministic product tests, then remote test staging k8 pod validation, then production pod rollout proof. EterniaBackend product edits add a mandatory local Docker/PostgreSQL integration lane before staging: read the backend `docs/testing/README.md` and require `scripts/test.sh` default Postgres tier evidence, not `scripts/test.sh --sqlite` or mocked-only tests. Harness auto-runs the local final gate; Backend Docker/PostgreSQL, staging, and prod rollout proof must be explicit proof records from the appropriate environment and must not be invented from prose, commit refs, or self-test evidence.
-- For Backend Docker/PostgreSQL proof, prefer the Harness helper `python scripts/backend_postgres_proof.py --backend-root "X:\Unreal Engine\Engine\EterniaBackend\eternia-backend"` when an operator/agent needs to collect or dry-run the exact local release gate with a preserved `qa_artifacts` log. The helper rejects SQLite escape-hatch arguments; focused test targets may be passed after `--`.
-- When the production deployment path is push-triggered, include the remote-sync requirement in the scope: pull/fetch, rebase if needed, rerun affected local proof after any rebase, then push. Do not release final QA approval from a raw push proof that lacks the sync/rebase evidence.
-- For no-product-edit Harness smoke/certification stages, set Dev stages to `proof_only`/`requires_product_edit: false`. If the mission names a focused command/path such as `tests/agent_runtime/test_*.py`, make that path the proof gate; do not replace it with a generic status/observability recipe.
-- Typed `mission_plan.stages[]` does not support a `command` field. To require an exact proof command, name the safe relative command/path in the stage objective, acceptance criteria, or `handoff_packet.proof_gate`; Harness will project the executable proof gate.
-- Use proof result vocabulary in proof gates: `minimum_status` is normally `passed`; use `blocked`, `failed`, or `missing` only when the gate is intentionally not releasable. Do not put workflow states such as `ready_for_qa` in `minimum_status`.
-- Use the supported handoff packet fields below. Do not invent nested metadata blobs such as `launcher_dev_scope`, `backend_dev_scope`, or raw proof summaries; put only compact redaction-safe steering in `operator_note`, `target_owner`, `target_repo`, `next_owner`, `next_repo`, `final_owner`, `final_repo`, `proof_gate`, `join_gate`, `joined_proof_ids`, `joined_contract_packet_ids`, and `self_heal`.
+- You are a normal self-looped Hermes agent with root-only service tools.
+- The harness is substrate only: it runs loops, resolves workdirs, captures evidence, enforces plain budgets, persists Mission Control rows, and kills hangs.
+- You own judgment. Python does not decide whether child work is good.
+- Author stages for this exact goal. Derive repos from the user request and visible task context; do not use baked-in cross-stack defaults.
+- Run each child stage with `run_node({"stage": ...})`.
+- Judge the child from its summary plus the returned evidence handles: self-test records, proof IDs, repo label, workdir label, and diff summary.
+- If a child needs another turn, call `steer_node` with the child's `session_id`. Steering is the child's next turn in the same session.
+- When all stages are good, say so and end with `ROOT_NODE_DONE`.
+- If the goal is genuinely stuck after bounded steering, say why and end with `ROOT_NODE_BLOCKED`.
 
-## Scoped Handoff
+Do not emit AgentDecision JSON on the root-node path. Do not invent completion
+contracts, failure ladders, rerun gates, incident routing, packet fields, or hidden
+approval steps. If you feel tempted to add a Python rule, stop: that judgment is yours.
 
-When `agent_hud` is present, prefer this product shape in the decision summary/rationale and let Harness project it internally:
+## Author Stages
+
+Create the smallest complete stage list for this goal.
+
+Each `run_node` stage should include:
 
 ```json
 {
-  "action": "assign",
-  "repo_bundle_id": "bundle_id_from_agent_hud_or_null",
+  "id": "safe_stage_id",
+  "title": "Short stage title",
+  "objective": "What the child must do and prove",
   "owner": "dev",
-  "objective": "Implement the scoped Launcher change and run one focused self-test.",
-  "acceptance": ["The requested UI behavior is visible and focused proof passes."],
-  "proof_expectation": "focused command proof plus visual proof if required",
-  "missing_input": null
+  "repo": "hermes-agent",
+  "acceptance_criteria": ["Concrete acceptance item"],
+  "test_plan": ["Exact focused command if the goal names one"]
 }
 ```
 
-Use the HUD `recommended_action.payload_skeleton` first. The template below is explanatory guidance for choosing owner/repo/proof intent; the registry remains the field source of truth.
+Allowed repo labels are `hermes-agent`, `EterniaLauncher`, and `EterniaBackend`.
+Aliases are accepted by `run_node` only when the harness can canonicalize them.
+If the goal names a repo mid-sentence or in a focused command, preserve that repo.
+If the goal names an exact command, keep that command in the stage `test_plan`.
 
-## Handoff Packet Shape
+Use `owner: "dev"` for Launcher/Hermes implementation, `owner: "backend_dev"` for
+backend work, and `owner: "qa"` only for a real QA stage. QA is a child node only
+when you intentionally author a QA stage.
 
-Add `payload.handoff_packet` when steering specialist work:
+## Run And Judge
+
+Call `run_node` for one stage at a time. Read the returned JSON as the authoritative
+child-result envelope:
+
+- `summary`: the child's own concise report.
+- `session_id`: the child session to steer if needed.
+- `run_id`: the persisted AgentRun row.
+- `stage_id` and `persona_id`: the persisted stage/node identity.
+- `evidence`: harness-captured command, proof, and diff handles.
+
+Evidence is not a Python gate; it is your evidence stack. A child's prose is not proof
+by itself. Prefer command/self-test evidence from the child session that ran in the
+named repo. If evidence is missing, failed, wrong-repo, or stale, steer the same child
+session with the smallest concrete correction.
+
+## Steer Node
+
+Use `steer_node` when the same child should continue:
 
 ```json
 {
-  "packet_kind": "fresh_scope",
-  "mission_phase": "initial_scope",
-  "handoff_mode": "backend_first_cross_stack",
-  "target_owner": "backend_dev",
-  "target_repo": "EterniaBackend",
-  "repo_bundle_id": "bundle_id_from_agent_hud_or_empty",
-  "next_owner": "dev",
-  "next_repo": "EterniaLauncher",
-  "proof_gate": {
-    "required": true,
-    "required_proof_types": ["test_run"],
-    "minimum_status": "passed",
-    "visual_required": false
-  },
-  "join_gate": {
-    "release_condition": "backend proof passed and contract packet available"
-  },
-  "self_heal": {
-    "classification": "none",
-    "action": "none"
-  }
+  "session_id": "session_from_run_node",
+  "stage_id": "same_stage_id",
+  "message": "Concrete correction and the exact proof to rerun."
 }
 ```
 
-Only include fields the Harness cannot derive. Do not include absolute paths, raw logs, secrets, or copied stdout/stderr.
+Do not spawn a fresh duplicate child for a simple fix. Preserve the same session so the
+child keeps its context and prompt cache. If steering fails because the old session is
+not reusable, report the cache-loss risk and run a fresh child only when that is still
+the smallest safe path.
 
-## QA Release
+## Scope Route
 
-Use only when Dev delivery/proof packets are present and the active graph's next owner is QA. Join proof IDs, name missing proof lanes if any, and release only the scoped work whose evidence is ready for QA review. If the selected blueprint has no QA/verifier node, do not create a QA release; release the next graph stage or let the Harness close. Missing proof is a HUD/evidence warning for Neko to adjudicate or repair, not an automatic terminal block. For product-edit goals, do not release to final QA approval while the local, staging k8, and prod rollout promotion proofs are incomplete or out of order.
+Historical compatibility anchor: in root-node mode, a scope route is a stage object
+passed to `run_node`, not an AgentDecision payload.
 
-## Incident Resolution
+Keep scope compact:
 
-Use when the task is blocked with open incidents and the HUD recommends incident resolution. Resolve only with new evidence or a bounded recovery route; otherwise block with the incident ID and exact remaining blocker. A blocked task without an open incident should stay recoverable through the visible HUD action menu.
+- one rightful owner;
+- one canonical repo label;
+- concrete acceptance;
+- focused proof expectations;
+- explicit non-goals only when needed.
 
-## Recovery Template
+Do not create extra owners, packet fields, proof lanes, or cross-stack choreography
+unless the user's goal actually requires them.
 
 ## Bounded Recovery
 
-When a specialist fails, classify the blocker as `environment`, `code`, `proof_command`, `context`, `prompt_skill`, `routing`, `provider`, or `human_only`.
+If a child returns red evidence or an incomplete summary, classify the blocker in your
+own words and steer once with a narrow correction. Useful classes: `code`,
+`proof_command`, `context`, `environment`, `provider`, `routing`, `human_only`.
 
-If a bounded self-heal is possible, emit a recovery handoff packet with:
+Escalate to `ROOT_NODE_BLOCKED` only when a real human-only blocker remains or bounded
+steering has stopped making progress. Include the smallest next action and the
+redaction-safe evidence handle that proves the blocker.
 
-- `packet_kind`: `recovery`
-- `mission_phase`: `recovery`
-- `target_owner`: the rightful next actor
-- `proof_gate`: the next proof gate
-- `self_heal.classification`
-- `self_heal.action`
+## QA Release
 
-If it cannot self-heal, emit `block` with a redaction-safe `log_ref` and a `cannot_self_heal` packet naming the smallest human action required.
+Historical compatibility anchor: in root-node mode, QA release means you author and
+run a QA child node.
 
-## Backend Proof Join Template
+Use QA when the goal needs independent verification or visual proof. The QA stage
+should instruct QA to rerun the relevant tests itself and, for Launcher visual work,
+capture screenshot proof with its `launcher_qa` MCP tools. If QA asks for a dev fix,
+relay that finding to the dev child with `steer_node` using the dev session id.
 
-When the latest context already contains a passing backend proof and the next required step is Launcher Dev:
+## Incident Resolution
 
-- Do not re-search the repo unless the latest proof or handoff packet is missing from context.
-- Do not reload more than this skill unless a named missing field requires a domain skill.
-- Emit `propose_acceptance` with a `handoff_packet` using:
-  - `packet_kind`: `contract_join`
-  - `mission_phase`: `launcher_handoff`
-  - `handoff_mode`: `sequential_specialists`
-  - `target_owner`: `dev`
-  - `target_repo`: `EterniaLauncher`
-  - `final_owner`: include `qa` only when the active graph includes a QA/verifier node; otherwise omit it
-  - `final_repo`: include only when `final_owner` is present
-  - `joined_proof_ids`: the passed backend proof IDs being released to Launcher Dev
-  - `joined_contract_packet_ids`: the backend delivery/contract packet IDs Launcher Dev must consume
-  - `proof_gate.minimum_status`: `passed`
-  - `proof_gate.required_proof_ids`: the passed backend proof IDs required by this join
-  - `operator_note`: compact statement that the backend proof is joined and Launcher Dev must implement, self-test in-session, deliver, and let Harness run the final gate; for no-edit/certification stages, request one bounded monitored proof or block with exact environment evidence
+Historical compatibility anchor: do not route incidents on the root-node path.
 
-Keep the packet as a route and proof contract. Do not embed command output, absolute paths, or invented scope objects.
+If a child run fails from a substrate problem, treat the returned error and evidence as
+context. Decide whether to steer, rerun, or block. Do not invent an incident workflow or
+ask Python to adjudicate.
 
-## QA Coordination Release Template
+## Graph Questions
 
-When backend and Launcher proof IDs are both attached and the active graph's next owner is QA:
+When asked "what graph/flow are you using?", answer from the supplied active task's `mission_plan`,
+not from the most recent running goal, old chat memory, status agents, or installed-agent rosters.
+Name `blueprint_id`, active stage, stage order, owners, and outgoing edges visible in the task. Include `mission_plan.agent_topology` when the
+operator asks who coordinates whom. If no `mission_plan` is supplied, say the graph
+context is unavailable and ask for the exact task.
 
-- Emit `propose_acceptance` with a `handoff_packet`.
-- Use `packet_kind`: `qa_coordination_release`.
-- Use `mission_phase`: `qa_handoff`.
-- Use `handoff_mode`: `sequential_specialists`.
-- Use `target_owner`: `qa` and `target_repo`: `EterniaLauncher`.
-- Put every proof QA must review in `proof_gate.required_proof_ids`.
-- Include `join_gate.release_condition` stating that the backend proof and Launcher proof are both attached and QA must verify status, scope, and cross-stack join before verdict.
+## Redaction
 
-Do not omit `join_gate.release_condition`; it is the deterministic QA release proof boundary.
+Persisted summaries, stage objectives, and steering messages must be redaction-safe:
+no absolute local paths, secrets, raw credentials, auth headers, cookies, or copied long
+logs. Use repo labels, proof IDs, run IDs, and short command labels instead.

@@ -9,6 +9,7 @@ from .models import AgentRun, Task, TaskStage
 from .mission_plan import task_stage_records
 from .profile_context import active_profile_name
 from .runtime_config import RuntimeConfig
+from .simplified_contract import expose_only_simplified_actions
 from .stage_intent import no_product_edit_recipe_for_stage, no_product_edit_recipe_id, stage_requires_product_edit
 from .stage_intent import stage_is_committed_verification_gate
 from .states import StageStatus, TaskState
@@ -43,7 +44,14 @@ class WorkerAction:
 
 def normal_worker_flow_enabled(config: RuntimeConfig | None) -> bool:
     flow = getattr(config, "normal_worker_flow", None)
-    return bool(getattr(flow, "enabled", False))
+    simplified = getattr(config, "simplified_agent_contract", None)
+    return bool(
+        getattr(flow, "enabled", False)
+        or (
+            getattr(simplified, "enabled", False)
+            and getattr(simplified, "expose_only_simplified_actions", False)
+        )
+    )
 
 
 def worker_actions_for_role(
@@ -57,6 +65,8 @@ def worker_actions_for_role(
     if not normal_worker_flow_enabled(config):
         return []
     resolved = _worker_role(role, run)
+    if expose_only_simplified_actions(config):
+        return _collapsed_actions(resolved, task, run)
     if mission_plan_hud_enabled(config):
         return _typed_actions(resolved, task, run, proof_store=proof_store)
     if resolved == "dev":
@@ -68,6 +78,113 @@ def worker_actions_for_role(
     return [_block_action(primary=True, reason="Unknown worker role; block with evidence instead of guessing.")]
 
 
+def _collapsed_actions(role: str, task: Task, run: AgentRun) -> list[WorkerAction]:
+    stage = current_plan_stage(task)
+    if role == "alice_supervisor":
+        state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
+        if state == TaskState.BLOCKED and getattr(task, "open_incident_ids", None):
+            return [
+                WorkerAction("resolve_incident", DecisionType.RESOLVE_INCIDENT, "neko.resolve_incident", "Resolve Incident", primary=True, reason="Resolve one open incident or route recovery."),
+                WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+                _block_action(reason="Use only for a true external/human/environment blocker."),
+            ]
+        target_owner = "neko_supervisor" if _diagnostic_persona(task) == "neko_supervisor" else None
+        return [
+            WorkerAction(
+                "scope_route",
+                DecisionType.SCOPE_ROUTE,
+                "neko.scope_route",
+                "Scope Route",
+                primary=True,
+                reason="Scope and route one bounded owner/repo/proof gate.",
+                payload_template=_scope_route_payload_for_stage(task, stage, target_owner=target_owner),
+            ),
+            WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            _block_action(reason="Use only for a true external/human/environment blocker."),
+        ]
+    if role == "qa" or (stage is not None and _stage_owner_role(stage.owner) == "qa"):
+        if _typed_visual_missing(task):
+            return [
+                WorkerAction(
+                    "request_missing_proof",
+                    DecisionType.REQUEST_SCREENSHOT,
+                    "qa.request_screenshot",
+                    "Request Visual Proof",
+                    primary=True,
+                    reason="Visual proof is required but no launcher_qa screenshot proof is attached yet.",
+                    payload_template={
+                        "stage_id": getattr(stage, "id", None) or run.stage_id or task.current_stage_id,
+                        "target": "mission_control",
+                        "proof_requirement": "fullscreen visual proof for the current stage",
+                        "mcp_server": "launcher_qa",
+                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    },
+                ),
+                _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
+                WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            ]
+        return [
+            WorkerAction("qa_verdict", DecisionType.QA_VERDICT, "qa.verdict", "QA Verdict", primary=True, reason="Issue a verdict over Harness-verified proof."),
+            WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            _block_action(reason="Use when proof cannot be independently verified."),
+        ]
+    if role == "dev":
+        if stage is None:
+            return [
+                _block_action(primary=True, reason="No typed current stage is active; block with the missing-stage evidence."),
+                WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            ]
+        stage_explicitly_product_edit = getattr(stage, "requires_product_edit", None) is True
+        if (
+            not stage_explicitly_product_edit
+            and _typed_visual_missing(task)
+            and (not stage_requires_product_edit(task, stage) or _visual_no_edit_intent(task, stage))
+        ):
+            return [
+                WorkerAction(
+                    "request_visual_gate",
+                    DecisionType.REQUEST_SCREENSHOT,
+                    "dev.request_screenshot",
+                    "Request Visual Proof",
+                    primary=True,
+                    reason="Visual proof is required for this no-product-edit stage; ask Harness for launcher_qa screenshot proof.",
+                    payload_template={
+                        "stage_id": stage.id,
+                        "target": "mission_control",
+                        "proof_requirement": "fullscreen visual proof for the current stage",
+                        "mcp_server": "launcher_qa",
+                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    },
+                ),
+                _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
+                WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+            ]
+        return [
+            WorkerAction("hand_off", DecisionType.HAND_OFF, "dev.hand_off", "Hand Off", primary=True, reason=_collapsed_dev_hand_off_reason(stage)),
+            _block_action(reason="Use when implementation or proof is blocked by exact evidence."),
+            WorkerAction("escalate", DecisionType.ESCALATE, "common.escalate", "Escalate"),
+        ]
+    return [_block_action(primary=True, reason="Unknown worker role; block with evidence instead of guessing.")]
+
+
+def _collapsed_dev_hand_off_reason(stage) -> str:
+    gate = getattr(stage, "proof_gate", None)
+    gate = gate if isinstance(gate, dict) else {}
+    required = {str(item).strip() for item in (gate.get("required_proof_types") or []) if str(item).strip()}
+    expectation = str(gate.get("observed_lane_expectation") or "").strip()
+    proof_only = str(getattr(stage, "kind", "") or "") == "proof_only"
+    has_test_gate = bool(getattr(stage, "proof_recipe_id", None)) or "test_run" in required
+    if expectation or proof_only or has_test_gate:
+        return (
+            "Run a real focused terminal self-test in this agent session first "
+            "(pytest, flutter test/analyze, or manage.py check; not an ad hoc "
+            "echo/print marker) so run.tool.finished becomes observed "
+            "agent_tool_trace evidence; then hand_off so Harness captures the "
+            "diff and reruns the authoritative gate."
+        )
+    return "Signal done; Harness captures diff and reruns the authoritative gate."
+
+
 def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerAction]:
     stage = current_plan_stage(task)
     if stage is None:
@@ -75,11 +192,12 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
             return [
                 WorkerAction(
                     "set_or_repair_plan",
-                    DecisionType.PROPOSE_ACCEPTANCE,
-                    "neko.scoped_handoff",
-                    "Set Plan",
+                    DecisionType.SCOPE_ROUTE,
+                    "neko.scope_route",
+                    "Scope Route",
                     primary=True,
                     reason="No typed stage is active; create or repair the typed mission plan.",
+                    payload_template=_scope_route_payload_for_stage(task, None),
                 ),
                 _block_action(reason="Use only if a typed plan cannot be safely created with current evidence."),
             ]
@@ -98,16 +216,12 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
         return [
             WorkerAction(
                 "release_next_stage",
-                DecisionType.PROPOSE_ACCEPTANCE,
-                "neko.scoped_handoff",
+                DecisionType.SCOPE_ROUTE,
+                "neko.scope_route",
                 "Release Stage",
                 primary=True,
                 reason=f"Release or repair typed stage {stage.id}; preserve the parent mission intent.",
-                payload_template={
-                    "objective": "<release or repair summary>",
-                    "acceptance_criteria": ["<unchanged parent criterion or typed stage criterion>"],
-                    "release_stage_id": stage.id,
-                },
+                payload_template=_scope_route_payload_for_stage(task, stage),
             ),
             WorkerAction("route_recovery", DecisionType.TRIAGE_ISSUE_DISCOVERY, "neko.triage_issue_discovery", "Route Recovery"),
             _block_action(reason="Use only for true external/human/environment blockers."),
@@ -131,22 +245,20 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
                         "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
                     },
                 ),
-                WorkerAction("report_verdict", DecisionType.REPORT_QA_VERDICT, "qa.report_qa_verdict", "QA Verdict"),
+                WorkerAction("qa_verdict", DecisionType.QA_VERDICT, "qa.verdict", "QA Verdict"),
                 _block_action(reason="Use when proof cannot be collected or verified."),
             ]
         return [
             WorkerAction(
-                "report_verdict",
-                DecisionType.REPORT_QA_VERDICT,
-                "qa.report_qa_verdict",
+                "qa_verdict",
+                DecisionType.QA_VERDICT,
+                "qa.verdict",
                 "QA Verdict",
                 primary=True,
                 reason="All typed blocking stage proof appears present; report an evidence-backed verdict.",
                 payload_template={
-                    "review_scope": "implementation",
                     "verdict": "approved",
-                    "proof_ids": ["<proof_id if command/visual proof was required>"],
-                    "delivery_packets_reviewed": ["<latest delivery packet id if no command proof was required>"],
+                    "coverage": {"command_gate": "reviewed"},
                     "findings": [],
                 },
             ),
@@ -162,31 +274,44 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
     if role == "dev" and stage_owner_role == "dev":
         inferred_no_edit_recipe_id = _typed_no_edit_recipe_id(stage)
         no_edit_context_stage = _is_no_edit_context_stage(task, stage)
+        stage_explicitly_product_edit = getattr(stage, "requires_product_edit", None) is True
+        if (not stage_explicitly_product_edit and (not stage_requires_product_edit(task, stage) or _visual_no_edit_intent(task, stage))) and _typed_visual_missing(task, proof_store=proof_store):
+            return [
+                WorkerAction(
+                    "request_visual_gate",
+                    DecisionType.REQUEST_SCREENSHOT,
+                    "dev.request_screenshot",
+                    "Request Visual Proof",
+                    primary=True,
+                    reason=f"Typed stage {stage.id} requires visual proof; ask Harness to collect launcher_qa screenshot proof.",
+                    payload_template={
+                        "stage_id": stage.id,
+                        "target": "mission_control",
+                        "proof_requirement": "fullscreen visual proof for the typed mission stage",
+                        "mcp_server": "launcher_qa",
+                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    },
+                ),
+                WorkerAction("request_context", DecisionType.REQUEST_FILE_READS, "common.request_file_reads", "Request Context"),
+                _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
+            ]
         if no_edit_context_stage and not _context_stage_should_request_gate(stage):
             if _fulfilled_context_request_count(task, actor=stage.owner, stage_id=stage.id) >= 2:
                 return [
                     WorkerAction(
-                        "deliver_findings",
-                        DecisionType.PROPOSE_PATCH,
-                        "dev.propose_patch",
-                        "Deliver Findings",
+                        "hand_off",
+                        DecisionType.HAND_OFF,
+                        "dev.hand_off",
+                        "Hand Off",
                         primary=True,
                         reason=(
                             f"Typed no-edit investigation stage {stage.id} already has repeated context bundles; "
-                            "deliver the findings and hardening plan from existing context now."
+                            "summarize the findings from existing context and hand off now."
                         ),
                         payload_template={
-                            "summary": "<investigation findings and recommended staged hardening plan>",
-                            "changed_files": [],
-                            "tests": ["no product edits; findings synthesized from fulfilled Harness context bundles"],
-                            "delivery": {
-                                "work_status": "patch_proposed",
-                                "summary": "<one paragraph no-edit investigation conclusion>",
-                                "findings": ["<grounded leakage cause or verified risk>"],
-                                "recommendations": ["<staged hardening action>"],
-                                "questions": ["<Tony decision needed, or omit if none>"],
-                                "known_gaps": ["<remaining unknowns or none>"],
-                            },
+                            "stage_id": stage.id,
+                            "summary": "<one paragraph no-edit investigation conclusion>",
+                            "known_gaps": ["<remaining unknowns or none>"],
                         },
                     ),
                     _block_action(reason="Use only if the fulfilled context bundles are insufficient to produce a truthful report."),
@@ -244,20 +369,16 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
                 ]
             return [
                 WorkerAction(
-                    "deliver_patch",
-                    DecisionType.PROPOSE_PATCH,
-                    "dev.propose_patch",
-                    "Deliver Patch",
+                    "hand_off",
+                    DecisionType.HAND_OFF,
+                    "dev.hand_off",
+                    "Hand Off",
                     primary=True,
-                    reason=f"Typed implementation stage {stage.id}; edit, self-test in-session, then deliver.",
+                    reason=f"Typed implementation stage {stage.id}; edit, self-test in-session, then hand off.",
                     payload_template={
-                        "summary": "<patch summary>",
-                        "changed_files": ["<relative path>"],
-                        "tests": ["<self-test command and status or not-run reason>"],
-                        "delivery": {
-                            "work_status": "patch_proposed",
-                            "self_test_evidence_ids": ["<selftest_id>"],
-                        },
+                        "stage_id": stage.id,
+                        "summary": "<short completion signal>",
+                        "known_gaps": [],
                     },
                 ),
                 WorkerAction("request_context", DecisionType.REQUEST_FILE_READS, "common.request_file_reads", "Request Context"),
@@ -269,7 +390,7 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
                     "Request Gate",
                     visible=False,
                     reason="Harness final gate runs after delivery.",
-                    not_allowed_reason="Typed implementation stage has no accepted delivery yet; deliver_patch first.",
+                    not_allowed_reason="Typed implementation stage has no accepted hand_off yet.",
                 ),
             ]
     return [_block_action(primary=True, reason=f"Typed stage {stage.id} is owned by {stage.owner}; current role cannot safely act.")]
@@ -382,23 +503,44 @@ def _dev_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerA
             ),
             _block_action(reason="Use when the committed verification proof cannot run with current environment evidence."),
         ]
+    stage_explicitly_product_edit = getattr(stage, "requires_product_edit", None) is True
+    if (
+        (not stage_explicitly_product_edit and (not product_edit or _visual_no_edit_intent(task, stage)))
+        and _explicit_visual_required(task, stage)
+        and not _has_visual_proof(task, proof_store=proof_store)
+    ):
+        return [
+            WorkerAction(
+                "request_visual_gate",
+                DecisionType.REQUEST_SCREENSHOT,
+                "dev.request_screenshot",
+                "Request Visual Proof",
+                primary=True,
+                reason="Visual proof is required for this no-product-edit stage; ask Harness for launcher_qa screenshot proof.",
+                payload_template={
+                    "stage_id": stage_id,
+                    "target": "mission_control",
+                    "proof_requirement": "fullscreen visual proof for the current stage",
+                    "mcp_server": "launcher_qa",
+                    "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                },
+            ),
+            WorkerAction("request_context", DecisionType.REQUEST_FILE_READS, "common.request_file_reads", "Request Context"),
+            _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
+        ]
     if product_edit:
         actions = [
             WorkerAction(
-                "deliver_patch",
-                DecisionType.PROPOSE_PATCH,
-                "dev.propose_patch",
-                "Deliver Patch",
+                "hand_off",
+                DecisionType.HAND_OFF,
+                "dev.hand_off",
+                "Hand Off",
                 primary=True,
                 reason=_dev_delivery_reason(failed_proof_ids),
                 payload_template={
-                    "summary": "<patch summary>",
-                    "changed_files": ["<relative path>"],
-                    "tests": ["<self-test command and status or not-run reason>"],
-                    "delivery": {
-                        "work_status": "patch_proposed",
-                        "self_test_evidence_ids": ["<selftest_id>"],
-                    },
+                    "stage_id": stage_id,
+                    "summary": "<short completion signal>",
+                    "known_gaps": [],
                 },
             ),
             WorkerAction(
@@ -423,7 +565,7 @@ def _dev_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerA
                 "Request Gate",
                 visible=False,
                 reason="Harness final gate runs after delivery.",
-                not_allowed_reason="Product-edit stage has no accepted delivery yet; self-test locally and deliver_patch first.",
+                not_allowed_reason="Product-edit stage has no accepted hand_off yet; self-test locally and hand off first.",
             ),
         ]
         return actions
@@ -450,12 +592,12 @@ def _dev_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerA
         ]
     return [
         WorkerAction(
-            "deliver_patch",
-            DecisionType.PROPOSE_PATCH,
-            "dev.propose_patch",
-            "Deliver Patch",
+            "hand_off",
+            DecisionType.HAND_OFF,
+            "dev.hand_off",
+            "Hand Off",
             primary=True,
-            reason="Implement or document the concrete stage work, self-test locally, then deliver.",
+            reason="Implement or document the concrete stage work, self-test locally, then hand off.",
         ),
         WorkerAction("request_context", DecisionType.REQUEST_FILE_READS, "common.request_file_reads", "Request Context"),
         _block_action(),
@@ -482,14 +624,14 @@ def _qa_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerAc
                     "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
                 },
             ),
-            WorkerAction("qa_verdict", DecisionType.REPORT_QA_VERDICT, "qa.report_qa_verdict", "QA Verdict"),
+            WorkerAction("qa_verdict", DecisionType.QA_VERDICT, "qa.verdict", "QA Verdict"),
             _block_action(reason="Use when proof/environment is blocked and cannot be independently verified."),
         ]
     return [
         WorkerAction(
             "qa_verdict",
-            DecisionType.REPORT_QA_VERDICT,
-            "qa.report_qa_verdict",
+            DecisionType.QA_VERDICT,
+            "qa.verdict",
             "QA Verdict",
             primary=True,
             reason="Review final gate proof and issue an evidence-backed verdict.",
@@ -507,16 +649,18 @@ def _qa_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerAc
 
 def _neko_actions(task: Task, run: AgentRun) -> list[WorkerAction]:
     state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
+    diagnostic_owner = "neko_supervisor" if _diagnostic_persona(task) == "neko_supervisor" else None
     if state == TaskState.RUNNING:
         if _task_has_qa_stage(task):
             return [
                 WorkerAction(
                     "release_handoff",
-                    DecisionType.PROPOSE_ACCEPTANCE,
-                    "neko.qa_coordination_release",
+                    DecisionType.SCOPE_ROUTE,
+                    "neko.scope_route",
                     "Release QA",
                     primary=True,
                     reason="The active graph includes a QA/verifier stage; release QA only with joined proof IDs.",
+                    payload_template=_scope_route_payload_for_stage(task, _current_stage(task, run), target_owner="qa"),
                 ),
                 WorkerAction("route_repair", DecisionType.TRIAGE_ISSUE_DISCOVERY, "neko.triage_issue_discovery", "Route Repair"),
                 _block_action(),
@@ -524,11 +668,12 @@ def _neko_actions(task: Task, run: AgentRun) -> list[WorkerAction]:
         return [
             WorkerAction(
                 "release_handoff",
-                DecisionType.PROPOSE_ACCEPTANCE,
-                "neko.scoped_handoff",
+                DecisionType.SCOPE_ROUTE,
+                "neko.scope_route",
                 "Release Stage",
                 primary=True,
                 reason="Release or repair the next graph stage; do not add QA unless the active graph contains a QA/verifier node.",
+                payload_template=_scope_route_payload_for_stage(task, _current_stage(task, run)),
             ),
             WorkerAction("route_repair", DecisionType.TRIAGE_ISSUE_DISCOVERY, "neko.triage_issue_discovery", "Route Repair"),
             _block_action(),
@@ -548,15 +693,85 @@ def _neko_actions(task: Task, run: AgentRun) -> list[WorkerAction]:
     return [
         WorkerAction(
             "assign_scope",
-            DecisionType.PROPOSE_ACCEPTANCE,
-            "neko.scoped_handoff",
+            DecisionType.SCOPE_ROUTE,
+            "neko.scope_route",
             "Assign Scope",
             primary=True,
             reason="Scope the next bounded owner and proof gate.",
+            payload_template=(
+                _diagnostic_scope_payload(task)
+                if diagnostic_owner == "neko_supervisor"
+                else _scope_route_payload_for_stage(task, _current_stage(task, run), target_owner=diagnostic_owner)
+            ),
         ),
         WorkerAction("route_repair", DecisionType.TRIAGE_ISSUE_DISCOVERY, "neko.triage_issue_discovery", "Route Repair"),
         _block_action(reason="Use only for true human/safety/environment blockers."),
     ]
+
+
+def _scope_route_payload_for_stage(task: Task, stage, *, target_owner: str | None = None) -> dict[str, Any]:
+    owner = str(target_owner or getattr(stage, "owner", "") or getattr(stage, "owner_slot", "") or "dev").strip()
+    if owner == "launcher_dev":
+        owner = "dev"
+    if owner not in {"dev", "backend_dev", "qa", "neko_supervisor", "human"}:
+        owner = "dev"
+    repo = str(getattr(stage, "repo", "") or "").strip()
+    if repo not in {"EterniaLauncher", "EterniaBackend", "hermes-agent", "none"}:
+        repo = _scope_route_repo_from_task(task)
+    required = bool(getattr(stage, "proof_recipe_id", None) or getattr(stage, "test_plan", None) or getattr(stage, "requires_visual_proof", False))
+    proof_gate = getattr(stage, "proof_gate", None) if stage is not None else None
+    if not isinstance(proof_gate, dict):
+        proof_gate = {
+            "required": required,
+            "required_proof_types": ["test_run"] if required else [],
+            "minimum_status": "passed",
+            "visual_required": bool(getattr(stage, "requires_visual_proof", False)),
+        }
+    payload = {
+        "objective": str(getattr(stage, "objective", "") or getattr(task, "description", "") or getattr(task, "title", "") or "Route bounded work.").strip(),
+        "acceptance_criteria": list(getattr(stage, "acceptance_criteria", None) or getattr(task, "acceptance_criteria", None) or ["Routed owner completes the stage."]),
+        "target_owner": owner,
+        "target_repo": repo,
+        "proof_gate": proof_gate,
+    }
+    stage_id = str(getattr(stage, "id", "") or "").strip()
+    if stage_id:
+        payload["release_stage_id"] = stage_id
+    return payload
+
+
+def _diagnostic_scope_payload(task: Task) -> dict[str, Any]:
+    affected_repos = [str(item).strip() for item in (getattr(task, "affected_repos", []) or []) if str(item).strip()]
+    repo = affected_repos[0] if affected_repos and affected_repos[0] in {"EterniaLauncher", "EterniaBackend", "hermes-agent"} else "hermes-agent"
+    return {
+        "objective": str(getattr(task, "description", "") or getattr(task, "title", "") or "Run one Neko diagnostic turn.").strip(),
+        "acceptance_criteria": list(getattr(task, "acceptance_criteria", None) or ["The Harness records one valid Neko diagnostic decision and stops without launching Dev or QA."]),
+        "non_goals": list(getattr(task, "non_goals", None) or ["No Dev or QA handoff."]),
+        "target_owner": "neko_supervisor",
+        "target_repo": repo,
+        "proof_gate": {
+            "required": False,
+            "required_proof_types": ["harness_observation"],
+            "minimum_status": "passed",
+            "visual_required": False,
+        },
+    }
+
+
+def _diagnostic_persona(task: Task) -> str | None:
+    for flag in getattr(task, "risk_flags", None) or []:
+        text = str(flag or "").strip()
+        if text.startswith("diagnostic_persona:"):
+            return text.split(":", 1)[1].strip() or None
+    return None
+
+
+def _scope_route_repo_from_task(task: Task) -> str:
+    for repo in getattr(task, "affected_repos", None) or []:
+        text = str(repo or "").strip()
+        if text in {"EterniaLauncher", "EterniaBackend", "hermes-agent"}:
+            return text
+    return "none"
 
 
 def _block_action(*, primary: bool = False, reason: str = "Use when the next safe action is impossible with current evidence.") -> WorkerAction:
@@ -578,7 +793,10 @@ def _typed_visual_missing(task: Task, *, proof_store=None) -> bool:
     stage = current_plan_stage(task)
     if stage is None:
         return False
-    if not any(getattr(item, "requires_visual_proof", False) for item in (getattr(getattr(task, "mission_plan", None), "stages", []) or [])):
+    if not (
+        bool(getattr(task, "requires_visual_proof", False))
+        or any(getattr(item, "requires_visual_proof", False) for item in (getattr(getattr(task, "mission_plan", None), "stages", []) or []))
+    ):
         return False
     if proof_store is None:
         return True
@@ -671,8 +889,8 @@ def _failed_proof_ids(task: Task) -> list[str]:
 
 def _dev_delivery_reason(failed_proof_ids: list[str]) -> str:
     if failed_proof_ids:
-        return "A final gate failed; repair in the same worker session, self-test, and deliver the patched fix."
-    return "Product-edit stage is implementing; edit, self-test in-session, then deliver_patch. Harness runs final gate after delivery."
+        return "A final gate failed; repair in the same worker session, self-test, and hand off the patched fix."
+    return "Product-edit stage is implementing; edit, self-test in-session, then hand_off. Harness runs the final gate after handoff."
 
 
 def _visual_required(task: Task, stage: TaskStage | None) -> bool:
@@ -689,6 +907,40 @@ def _visual_required(task: Task, stage: TaskStage | None) -> bool:
         ]
     ).lower()
     return any(marker in text for marker in ("ui", "visual", "screenshot", "mission control", "launcher", "widget"))
+
+
+def _explicit_visual_required(task: Task, stage: TaskStage | None) -> bool:
+    return bool(getattr(task, "requires_visual_proof", False)) or (
+        stage is not None and getattr(stage, "requires_visual_proof", None) is True
+    )
+
+
+def _visual_no_edit_intent(task: Task, stage: TaskStage | None) -> bool:
+    text = " ".join(
+        [
+            str(getattr(task, "title", "")),
+            str(getattr(task, "description", "")),
+            " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(task, "non_goals", []) or [])),
+            str(getattr(stage, "title", "")),
+            str(getattr(stage, "objective", "")),
+            " ".join(str(item) for item in (getattr(stage, "acceptance_criteria", []) or [])),
+            " ".join(str(item) for item in (getattr(stage, "audit_notes", []) or [])),
+        ]
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "no product edit",
+            "no product edits",
+            "no-product-edit",
+            "no-product-edits",
+            "without product edits",
+            "without product edit",
+            "no product files are edited",
+            "do not edit product",
+        )
+    )
 
 
 def _has_visual_proof(task: Task, *, proof_store=None) -> bool:

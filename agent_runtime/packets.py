@@ -13,7 +13,7 @@ from . import paths
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .events import EventLog
 from .models import Event, Task
-from .proof_runner import _ABSOLUTE_PATH_PATTERNS, _SECRET_PATTERNS
+from .proof_runner import _ABSOLUTE_PATH_PATTERNS, _SECRET_PATTERNS, adapt_eternia_backend_manage_py_command
 from .serde import to_jsonable
 
 PACKET_SCHEMA_VERSION = 1
@@ -41,6 +41,7 @@ HANDOFF_PACKET_KEYS = frozenset(
         "self_heal",
         "joined_proof_ids",
         "joined_contract_packet_ids",
+        "cited_evidence_ids",
         "assumptions_made",
         "alternatives_considered",
         "operator_note",
@@ -74,6 +75,7 @@ DELIVERY_KEYS = frozenset(
         "wd_tagger_assessment",
         "questions",
         "proof_ids",
+        "cited_evidence_ids",
         "proof_summary",
         "command_summary",
         "known_gaps",
@@ -174,6 +176,7 @@ _DELIVERY_STATUS_FOR_DECISION = {
     "blocked": DecisionType.BLOCK,
     "issue_discovered": DecisionType.REPORT_ISSUE_DISCOVERY,
 }
+_DELIVERY_STATUS_BY_DECISION = {decision: status for status, decision in _DELIVERY_STATUS_FOR_DECISION.items()}
 _SECRET_WORDS = re.compile(r"(?i)\b(secret|token|password|credential|api[_ -]?key|authorization|cookie|bearer|private[_ -]?key)\b")
 _SECRET_VALUE_FRAGMENTS = re.compile(r"(?i)\bsk-[A-Za-z0-9][A-Za-z0-9_-]{7,}\b")
 _SECRET_EXPOSURE_PHRASES = re.compile(
@@ -251,11 +254,51 @@ def iter_packet_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, A
             packets.append(("delivery", _require_object(stage.get("delivery"), f"stages[{idx}].delivery")))
     handoff = payload.get("handoff")
     if isinstance(handoff, dict) and handoff.get("delivery") is not None:
-        packets.append(("delivery", _require_object(handoff.get("delivery"), "handoff.delivery")))
+            packets.append(("delivery", _require_object(handoff.get("delivery"), "handoff.delivery")))
     return packets
 
 
+def _body_with_harness_citations(
+    task: Task,
+    *,
+    packet_type: str,
+    body: dict[str, Any],
+    stage_id: str | None,
+) -> dict[str, Any]:
+    if packet_type not in {"handoff_packet", "delivery"}:
+        return body
+    citations = _packet_cited_evidence_ids(task, body, stage_id=stage_id)
+    if not citations:
+        return body
+    enriched = dict(body)
+    enriched["cited_evidence_ids"] = _dedupe_strings(
+        [*_string_list(enriched.get("cited_evidence_ids")), *citations]
+    )[:25]
+    return enriched
+
+
+def _packet_cited_evidence_ids(task: Task, body: dict[str, Any], *, stage_id: str | None) -> list[str]:
+    cited: list[str] = []
+    for key in ("proof_ids", "self_test_evidence_ids", "consumed_proof_ids", "joined_proof_ids"):
+        cited.extend(_string_list(body.get(key)))
+    proof_gate = body.get("proof_gate") if isinstance(body.get("proof_gate"), dict) else {}
+    cited.extend(_string_list(proof_gate.get("required_proof_ids")))
+    heal = task.harness_self_heal if isinstance(getattr(task, "harness_self_heal", None), dict) else {}
+    observations = heal.get("stage_observations") if isinstance(heal.get("stage_observations"), dict) else {}
+    stage_key = str(stage_id or getattr(task, "current_stage_id", "") or "").strip()
+    observed = observations.get(stage_key) if stage_key else None
+    if isinstance(observed, dict):
+        cited.extend(_string_list(observed.get("observed_proof_ids")))
+        cited.extend(_string_list(observed.get("authoritative_gate_proof_ids")))
+    guard = heal.get("delivery_no_progress_guard") if isinstance(heal.get("delivery_no_progress_guard"), dict) else {}
+    guarded = guard.get(stage_key) if stage_key else None
+    if isinstance(guarded, dict):
+        cited.extend(_string_list(guarded.get("cited_evidence_ids")))
+    return _dedupe_strings(cited)
+
+
 def make_packet(*, task: Task, decision: AgentDecision, packet_type: str, body: dict[str, Any], actor: str, run_id: str | None, stage_id: str | None) -> Packet:
+    body = _body_with_harness_citations(task, packet_type=packet_type, body=body, stage_id=stage_id)
     raw_body = _raw_packet_body_with_dropped_values(body)
     core = compact_packet_body(packet_type, body)
     normalization = _pop_normalization(core)
@@ -436,12 +479,34 @@ def _validate_delivery_self_test_refs(task: Task, body: dict[str, Any], *, stage
             raise DecisionPayloadInvalid("delivery.self_test_evidence_ids contains an empty evidence id")
         try:
             evidence = store.get(evidence_id)
-        except FileNotFoundError as exc:
-            raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids unknown evidence id: {evidence_id}") from exc
+        except FileNotFoundError:
+            # The field was authored for SelfTestEvidence ids, but a dev routinely
+            # cites the authoritative command-proof id for the same stage instead
+            # (that proof genuinely exists in the ProofStore). A real proof for
+            # this task/stage is valid self-test evidence — accept it rather than
+            # hard-rejecting a truthful hand-off on a store mismatch. Without this
+            # fallback a re-run of a stage that already produced a passing proof
+            # loops on `unknown evidence id`.
+            _validate_delivery_self_test_proof_ref(task, evidence_id, stage_id=stage_id)
+            continue
         if evidence.task_id != task.id:
             raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different task")
         if stage_id and evidence.stage_id and evidence.stage_id != stage_id:
             raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different stage")
+
+
+def _validate_delivery_self_test_proof_ref(task: Task, evidence_id: str, *, stage_id: str | None) -> None:
+    from .errors import NotFound
+    from .store import ProofStore
+
+    try:
+        proof = ProofStore().get(evidence_id)
+    except (NotFound, FileNotFoundError) as exc:
+        raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids unknown evidence id: {evidence_id}") from exc
+    if proof.task_id != task.id:
+        raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different task")
+    if stage_id and proof.stage_id and proof.stage_id != stage_id:
+        raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different stage")
 
 
 def content_hash(body: dict[str, Any]) -> str:
@@ -522,6 +587,20 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
         _default_qa_coordination_proof_gate(packet, proof_gate)
     if "minimum_status" not in proof_gate:
         proof_gate["minimum_status"] = "passed"
+    # Derivable booleans get defaulted (with an operator note), not hard-failed:
+    # a missing `required` on a gate that names proof types or a recipe means
+    # "required" in the STRICTER reading, and a missing `visual_required` means
+    # no visual lane was asked for. Hard-failing here burned a full lead turn
+    # live (2026-07-03, task_1b102976: neko omitted `required`; retryable=false
+    # killed the goal driver) — the same validated-form-rejects-real-work class
+    # Round 3 closed for delivery packets. qa_coordination_release already gets
+    # this defaulting; fresh_scope handoffs deserve the same.
+    if "required" not in proof_gate and (proof_gate.get("required_proof_types") or proof_gate.get("proof_recipe_id") or proof_gate.get("recipe_id")):
+        proof_gate["required"] = True
+        _append_operator_note(packet, "proof_gate.required defaulted to true from declared proof expectations")
+    if "visual_required" not in proof_gate:
+        proof_gate["visual_required"] = False
+        _append_operator_note(packet, "proof_gate.visual_required defaulted to false")
     for key in ("required", "required_proof_types", "minimum_status", "visual_required"):
         if key not in proof_gate:
             raise DecisionPayloadInvalid(f"handoff_packet.proof_gate missing {key}")
@@ -529,11 +608,17 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
         raise DecisionPayloadInvalid("handoff_packet proof_gate booleans are invalid")
     if not isinstance(proof_gate.get("required_proof_types"), list) or not proof_gate.get("required_proof_types"):
         raise DecisionPayloadInvalid("handoff_packet.proof_gate.required_proof_types must be non-empty")
+    for key in ("commands", "forbidden_commands", "required_proof_ids"):
+        if key in proof_gate:
+            value = proof_gate.get(key)
+            if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() for item in value):
+                raise DecisionPayloadInvalid(f"handoff_packet.proof_gate.{key} must be a list of non-empty strings")
     proof_gate["minimum_status"] = _normalize_proof_status(proof_gate.get("minimum_status"))
     if proof_gate.get("required") is False and str(proof_gate.get("minimum_status")) not in PROOF_STATUSES:
         proof_gate["minimum_status"] = "passed"
     if str(proof_gate.get("minimum_status")) not in PROOF_STATUSES:
         raise DecisionPayloadInvalid("handoff_packet.proof_gate.minimum_status is invalid")
+    _normalize_backend_self_test_command(packet, proof_gate)
     if mode in {"backend_first_cross_stack", "sequential_specialists"}:
         if str(packet.get("packet_kind") or "") == "qa_coordination_release":
             _default_qa_coordination_join_gate(packet, proof_gate=proof_gate)
@@ -542,6 +627,7 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
             raise DecisionPayloadInvalid("handoff_packet.join_gate.release_condition is required")
     _optional_string_list(packet, "joined_proof_ids")
     _optional_string_list(packet, "joined_contract_packet_ids")
+    _optional_string_list(packet, "cited_evidence_ids")
     if packet.get("harness_rules") is not None:
         _validate_harness_rules(packet.get("harness_rules"))
     if isinstance(packet.get("self_heal"), dict):
@@ -550,6 +636,36 @@ def _validate_handoff_packet(packet: dict[str, Any]) -> None:
             raise DecisionPayloadInvalid("handoff_packet.self_heal.classification is invalid")
         if "action" in self_heal and str(self_heal.get("action")) not in SELF_HEAL_ACTIONS:
             raise DecisionPayloadInvalid("handoff_packet.self_heal.action is invalid")
+
+
+def _normalize_backend_self_test_command(packet: dict[str, Any], proof_gate: dict[str, Any]) -> None:
+    """Adapt a backend-targeted ``self_test_command`` to the repo-venv interpreter.
+
+    Isolated worktrees carry no Python environment on PATH; the harness proof
+    runner already adapts its OWN commands, but the agent-facing
+    ``self_test_command`` reached the dev un-adapted, so every backend goal
+    burned a discovery turn (naked ``python manage.py check`` → no Django →
+    ``block`` → a full lead recovery turn). Normalize once at packet acceptance
+    so the dev is handed the interpreter that actually exists in the worktree.
+    """
+    if str(packet.get("target_repo") or "") != "EterniaBackend":
+        return
+    # Neko improvises the key name (live: `focused_self_test`); normalize every
+    # known self-test command key so the dev never sees the naked interpreter.
+    commands = proof_gate.get("commands")
+    if isinstance(commands, list):
+        adapted_commands = [adapt_eternia_backend_manage_py_command(str(command).strip()) for command in commands]
+        if adapted_commands != commands:
+            proof_gate["commands"] = adapted_commands
+            _append_operator_note(packet, "proof_gate.commands adapted to backend venv interpreter")
+    for key in ("self_test_command", "focused_self_test"):
+        command = str(proof_gate.get(key) or "").strip()
+        if not command:
+            continue
+        adapted = adapt_eternia_backend_manage_py_command(command)
+        if adapted != command:
+            proof_gate[key] = adapted
+            _append_operator_note(packet, f"proof_gate.{key} adapted to backend venv interpreter")
 
 
 def _normalize_handoff_repos(packet: dict[str, Any]) -> None:
@@ -623,18 +739,26 @@ def _append_operator_note(packet: dict[str, Any], note: str) -> None:
     packet["operator_note"] = f"{existing[:180]}; {note}" if existing else note
 
 
+def _derive_delivery_work_status(packet: dict[str, Any], *, decision_type: DecisionType) -> None:
+    expected = _DELIVERY_STATUS_BY_DECISION.get(decision_type)
+    if expected is None:
+        return
+    existing = str(packet.get("work_status") or "").strip()
+    if existing == expected:
+        return
+    packet["work_status"] = expected
+    reason = "derived missing delivery.work_status from decision_type"
+    if existing:
+        reason = f"normalized delivery.work_status from {existing!r} to {expected!r}"
+    _append_operator_note(packet, reason)
+    _merge_normalization(packet, renamed_fields=["work_status"])
+
+
 def _validate_delivery(packet: dict[str, Any], *, decision_type: DecisionType) -> None:
     _normalize_unknown_packet_metadata(packet, DELIVERY_KEYS, "delivery")
     _normalize_contract_packet_auth_shape(packet)
     _scan_packet_redaction(packet)
-    status = str(packet.get("work_status", "")).strip()
-    if not status:
-        raise DecisionPayloadInvalid("delivery.work_status is required")
-    if status == "patched":
-        raise DecisionPayloadInvalid("delivery.work_status patched is an internal precursor and cannot be emitted as final delivery")
-    expected = _DELIVERY_STATUS_FOR_DECISION.get(status)
-    if expected is None or expected != decision_type:
-        raise DecisionPayloadInvalid("delivery.work_status does not match enclosing decision type")
+    _derive_delivery_work_status(packet, decision_type=decision_type)
     _optional_string_list(packet, "consumed_contract_packet_ids")
     _optional_string_list(packet, "consumed_proof_ids")
     _optional_string_list(packet, "self_test_evidence_ids")
@@ -659,6 +783,7 @@ def _validate_delivery(packet: dict[str, Any], *, decision_type: DecisionType) -
         raise DecisionPayloadInvalid("delivery.wd_tagger_assessment must be a string")
     _optional_string_list(packet, "questions")
     _optional_string_list(packet, "proof_ids")
+    _optional_string_list(packet, "cited_evidence_ids")
     _optional_string_list(packet, "known_gaps")
     _optional_string_list(packet, "commit_refs")
     if "deploy_verification" in packet:
@@ -927,6 +1052,10 @@ def _dedupe_strings(items: list[Any]) -> list[str]:
         seen.add(text)
         result.append(text[:120])
     return result
+
+
+def _string_list(value: Any) -> list[str]:
+    return _dedupe_strings(value) if isinstance(value, list) else []
 
 
 def _scan_packet_redaction(value: Any, *, path: str = "packet", allow_bare_secret_terms: bool = True) -> Any:

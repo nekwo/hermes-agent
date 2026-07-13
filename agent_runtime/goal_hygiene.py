@@ -10,6 +10,7 @@ from .models import Event
 from .daemon import _clear_daemon_lease, _pid_is_alive, _write_daemon_status, read_daemon_status
 from .dirty_state import build_dirty_state
 from .launcher_process_hygiene import clean_launcher_visual_processes
+from .persona_assignments import PersonaInstanceStore
 from .recovery import mark_stale_runs
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
 from .states import TaskState
@@ -45,11 +46,15 @@ def prepare_new_goal_runtime(
     worker_session_store = worker_session_store or WorkerSessionStore()
     event_log = getattr(task_store, "event_log", None) or EventLog()
     runtime_store = GoalRuntimeInstanceStore(event_log=event_log)
+    persona_instance_store = PersonaInstanceStore(event_log=event_log)
     exclude_task_ids = {str(item) for item in (exclude_task_ids or set()) if str(item).strip()}
     daemon_cleanup = _clear_dead_daemon_status()
     launcher_process_cleanup = clean_launcher_visual_processes(enabled=cleanup_launcher_visual_processes)
     stale_incidents = mark_stale_runs(run_store, incident_store, heartbeat_ttl_seconds=heartbeat_ttl_seconds)
     worker_cleanup = worker_session_store.close_for_new_goal(reason="new goal hygiene")
+    persona_instance_cleanup = persona_instance_store.sweep_orphaned_task_bound_instances(
+        reason="new goal hygiene",
+    )
     cancelled_runs: list[str] = []
     cancelled_tasks: list[str] = []
     parked_task_ids: list[str] = []
@@ -146,6 +151,7 @@ def prepare_new_goal_runtime(
         "closed_worker_session_ids": worker_cleanup["closed_worker_session_ids"],
         "expired_possession_worker_session_ids": worker_cleanup["expired_possession_worker_session_ids"],
         "proof_sandbox_readonly_markers": worker_cleanup["proof_sandbox_readonly_markers"],
+        "persona_instance_cleanup": persona_instance_cleanup,
         "daemon_status_cleanup": daemon_cleanup,
         "dirty_state_after_cleanup": build_dirty_state(tasks=after_tasks, runs=after_runs, incidents=after_incidents, workers=after_workers, runtime_instances=runtime_instances),
         "foreground_runtime": foreground_summary,
@@ -162,7 +168,11 @@ def activate_foreground_runtime(
     runtime_store: GoalRuntimeInstanceStore | None = None,
 ) -> dict[str, Any]:
     runtime_store = runtime_store or GoalRuntimeInstanceStore()
-    instance = runtime_store.create_foreground(task_id=task_id, started_by=started_by)
+    existing = runtime_store.active_for_task(task_id)
+    if existing:
+        instance = runtime_store.transition(existing.id, "running", reason="reactivated existing lane", parked_reason=None)
+    else:
+        instance = runtime_store.create_lane(task_id=task_id, started_by=started_by, state="running")
     return {
         "instance_id": instance.id,
         "target_task_id": instance.task_id,

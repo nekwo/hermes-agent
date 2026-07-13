@@ -12,7 +12,9 @@ from utils import atomic_json_write
 
 from . import paths
 from .events import EventLog
-from .models import AgentRun, Event
+from .models import AgentRun, Event, Proof
+from .proof_rules import ProofType
+from .store import ProofStore
 
 
 @dataclass(slots=True)
@@ -127,7 +129,16 @@ def record_self_test_from_progress(
     if event_type != "run.tool.finished":
         return None
     tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip().lower()
-    if tool_name and tool_name not in {"terminal", "execute_code", "code_execution", "shell", "powershell"}:
+    if tool_name and tool_name not in {
+        "terminal",
+        "execute_code",
+        "code_execution",
+        "shell",
+        "shell_command",
+        "functions.shell_command",
+        "powershell",
+        "pwsh",
+    }:
         return None
     command = _command_from_payload(payload)
     if not looks_like_self_test_command(command):
@@ -164,7 +175,9 @@ def record_self_test_from_progress(
         source="worker_tool",
         satisfies_release_gate=False,
     )
-    return SelfTestEvidenceStore(event_log=event_log).save(evidence)
+    saved = SelfTestEvidenceStore(event_log=event_log).save(evidence)
+    _record_observed_proof_from_evidence(saved, event_log=event_log)
+    return saved
 
 
 def looks_like_self_test_command(command: object) -> bool:
@@ -203,6 +216,47 @@ def self_test_summary(evidence: SelfTestEvidence) -> dict[str, Any]:
     }
 
 
+def _record_observed_proof_from_evidence(evidence: SelfTestEvidence, *, event_log: EventLog | None) -> Proof | None:
+    proof_id = f"proof_observed_{evidence.evidence_id.removeprefix('selftest_')}"
+    record_path = paths.self_test_record_path(evidence.task_id, evidence.evidence_id)
+    proof = Proof(
+        id=proof_id,
+        task_id=evidence.task_id,
+        stage_id=evidence.stage_id,
+        type=ProofType.TEST_RUN,
+        title=f"Observed agent proof: {evidence.command_label[:80]}",
+        path_or_value=_relative_runtime_path(record_path),
+        created_by=evidence.persona_id,
+        created_at=now(),
+        metadata={
+            "source": "agent_tool_trace",
+            "authoritative": False,
+            "self_test_evidence_id": evidence.evidence_id,
+            "actor_requested": evidence.persona_id,
+            "run_id": evidence.run_id,
+            "command": evidence.command_label,
+            "command_hash": evidence.command_hash,
+            "exit_code": evidence.exit_code,
+            "status": evidence.status,
+            "duration_ms": evidence.elapsed_ms,
+            "workdir_label": evidence.workdir_label,
+            "repo_label": evidence.repo_label,
+            "redaction_status": evidence.redaction_status,
+        },
+        redaction_status=evidence.redaction_status,
+    )
+    return ProofStore(event_log=event_log).attach(proof)
+
+
+def _relative_runtime_path(path) -> str:
+    resolved = path.resolve()
+    root = paths.store_root().resolve()
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return resolved.name
+
+
 def _read_evidence(path) -> SelfTestEvidence:
     raw = json.loads(path.read_text(encoding="utf-8"))
     return SelfTestEvidence(
@@ -233,7 +287,7 @@ def _read_evidence(path) -> SelfTestEvidence:
 
 
 def _command_from_payload(payload: dict[str, Any]) -> str:
-    for key in ("command", "command_label", "summary", "detail"):
+    for key in ("command", "command_label", "command_full", "summary", "detail"):
         value = str(payload.get(key) or "").strip()
         if value:
             return value
@@ -251,7 +305,47 @@ def _status_from_payload(payload: dict[str, Any]) -> str:
         return "failed"
     if exit_code is not None:
         return "passed" if exit_code == 0 else "failed"
-    return "passed"
+    # No explicit status and no exit code. The observed lane must stay HONEST:
+    # defaulting to "passed" here recorded failed self-tests as passing (live
+    # 2026-07-03 — the empty-.env DJANGO_SECRET_KEY tracebacks and the emptied
+    # backend venv both logged status=passed, exit_code=None). Infer failure
+    # from an actual crash signature in the captured output; otherwise mark it
+    # "unknown" rather than claim success. The R1 observed-lane gate is
+    # presence-based (any agent_tool_trace proof satisfies it) and the
+    # authoritative harness re-run is what enforces pass/fail, so "unknown"
+    # narrows only the HUD display — it never green-lights unproven work.
+    if _output_shows_failure(payload):
+        return "failed"
+    return "unknown"
+
+
+# Only UNAMBIGUOUS crash signatures. A false "failed" (marking a real pass as
+# failed) is worse than an honest "unknown", so generic tokens like " failed"
+# (matches pytest's "0 failed") or "error" (matches "No issues/errors found")
+# are deliberately excluded — they only reliably distinguish pass from fail
+# alongside an exit code, which is handled above.
+_FAILURE_SIGNATURES = (
+    "traceback (most recent call last)",
+    "modulenotfounderror",
+    "importerror",
+    "runtimeerror",
+    "assertionerror",
+    "syntaxerror",
+    "fatal error",
+    "command not found",
+    "is not recognized as an internal or external command",
+    "no module named",
+)
+
+
+def _output_shows_failure(payload: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        str(payload.get(key) or "")
+        for key in ("stderr", "stderr_excerpt", "stdout", "stdout_excerpt", "summary", "detail")
+    ).lower()
+    if not haystack.strip():
+        return False
+    return any(signature in haystack for signature in _FAILURE_SIGNATURES)
 
 
 def _write_artifact(task_id: str, evidence_id: str, stream: str, text: str | None) -> str | None:

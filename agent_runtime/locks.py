@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 from pathlib import Path
+import time
 from typing import Iterator
 
 from . import paths
@@ -19,7 +21,9 @@ class HarnessLockUnavailable(RuntimeError):
 
 
 @contextlib.contextmanager
-def _file_lock(path: Path) -> Iterator[None]:
+def _file_lock(path: Path, *, timeout_seconds: float | None = None) -> Iterator[None]:
+    timeout_seconds = _lock_timeout_seconds(timeout_seconds)
+    deadline = time.monotonic() + timeout_seconds
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a+b") as handle:
         if os.name == "nt":
@@ -28,12 +32,16 @@ def _file_lock(path: Path) -> Iterator[None]:
                 handle.write(b"0")
                 handle.flush()
             handle.seek(0)
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError as exc:
-                if exc.errno in {errno.EACCES, errno.EDEADLK, 13, 36}:
-                    raise HarnessLockUnavailable(f"lock unavailable: {path}") from exc
-                raise
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EDEADLK, 13, 36}:
+                        raise
+                    if time.monotonic() >= deadline:
+                        raise HarnessLockUnavailable(f"lock unavailable after {timeout_seconds:g}s: {path}") from exc
+                    time.sleep(0.05)
             try:
                 yield
             finally:
@@ -81,3 +89,31 @@ def archive_lock() -> Iterator[None]:
 def events_lock() -> Iterator[None]:
     with _file_lock(paths.lock_dir() / "events.lock"):
         yield
+
+
+@contextlib.contextmanager
+def repo_land_lock(source_root: str | Path) -> Iterator[None]:
+    root = str(Path(source_root).resolve()).lower()
+    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:24]
+    with _file_lock(paths.lock_dir() / "repo_land" / f"{digest}.lock"):
+        yield
+
+
+@contextlib.contextmanager
+def incident_lock(incident_id: str) -> Iterator[None]:
+    with _file_lock(paths.lock_dir() / "incidents" / f"{incident_id}.lock"):
+        yield
+
+
+def _lock_timeout_seconds(value: float | None) -> float:
+    if value is not None:
+        try:
+            return max(0.01, float(value))
+        except (TypeError, ValueError):
+            return 15.0
+    try:
+        from .config import load_agent_runtime_config
+
+        return max(0.01, float(getattr(load_agent_runtime_config(), "lock_acquire_timeout_seconds", 15) or 15))
+    except Exception:
+        return 15.0

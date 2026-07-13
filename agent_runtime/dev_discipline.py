@@ -69,6 +69,8 @@ def needs_supervisor_slicing(task: Task) -> bool:
         plan and getattr(plan, "blueprint_id", None) in {"neko_dev_qa_basic", "neko_two_dev_default"}
     ):
         return False
+    if _blueprint_current_stage_is_specialist_slice(task):
+        return False
     repos = [str(repo).strip().lower() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()]
     text = " ".join(
         [
@@ -77,7 +79,7 @@ def needs_supervisor_slicing(task: Task) -> bool:
             " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
         ]
     ).lower()
-    if _has_backend_first_handoff_packet(task):
+    if _has_bounded_specialist_handoff_packet(task):
         return False
     if _is_backend_first_slice(task, repos=repos, text=text):
         return False
@@ -87,6 +89,24 @@ def needs_supervisor_slicing(task: Task) -> bool:
     broad_body_hits = sum(1 for marker in _BROAD_DESCRIPTION_MARKERS if marker in text)
     many_acceptance = len(getattr(task, "acceptance_criteria", []) or []) >= 3
     return multi_repo and (broad_title or broad_body_hits >= 2 or many_acceptance)
+
+
+def _blueprint_current_stage_is_specialist_slice(task: Task) -> bool:
+    plan = getattr(task, "mission_plan", None)
+    if not plan or getattr(plan, "blueprint_id", None) not in {"neko_dev_qa_basic", "neko_two_dev_default"}:
+        return False
+    current_id = str(getattr(plan, "current_stage_id", None) or getattr(task, "current_stage_id", None) or "").strip()
+    if not current_id:
+        return False
+    stage = next((item for item in list(getattr(plan, "stages", None) or []) if str(getattr(item, "id", "")) == current_id), None)
+    if stage is None:
+        return False
+    owner = str(getattr(stage, "owner_slot", None) or getattr(stage, "owner", None) or "").strip()
+    if owner not in {"dev", "backend_dev", "builder", "backend_builder"}:
+        return False
+    status = getattr(stage, "status", None)
+    status_value = getattr(status, "value", status)
+    return str(status_value or "").strip().lower() in {"ready", "implementing", "rework", "blocked"}
 
 
 def _repos_that_require_specialist_slicing(repos: list[str]) -> list[str]:
@@ -101,7 +121,7 @@ def _is_harness_support_repo(repo: str) -> bool:
     return any(marker in normalized for marker in _HARNESS_SUPPORT_REPO_MARKERS)
 
 
-def _has_backend_first_handoff_packet(task: Task) -> bool:
+def _has_bounded_specialist_handoff_packet(task: Task) -> bool:
     try:
         packet = latest_packet(task.id, "handoff_packet")
     except Exception:
@@ -113,6 +133,13 @@ def _has_backend_first_handoff_packet(task: Task) -> bool:
     target_owner = str(body.get("target_owner") or "")
     target_repo = str(body.get("target_repo") or "")
     proof_gate = body.get("proof_gate") if isinstance(body.get("proof_gate"), dict) else {}
+    if (
+        mode in {"single_specialist", "sequential_specialists"}
+        and target_owner in {"dev", "backend_dev", "launcher_dev"}
+        and target_repo
+        and proof_gate.get("required") is True
+    ):
+        return True
     return (
         mode in {"backend_first_cross_stack", "sequential_specialists"}
         and target_owner == "backend_dev"
@@ -144,7 +171,9 @@ _PROGRESS_OK_DECISIONS = frozenset({
     DecisionType.PROPOSE_STAGE_PLAN,
     DecisionType.CORRECT_STAGE,
     DecisionType.REQUEST_TEST_RUN,
+    DecisionType.HAND_OFF,
     DecisionType.BLOCK,
+    DecisionType.ESCALATE,
     DecisionType.NEEDS_CONTEXT,
     DecisionType.REQUEST_FILE_READS,
     DecisionType.REPORT_ISSUE_DISCOVERY,
@@ -152,6 +181,7 @@ _PROGRESS_OK_DECISIONS = frozenset({
 
 _BUDGET_PRESSURE_OK_DECISIONS = frozenset({
     DecisionType.REQUEST_TEST_RUN,
+    DecisionType.HAND_OFF,
     DecisionType.BLOCK,
     DecisionType.NEEDS_CONTEXT,
 })
@@ -198,7 +228,7 @@ def validate_dev_progress_gate(persona: AgentPersona, run: AgentRun, decision: A
         if decision.type == DecisionType.REQUEST_QA_REVIEW and _decision_has_proof_ids(decision):
             return
         raise DecisionPayloadInvalid(
-            "Dev budget pressure gate failed: run is approaching budget without a proof-oriented handoff; stop exploration and request_test_run, request_qa_review with proof_ids, or block with exact evidence so Neko can steer."
+            "Dev budget pressure gate failed: run is approaching budget without a proof-oriented handoff; stop exploration and emit hand_off, or block with exact evidence so Neko can steer."
         )
     if decision.type in _PROGRESS_OK_DECISIONS:
         return

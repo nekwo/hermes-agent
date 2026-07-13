@@ -324,7 +324,7 @@ def _hermes_path_markers(hermes_home: Path) -> list[str]:
     root = str(hermes_home).rstrip("\\/")
     # Match on prefix so sub-entries (git\cmd, git\bin, git\usr\bin, node, etc.)
     # all get swept.  Also match the bare hermes-agent install dir.
-    markers = [root + "\\hermes-agent", root + "\\git", root + "\\node", root + "\\venv"]
+    markers = [root + "\\hermes-agent", root + "\\git", root + "\\node", root + "\\venv", root + "\\bin"]
     # Also match if HERMES_HOME was customised to somewhere else — find-and-nuke
     # any entry whose path component contains "hermes".  We don't want to catch
     # unrelated entries like "chermes-foo" or "ephermeral", so we look for
@@ -402,7 +402,7 @@ def remove_portable_tooling_windows(hermes_home: Path) -> list[Path]:
     ``%LOCALAPPDATA%\\hermes\\``.  Only called on full uninstall; they're
     isolated from any system Git / Node so they cannot break other tools."""
     removed: list[Path] = []
-    for sub in ("git", "node", "gateway-service"):
+    for sub in ("git", "node", "gateway-service", "bin"):
         target = hermes_home / sub
         if target.exists():
             try:
@@ -575,6 +575,14 @@ def run_uninstall(args):
     project_root = get_project_root()
     hermes_home = get_hermes_home()
 
+    if bool(getattr(args, "dry_run", False)):
+        _print_uninstall_dry_run(
+            project_root=project_root,
+            hermes_home=hermes_home,
+            full_uninstall=bool(getattr(args, "full", False)),
+        )
+        return
+
     # Detect named profiles when uninstalling from the default root —
     # offer to clean them up too instead of leaving zombie HERMES_HOMEs
     # and systemd units behind.
@@ -702,6 +710,30 @@ def run_uninstall(args):
         remove_profiles=remove_profiles,
         named_profiles=named_profiles,
     )
+
+
+def _print_uninstall_dry_run(*, project_root: Path, hermes_home: Path, full_uninstall: bool) -> None:
+    """Print the uninstall plan without stopping services or deleting files."""
+    print()
+    print(color("Dry run: no files, services, or environment entries will be changed.", Colors.CYAN, Colors.BOLD))
+    print()
+    print(color("Would inspect/remove:", Colors.YELLOW, Colors.BOLD))
+    print("  • Gateway services and standalone gateway processes")
+    print("  • Hermes PATH entries from shell configs / Windows User PATH")
+    print("  • Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks")
+    print("  • Desktop Chat GUI artifacts")
+    print(f"  • Code checkout: {project_root}")
+    if full_uninstall:
+        print(f"  • Hermes config/data: {hermes_home}")
+        if _is_default_hermes_home(hermes_home):
+            profiles = _discover_named_profiles()
+            if profiles:
+                print("  • Named profiles (interactive uninstall asks before removing):")
+                for prof in profiles:
+                    print(f"    - {prof.name}: {prof.path}")
+    else:
+        print(f"  • Keep Hermes config/data: {hermes_home}")
+    print()
 
 
 def _perform_uninstall(

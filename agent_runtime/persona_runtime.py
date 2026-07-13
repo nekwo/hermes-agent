@@ -16,18 +16,20 @@ from .decision_schema import (
     DECISION_SCHEMA,
     AgentDecision,
     DecisionPayloadInvalid,
+    DecisionType,
     parse_structured_decision,
     validate_decision_for_role,
 )
 from .decision_contracts import validate_planning_decision
 from .models import AgentPersona, AgentRun
+from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_plan import current_plan_stage
 from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .profile_runner import AgentRunRequest, AgentRunResult, ProfileAgentRunner, RunBudgetExceeded
 from .progress import ChatProgressSink, RunProgressSink
-from .repo_context import RepoExecutionContext, repo_execution_context_for_task
+from .repo_context import RepoExecutionContext, capture_repo_baseline, isolated_repo_context_for_run, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
 from .store import RunStore, _safe_session_id
 from .tool_permissions import (
@@ -106,7 +108,12 @@ class GPTPersonaRuntime:
         progress_sink = RunProgressSink(run_store=RunStore(), run_id=run.id)
         repo_ctx = _repo_context_for_persona(persona, ctx)
         if repo_ctx is not None:
+            try:
+                repo_ctx = isolated_repo_context_for_run(repo_ctx, task_id=ctx.task.id, run_id=run.id)
+            except ValueError as exc:
+                raise DecisionPayloadInvalid(f"Dev run repo isolation failed closed: {exc}") from exc
             ctx.repo_context = _repo_context_for_render(repo_ctx)
+            _attach_repo_baseline(run, repo_ctx)
             progress_sink.emit("run.progress", _repo_context_progress_payload(repo_ctx))
         render_started = time.perf_counter()
         user_message = render_context(ctx)
@@ -171,8 +178,16 @@ class GPTPersonaRuntime:
         message: str,
         *,
         session_id: str | None = None,
+        turn_id: str | None = None,
         max_wall_seconds: float | None = 120.0,
-        max_api_calls: int | None = 8,
+        # No API-call cap on the chat lane — align with base Hermes, where a
+        # conversational turn is bounded by the tool-calling loop
+        # (AgentRunRequest.max_iterations = 90) plus the wall-clock budget, not a
+        # hard call count. Operator chats and agent_chat_send relays share this
+        # path; both keep their wall deadline (max_wall_seconds / the shared
+        # relay budget), so a runaway turn is caught by time + iterations, not an
+        # arbitrary 8 that also throttled ordinary multi-step chat requests.
+        max_api_calls: int | None = None,
         max_total_tokens: int | None = None,
         stream_callback: Callable[[str | None], None] | None = None,
         pre_trace_callback: Callable[[dict], None] | None = None,
@@ -196,6 +211,7 @@ class GPTPersonaRuntime:
         if binding.readiness == "missing_profile":
             raise ValueError(binding.summary)
         assert_provider_health_for_persona(persona)
+        clarify_capture = MissionChatClarifyCapture()
         result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
@@ -206,7 +222,15 @@ class GPTPersonaRuntime:
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
                 quiet_mode=True,
                 skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
-                skip_memory=False,
+                # Profile memory (MEMORY.md / USER.md) is identity-adjacent: it
+                # carries the bound profile's worldview into the turn. Honor the
+                # persona's include_profile_memory opt-in instead of loading it
+                # unconditionally, so a persona bound to a supervisor profile for
+                # *capabilities* does not also inherit that profile's memory-model
+                # (the Alice "goal->Neko->Dev" mental model that made Neko relay
+                # to itself). A persona keeps its own profile's memory when the
+                # binding is its own; it drops a borrowed profile's memory.
+                skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
                 session_id=session_id,
                 max_wall_seconds=max_wall_seconds,
@@ -215,9 +239,11 @@ class GPTPersonaRuntime:
                 user_message=message,
                 system_message=_persona_chat_system_prompt(persona),
                 stream_callback=stream_callback,
+                clarify_callback=clarify_capture.callback,
                 progress_callback=_chat_trace_callback(
                     session_id=session_id,
                     persona=persona,
+                    turn_id=turn_id,
                     before_first_trace=pre_trace_callback,
                     on_trace=trace_callback,
                 ),
@@ -225,6 +251,8 @@ class GPTPersonaRuntime:
             )
         )
         ChatToolPermissionStore().consume_turn(persona_id=persona.id, session_id=session_id)
+        if clarify_capture.requested and isinstance(result.raw, dict):
+            result.raw["clarify_request"] = clarify_capture.request
         return result
 
     def mission_chat_reply(
@@ -234,16 +262,28 @@ class GPTPersonaRuntime:
         *,
         session_id: str | None = None,
         permission_session_id: str | None = None,
+        turn_id: str | None = None,
         provider_override: str | None = None,
         model_override: str | None = None,
+        reasoning_effort: str | None = None,
         surface_prompt: str | None = "",
         max_wall_seconds: float | None = 120.0,
-        max_api_calls: int | None = 8,
+        # No API-call cap on the chat lane — align with base Hermes, where a
+        # conversational turn is bounded by the tool-calling loop
+        # (AgentRunRequest.max_iterations = 90) plus the wall-clock budget, not a
+        # hard call count. Operator chats and agent_chat_send relays share this
+        # path; both keep their wall deadline (max_wall_seconds / the shared
+        # relay budget), so a runaway turn is caught by time + iterations, not an
+        # arbitrary 8 that also throttled ordinary multi-step chat requests.
+        max_api_calls: int | None = None,
         max_total_tokens: int | None = None,
         stream_callback: Callable[[str | None], None] | None = None,
         pre_trace_callback: Callable[[dict], None] | None = None,
         trace_callback: Callable[[dict], None] | None = None,
         agent_ready_callback: Callable[[object], Callable[[], None] | None] | None = None,
+        preloaded_skill_prompt: str | None = None,
+        workspace_agents_content: str | None = None,
+        situational_hud_content: str | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -276,26 +316,55 @@ class GPTPersonaRuntime:
         health_persona.provider = runtime_provider
         health_persona.model = runtime_model
         assert_provider_health_for_persona(health_persona)
+        # Non-blocking clarify bridge for this lane: a clarify call records the
+        # question and ends the turn instead of blocking on a human queue the
+        # spawn does not have. Read back after the run and threaded to the
+        # caller as a structured clarify_request.
+        clarify_capture = MissionChatClarifyCapture()
         result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
                 provider=runtime_provider,
                 model=runtime_model,
                 api_mode=persona.api_mode,
+                reasoning_effort=reasoning_effort,
                 enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=perm_session_id),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=perm_session_id),
                 quiet_mode=True,
-                skip_context_files=False,
-                skip_memory=False,
+                # Operator chat honors the persona's core-context-file opt-in like
+                # the mission-run (L143) and free-chat (L208) paths. Isolated
+                # personas (the default) must NOT auto-inject the process-cwd repo
+                # project docs (e.g. the 72KB hermes-agent AGENTS.md, truncated to
+                # ~65K chars = ~16K tokens) into every conversational turn — that
+                # is ~20K tokens of fixed overhead per turn regardless of persona.
+                # Repo doctrine an operator persona needs is carried by its skills
+                # or read on demand; developer repo docs are not chat-turn context.
+                skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
+                # Profile memory (MEMORY.md / USER.md) is identity-adjacent: it
+                # carries the bound profile's worldview into the turn. Honor the
+                # persona's include_profile_memory opt-in instead of loading it
+                # unconditionally, so a persona bound to a supervisor profile for
+                # *capabilities* does not also inherit that profile's memory-model
+                # (the Alice "goal->Neko->Dev" mental model that made Neko relay
+                # to itself). A persona keeps its own profile's memory when the
+                # binding is its own; it drops a borrowed profile's memory.
+                skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
                 session_id=session_id,
                 max_wall_seconds=max_wall_seconds,
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,
                 user_message=message,
-                system_message=_mission_chat_surface_message(surface_prompt),
+                system_message=_mission_chat_surface_message(
+                    persona,
+                    surface_prompt,
+                    preloaded_skill_prompt=preloaded_skill_prompt,
+                    workspace_agents_content=workspace_agents_content,
+                    situational_hud_content=situational_hud_content,
+                ),
                 stream_callback=stream_callback,
                 agent_ready_callback=agent_ready_callback,
+                clarify_callback=clarify_capture.callback,
                 # Key chat trace on the real chat session: Mission Control passes
                 # session_id=None (the transcript is already baked into the
                 # message) but the permission/session lineage lives on
@@ -303,6 +372,7 @@ class GPTPersonaRuntime:
                 progress_callback=_chat_trace_callback(
                     session_id=perm_session_id,
                     persona=persona,
+                    turn_id=turn_id,
                     before_first_trace=pre_trace_callback,
                     on_trace=trace_callback,
                 ),
@@ -310,6 +380,8 @@ class GPTPersonaRuntime:
             )
         )
         ChatToolPermissionStore().consume_turn(persona_id=persona.id, session_id=perm_session_id)
+        if clarify_capture.requested and isinstance(result.raw, dict):
+            result.raw["clarify_request"] = clarify_capture.request
         return result
 
 
@@ -327,6 +399,8 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
     return (
         f"You are {display}, a Mission Control operator-channel agent (role: {role}). "
         "You are in a direct, real-time chat with a single human operator — your teammate, not an end user. "
+        "You are embodied in the Mission Control office — a 2D/3D space shared with the other agents — and the "
+        "operator's HUD shows live state: the current realm, workspace, and each agent's name and steer handle. "
         f"{_persona_chat_voice(role, display)} "
         "Voice: warm, plain text, teammate-tight. Lead with the answer; skip preamble, filler, and restating the question. "
         "A sentence or two is usually enough — only go longer when the operator clearly wants depth. "
@@ -339,6 +413,9 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         "grant blocks it, say so plainly instead of inventing output. "
         "Keep replies as clean teammate prose: never paste decision JSON, task scopes, acceptance criteria, handoff packets, "
         "or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane. "
+        "If an order is ambiguous or underspecified, use the `clarify` tool to ask before acting instead of guessing — you are "
+        "in a live channel, and on this surface clarify ends your turn with your question and the answer comes back as the "
+        "asker's next message (pass `choices` when the answer is one of a few known options). "
         "If the operator just greets you or makes small talk, talk back like a teammate. "
         "Recall: lean on the inline chat history for continuity. Reach for session_search only when the operator points at "
         "something specific from a past session you can't already see, and consult your durable memory only when it actually "
@@ -392,27 +469,112 @@ def _mission_chat_operative_rules() -> str:
         "run the no-model smoke test (or any temp/throwaway graph validation) as a stand-in for a real goal — the smoke "
         "never appears in Mission Control. Only fall back to the smoke if the operator explicitly asks to validate the "
         "graph without creating real work.\n"
+        "- If an order is ambiguous or underspecified — an unclear target, a missing detail, or a routing choice with more "
+        "than one plausible answer — use the `clarify` tool to ask before acting, rather than guessing. Pass the question, and "
+        "when the answer is one of a few known options pass them as `choices` (up to 4) so they render as pickable rows. On "
+        "this channel `clarify` does NOT block: it ends your turn with your question, and the answer arrives as their next "
+        "message in this same conversation. This is the operator channel, not an autonomous goal run: here, ask. Reach for it "
+        "especially when you hold context the asker can't see (e.g. which of several same-role agents they mean).\n"
+        "- When an agent you briefed replies with a clarifying question of their own, answer it by sending the choice back to "
+        "them (agent_chat_send into that same session) so the exchange continues as one conversation — don't drop their "
+        "question or answer it by guessing.\n"
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
         "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane."
     )
 
 
-def _mission_chat_surface_message(surface_prompt: str | None) -> str:
-    """Compose the operator-chat system message: the non-negotiable operative
-    rules first, then the operator's optional per-session surface prompt. The
-    rules always apply so the anti-fabrication invariant holds even when the
-    operator supplies their own surface prompt."""
+def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
+    """First-person identity block for the canonical Mission Control chat lane.
 
+    The mission-chat lane deliberately runs isolated (``skip_context_files``),
+    so the bound profile's SOUL.md is NOT loaded as the stable-tier identity —
+    the model falls back to the generic ``DEFAULT_AGENT_IDENTITY`` and, without
+    this block, never learns *which* persona it is. That was the root cause of
+    the "Neko messages itself" incident: a persona bound to a supervisor
+    profile (Alice) inherited that profile's "Neko is a separate agent I brief"
+    memory model with no counter-vailing "you ARE Neko" hat, and relayed the
+    operator's question to its own persona id via ``agent_chat_send``.
+
+    This asserts the persona's own identity first, names the persona id so the
+    model can recognize a self-directed relay, and states plainly that the
+    persona is already the one speaking in this channel."""
+
+    display = str(getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")).strip()
+    persona_id = str(getattr(persona, "id", "") or "").strip()
+    role = role_from_persona(persona).value
+    voice = _persona_chat_voice(role, display)
+    id_clause = f" (Mission Control persona id: `{persona_id}`)" if persona_id else ""
+    never_self = (
+        f" Never use `agent_chat_send` to message `{persona_id}`: that persona is you — "
+        "answer the operator directly instead of relaying to yourself."
+        if persona_id
+        else ""
+    )
+    return (
+        f"You are {display}{id_clause}. {voice} You are already the persona speaking in this "
+        "channel — the operator is talking to you right now, so respond directly in your own "
+        f"voice.{never_self} Dev, Backend Dev, QA, and profile agents are the separate personas "
+        "you may brief with `agent_chat_send`; you are not any of them and you are not your own "
+        "relay target."
+    )
+
+
+def _mission_chat_surface_message(
+    persona: AgentPersona,
+    surface_prompt: str | None,
+    *,
+    preloaded_skill_prompt: str | None = None,
+    workspace_agents_content: str | None = None,
+    situational_hud_content: str | None = None,
+) -> str:
+    """Compose the operator-chat system message: the persona's first-person
+    identity block first, then the non-negotiable operative rules, then the
+    runtime situational HUD (the same picture the operator's Mission Control
+    runtime HUD strip shows, so the two are on the same page), then the
+    operator's optional per-session surface prompt. The identity block gives the
+    isolated chat lane a "you ARE <persona>" hat (the profile SOUL is not loaded
+    here); the rules always apply so the anti-fabrication invariant holds even
+    when the operator supplies their own surface prompt."""
+
+    identity = _mission_chat_identity_prompt(persona)
     operator_surface = (surface_prompt or "").strip()
+    skill_prompt = (preloaded_skill_prompt or "").strip()
+    workspace_agents = (workspace_agents_content or "").strip()
+    situational_hud = (situational_hud_content or "").strip()
     rules = _mission_chat_operative_rules()
+    parts = [identity, rules]
+    if situational_hud:
+        parts.append(situational_hud)
+    if skill_prompt:
+        parts.append(skill_prompt)
+    if workspace_agents:
+        parts.append(
+            "Workspace instructions from the operator-selected AGENTS.md "
+            "(apply these instructions to this turn):\n\n" + workspace_agents
+        )
     if operator_surface:
-        return f"{rules}\n\n{operator_surface}"
-    return rules
+        parts.append(operator_surface)
+    return "\n\n".join(part for part in parts if part)
 
 
 def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:
     if role_from_persona(persona) != "dev":
         return None
+    # Ground in the CURRENT mission-plan stage's repo first. task.affected_repos lags
+    # the active stage in a graph blueprint — it holds the *previous* stage's repo — so
+    # grounding off it mis-routes every cross-stack dev (backend_dev lands in
+    # hermes-agent, launcher dev lands in EterniaBackend, each then fails its proof in
+    # the wrong tree). The stage repo is authoritative for the slice this persona owns.
+    # Falls through to the legacy affected_repos/handoff resolution when there is no plan
+    # stage (e.g. CLI goal_run) or the stage repo is unknown/unresolvable.
+    stage_repo = _stage_repo_scope_for_persona(persona, ctx)
+    if stage_repo is not None:
+        try:
+            return repo_execution_context_for_task(
+                type("TaskStageRepoScope", (), {"affected_repos": [stage_repo]})()
+            )
+        except ValueError:
+            pass
     repo_task = ctx.task
     if not (getattr(repo_task, "affected_repos", []) or []):
         handoff_repo = _handoff_repo_scope_for_persona(persona, ctx)
@@ -425,6 +587,39 @@ def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoE
         return repo_execution_context_for_task(repo_task, explicit_workdir=repo_scope if repo_scope else None)
     except ValueError as exc:
         raise DecisionPayloadInvalid("Dev run could not resolve a valid affected repo workdir; fix affected_repos before dispatching Dev.") from exc
+
+
+def _stage_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
+    """Resolve the grounding repo from the current mission-plan stage.
+
+    Authoritative over ``task.affected_repos`` (which lags the active stage). Only
+    returns a repo when it is a known product/harness repo and — if the persona
+    declares a ``repo_scope`` — that scope agrees with the stage repo. A mismatch is
+    a slot/persona mis-binding we surface via the legacy path rather than silently
+    grounding in the wrong tree.
+    """
+    stage = current_plan_stage(ctx.task) or getattr(ctx, "current_stage", None)
+    stage_repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
+    if stage_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
+        return None
+    from .final_gate import default_blueprint_placeholder_repo_override
+
+    # On the bundled default blueprint the stage repo is a placeholder; a goal
+    # resolved to a single different repo grounds there instead (observed live
+    # 2026-07-03, task_8e1e0832: backend_dev grounded in an EterniaBackend
+    # worktree for a hermes-agent goal, so the goal-named gate command failed
+    # with file-not-found in the wrong tree).
+    stage_repo = default_blueprint_placeholder_repo_override(ctx.task, stage_repo) or stage_repo
+    persona_scope = getattr(persona, "repo_scope", None)
+    if persona_scope:
+        try:
+            scoped = repo_execution_context_for_task(type("TaskPersonaScope", (), {"affected_repos": [persona_scope]})())
+            stage_ctx = repo_execution_context_for_task(type("TaskStageRepo", (), {"affected_repos": [stage_repo]})())
+        except ValueError:
+            return None
+        if scoped is None or stage_ctx is None or scoped.workdir != stage_ctx.workdir:
+            return None
+    return stage_repo
 
 
 def _handoff_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
@@ -481,6 +676,11 @@ def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | Non
         return []
     names = set(blocked_tool_names(persona))
     names.update(extra_blocked_tools_for_permission_mode(options.permission_mode))
+    # clarify is globally blocked (PERSONA_BLOCKED_TOOLS) because autonomous
+    # runs have no interactive callback to answer it — but the operator/relay
+    # chat lane provides a non-blocking clarify bridge (MissionChatClarifyCapture),
+    # so it is allowed here even in bounded permission mode.
+    names.discard("clarify")
     return sorted(names)
 
 
@@ -488,11 +688,16 @@ def _chat_trace_callback(
     *,
     session_id: str | None,
     persona: AgentPersona,
+    turn_id: str | None = None,
     before_first_trace: Callable[[dict], None] | None = None,
     on_trace: Callable[[dict], None] | None = None,
 ) -> Callable[[dict], None] | None:
     """Build a runner ``progress_callback`` that records a chat turn's tool
     calls as redaction-safe trace events keyed on the chat session.
+
+    ``turn_id`` is the turn's canonical identity (the operator's
+    ``client_message_id`` token); it is stamped on every recorded event so the
+    snapshot projections carry one reconciliation key for the whole turn.
 
     Returns ``None`` when there is no session to key on (e.g. a sandbox run with
     no durable chat), which leaves the chat turn's telemetry exactly as it was
@@ -504,6 +709,7 @@ def _chat_trace_callback(
     sink = ChatProgressSink(
         session_id=session_id or "",
         persona_id=getattr(persona, "id", None),
+        turn_id=turn_id,
         before_first_trace=before_first_trace,
         on_trace=on_trace,
     )
@@ -522,7 +728,7 @@ def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None)
 # existed) may not yet enumerate. Without this, a deployment whose supervisor
 # toolsets were persisted before ``mission_goal`` shipped could never trigger a
 # real Mission Control goal from chat — the very thing the tool exists for.
-_CHAT_CAPABILITY_TOOLSETS = ("mission_goal",)
+_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat")
 
 
 def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> list[str]:
@@ -532,6 +738,12 @@ def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> li
     for toolset in _CHAT_CAPABILITY_TOOLSETS:
         if toolset in allowed and toolset not in augmented:
             augmented.append(toolset)
+    # clarify is a universal operator/relay conversational primitive — ask a
+    # question, get the answer as the next message in the same session — so it
+    # is available to every chat persona regardless of role, unlike the
+    # privileged mission_goal capability which stays gated on `allowed`.
+    if "clarify" not in augmented:
+        augmented.append("clarify")
     return augmented
 
 
@@ -566,6 +778,28 @@ def _repo_context_progress_payload(repo_ctx: RepoExecutionContext) -> dict:
         "context_loaded": repo_ctx.context_loaded_label,
         "next_expected": "repo_scoped_audit",
     }
+
+
+def _attach_repo_baseline(run: AgentRun, repo_ctx: RepoExecutionContext) -> None:
+    try:
+        baseline = capture_repo_baseline(repo_ctx.workdir)
+        run.progress = {
+            **(run.progress or {}),
+            "repo_baseline": baseline,
+            "repo_execution": {
+                "schema_version": 1,
+                "workdir": str(repo_ctx.workdir),
+                "workdir_label": repo_ctx.workdir.name,
+                "repo_label": repo_ctx.repo_label,
+                "source": repo_ctx.source,
+                "isolated": repo_ctx.source.endswith("-worktree"),
+                "detached_head": baseline.get("git_branch") == "HEAD",
+                "git_head": baseline.get("git_head"),
+            },
+        }
+        RunStore().update(run)
+    except Exception:
+        return
 
 
 
@@ -744,7 +978,12 @@ def _finish_reason_from_result(result: dict | object) -> str | None:
 def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) -> str:
     role = role_from_persona(persona)
     compact_schema = json.dumps(DECISION_SCHEMA, separators=(",", ":"))
-    payload_contracts = prompt_contract_markdown()
+    try:
+        cfg = load_agent_runtime_config()
+    except Exception:
+        cfg = None
+    simplified_prompt = _simplified_contract_prompt_enabled(cfg)
+    payload_contracts = prompt_contract_markdown(_simplified_contract_decisions_for_role(role) if simplified_prompt else None)
     parts = [load_bundled_prompt(role)]
     overlay = Path(__file__).with_name("prompts") / "shared_harness_overlay.md"
     if overlay.exists():
@@ -761,6 +1000,9 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
     normal_flow_guidance = _normal_worker_flow_guidance(persona)
     if normal_flow_guidance:
         parts.append(normal_flow_guidance)
+    simplified_contract_guidance = _simplified_contract_guidance(persona, cfg=cfg)
+    if simplified_contract_guidance:
+        parts.append(simplified_contract_guidance)
     parts.extend(
         [
             "# Universal Harness Rules\n"
@@ -768,7 +1010,7 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
             "Do not ask the human questions from inside a tick. Do not claim proof you did not receive from the harness. "
             "Do not use delegated agents, cron jobs, memory writes, messaging, or Kanban side effects. "
             "Do not use Kanban vocabulary or mutate Kanban state. The Autonomy / Tool Economy Contract in the tick context is Harness-generated public operating context; obey its budgets and do not add new AgentDecision keys unless the payload contract allows them. "
-            "When Mission HUD is present, treat mission_hud.agent_hud as the only live control panel: choose exactly one visible agent_hud.options item, prefer agent_hud.recommended_action, use only recommended_action.allowed_payload_keys, and shape the payload from recommended_action.payload_skeleton. Unknown payload keys are invalid. Open only the named recommended_action.skill_ref when the HUD says deeper guidance is needed. "
+            "When Mission HUD is present, read mission_hud.agent_hud as a two-sided dashboard: STATUS shows Harness-observed diff/proof/gate state, ACTION shows bounded steering or handoff choices. Prefer the recommended visible action, use only allowed payload keys, and treat unknown payload keys as invalid. Open only the named recommended_action.skill_ref when the HUD says deeper guidance is needed. "
             "Generic Hermes core guidance about tool persistence, task completion, profile identity, or manual-session workflow is subordinate to this Harness contract: returning a valid AgentDecision is the action for this tick. "
             "If the stage is no-edit, proof-backed, or explicitly requests Harness-owned proof, do not call extra tools just to satisfy generic tool-use guidance; emit the precise AgentDecision instead.",
             "# Stage Ownership and Handoff\n"
@@ -788,13 +1030,71 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
     return "\n\n".join(part for part in parts if part)
 
 
+def _simplified_contract_prompt_enabled(cfg) -> bool:
+    simplified = getattr(cfg, "simplified_agent_contract", None)
+    return bool(
+        getattr(simplified, "enabled", False)
+        and getattr(simplified, "expose_only_simplified_actions", True)
+    )
+
+
+def _simplified_contract_decisions_for_role(role) -> list[DecisionType]:
+    role_value = role.value if hasattr(role, "value") else str(role)
+    if role_value == "dev":
+        return [DecisionType.HAND_OFF, DecisionType.ESCALATE, DecisionType.BLOCK]
+    if role_value == "qa":
+        return [DecisionType.QA_VERDICT, DecisionType.ESCALATE, DecisionType.BLOCK]
+    if role_value == "alice_supervisor":
+        return [DecisionType.SCOPE_ROUTE, DecisionType.ESCALATE, DecisionType.BLOCK, DecisionType.RESOLVE_INCIDENT]
+    return [DecisionType.BLOCK]
+
+
+def _simplified_contract_guidance(persona: AgentPersona, *, cfg) -> str:
+    if not _simplified_contract_prompt_enabled(cfg):
+        return ""
+    role = role_from_persona(persona).value
+    common = (
+        "# Simplified Agent Contract Active\n"
+        "Mission HUD mode is `simplified_agent_contract`. The visible ACTION menu is authoritative. "
+        "Ignore older bundled-prompt mentions of legacy decision names unless terminal feedback explicitly asks for a one-turn repair. "
+        "Do not emit legacy micro-decisions while this mode is active. "
+        "The Harness keeps legacy aliases only for archive/backcompat normalization and logs parity events when it maps one forward."
+    )
+    if role == "dev":
+        return (
+            common
+            + "\n\nFor Dev and Backend Dev, allowed public decisions are `hand_off`, `block`, and `escalate`. "
+            "For product-edit stages, no-edit proof stages, exact proof recipes, failed-gate repairs, and contract joins, emit `hand_off` when your slice is ready for Harness attribution/proof. "
+            "`hand_off` is the only Dev completion signal: the Harness captures the isolated-worktree diff and runs the authoritative gate/recipe. "
+            "Use `block` only for exact missing prerequisites, and `escalate` only for a discovered issue too large or unsafe to fold into this stage."
+        )
+    if role == "qa":
+        return (
+            common
+            + "\n\nFor QA, allowed public decisions are `qa_verdict`, `block`, and `escalate`. "
+            "`qa_verdict` is the QA completion signal; cite existing Harness proof IDs and findings. "
+            "Use `block` for missing proof and `escalate` for out-of-scope or systemic issues."
+        )
+    if role == "alice_supervisor":
+        return (
+            common
+            + "\n\nFor Neko Mission Lead, the normal public routing decision is `scope_route`. "
+            "Use `scope_route` for kickoff, rescope, graph-faithful owner/repo routing, and proof-gate release. "
+            "Open incidents are yours to adjudicate: when an incident's underlying run is already terminal "
+            "(cancelled/failed/hung-reaped), close it with `resolve_incident` and a redaction-safe reason — "
+            "never answer `block` for an incident you can close. Use `block` only for true external blockers "
+            "that genuinely need a human, and `escalate` for issue discovery."
+        )
+    return common
+
+
 def _specialist_dev_guidance(persona: AgentPersona) -> str:
     if role_from_persona(persona) != "dev":
         return ""
     shared = (
         "# Specialist Dev Loop Guard\n"
-        "Operate with Alice/Neko-style budget discipline: use one bounded repo-scoped search/read pass, then choose target files, patch, test, request deterministic proof, or block with exact evidence. "
-        "If repeated read/search/tool-loop warnings appear before patch/test/proof progress, stop immediately and return a smaller stage plan, `request_test_run`, or `block` so Neko can slice or steer. "
+        "Operate with Alice/Neko-style budget discipline: use one bounded repo-scoped search/read pass, then choose target files, patch, run a focused self-test, hand off, or block with exact evidence. "
+        "If repeated read/search/tool-loop warnings appear before patch/test/proof progress, stop immediately and return a smaller stage plan, `block`, or exact missing-input report so Neko can slice or steer. "
         "Do not spend live ticks rediscovering the repo. Token management is part of correctness: narrow context beats broad audits."
     )
     persona_id = str(getattr(persona, "id", "") or "").lower()
@@ -828,22 +1128,23 @@ def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
     if role == "dev":
         return (
             "# Normal Worker Flow\n"
-            "For product-edit stages, do the work like one uninterrupted competent developer: inspect narrowly, edit files, run focused self-tests in-session with terminal/code tools, then deliver with `propose_patch`. "
-            "Include changed files and concise self-test results in `tests`; include `delivery.self_test_evidence_ids` when the Harness HUD lists recorded self-test evidence. "
+            "For product-edit stages, do the work like one uninterrupted competent developer: inspect narrowly, edit files, run focused self-tests in-session with terminal/code tools, then emit `hand_off`. "
+            "Do not declare changed files, proof IDs, delivery packets, or `delivery.work_status`; Harness derives diff, delivery, and final-gate state. "
             "Do not use `request_test_run` as your normal inner loop. Use Harness proof only when the Mission HUD exposes `request_gate`, the stage is no-edit/certification, QA requests a missing gate, or you are repairing a failed final gate. "
-            "After delivery, the Harness owns the final deterministic gate and will return failed proof IDs to this same worker if repair is needed."
+            "After hand_off, the Harness owns the final deterministic gate and will return failed proof IDs to this same worker if repair is needed."
         )
     if role == "qa":
         return (
             "# Normal Worker Flow QA\n"
             "Self-test evidence helps triage but is not release proof. Base implementation approval on Harness final gate proof IDs and required visual/MCP artifacts. "
-            "Request exactly one missing command or visual gate when proof is absent or stale; otherwise emit `report_qa_verdict` with cited proof IDs."
+            "Request exactly one missing command or visual gate when proof is absent or stale; otherwise emit `qa_verdict` with cited proof IDs."
         )
     if role == "alice_supervisor":
         return (
             "# Normal Worker Flow Neko\n"
             "Prefer same-worker repair over spawning new work. Wait/request-human only at kickoff or for true human/safety blockers. "
-            "Route by attached evidence, failed proof IDs, and worker HUD state; release QA only when the active graph includes QA and final gate proof is attached."
+            "Route with `scope_route` by attached evidence, failed proof IDs, and worker HUD state; release QA only when the active graph includes QA and final gate proof is attached. "
+            "For heavy investigation, spawn/steer instead of absorbing transcripts: sample only bounded progress_peek/topology status, pass pointers and repo handles, and leave child bytes in their artifacts."
         )
     return ""
 
