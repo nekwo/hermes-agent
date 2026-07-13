@@ -5,7 +5,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_shared_skills_dir
 
 HARNESS_SKILLS = frozenset(
     {
@@ -40,8 +40,11 @@ def harness_skill_source(skill: str) -> Path:
 
 
 def harness_skill_destination(skill: str, *, hermes_home: Path | None = None) -> Path:
-    home = hermes_home or get_hermes_home()
-    return home / "skills" / skill / "SKILL.md"
+    # Built-in Harness skills install to the shared canonical root so every
+    # persona references one copy and realm sync publishes it. ``hermes_home``
+    # is retained for signature/back-compat but no longer changes the target —
+    # placement is now root-relative, not per-profile.
+    return get_shared_skills_dir() / skill / "SKILL.md"
 
 
 def install_harness_skills(*, hermes_home: Path | None = None, skills: list[str] | None = None) -> list[SkillInstallResult]:
@@ -53,22 +56,17 @@ def install_harness_skills(*, hermes_home: Path | None = None, skills: list[str]
 
 
 def install_harness_skills_for_personas(personas) -> list[SkillInstallResult]:
-    from .profile_context import resolve_persona_profile
-
+    # Placement is the shared canonical root (see harness_skill_destination),
+    # so a skill required by multiple personas installs exactly once. We still
+    # iterate personas to collect the union of required Harness skills.
     results: list[SkillInstallResult] = []
-    installed_keys: set[tuple[str, str | None]] = set()
+    installed: set[str] = set()
     for persona in personas:
-        required = harness_required_skills_for_persona(persona)
-        if not required:
-            continue
-        binding = resolve_persona_profile(persona)
-        hermes_home = binding.profile_home
-        for skill in required:
-            key = (skill, str(hermes_home) if hermes_home else None)
-            if key in installed_keys:
+        for skill in harness_required_skills_for_persona(persona):
+            if skill in installed:
                 continue
-            installed_keys.add(key)
-            results.append(install_harness_skill(skill, hermes_home=hermes_home))
+            installed.add(skill)
+            results.append(install_harness_skill(skill))
     return results
 
 

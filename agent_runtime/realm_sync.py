@@ -10,7 +10,8 @@ from datetime import timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hermes_constants import get_config_path, get_hermes_home
+from agent.skill_utils import EXCLUDED_SKILL_DIRS
+from hermes_constants import get_config_path, get_hermes_home, get_shared_skills_dir
 from hermes_time import now
 from utils import atomic_json_write
 
@@ -292,20 +293,43 @@ def sync_artifacts_for_workspace_agent(workspace_id: str, persona_id: str) -> li
 
 
 def _skill_artifacts() -> list[RealmSyncArtifact]:
-    root = get_hermes_home() / "skills"
+    # Publish the shared canonical skills root (see get_shared_skills_dir) —
+    # the one physical dir every persona references. Walk each skill package
+    # WHOLE (not just SKILL.md) so multi-file skills — references/, scripts/,
+    # assets/, templates/ — travel intact to every realm member. Only the
+    # top-level skill directory name is tokenized; sub-path filenames are kept
+    # verbatim (rglob cannot emit ``..``) so files like ``__init__.py`` are not
+    # mangled. Junk/VCS/cache/dot components are pruned; the shared secret/state
+    # validation still runs over the result (_assert_no_secret_artifacts).
+    root = get_shared_skills_dir()
     artifacts: list[RealmSyncArtifact] = []
     if not root.exists():
         return artifacts
-    for skill_md in sorted(root.glob("*/SKILL.md")):
-        skill = skill_md.parent.name
-        artifacts.append(
-            RealmSyncArtifact(
-                kind="skill",
-                source=skill_md,
-                relative_path=f"skills/{_safe_token(skill)}/SKILL.md",
-                destination=get_hermes_home() / "skills" / _safe_token(skill) / "SKILL.md",
+    for skill_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        skill = skill_dir.name
+        # Skip dotdirs (.archive/.hub/.curator_backups/…) and any folder
+        # without a SKILL.md manifest — housekeeping, not a skill.
+        if skill.startswith(".") or not (skill_dir / "SKILL.md").is_file():
+            continue
+        safe_skill = _safe_token(skill)
+        for source in sorted(skill_dir.rglob("*")):
+            if not source.is_file():
+                continue
+            rel_parts = source.relative_to(skill_dir).parts
+            if any(
+                part.startswith(".") or part in EXCLUDED_SKILL_DIRS
+                for part in rel_parts
+            ):
+                continue
+            rel_within = "/".join(rel_parts)
+            artifacts.append(
+                RealmSyncArtifact(
+                    kind="skill",
+                    source=source,
+                    relative_path=f"skills/{safe_skill}/{rel_within}",
+                    destination=root / safe_skill / Path(*rel_parts),
+                )
             )
-        )
     return artifacts
 
 
@@ -440,8 +464,16 @@ def _pulled_artifact_bytes(artifact: RealmSyncArtifact, *, realm: Realm) -> byte
 
 def _destination_for_sync_path(rel: str) -> Path | None:
     parts = Path(rel).parts
-    if len(parts) == 3 and parts[0] == "skills" and parts[2] == "SKILL.md":
-        return get_hermes_home() / "skills" / parts[1] / "SKILL.md"
+    if len(parts) >= 3 and parts[0] == "skills":
+        sub = parts[1:]
+        # Untrusted remote path: refuse traversal / absolute / drive-letter
+        # components so a hostile realm repo can't escape the shared root.
+        if any(
+            p in ("", ".", "..") or ":" in p or p.startswith(("/", "\\"))
+            for p in sub
+        ):
+            return None
+        return get_shared_skills_dir().joinpath(*sub)
     if len(parts) == 3 and parts[0] == "store" and parts[1] == "workspaces":
         return paths.workspaces_dir() / parts[2]
     if len(parts) == 3 and parts[0] == "store" and parts[1] == "realms":

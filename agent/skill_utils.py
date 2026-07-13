@@ -12,7 +12,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from hermes_constants import get_config_path, get_skills_dir, is_termux
+from hermes_constants import (
+    get_config_path,
+    get_shared_skills_dir,
+    get_skills_dir,
+    is_termux,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -497,13 +502,25 @@ def get_external_skills_dirs() -> List[Path]:
 
 
 def get_all_skills_dirs() -> List[Path]:
-    """Return all skill directories: local ``~/.hermes/skills/`` first, then external.
+    """Return all skill directories: local profile ``skills/`` first, then the
+    shared canonical root, then config ``external_dirs``.
 
-    The local dir is always first (and always included even if it doesn't exist
-    yet — callers handle that).  External dirs follow in config order.
+    Index 0 is always the local profile skills dir (always included even if it
+    doesn't exist yet — callers handle that; some callers slice ``[1:]`` to get
+    the non-primary dirs). The shared canonical root
+    (:func:`hermes_constants.get_shared_skills_dir`) follows — one physical dir
+    every persona-profile shares and that realm sync publishes — then external
+    dirs in config order. Duplicates are dropped so a shared root that equals
+    the local dir (or an external entry) appears only once.
     """
-    dirs = [get_skills_dir()]
-    dirs.extend(get_external_skills_dirs())
+    dirs: List[Path] = [get_skills_dir()]
+    seen: Set[Path] = {dirs[0].expanduser()}
+    for candidate in [get_shared_skills_dir(), *get_external_skills_dirs()]:
+        key = candidate.expanduser()
+        if key in seen:
+            continue
+        seen.add(key)
+        dirs.append(candidate)
     return dirs
 
 

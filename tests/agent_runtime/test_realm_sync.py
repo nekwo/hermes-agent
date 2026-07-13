@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_shared_skills_dir
 
 from agent_runtime import paths as runtime_paths
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
@@ -85,7 +85,7 @@ def test_harness_runtime_model_is_hash_tracked():
 
 def test_publish_dry_run_is_allowlisted_and_excludes_state(isolate_agent_runtime_root, tmp_path):
     home = get_hermes_home()
-    skill = home / "skills" / "demo-skill" / "SKILL.md"
+    skill = get_shared_skills_dir() / "demo-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: demo-skill\n---\n# Demo\n", encoding="utf-8")
     system_prompt = home / "personas" / "dev" / "system.md"
@@ -114,7 +114,7 @@ def test_publish_dry_run_is_allowlisted_and_excludes_state(isolate_agent_runtime
 
 def test_publish_secret_candidate_hard_fails(isolate_agent_runtime_root, tmp_path):
     home = get_hermes_home()
-    skill = home / "skills" / "leaky-skill" / "SKILL.md"
+    skill = get_shared_skills_dir() / "leaky-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: leaky-skill\n---\napi_key = \"sk-test-secret-value-123456\"\n", encoding="utf-8")
     realm, _repo = _realm_with_repo(tmp_path)
@@ -131,7 +131,7 @@ def test_publish_secret_candidate_hard_fails(isolate_agent_runtime_root, tmp_pat
 def test_pull_reconciles_harness_skill_hash(isolate_agent_runtime_root, tmp_path):
     home = get_hermes_home()
     install_harness_skills(hermes_home=home, skills=["harness-runtime-model"])
-    installed = home / "skills" / "harness-runtime-model" / "SKILL.md"
+    installed = get_shared_skills_dir() / "harness-runtime-model" / "SKILL.md"
     installed.write_text("# stale local copy\n", encoding="utf-8")
     assert harness_skill_hash_mismatches(["harness-runtime-model"], hermes_home=home) == ["harness-runtime-model"]
 
@@ -145,6 +145,42 @@ def test_pull_reconciles_harness_skill_hash(isolate_agent_runtime_root, tmp_path
     assert result["state"] == "pulled"
     assert result["skill_reconcile"]["ok"] is True
     assert harness_skill_hash_mismatches(["harness-runtime-model"], hermes_home=home) == []
+
+
+def test_publish_syncs_multi_file_skill_package(isolate_agent_runtime_root, tmp_path):
+    # A multi-file skill (references/, scripts/) must sync WHOLE, while junk
+    # (__pycache__) and dotfiles are pruned so they never ride the realm repo.
+    pkg = get_shared_skills_dir() / "multi-skill"
+    (pkg / "references").mkdir(parents=True)
+    (pkg / "scripts").mkdir(parents=True)
+    (pkg / "__pycache__").mkdir(parents=True)
+    (pkg / "SKILL.md").write_text("---\nname: multi-skill\n---\n# Multi\n", encoding="utf-8")
+    (pkg / "references" / "guide.md").write_text("# Guide\n", encoding="utf-8")
+    (pkg / "scripts" / "run.py").write_text("print('hi')\n", encoding="utf-8")
+    (pkg / "__pycache__" / "x.pyc").write_text("junk\n", encoding="utf-8")
+    (pkg / ".scratch_note").write_text("local only\n", encoding="utf-8")
+
+    realm, _repo = _realm_with_repo(tmp_path)
+    result = publish_realm_sync(realm.id, dry_run=True)
+    paths = [item["path"] for item in result["artifacts"]]
+
+    assert "skills/multi-skill/SKILL.md" in paths
+    assert "skills/multi-skill/references/guide.md" in paths
+    assert "skills/multi-skill/scripts/run.py" in paths
+    assert all("__pycache__" not in path for path in paths)
+    assert all(".scratch_note" not in path for path in paths)
+
+
+def test_sync_destination_maps_nested_skill_and_blocks_traversal(isolate_agent_runtime_root):
+    from agent_runtime.realm_sync import _destination_for_sync_path
+
+    root = get_shared_skills_dir()
+    assert (
+        _destination_for_sync_path("skills/foo/references/guide.md")
+        == root / "foo" / "references" / "guide.md"
+    )
+    # A hostile realm repo must not escape the shared root.
+    assert _destination_for_sync_path("skills/foo/../evil.md") is None
 
 
 def test_realm_sync_status_cli_uses_stage42_envelope(isolate_agent_runtime_root, tmp_path):
@@ -404,7 +440,7 @@ def test_pull_threads_credential_header_per_invocation_only(isolate_agent_runtim
 
 def test_sidecar_written_by_each_verb(isolate_agent_runtime_root, tmp_path):
     home = get_hermes_home()
-    skill = home / "skills" / "sidecar-skill" / "SKILL.md"
+    skill = get_shared_skills_dir() / "sidecar-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: sidecar-skill\n---\n# Sidecar\n", encoding="utf-8")
     realm, _repo = _realm_with_remote(tmp_path)
@@ -457,7 +493,7 @@ def test_publish_notify_failure_is_warning_not_error(isolate_agent_runtime_root,
     import agent_runtime.realm_membership as realm_membership_module
 
     home = get_hermes_home()
-    skill = home / "skills" / "notify-skill" / "SKILL.md"
+    skill = get_shared_skills_dir() / "notify-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: notify-skill\n---\n# Notify\n", encoding="utf-8")
     realm, _repo = _realm_with_remote(tmp_path)
@@ -480,7 +516,7 @@ def test_publish_notify_posts_counts_only(isolate_agent_runtime_root, tmp_path, 
     import agent_runtime.realm_membership as realm_membership_module
 
     home = get_hermes_home()
-    skill = home / "skills" / "counts-skill" / "SKILL.md"
+    skill = get_shared_skills_dir() / "counts-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: counts-skill\n---\n# Counts\n", encoding="utf-8")
     realm, _repo = _realm_with_remote(tmp_path)

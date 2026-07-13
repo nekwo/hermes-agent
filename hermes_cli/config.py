@@ -2124,9 +2124,12 @@ DEFAULT_CONFIG = {
         },
     },
 
-    # Skills — external skill directories for sharing skills across tools/agents.
-    # Each path is expanded (~, ${VAR}) and resolved.  Read-only — skill creation
-    # always goes to ~/.hermes/skills/.
+    # Skills — discovery + sharing.
+    #   • The shared canonical root (<hermes_root>/shared/skills, override via
+    #     HERMES_SHARED_SKILLS) is discovered by every persona-profile and is
+    #     what realm sync publishes — one physical copy shared across all
+    #     profiles, and git-carried across machines by realm sync.
+    #   • external_dirs: extra read-only skill dirs, expanded (~, ${VAR}).
     "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
         # Substitute ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID} in SKILL.md
