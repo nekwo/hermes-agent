@@ -312,4 +312,13 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
         "config",
         help="Interactive skill configuration — enable/disable individual skills",
     )
+
+    skills_link_external = skills_subparsers.add_parser(
+        "link-external",
+        help="Link the shared skills root into external harnesses (~/.claude, ~/.codex)",
+    )
+    skills_link_external.add_argument(
+        "--json", action="store_true", help="Emit the link report as JSON"
+    )
+
     skills_parser.set_defaults(func=cmd_skills)

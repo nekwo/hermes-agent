@@ -1683,6 +1683,22 @@ def do_snapshot_import(input_path: str, force: bool = False,
 # CLI argparse entry point
 # ---------------------------------------------------------------------------
 
+def do_link_external(*, as_json: bool = False) -> None:
+    """Link the shared canonical skills root into external harness dirs."""
+    from agent_runtime.external_skill_links import (
+        format_report,
+        link_shared_skills_into_external_harnesses,
+    )
+
+    report = link_shared_skills_into_external_harnesses()
+    if as_json:
+        import json as _json
+
+        _console.print(_json.dumps(report.to_dict(), indent=2))
+    else:
+        _console.print(format_report(report), markup=False)
+
+
 def skills_command(args) -> None:
     """Router for `hermes skills <subcommand>` — called from hermes_cli/main.py."""
     action = getattr(args, "skills_action", None)
@@ -1748,8 +1764,10 @@ def skills_command(args) -> None:
             _console.print("Usage: hermes skills tap [list|add|remove]\n")
             return
         do_tap(tap_action, repo=repo)
+    elif action == "link-external":
+        do_link_external(as_json=getattr(args, "json", False))
     else:
-        _console.print("Usage: hermes skills [browse|search|install|inspect|list|list-modified|diff|check|update|audit|uninstall|reset|opt-out|opt-in|publish|snapshot|tap]\n")
+        _console.print("Usage: hermes skills [browse|search|install|inspect|list|list-modified|diff|check|update|audit|uninstall|reset|opt-out|opt-in|publish|snapshot|tap|link-external]\n")
         _console.print("Run 'hermes skills <command> --help' for details.\n")
 
 
