@@ -19,6 +19,15 @@ DEFAULT_CHAT_HISTORY_LIMIT = 8
 MAX_WORKSPACE_AGENTS_BYTES = 128 * 1024
 
 
+def _mission_chat_memory_loaded(persona: Any) -> bool:
+    """Whether the mission-chat lane loads this persona's bound-profile memory.
+
+    Mirrors ``GPTPersonaRuntime.mission_chat_reply`` (skip_memory is gated on
+    ``include_profile_memory``); kept here so the observability report reflects
+    the real prompt flag instead of a hardcoded assumption."""
+    return bool(getattr(persona, "include_profile_memory", False))
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceAgentsContext:
     """One explicitly selected workspace ``AGENTS.md`` and its safe receipt."""
@@ -172,6 +181,17 @@ def mission_chat_prompt_observability(
         "limiting_wrapper_active": bool(limiting_wrapper_active),
         "prompt_layers": [
             {
+                "name": "Persona identity",
+                "kind": "persona_identity",
+                "status": "loaded",
+                "summary": (
+                    "First-person 'you are "
+                    + (safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id)
+                    + "' identity block; the isolated chat lane does not load the profile SOUL, so this "
+                    "names the persona and forbids self-relay."
+                ),
+            },
+            {
                 "name": "Hermes core prompt",
                 "kind": "system_core",
                 "status": "loaded_by_profile_runner",
@@ -185,10 +205,14 @@ def mission_chat_prompt_observability(
                 "preview": surface[:SAFE_PREVIEW_LIMIT],
             },
             {
-                "name": "Profile SOUL and memory",
+                "name": "Profile memory",
                 "kind": "profile_context",
-                "status": "loaded",
-                "summary": "Loaded through normal Hermes profile context files and memory.",
+                "status": "loaded" if _mission_chat_memory_loaded(persona) else "skipped",
+                "summary": (
+                    "Profile MEMORY.md / USER.md loaded (persona opts in via include_profile_memory)."
+                    if _mission_chat_memory_loaded(persona)
+                    else "Profile memory skipped; this persona does not opt into its bound profile's memory."
+                ),
             },
             *(
                 [
@@ -229,8 +253,11 @@ def mission_chat_prompt_observability(
         "context_budget": _context_budget(model_selection, final_model_input),
         "prompt_flags": {
             "skip_context_files": not bool(getattr(persona, "include_core_context_files", False)),
-            "skip_memory": False,
-            "load_soul_identity": True,
+            "skip_memory": not _mission_chat_memory_loaded(persona),
+            # The isolated chat lane runs with skip_context_files=True and never
+            # sets load_soul_identity, so the profile SOUL is NOT the identity —
+            # the first-person persona-identity layer is. Report that honestly.
+            "load_soul_identity": False,
             "surface_prompt_blank": surface == "",
             "limiting_wrapper_active": bool(limiting_wrapper_active),
             "workspace_agents_injected": bool(

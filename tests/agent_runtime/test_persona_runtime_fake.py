@@ -338,32 +338,65 @@ def test_clarify_enabled_and_unblocked_on_chat_lane_but_blocked_on_runs():
 
 
 def test_mission_chat_surface_message_always_carries_operative_rules():
-    from agent_runtime.persona_runtime import _mission_chat_operative_rules, _mission_chat_surface_message
+    from agent_runtime.persona_runtime import (
+        _mission_chat_identity_prompt,
+        _mission_chat_operative_rules,
+        _mission_chat_surface_message,
+    )
 
-    # Blank operator surface still injects the operative rules (so the
-    # anti-fabrication invariant holds on the default operator channel).
-    assert _mission_chat_surface_message("") == _mission_chat_operative_rules()
-    assert _mission_chat_surface_message(None) == _mission_chat_operative_rules()
-    assert "Never fabricate" in _mission_chat_surface_message("")
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+
+    # Blank operator surface still injects the identity block THEN the operative
+    # rules (so the "you are <persona>" hat and the anti-fabrication invariant
+    # both hold on the default operator channel).
+    identity = _mission_chat_identity_prompt(neko)
+    rules = _mission_chat_operative_rules()
+    assert _mission_chat_surface_message(neko, "") == identity + "\n\n" + rules
+    assert _mission_chat_surface_message(neko, None) == identity + "\n\n" + rules
+    # Identity comes first; rules follow.
+    assert _mission_chat_surface_message(neko, "").startswith(identity)
+    assert "Never fabricate" in _mission_chat_surface_message(neko, "")
     # Ambiguous-order clarify norm rides the always-injected operative rules,
     # and names the clarify tool + the answer-threads-back contract.
-    rules = _mission_chat_operative_rules()
     assert "use the `clarify` tool to ask before acting" in rules
     assert "answer arrives as their next message" in rules
     # Relay lane: answer a briefed agent's clarify instead of dropping/guessing.
     assert "answer it by sending the choice back" in rules
 
     # An operator-supplied surface prompt is layered after the rules, not instead.
-    composed = _mission_chat_surface_message("Focus on the auth refresh path.")
+    composed = _mission_chat_surface_message(neko, "Focus on the auth refresh path.")
+    assert composed.startswith(identity)
     assert "Never fabricate" in composed
     assert composed.endswith("Focus on the auth refresh path.")
 
     workspace_composed = _mission_chat_surface_message(
+        neko,
         "",
         workspace_agents_content="# Selected workspace\nUse its conventions.",
     )
     assert "operator-selected AGENTS.md" in workspace_composed
     assert workspace_composed.endswith("Use its conventions.")
+
+
+def test_mission_chat_identity_prompt_names_persona_and_forbids_self_relay():
+    # Root-cause guard for the "Neko messages itself" incident: the isolated
+    # chat lane does not load the profile SOUL, so this block is the ONLY place
+    # the model learns which persona it is. It must name the persona, name the
+    # persona id (so a self-directed agent_chat_send is recognizable), and
+    # forbid relaying to itself.
+    from agent_runtime.persona_runtime import _mission_chat_identity_prompt
+
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    identity = _mission_chat_identity_prompt(neko)
+
+    assert "You are Neko Mission Lead" in identity
+    assert "`neko_supervisor`" in identity
+    assert "agent_chat_send" in identity
+    assert "that persona is you" in identity
+    assert "already the persona speaking in this channel" in identity
+    # No leaked Alice-identity / third-person "deploy Neko" framing.
+    assert "Alice" not in identity
+    assert "catgirl" not in identity.lower()
 
 
 def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path, monkeypatch):
@@ -399,12 +432,63 @@ def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path
     )
 
     system_message = captured["request"].system_message
+    # Identity block leads the system message (the "you ARE Neko" hat) so the
+    # isolated chat lane never externalizes the persona and relays to itself.
+    assert system_message.startswith("You are Neko Mission Lead")
+    assert "that persona is you" in system_message
     assert "Never fabricate" in system_message
     assert "actually use your tools" in system_message
     assert "# Workspace rules" in system_message
     # And the chat-trace callback is wired on the canonical operator path too.
     assert captured["request"].progress_callback is not None
     assert captured["request"].agent_ready_callback is agent_ready
+
+
+def test_mission_chat_reply_honors_include_profile_memory(tmp_path, monkeypatch):
+    # A persona bound to a profile for CAPABILITIES must not also inherit that
+    # profile's MEMORY.md/USER.md worldview unless it opts in. skip_memory now
+    # tracks include_profile_memory instead of being hardcoded False (which had
+    # loaded Alice's "goal->Neko->Dev" memory into every Neko turn).
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime.models import AgentPersona
+
+    def _persona(include_memory: bool) -> AgentPersona:
+        return AgentPersona(
+            id="neko_supervisor",
+            display_name="Neko Mission Lead",
+            role="alice_supervisor",
+            model="gpt-5.5",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            toolsets=["file", "search", "skills"],
+            system_prompt_path="",
+            hermes_profile=None,
+            include_profile_memory=include_memory,
+        )
+
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="s",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.mission_chat_reply(_persona(False), "hi", permission_session_id="s")
+    assert captured["request"].skip_memory is True
+
+    runtime.mission_chat_reply(_persona(True), "hi", permission_session_id="s")
+    assert captured["request"].skip_memory is False
 
 
 def test_profile_role_sentinel_resolves_to_supervisor_capabilities():

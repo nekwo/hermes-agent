@@ -25,6 +25,43 @@ def test_prompt_observability_preserves_profile_persona_identity():
     assert context["profile"] == "alice"
 
 
+def test_prompt_observability_reports_persona_identity_layer_and_memory_flag():
+    # The mission-chat lane injects a first-person identity block and (post-fix)
+    # does NOT load the profile SOUL as identity; memory tracks
+    # include_profile_memory. The observability report must reflect that honestly
+    # so the launcher CONTEXT peek does not claim SOUL/memory that isn't loaded.
+    no_memory = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="neko_supervisor",
+            hermes_profile="neko",
+            display_name="Neko Mission Lead",
+            role="alice_supervisor",
+            include_profile_memory=False,
+        ),
+        session_id="persona_chat_neko",
+    )
+    layers = {layer["kind"]: layer for layer in no_memory["prompt_layers"]}
+    assert "persona_identity" in layers
+    assert "Neko Mission Lead" in layers["persona_identity"]["summary"]
+    assert layers["profile_context"]["status"] == "skipped"
+    assert no_memory["prompt_flags"]["skip_memory"] is True
+    assert no_memory["prompt_flags"]["load_soul_identity"] is False
+
+    with_memory = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="neko_supervisor",
+            hermes_profile="neko",
+            display_name="Neko Mission Lead",
+            role="alice_supervisor",
+            include_profile_memory=True,
+        ),
+        session_id="persona_chat_neko",
+    )
+    memory_layer = {layer["kind"]: layer for layer in with_memory["prompt_layers"]}["profile_context"]
+    assert memory_layer["status"] == "loaded"
+    assert with_memory["prompt_flags"]["skip_memory"] is False
+
+
 def test_prompt_observability_names_live_task_bound_chat_without_session_row():
     context = mission_chat_prompt_observability(
         persona=SimpleNamespace(

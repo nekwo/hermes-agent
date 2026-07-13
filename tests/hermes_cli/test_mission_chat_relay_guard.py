@@ -103,6 +103,45 @@ def test_exhausted_shared_deadline_refused(tmp_path, monkeypatch, capsys):
     assert data["error_kind"] == "relay_budget_exhausted"
 
 
+def test_root_turn_seeds_speaker_so_self_send_is_refused(tmp_path, monkeypatch):
+    # End-to-end for the "Neko messages itself" incident. Two halves:
+    #
+    #  (1) The handler seeds THIS turn's relay chain with the speaking persona
+    #      (a root operator turn -> chain ("neko_supervisor",)), which it sets
+    #      into RELAY_CHAIN around the model turn.
+    #  (2) A tool worker running under that seeded ContextVar that calls
+    #      agent_chat_send back to the SAME persona inherits the chain, so the
+    #      nested mission-chat chokepoint refuses it relay_cycle.
+    #
+    # The existing tests inject an explicit --relay-chain envelope; this proves
+    # the seed->tool-worker inheritance path that has no envelope on the wire.
+    from agent_runtime import relay_policy
+    from tools import agent_chat_tool
+
+    # (1) Root turn decision seeds the speaker into the chain.
+    decision = relay_policy.evaluate_relay(chain=(), target_persona_id="neko_supervisor")
+    assert decision.allowed is True
+    assert decision.chain == ("neko_supervisor",)
+
+    # (2) A tool worker under the seeded chain sends back to itself -> refused.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    chain_token = relay_policy.RELAY_CHAIN.set(decision.chain)
+    deadline_token = relay_policy.RELAY_DEADLINE.set(None)  # healthy budget, not the failure under test
+    try:
+        raw = agent_chat_tool.agent_chat_send(
+            persona_id="neko_supervisor",
+            message="relay this back to myself",
+        )
+    finally:
+        relay_policy.RELAY_CHAIN.reset(chain_token)
+        relay_policy.RELAY_DEADLINE.reset(deadline_token)
+
+    result = json.loads(raw)
+    assert result["ok"] is False
+    assert result["error_kind"] == "relay_cycle"
+    assert result["relay_chain"] == ["neko_supervisor"]
+
+
 def test_direct_operator_send_carries_no_relay_refusal(tmp_path, monkeypatch, capsys):
     # No envelope: the guard must not reject; the send proceeds past it (and
     # fails later only if the runtime/persona store is absent in tmp_path —

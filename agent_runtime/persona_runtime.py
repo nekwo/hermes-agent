@@ -222,7 +222,15 @@ class GPTPersonaRuntime:
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
                 quiet_mode=True,
                 skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
-                skip_memory=False,
+                # Profile memory (MEMORY.md / USER.md) is identity-adjacent: it
+                # carries the bound profile's worldview into the turn. Honor the
+                # persona's include_profile_memory opt-in instead of loading it
+                # unconditionally, so a persona bound to a supervisor profile for
+                # *capabilities* does not also inherit that profile's memory-model
+                # (the Alice "goal->Neko->Dev" mental model that made Neko relay
+                # to itself). A persona keeps its own profile's memory when the
+                # binding is its own; it drops a borrowed profile's memory.
+                skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
                 session_id=session_id,
                 max_wall_seconds=max_wall_seconds,
@@ -329,7 +337,15 @@ class GPTPersonaRuntime:
                 # Repo doctrine an operator persona needs is carried by its skills
                 # or read on demand; developer repo docs are not chat-turn context.
                 skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
-                skip_memory=False,
+                # Profile memory (MEMORY.md / USER.md) is identity-adjacent: it
+                # carries the bound profile's worldview into the turn. Honor the
+                # persona's include_profile_memory opt-in instead of loading it
+                # unconditionally, so a persona bound to a supervisor profile for
+                # *capabilities* does not also inherit that profile's memory-model
+                # (the Alice "goal->Neko->Dev" mental model that made Neko relay
+                # to itself). A persona keeps its own profile's memory when the
+                # binding is its own; it drops a borrowed profile's memory.
+                skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
                 session_id=session_id,
                 max_wall_seconds=max_wall_seconds,
@@ -337,6 +353,7 @@ class GPTPersonaRuntime:
                 max_total_tokens=max_total_tokens,
                 user_message=message,
                 system_message=_mission_chat_surface_message(
+                    persona,
                     surface_prompt,
                     preloaded_skill_prompt=preloaded_skill_prompt,
                     workspace_agents_content=workspace_agents_content,
@@ -462,22 +479,62 @@ def _mission_chat_operative_rules() -> str:
     )
 
 
+def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
+    """First-person identity block for the canonical Mission Control chat lane.
+
+    The mission-chat lane deliberately runs isolated (``skip_context_files``),
+    so the bound profile's SOUL.md is NOT loaded as the stable-tier identity —
+    the model falls back to the generic ``DEFAULT_AGENT_IDENTITY`` and, without
+    this block, never learns *which* persona it is. That was the root cause of
+    the "Neko messages itself" incident: a persona bound to a supervisor
+    profile (Alice) inherited that profile's "Neko is a separate agent I brief"
+    memory model with no counter-vailing "you ARE Neko" hat, and relayed the
+    operator's question to its own persona id via ``agent_chat_send``.
+
+    This asserts the persona's own identity first, names the persona id so the
+    model can recognize a self-directed relay, and states plainly that the
+    persona is already the one speaking in this channel."""
+
+    display = str(getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")).strip()
+    persona_id = str(getattr(persona, "id", "") or "").strip()
+    role = role_from_persona(persona).value
+    voice = _persona_chat_voice(role, display)
+    id_clause = f" (Mission Control persona id: `{persona_id}`)" if persona_id else ""
+    never_self = (
+        f" Never use `agent_chat_send` to message `{persona_id}`: that persona is you — "
+        "answer the operator directly instead of relaying to yourself."
+        if persona_id
+        else ""
+    )
+    return (
+        f"You are {display}{id_clause}. {voice} You are already the persona speaking in this "
+        "channel — the operator is talking to you right now, so respond directly in your own "
+        f"voice.{never_self} Dev, Backend Dev, QA, and profile agents are the separate personas "
+        "you may brief with `agent_chat_send`; you are not any of them and you are not your own "
+        "relay target."
+    )
+
+
 def _mission_chat_surface_message(
+    persona: AgentPersona,
     surface_prompt: str | None,
     *,
     preloaded_skill_prompt: str | None = None,
     workspace_agents_content: str | None = None,
 ) -> str:
-    """Compose the operator-chat system message: the non-negotiable operative
-    rules first, then the operator's optional per-session surface prompt. The
-    rules always apply so the anti-fabrication invariant holds even when the
-    operator supplies their own surface prompt."""
+    """Compose the operator-chat system message: the persona's first-person
+    identity block first, then the non-negotiable operative rules, then the
+    operator's optional per-session surface prompt. The identity block gives the
+    isolated chat lane a "you ARE <persona>" hat (the profile SOUL is not loaded
+    here); the rules always apply so the anti-fabrication invariant holds even
+    when the operator supplies their own surface prompt."""
 
+    identity = _mission_chat_identity_prompt(persona)
     operator_surface = (surface_prompt or "").strip()
     skill_prompt = (preloaded_skill_prompt or "").strip()
     workspace_agents = (workspace_agents_content or "").strip()
     rules = _mission_chat_operative_rules()
-    parts = [rules]
+    parts = [identity, rules]
     if skill_prompt:
         parts.append(skill_prompt)
     if workspace_agents:
@@ -487,7 +544,7 @@ def _mission_chat_surface_message(
         )
     if operator_surface:
         parts.append(operator_surface)
-    return "\n\n".join(parts)
+    return "\n\n".join(part for part in parts if part)
 
 
 def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:
