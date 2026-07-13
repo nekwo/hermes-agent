@@ -866,6 +866,13 @@ def build_parser(parent_subparsers) -> None:
     status.add_argument("--json", action="store_true")
     status.set_defaults(func=_cmd_status)
 
+    providers = subs.add_parser(
+        "providers",
+        help="List credential pools with typed auth health (machine-readable via --json)",
+    )
+    providers.add_argument("--json", action="store_true")
+    providers.set_defaults(func=_cmd_providers)
+
     doctor = subs.add_parser("doctor", help="Show Harness runtime diagnostics and stale-state report")
     doctor.add_argument("--json", action="store_true")
     doctor.add_argument("--fix", action="store_true", help="Repair stale Harness runtime rows and reap orphan worktrees")
@@ -2443,6 +2450,107 @@ def _cmd_install_harness_skills(args) -> int:
             state = "updated" if result.changed else "ok"
             print(f"{result.skill}: {state}")
     return 0 if data["ok"] else 1
+
+
+def _credential_health(entry) -> dict:
+    """Typed health for one pooled credential, derived from the SAME upstream
+    classification the human `hermes auth list` uses — reused, never
+    re-implemented, so there is exactly one authority on what "401 vs 429 vs
+    dead" means. A healthy credential carries no annotation; an exhausted one
+    is split into auth_failed / rate_limited / exhausted with the retry window;
+    a dead credential (which the human list renders with NO marker — a latent
+    "looks healthy" bug) is surfaced explicitly.
+    """
+    from agent.credential_pool import STATUS_DEAD, STATUS_EXHAUSTED, _exhausted_until
+    from hermes_cli.auth_commands import (
+        _classify_exhausted_status,
+        _format_exhausted_status,
+    )
+
+    last_status = getattr(entry, "last_status", None)
+    if last_status not in {STATUS_EXHAUSTED, STATUS_DEAD}:
+        return {"state": "healthy"}
+
+    message = _format_exhausted_status(entry).strip()
+    if last_status == STATUS_DEAD:
+        return {
+            "state": "dead",
+            "code": getattr(entry, "last_error_code", None),
+            "reason": getattr(entry, "last_error_reason", None),
+            "retry_at": None,
+            "message": message or "credential dead (re-auth required)",
+        }
+
+    label, retryable = _classify_exhausted_status(entry)
+    state = {"auth failed": "auth_failed", "rate-limited": "rate_limited"}.get(
+        label, "exhausted"
+    )
+    return {
+        "state": state,
+        "code": getattr(entry, "last_error_code", None),
+        "reason": getattr(entry, "last_error_reason", None),
+        "retry_at": _exhausted_until(entry) if retryable else None,
+        "message": message,
+    }
+
+
+def build_provider_visibility() -> dict:
+    """Typed, machine-readable snapshot of every credential pool — the contract
+    the Launcher's provider/model surfaces consume instead of scraping the
+    human `hermes auth list` table. Mirrors that command's provider iteration
+    (skips empty pools, marks the selected credential) but emits structure, not
+    prose, so a present-but-failing credential is never indistinguishable from
+    an absent one.
+    """
+    from agent.credential_pool import list_custom_pool_providers, load_pool
+    from hermes_cli.auth import PROVIDER_REGISTRY
+    from hermes_cli.auth_commands import _display_source
+
+    provider_ids = sorted(
+        {*PROVIDER_REGISTRY.keys(), "openrouter", *list_custom_pool_providers()}
+    )
+    providers_out = []
+    for provider in provider_ids:
+        pool = load_pool(provider)
+        entries = pool.entries()
+        if not entries:
+            continue
+        current = pool.peek()
+        credentials = []
+        for idx, entry in enumerate(entries, start=1):
+            credentials.append(
+                {
+                    "index": idx,
+                    "label": entry.label,
+                    "auth_type": entry.auth_type,
+                    "source": _display_source(entry.source),
+                    "selected": current is not None and entry.id == current.id,
+                    "health": _credential_health(entry),
+                }
+            )
+        providers_out.append({"id": provider, "credentials": credentials})
+    return {"schema": "hermes.provider_visibility/v1", "providers": providers_out}
+
+
+def _cmd_providers(args) -> int:
+    payload = build_provider_visibility()
+    if getattr(args, "json", False):
+        print(emit_json(payload))
+        return 0
+    if not payload["providers"]:
+        print("No credential pools configured.")
+        return 0
+    for provider in payload["providers"]:
+        print(f"{provider['id']} ({len(provider['credentials'])} credentials):")
+        for credential in provider["credentials"]:
+            health = credential["health"]
+            tag = "" if health["state"] == "healthy" else f"  [{health['state']}]"
+            marker = " ←" if credential["selected"] else ""
+            print(
+                f"  #{credential['index']}  {credential['label']:<20} "
+                f"{credential['auth_type']:<7} {credential['source']}{tag}{marker}"
+            )
+    return 0
 
 
 def _cmd_doctor(args) -> int:
