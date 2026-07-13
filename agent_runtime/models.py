@@ -154,6 +154,74 @@ class Realm:
 
 
 @dataclass(slots=True)
+class BoardColumn:
+    """A value object living inside ``board.json`` (never its own file).
+
+    Default columns use FIXED ids + deterministic content so two machines
+    lazily creating the same default board converge on identical semantic
+    content instead of conflicting on first realm sync. Behavior binds to
+    ``kind`` (queued/active/review/done/custom), never to ``title``.
+    """
+
+    column_id: str
+    title: str
+    kind: str = "custom"
+    wip_limit: int | None = None  # soft — surfaces a warning, never blocks
+
+
+@dataclass(slots=True)
+class BoardCard:
+    """One planning card — one file each under ``boards/<board_id>/cards/``.
+
+    A card is a PLANNING artifact only: its column is planning state and never
+    mutates a goal. ``linked_goal_id`` is a read-only reflection pointer (the
+    card stores the id, never a cached goal state). ``created_by`` attribution
+    is first-class so operator- and agent-authored cards render distinctly.
+    """
+
+    card_id: str
+    board_id: str
+    column_id: str
+    title: str
+    order_key: str
+    description: str = ""
+    priority: str = "p2"  # "p0".."p3"
+    labels: list[str] = field(default_factory=list)
+    assignee: str | None = None  # persona_id or "operator"
+    checklist: list[dict[str, Any]] = field(default_factory=list)  # [{text, done}]
+    linked_goal_id: str | None = None
+    state: str = "active"  # "active" | "archived"
+    created_by: str = "operator"  # "operator" | persona_id
+    revision: int = 1
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    updated_by: str = "operator"
+    schema_version: int = 1
+
+
+@dataclass(slots=True)
+class Board:
+    """A workspace-scoped kanban board (def + ordered columns + card ledger).
+
+    The default board id is deterministic (``board_default_<workspace_id>``) so
+    two machines converge on it. ``archived_card_ids`` is the resurrection-guard
+    ledger (ids only, bounded) that blocks a pulled remote copy from re-creating
+    a locally archived card.
+    """
+
+    board_id: str
+    workspace_id: str
+    title: str
+    columns: list[BoardColumn] = field(default_factory=list)
+    archived_card_ids: list[str] = field(default_factory=list)
+    revision: int = 1
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    updated_by: str = "operator"
+    schema_version: int = 1
+
+
+@dataclass(slots=True)
 class GoalRuntimeInstance:
     id: str
     task_id: str

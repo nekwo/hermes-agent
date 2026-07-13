@@ -66,6 +66,57 @@ def realms_dir() -> Path:
     return store_root() / "realms"
 
 
+def boards_root() -> Path:
+    return store_root() / "boards"
+
+
+def board_dir(board_id: str) -> Path:
+    return boards_root() / _safe_path_token(board_id)
+
+
+def board_def_path(board_id: str) -> Path:
+    return board_dir(board_id) / "board.json"
+
+
+def board_cards_dir(board_id: str) -> Path:
+    return board_dir(board_id) / "cards"
+
+
+def board_card_path(board_id: str, card_id: str) -> Path:
+    return board_cards_dir(board_id) / f"{_safe_path_token(card_id)}.json"
+
+
+def board_archive_dir(board_id: str) -> Path:
+    # archive-never-delete; NOT published to realms
+    return board_dir(board_id) / "archive"
+
+
+def board_archived_card_path(board_id: str, card_id: str) -> Path:
+    return board_archive_dir(board_id) / f"{_safe_path_token(card_id)}.json"
+
+
+def board_conflicts_dir(board_id: str) -> Path:
+    # per-card sync conflict sidecars; NOT published to realms
+    return board_dir(board_id) / "conflicts"
+
+
+def board_conflict_path(board_id: str, card_id: str) -> Path:
+    return board_conflicts_dir(board_id) / f"{_safe_path_token(card_id)}.json"
+
+
+def board_idempotency_dir(board_id: str) -> Path:
+    return board_dir(board_id) / "idempotency"
+
+
+def board_idempotency_path(board_id: str, key: str) -> Path:
+    return board_idempotency_dir(board_id) / f"{_safe_path_token(key)}.json"
+
+
+def board_baseline_path(realm_id: str) -> Path:
+    # realm-sync baseline sidecar; NEVER synced, NEVER published
+    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "board_baseline.json"
+
+
 def repo_bundles_task_dir(task_id: str) -> Path:
     return repo_bundles_dir() / _safe_path_token(task_id)
 
