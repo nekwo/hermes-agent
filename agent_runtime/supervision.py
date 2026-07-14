@@ -18,11 +18,28 @@ def recursive_supervision_enabled(config) -> bool:
     return bool(getattr(supervision, "recursive_enabled", False))
 
 
+def _instance_parent_ids(instance: PersonaInstance) -> list[str]:
+    """Steering-parent ids (multi-parent fan-in aware): the authoritative
+    ``steered_by`` set, falling back to the legacy scalar ``spawned_by``."""
+    parents = list(getattr(instance, "steered_by", []) or [])
+    if not parents:
+        scalar = getattr(instance, "spawned_by", None)
+        if scalar:
+            parents = [scalar]
+    return parents
+
+
 def direct_children(parent_node_id: str, *, goal_id: str | None = None, store: PersonaInstanceStore | None = None) -> list[PersonaInstance]:
     store = store or PersonaInstanceStore()
     parent = safe_assignment_text(parent_node_id, limit=160)
     goal = safe_assignment_text(goal_id, limit=160) if goal_id is not None else None
-    children = [instance for instance in store.list_all() if safe_assignment_text(instance.spawned_by, limit=160) == parent]
+    # Fan-in: a child belongs to EVERY parent that steers it, not only its
+    # primary. Match against the whole steering set.
+    children = [
+        instance
+        for instance in store.list_all()
+        if parent in {safe_assignment_text(pid, limit=160) for pid in _instance_parent_ids(instance)}
+    ]
     if goal:
         children = [instance for instance in children if instance.goal_id == goal or instance.current_task_id == goal]
     return children

@@ -374,7 +374,14 @@ class PersonaInstance:
     state: WorkerSessionState
     mode: str = "configured"
     goal_id: str | None = None
+    # Legacy scalar parent. Retained as a denormalized back-compat MIRROR of the
+    # primary steer parent (``steered_by[0]``); the PersonaInstanceStore is the
+    # single writer that keeps it in sync. New code reads ``steered_by``.
     spawned_by: str | None = None
+    # Authoritative living-graph parent SET (Stage 77 multi-parent fan-in): the
+    # persona-instance ids that steer this child. Empty = standalone owner.
+    # Back-filled from ``spawned_by`` for legacy v1 records in ``__post_init__``.
+    steered_by: list[str] = field(default_factory=list)
     returned_to: str | None = None
     current_chat_goal: str | None = None
     skill_overrides: list[str] | None = None
@@ -407,6 +414,16 @@ class PersonaInstance:
     last_heartbeat_at: datetime | None = None
     updated_at: datetime | None = None
     schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        # Back-compat: a legacy record (or any writer) that only set the scalar
+        # ``spawned_by`` seeds the authoritative ``steered_by`` set, so every
+        # reader sees a populated parent set. Idempotent — a writer that already
+        # set ``steered_by`` (mirroring ``spawned_by`` = steered_by[0]) is a
+        # no-op here. Kept out of ``upgrade()`` on purpose: schema_version stays
+        # 1 (serde's shared upgrade hook hard-rejects any other version).
+        if not self.steered_by and self.spawned_by:
+            self.steered_by = [self.spawned_by]
 
 
 def apply_instance_model_overrides(

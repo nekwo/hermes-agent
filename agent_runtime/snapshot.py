@@ -2624,34 +2624,43 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
 
     edges: list[dict] = []
     targets_with_runtime_parent: set[str] = set()
+    fan_in_targets: set[str] = set()
     seen_spawn_edges: set[tuple[str, str]] = set()
     for instance in related_instances:
-        parent_ref = str(getattr(instance, "spawned_by", "") or "").strip()
-        parent = _topology_parent_instance(parent_ref, related_instances)
-        if parent is None:
-            continue
-        # Map lineage onto canonical persona nodes so collapsed multi-turn instances
-        # don't drop the spawn edge; dedupe and skip self-edges (a persona spawning
-        # another turn of itself is not a distinct steer).
-        target_node = _canonical_node_for(instance)
-        parent_node = _canonical_node_for(parent)
-        if not target_node or not parent_node or parent_node == target_node:
-            continue
-        if target_node not in nodes_by_id or parent_node not in nodes_by_id:
-            continue
-        key = (parent_node, target_node)
-        if key in seen_spawn_edges:
-            continue
-        seen_spawn_edges.add(key)
-        targets_with_runtime_parent.add(target_node)
-        edges.append(
-            {
-                "source_node_id": parent_node,
-                "target_node_id": target_node,
-                "kind": "steers",
-                "source": "runtime_spawned_by",
-            }
-        )
+        # Multi-parent fan-in (Stage 77): a child can be steered by ≥1 parents.
+        # Iterate the authoritative `steered_by` set (falling back to the legacy
+        # scalar `spawned_by` for un-migrated records) and emit one edge per
+        # distinct parent node.
+        for parent_ref in _instance_parent_refs(instance):
+            parent = _topology_parent_instance(parent_ref, related_instances)
+            if parent is None:
+                continue
+            # Map lineage onto canonical persona nodes so collapsed multi-turn
+            # instances don't drop the spawn edge; dedupe and skip self-edges (a
+            # persona spawning another turn of itself is not a distinct steer).
+            target_node = _canonical_node_for(instance)
+            parent_node = _canonical_node_for(parent)
+            if not target_node or not parent_node or parent_node == target_node:
+                continue
+            if target_node not in nodes_by_id or parent_node not in nodes_by_id:
+                continue
+            key = (parent_node, target_node)
+            if key in seen_spawn_edges:
+                continue
+            seen_spawn_edges.add(key)
+            if target_node in targets_with_runtime_parent:
+                # A second (or later) distinct runtime parent for this node =
+                # true fan-in.
+                fan_in_targets.add(target_node)
+            targets_with_runtime_parent.add(target_node)
+            edges.append(
+                {
+                    "source_node_id": parent_node,
+                    "target_node_id": target_node,
+                    "kind": "steers",
+                    "source": "runtime_spawned_by",
+                }
+            )
 
     if topology_edges:
         for edge in topology_edges:
@@ -2691,6 +2700,7 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
         "completeness": {
             "node_count": len(nodes_by_id),
             "edge_count": len(edges),
+            "fan_in_targets": len(fan_in_targets),
             "collapsed_multi_turn_instances": collapsed_instances,
             "stream_event_cap_per_node": 3,
             "id_cap_per_node": AGENT_TOPOLOGY_NODE_ID_CAP,
@@ -2725,6 +2735,7 @@ def _agent_topology_node(*, node_id: str, persona_id: str, instance, owned_stage
         "budget": _actor_budget_summary(runs, stream),
         "current_stage_id": getattr(stage, "id", None),
         "spawned_by": str(getattr(instance, "spawned_by", "") or "").strip() or None,
+        "steered_by": _instance_parent_refs(instance),
         "returned_to": str(getattr(instance, "returned_to", "") or "").strip() or None,
         "stream_event_count": len(stream.get("events") or []) if isinstance(stream, dict) else 0,
         "progress_peek": _progress_peek(stream),
@@ -2799,6 +2810,24 @@ def _instance_for_persona(persona_id: str, instances_by_persona: dict[str, list]
     if not candidates:
         return None
     return sorted(candidates, key=lambda item: str(getattr(item, "updated_at", "") or ""), reverse=True)[0]
+
+
+def _instance_parent_refs(instance) -> list[str]:
+    """The child's steering-parent refs, preferring the authoritative
+    ``steered_by`` set and falling back to the legacy scalar ``spawned_by`` for
+    un-migrated records. De-duplicated, order-preserving (first = primary)."""
+    raw = list(getattr(instance, "steered_by", []) or [])
+    if not raw:
+        scalar = getattr(instance, "spawned_by", None)
+        raw = [scalar] if scalar else []
+    refs: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        ref = str(value or "").strip()
+        if ref and ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+    return refs
 
 
 def _topology_parent_instance(parent_ref: str, instances: list):

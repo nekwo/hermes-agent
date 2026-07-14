@@ -306,11 +306,16 @@ class PersonaInstanceStore:
             self._write(instance)
             self._event("persona_instance.created", instance, {"mode": "task_bound", "placement_id": placement})
         changed = False
+        normalized_spawned_by = safe_optional_token(spawned_by)
         updates = {
             "mode": "task_bound",
             "current_task_id": normalized_goal,
             "goal_id": normalized_goal,
-            "spawned_by": safe_optional_token(spawned_by),
+            "spawned_by": normalized_spawned_by,
+            # Keep the authoritative parent set in sync with the spawn parent at
+            # creation, so the on-disk record is self-consistent (not only healed
+            # by the read-time __post_init__ backfill).
+            "steered_by": [normalized_spawned_by] if normalized_spawned_by else [],
         }
         for attr, value in updates.items():
             if getattr(instance, attr) != value:
@@ -330,53 +335,151 @@ class PersonaInstanceStore:
         goal_id: str | None = None,
         detach: bool = False,
     ) -> PersonaInstance:
-        """Re-route an existing instance's living-graph wiring (Stage 77).
+        """Back-compat single-parent re-route (Stage 77).
 
-        Persists the steering edge the operator draws in the agent graph: it
-        sets the child's ``spawned_by`` parent and the ``goal_id`` it inherits
-        from that container, so the wiring round-trips back into the graph and
-        drives the runtime's membership resolution. ``detach`` clears both,
-        returning the instance to a standalone owner. This is a re-route (a
+        Preserves the original ``--parent`` semantics EXACTLY: replace the whole
+        steering set with the one given parent, or clear it on ``detach``. New
+        multi-parent callers use :meth:`set_parents` / :meth:`add_parent` /
+        :meth:`remove_parent` / :meth:`detach_parents`. This is a re-route (a
         STEER verb, ungated per 76D.3), never a create/kill.
         """
-        instance = self.get(persona_instance_id)
         if detach:
-            updates: dict[str, Any] = {"spawned_by": None, "goal_id": None, "current_task_id": None}
-            if instance.mode == "task_bound":
-                updates["mode"] = "configured"
-        else:
-            normalized_parent = safe_optional_token(parent_instance_id)
-            if not normalized_parent:
-                raise ValueError("parent_instance_id is required unless detach is set")
-            if normalized_parent == persona_instance_id:
+            return self.detach_parents(persona_instance_id)
+        normalized_parent = safe_optional_token(parent_instance_id)
+        if not normalized_parent:
+            raise ValueError("parent_instance_id is required unless detach is set")
+        return self.set_parents(persona_instance_id, [normalized_parent], goal_id=goal_id)
+
+    def set_parents(
+        self,
+        persona_instance_id: str,
+        parent_instance_ids: list[str],
+        *,
+        goal_id: str | None = None,
+    ) -> PersonaInstance:
+        """Declaratively REPLACE a child's steering-parent set (fan-in).
+
+        The Launcher graph-save reconciler asserts the desired set per child
+        with this; it is idempotent (re-asserting the same set is a no-op) and
+        the single write path for the persisted living-graph wiring. An empty
+        set detaches the child (standalone owner).
+        """
+        normalized = _dedupe_tokens(parent_instance_ids)
+        if not normalized:
+            return self.detach_parents(persona_instance_id)
+        return self._apply_steer_edges(persona_instance_id, normalized, goal_id=goal_id)
+
+    def add_parent(
+        self,
+        persona_instance_id: str,
+        parent_instance_id: str,
+        *,
+        goal_id: str | None = None,
+    ) -> PersonaInstance:
+        """Idempotently ADD one parent to a child's steering set (set-union)."""
+        normalized_parent = safe_optional_token(parent_instance_id)
+        if not normalized_parent:
+            raise ValueError("parent_instance_id is required")
+        instance = self.get(persona_instance_id)
+        desired = list(instance.steered_by)
+        if normalized_parent not in desired:
+            desired.append(normalized_parent)
+        return self._apply_steer_edges(persona_instance_id, desired, goal_id=goal_id, _instance=instance)
+
+    def remove_parent(self, persona_instance_id: str, parent_instance_id: str) -> PersonaInstance:
+        """Remove ONE parent from a child's steering set (detach-one).
+
+        Removing the last parent detaches the child (standalone owner).
+        """
+        normalized_parent = safe_optional_token(parent_instance_id)
+        instance = self.get(persona_instance_id)
+        desired = [pid for pid in instance.steered_by if pid != normalized_parent]
+        if not desired:
+            return self.detach_parents(persona_instance_id)
+        return self._apply_steer_edges(persona_instance_id, desired, goal_id=instance.goal_id, _instance=instance)
+
+    def detach_parents(self, persona_instance_id: str) -> PersonaInstance:
+        """Clear a child's entire steering set (detach-all) → standalone owner."""
+        instance = self.get(persona_instance_id)
+        removed = list(instance.steered_by)
+        updates: dict[str, Any] = {
+            "steered_by": [],
+            "spawned_by": None,
+            "goal_id": None,
+            "current_task_id": None,
+        }
+        if instance.mode == "task_bound":
+            updates["mode"] = "configured"
+        self._commit_steer(instance, updates, added=[], removed=removed, detached=True)
+        return self.get(instance.id)
+
+    def _apply_steer_edges(
+        self,
+        persona_instance_id: str,
+        parent_instance_ids: list[str],
+        *,
+        goal_id: str | None,
+        _instance: PersonaInstance | None = None,
+    ) -> PersonaInstance:
+        instance = _instance or self.get(persona_instance_id)
+        normalized = _dedupe_tokens(parent_instance_ids)
+        if not normalized:
+            return self.detach_parents(persona_instance_id)
+        for parent in normalized:
+            if parent == persona_instance_id:
                 raise ValueError("a persona instance cannot steer itself")
             try:
-                self.get(normalized_parent)
+                self.get(parent)
             except Exception as exc:
-                raise ValueError(f"parent persona instance not found: {normalized_parent}") from exc
-            self._validate_no_steering_cycle(persona_instance_id, normalized_parent)
-            resolved_goal = safe_optional_token(goal_id) if goal_id is not None else instance.goal_id
-            updates = {
-                "spawned_by": normalized_parent,
-                "goal_id": resolved_goal,
-            }
-            if resolved_goal:
-                updates["mode"] = "task_bound"
-                updates["current_task_id"] = resolved_goal
+                raise ValueError(f"parent persona instance not found: {parent}") from exc
+            self._validate_no_steering_cycle(persona_instance_id, parent)
+        before = list(instance.steered_by)
+        resolved_goal = safe_optional_token(goal_id) if goal_id is not None else instance.goal_id
+        updates: dict[str, Any] = {
+            "steered_by": normalized,
+            # Denormalized legacy mirror: the primary (first) parent, for old
+            # readers still keyed on the scalar. Single writer, single source.
+            "spawned_by": normalized[0],
+            "goal_id": resolved_goal,
+        }
+        if resolved_goal:
+            updates["mode"] = "task_bound"
+            updates["current_task_id"] = resolved_goal
+        added = [pid for pid in normalized if pid not in before]
+        removed = [pid for pid in before if pid not in normalized]
+        self._commit_steer(instance, updates, added=added, removed=removed, detached=False)
+        return self.get(instance.id)
+
+    def _commit_steer(
+        self,
+        instance: PersonaInstance,
+        updates: dict[str, Any],
+        *,
+        added: list[str],
+        removed: list[str],
+        detached: bool,
+    ) -> None:
         changed = False
         for attr, value in updates.items():
             if getattr(instance, attr) != value:
                 setattr(instance, attr, value)
                 changed = True
-        if changed:
-            instance.updated_at = now()
-            self._write(instance)
-            self._event(
-                "persona_instance.steered",
-                instance,
-                {"goal_id": instance.goal_id, "spawned_by": instance.spawned_by, "detached": bool(detach)},
-            )
-        return self.get(instance.id)
+        if not changed:
+            return
+        instance.updated_at = now()
+        self._write(instance)
+        self._event(
+            "persona_instance.steered",
+            instance,
+            {
+                "goal_id": instance.goal_id,
+                "spawned_by": instance.spawned_by,
+                "steered_by": list(instance.steered_by),
+                "added": added,
+                "removed": removed,
+                "detached": bool(detached),
+            },
+        )
 
     def update_profile(
         self,
@@ -495,17 +598,25 @@ class PersonaInstanceStore:
         return self.get(instance.id)
 
     def _validate_no_steering_cycle(self, persona_instance_id: str, parent_instance_id: str) -> None:
-        seen = {persona_instance_id}
-        cursor = parent_instance_id
-        while cursor:
-            if cursor in seen:
+        # Multi-parent DAG walk: adding parent → child must not let the child
+        # reach itself through the steering graph. We only reject when the child
+        # is reachable from the new parent (a real cycle); a diamond (two parents
+        # sharing an ancestor) is fine, so we track a visited set separately from
+        # the cycle test rather than raising on any re-visit.
+        visited: set[str] = set()
+        frontier = _dedupe_tokens([parent_instance_id])
+        while frontier:
+            cursor = frontier.pop()
+            if cursor == persona_instance_id:
                 raise ValueError("steering edge would create a cycle")
-            seen.add(cursor)
+            if cursor in visited:
+                continue
+            visited.add(cursor)
             try:
                 parent = self.get(cursor)
             except Exception:
-                return
-            cursor = safe_optional_token(parent.spawned_by)
+                continue
+            frontier.extend(_dedupe_tokens(list(parent.steered_by)))
 
     def get(self, persona_instance_id: str) -> PersonaInstance:
         raw = json.loads(paths.persona_instance_path(persona_instance_id).read_text(encoding="utf-8"))
@@ -848,6 +959,7 @@ class PersonaInstanceStore:
                 instance.current_task_id = None
                 instance.goal_id = None
                 instance.spawned_by = None
+                instance.steered_by = []
                 instance.active_worker_session_id = None
                 instance.active_run_id = None
                 instance.session_id = None
@@ -1377,6 +1489,7 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "mode": instance.mode,
         "goal_id": instance.goal_id,
         "spawned_by": instance.spawned_by,
+        "steered_by": list(instance.steered_by),
         "returned_to": instance.returned_to,
         "current_chat_goal": instance.current_chat_goal,
         "current_work_assignment_id": instance.current_assignment_id,
@@ -1573,6 +1686,22 @@ def safe_assignment_token(value: Any) -> str:
 def safe_optional_token(value: Any) -> str | None:
     token = safe_assignment_token(value)
     return token or None
+
+
+def _dedupe_tokens(values: list[str] | None) -> list[str]:
+    """Normalize + de-duplicate a parent-id list, preserving first-seen order.
+
+    The first surviving token is treated as the PRIMARY parent everywhere
+    (the ``spawned_by`` mirror, the projection's home owner), so order matters.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values or []:
+        token = safe_optional_token(value)
+        if token and token not in seen:
+            seen.add(token)
+            result.append(token)
+    return result
 
 
 def safe_assignment_state(value: str) -> str:

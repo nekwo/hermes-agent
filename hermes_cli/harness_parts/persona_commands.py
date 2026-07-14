@@ -1356,17 +1356,35 @@ def _cmd_persona_instance_steer(args) -> int:
         data = {"ok": False, "error": "persona_instance_id is required"}
         print(emit_json(data) if args.json else data["error"])
         return 2
+    # Exactly one steering operation. --parent stays a back-compat alias for
+    # "replace the set with this single parent"; the multi-parent verbs are
+    # additive (--add-parent / --remove-parent) or declarative (--set-parents).
     detach = bool(getattr(args, "detach", False))
-    parent_instance_id = None if detach else safe_optional_token(getattr(args, "parent_instance_id", None))
+    parent_instance_id = safe_optional_token(getattr(args, "parent_instance_id", None))
+    add_parent = safe_optional_token(getattr(args, "add_parent", None))
+    remove_parent = safe_optional_token(getattr(args, "remove_parent", None))
+    set_parents_raw = getattr(args, "set_parents", None)
     goal_id = None if detach else safe_optional_token(getattr(args, "goal_id", None))
-    if not detach and not parent_instance_id:
-        data = {"ok": False, "error": "--parent is required unless --detach is set"}
+    selected = [
+        name
+        for name, present in (
+            ("detach", detach),
+            ("parent", bool(parent_instance_id)),
+            ("set_parents", set_parents_raw is not None),
+            ("add_parent", bool(add_parent)),
+            ("remove_parent", bool(remove_parent)),
+        )
+        if present
+    ]
+    if not selected:
+        data = {"ok": False, "error": "one of --parent / --add-parent / --remove-parent / --set-parents / --detach is required"}
         print(emit_json(data) if args.json else data["error"])
         return 2
-    if not detach and parent_instance_id == persona_instance_id:
-        data = {"ok": False, "error": "a persona instance cannot steer itself"}
+    if len(selected) > 1:
+        data = {"ok": False, "error": f"steer operations are mutually exclusive: got {', '.join(selected)}"}
         print(emit_json(data) if args.json else data["error"])
         return 2
+    op = selected[0]
     store = PersonaInstanceStore()
     try:
         target = store.get(persona_instance_id)
@@ -1374,6 +1392,7 @@ def _cmd_persona_instance_steer(args) -> int:
         data = {"ok": False, "error": f"persona instance not found: {persona_instance_id}"}
         print(emit_json(data) if args.json else data["error"])
         return 2
+    before = list(target.steered_by)
     # 76D.3: re-routing a steering edge is a STEER verb (ungated); operator
     # actors bypass entirely. Coordinators still pass through the authorizer so
     # the contract stays uniform with create/kill paths.
@@ -1387,7 +1406,16 @@ def _cmd_persona_instance_steer(args) -> int:
             print(emit_json(data) if args.json else data["status"])
             return 2
     try:
-        updated = store.steer(persona_instance_id, parent_instance_id=parent_instance_id, goal_id=goal_id, detach=detach)
+        if op == "detach":
+            updated = store.detach_parents(persona_instance_id)
+        elif op == "add_parent":
+            updated = store.add_parent(persona_instance_id, add_parent, goal_id=goal_id)
+        elif op == "remove_parent":
+            updated = store.remove_parent(persona_instance_id, remove_parent)
+        elif op == "set_parents":
+            updated = store.set_parents(persona_instance_id, list(set_parents_raw or []), goal_id=goal_id)
+        else:  # "parent" — back-compat replace-with-one
+            updated = store.set_parents(persona_instance_id, [parent_instance_id], goal_id=goal_id)
     except ValueError as exc:
         data = {"ok": False, "error": str(exc)}
         print(emit_json(data) if args.json else data["error"])
@@ -1396,8 +1424,19 @@ def _cmd_persona_instance_steer(args) -> int:
         persona = _persona_by_id(cfg, updated.persona_id)
     except Exception:
         persona = None
-    data = {"ok": True, "detached": detach, "instance": persona_instance_summary(updated, persona)}
-    print(emit_json(data) if args.json else f"steered {persona_instance_id}: parent={updated.spawned_by} goal={updated.goal_id}")
+    after = list(updated.steered_by)
+    added = [pid for pid in after if pid not in before]
+    removed = [pid for pid in before if pid not in after]
+    data = {
+        "ok": True,
+        "detached": not after,
+        "steered_by": after,
+        "added": added,
+        "removed": removed,
+        "instance": persona_instance_summary(updated, persona),
+    }
+    parents_label = ",".join(after) if after else "(none)"
+    print(emit_json(data) if args.json else f"steered {persona_instance_id}: parents={parents_label} goal={updated.goal_id}")
     return 0
 
 
