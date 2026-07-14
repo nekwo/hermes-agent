@@ -145,6 +145,60 @@ def test_cycle_guard_rejects_but_allows_diamond():
         store.set_parents(c.id, [c.id])
 
 
+# --- store: id-scheme drift tolerance at the steer boundary ---------------
+# Regression: the Launcher graph save shipped a node's raw ownerSlot to
+# `persona instance steer`. The roster preserves raw ids, so a drifted
+# actor-token id (`persona_personainst_x`) reached the store, `get()` did a
+# literal filename read, and the steer failed with "parent persona instance not
+# found" — the edit never persisted and closing the graph editor reverted it.
+
+
+def test_get_resolves_actor_token_drift_to_the_real_row():
+    from agent_runtime.persona_assignments import canonical_persona_instance_id
+
+    store = PersonaInstanceStore()
+    inst = _make(store, "backend_dev")
+    drift = f"persona_{inst.id}"  # persona_personainst_..._backend_dev
+    # Precondition: this IS the actor-token drift the identity authority strips.
+    assert canonical_persona_instance_id(drift) == inst.id
+    assert drift != inst.id
+
+    # The literal file is missing, so get() resolves the drift to the real row.
+    assert store.get(drift).id == inst.id
+
+
+def test_get_still_raises_for_a_genuinely_missing_row():
+    store = PersonaInstanceStore()
+    with pytest.raises(FileNotFoundError):
+        store.get("personainst_does_not_exist")
+
+
+def test_set_parents_canonicalizes_drifted_parent_ids():
+    store = PersonaInstanceStore()
+    child = _make(store, "qa")
+    p1 = _make(store, "dev")
+    p2 = _make(store, "backend_dev")
+
+    # The operator wired the graph from nodes carrying the drifted ids.
+    result = store.set_parents(child.id, [f"persona_{p1.id}", f"persona_{p2.id}"])
+
+    # The steer lands, and the PERSISTED set is canonical — never the drift —
+    # so the next snapshot re-emits ids the Launcher graph can resolve.
+    assert result.steered_by == [p1.id, p2.id]
+    assert result.spawned_by == p1.id
+    assert store.get(child.id).steered_by == [p1.id, p2.id]
+
+
+def test_set_parents_dedupes_a_drift_and_canonical_twin_of_one_parent():
+    store = PersonaInstanceStore()
+    child = _make(store, "qa")
+    p1 = _make(store, "dev")
+
+    # The same parent named two ways collapses to a single canonical edge.
+    result = store.set_parents(child.id, [p1.id, f"persona_{p1.id}"])
+    assert result.steered_by == [p1.id]
+
+
 # --- model: legacy backfill ----------------------------------------------
 
 

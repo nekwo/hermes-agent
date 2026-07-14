@@ -422,17 +422,34 @@ class PersonaInstanceStore:
         _instance: PersonaInstance | None = None,
     ) -> PersonaInstance:
         instance = _instance or self.get(persona_instance_id)
-        normalized = _dedupe_tokens(parent_instance_ids)
-        if not normalized:
-            return self.detach_parents(persona_instance_id)
-        for parent in normalized:
-            if parent == persona_instance_id:
-                raise ValueError("a persona instance cannot steer itself")
+        # Resolve every parent to the id of the row actually on disk BEFORE
+        # persisting, so id-scheme drift (e.g. persona_personainst_x) can never
+        # enter the stored steering set. Storing a drifted parent id would make
+        # the next snapshot re-emit the drift, and the Launcher graph edge (which
+        # matches parents by canonical instance id) would silently fail to
+        # resolve. Dedupe on the CANONICAL id so a drifted and a canonical
+        # spelling of one parent collapse to a single edge. The child id is
+        # already canonical here — `instance.id` is the resolved row.
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for parent in parent_instance_ids or []:
+            token = safe_optional_token(parent)
+            if not token:
+                continue
             try:
-                self.get(parent)
+                parent_instance = self.get(token)
             except Exception as exc:
-                raise ValueError(f"parent persona instance not found: {parent}") from exc
-            self._validate_no_steering_cycle(persona_instance_id, parent)
+                raise ValueError(f"parent persona instance not found: {token}") from exc
+            canonical_parent = parent_instance.id
+            if canonical_parent == instance.id:
+                raise ValueError("a persona instance cannot steer itself")
+            if canonical_parent in seen:
+                continue
+            seen.add(canonical_parent)
+            self._validate_no_steering_cycle(instance.id, canonical_parent)
+            normalized.append(canonical_parent)
+        if not normalized:
+            return self.detach_parents(instance.id)
         before = list(instance.steered_by)
         resolved_goal = safe_optional_token(goal_id) if goal_id is not None else instance.goal_id
         updates: dict[str, Any] = {
@@ -619,8 +636,56 @@ class PersonaInstanceStore:
             frontier.extend(_dedupe_tokens(list(parent.steered_by)))
 
     def get(self, persona_instance_id: str) -> PersonaInstance:
-        raw = json.loads(paths.persona_instance_path(persona_instance_id).read_text(encoding="utf-8"))
+        path = paths.persona_instance_path(persona_instance_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # The literal file wins (canonical ids are read verbatim — zero
+            # behaviour change). Only when it is missing do we resolve the same
+            # id-scheme drift the identity module already defines, so a caller
+            # that hands us a legacy/actor-token id (the Launcher graph save, a
+            # replayed spec, a CLI verb) reaches the real row instead of a hard
+            # "not found". Re-raise the original error for a genuinely absent id.
+            resolved = self._resolve_stored_instance_id(persona_instance_id)
+            if resolved is None:
+                raise
+            raw = json.loads(paths.persona_instance_path(resolved).read_text(encoding="utf-8"))
         return from_jsonable(PersonaInstance, raw)
+
+    def _resolve_stored_instance_id(self, raw_id: str) -> str | None:
+        """Resolve a caller-supplied id to the id of the row actually on disk.
+
+        Tolerates exactly the drift :mod:`persona_instance_identity` already
+        knows how to collapse: structural actor-token drift
+        (``persona_personainst_x`` -> ``personainst_x`` /
+        ``persona:<persona>`` -> canonical channel, via
+        :func:`canonical_persona_instance_id`) and the durable
+        legacy->canonical alias registry (the operator-hash schemes the store
+        reconciler records). Returns a stored id whose file exists, or ``None``
+        so the caller raises on a genuinely missing row. Read-only: it never
+        mints or rewrites a row — the reconciler remains the durable cleanup.
+        """
+        candidates: list[str] = []
+
+        def _add(candidate: str | None) -> None:
+            if candidate and candidate != raw_id and candidate not in candidates:
+                candidates.append(candidate)
+
+        structural = canonical_persona_instance_id(raw_id)
+        _add(structural)
+        try:
+            from .persona_instance_identity import load_persona_instance_aliases
+
+            aliases = load_persona_instance_aliases()
+        except Exception:
+            aliases = {}
+        _add(aliases.get(raw_id))
+        if structural:
+            _add(aliases.get(structural))
+        for candidate in candidates:
+            if paths.persona_instance_path(candidate).exists():
+                return candidate
+        return None
 
     def list_for_task(self, task_id: str, *, goal_id: str | None = None) -> list[PersonaInstance]:
         normalized = safe_optional_token(task_id)
