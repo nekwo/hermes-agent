@@ -139,6 +139,7 @@ def resolve_situational_hud(
     task: Any = None,
     goal_task: Any = None,
     proof_store: Any = None,
+    board: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the typed situational snapshot for one lane.
 
@@ -177,6 +178,12 @@ def resolve_situational_hud(
     roster_block = _roster_block(roster, self_id=self_id)
     if roster_block:
         hud["roster"] = roster_block
+
+    # Advisory Mission Board digest (nudge, not instruction): a one-line
+    # awareness cue. Absent when there is no board or it has no open cards, so a
+    # workspace with no board contributes NO line (nudged-never-forced).
+    if isinstance(board, dict) and board:
+        hud["board"] = board
 
     if task is not None:
         # Deferred import: context_builder pulls a large dependency graph and is
@@ -241,6 +248,20 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
     else:
         lines.append("- Mission: no mission bound to this lane")
 
+    board = hud.get("board") if isinstance(hud.get("board"), dict) else {}
+    if board:
+        segments = [
+            (board.get("queued"), "queued"),
+            (board.get("active"), "in progress"),
+            (board.get("review"), "in review"),
+        ]
+        parts = [f"{count} {label}" for count, label in segments if isinstance(count, int) and count > 0]
+        if parts:
+            lines.append(
+                f"- Board: {' · '.join(parts)} (a workspace board exists; you MAY add a "
+                "card for follow-up work worth tracking — advisory, never required)"
+            )
+
     lane = hud.get("lane") if isinstance(hud.get("lane"), dict) else {}
     if lane:
         who = lane.get("display_name") or lane.get("persona_instance_id") or "this agent"
@@ -274,6 +295,34 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
             lines.append(f"- Mission HUD: {' · '.join(hud_bits)}")
 
     return "\n".join(lines)
+
+
+def _board_digest_for_workspace(workspace_id: str | None) -> dict[str, Any] | None:
+    """Count open (non-done) cards on the active workspace's default board, by
+    typed column kind. Returns ``None`` when there is no board or no open cards,
+    so a workspace with no board contributes no HUD line. One store read per chat
+    turn (chat-side wrapper only — never on the snapshot's per-lane hot path)."""
+
+    if not workspace_id:
+        return None
+    try:
+        from . import board_models
+        from .board_store import BoardStore
+
+        store = BoardStore()
+        board_id = board_models.default_board_id(workspace_id)
+        if not store.exists(board_id):
+            return None
+        board = store.get(board_id)
+        kind_by_column = {column.column_id: column.kind for column in board.columns}
+        counts: dict[str, int] = {}
+        for card in store.list_cards(board_id):
+            kind = kind_by_column.get(card.column_id, "custom")
+            counts[kind] = counts.get(kind, 0) + 1
+        digest = {key: counts.get(key, 0) for key in ("queued", "active", "review")}
+        return digest if any(digest.values()) else None
+    except Exception:
+        return None
 
 
 def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = None) -> str:
@@ -336,6 +385,7 @@ def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = No
             task=_safe_get(getattr(instance, "current_task_id", None)),
             goal_task=_safe_get(getattr(instance, "goal_id", None)),
             proof_store=proof_store,
+            board=_board_digest_for_workspace(workspace_store.active_id()),
         )
         return render_situational_hud_block(hud)
     except Exception:
