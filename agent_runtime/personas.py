@@ -66,10 +66,13 @@ def coerce_agent_role(role: AgentRole | str | None) -> AgentRole:
     return AgentRole(text)
 
 
+# NOTE: the ``board`` toolset (advisory Mission Board card tools) is allowed for
+# every mission role — the board is nudged-never-forced, so any agent may track
+# follow-up work as a card. It never mutates goal state.
 ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
-    AgentRole.PM: frozenset({"file", "session_search", "todo", "skills", "agent_chat"}),
-    AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills", "agent_chat"}),
-    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills", "agent_chat"}),
+    AgentRole.PM: frozenset({"file", "session_search", "todo", "skills", "agent_chat", "board"}),
+    AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills", "agent_chat", "board"}),
+    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills", "agent_chat", "board"}),
     AgentRole.ALICE_SUPERVISOR: frozenset(
         {
             "file",
@@ -84,6 +87,7 @@ ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
             "skills",
             "mission_goal",
             "agent_chat",
+            "board",
         }
     ),
 }
@@ -99,6 +103,7 @@ PROFILE_CHAT_FALLBACK_TOOLSETS = (
     "skills",
     "mission_goal",
     "agent_chat",
+    "board",
 )
 
 

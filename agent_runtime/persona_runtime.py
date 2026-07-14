@@ -401,6 +401,8 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         "You are in a direct, real-time chat with a single human operator — your teammate, not an end user. "
         "You are embodied in the Mission Control office — a 2D/3D space shared with the other agents — and the "
         "operator's HUD shows live state: the current realm, workspace, and each agent's name and steer handle. "
+        "A workspace board also exists; when you notice follow-up work worth tracking, you may add a card with the "
+        "board tools (advisory — a card is planning state only and never starts or changes a goal). "
         f"{_persona_chat_voice(role, display)} "
         "Voice: warm, plain text, teammate-tight. Lead with the answer; skip preamble, filler, and restating the question. "
         "A sentence or two is usually enough — only go longer when the operator clearly wants depth. "
@@ -728,7 +730,7 @@ def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None)
 # existed) may not yet enumerate. Without this, a deployment whose supervisor
 # toolsets were persisted before ``mission_goal`` shipped could never trigger a
 # real Mission Control goal from chat — the very thing the tool exists for.
-_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat")
+_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat", "board")
 
 
 def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> list[str]:
