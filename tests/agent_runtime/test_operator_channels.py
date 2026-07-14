@@ -1,6 +1,10 @@
 from agent_runtime.models import PersonaInstance
 from agent_runtime.models import Task
-from agent_runtime.operator_channels import operator_channel_summary
+from agent_runtime.operator_channels import (
+    _conversation_history_message,
+    operator_channel_summary,
+)
+from agent_runtime.persona_chat_history import PERSONA_PRE_TRACE_ACK_KIND
 from agent_runtime.states import TaskState, WorkerSessionState
 from hermes_time import now
 
@@ -1122,3 +1126,42 @@ def test_operator_channel_reports_incomplete_when_sources_exist_but_nothing_proj
 
     assert orphan["conversation_status"] == "incomplete"
     assert orphan["conversation"]["incomplete_reason"]
+
+
+def test_conversation_history_message_carries_pre_trace_ack_kind():
+    # A history row marked with the pre_trace_ack kind keeps that typed kind in
+    # the projected conversation message (role stays agent) so the Launcher
+    # collapses/drops it structurally.
+    message = _conversation_history_message(
+        {
+            "id": "m_ack",
+            "role": "agent",
+            "text": "I'll load the relevant guidance first, then report back with the useful part.",
+            "kind": PERSONA_PRE_TRACE_ACK_KIND,
+            "timestamp": "2026-07-13T20:51:00Z",
+        },
+        channel_id="chan_neko",
+        index=1,
+        persona_id="neko_supervisor",
+        persona_instance_id="personainst_neko_supervisor",
+    )
+    assert message is not None
+    assert message["role"] == "agent"
+    assert message["kind"] == PERSONA_PRE_TRACE_ACK_KIND
+
+
+def test_conversation_history_message_normal_reply_kind_is_reply():
+    message = _conversation_history_message(
+        {
+            "id": "m_reply",
+            "role": "agent",
+            "text": "Currently one skill is loaded: hermes-agent.",
+            "timestamp": "2026-07-13T20:51:02Z",
+        },
+        channel_id="chan_neko",
+        index=2,
+        persona_id="neko_supervisor",
+        persona_instance_id="personainst_neko_supervisor",
+    )
+    assert message is not None
+    assert message["kind"] == "reply"

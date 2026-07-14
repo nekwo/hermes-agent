@@ -142,6 +142,41 @@ def test_tool_system_and_empty_rows_are_dropped():
     assert [r["role"] for r in rows] == ["agent"]
 
 
+def test_pre_trace_ack_marker_projects_typed_kind():
+    # The canned "I'll … then report back with …" ack is persisted with a
+    # finish_reason marker so the projection stamps a typed kind. The Launcher
+    # drops/collapses the ack by kind instead of matching its (tool-specific,
+    # drifting) prose.
+    ack = "I'll load the relevant guidance first, then report back with the useful part."
+    db = FakeSessionDB(
+        [
+            {"role": "user", "content": "what skills are loaded"},
+            {"role": "assistant", "content": ack, "finish_reason": "pre_trace_ack"},
+            {"role": "assistant", "content": "Currently one skill is loaded: hermes-agent."},
+        ]
+    )
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+    ack_rows = [r for r in rows if r.get("kind") == "pre_trace_ack"]
+    assert len(ack_rows) == 1
+    assert ack_rows[0]["role"] == "agent"
+    assert ack_rows[0]["text"] == ack
+    # The real reply carries no pre_trace_ack kind.
+    assert not any(
+        r.get("kind") == "pre_trace_ack" and "Currently one skill" in r["text"]
+        for r in rows
+    )
+
+
+def test_pre_trace_ack_without_marker_has_no_typed_kind():
+    # Legacy rows persisted before the marker carry no kind; the projection never
+    # guesses a kind from prose (the Launcher text fallback handles those).
+    ack = "I'll check that now and report back with what I find."
+    db = FakeSessionDB([{"role": "assistant", "content": ack}])
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+    assert len(rows) == 1
+    assert "kind" not in rows[0]
+
+
 def test_unparseable_raw_dict_is_not_shown():
     # A serialized dict we can't parse must not dump as raw JSON to the operator.
     db = FakeSessionDB([{"role": "assistant", "content": '{"type": broken json'}])

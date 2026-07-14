@@ -11,6 +11,14 @@ from .persona_assignments import persona_instance_id_for, safe_assignment_text, 
 from .redaction_mode import redaction_observe_enabled
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
+# Structural marker for the canned "I'll … then report back with …" pre-trace
+# acknowledgment the persona-chat turn writes ahead of the real LLM reply. The
+# ack text is tool-specific (several variants) and changes over time, so we stamp
+# a machine flag at persist time (``finish_reason``) and re-emit it as a typed
+# message ``kind`` through every projection. Consumers (operator conversation,
+# the Launcher) key on the kind instead of matching the prose.
+PERSONA_PRE_TRACE_ACK_FINISH_REASON = "pre_trace_ack"
+PERSONA_PRE_TRACE_ACK_KIND = "pre_trace_ack"
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
 DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
 MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
@@ -771,6 +779,14 @@ def _safe_recent_messages(
             ),
             "redaction_status": status,
         }
+        # Typed marker for the canned pre-trace ack (finish_reason stamped at
+        # persist time). Downstream projections re-emit this kind so the Launcher
+        # collapses/drops the ack structurally instead of matching its prose.
+        if role == "agent" and (
+            safe_assignment_token(raw.get("finish_reason"))
+            == PERSONA_PRE_TRACE_ACK_FINISH_REASON
+        ):
+            row["kind"] = PERSONA_PRE_TRACE_ACK_KIND
         if client_message_id:
             row["client_message_id"] = client_message_id
         if role == "agent" and client_message_id:

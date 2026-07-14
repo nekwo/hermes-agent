@@ -6,7 +6,7 @@ from typing import Any, Iterable
 
 from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
-from .persona_chat_history import _canonical_persona_id
+from .persona_chat_history import _canonical_persona_id, PERSONA_PRE_TRACE_ACK_KIND
 from .simplified_contract import public_decision_type_value
 
 OPERATOR_CHANNELS_SCHEMA_VERSION = 1
@@ -750,6 +750,19 @@ def _conversation_history_message(
         if turn_id:
             message["turn_id"] = turn_id
         return message
+    # A canned pre-trace ack keeps its typed kind end-to-end so the Launcher
+    # collapses/drops it structurally (never as a settled reply bubble ahead of
+    # the real tool run), instead of matching the tool-specific ack prose.
+    is_pre_trace_ack = (
+        role == "agent"
+        and safe_assignment_token(row.get("kind")) == PERSONA_PRE_TRACE_ACK_KIND
+    )
+    if role == "agent":
+        default_kind = PERSONA_PRE_TRACE_ACK_KIND if is_pre_trace_ack else "reply"
+    elif role == "operator":
+        default_kind = "operator_message"
+    else:
+        default_kind = "system_message"
     message = {
         "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
         "seq": 0,
@@ -757,7 +770,7 @@ def _conversation_history_message(
         "actor_persona_id": "operator" if role == "operator" else persona_id,
         "actor_instance_id": None if role == "operator" else persona_instance_id,
         "role": role,
-        "kind": "reply" if role == "agent" else "operator_message" if role == "operator" else "system_message",
+        "kind": default_kind,
         "status": "delivered",
         "display_title": "",
         "display_text": text,

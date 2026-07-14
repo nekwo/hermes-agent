@@ -2706,6 +2706,7 @@ def _append_persona_assistant_text(
     session_id: str,
     text: str,
     client_message_id: str | None = None,
+    finish_reason: str | None = None,
 ) -> None:
     if session_db is None or not session_id:
         return
@@ -2725,6 +2726,7 @@ def _append_persona_assistant_text(
             role="assistant",
             content=safe,
             platform_message_id=safe_client_message_id or None,
+            finish_reason=finish_reason,
         )
     except Exception:
         return
@@ -2736,12 +2738,21 @@ def _append_persona_pre_trace_ack(
     session_id: str,
     trace_payload: dict,
 ) -> None:
+    # Persist the canned ack with a structural marker (finish_reason) so the
+    # history/conversation projections re-emit it as a typed ``pre_trace_ack``
+    # kind. The Launcher then collapses/drops it by kind instead of matching the
+    # tool-specific prose (which drifts — see _persona_pre_trace_ack_text).
+    from agent_runtime.persona_chat_history import (
+        PERSONA_PRE_TRACE_ACK_FINISH_REASON,
+    )
+
     text = _persona_pre_trace_ack_text(trace_payload)
     _append_persona_assistant_text(
         session_db=session_db,
         session_id=session_id,
         text=text,
         client_message_id=None,
+        finish_reason=PERSONA_PRE_TRACE_ACK_FINISH_REASON,
     )
 
 
