@@ -4,7 +4,6 @@ import time
 
 from .config import ensure_persisted_personas, load_agent_runtime_config
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
-from .daemon import daemon_status_schema
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .dirty_state import build_dirty_state
 from .events import CachedEventLog, EventLog
@@ -52,12 +51,13 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     workers = worker_session_store.list_all()
     incidents = incident_store.list_all()
     cfg = load_agent_runtime_config()
-    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
+    # The background Mission Daemon was retired; execution is always operator/
+    # goal-runner driven ("manual").
+    execution_mode = "manual"
     agents = agent_store.list_all() or ensure_persisted_personas(cfg)
     proofs = []
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
-    daemon_status = daemon_status_schema()
     from .burn_in import certification_summary
 
     cert = certification_summary()
@@ -99,7 +99,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "runtime_health": provider_health_for_personas(agents),
         "runtime_config": effective_config_summary(cfg),
         "production_envelope": production_envelope_status(cfg),
-        "daemon": daemon_status,
         "swarm": {
             "enabled": bool(getattr(getattr(cfg, "swarm", None), "enabled", False)),
             "certification": {
@@ -115,7 +114,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             },
         },
         "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
+        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "next_actions": [
             _next_action(
                 t,

@@ -10,7 +10,6 @@ from typing import Any
 from hermes_time import now
 
 from . import paths
-from .daemon import daemon_status_schema
 from .events import EventLog
 from .models import Event
 from .serde import to_jsonable
@@ -49,33 +48,19 @@ def hydrate_frame(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def heartbeat_frame(*, offset: int) -> dict[str, Any]:
-    """Liveness frame; additionally carries the daemon status block.
+    """Liveness frame that advances the stream watermark without a core delta.
 
-    The daemon's per-loop status writes go to daemon_status.json, not the
-    EventLog, so an idle daemon emits no deltas — without this block a
-    stream consumer's runtime HUD freezes exactly while the daemon idles.
-    The block is read-model telemetry: consumers merge it fire-and-forget
-    and a dropped frame only ages the HUD, never runtime state.
-
-    Stage 12 rule: this block is the ONE sanctioned out-of-band channel
-    (eventing per-loop status writes would flood the log), and its shape is
-    pinned by ``daemon_status_schema`` + the stream contract test. New
-    event-less state gets EVENTS, not a second heartbeat rider.
+    Pure liveness telemetry: consumers merge it fire-and-forget and a dropped
+    frame only ages the HUD, never runtime state. (This frame previously also
+    carried the Mission Daemon status block; the background daemon was retired.)
     """
 
-    frame = {
+    return {
         "type": "heartbeat",
         "schema_version": STREAM_SCHEMA_VERSION,
         "generated_at": now(),
         "watermark": {"event_offset": int(offset or 0), "captured_at": now()},
     }
-    try:
-        frame["daemon"] = to_jsonable(daemon_status_schema())
-    except Exception:
-        # Heartbeats are pure liveness; a corrupt status file must not
-        # break the stream. Consumers treat a missing block as "no update".
-        pass
-    return frame
 
 
 def delta_frame(event: Event, *, offset: int, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:

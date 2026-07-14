@@ -305,38 +305,17 @@ def test_strict_mode_accepts_contract_complete_payload(monkeypatch):
     assert EventLog().tail(1)[0].payload["realm_id"] == "realm_x"
 
 
-# ── Slice F: the heartbeat daemon block is the ONE pinned side channel ──────
+# ── Slice F: heartbeat frames carry NO core (the launcher drops same-offset
+# snapshots, so a heartbeat core would be a silently-dead channel) ──────────
 
 
-def test_heartbeat_daemon_block_schema_is_pinned():
-    """The daemon block is the single sanctioned out-of-band heartbeat rider
-    (eventing per-loop status writes would flood the log). Pin its shape so
-    it evolves consciously — and pin that heartbeats carry NO core: the
-    launcher drops same-offset snapshots, so a heartbeat core would be a
-    silently-dead channel (Stage 12)."""
-
-    from agent_runtime.daemon import DAEMON_STATUS_SCHEMA_VERSION
+def test_heartbeat_frame_carries_no_core():
     from agent_runtime.stream import heartbeat_frame
 
     frame = heartbeat_frame(offset=123)
+    assert frame["type"] == "heartbeat"
     assert "core" not in frame
-    block = frame.get("daemon")
-    assert isinstance(block, dict)
-    required = {
-        "schema_version",
-        "field_set_version",
-        "state",
-        "pid",
-        "heartbeat_at",
-        "target_task_id",
-        "settle_stop_reason",
-        "loops",
-    }
-    missing = required - set(block)
-    assert not missing, f"daemon status block lost pinned keys: {sorted(missing)}"
-    assert block["schema_version"] == DAEMON_STATUS_SCHEMA_VERSION
-    assert isinstance(block["state"], str)
-    assert isinstance(block["loops"], int)
+    assert frame["watermark"]["event_offset"] == 123
 
 
 def test_workspace_use_verb_emits_exactly_one_activation(capsys):

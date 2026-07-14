@@ -243,12 +243,11 @@ def test_snapshot_includes_situational_hud_for_instance(monkeypatch):
         personas=[persona],
         persona_instances=[instance],
         tasks=[],
-        daemon={"state": "starting", "loops": 0},
+        daemon=None,
         realm="default",
         workspace="default",
     )
     situational = snapshot["chat_contexts"][0]["situational_hud"]
-    assert situational["runtime"]["state"] == "starting"
     assert situational["scope"] == {"realm": "default", "workspace": "default"}
     assert situational["lane"]["persona_instance_id"] == "personainst_neko"
 

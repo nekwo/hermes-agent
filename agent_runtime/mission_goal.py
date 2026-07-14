@@ -27,7 +27,6 @@ from .blueprints.resolve import BindingResolver
 from .blueprints.store import BlueprintStore
 from .cli_format import task_summary
 from .config import load_agent_runtime_config
-from .daemon import start_daemon
 from .default_plan import ensure_default_mission_plan, specialize_default_plan_for_task
 from .delivery_directive import DeliveryDirectiveInvalid, normalize_delivery_directive
 from .events import EventLog
@@ -713,37 +712,15 @@ def start_daemon_for_new_goal(
     start_daemon_mode: bool | None,
     foreground_runtime_instance_id: str | None = None,
 ) -> dict[str, Any]:
-    """Start the Mission Daemon for a freshly created goal, tolerant of failures.
+    """Retired: the background Mission Daemon was removed.
 
-    A daemon failure never raises — the task is already created; the caller and
-    operator just need to know it requires a manual daemon start or ticks.
+    Goal creation no longer spawns a runtime; missions advance via
+    ``harness goal run`` / the goal-runner. The ``start_daemon_mode`` argument is
+    accepted for call-site compatibility but is a no-op.
     """
 
-    requested = start_daemon_mode
-    if requested is None:
-        requested = bool(getattr(config, "task_create_auto_start_daemon", False))
-    if not requested:
-        return {
-            "attempted": False,
-            "started": False,
-            "summary": "disabled; use harness goal run for in-process execution or --start-daemon for daemon mode",
-        }
-    try:
-        result = start_daemon(
-            task_id=task_id,
-            foreground_runtime_instance_id=foreground_runtime_instance_id,
-            interval_seconds=getattr(config, "daemon_interval_seconds", None),
-            idle_interval_seconds=getattr(config, "daemon_idle_interval_seconds", None),
-        )
-    except Exception as exc:
-        return {
-            "attempted": True,
-            "started": False,
-            "ok": False,
-            "error_class": type(exc).__name__,
-            "summary": "daemon start failed; task was created and requires manual daemon start or ticks",
-        }
-    if result.get("error") == "daemon_target_conflict":
-        return {"attempted": True, "ok": False, "summary": "daemon already driving another foreground task", **result}
-    summary = "started" if result.get("started") else f"already {result.get('state', 'running')}"
-    return {"attempted": True, "ok": True, "summary": summary, **result}
+    return {
+        "attempted": False,
+        "started": False,
+        "summary": "daemon retired; use `harness goal run` to advance this goal",
+    }

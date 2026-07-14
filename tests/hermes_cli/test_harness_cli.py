@@ -54,10 +54,6 @@ def test_harness_mission_chat_steer_no_active_turn_returns_structured_json(tmp_p
 
 def test_harness_task_create_reports_new_goal_hygiene(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr(
-        "agent_runtime.mission_goal.start_daemon",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("daemon should not start by default")),
-    )
 
     args = parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
 
@@ -69,42 +65,6 @@ def test_harness_task_create_reports_new_goal_hygiene(tmp_path, monkeypatch, cap
     assert data["daemon_start"]["attempted"] is False
     assert data["daemon_start"]["started"] is False
     assert "harness goal run" in data["daemon_start"]["summary"]
-
-
-def test_harness_task_create_can_start_daemon_with_explicit_flag(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    daemon_starts = []
-    monkeypatch.setattr(
-        "agent_runtime.mission_goal.start_daemon",
-        lambda **kwargs: daemon_starts.append(kwargs) or {"started": True, "pid": 1234, "state": "starting"},
-    )
-
-    args = parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--start-daemon", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["daemon_start"]["attempted"] is True
-    assert data["daemon_start"]["started"] is True
-    assert daemon_starts[0]["task_id"] == data["task_id"]
-    assert daemon_starts[0]["foreground_runtime_instance_id"] == data["foreground_runtime"]["instance_id"]
-    assert daemon_starts[0]["interval_seconds"] == 10
-    assert daemon_starts[0]["idle_interval_seconds"] == 30
-
-
-def test_harness_task_create_can_skip_daemon_start(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr("agent_runtime.mission_goal.start_daemon", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("daemon should not start")))
-
-    args = parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--no-start-daemon", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["task_id"].startswith("task_")
-    assert data["daemon_start"] == {
-        "attempted": False,
-        "started": False,
-        "summary": "disabled; use harness goal run for in-process execution or --start-daemon for daemon mode",
-    }
 
 
 def test_harness_parser_exposes_task_archive_ready_json():
@@ -341,53 +301,6 @@ def test_harness_run_show_returns_run_proofs_and_events(tmp_path, monkeypatch, c
     assert data["run"]["id"] == run.id
     assert data["proofs"][0]["id"] == "proof_run_show"
     assert any(item["type"] == "run.opened" for item in data["events"]["items"])
-
-
-def test_harness_parser_exposes_daemon_start_status_stop():
-    p = parser()
-    assert p.parse_args(["harness", "daemon", "start", "--json"]).daemon_command == "start"
-    assert p.parse_args(["harness", "daemon", "status", "--json"]).daemon_command == "status"
-    assert p.parse_args(["harness", "daemon", "stop", "--json"]).daemon_command == "stop"
-    assert p.parse_args(["harness", "daemon", "run-once", "--json"]).daemon_command == "run-once"
-
-
-def test_harness_status_and_daemon_status_share_daemon_schema(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    status_path = paths.daemon_status_path()
-    status_path.parent.mkdir(parents=True, exist_ok=True)
-    status_path.write_text(
-        json.dumps(
-            {
-                "state": "idle",
-                "pid": None,
-                "heartbeat_at": "2026-07-06T12:00:00Z",
-                "target_task_id": "task_1",
-                "settle_stop_reason": "idle",
-                "loops": 7,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    daemon_args = parser().parse_args(["harness", "daemon", "status", "--json"])
-    assert daemon_args.func(daemon_args) == 0
-    daemon_data = json.loads(capsys.readouterr().out)
-
-    status_args = parser().parse_args(["harness", "status", "--json"])
-    assert status_args.func(status_args) == 0
-    status_data = json.loads(capsys.readouterr().out)
-
-    assert status_data["daemon"] == daemon_data
-    assert set(daemon_data) >= {
-        "schema_version",
-        "field_set_version",
-        "state",
-        "pid",
-        "heartbeat_at",
-        "target_task_id",
-        "settle_stop_reason",
-        "loops",
-    }
 
 
 def test_harness_parser_exposes_doctor_fix_flags():

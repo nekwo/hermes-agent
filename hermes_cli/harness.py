@@ -29,7 +29,6 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.default_plan import ensure_default_mission_plan
-from agent_runtime.daemon import MissionDaemon, daemon_status_schema, read_daemon_status, start_daemon, stop_daemon
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
@@ -1014,39 +1013,6 @@ def build_parser(parent_subparsers) -> None:
     contracts_verify = contracts_subs.add_parser("verify-examples", help="Verify the contract registry is internally consistent")
     contracts_verify.add_argument("--json", action="store_true")
     contracts_verify.set_defaults(func=_cmd_contracts_verify_examples)
-
-    daemon = subs.add_parser("daemon", help="Run or inspect the Mission Daemon")
-    daemon.add_argument("--foreground", action="store_true", help="Run the daemon loop in the foreground")
-    daemon.add_argument("--interval", type=float, default=None)
-    daemon.add_argument("--idle-interval", type=float, default=None)
-    daemon.add_argument("--task", default=None, help="Drive one foreground task id")
-    daemon.add_argument("--max-loops", type=int, default=None, help=argparse.SUPPRESS)
-    daemon.add_argument("--json", action="store_true")
-    daemon_subs = daemon.add_subparsers(dest="daemon_command")
-    daemon_start = daemon_subs.add_parser("start", help="Start the Mission Daemon in the background")
-    daemon_start.add_argument("--interval", type=float, default=None)
-    daemon_start.add_argument("--idle-interval", type=float, default=None)
-    daemon_start.add_argument("--task", default=None, help="Drive one foreground task id")
-    daemon_start.add_argument("--json", action="store_true")
-    daemon_status = daemon_subs.add_parser("status", help="Show Mission Daemon status")
-    daemon_status.add_argument("--json", action="store_true")
-    daemon_stop = daemon_subs.add_parser("stop", help="Stop the Mission Daemon")
-    daemon_stop.add_argument("--json", action="store_true")
-    daemon_foreground = daemon_subs.add_parser("foreground", help="Run the Mission Daemon loop in the foreground")
-    daemon_foreground.add_argument("--interval", type=float, default=None)
-    daemon_foreground.add_argument("--idle-interval", type=float, default=None)
-    daemon_foreground.add_argument("--task", default=None, help="Drive one foreground task id")
-    daemon_foreground.add_argument("--max-loops", type=int, default=None, help=argparse.SUPPRESS)
-    daemon_foreground.add_argument("--json", action="store_true")
-    daemon_run_once = daemon_subs.add_parser("run-once", help="Run one bounded Mission Daemon loop and exit")
-    daemon_run_once.add_argument("--task", default=None, help="Drive one foreground task id")
-    daemon_run_once.add_argument("--json", action="store_true")
-    daemon.set_defaults(func=_cmd_daemon)
-    daemon_start.set_defaults(func=_cmd_daemon)
-    daemon_status.set_defaults(func=_cmd_daemon)
-    daemon_stop.set_defaults(func=_cmd_daemon)
-    daemon_foreground.set_defaults(func=_cmd_daemon)
-    daemon_run_once.set_defaults(func=_cmd_daemon)
 
     worktree = subs.add_parser("worktree", help="Manage harness-managed git worktrees")
     worktree_subs = worktree.add_subparsers(dest="worktree_command", required=True)

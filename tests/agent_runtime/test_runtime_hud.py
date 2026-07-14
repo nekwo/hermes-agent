@@ -27,13 +27,11 @@ def test_resolve_situational_hud_standing_by_lane_has_runtime_scope_lane_no_miss
     roster = [instance, _instance(id="personainst_qa", display_name="QA Agent")]
     hud = resolve_situational_hud(
         instance,
-        daemon={"state": "starting", "loops": 0, "next_wake_at": "2026-07-13T15:12:00Z"},
         realm="default",
         workspace="default",
         roster=roster,
     )
     assert hud["preview"] is True
-    assert hud["runtime"]["state"] == "starting"
     assert hud["scope"] == {"realm": "default", "workspace": "default"}
     assert hud["lane"]["persona_instance_id"] == "personainst_neko"
     assert hud["lane"]["display_name"] == "Neko Mission Lead"
@@ -104,7 +102,6 @@ def test_render_situational_hud_block_is_readonly_and_mirrors_widget_lines():
     goal_task = SimpleNamespace(id="goal_1", title="Live token burn", state="queued")
     hud = resolve_situational_hud(
         instance,
-        daemon={"state": "starting", "loops": 0},
         realm="default",
         workspace="default",
         roster=[instance],
@@ -114,7 +111,6 @@ def test_render_situational_hud_block_is_readonly_and_mirrors_widget_lines():
     block = render_situational_hud_block(hud)
     assert block.startswith("## Runtime Situation")
     assert "read-only" in block
-    assert "- Runtime: state starting" in block
     assert "- Scope: realm default · workspace default" in block
     assert "Live token burn" in block
     assert "@personainst_neko" in block

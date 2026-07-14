@@ -874,7 +874,6 @@ def _cmd_verify(args) -> int:
                 "addopts=",
                 "-q",
                 "tests/agent_runtime/test_proof_runner.py",
-                "tests/agent_runtime/test_daemon.py",
                 "tests/agent_runtime/test_store.py",
                 "tests/agent_runtime/test_snapshot.py",
                 "tests/agent_runtime/test_status.py",
@@ -906,13 +905,13 @@ def _cmd_observe(args) -> int:
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
     cfg = load_agent_runtime_config()
-    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
+    execution_mode = "manual"
     data = build_observability(
         tasks=tasks,
         runs=runs,
         incidents=incidents,
         proofs=proofs,
-        daemon_status=read_daemon_status(),
+        daemon_status=None,
         events=EventLog().tail(20),
         execution_mode=execution_mode,
         worker_sessions=workers,
@@ -1001,46 +1000,6 @@ def _git_summary(root: Path) -> dict:
 
     status = run(["status", "--short"])
     return {"path": str(root), "git_head": run(["rev-parse", "HEAD"]), "dirty": bool(status)}
-
-
-def _cmd_daemon(args) -> int:
-    cfg = load_agent_runtime_config()
-    command = getattr(args, "daemon_command", None)
-    if command == "start":
-        data = start_daemon(task_id=getattr(args, "task", None), interval_seconds=args.interval, idle_interval_seconds=args.idle_interval)
-        print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')} pid={data.get('pid', '')}")
-        return 0
-    if command == "stop":
-        data = stop_daemon()
-        print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')}")
-        return 0
-    if command == "status" or (not command and not args.foreground):
-        data = daemon_status_schema()
-        print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')}")
-        return 0
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-
-    def engine_factory():
-        if bool(getattr(cfg, "root_node_mode", False)):
-            from agent_runtime.root_node_engine import RootNodeEngine
-
-            return RootNodeEngine(config=cfg)
-        return TickEngine(
-            config=cfg,
-            persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-        )
-
-    daemon = MissionDaemon(
-        engine_factory=engine_factory,
-        target_task_id=getattr(args, "task", None),
-        interval_seconds=args.interval if args.interval is not None else cfg.daemon_interval_seconds,
-        idle_interval_seconds=args.idle_interval if args.idle_interval is not None else cfg.daemon_idle_interval_seconds,
-        heartbeat_seconds=cfg.daemon_heartbeat_seconds,
-    )
-    max_loops = 1 if command == "run-once" else getattr(args, "max_loops", None)
-    result = daemon.run_foreground(max_loops=max_loops)
-    print(emit_json(result) if args.json else f"daemon stopped after {result['loops']} loops")
-    return 0
 
 
 def _cmd_agents(args) -> int:

@@ -19,7 +19,6 @@ from .blueprints.store import BlueprintStore, blueprint_summary
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .capabilities import capability_descriptors
 from .config import ensure_persisted_personas, load_agent_runtime_config
-from .daemon import daemon_status_schema
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash, event_catalog
 from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
@@ -220,7 +219,9 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     cfg = load_agent_runtime_config()
-    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
+    # The background Mission Daemon was retired; execution is always operator/
+    # goal-runner driven ("manual").
+    execution_mode = "manual"
     # Base-profile foundation: Mission Control shows the seeded store (base only). On a
     # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
     # also returns the dormant typed catalog for resolution and would surface mothballed
@@ -261,7 +262,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
         self_tests.extend(SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id))
-    daemon_status = daemon_status_schema()
     recent_events = event_log.tail(20)
     active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
     active_workers = worker_session_store.find_active()
@@ -304,7 +304,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             "dirty_summary": dirty_state["summary"],
         },
         "dirty_state": dirty_state,
-        "daemon": daemon_status,
         "foreground_runtime": runtime_instances_summary(runtime_instances),
         "execution_mode": execution_mode,
         # Single runtime-default authority, resolved + provenance-stamped, as a
@@ -327,11 +326,11 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             session_db=session_db,
             tasks=tasks,
             proof_store=proof_store,
-            daemon=daemon_status,
+            daemon=None,
             realm=active_realm_name,
             workspace=active_workspace_name,
         ),
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
+        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
         "tasks": [
             _task_summary(

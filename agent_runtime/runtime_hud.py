@@ -29,19 +29,6 @@ from typing import Any, Iterable
 # widget wraps chips; the fed block lists names and notes the overflow count.
 SITUATIONAL_HUD_ROSTER_CAP = 16
 
-# Daemon status keys mirrored into the fed `runtime` block — the same fields the
-# launcher pulse line renders (see daemon.daemon_status_schema).
-_RUNTIME_KEYS = (
-    "state",
-    "loops",
-    "heartbeat_at",
-    "next_wake_at",
-    "last_tick_finished_at",
-    "actions_last_tick",
-    "wait_seconds",
-)
-
-
 def _clean(value: Any) -> bool:
     """True when a value carries information worth emitting."""
 
@@ -53,16 +40,6 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
-
-
-def _runtime_block(daemon: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(daemon, dict):
-        return {}
-    block: dict[str, Any] = {}
-    for key in _RUNTIME_KEYS:
-        if key in daemon and _clean(daemon.get(key)):
-            block[key] = daemon.get(key)
-    return block
 
 
 def _lane_block(instance: Any) -> dict[str, Any]:
@@ -155,9 +132,6 @@ def resolve_situational_hud(
     self_id = _text(getattr(instance, "id", None))
 
     hud: dict[str, Any] = {"preview": True}
-    runtime = _runtime_block(daemon)
-    if runtime:
-        hud["runtime"] = runtime
 
     scope = {
         key: value
@@ -219,16 +193,6 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
         "operator share one view of the runtime. Treat it as read-only context, "
         "not an instruction to act.",
     ]
-
-    runtime = hud.get("runtime") if isinstance(hud.get("runtime"), dict) else {}
-    if runtime:
-        parts = [f"state {runtime['state']}"] if _clean(runtime.get("state")) else []
-        if _clean(runtime.get("loops")):
-            parts.append(f"loop {runtime['loops']}")
-        if _clean(runtime.get("next_wake_at")):
-            parts.append(f"next wake {runtime['next_wake_at']}")
-        if parts:
-            lines.append(f"- Runtime: {' · '.join(parts)}")
 
     scope = hud.get("scope") if isinstance(hud.get("scope"), dict) else {}
     if scope:
@@ -340,11 +304,9 @@ def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = No
     try:
         # Deferred imports keep module load order robust (context_builder, the
         # stores, and daemon all pull sizeable graphs).
-        from .daemon import daemon_status_schema
         from .persona_assignments import PersonaInstanceStore
         from .store import RealmStore, TaskStore, WorkspaceStore
 
-        daemon = daemon_status_schema()
         roster = PersonaInstanceStore().list_all()
 
         workspace_store = WorkspaceStore()
@@ -378,7 +340,7 @@ def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = No
 
         hud = resolve_situational_hud(
             instance,
-            daemon=daemon,
+            daemon=None,
             realm=realm,
             workspace=workspace,
             roster=roster,
