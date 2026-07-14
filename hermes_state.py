@@ -121,6 +121,40 @@ def _delete_delegate_children(conn, parent_ids: List[str]) -> List[str]:
 T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
+# Frozen copy of the import-time value. ``DEFAULT_DB_PATH`` is a module-level
+# constant computed once at import, so it captures ``HERMES_HOME`` as it stood
+# when this module was first imported — typically before a test body (or an
+# in-process profile switch) has had a chance to change it. A large body of
+# tests pin ``DEFAULT_DB_PATH`` directly via ``monkeypatch.setattr`` to isolate
+# from the real ``~/.hermes/state.db``; keeping that hook working means we must
+# distinguish "caller/test pinned the constant" from "still the import default".
+_IMPORT_DEFAULT_DB_PATH = DEFAULT_DB_PATH
+
+
+def _resolve_default_db_path() -> Path:
+    """Resolve the path a no-arg :class:`SessionDB` should open.
+
+    Precedence:
+
+    1. An explicitly pinned module-level ``DEFAULT_DB_PATH`` (i.e. reassigned
+       away from its import value — the historical ``monkeypatch.setattr``
+       isolation hook that ~25 gateway/CLI test files rely on).
+    2. Otherwise ``HERMES_HOME`` resolved **at call time** via
+       :func:`get_hermes_home` — which also honors the context-local override.
+
+    Resolving live in case (2) is the fix for a silent test-isolation /
+    cross-profile-corruption hole: ``get_hermes_home()`` reads the env on every
+    call, but ``DEFAULT_DB_PATH`` froze it at import, so a test that only did
+    ``monkeypatch.setenv("HERMES_HOME", tmp)`` (rather than patching the
+    constant) had its no-arg ``SessionDB()`` writes land in whatever home
+    existed at import — on a dev box, the live profile's ``state.db``. See the
+    same hazard called out in :func:`get_hermes_home`'s docstring.
+    """
+
+    if DEFAULT_DB_PATH != _IMPORT_DEFAULT_DB_PATH:
+        return DEFAULT_DB_PATH
+    return get_hermes_home() / "state.db"
+
 
 SCHEMA_VERSION = 19
 
@@ -902,7 +936,7 @@ class SessionDB:
     _OPTIMIZE_EVERY_N_WRITES = 1000
 
     def __init__(self, db_path: Path = None, read_only: bool = False):
-        self.db_path = db_path or DEFAULT_DB_PATH
+        self.db_path = db_path or _resolve_default_db_path()
         self.read_only = read_only
 
         self._lock = threading.Lock()

@@ -5362,3 +5362,57 @@ def test_refresh_compression_lock_requires_holder_and_preserves_reclaimability(d
 
     monkeypatch.setattr(hermes_state.time, "time", lambda: 1016.0)
     assert db.try_acquire_compression_lock("s1", "holder-b", ttl_seconds=10.0) is True
+
+
+def test_no_arg_sessiondb_honors_hermes_home_env_at_call_time(tmp_path, monkeypatch):
+    """A no-arg ``SessionDB()`` must resolve ``HERMES_HOME`` live.
+
+    Regression: ``DEFAULT_DB_PATH`` freezes ``get_hermes_home()`` at import, so
+    a test (or in-process profile switch) that only set ``HERMES_HOME`` via env
+    had its no-arg ``SessionDB()`` writes silently land in whatever home existed
+    at import — on a dev box, the live profile's ``state.db``. The resolver must
+    read the env on construction, WITHOUT the caller having to patch the private
+    ``DEFAULT_DB_PATH`` constant.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    # Deliberately do NOT patch DEFAULT_DB_PATH — that is the whole point.
+
+    db = SessionDB()
+    try:
+        assert db.db_path == home / "state.db"
+        # End-to-end: the row is written under the redirected home, and the
+        # import-time (real) home is never touched.
+        db.create_session("iso-1", "cli")
+        assert (home / "state.db").exists()
+        assert db.db_path != hermes_state._IMPORT_DEFAULT_DB_PATH
+    finally:
+        db.close()
+
+
+def test_pinned_default_db_path_still_wins_over_env(tmp_path, monkeypatch):
+    """The historical ``monkeypatch.setattr(DEFAULT_DB_PATH, ...)`` hook keeps
+    working: an explicitly pinned constant takes precedence over a diverging
+    ``HERMES_HOME`` env, so the ~25 gateway/CLI tests that rely on it are
+    unaffected by the call-time resolution."""
+    pinned = tmp_path / "pinned" / "state.db"
+    env_home = tmp_path / "env-home"
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", pinned)
+    monkeypatch.setenv("HERMES_HOME", str(env_home))
+
+    assert hermes_state._resolve_default_db_path() == pinned
+
+    db = SessionDB()
+    try:
+        assert db.db_path == pinned
+    finally:
+        db.close()
+
+
+def test_resolve_default_db_path_falls_back_to_live_home(tmp_path, monkeypatch):
+    """When ``DEFAULT_DB_PATH`` is untouched, the resolver reads the current
+    ``HERMES_HOME`` rather than the import-time snapshot."""
+    home = tmp_path / "live-home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    assert hermes_state.DEFAULT_DB_PATH == hermes_state._IMPORT_DEFAULT_DB_PATH
+    assert hermes_state._resolve_default_db_path() == home / "state.db"
