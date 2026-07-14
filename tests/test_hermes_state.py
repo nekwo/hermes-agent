@@ -3594,6 +3594,27 @@ class TestListSessionsRich:
         sessions = db.list_sessions_rich(cwd_prefix="/repo")
         assert [session["id"] for session in sessions] == ["s2", "s1"]
 
+    def test_rich_list_orders_deterministically_on_started_at_tie(self, db):
+        """Sessions sharing a ``started_at`` must sort by a stable tiebreak.
+
+        Regression: the non-``order_by_last_active`` branch ordered by
+        ``started_at DESC`` alone, so two sessions created in the same clock
+        tick sorted in an undefined order — an intermittent flake
+        (``test_rich_list_cwd_prefix_filter``) whenever ``time.time()`` tied.
+        Force the tie explicitly and assert the ``s.id DESC`` tiebreak (matching
+        the method's other two ORDER BY branches) makes the order stable.
+        """
+        db.create_session("s1", "cli")
+        db.create_session("s2", "cli")
+        # Collapse both onto the same started_at — the flake condition.
+        with db._lock:
+            db._conn.execute("UPDATE sessions SET started_at = 1000.0")
+            db._conn.commit()
+
+        for _ in range(5):
+            ids = [row["id"] for row in db.list_sessions_rich()]
+            assert ids == ["s2", "s1"], f"unstable tie ordering: {ids}"
+
     def test_preview_newlines_collapsed(self, db):
         db.create_session("s1", "cli")
         db.append_message("s1", "user", "Line one\nLine two\nLine three")
