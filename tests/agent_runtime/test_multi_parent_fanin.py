@@ -278,6 +278,63 @@ def test_agent_topology_emits_fan_in_edges():
     assert set(child_node["steered_by"]) == {"inst_dev", "inst_backend"}
 
 
+def test_agent_topology_includes_steered_fan_in_on_goal_less_flow():
+    """A fan-in node steered into a GOAL-LESS default flow must still appear
+    (steering closure), not collapse to the plan slots. Regression for
+    "connected + saved, gone on refresh": the mission is goal-less, so the
+    steered agents don't match the task goal; without the closure the topology
+    emitted only the plan slots and the Launcher reprojected the wiring away."""
+    mission_plan = SimpleNamespace(
+        stages=[],
+        agent_topology={
+            "root": "lead",
+            "edges": [
+                {"source": "lead", "target": "builder", "kind": "steers"},
+                {"source": "builder", "target": "verifier", "kind": "steers"},
+            ],
+        },
+        slots={"lead": {}, "builder": {}, "verifier": {}},
+        bindings={
+            "lead": "persona:neko_supervisor",
+            "builder": "persona:dev",
+            "verifier": "persona:qa",
+        },
+    )
+    task = SimpleNamespace(
+        id="g1", goal_id="g1", mission_plan=mission_plan,
+        current_stage_id=None, open_incident_ids=[], state=TaskState.RUNNING,
+    )
+
+    def goal_less(iid, persona, *, steered=None):
+        return SimpleNamespace(
+            id=iid, persona_id=persona, role=persona, display_name=f"{persona} agent",
+            goal_id=None, current_task_id=None, task_id=None,
+            spawned_by=(steered[0] if steered else None), steered_by=list(steered or []),
+            state=WorkerSessionState.IDLE, updated_at="2026-07-14",
+        )
+
+    neko = goal_less("i_neko", "neko_supervisor")
+    dev = goal_less("i_dev", "dev", steered=["i_neko"])
+    qa = goal_less("i_qa", "qa", steered=["i_neko"])
+    alice = goal_less("i_alice", "alice", steered=["i_dev", "i_qa"])  # fan-in, not a plan slot
+
+    topo = _agent_topology(
+        task, active_runs=[], active_workers=[],
+        runtime_instances=[], persona_instances=[neko, dev, qa, alice], role_streams=[],
+    )
+
+    node_ids = {node["node_id"] for node in topo["nodes"]}
+    # All four steered agents present, keyed by instance id (not plan slots).
+    assert {"i_neko", "i_dev", "i_qa", "i_alice"} <= node_ids
+    steers_into_alice = {
+        edge["source_node_id"]
+        for edge in topo["edges"]
+        if edge["kind"] == "steers" and edge["target_node_id"] == "i_alice"
+    }
+    assert steers_into_alice == {"i_dev", "i_qa"}  # fan-in preserved
+    assert topo["completeness"]["fan_in_targets"] == 1
+
+
 # --- CLI: steer verbs + --json shape -------------------------------------
 
 

@@ -2523,6 +2523,47 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
         for instance in [*runtime_instances, *persona_instances]
         if _instance_matches_task(instance, task, task_goal_id)
     ]
+    # --- Steering closure -------------------------------------------------
+    # The runtime graph the operator edits lives in persona-instance steering
+    # (``steered_by``, keyed by instance id). Seeding topology nodes only from
+    # goal-matched instances + plan slots drops any node the operator steered IN
+    # whose goal does not match the task — e.g. a fan-in convergence agent on a
+    # goal-less default flow. Its node (and every edge into it) is omitted, so
+    # the Launcher reprojects the operator's wiring away ("connected + saved,
+    # gone on refresh"). Pull the steered graph in: anchor on the goal-matched
+    # set plus the lead instance bound to the plan root, then transitively add
+    # any instance steered by a member. This mirrors the Launcher's own
+    # related-instance expansion and stays BOUNDED to the mission — only steered
+    # descendants of the seed, never the global persona pool.
+    _all_instances = [*runtime_instances, *persona_instances]
+    _seed_ids = {
+        sid
+        for sid in (str(getattr(i, "id", "") or "").strip() for i in related_instances)
+        if sid
+    }
+    if root_slot:
+        _root_persona = _topology_slot_persona_id(root_slot, bindings)
+        _by_persona_all: dict[str, list] = {}
+        for _inst in _all_instances:
+            _pid = str(getattr(_inst, "persona_id", "") or "").strip()
+            if _pid:
+                _by_persona_all.setdefault(_pid, []).append(_inst)
+        _root_inst = _instance_for_persona(_root_persona, _by_persona_all)
+        _root_id = str(getattr(_root_inst, "id", "") or "").strip() if _root_inst else ""
+        if _root_id and _root_id not in _seed_ids:
+            related_instances.append(_root_inst)
+            _seed_ids.add(_root_id)
+    _closure_changed = True
+    while _closure_changed:
+        _closure_changed = False
+        for _inst in _all_instances:
+            _iid = str(getattr(_inst, "id", "") or "").strip()
+            if not _iid or _iid in _seed_ids:
+                continue
+            if any(ref in _seed_ids for ref in _instance_parent_refs(_inst)):
+                related_instances.append(_inst)
+                _seed_ids.add(_iid)
+                _closure_changed = True
     instances_by_id = {str(getattr(instance, "id", "") or ""): instance for instance in related_instances}
     instances_by_persona: dict[str, list] = {}
     for instance in related_instances:
