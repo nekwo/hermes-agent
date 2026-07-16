@@ -885,6 +885,20 @@ def _cmd_mission_chat_message(args) -> int:
     workspace_name = safe_assignment_text(
         getattr(args, "workspace_name", None), limit=120
     )
+    # Runtime situational HUD for this lane — the same projection the
+    # operator's Mission Control runtime HUD strip renders, fed into the chat
+    # turn so the operator and the agent share one view. Resolved ONCE here so
+    # the fed block and every observability row this turn persists (the
+    # write-ahead row below and the post-turn row) record the same object —
+    # record-at-injection, never a later re-derivation. Best-effort ({} / ''
+    # when unavailable); never blocks the turn.
+    from agent_runtime.runtime_hud import (
+        render_situational_hud_block,
+        situational_hud_for_instance,
+    )
+
+    situational_hud = situational_hud_for_instance(instance)
+    situational_hud_content = render_situational_hud_block(situational_hud)
     prompt_context = mission_chat_prompt_observability(
         persona=persona,
         persona_instance_id=instance.id,
@@ -900,6 +914,7 @@ def _cmd_mission_chat_message(args) -> int:
         workspace_id=workspace_id,
         workspace_name=workspace_name,
         workspace_agents=workspace_agents,
+        situational_hud=situational_hud,
     )
     stream = bool(getattr(args, "stream", False))
     stream_emitter = _ChatProtocolV2Emitter(
@@ -970,13 +985,9 @@ def _cmd_mission_chat_message(args) -> int:
             if relay_deadline is not None
             else _relay_time.time() + relay_wall_seconds
         )
-        # Runtime situational HUD for this lane — the same projection the
-        # operator's Mission Control runtime HUD strip renders, fed into the chat
-        # turn so the operator and the agent share one view. Best-effort ('' when
-        # unavailable); never blocks the turn.
-        from agent_runtime.runtime_hud import situational_hud_content_for_instance
-
-        situational_hud_content = situational_hud_content_for_instance(instance)
+        # situational_hud / situational_hud_content were resolved once above
+        # (record-at-injection): the write-ahead row, the fed block here, and
+        # the post-turn row all carry the same object.
         try:
             chat_result = GPTPersonaRuntime(
                 default_provider=cfg.default_provider,
@@ -1035,6 +1046,9 @@ def _cmd_mission_chat_message(args) -> int:
             workspace_id=workspace_id,
             workspace_name=workspace_name,
             workspace_agents=workspace_agents,
+            # The very dict rendered into this turn's fed block above — recorded
+            # at injection so the peek's row IS what the model received.
+            situational_hud=situational_hud,
         )
         if preloaded_skills_loaded:
             prompt_context["used_skills"] = prompt_context.get("used_skills") or []

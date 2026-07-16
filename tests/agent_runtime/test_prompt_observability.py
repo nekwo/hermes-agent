@@ -285,6 +285,31 @@ def test_backfill_copies_situational_hud_onto_persisted_row():
     assert persisted["situational_hud"] == {"preview": True, "lane": {"persona_instance_id": "x"}}
 
 
+def test_chat_time_row_carries_situational_hud_verbatim():
+    # Record-at-injection: the chat turn passes the very dict it rendered into
+    # the fed block, so the persisted row IS what the model received — the
+    # CONTEXT peek must never depend on the snapshot backfill's key match
+    # (persona_instance_id, session_id, persona_id), which misses whenever the
+    # console chat session differs from the instance's session field.
+    injected = {
+        "preview": True,
+        "lane": {"persona_instance_id": "personainst_neko"},
+        "steering": {"steered_by": [], "steers": [{"persona_instance_id": "personainst_dev", "display_name": "Dev"}]},
+    }
+    row = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="neko_supervisor",
+            hermes_profile="neko",
+            display_name="Neko Mission Lead",
+            role="supervisor",
+        ),
+        persona_instance_id="personainst_neko",
+        session_id="console_chat_session",
+        situational_hud=injected,
+    )
+    assert row["situational_hud"] == injected
+
+
 def test_backfill_copies_mission_hud_onto_persisted_row():
     persisted = {"persona_instance_id": "x", "session_id": "s", "persona_id": "p"}
     built = {"mission_hud": {"preview": True, "phase": "in_progress"}}

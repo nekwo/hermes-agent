@@ -133,6 +133,88 @@ def test_render_situational_hud_block_empty_for_empty_hud():
     assert render_situational_hud_block({}) == ""
 
 
+def test_resolve_steering_fan_in_resolves_parents_in_edge_order():
+    lead = _instance(id="personainst_neko", display_name="Neko Mission Lead")
+    reviewer = _instance(id="personainst_rev", display_name="Reviewer")
+    child = _instance(
+        id="personainst_dev",
+        display_name="Dev",
+        steered_by=["personainst_neko", "personainst_rev"],
+    )
+    hud = resolve_situational_hud(child, roster=[lead, reviewer, child])
+    steering = hud["steering"]
+    assert [entry["persona_instance_id"] for entry in steering["steered_by"]] == [
+        "personainst_neko",
+        "personainst_rev",
+    ]
+    assert steering["steered_by"][0]["display_name"] == "Neko Mission Lead"
+    assert steering["steers"] == []
+
+
+def test_resolve_steering_falls_back_to_spawned_by_for_unmigrated_records():
+    lead = _instance(id="personainst_neko", display_name="Neko Mission Lead")
+    child = _instance(
+        id="personainst_dev", display_name="Dev", steered_by=[], spawned_by="personainst_neko"
+    )
+    hud = resolve_situational_hud(child, roster=[lead, child])
+    assert [entry["persona_instance_id"] for entry in hud["steering"]["steered_by"]] == [
+        "personainst_neko"
+    ]
+
+
+def test_resolve_steering_ref_may_name_persona_id_and_unresolved_ref_keeps_raw():
+    lead = _instance(id="personainst_neko", persona_id="neko_supervisor")
+    child = _instance(
+        id="personainst_dev",
+        display_name="Dev",
+        # One ref by persona id (resolvable), one naming a departed lane.
+        steered_by=["neko_supervisor", "personainst_gone"],
+    )
+    hud = resolve_situational_hud(child, roster=[lead, child])
+    steered_by = hud["steering"]["steered_by"]
+    assert steered_by[0]["persona_instance_id"] == "personainst_neko"
+    # A departed steerer is a fact, not "no steerer": the raw ref survives.
+    assert steered_by[1] == {"ref": "personainst_gone"}
+
+
+def test_resolve_steering_derives_steers_by_roster_inversion_once_per_child():
+    lead = _instance(id="personainst_neko", persona_id="neko_supervisor", display_name="Neko Mission Lead")
+    # Child names the lead twice (instance id + persona id): must appear once.
+    child = _instance(
+        id="personainst_dev",
+        display_name="Dev",
+        steered_by=["personainst_neko", "neko_supervisor"],
+    )
+    bystander = _instance(id="personainst_x", display_name="X")
+    hud = resolve_situational_hud(lead, roster=[lead, child, bystander])
+    steers = hud["steering"]["steers"]
+    assert steers == [{"persona_instance_id": "personainst_dev", "display_name": "Dev"}]
+
+
+def test_resolve_steering_standalone_is_explicit_empty_not_absent():
+    hud = resolve_situational_hud(_instance(), roster=[_instance()])
+    assert hud["steering"] == {"steered_by": [], "steers": []}
+
+
+def test_render_steering_lines_for_links_and_standalone():
+    lead = _instance(id="personainst_neko", display_name="Neko Mission Lead")
+    child = _instance(id="personainst_dev", display_name="Dev", steered_by=["personainst_neko"])
+    linked = render_situational_hud_block(
+        resolve_situational_hud(child, roster=[lead, child])
+    )
+    assert "- Steered by: Neko Mission Lead (@personainst_neko)" in linked
+
+    lead_block = render_situational_hud_block(
+        resolve_situational_hud(lead, roster=[lead, child])
+    )
+    assert "- Steers: Dev (@personainst_dev)" in lead_block
+
+    standalone = render_situational_hud_block(
+        resolve_situational_hud(_instance(), roster=[_instance()])
+    )
+    assert "- Steering: standalone — no steerer, steers nobody" in standalone
+
+
 def _chat_persona():
     from agent_runtime.models import AgentPersona
 

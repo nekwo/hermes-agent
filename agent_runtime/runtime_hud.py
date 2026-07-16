@@ -106,6 +106,74 @@ def _roster_block(roster: Iterable[Any], *, self_id: str | None) -> list[dict[st
     return entries
 
 
+def _parent_refs(instance: Any) -> list[str]:
+    """The steering-parent ref set of an instance (fan-in aware): the
+    authoritative ``steered_by`` list, falling back to ``[spawned_by]`` for
+    un-migrated records. Mirrors the launcher's
+    ``missionAgentInstanceParentIds`` so both ends agree who steers whom."""
+
+    refs = [ref for ref in (_text(item) for item in (getattr(instance, "steered_by", None) or ())) if ref]
+    if refs:
+        return refs
+    spawned_by = _text(getattr(instance, "spawned_by", None))
+    return [spawned_by] if spawned_by else []
+
+
+def _resolve_parent_ref(ref: str, roster: Iterable[Any]) -> Any | None:
+    """Resolve a parent ref to a roster instance. A ref may name an instance id,
+    a persona id, or a role — in that precedence order (mirrors the launcher's
+    ``missionAgentOwnerForSpawnedBy``)."""
+
+    by_persona = None
+    by_role = None
+    for inst in roster or ():
+        if _text(getattr(inst, "id", None)) == ref:
+            return inst
+        if by_persona is None and _text(getattr(inst, "persona_id", None)) == ref:
+            by_persona = inst
+        if by_role is None and _text(getattr(inst, "role", None)) == ref:
+            by_role = inst
+    return by_persona or by_role
+
+
+def _steering_block(instance: Any, roster: Iterable[Any], *, self_id: str | None) -> dict[str, Any]:
+    """Who steers this lane, and whom it steers — harness truth, fan-in aware.
+
+    Hermes states steering only child→parent (``steered_by``/``spawned_by``), so
+    the downstream set is derived by inverting the roster through the same ref
+    resolution, keeping both directions consistent. Both keys are ALWAYS present:
+    explicit empty lists mean genuinely standalone (the common case), which a
+    consumer must be able to tell apart from "this hermes predates steering"."""
+
+    roster = list(roster or ())
+    steered_by: list[dict[str, Any]] = []
+    for ref in _parent_refs(instance):
+        parent = _resolve_parent_ref(ref, roster)
+        entry: dict[str, Any] = {"ref": ref}
+        if parent is not None:
+            entry["persona_instance_id"] = _text(getattr(parent, "id", None))
+            entry["display_name"] = _text(getattr(parent, "display_name", None)) or ref
+        steered_by.append(entry)
+
+    steers: list[dict[str, Any]] = []
+    for inst in roster:
+        instance_id = _text(getattr(inst, "id", None))
+        if instance_id is None or instance_id == self_id:
+            continue
+        for ref in _parent_refs(inst):
+            parent = _resolve_parent_ref(ref, roster)
+            if parent is not None and _text(getattr(parent, "id", None)) == self_id:
+                steers.append(
+                    {
+                        "persona_instance_id": instance_id,
+                        "display_name": _text(getattr(inst, "display_name", None)) or instance_id,
+                    }
+                )
+                break
+
+    return {"steered_by": steered_by, "steers": steers}
+
+
 def resolve_situational_hud(
     instance: Any,
     *,
@@ -152,6 +220,11 @@ def resolve_situational_hud(
     roster_block = _roster_block(roster, self_id=self_id)
     if roster_block:
         hud["roster"] = roster_block
+
+    # Steering is always emitted (unlike the other blocks, which drop when
+    # empty): an explicit empty block is the honest "standalone" answer, and
+    # its absence is reserved for HUDs that predate steering entirely.
+    hud["steering"] = _steering_block(instance, roster, self_id=self_id)
 
     # Advisory Mission Board digest (nudge, not instruction): a one-line
     # awareness cue. Absent when there is no board or it has no open cards, so a
@@ -236,6 +309,28 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
             who_bits.append(f"role {lane['role']}")
         lines.append(f"- You: {' · '.join(who_bits)}")
 
+    steering = hud.get("steering") if isinstance(hud.get("steering"), dict) else None
+    if steering is not None:
+        def _handle(entry: dict[str, Any]) -> str:
+            name = entry.get("display_name")
+            ref = entry.get("persona_instance_id") or entry.get("ref")
+            if _clean(name) and _clean(ref) and name != ref:
+                return f"{name} (@{ref})"
+            return f"@{ref}" if _clean(ref) else str(name or "unknown")
+
+        steered_by = steering.get("steered_by") if isinstance(steering.get("steered_by"), list) else []
+        steers = steering.get("steers") if isinstance(steering.get("steers"), list) else []
+        if steered_by:
+            lines.append(
+                "- Steered by: " + ", ".join(_handle(e) for e in steered_by if isinstance(e, dict))
+            )
+        if steers:
+            lines.append(
+                "- Steers: " + ", ".join(_handle(e) for e in steers if isinstance(e, dict))
+            )
+        if not steered_by and not steers:
+            lines.append("- Steering: standalone — no steerer, steers nobody")
+
     roster = hud.get("roster") if isinstance(hud.get("roster"), list) else []
     if roster:
         names = ", ".join(str(entry.get("display_name") or entry.get("persona_instance_id")) for entry in roster)
@@ -289,18 +384,21 @@ def _board_digest_for_workspace(workspace_id: str | None) -> dict[str, Any] | No
         return None
 
 
-def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = None) -> str:
+def situational_hud_for_instance(instance: Any, *, proof_store: Any = None) -> dict[str, Any]:
     """Chat-side convenience: load the ambient runtime facts for one lane and
-    render the fed ``## Runtime Situation`` block.
+    resolve the situational HUD dict.
 
     The snapshot path resolves the same projection from data it already has
     loaded; this wrapper does the store I/O for a single mission-chat turn, then
-    calls the same pure `resolve_situational_hud` + `render_situational_hud_block`
-    (one authority). Best-effort: returns '' on any failure so a chat turn is
+    calls the same pure `resolve_situational_hud` (one authority). The chat
+    caller renders THIS dict into the fed block AND records it verbatim on the
+    turn's observability row, so the Mission Control CONTEXT peek shows exactly
+    the object that was injected — parity by construction, not by later
+    re-derivation. Best-effort: returns {} on any failure so a chat turn is
     never blocked by situational-HUD assembly."""
 
     if instance is None:
-        return ""
+        return {}
     try:
         # Deferred imports keep module load order robust (context_builder, the
         # stores, and daemon all pull sizeable graphs).
@@ -338,7 +436,7 @@ def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = No
             except Exception:
                 return None
 
-        hud = resolve_situational_hud(
+        return resolve_situational_hud(
             instance,
             daemon=None,
             realm=realm,
@@ -349,6 +447,14 @@ def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = No
             proof_store=proof_store,
             board=_board_digest_for_workspace(workspace_store.active_id()),
         )
-        return render_situational_hud_block(hud)
     except Exception:
-        return ""
+        return {}
+
+
+def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = None) -> str:
+    """Rendered-block form of `situational_hud_for_instance` (same authority);
+    kept for callers that only need the fed text."""
+
+    return render_situational_hud_block(
+        situational_hud_for_instance(instance, proof_store=proof_store)
+    )
