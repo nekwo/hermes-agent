@@ -2595,7 +2595,89 @@ def build_provider_visibility() -> dict:
                 }
             )
         providers_out.append({"id": provider, "credentials": credentials})
-    return {"schema": "hermes.provider_visibility/v1", "providers": providers_out}
+    payload: dict = {
+        "schema": "hermes.provider_visibility/v2",
+        "providers": providers_out,
+    }
+    # v2 additions (transport plan W4): the fields the launcher used to
+    # scrape out of the human `hermes status` ◆-box — model/provider, API-key
+    # presence (STATUS_API_KEYS is the box's own registry, hoisted so this
+    # cannot drift from it), and OAuth login state. Each block is
+    # failure-isolated: a broken import or status probe drops the block, it
+    # NEVER breaks the credential payload above (which the launcher's model
+    # switcher depends on). Consumers treat an absent block as "fall back to
+    # the scrape", exactly like a v1 hermes.
+    try:
+        payload["environment"] = _provider_visibility_environment()
+    except Exception:
+        pass
+    try:
+        payload["api_keys"] = _provider_visibility_api_keys()
+    except Exception:
+        pass
+    try:
+        payload["auth_logins"] = _provider_visibility_auth_logins()
+    except Exception:
+        pass
+    return payload
+
+
+def _provider_visibility_environment() -> dict:
+    from hermes_cli.status import _configured_model_label, _effective_provider_label
+
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+    except Exception:
+        config = {}
+    return {
+        "model": _configured_model_label(config),
+        "provider": _effective_provider_label(),
+    }
+
+
+def _provider_visibility_api_keys() -> list[dict]:
+    from hermes_cli.auth import get_anthropic_key
+    from hermes_cli.status import STATUS_API_KEYS, resolve_status_env
+
+    out: list[dict] = []
+    for name, env_ref in STATUS_API_KEYS.items():
+        if name == "Anthropic":
+            # Same single source of truth the status box uses (also resolves
+            # OAuth tokens).
+            configured = bool(get_anthropic_key())
+        else:
+            configured = bool(resolve_status_env(env_ref))
+        out.append({"name": name, "configured": configured})
+    return out
+
+
+def _provider_visibility_auth_logins() -> list[dict]:
+    from hermes_cli.auth import (
+        get_codex_auth_status,
+        get_minimax_oauth_auth_status,
+        get_nous_auth_status,
+        get_qwen_auth_status,
+    )
+
+    logins: list[dict] = []
+    for name, probe in (
+        ("Nous Portal", get_nous_auth_status),
+        ("OpenAI Codex", get_codex_auth_status),
+        ("Qwen", get_qwen_auth_status),
+        ("MiniMax", get_minimax_oauth_auth_status),
+    ):
+        try:
+            status = probe() or {}
+        except Exception:
+            status = {}
+        entry: dict = {"name": name, "logged_in": bool(status.get("logged_in"))}
+        refreshed = status.get("last_refresh")
+        if refreshed:
+            entry["refreshed_at"] = str(refreshed)
+        logins.append(entry)
+    return logins
 
 
 def _cmd_providers(args) -> int:
