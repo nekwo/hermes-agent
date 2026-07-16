@@ -334,30 +334,6 @@ _CAPABILITIES: tuple[dict[str, Any], ...] = (
         for verb in ("pause", "park", "resume", "drain")
     ),
     {
-        "id": "daemon.start",
-        "target_kind": "daemon",
-        "label": "Start Daemon",
-        "group": "lifecycle",
-        "execution_semantics": "daemon_lifecycle",
-        "danger": "normal",
-    },
-    {
-        "id": "daemon.stop",
-        "target_kind": "daemon",
-        "label": "Stop Daemon",
-        "group": "lifecycle",
-        "execution_semantics": "daemon_lifecycle",
-        "danger": "warning",
-    },
-    {
-        "id": "daemon.run_once",
-        "target_kind": "daemon",
-        "label": "Run Daemon Loop Once",
-        "group": "run",
-        "execution_semantics": "bounded_execution",
-        "danger": "normal",
-    },
-    {
         "id": "persona.instance.close",
         "target_kind": "persona_instance",
         "label": "Close Assignment",
@@ -463,8 +439,6 @@ def _readback_for(item: dict[str, Any]) -> list[str]:
         return ["snapshot", "worker.show"]
     if capability_id.startswith("run."):
         return ["snapshot", "run.show"]
-    if capability_id.startswith("daemon."):
-        return ["snapshot", "status"]
     if capability_id.startswith("goal.archive"):
         return ["snapshot", "goal.history"]
     return ["snapshot"]

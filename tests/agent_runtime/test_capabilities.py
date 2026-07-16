@@ -33,7 +33,16 @@ def test_capability_descriptors_are_unique_and_redaction_safe():
     assert "goal.run_until_settled" in ids
     assert "goal.steer" in ids
     assert "task.run_until_settled" not in ids
-    assert "daemon.start" in ids
+    # The Mission Daemon was retired in 6b558417f: `hermes harness` has no
+    # `daemon` subcommand, so these advertised nothing servable at the catalog's
+    # own write boundary (`hermes harness --json`). They must not come back
+    # without a command to serve them.
+    assert "daemon.start" not in ids
+    assert "daemon.stop" not in ids
+    assert "daemon.run_once" not in ids
+    assert not [item for item in ids if item.startswith("daemon.")]
+    assert all(item["target_kind"] != "daemon" for item in descriptors)
+    assert all(item["execution_semantics"] != "daemon_lifecycle" for item in descriptors)
     assert "shell.anything" not in ids
     assert all("command" not in item for item in descriptors)
     assert all(item["capability_id"] == item["id"] for item in descriptors)
@@ -133,7 +142,10 @@ def test_snapshot_emits_callable_capability_descriptors(isolate_agent_runtime_ro
     assert "mission.chat.queue_skill_for_next_turn" in ids
     assert "persona.instance.message" not in ids
     assert "persona.instance.return_summary" in ids
-    assert "daemon.start" in ids
+    # Retired with the Mission Daemon (6b558417f) — the snapshot must not
+    # re-advertise a verb no `hermes harness` command can serve.
+    assert "daemon.start" not in ids
+    assert not [item for item in ids if item.startswith("daemon.")]
 
 
 def test_observability_emits_same_capability_descriptors(isolate_agent_runtime_root):
