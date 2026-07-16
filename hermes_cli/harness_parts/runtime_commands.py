@@ -1120,6 +1120,11 @@ def _cmd_stream(args) -> int:
         for frame in stream_frames(
             poll_interval_seconds=float(getattr(args, "poll_interval", 0.25) or 0.25),
             heartbeat_interval_seconds=float(getattr(args, "heartbeat_interval", 5.0) or 5.0),
+            # 0 disables the settle window; None/absent (old Namespace shapes)
+            # keeps the coalescing default.
+            delta_debounce_seconds=max(
+                0.0, float(getattr(args, "delta_debounce_ms", 200) or 0) / 1000.0
+            ),
             max_frames=getattr(args, "max_frames", None),
         ):
             sys.stdout.write(json.dumps(to_jsonable(frame), ensure_ascii=False, separators=(",", ":")) + "\n")

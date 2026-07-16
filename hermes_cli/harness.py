@@ -1114,6 +1114,12 @@ def build_parser(parent_subparsers) -> None:
     stream = subs.add_parser("stream", help="Emit Mission Control hydrate/delta frames as NDJSON")
     stream.add_argument("--poll-interval", type=float, default=0.25)
     stream.add_argument("--heartbeat-interval", type=float, default=5.0)
+    stream.add_argument(
+        "--delta-debounce-ms",
+        type=int,
+        default=200,
+        help="Settle window for coalescing an event burst into one delta frame (0 disables)",
+    )
     stream.add_argument("--max-frames", type=int, default=None, help=argparse.SUPPRESS)
     stream.set_defaults(func=_cmd_stream)
     serve = subs.add_parser("serve", help="Persistent NDJSON stdio bridge: dispatch harness argv requests in one warm process (Mission Control serve lane)")

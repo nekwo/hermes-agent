@@ -63,8 +63,26 @@ def heartbeat_frame(*, offset: int) -> dict[str, Any]:
     }
 
 
-def delta_frame(event: Event, *, offset: int, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+def _delta_entity(event: Event) -> dict[str, Any]:
+    """One event's redaction-safe entity block, shared by the single-delta
+    shape and the batched ``events`` list so the two can never drift."""
+
     payload = _redaction_safe_json(event.payload)
+    return {
+        "event": {
+            **to_jsonable(event),
+            "payload": payload,
+        },
+        "task_id": event.task_id,
+        "goal_id": event.task_id,
+        "run_id": event.run_id,
+        "persona_id": event.persona_id,
+        "session_id": event.session_id,
+        "correlation_id": payload.get("correlation_id") if isinstance(payload, dict) else None,
+    }
+
+
+def delta_frame(event: Event, *, offset: int, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "type": "delta",
         "schema_version": STREAM_SCHEMA_VERSION,
@@ -76,20 +94,46 @@ def delta_frame(event: Event, *, offset: int, snapshot: dict[str, Any] | None = 
         },
         "seq": int(offset or 0),
         "op": _delta_op(event),
-        "entity": {
-            "event": {
-                **to_jsonable(event),
-                "payload": payload,
-            },
-            "task_id": event.task_id,
-            "goal_id": event.task_id,
-            "run_id": event.run_id,
-            "persona_id": event.persona_id,
-            "session_id": event.session_id,
-            "correlation_id": payload.get("correlation_id") if isinstance(payload, dict) else None,
-        },
+        "entity": _delta_entity(event),
         "core": snapshot if snapshot is not None else build_snapshot(),
     }
+
+
+def delta_batch_frame(
+    batch: list[tuple[int, Event]], *, snapshot: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """One delta frame for a whole drained event batch (transport plan W1).
+
+    The old loop shipped one full ``build_snapshot()`` core PER EVENT — a
+    ~9MB rebuild + serialize per append, measured live 2026-07-16 — which is
+    why a 30-event burst cost thirty rebuilds on this side and thirty full
+    decodes on the launcher side. This frame carries the SAME core exactly
+    once for the batch.
+
+    Shape is strictly additive over :func:`delta_frame` (schema_version stays
+    1; pinned by ``tests/fixtures/stream_frames/delta_batch.json`` and the
+    launcher's byte-identical golden): ``watermark``/``seq`` sit at the FINAL
+    offset so the launcher's ``>``-only sequence gate applies the batch once;
+    ``entity``/``op`` remain the LAST event for pre-batch consumers; the new
+    ``events`` list carries every batched entity and ``coalesced_count`` its
+    length. The launcher reads only type/watermark/identity_map/core, so the
+    additions must stay additions.
+    """
+
+    if not batch:
+        raise ValueError("delta_batch_frame requires a non-empty batch")
+    last_offset, last_event = batch[-1]
+    core = snapshot if snapshot is not None else build_snapshot()
+    frame = delta_frame(last_event, offset=last_offset, snapshot=core)
+    frame["events"] = [_delta_entity(event) for _, event in batch]
+    frame["coalesced_count"] = len(batch)
+    return frame
+
+
+#: Upper bound on events carried by one batched delta frame. Bounds both the
+#: frame's `events` list and the drain's in-memory buffer; a longer backlog
+#: emits multiple batch frames, each with its own (single) core.
+_DELTA_BATCH_CAP = 256
 
 
 def stream_frames(
@@ -97,6 +141,7 @@ def stream_frames(
     event_log: EventLog | None = None,
     poll_interval_seconds: float = 0.25,
     heartbeat_interval_seconds: float = 5.0,
+    delta_debounce_seconds: float = 0.2,
     max_frames: int | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield hydrate, delta, and heartbeat frames for ``hermes harness stream``.
@@ -128,17 +173,46 @@ def stream_frames(
 
     last_heartbeat = time.monotonic()
     while True:
-        # Fingerprint BEFORE reading events. A delta batch rebuilds a full
-        # snapshot per event (slow); a memo taken AFTER the batch would absorb
-        # any event-less write that raced the batch — swallowing forever the
-        # exact violations the watchdog exists to catch (found by live proof).
-        # Taken before the read, a racing write always lands in a LATER
-        # iteration's candidate and reconciles at the next heartbeat.
+        # Fingerprint BEFORE reading events. A delta batch rebuilds one full
+        # snapshot per BATCH (W1 coalescing — it was per event, ~9MB a time);
+        # a memo taken AFTER the batch would absorb any event-less write that
+        # raced the batch — swallowing forever the exact violations the
+        # watchdog exists to catch (found by live proof). Taken before the
+        # read, a racing write always lands in a LATER iteration's candidate
+        # and reconciles at the next heartbeat.
         fingerprint_candidate = _scope_fingerprint()
         emitted_delta = False
+        pending: list[tuple[int, Event]] = []
         for next_offset, event in log.iter_from_offset(offset):
             offset = int(next_offset)
-            yield delta_frame(event, offset=offset)
+            pending.append((offset, event))
+            if len(pending) >= _DELTA_BATCH_CAP:
+                yield delta_batch_frame(pending)
+                pending = []
+                emitted += 1
+                emitted_delta = True
+                last_heartbeat = time.monotonic()
+                if max_frames is not None and emitted >= max_frames:
+                    return
+        if pending and delta_debounce_seconds > 0:
+            # Settle window: an event burst usually lands over a few tens of
+            # milliseconds — one bounded sleep lets the tail join the SAME
+            # frame instead of costing a full core each. 200ms sits well
+            # inside the declared ≤2×heartbeat staleness SLO.
+            time.sleep(delta_debounce_seconds)
+            for next_offset, event in log.iter_from_offset(offset):
+                offset = int(next_offset)
+                pending.append((offset, event))
+                if len(pending) >= _DELTA_BATCH_CAP:
+                    yield delta_batch_frame(pending)
+                    pending = []
+                    emitted += 1
+                    emitted_delta = True
+                    last_heartbeat = time.monotonic()
+                    if max_frames is not None and emitted >= max_frames:
+                        return
+        if pending:
+            yield delta_batch_frame(pending)
             emitted += 1
             emitted_delta = True
             last_heartbeat = time.monotonic()
