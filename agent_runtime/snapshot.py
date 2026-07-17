@@ -1428,9 +1428,45 @@ def _event_summary_warnings(events) -> list[dict]:
     return warnings
 
 
+_STALE_SNAPSHOT_TMP_AGE_SECONDS = 3600.0
+
+
+def _sweep_stale_snapshot_tmp_files() -> None:
+    """Remove orphaned ``.snapshot_*.tmp`` files beside the boot cache.
+
+    ``atomic_json_write`` stages via ``tempfile.mkstemp(prefix=".snapshot_",
+    suffix=".tmp")`` in the store root; a crash between staging and
+    ``os.replace`` strands the temp file forever (live root had two, one 3MB).
+    Swept only at the next boot-cache write, age-gated so an in-flight writer's
+    fresh temp file is never touched. Best-effort: a locked/vanished file is
+    skipped, never raised.
+    """
+
+    try:
+        cutoff = time.time() - _STALE_SNAPSHOT_TMP_AGE_SECONDS
+        for tmp in paths.snapshot_path().parent.glob(".snapshot_*.tmp"):
+            try:
+                if tmp.stat().st_mtime < cutoff:
+                    tmp.unlink()
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
 def write_snapshot(snapshot: dict | None = None) -> dict:
     snapshot = snapshot or build_snapshot()
-    atomic_json_write(paths.snapshot_path(), to_jsonable(snapshot), indent=2, sort_keys=True)
+    # Compact JSON: the boot cache is machine-read only (launcher boot decode +
+    # audits), and indent=2 inflated the 9MB-era cache by ~30%. sort_keys stays
+    # (stable diffs / byte-reproducible caches).
+    atomic_json_write(
+        paths.snapshot_path(),
+        to_jsonable(snapshot),
+        indent=None,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    _sweep_stale_snapshot_tmp_files()
     cfg = load_agent_runtime_config()
     read_model_cfg = getattr(cfg, "read_model", None)
     if bool(getattr(read_model_cfg, "enabled", False)):
