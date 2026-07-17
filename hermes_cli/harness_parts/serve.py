@@ -191,6 +191,19 @@ def _runtime_state_fingerprint() -> tuple | None:
         _stat(root / name)
     for name in _FINGERPRINT_STORE_DIRS:
         _stat(root / name)
+    # Event-log rotation (C6a) moves appends off the static "events.jsonl" onto a
+    # rotating live slice, so the _FINGERPRINT_ROOT_FILES entry above freezes once
+    # the log rotates. Stat the manifest (flips on each rotation) AND the resolved
+    # live slice (flips on every append) so a cached snapshot never serves stale
+    # frames after rotation. Pre-rotation the live slice IS events.jsonl (a
+    # harmless duplicate stat); the manifest is absent (a stable -1/-1 signal).
+    try:
+        from agent_runtime import event_rotation as _event_rotation
+
+        _stat(_event_rotation.manifest_path())
+        _stat(_event_rotation.live_path())
+    except Exception:
+        parts.append(("event_log_rotation", -1, -1))
     # Mission Board tree is nested two levels deep (boards/<id>/cards/<card>.json),
     # so a top-level dir stat alone misses card adds/moves/in-place edits and
     # pull-materialized cards. Every board mutation also advances events.jsonl

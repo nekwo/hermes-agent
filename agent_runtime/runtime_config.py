@@ -110,6 +110,24 @@ class ReadModelConfig:
 
 
 @dataclass(slots=True)
+class EventLogConfig:
+    """Durable-log hygiene (C6a): size-gated, offset-safe rotation of the
+    append-only ``events.jsonl``.
+
+    ``rotation_cap_bytes`` is the size at/above which the live slice is sealed
+    into an archive slice (``events_archive/events.<start_offset>.jsonl``) and a
+    fresh live slice is opened. Logical (cross-slice, monotonic) offsets are
+    preserved via the slice manifest, so byte-offset tailers and the checkpoint
+    ``event_offset`` watermark keep resolving unchanged. ``0`` disables rotation
+    (the live file grows unbounded, i.e. legacy behavior). The env override
+    ``HERMES_EVENT_LOG_ROTATION_CAP_BYTES`` wins over this field when set
+    (operator/test knob); no config is required for the 16 MiB default.
+    """
+
+    rotation_cap_bytes: int = 16 * 1024 * 1024
+
+
+@dataclass(slots=True)
 class SwarmConfig:
     enabled: bool = False
     requires_certification: bool = True
@@ -184,6 +202,7 @@ class RuntimeConfig:
     repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)
     read_model: ReadModelConfig = field(default_factory=ReadModelConfig)
+    event_log: EventLogConfig = field(default_factory=EventLogConfig)
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
     supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)

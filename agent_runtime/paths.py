@@ -183,7 +183,34 @@ def incidents_dir() -> Path:
 
 
 def events_path() -> Path:
+    """The pristine/base live event-log file.
+
+    Semantics (C6a event-log rotation): before any rotation this IS the live
+    file the log appends to; after the first rotation it becomes the sealed
+    base-offset (``[0, …)``) slice while appends move to a fresh live file under
+    :func:`events_archive_dir`. The current live file and the ordered slice set
+    are resolved through ``agent_runtime.event_rotation`` (manifest-backed), so
+    prefer those helpers over reading this path directly when you need the whole
+    log. This path stays the manifest's canonical base-0 slice name.
+    """
     return store_root() / "events.jsonl"
+
+
+def events_manifest_path() -> Path:
+    """Slice manifest for the rotated event log (C6a).
+
+    Absent until the first rotation — its absence is the "pristine, single live
+    file" state, in which ``events_path()`` is the whole log at logical offset 0.
+    """
+    return store_root() / "events_manifest.json"
+
+
+def events_archive_dir() -> Path:
+    """Rotated event-log slices (C6a): archive-never-delete, offset-load-bearing.
+
+    Distinct from :func:`deleted_archive_dir` (per-task compaction batches).
+    """
+    return store_root() / "events_archive"
 
 
 def lock_dir() -> Path:

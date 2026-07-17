@@ -13,7 +13,7 @@ from hermes_cli.profiles import profile_exists
 from .personas import DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, MissionPlanConfig, NormalWorkerFlowConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
 
 @dataclass(slots=True)
 class AgentRuntimeConfig(RuntimeConfig):
@@ -98,6 +98,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     repo_bundle_routing = _repo_bundle_routing_config(raw.get("repo_bundle_routing") or {})
     simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
     read_model = _read_model_config(raw.get("read_model") or {})
+    event_log = _event_log_config(raw.get("event_log") or {})
     swarm = _swarm_config(raw.get("swarm") or {})
     supervision = _supervision_config(raw.get("supervision") or {})
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
@@ -153,6 +154,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         repo_bundle_routing=repo_bundle_routing,
         simplified_agent_contract=simplified_agent_contract,
         read_model=read_model,
+        event_log=event_log,
         swarm=swarm,
         supervision=supervision,
         coordinator_permissions=coordinator_permissions,
@@ -528,6 +530,21 @@ def _read_model_config(raw: dict[str, Any]) -> ReadModelConfig:
         db_filename=filename,
         delta_patches=bool(raw.get("delta_patches", defaults.delta_patches)),
     )
+
+
+def _event_log_config(raw: dict[str, Any]) -> EventLogConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = EventLogConfig()
+    cap = raw.get("rotation_cap_bytes", defaults.rotation_cap_bytes)
+    try:
+        cap_int = int(cap)
+    except (TypeError, ValueError):
+        cap_int = defaults.rotation_cap_bytes
+    # Negative is meaningless; clamp to 0 (rotation disabled). 0 is a valid
+    # explicit "never rotate" (legacy unbounded live file).
+    if cap_int < 0:
+        cap_int = 0
+    return EventLogConfig(rotation_cap_bytes=cap_int)
 
 
 def _swarm_config(raw: dict[str, Any]) -> SwarmConfig:

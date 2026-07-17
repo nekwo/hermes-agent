@@ -18,13 +18,12 @@ See `Launcher_Brain/20 — Active Initiatives/mission-control-snapshot-architect
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
 from hermes_time import now
 
-from . import paths
+from . import event_rotation, paths
 
 PARITY_ENVELOPE_VERSION = 1
 
@@ -114,15 +113,17 @@ class ProjectionAccountant:
 def events_watermark(*, last_event_ts: Any = None) -> dict[str, Any]:
     """Source-position marker for the append-only event log.
 
-    ``event_offset`` is the file byte size — the cursor a streaming tailer would
-    resume from (S1) — read cheaply via ``stat`` without scanning the 45MB log.
-    ``last_event_ts`` is passed in by the caller (which has already tailed the
-    log for the snapshot) so this stays O(1).
+    ``event_offset`` is the log's total byte size — the cursor a streaming tailer
+    would resume from (S1) — read cheaply via ``stat`` without scanning the log.
+    Under rotation (C6a) that is the LOGICAL tail (live base offset + live slice
+    size), spanning sealed slices, so ``iter_from_offset(event_offset)`` still
+    resolves to "nothing past the tail". Equals ``getsize(events.jsonl)`` in the
+    pristine (pre-rotation) state. ``last_event_ts`` is passed in by the caller
+    (which has already tailed the log for the snapshot) so this stays O(1).
     """
 
-    offset = 0
     try:
-        offset = os.path.getsize(paths.events_path())
+        offset = event_rotation.log_end_offset()
     except OSError:
         offset = 0
     return {"event_offset": offset, "last_event_ts": last_event_ts, "captured_at": now()}
