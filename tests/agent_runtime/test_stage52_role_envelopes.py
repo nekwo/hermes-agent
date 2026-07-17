@@ -608,7 +608,9 @@ def test_context_hud_injects_task_list_after_checklist_exists():
     assert "valid_item_ids" in ctx.mission_hud["stage_task_list"]
 
 
-def test_archive_preserves_role_state_evidence(isolate_agent_runtime_root):
+def test_archive_preserves_role_state_evidence(isolate_agent_runtime_root, history_in_frame_config):
+    # Asserts the FULL pre-S2 in-frame archived_tasks projection (kill-switch
+    # shape) — the S2 eviction itself is covered by the S2 goldens.
     tasks = TaskStore()
     task = _task("task_archive", state=TaskState.DONE)
     tasks.create(task)
