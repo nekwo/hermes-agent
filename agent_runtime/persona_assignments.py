@@ -779,6 +779,7 @@ class PersonaInstanceStore:
                 # row is a REMOVE the launcher deletes (never a stale live agent).
                 # Dark by default (read_model.delta_patches off).
                 emit_persona_instance_remove(self.event_log, instance, reason=reason)
+                self._archive_office_placements(instance)
         remaining = self.list_for_task(task_id, goal_id=goal_id)
         return {
             "task_id": safe_optional_token(task_id),
@@ -790,6 +791,19 @@ class PersonaInstanceStore:
             "skipped_active_count": len(skipped_active),
             "remaining_count": len(remaining),
         }
+
+    def _archive_office_placements(self, instance) -> None:
+        """Mission Office prune-lane hook (office plan §4.3): a reaped instance
+        must not leave a phantom desk file that re-materializes the agent —
+        and the fix lives HERE, never in a launcher-side filter (the
+        orphan-tombstone precedent). Best-effort: office archival never fails
+        the reap."""
+        try:
+            from .office_store import OfficeStore
+
+            OfficeStore(event_log=self.event_log).archive_actors_for_instance(instance.id, reason="instance_reaped")
+        except Exception:
+            pass
 
     def sweep_orphaned_task_bound_instances(self, *, reason: str = "persona instance janitor") -> dict[str, Any]:
         """Reap stale task-bound instances whose owner is terminal or gone.
@@ -823,6 +837,7 @@ class PersonaInstanceStore:
                 )
                 # S7-A producer: janitor reap also removes the keyed row.
                 emit_persona_instance_remove(self.event_log, instance, reason=reason)
+                self._archive_office_placements(instance)
         after = [instance for instance in self.list_all() if instance.mode == "task_bound"]
         return {
             "before_task_bound_count": len(before),

@@ -14,6 +14,7 @@ from utils import atomic_json_write
 
 from . import paths
 from .board_store import BoardStore
+from .office_store import OfficeStore
 from .blueprints.runs import BlueprintRunStore, blueprint_run_summary
 from .blueprints.store import BlueprintStore, blueprint_summary
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
@@ -614,6 +615,14 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             _boards_summary(BoardStore(event_log=event_log), {getattr(w, "id", None) for w in workspaces}),
             "board_id",
         ),
+        # Mission Office projection: surface defs + bounded actor rows, keyed by
+        # workspace. Local reads only — conflict state comes from local sidecar
+        # files and the `unpublished` honesty flag from the local baseline
+        # sidecar; NEVER a git call in the snapshot path.
+        "offices": _keyed(
+            _offices_summary(OfficeStore(event_log=event_log), workspaces),
+            "workspace_id",
+        ),
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
@@ -805,7 +814,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # (typed ``*_ref`` / ``detail_ref`` / ``evicted`` markers), never a silent
         # absence. S2/S3/S4 shape unchanged. Launcher pin
         # (kSupportedMissionContractVersion) moves in lockstep.
-        "contract_version": 42,
+        "contract_version": 43,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
@@ -996,12 +1005,128 @@ def _board_parity_warnings(data) -> list[dict]:
     return warnings
 
 
+MAX_OFFICE_ACTORS_PROJECTED = 200
+
+
+def _office_actor_summary_row(actor, *, unpublished: bool | None) -> dict:
+    row = {
+        "actor_key": actor.actor_key,
+        "persona_id": actor.persona_id,
+        "persona_instance_id": actor.persona_instance_id,
+        "backing_profile": actor.backing_profile,
+        "items": [
+            {
+                "item_id": item.item_id,
+                "persona_id": item.persona_id,
+                "kind": item.kind,
+                "position": list(item.position),
+                "folder": item.folder,
+                "display_name": item.display_name,
+                "pet_slug": item.pet_slug,
+                "scale": item.scale,
+            }
+            for item in actor.items
+        ],
+        "revision": actor.revision,
+        "updated_at": to_jsonable(actor.updated_at),
+        "updated_by": actor.updated_by,
+    }
+    if unpublished is not None:
+        row["unpublished"] = unpublished
+    return row
+
+
+def _offices_summary(office_store, workspaces) -> list[dict]:
+    """Mission Office projection rows, keyed by workspace_id. Local reads only:
+    conflict state from local sidecar files, ``unpublished`` from the local
+    realm-sync baseline sidecar (a pure file read — Decision 7 posture)."""
+
+    from .office_sync import read_office_baseline
+
+    workspace_ids = {getattr(w, "id", None) for w in workspaces}
+    realm_by_workspace = {getattr(w, "id", None): getattr(w, "realm_id", None) for w in workspaces}
+    baselines: dict[str, dict[str, str]] = {}
+    offices: list[dict] = []
+    for workspace_token in office_store.list_workspaces():
+        try:
+            surface = office_store.get_surface(workspace_token)
+        except Exception:
+            continue
+        actors = office_store.list_actors(workspace_token)
+        projected = actors[:MAX_OFFICE_ACTORS_PROJECTED]
+        realm_id = realm_by_workspace.get(surface.workspace_id)
+        baseline: dict[str, str] | None = None
+        if realm_id:
+            if realm_id not in baselines:
+                try:
+                    baselines[realm_id] = read_office_baseline(realm_id)
+                except Exception:
+                    baselines[realm_id] = {}
+            baseline = baselines[realm_id]
+
+        def _actor_unpublished(actor) -> bool | None:
+            # Publication honesty is only meaningful for realm-bound workspaces.
+            if baseline is None:
+                return None
+            from .office_models import office_content_hash
+
+            return baseline.get(f"{surface.workspace_id}:actor:{actor.actor_key}") != office_content_hash(actor)
+
+        offices.append(
+            {
+                "workspace_id": surface.workspace_id,
+                "folders": list(surface.folders),
+                "actors": [_actor_summary for _actor_summary in (_office_actor_summary_row(a, unpublished=_actor_unpublished(a)) for a in projected)],
+                "actor_count": len(actors),
+                "actors_truncated": max(0, len(actors) - len(projected)),
+                "conflict_actor_keys": office_store.conflict_actor_keys(workspace_token),
+                "archived_actor_keys": list(surface.archived_actor_keys),
+                "revision": surface.revision,
+                "updated_at": to_jsonable(surface.updated_at),
+                # A surface whose workspace no longer resolves is accounted,
+                # never silently hidden — parity warning below.
+                "orphaned": surface.workspace_id not in workspace_ids,
+            }
+        )
+    return offices
+
+
+def _office_parity_warnings(data) -> list[dict]:
+    warnings: list[dict] = []
+    for office in _rows(data.get("offices")):
+        if office.get("orphaned"):
+            warnings.append(
+                {
+                    "code": "orphaned_office",
+                    "entity_id": office.get("workspace_id"),
+                    "detail": (
+                        f"office surface points at workspace '{office.get('workspace_id')}' "
+                        "which no longer resolves"
+                    ),
+                }
+            )
+        for actor_key in office.get("conflict_actor_keys") or []:
+            warnings.append(
+                {
+                    "code": "office_actor_conflict",
+                    "entity_id": actor_key,
+                    "workspace_id": office.get("workspace_id"),
+                    "detail": (
+                        f"office actor '{actor_key}' has an unresolved realm-sync conflict; "
+                        "resolve with `harness office resolve-conflict --actor <key> --take local|remote`"
+                    ),
+                }
+            )
+    return warnings
+
+
 def _parity_warnings(data) -> list[dict]:
     """Snapshot-level self-checks that flag likely UI/harness divergence."""
 
-    # Board warnings do not depend on the persona-instance runtime, so they are
-    # computed before the runtime-disabled early return below.
+    # Board/office warnings do not depend on the persona-instance runtime, so
+    # they are computed before the runtime-disabled early return below.
     warnings: list[dict] = _board_parity_warnings(data)
+    warnings.extend(_office_parity_warnings(data))
     runtime = data.get("persona_instance_runtime") or {}
     if not runtime.get("enabled"):
         warnings.append(

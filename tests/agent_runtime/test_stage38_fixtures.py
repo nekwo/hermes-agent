@@ -98,7 +98,7 @@ def test_stage38_runtime_snapshot_matches_fixture_contract_shape(isolate_agent_r
 
     # Envelope: real parity carries every Stage 38 field the Launcher consumes.
     parity = snapshot["parity"]
-    assert parity["contract_version"] == 42
+    assert parity["contract_version"] == 43
     assert {"runtime_root", "profile", "capabilities", "freshness"} <= set(parity.keys())
     assert row["proof_gate_state"]["gate_state"] in {
         "not_required", "incomplete", "running", "blocked", "failed", "passed", "waived",

@@ -30,7 +30,7 @@ per-field allowlist, no re-derivation. So coverage is defined at the OP level:
   run traces, the ``state.reconciled`` watchdog, ``persona_assignment.*`` (the
   ``persona_assignments`` frame section is a ``{active, recent}`` projection, not
   an id-keyed table the launcher can fold a remove into), ``task.*`` domain
-  events, board/flow writes, and — the known uncovered case the plan names —
+  events, board/flow/office writes, and — the known uncovered case the plan names —
   ``planning.py`` chokepoint-less mutations (no ``state.patched`` at all).
 
 Conservative-by-construction: a single uncovered event in a batch demotes the
@@ -93,7 +93,7 @@ def event_is_patch_coverable(event: Any) -> bool:
     A ``state.patched`` is coverable iff foldable (upsert/remove, not refresh); a
     covered domain event is coverable because its fold state rides in the paired
     patch. Anything else (task/assignment domain events, run traces,
-    ``state.reconciled`` watchdog, board/flow writes, planning.py chokepoint-less
+    ``state.reconciled`` watchdog, board/flow/office writes, planning.py chokepoint-less
     mutations) is uncovered → the whole batch falls back to a full core."""
 
     event_type = getattr(event, "type", None)
