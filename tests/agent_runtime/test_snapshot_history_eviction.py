@@ -1,9 +1,10 @@
 """S2 read-model goldens: history out of the live frame (operator move 6).
 
-Pins the eviction shape with the kill-switch OFF (default = evict) and ON
-(restore full-in-frame), the byte-budget drop, and the log-backed paged history
-queries that replace the evicted sections. Archive-never-delete is verified: the
-rows leave the FRAME, never the disk stores.
+Pins the eviction shape (S7-B RULING-0: the evicted pointer-stub shape is the
+ONLY shape — no kill-switch, no full-in-frame legacy branch), the byte-budget
+drop, and the log-backed paged history queries that replace the evicted
+sections. Archive-never-delete is verified: the rows leave the FRAME, never the
+disk stores.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import hermes_cli.harness as harness
 from agent_runtime.models import Incident, Task
 from agent_runtime.snapshot import (
     ARCHIVED_TASKS_REF_RECENT_CAP,
+    _archived_task_summaries,
     _open_incidents_frame,
     _persona_chat_history_frame,
     build_snapshot,
@@ -112,14 +114,6 @@ def test_archived_tasks_evicted_to_pointer_stub_by_default(isolate_agent_runtime
     assert "task history" in ref["fetch"]
 
 
-def test_archived_tasks_full_rows_when_flag_on(isolate_agent_runtime_root, history_in_frame_config):
-    _seed_archive_batch(isolate_agent_runtime_root, count=2)
-    snap = build_snapshot()
-    rows = snap["archived_tasks"]
-    assert isinstance(rows, list) and len(rows) == 2
-    assert {row["task_id"] for row in rows} == {"task_archived_0", "task_archived_1"}
-
-
 def test_archived_tasks_recent_ids_capped(isolate_agent_runtime_root):
     _seed_archive_batch(isolate_agent_runtime_root, count=ARCHIVED_TASKS_REF_RECENT_CAP + 5)
     snap = build_snapshot()
@@ -165,16 +159,6 @@ def test_incidents_open_only_and_history_ref(isolate_agent_runtime_root):
     assert paths.incident_path("inc_ancient").exists()
 
 
-def test_incidents_full_frame_when_flag_on(isolate_agent_runtime_root, history_in_frame_config):
-    store = IncidentStore()
-    _seed_incident(store, "inc_open")
-    _seed_incident(store, "inc_closed", closed_delta_hours=1)
-    snap = build_snapshot()
-    frame_ids = {row["incident_id"] for row in list(snap["incidents"].values())}
-    assert frame_ids == {"inc_open", "inc_closed"}
-    assert "incidents_history_ref" not in snap
-
-
 def test_open_incidents_summary_unaffected_by_eviction(isolate_agent_runtime_root):
     store = IncidentStore()
     _seed_incident(store, "inc_open_1")
@@ -193,10 +177,10 @@ def test_open_incidents_frame_helper_open_only():
         SimpleNamespace(closed_at=now()),
         SimpleNamespace(closed_at=None),
     ]
-    kept, evicted = _open_incidents_frame(incidents, evict=True)
+    # The helper always evicts closed incidents (RULING-0: open-only is the only
+    # shape) — two open kept, one closed evicted.
+    kept, evicted = _open_incidents_frame(incidents)
     assert len(kept) == 2 and evicted == 1
-    kept2, evicted2 = _open_incidents_frame(incidents, evict=False)
-    assert len(kept2) == 3 and evicted2 == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -219,7 +203,7 @@ def test_persona_chat_history_frame_strips_tail_keeps_anchors():
             "messages": [{"id": "m1", "role": "operator", "text": "hi"}],
         }
     ]
-    pointers = _persona_chat_history_frame(rows, evict=True)
+    pointers = _persona_chat_history_frame(rows)
     row = pointers[0]
     assert row["messages"] == []
     assert row["messages_evicted"] is True
@@ -228,59 +212,44 @@ def test_persona_chat_history_frame_strips_tail_keeps_anchors():
         assert row[key] == rows[0][key]
 
 
-def test_persona_chat_history_frame_noop_when_flag_on():
-    rows = [{"session_id": "s1", "messages": [{"id": "m1"}]}]
-    assert _persona_chat_history_frame(rows, evict=False) is rows
-
-
 # --------------------------------------------------------------------------- #
 # byte budget — evicting drops real bytes; the stub is tiny
 # --------------------------------------------------------------------------- #
 
 
-def test_history_eviction_drops_bytes(isolate_agent_runtime_root, monkeypatch):
+def test_history_eviction_drops_bytes(isolate_agent_runtime_root):
     # Seed a heavy archive (big descriptions) + many closed/ancient incidents.
+    from agent_runtime.serde import to_jsonable as _jsonable
+
     big = "D" * 30_000
     _seed_archive_batch(isolate_agent_runtime_root, count=10, description=big)
     store = IncidentStore()
     for index in range(40):
         _seed_incident(store, f"inc_old_{index}", closed_delta_hours=100)
 
-    evicted = build_snapshot()  # default: evict
+    # The only shape: history evicted (S7-B RULING-0 — no in-frame legacy build to
+    # A/B against). The eviction win is measured against the WEIGHT of the rows
+    # the pointer replaced, read straight from the projection the pointer
+    # references (the same rows `harness task history` serves).
+    snap = build_snapshot()
 
-    # In-frame build via the kill-switch.
-    from agent_runtime import snapshot as snapshot_module
-    from agent_runtime.config import load_agent_runtime_config as _real_load
+    archived_stub = snapshot_section_bytes(snap, "archived_tasks")
+    assert archived_stub < 1_000  # a pointer stub, not the row array
+    assert snap["archived_tasks"]["evicted"] is True
+    assert snap["archived_tasks"]["count"] == 10
 
-    def _loader(*args, **kwargs):
-        cfg = _real_load(*args, **kwargs)
-        cfg.read_model.history_in_frame = True
-        return cfg
-
-    monkeypatch.setattr(snapshot_module, "load_agent_runtime_config", _loader)
-    in_frame = build_snapshot()
-
-    archived_evicted = snapshot_section_bytes(evicted, "archived_tasks")
-    archived_full = snapshot_section_bytes(in_frame, "archived_tasks")
-    incidents_evicted = snapshot_section_bytes(evicted, "incidents")
-    incidents_full = snapshot_section_bytes(in_frame, "incidents")
-
-    # The stub is tiny; the full section is large.
-    assert archived_evicted < 1_000
+    full_rows = _archived_task_summaries()
+    archived_full = len(
+        json.dumps(_jsonable(full_rows), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
     assert archived_full > 250_000  # 10 * 30KB descriptions
-    # Windowed incidents section is much smaller than the full one.
-    assert incidents_evicted < incidents_full
+    # The bytes the stub keeps out of every steady-state frame.
+    assert archived_full - archived_stub >= 250_000
 
-    def _frame_bytes(snap):
-        return len(
-            json.dumps(_jsonable(snap), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        )
-
-    from agent_runtime.serde import to_jsonable as _jsonable
-
-    drop = _frame_bytes(in_frame) - _frame_bytes(evicted)
-    # The whole-frame drop clears the seeded archived-task payload alone.
-    assert drop >= 250_000
+    # Every closed incident left the frame; only the typed history ref accounts
+    # for them (open-only retention). The in-frame incidents map is empty here.
+    assert snap["incidents"] == {}
+    assert snap["incidents_history_ref"]["count"] == 40
 
 
 # --------------------------------------------------------------------------- #

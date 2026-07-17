@@ -9,7 +9,7 @@ from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, M
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore, PersonaInstanceStore
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
-from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, _parity_warnings, build_snapshot, write_snapshot
+from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, _archived_task_summaries, _parity_warnings, build_snapshot, write_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
@@ -281,7 +281,7 @@ def test_snapshot_projects_blueprint_run_records(isolate_agent_runtime_root):
     assert any(item["id"] == "one_agent_smoke" for item in snap["blueprints"])
 
 
-def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_root, history_in_frame_config):
+def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_root):
     n = now()
     task = Task(
         id="stage38",
@@ -1285,7 +1285,7 @@ def test_snapshot_exposes_canonical_persona_instance_ids(monkeypatch, isolate_ag
     assert by_id[created.id]["lifecycle_mode"] == "free_floating"
 
 
-def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root, history_in_frame_config):
+def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root):
     archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
     (archive / "tasks").mkdir(parents=True)
     atomic_json_write(
@@ -1297,9 +1297,11 @@ def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root, histor
         {"id": "task_archived", "title": "Archived mission from disk", "state": "done"},
     )
 
-    snap = build_snapshot()
-
-    archived = snap["archived_tasks"][0]
+    # S7-B: the frame carries an archived_tasks POINTER stub; the full archived
+    # rows are read from the projection it references (the same rows
+    # `harness task history` serves).
+    assert "task_archived" in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived = _archived_task_summaries()[0]
     assert archived["task_id"] == "task_archived"
     assert archived["title"] == "Archived mission from disk"
     assert archived["state"] == "archived"
@@ -1309,7 +1311,7 @@ def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root, histor
     assert archived["archived_at"] == "2026-06-01T01:02:03Z"
 
 
-def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isolate_agent_runtime_root, history_in_frame_config):
+def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isolate_agent_runtime_root):
     archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
     (archive / "tasks").mkdir(parents=True)
     (archive / "runs").mkdir(parents=True)
@@ -1406,9 +1408,10 @@ def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isola
         encoding="utf-8",
     )
 
-    snap = build_snapshot()
-
-    archived = snap["archived_tasks"][0]
+    # S7-B: read the full archived row from the projection the frame pointer
+    # references (the frame ships the pointer stub, not the rows).
+    assert "task_archived" in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived = _archived_task_summaries()[0]
     assert archived["runs"][0]["run_id"] == "run_slot"
     assert archived["runs"][0]["decision_summary"] == "Implemented archived transcript mapping."
     assert archived["runs"][0]["decision_rationale"] == "Tests are required before QA handoff."
@@ -1559,7 +1562,7 @@ def test_snapshot_projects_archived_goal_as_operator_channel(monkeypatch, isolat
     assert "archived operator channel should remain recallable" in transcript
 
 
-def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root, history_in_frame_config):
+def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root):
     archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
     (archive / "tasks").mkdir(parents=True)
     (archive / "runs").mkdir(parents=True)
@@ -1603,7 +1606,10 @@ def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(i
         },
     )
 
-    archived = build_snapshot()["archived_tasks"][0]
+    # S7-B: the full archived row comes from the projection the frame pointer
+    # references, not the in-frame section (which is a pointer stub now).
+    assert "task_archived" in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived = _archived_task_summaries()[0]
     roles = {stream["persona_id"]: stream for stream in archived["role_streams"]}
 
     assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
@@ -1616,7 +1622,7 @@ def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(i
     assert roles["qa"]["events"][0]["payload"]["display_title"] == "QA Agent archived"
 
 
-def test_snapshot_masks_secret_assignments_but_keeps_pathful_decision_text(isolate_agent_runtime_root, history_in_frame_config):
+def test_snapshot_masks_secret_assignments_but_keeps_pathful_decision_text(isolate_agent_runtime_root):
     """Decision text is operator-grade: paths survive verbatim; only
     secret-shaped assignments are masked, in place, without nulling the rest
     of the rationale (the old behavior dropped the whole text and starved the
@@ -1643,7 +1649,10 @@ def test_snapshot_masks_secret_assignments_but_keeps_pathful_decision_text(isola
         },
     )
 
-    archived = build_snapshot()["archived_tasks"][0]
+    # S7-B: the frame ships a pointer stub; read the full archived row from the
+    # projection it references.
+    assert "task_archived" in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived = _archived_task_summaries()[0]
     run = archived["runs"][0]
 
     # Paths are content on the operator surface — they must survive.

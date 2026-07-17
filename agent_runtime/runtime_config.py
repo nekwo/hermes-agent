@@ -93,29 +93,20 @@ class ReadModelConfig:
     enabled: bool = False
     serve_snapshot_from_db: bool = True
     db_filename: str = "read_model.db"
-    # S2 read-model kill-switch. When False (default), history sections
-    # (``archived_tasks``, closed/ancient ``incidents``, persona-chat message
-    # tails) are EVICTED from the steady-state frame and served via paged
-    # on-demand queries; the frame carries typed pointer stubs in their place.
-    # Flip True to restore the old full-in-frame shape for one release so a
-    # surface that regressed can be caught against the previous shape.
-    history_in_frame: bool = False
     # S6 producer kill-switch. When False (default), store chokepoints emit NO
     # ``state.patched`` field-patch entries — the producer lane is dark until the
     # launcher fold exists (the consumer + stream wire land after S4). Flip True
     # to have steer/profile/task-transition/incident-close chokepoints append a
     # ``state.patched`` EventLog entry carrying the field-level patch. Log-only:
     # no stream/wire change rides this flag in S6.
+    #
+    # NOTE (S7-B RULING-0 COMPAT STRIP, 2026-07-16): the S2 ``history_in_frame``
+    # and S3 ``inline_prompt_payloads`` kill-switches were removed here — the
+    # evicted/hoisted read-model shape is the ONLY shape (operator ruling: "no
+    # backward-shape support; makes things stale"). Rollback = ``git revert`` of
+    # the landing, not a runtime flag flip. ``delta_patches`` stays: it gates the
+    # in-progress S6 producer lane, not a legacy-emission fallback.
     delta_patches: bool = False
-    # S3 read-model kill-switch. When False (default), the duplicated skills
-    # catalogs (``available_skills`` / ``skills_catalog`` / ``accessible_skills``
-    # / ``skills``) are HOISTED out of every ``chat_contexts`` row and stored
-    # once, content-addressed, under ``prompt_observability.skills_catalogs``
-    # (rows carry ``available_skills_ref`` / ``accessible_skills_ref`` hashes),
-    # and the heavy per-turn ``final_model_input`` debug payload is EVICTED from
-    # the frame to a typed stub (the full row stays on disk). Flip True to
-    # restore the old inline payloads for one release for A/B parity.
-    inline_prompt_payloads: bool = False
 
 
 @dataclass(slots=True)

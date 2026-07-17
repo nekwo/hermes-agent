@@ -1298,11 +1298,6 @@ def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_age
     import agent_runtime.snapshot as snapshot_module
 
     cfg = _assignment_config()
-    # This test asserts the FULL pre-S2 in-frame history rows (the kill-switch
-    # shape); the S2 eviction itself is covered by the S2 goldens. It pins its
-    # own config loader, so flip the flag on that cfg directly — the
-    # history_in_frame_config fixture would be overridden by this monkeypatch.
-    cfg.read_model.history_in_frame = True
     monkeypatch.setattr("agent_runtime.snapshot.load_agent_runtime_config", lambda: cfg)
     db = _FakeSessionDB(
         [
@@ -1341,46 +1336,30 @@ def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_age
 
     assert by_instance["personainst_dev"]["mode"] == "chat"
     assert by_instance["personainst_dev"]["session_id"] == "chat_old_123"
-    assert snapshot["persona_chat_history"] == [
-        {
-            "session_id": "chat_old_123",
-            "persona_id": "dev",
-            "persona_instance_id": "personainst_dev",
-            "kind": "chat",
-            "live_mission": False,
-            "title": "Launcher Dev operator channel",
-            "last_message_preview": "Continue the old chat safely.",
-            "message_count": 3,
-            "created_at": "1970-01-01T00:01:40.000000Z",
-            "updated_at": "1970-01-01T00:03:20.000000Z",
-            "state": "open",
-            "redaction_status": "safe",
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_write_tokens": 0,
-            "cache_mode": "none",
-            "cache_ttl_seconds": None,
-            "cache_ttl_basis": None,
-            "messages": [
-                {
-                    "id": "msg_1",
-                    "role": "operator",
-                    "text": "Can you keep working from the old chat?",
-                    "timestamp": "2026-06-19T10:00:00.000000Z",
-                    "redaction_status": "safe",
-                },
-                {
-                    "id": "msg_2",
-                    "role": "agent",
-                    "text": "Yes. I will continue from this persona session.",
-                    "timestamp": "2026-06-19T10:01:00.000000Z",
-                    "redaction_status": "safe",
-                },
-            ],
-        }
-    ]
+    # S2/S7-B: the frame emits the open chat's history as a recency POINTER — the
+    # anchors (session/persona/instance ids, title, preview, count, timestamps,
+    # state) survive; the heavy message tail is evicted and fetched on demand via
+    # `harness persona chat history --session-id <id> --json` (the fetch path is
+    # covered by test_snapshot_history_eviction). The open chat is still emitted —
+    # as a pointer, never a silent absence.
+    history = snapshot["persona_chat_history"]
+    assert len(history) == 1
+    pointer = history[0]
+    assert pointer["session_id"] == "chat_old_123"
+    assert pointer["persona_id"] == "dev"
+    assert pointer["persona_instance_id"] == "personainst_dev"
+    assert pointer["kind"] == "chat"
+    assert pointer["live_mission"] is False
+    assert pointer["title"] == "Launcher Dev operator channel"
+    assert pointer["last_message_preview"] == "Continue the old chat safely."
+    assert pointer["message_count"] == 3
+    assert pointer["created_at"] == "1970-01-01T00:01:40.000000Z"
+    assert pointer["updated_at"] == "1970-01-01T00:03:20.000000Z"
+    assert pointer["state"] == "open"
+    assert pointer["redaction_status"] == "safe"
+    # The tail is gone from the frame; the eviction is flagged, never silent.
+    assert pointer["messages"] == []
+    assert pointer["messages_evicted"] is True
     assert PersonaAssignmentStore().list_all() == []
     assert RunStore().list_all() == []
 
@@ -3240,12 +3219,6 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
             )
         ],
         session_db=db,
-        # This test asserts the accessible-skills RESOLUTION content (the
-        # profile-snapshot fallback), not the frame shape. S3 hoists those
-        # lists to refs by default; restore the inline shape via the
-        # kill-switch so the content assertions below read the payload directly.
-        # The hoisted shape (+ ref→content parity) is covered by the S3 goldens.
-        inline_payloads=True,
     )
 
     context = snapshot["chat_contexts"][0]
@@ -3253,9 +3226,14 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
     assert context["chat_id"] == "persona_chat_personainst_profile_alice"
     assert context["chat_title"] == "Alice Agent chat"
     assert context["used_skills"] == []
-    assert [item["name"] for item in context["accessible_skills"]] == ["alice-profile-skill"]
-    assert context["skills"] == context["accessible_skills"]
-    assert context["accessible_skills"][0]["source"] == "profile_skills_snapshot"
+    # S7-B: accessible skills are hoisted to a content-addressed ref (the only
+    # shape). This test pins the accessible-skills RESOLUTION content (the
+    # profile-snapshot fallback), so resolve the ref against the catalog table.
+    # (`skills` aliased `accessible_skills`; both collapse to this one ref — the
+    # alias collapse is covered by the S3 hoist golden.)
+    accessible = snapshot["skills_catalogs"][context["accessible_skills_ref"]]
+    assert [item["name"] for item in accessible] == ["alice-profile-skill"]
+    assert accessible[0]["source"] == "profile_skills_snapshot"
 
 
 def test_persona_instance_close_cli_closes_only_free_floating_assignment(monkeypatch, isolate_agent_runtime_root):
@@ -3549,7 +3527,7 @@ def test_tick_reuses_task_flagged_diagnostic_assignment(isolate_agent_runtime_ro
 
 
 def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(
-    isolate_agent_runtime_root, history_in_frame_config
+    isolate_agent_runtime_root,
 ):
     cfg = _assignment_config()
     tasks = TaskStore()
@@ -3582,8 +3560,16 @@ def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(
     batch = Path(archived["archive_dir"])
     assert archived["archived_tasks"][0]["persona_assignment_ids"] == [assignment_id]
     assert (batch / "persona_assignments" / f"{assignment_id}.json").exists()
-    snapshot = build_snapshot()
-    archived_task = snapshot["archived_tasks"][0]
+    # S7-B: the frame carries an archived_tasks POINTER stub, not the rows. The
+    # preserved assignment/command-proof evidence is read from the projection the
+    # pointer references (the same rows `harness task history` serves) + the
+    # on-disk artifact asserted above — not the in-frame projection.
+    from agent_runtime.snapshot import _archived_task_summaries
+
+    assert task.id in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived_task = next(
+        row for row in _archived_task_summaries() if row["task_id"] == task.id
+    )
     assert archived_task["persona_assignment_ids"] == [assignment_id]
     assert archived_task["persona_streams"]["dev"]["assignment_ids"] == [assignment_id]
 

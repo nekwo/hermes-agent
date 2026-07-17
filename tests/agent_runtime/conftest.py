@@ -8,47 +8,10 @@ def isolate_agent_runtime_root(tmp_path, monkeypatch):
     yield root
 
 
-@pytest.fixture
-def history_in_frame_config(monkeypatch):
-    """Opt a snapshot test into the pre-S2 full-in-frame history shape.
-
-    S2 evicts ``archived_tasks`` / closed-incident bulk / persona-chat tails from
-    the steady-state frame by default (read_model.history_in_frame=False). Tests
-    that assert the FULL in-frame projection content flip the kill-switch on via
-    this fixture; the eviction itself is exercised by the S2 goldens.
-    """
-
-    from agent_runtime import snapshot as snapshot_module
-    from agent_runtime.config import load_agent_runtime_config as _real_load
-
-    def _loader(*args, **kwargs):
-        cfg = _real_load(*args, **kwargs)
-        cfg.read_model.history_in_frame = True
-        return cfg
-
-    monkeypatch.setattr(snapshot_module, "load_agent_runtime_config", _loader)
-    return _loader
-
-
-@pytest.fixture
-def inline_prompt_payloads_config(monkeypatch):
-    """Opt a snapshot test into the pre-S3 inline prompt-payload shape.
-
-    S3 hoists the duplicated skills catalogs out of every ``chat_contexts`` row
-    (rows carry ``*_ref`` hashes; the lists live once under
-    ``prompt_observability.skills_catalogs``) and evicts ``final_model_input``
-    from the frame by default (read_model.inline_prompt_payloads=False). Tests
-    that assert the FULL inline row content flip the kill-switch on via this
-    fixture; the hoist/eviction itself is exercised by the S3 goldens.
-    """
-
-    from agent_runtime import snapshot as snapshot_module
-    from agent_runtime.config import load_agent_runtime_config as _real_load
-
-    def _loader(*args, **kwargs):
-        cfg = _real_load(*args, **kwargs)
-        cfg.read_model.inline_prompt_payloads = True
-        return cfg
-
-    monkeypatch.setattr(snapshot_module, "load_agent_runtime_config", _loader)
-    return _loader
+# S7-B RULING-0 COMPAT STRIP (2026-07-16): the ``history_in_frame_config`` and
+# ``inline_prompt_payloads_config`` kill-switch fixtures were removed with the
+# flags they flipped. The evicted/hoisted read-model shape is the only shape;
+# tests that used to assert the legacy full-in-frame / inline content now
+# re-target the on-disk archive artifacts + the paged history / on-demand fetch
+# paths (see test_snapshot_history_eviction.py, test_snapshot.py,
+# test_persona_assignments.py, test_stage52_role_envelopes.py).

@@ -340,8 +340,9 @@ def _safe_persona_id(value: Any) -> str:
 # message count + fetch verb; the full payload stays on disk in the persisted
 # observability row (archive-never-delete) and is fetched on demand.
 #
-# Both are gated by ``read_model.inline_prompt_payloads`` (default False =
-# hoist/evict; True restores the inline payloads for one release for A/B parity).
+# S7-B RULING-0 COMPAT STRIP (2026-07-16): the ``read_model.inline_prompt_payloads``
+# kill-switch and its inline legacy branch were removed — the hoisted/evicted
+# shape is the ONLY shape. Rollback = ``git revert``, not a flag flip.
 # --------------------------------------------------------------------------- #
 
 #: Length of the content-hash refs (sha256 prefix). Short enough to be cheap on
@@ -484,7 +485,6 @@ def snapshot_prompt_observability(
     daemon: dict[str, Any] | None = None,
     realm: str | None = None,
     workspace: str | None = None,
-    inline_payloads: bool = False,
 ) -> dict[str, Any]:
     # Deferred import: context_builder pulls a large dependency graph, and this
     # module is imported very early. A function-local import keeps module load
@@ -570,13 +570,12 @@ def snapshot_prompt_observability(
                 )
                 break
     chat_contexts = _merge_latest_contexts(contexts, session_db=session_db)
-    # S3: hoist the duplicated skills catalogs to one content-addressed table
-    # and evict the heavy per-turn debug payload, unless the kill-switch restores
-    # the inline shape. ``skills_catalogs`` stays empty in inline mode.
+    # S3: hoist the duplicated skills catalogs to one content-addressed table and
+    # evict the heavy per-turn debug payload. This is the only shape (S7-B
+    # RULING-0: no inline legacy fallback).
     skills_catalogs: dict[str, Any] = {}
-    if not inline_payloads:
-        _hoist_skills_catalogs(chat_contexts, skills_catalogs)
-        _evict_final_model_input(chat_contexts)
+    _hoist_skills_catalogs(chat_contexts, skills_catalogs)
+    _evict_final_model_input(chat_contexts)
     return {
         "schema_version": 1,
         "default_flow": {
@@ -588,8 +587,7 @@ def snapshot_prompt_observability(
         "surface_prompt_default": "",
         "chat_contexts": chat_contexts,
         # One fact, one owner: the deduplicated skill lists live here once,
-        # keyed by content hash; rows reference them by ``*_ref``. Empty when
-        # inline payloads are restored (kill-switch on).
+        # keyed by content hash; rows reference them by ``*_ref``.
         "skills_catalogs": skills_catalogs,
     }
 

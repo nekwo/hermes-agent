@@ -90,41 +90,30 @@ STAGE_VERIFICATION_PATH_CAP = 6
 # history`` / ``goal history`` / ``incident list`` / ``persona chat history``).
 # Archive-never-delete: eviction removes rows from the FRAME, never from disk —
 # archived tasks stay in ``deleted_archive/``, closed incidents stay in
-# ``incidents/``. The kill-switch ``read_model.history_in_frame`` (default False
-# = evict) restores the old full-in-frame shape for one release.
+# ``incidents/``.
 # Incident retention is OPEN-ONLY (operator decision 2026-07-16, supersedes the
 # plan's closed-within-TTL recommendation): a closed incident is history the
 # moment it closes and is served exclusively by the paged history query. Only
 # OPEN incidents (live state) ship in the frame.
 # Newest-N archived-task ids carried on the ``archived_tasks`` pointer stub so a
 # consumer can name the most recent dead missions without shipping their rows.
+#
+# S7-B RULING-0 COMPAT STRIP (2026-07-16): the ``read_model.history_in_frame``
+# kill-switch and its full-in-frame legacy branches were removed here — the
+# evicted (pointer-stub) shape is the ONLY shape. Rollback = ``git revert``, not
+# a flag flip. The helpers below always evict.
 ARCHIVED_TASKS_REF_RECENT_CAP = 25
 
 
-def _history_in_frame(cfg) -> bool:
-    """Kill-switch read: True keeps the old full-in-frame history shape."""
+def _archived_tasks_frame(archived_tasks: list):
+    """The ``archived_tasks`` frame value: a typed pointer stub.
 
-    return bool(getattr(getattr(cfg, "read_model", None), "history_in_frame", False))
-
-
-def _inline_prompt_payloads(cfg) -> bool:
-    """Kill-switch read (S3): True keeps the old inline skills catalogs +
-    per-row ``final_model_input`` (no hoist, no eviction)."""
-
-    return bool(getattr(getattr(cfg, "read_model", None), "inline_prompt_payloads", False))
-
-
-def _archived_tasks_frame(archived_tasks: list, *, evict: bool):
-    """The ``archived_tasks`` frame value: the full rows, or a typed pointer stub.
-
-    Evicting replaces the 25-dead-row array (≈1.27 MB live) with a small honest
-    marker carrying the count + newest-N ids + the fetch verb — never a silent
-    absence. Full rows are fetched via ``harness task history <task_id> --json``
-    (which already reads archived batches).
+    Replaces the 25-dead-row array (≈1.27 MB live) with a small honest marker
+    carrying the count + newest-N ids + the fetch verb — never a silent absence.
+    Full rows are fetched via ``harness task history <task_id> --json`` (which
+    already reads archived batches).
     """
 
-    if not evict:
-        return archived_tasks
     recent_ids = [
         str(row.get("task_id"))
         for row in archived_tasks[:ARCHIVED_TASKS_REF_RECENT_CAP]
@@ -138,29 +127,27 @@ def _archived_tasks_frame(archived_tasks: list, *, evict: bool):
     }
 
 
-def _open_incidents_frame(incidents: list, *, evict: bool) -> tuple[list, int]:
-    """Split incidents into (in-frame rows, closed-evicted count).
+def _open_incidents_frame(incidents: list) -> tuple[list, int]:
+    """Split incidents into (in-frame open rows, closed-evicted count).
 
     Open incidents are live state and always in-frame. Closed incidents are
     history the moment they close (operator decision 2026-07-16: open-only, no
     TTL window) — evicted from the frame and served by the paged history query.
-    Not evicting keeps every row."""
+    """
 
-    if not evict:
-        return list(incidents), 0
     kept = [incident for incident in incidents if getattr(incident, "closed_at", None) is None]
     return kept, len(incidents) - len(kept)
 
 
-def _persona_chat_history_frame(rows: list, *, evict: bool) -> list:
-    """The ``persona_chat_history`` frame rows. Evicting keeps every recency
-    pointer (session id + last-message anchors + counts + timestamps) but drops
-    the heavy ``messages`` tail, flagging each row so a consumer distinguishes an
-    evicted tail from a genuinely empty chat. The tail is fetched per session via
+def _persona_chat_history_frame(rows: list) -> list:
+    """The ``persona_chat_history`` frame rows: recency pointers only.
+
+    Keeps every recency pointer (session id + last-message anchors + counts +
+    timestamps) but drops the heavy ``messages`` tail, flagging each row so a
+    consumer distinguishes an evicted tail from a genuinely empty chat. The tail
+    is fetched per session via
     ``harness persona chat history --session-id <id> --json``."""
 
-    if not evict:
-        return rows
     pointers: list = []
     for row in rows:
         if not isinstance(row, dict):
@@ -376,9 +363,9 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     cfg = load_agent_runtime_config()
-    # S2 read-model: evict history from the steady-state frame unless the
-    # kill-switch (read_model.history_in_frame) restores the old shape.
-    evict_history = not _history_in_frame(cfg)
+    # S2 read-model: history is always evicted from the steady-state frame and
+    # served via paged on-demand queries (S7-B RULING-0: no legacy full-in-frame
+    # shape; the pointer-stub shape is the only shape).
     # The background Mission Daemon was retired; execution is always operator/
     # goal-runner driven ("manual").
     execution_mode = "manual"
@@ -449,9 +436,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     # closed incident is history, evicted to the paged query. The full
     # ``incidents`` list still feeds summary/observability/dirty/tasks — only the
     # ``incidents`` frame key is filtered to open.
-    incident_frame_rows, incidents_evicted_count = _open_incidents_frame(
-        incidents, evict=evict_history
-    )
+    incident_frame_rows, incidents_evicted_count = _open_incidents_frame(incidents)
     # S4: the frame carries these as id-keyed maps (``_keyed`` below). The row
     # LISTS are still needed as an ordered input to the operator-channel
     # projection (``run_summaries`` feeds the goal-turn flow), so build them once
@@ -502,9 +487,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             daemon=None,
             realm=active_realm_name,
             workspace=active_workspace_name,
-            # S3: hoist duplicated skills catalogs + evict per-turn debug payload
-            # unless the kill-switch restores the inline shape.
-            inline_payloads=_inline_prompt_payloads(cfg),
         ),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
@@ -569,7 +551,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
-        "archived_tasks": _archived_tasks_frame(archived_tasks, evict=evict_history),
+        "archived_tasks": _archived_tasks_frame(archived_tasks),
         "agents": agent_summaries,
         "available_personas": available_personas,
         "blueprints": [blueprint_summary(bp) for bp in BlueprintStore().list()],
@@ -588,17 +570,16 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "proofs": [_proof_summary(p) for p in proofs],
         "self_tests": [self_test_summary(item) for item in self_tests],
     }
-    if evict_history:
-        # Honest accounting for the closed incidents evicted from the
-        # ``incidents`` section — a typed pointer, never a silent absence. Only
-        # OPEN incidents remain in ``incidents`` as live state; every closed one
-        # is history-only (open-only retention, operator decision 2026-07-16).
-        data["incidents_history_ref"] = {
-            "evicted": True,
-            "closed_evicted": True,
-            "count": incidents_evicted_count,
-            "fetch": "harness incident list --state closed --json",
-        }
+    # Honest accounting for the closed incidents evicted from the ``incidents``
+    # section — a typed pointer, never a silent absence. Only OPEN incidents
+    # remain in ``incidents`` as live state; every closed one is history-only
+    # (open-only retention, operator decision 2026-07-16).
+    data["incidents_history_ref"] = {
+        "evicted": True,
+        "closed_evicted": True,
+        "count": incidents_evicted_count,
+        "fetch": "harness incident list --state closed --json",
+    }
     if persona_instance_runtime_enabled(cfg):
         data["persona_instance_runtime"] = {
             "enabled": True,
@@ -621,8 +602,8 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         trace_accountant = ProjectionAccountant("persona_chat_trace")
         # Full history (with message tails) is computed once and used to build the
         # operator_channels conversations (their tail slimming is S4's concern).
-        # The FRAME carries recency pointers only when evicting (S2) — the tail
-        # bytes leave, the anchors stay.
+        # The FRAME carries recency pointers only (S2) — the tail bytes leave, the
+        # anchors stay.
         persona_chat_history_full = persona_chat_history_summary(
             persona_instances=persona_instances,
             session_db=session_db,
@@ -630,9 +611,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             accountant=history_accountant,
             persona_assignments=persona_assignments,
         )
-        data["persona_chat_history"] = _persona_chat_history_frame(
-            persona_chat_history_full, evict=evict_history
-        )
+        data["persona_chat_history"] = _persona_chat_history_frame(persona_chat_history_full)
         data["persona_chat_trace"] = persona_chat_trace_summary(
             persona_instances=persona_instances,
             event_log=event_log,

@@ -3,9 +3,14 @@
 Covers operator moves 2 (store the skills catalog once, reference by hash) and
 3 (fetch the heavy per-turn ``final_model_input`` on demand, not in every
 frame). The frame-shrink is proven against the S1 audit seam (a tight
-prompt_observability byte budget the hoisted section passes and the inline
+prompt_observability byte budget the hoisted section passes and the un-hoisted
 section blows), and the win is meaning-preserving: resolving a row's refs
-reproduces the inline lists byte-for-byte.
+reproduces the persisted skill lists byte-for-byte.
+
+S7-B RULING-0 COMPAT STRIP (2026-07-16): the hoisted/evicted shape is the ONLY
+shape — the ``inline_prompt_payloads`` kill-switch and its A/B goldens were
+removed. The shrink is now measured against the raw (pre-hoist) row shape built
+by the test's own ``_hoist_skills_catalogs`` primitive, not a legacy runtime flag.
 """
 
 from __future__ import annotations
@@ -159,7 +164,7 @@ def test_final_model_input_fetchable_by_context(isolate_agent_runtime_root):
 
 
 # --------------------------------------------------------------------------- #
-# Integration through snapshot_prompt_observability + kill-switch parity.
+# Integration through snapshot_prompt_observability + ref→content parity.
 # --------------------------------------------------------------------------- #
 def _profile_instance(session_id: str):
     from agent_runtime.models import PersonaInstance, WorkerSessionState
@@ -218,72 +223,61 @@ def test_snapshot_prompt_observability_hoists_by_default(isolate_agent_runtime_r
     assert po.load_final_model_input_for_context("ctx_alice") is not None
 
 
-def test_inline_kill_switch_restores_full_payloads(isolate_agent_runtime_root):
+def test_hoisted_refs_resolve_to_the_persisted_lists(isolate_agent_runtime_root):
+    # Meaning-preserving: the hoisted frame carries the SAME skill content the
+    # persisted row held — resolving the refs reproduces the persisted lists
+    # byte-for-byte. (S7-B: the hoisted shape is the only shape; parity is proven
+    # against the known persisted input, not a legacy inline frame build.)
     _persist_alice_row()
-    section = po.snapshot_prompt_observability(
-        personas=[],
-        persona_instances=[_profile_instance("persona_chat_alice")],
-        inline_payloads=True,
-    )
-    row = next(r for r in section["chat_contexts"] if r["context_id"] == "ctx_alice")
-
-    assert section["skills_catalogs"] == {}
-    assert "available_skills_ref" not in row
-    assert isinstance(row["available_skills"], list)
-    assert isinstance(row["accessible_skills"], list)
-    # final_model_input is the full payload, not a stub.
-    assert row["final_model_input"].get("evicted") is not True
-    assert row["final_model_input"]["message_count"] == 2
-
-
-def test_hoisted_refs_resolve_to_the_inline_lists(isolate_agent_runtime_root):
-    # A/B parity: the hoisted frame carries the SAME skill content the inline
-    # frame did — resolving the refs reproduces the inline lists byte-for-byte.
-    _persist_alice_row()
-    instances = [_profile_instance("persona_chat_alice")]
-    inline = po.snapshot_prompt_observability(
-        personas=[], persona_instances=instances, inline_payloads=True
-    )
     hoisted = po.snapshot_prompt_observability(
-        personas=[], persona_instances=instances, inline_payloads=False
+        personas=[], persona_instances=[_profile_instance("persona_chat_alice")]
     )
-    inline_row = next(r for r in inline["chat_contexts"] if r["context_id"] == "ctx_alice")
     hoisted_row = next(r for r in hoisted["chat_contexts"] if r["context_id"] == "ctx_alice")
     catalogs = hoisted["skills_catalogs"]
 
-    assert catalogs[hoisted_row["available_skills_ref"]] == inline_row["available_skills"]
-    assert catalogs[hoisted_row["accessible_skills_ref"]] == inline_row["accessible_skills"]
-    # The alias fields were pure aliases — recoverable from the same two refs.
-    assert catalogs[hoisted_row["available_skills_ref"]] == inline_row["skills_catalog"]
-    assert catalogs[hoisted_row["accessible_skills_ref"]] == inline_row["skills"]
+    # The exact lists _persist_alice_row wrote (available catalog + accessible set).
+    available = [
+        _skill("a", "installed_skill_catalog"),
+        _skill("b", "installed_skill_catalog"),
+    ]
+    accessible = [_skill("mission-lead")]
+    assert catalogs[hoisted_row["available_skills_ref"]] == available
+    assert catalogs[hoisted_row["accessible_skills_ref"]] == accessible
+    # `skills_catalog`/`skills` were pure aliases of `available`/`accessible` —
+    # they collapse to the same two refs (no third/fourth stored blob).
+    assert hoisted_row["available_skills_ref"] != hoisted_row["accessible_skills_ref"]
+    assert len(catalogs) == 2
 
 
 # --------------------------------------------------------------------------- #
 # Size-budget ratchet (S1 seam, tightened via the budgets parameter — NOT by
 # editing snapshot_audit.py).
 # --------------------------------------------------------------------------- #
-def _bulky_section(inline_payloads: bool) -> dict:
+def _bulky_section(*, hoisted: bool) -> dict:
     """A prompt_observability section with a fat catalog repeated across many
-    rows, built inline or hoisted, for the byte-budget comparison."""
+    rows, built hoisted (refs) or un-hoisted (raw inline lists), for the
+    byte-budget comparison. The un-hoisted rows are the RAW shape the production
+    hoist collapses — the baseline that proves the shrink is real (not a removed
+    runtime flag)."""
 
     catalog = [_skill(f"skill-{i}", "installed_skill_catalog") for i in range(80)]
     accessible = [_skill("mission-lead")]
     rows = [_row(f"ctx_{i}", available=catalog, accessible=accessible) for i in range(24)]
     catalogs: dict = {}
-    if not inline_payloads:
+    if hoisted:
         po._hoist_skills_catalogs(rows, catalogs)
     return {"schema_version": 1, "chat_contexts": rows, "skills_catalogs": catalogs}
 
 
 def test_prompt_observability_budget_ratchet():
-    inline = {"prompt_observability": _bulky_section(inline_payloads=True)}
-    hoisted = {"prompt_observability": _bulky_section(inline_payloads=False)}
-    # A ratchet tight enough that the 24-row inline catalog blows it, but the
+    un_hoisted = {"prompt_observability": _bulky_section(hoisted=False)}
+    hoisted = {"prompt_observability": _bulky_section(hoisted=True)}
+    # A ratchet tight enough that the 24-row un-hoisted catalog blows it, but the
     # hoisted single-catalog section clears it comfortably. This is the S1 seam
     # tightened via its budgets parameter, proving the shrink is real.
     ratchet = {"prompt_observability": 40 * 1024}
 
     assert snapshot_size_budget(hoisted, ratchet) == []
-    inline_violations = snapshot_size_budget(inline, ratchet)
-    assert inline_violations, "the inline 24-row catalog must blow the ratchet"
-    assert "prompt_observability" in inline_violations[0]
+    violations = snapshot_size_budget(un_hoisted, ratchet)
+    assert violations, "the un-hoisted 24-row catalog must blow the ratchet"
+    assert "prompt_observability" in violations[0]
