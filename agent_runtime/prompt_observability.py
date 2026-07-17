@@ -570,12 +570,45 @@ def snapshot_prompt_observability(
                 )
                 break
     chat_contexts = _merge_latest_contexts(contexts, session_db=session_db)
+    # S8: the frame keeps only LIVE persona instances' current-session context
+    # rows; historical/stale rows (departed instances, closed sessions) leave the
+    # frame (operator ruling 2026-07-17: "old residue and runs need to be
+    # purged"). The persisted files stay on disk (archive-never-delete); the
+    # Context peek only selects a live roster agent, so a dropped row is never
+    # requested. ``built_keys`` are the freshly-built roster contexts = the live
+    # rows; live instance/session ids catch a live agent whose row came only from
+    # disk.
+    built_keys = {_context_row_key(item) for item in contexts}
+    live_instance_ids = {
+        token
+        for token in (safe_assignment_token(_persona_instance_id(inst)) for inst in roster)
+        if token
+    }
+    live_session_ids = {
+        session
+        for session in (
+            safe_assignment_text(getattr(inst, "session_id", None), limit=200) for inst in roster
+        )
+        if session
+    }
+    chat_contexts, chat_contexts_evicted = _filter_live_chat_contexts(
+        chat_contexts,
+        built_keys=built_keys,
+        live_instance_ids=live_instance_ids,
+        live_session_ids=live_session_ids,
+    )
     # S3: hoist the duplicated skills catalogs to one content-addressed table and
     # evict the heavy per-turn debug payload. This is the only shape (S7-B
     # RULING-0: no inline legacy fallback).
     skills_catalogs: dict[str, Any] = {}
     _hoist_skills_catalogs(chat_contexts, skills_catalogs)
     _evict_final_model_input(chat_contexts)
+    # S8: the ``skills_catalogs`` table LEAVES the frame entirely (operator ruling
+    # 2026-07-17: "skills catalog should just be pointers to the skills"). Rows
+    # keep their ``*_ref`` content hashes; the catalog bodies are served on demand
+    # by ``harness skills catalog --hash <h> --json`` and cached FOREVER launcher
+    # side (a content hash is immutable). The frame carries only a typed pointer
+    # stub (count + fetch verb) — never a silent absence.
     return {
         "schema_version": 1,
         "default_flow": {
@@ -586,10 +619,52 @@ def snapshot_prompt_observability(
         },
         "surface_prompt_default": "",
         "chat_contexts": chat_contexts,
-        # One fact, one owner: the deduplicated skill lists live here once,
-        # keyed by content hash; rows reference them by ``*_ref``.
-        "skills_catalogs": skills_catalogs,
+        # S8: honest accounting for the historical/stale context rows evicted
+        # from the frame — their persisted files remain on disk and are fetched
+        # on demand (never a silent absence).
+        "chat_contexts_ref": {
+            "evicted": True,
+            "count": chat_contexts_evicted,
+            "live_count": len(chat_contexts),
+            "fetch": "harness prompt-context show --context-id <id> --json",
+        },
+        # One fact, one owner, one COPY: the deduplicated skill lists are no
+        # longer shipped in-frame. Rows carry ``available_skills_ref`` /
+        # ``accessible_skills_ref``; the bodies are content-addressed and fetched
+        # once by hash. This pointer accounts the eviction.
+        "skills_catalogs_ref": {
+            "evicted": True,
+            "count": len(skills_catalogs),
+            "hashes": sorted(skills_catalogs),
+            "fetch": "harness skills catalog --hash <hash> --json",
+        },
     }
+
+
+def skills_catalog_by_hash(content_hash: str) -> list[dict[str, Any]] | None:
+    """On-demand resolve of one content-addressed skills catalog by its hash.
+
+    S8: the steady-state frame evicts the ``skills_catalogs`` table and rows keep
+    only ``*_ref`` hashes; this resolves a hash back to its skill list. The lists
+    are content-addressed (immutable), so any persisted observability row carrying
+    a byte-identical list resolves it — the same global installed catalog / per-
+    persona accessible set that produced the ref. Read-only: it walks the
+    persisted prompt-observability rows on disk (archive-never-delete leaves them
+    there) and never rebuilds live runtime. Returns ``None`` on an honest miss
+    (the launcher renders a pending state and retries next frame), never a fake
+    empty catalog."""
+
+    token = str(content_hash or "").strip()
+    if not token:
+        return None
+    for row in load_latest_prompt_observability_contexts():
+        if not isinstance(row, dict):
+            continue
+        for field in HOISTED_SKILL_LIST_FIELDS:
+            value = row.get(field)
+            if isinstance(value, list) and _skills_list_content_hash(value) == token:
+                return value
+    return None
 
 
 def persist_prompt_observability_context(context: dict[str, Any]) -> None:
@@ -624,6 +699,54 @@ def load_latest_prompt_observability_contexts() -> list[dict[str, Any]]:
     return rows
 
 
+def _context_row_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    """The (instance, session, persona) identity a chat-context row folds on."""
+
+    return (
+        safe_assignment_token(item.get("persona_instance_id")) or "",
+        safe_assignment_text(item.get("session_id"), limit=200) or "",
+        safe_assignment_token(item.get("persona_id")) or "",
+    )
+
+
+def _filter_live_chat_contexts(
+    chat_contexts: list[dict[str, Any]],
+    *,
+    built_keys: set[tuple[str, str, str]],
+    live_instance_ids: set[str],
+    live_session_ids: set[str],
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep only chat-context rows tied to a LIVE persona instance's current
+    session (S8); return ``(kept, evicted_count)``.
+
+    A row is live when it was freshly BUILT this frame for a roster instance
+    (``built_keys``) OR its persona_instance_id / session_id resolves to a live
+    instance. Purely-historical/stale rows (a departed instance, a closed
+    session) are evicted from the frame — their persisted files stay on disk and
+    the Context peek, which only ever selects a LIVE roster agent, never requests
+    them (so the eviction is honest, never a fake-empty)."""
+
+    kept: list[dict[str, Any]] = []
+    evicted = 0
+    for row in chat_contexts:
+        if not isinstance(row, dict):
+            kept.append(row)
+            continue
+        key = _context_row_key(row)
+        inst_id = safe_assignment_token(row.get("persona_instance_id"))
+        sess_id = safe_assignment_text(row.get("session_id"), limit=200)
+        is_live = (
+            key in built_keys
+            or (inst_id and inst_id in live_instance_ids)
+            or (sess_id and sess_id in live_session_ids)
+        )
+        if is_live:
+            kept.append(row)
+        else:
+            evicted += 1
+    return kept, evicted
+
+
 def _merge_latest_contexts(
     contexts: list[dict[str, Any]],
     *,
@@ -632,12 +755,7 @@ def _merge_latest_contexts(
     merged: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
-    def key_for(item: dict[str, Any]) -> tuple[str, str, str]:
-        return (
-            safe_assignment_token(item.get("persona_instance_id")) or "",
-            safe_assignment_text(item.get("session_id"), limit=200) or "",
-            safe_assignment_token(item.get("persona_id")) or "",
-        )
+    key_for = _context_row_key
 
     built_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in contexts:
