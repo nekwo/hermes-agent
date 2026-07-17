@@ -1282,6 +1282,52 @@ def _safe_turn_usage(value: dict[str, Any] | None) -> dict[str, Any] | None:
     return safe
 
 
+def turn_usage_from_result(result: Any) -> dict[str, int] | None:
+    """Shape an ``AgentRunResult`` into the envelope's ``turn_usage`` block.
+
+    Mission Control builds a fresh runtime per turn, so the result's totals ARE
+    this turn's totals, and ``usage_ledger[0]`` is the turn's FIRST API call —
+    the one whose prompt is exactly the assembled context (system + user + tool
+    schemas) with no tool-result loop growth yet. That single number is what the
+    context budget must show; the sums are what the message cost.
+
+    Lives here, beside the envelope contract it feeds, rather than in the CLI
+    command part — `hermes_cli/harness_parts/persona_commands.py` is exec'd into
+    harness globals, so nothing defined there is importable or unit-testable.
+    """
+    if result is None:
+        return None
+    ledger = getattr(result, "usage_ledger", None)
+    first_call_prompt: int | None = None
+    if isinstance(ledger, list) and ledger and isinstance(ledger[0], dict):
+        candidate = ledger[0].get("prompt_tokens")
+        if isinstance(candidate, int) and candidate > 0:
+            first_call_prompt = candidate
+
+    def _count(name: str) -> int:
+        value = getattr(result, name, None)
+        return value if isinstance(value, int) and value > 0 else 0
+
+    input_tokens = _count("input_tokens")
+    cache_read_tokens = _count("cache_read_tokens")
+    cache_write_tokens = _count("cache_write_tokens")
+    usage = {
+        "api_calls": _count("api_calls"),
+        # prompt = input + cache_read + cache_write (CanonicalUsage's own
+        # definition — input_tokens is already the uncached remainder).
+        "prompt_tokens": input_tokens + cache_read_tokens + cache_write_tokens,
+        "input_tokens": input_tokens,
+        "output_tokens": _count("output_tokens"),
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "reasoning_tokens": _count("reasoning_tokens"),
+        "first_call_prompt_tokens": first_call_prompt,
+    }
+    if not any(value for value in usage.values()):
+        return None
+    return usage
+
+
 _SAFE_TOOL_NAME_LIMIT = 120
 
 
