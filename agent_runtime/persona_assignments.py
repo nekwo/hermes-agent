@@ -19,7 +19,6 @@ from .serde import from_jsonable, to_jsonable
 from .state_patches import emit_persona_instance_patch, emit_persona_instance_remove
 from .states import RunState, WorkerSessionState
 from .tool_visibility import (
-    agent_hud_state_for_persona,
     permission_state_for_persona,
     resolve_tool_visibility,
     turn_tool_context_for_persona,
@@ -1666,14 +1665,85 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "updated_at": instance.updated_at,
     }
     if visibility_persona is not None:
-        summary["tool_resolution"] = resolve_tool_visibility(visibility_persona, tool_options)
-        summary["turn_tool_context"] = turn_tool_context_for_persona(visibility_persona, tool_options)
-        summary["permission_state"] = permission_state_for_persona(visibility_persona, tool_options)
-        summary["agent_hud_state"] = agent_hud_state_for_persona(visibility_persona, tool_options)
-        summary["blocked_tools"] = summary["tool_resolution"]["blocked_tools"]
-        summary["blocked_tools_count"] = len(summary["blocked_tools"])
-        summary["effective_toolsets"] = summary["tool_resolution"]["effective_toolsets"]
+        # Residue-slim R2: the heavy tool-detail payloads
+        # (``turn_tool_context`` / ``tool_resolution`` / ``permission_state`` /
+        # ``blocked_tools`` — ~97% of this row's bytes) leave the wire row behind
+        # a typed ``visibility_ref`` pointer and are rebuilt on demand by
+        # ``harness persona-instance detail <id> --json``. ``agent_hud_state`` is
+        # RETIRED outright (the situational-HUD lane in ``runtime_hud.py`` is the
+        # single HUD authority now). The always-visible agents drawer renders only
+        # the head SCALARS below, derived at emit from the same tool-visibility
+        # resolution (never from the retired hud state).
+        tool_resolution = resolve_tool_visibility(visibility_persona, tool_options)
+        summary["permission_mode"] = tool_resolution.get("permission_mode") or "profile_default"
+        summary["mutation_boundary"] = tool_resolution["mutation_boundary"]
+        summary["tool_count"] = tool_resolution["final_tool_count"]
+        summary["blocked_tools_count"] = len(tool_resolution["blocked_tools"])
+        summary["effective_toolsets"] = tool_resolution["effective_toolsets"]
+        summary["visibility_ref"] = persona_instance_visibility_ref(instance.id)
     return summary
+
+
+#: The tool-detail fields R2 evicts from ``persona_instance_summary`` /
+#: ``_agent_summary`` and serves on demand. ``agent_hud_state`` is deliberately
+#: absent — retired, not evicted.
+PERSONA_INSTANCE_VISIBILITY_FIELDS = (
+    "tool_resolution",
+    "turn_tool_context",
+    "permission_state",
+    "blocked_tools",
+)
+
+
+def persona_instance_visibility_ref(entity_id: str) -> dict[str, Any]:
+    """Typed pointer replacing the evicted tool-detail payloads on a wire row.
+
+    Mirrors the S8 ``detail_ref`` grammar (``evicted`` / id / evicted ``fields`` /
+    ``fetch`` verb). The launcher renders an honest fetch affordance and pulls the
+    full payloads via the fetch verb when the visibility dialog opens. Shared by
+    ``persona_instance_summary`` and ``_agent_summary`` — both evict the same four
+    fields and both fetch through ``harness persona-instance detail`` (which
+    resolves a persona-instance id OR a persona id)."""
+
+    return {
+        "evicted": True,
+        "id": entity_id,
+        "fields": list(PERSONA_INSTANCE_VISIBILITY_FIELDS),
+        "fetch": "harness persona-instance detail <id> --json",
+    }
+
+
+def persona_instance_tool_detail(
+    instance: PersonaInstance, persona: AgentPersona | None = None
+) -> dict[str, Any] | None:
+    """The evicted tool-detail payloads for one persona instance, rebuilt from the
+    same tool-visibility resolution ``persona_instance_summary`` used before R2.
+
+    Served by ``harness persona-instance detail`` — the on-demand fetch behind the
+    ``visibility_ref`` pointer. Returns ``None`` when no backing persona resolves
+    (an honest "unavailable" the launcher surfaces, never a fake-empty payload).
+    ``agent_hud_state`` is intentionally NOT rebuilt here (retired)."""
+
+    visibility_persona = persona or _profile_visibility_persona(instance)
+    if visibility_persona is None:
+        return None
+    tool_options = permission_options_for_chat(
+        visibility_persona,
+        session_id=instance.session_id,
+        task_id=instance.current_task_id,
+        goal_id=instance.goal_id,
+        runtime_root=instance.runtime_root,
+    )
+    tool_resolution = resolve_tool_visibility(visibility_persona, tool_options)
+    return {
+        "persona_instance_id": instance.id,
+        "persona_id": instance.persona_id,
+        "display_name": instance.display_name,
+        "tool_resolution": tool_resolution,
+        "turn_tool_context": turn_tool_context_for_persona(visibility_persona, tool_options),
+        "permission_state": permission_state_for_persona(visibility_persona, tool_options),
+        "blocked_tools": tool_resolution["blocked_tools"],
+    }
 
 
 def active_persona_instance_agent_summaries(
@@ -1698,8 +1768,6 @@ def active_persona_instance_agent_summaries(
         row["persona_instance_id"] = instance_id
         row["base_persona_id"] = persona_id
         row["display_name"] = row.get("display_name") or instance_id
-        row["agent_hud_state"] = row.get("agent_hud_state") or {}
-        row["tool_resolution"] = row.get("tool_resolution") or {}
         seen.add(instance_id)
         rows.append(row)
     return rows

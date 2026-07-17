@@ -146,40 +146,12 @@ def permission_state_for_persona(persona: AgentPersona, options: ToolVisibilityO
     }
 
 
-def agent_hud_state_for_persona(persona: AgentPersona, options: ToolVisibilityOptions | None = None) -> dict[str, Any]:
-    """DEPRECATED — legacy per-persona tools/permissions HUD.
-
-    This is the "Agent HUD" surface the launcher's `showAgentHudStateDialog`
-    reads off `instance.agentHudState`. It predates the runtime situational HUD
-    and is **due for migration to the injected situational-HUD fed path** — the
-    single projection (`agent_runtime/runtime_hud.py`) that the operator's
-    Mission Control runtime HUD strip and the agent's chat turn now both render
-    ("parity so the AI and I are on the same page").
-
-    Retained (emission unchanged) only until the launcher Agent-HUD dialog is
-    migrated/removed; do not build new consumers on it — extend the situational
-    HUD instead so operator and agent stay on one authority.
-    """
-
-    visibility = resolve_tool_visibility(persona, options)
-    return {
-        "schema_version": TOOL_VISIBILITY_SCHEMA_VERSION,
-        "kind": "agent_hud_state",
-        "persona_id": visibility["persona_id"],
-        "display_name": visibility["display_name"],
-        "role": visibility["role"],
-        "permission_mode": visibility["permission_mode"],
-        "repo_scope": visibility.get("repo_scope"),
-        "workdir": visibility.get("workdir"),
-        "session_id": visibility.get("session_id"),
-        "task_id": visibility.get("task_id"),
-        "goal_id": visibility.get("goal_id"),
-        "tool_count": visibility["final_tool_count"],
-        "model_tool_tokens": visibility["model_tool_tokens"],
-        "toolsets": visibility["effective_toolsets"],
-        "blocked_tools": visibility["blocked_tools"],
-        "mutation_boundary": visibility["mutation_boundary"],
-    }
+# ``agent_hud_state_for_persona`` was RETIRED in the snapshot residue-slim R2
+# (2026-07-17). The legacy per-persona "Agent HUD" readout is superseded by the
+# runtime situational-HUD lane (``runtime_hud.py``) — the single HUD authority
+# the operator's Mission Control HUD strip and the agent's chat turn both render.
+# The wire summary no longer carries ``agent_hud_state``; the launcher's HUD
+# dialog kind is removed. Do not reintroduce this — extend the situational HUD.
 
 
 def _tool_names_for_toolsets(toolsets: list[str], *, blocked_tool_names: list[str]) -> list[str]:

@@ -15,12 +15,9 @@ from utils import atomic_json_write
 from . import paths
 from .board_store import BoardStore
 from .office_store import OfficeStore
-from .blueprints.runs import BlueprintRunStore, blueprint_run_summary
-from .blueprints.store import BlueprintStore, blueprint_summary
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
-from .capabilities import capability_descriptors
 from .config import ensure_persisted_personas, load_agent_runtime_config
-from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash, event_catalog
+from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
 from .events import CachedEventLog, EventLog, event_summary_missing, operator_event_summary
@@ -41,6 +38,7 @@ from .persona_assignments import (
     persona_assignment_summary,
     persona_instance_runtime_enabled,
     persona_instance_summary,
+    persona_instance_visibility_ref,
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _SECRET_RE, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
 from .persona_instance_identity import (
@@ -70,18 +68,19 @@ from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
 from .steering import build_steer_actions
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RealmStore, RunStore, TaskStore, WorkspaceStore
-from .tool_visibility import (
-    agent_hud_state_for_persona,
-    permission_state_for_persona,
-    resolve_tool_visibility,
-    turn_tool_context_for_persona,
-)
+from .tool_visibility import resolve_tool_visibility
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
 AGENT_TOPOLOGY_NODE_ID_CAP = 20
 STAGE_VERIFICATION_STAGE_CAP = 12
 STAGE_VERIFICATION_PROOF_ID_CAP = 8
 STAGE_VERIFICATION_PATH_CAP = 6
+# Residue-slim R5(a): cap the in-head ``mission_flow_timeline.items`` at the FRONT
+# window (the office renders ``items.take(5)``; keeping the front 8 preserves that
+# render byte-for-byte with margin). The evicted tail — the newest coalesced
+# progress events, the bulk of this projection's bytes — is accounted (count +
+# ``harness goal history`` pointer) and fetched on demand, never silently dropped.
+MISSION_FLOW_TIMELINE_ITEM_CAP = 8
 
 # S2 read-model — history out of the live frame (operator move 6).
 # ``archived_tasks`` (all dead), the closed/ancient tail of ``incidents``, and
@@ -440,7 +439,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     proof_batch_store = ProofBatchStore(event_log=event_log)
     repo_bundle_store = RepoBundleStore(event_log=event_log)
     runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
-    blueprint_run_store = BlueprintRunStore()
     role_envelopes = role_envelope_store.list_all()
     role_checklists = role_checklist_store.list_all()
     proof_batches = proof_batch_store.list_all()
@@ -461,7 +459,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         (getattr(r, "name", None) for r in realms if getattr(r, "id", None) == realm_store.active_id()),
         None,
     )
-    blueprint_runs = blueprint_run_store.list_all()
     agent_summaries = [_agent_summary(a, include_tool_details=True) for a in agents]
     available_personas = _available_persona_summary(agents)
     proofs = []
@@ -481,6 +478,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     topology_persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
     stage_verification_accountant = ProjectionAccountant("stage_verification")
+    flow_timeline_accountant = ProjectionAccountant("mission_flow_timeline")
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         persona_instances = instance_store.derive_from_workers(agents, workers)
@@ -544,7 +542,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         },
         "runtime_config": effective_config_summary(cfg),
         "migration": migration_status(),
-        "capabilities": capability_descriptors(),
         "prompt_observability": snapshot_prompt_observability(
             personas=agents,
             persona_instances=persona_instances,
@@ -589,6 +586,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
                     runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
                     persona_instances=topology_persona_instances,
                     stage_verification_accountant=stage_verification_accountant,
+                    flow_timeline_accountant=flow_timeline_accountant,
                     workspaces=workspaces,
                 ))
                 for t in tasks
@@ -629,8 +627,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "archived_tasks": _archived_tasks_frame(archived_tasks),
         "agents": agent_summaries,
         "available_personas": available_personas,
-        "blueprints": [blueprint_summary(bp) for bp in BlueprintStore().list()],
-        "blueprint_runs": [blueprint_run_summary(record) for record in blueprint_runs[-50:]],
         "runtime_paths_diagnostic": _runtime_paths_diagnostic(available_personas),
         "worker_sessions": [worker_session_summary(worker) for worker in workers],
         "role_envelopes": [role_envelope_summary(item, checklist_store=role_checklist_store) for item in role_envelopes],
@@ -639,7 +635,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "repo_bundles": [repo_bundle_summary(item) for item in repo_bundles],
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "runtime_instances": [runtime_instance_summary(item) for item in runtime_instances],
-        "event_contracts": event_catalog(),
         "runs": _keyed(frame_run_rows, "run_id"),
         "incidents": _keyed(incident_rows, "incident_id"),
         "proofs": [_proof_summary(p) for p in proofs],
@@ -769,6 +764,8 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         drop_samples = []
     completeness["stage_verification"] = stage_verification_accountant.summary()
     drop_samples.extend(stage_verification_accountant.drop_samples())
+    completeness["mission_flow_timeline"] = flow_timeline_accountant.summary()
+    drop_samples.extend(flow_timeline_accountant.drop_samples())
     data["parity"] = _parity_envelope(
         data,
         build_started=_build_started,
@@ -814,7 +811,17 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # (typed ``*_ref`` / ``detail_ref`` / ``evicted`` markers), never a silent
         # absence. S2/S3/S4 shape unchanged. Launcher pin
         # (kSupportedMissionContractVersion) moves in lockstep.
-        "contract_version": 43,
+        #
+        # 44 (snapshot residue-slim R1/R2/R5a, 2026-07-17; 43 was taken by the
+        # office-realm-sync landing): the dead ``capabilities`` /
+        # ``observability.capabilities`` / ``event_contracts`` / ``blueprints`` /
+        # ``blueprint_runs`` frame sections (zero readers in all three repos) are
+        # DELETED; ``persona_instances`` / ``agents`` rows evict the heavy
+        # tool-detail payloads behind a typed ``visibility_ref`` (fetched via
+        # ``harness persona-instance detail``) and ``agent_hud_state`` is RETIRED;
+        # ``goals[].mission_flow_timeline.items`` is capped to the front window
+        # (accounted, ``harness goal history`` pointer).
+        "contract_version": 44,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
@@ -2496,7 +2503,7 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
-def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None):
+def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None):
     gate = task_verdict_proof_satisfied(task, proofs)
     current_stage_id = _task_current_stage_id(task)
     current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
@@ -2592,7 +2599,7 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
                 proof_batches=proof_batches or [],
             ),
         ),
-        "mission_flow_timeline": _mission_flow_timeline(task, events or []),
+        "mission_flow_timeline": _mission_flow_timeline(task, events or [], accountant=flow_timeline_accountant),
         "proof_gate_state": _proof_gate_state(task, proofs),
         "operator_capabilities": _operator_capabilities(task, next_action, gate),
     }
@@ -2805,7 +2812,7 @@ def _task_current_stage_id(task) -> str | None:
     return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
 
 
-def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, workspaces=None) -> dict:
+def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None) -> dict:
     # S4 goals/tasks merge: the goal entity is the FULL task summary (all the
     # rich lanes the old ``tasks`` section carried — self_tests, role_envelopes,
     # role_checklists, proof_batches, accounted stage_verification) UNIONED with
@@ -2830,6 +2837,7 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         runtime_instances=runtime_instances,
         persona_instances=persona_instances,
         stage_verification_accountant=stage_verification_accountant,
+        flow_timeline_accountant=flow_timeline_accountant,
     )
     workspace_id = getattr(task, "workspace_id", None)
     realm_id = None
@@ -2916,6 +2924,58 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
         stage_verification_accountant=None,
         workspaces=workspaces,
     )
+
+
+def _agent_tool_detail(agent) -> dict:
+    """The evicted tool-detail payloads for one persona (``agents`` section row),
+    rebuilt read-only — the same fields ``_agent_summary`` carried before R2 evicted
+    them (minus the retired ``agent_hud_state``)."""
+
+    from .tool_visibility import permission_state_for_persona, turn_tool_context_for_persona
+
+    tool_resolution = resolve_tool_visibility(agent)
+    return {
+        "persona_id": agent.id,
+        "display_name": agent.display_name,
+        "tool_resolution": tool_resolution,
+        "turn_tool_context": turn_tool_context_for_persona(agent),
+        "permission_state": permission_state_for_persona(agent),
+        "blocked_tools": tool_resolution["blocked_tools"],
+    }
+
+
+def persona_instance_detail_for_id(entity_id: str, *, event_log=None) -> dict | None:
+    """The tool-detail payloads R2 evicted from ``persona_instances`` / ``agents``
+    rows, rebuilt read-only and served on demand by ``harness persona-instance
+    detail``.
+
+    Resolves ``entity_id`` as a live persona-instance id first (the same derived
+    set the frame keys), then falls back to a persona (agent) id — both wire rows
+    carry a ``visibility_ref`` pointing here. Read-only (lists stores, mutates
+    nothing). Returns ``None`` on a genuine miss (an honest ``not_found`` the
+    launcher surfaces as 'unavailable', never a fabricated empty payload)."""
+
+    token = str(entity_id or "").strip()
+    if not token:
+        return None
+    from .persona_assignments import persona_instance_tool_detail
+
+    event_log = event_log or CachedEventLog()
+    cfg = load_agent_runtime_config()
+    agents = AgentStore().list_all() or seed_personas()
+    personas_by_id = {str(getattr(a, "id", "") or ""): a for a in agents}
+    if persona_instance_runtime_enabled(cfg):
+        worker_session_store = WorkerSessionStore(event_log=event_log)
+        workers = worker_session_store.list_all()
+        instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, workers)
+        for instance in instances:
+            if str(getattr(instance, "id", "") or "") == token:
+                persona = personas_by_id.get(str(getattr(instance, "persona_id", "") or ""))
+                return persona_instance_tool_detail(instance, persona)
+    persona = personas_by_id.get(token)
+    if persona is not None:
+        return _agent_tool_detail(persona)
+    return None
 
 
 def _workspace_summary(workspace, *, tasks, active_id: str | None = None) -> dict:
@@ -3538,7 +3598,7 @@ def _topology_parent_instance(parent_ref: str, instances: list):
     return None
 
 
-def _mission_flow_timeline(task, events) -> dict:
+def _mission_flow_timeline(task, events, *, accountant: ProjectionAccountant | None = None) -> dict:
     plan = getattr(task, "mission_plan", None)
     stages = list(getattr(plan, "stages", []) or [])
     items = []
@@ -3572,12 +3632,41 @@ def _mission_flow_timeline(task, events) -> dict:
                 "artifact_refs": display.get("artifact_refs") or [],
             }
         )
-    return {
+    total = len(items)
+    if accountant is not None:
+        accountant.consider(total)
+    # Keep the office-rendered FRONT window (office takes ``items.take(5)``; the
+    # cap keeps the front MISSION_FLOW_TIMELINE_ITEM_CAP so that render is
+    # byte-identical) and account the evicted tail with a fetch pointer.
+    selected = items[:MISSION_FLOW_TIMELINE_ITEM_CAP]
+    evicted = total - len(selected)
+    if accountant is not None:
+        accountant.include(len(selected))
+        if evicted:
+            accountant.drop(
+                "flow_item_cap",
+                count=evicted,
+                entity_id=getattr(task, "id", None),
+                detail=f"kept front {MISSION_FLOW_TIMELINE_ITEM_CAP} flow items",
+            )
+            accountant.mark_truncated()
+    result = {
         "schema_version": 1,
         "mission_id": task.id,
         "active_stage_id": getattr(plan, "current_stage_id", None) if plan else getattr(task, "current_stage_id", None),
-        "items": items,
+        "items": selected,
+        "items_total": total,
+        "items_evicted": evicted,
     }
+    if evicted:
+        # Honest accounting: a typed pointer to the full paged history, never a
+        # silent truncation (the full timeline is rebuilt from the EventLog).
+        result["items_ref"] = {
+            "evicted": True,
+            "count": evicted,
+            "fetch": "harness goal history <task_id> --json",
+        }
+    return result
 
 
 def _proof_gate_state(task, proofs) -> dict:
@@ -4223,18 +4312,22 @@ def _agent_summary(agent, *, include_tool_details: bool = False):
         "repo_scope_label": _safe_text(getattr(agent, "repo_scope_label", None)) or _safe_repo_scope_label(getattr(agent, "repo_scope", None)),
     }
     if include_tool_details:
+        # Residue-slim R2: same tool-detail eviction as persona_instance_summary.
+        # The heavy payloads (tool_resolution / turn_tool_context /
+        # permission_state / blocked_tools) leave the row behind a typed
+        # ``visibility_ref`` pointer, fetched on demand via
+        # ``harness persona-instance detail``; ``agent_hud_state`` is RETIRED
+        # (runtime_hud.py is the single HUD authority). The head keeps only the
+        # SCALARS the agents drawer renders, derived at emit from the same
+        # tool-visibility resolution.
         summary.update(
             {
+                "permission_mode": tool_resolution.get("permission_mode") or "profile_default",
+                "mutation_boundary": tool_resolution["mutation_boundary"],
+                "tool_count": tool_resolution["final_tool_count"],
                 "blocked_tools_count": len(tool_resolution["blocked_tools"]),
-                "blocked_tools": tool_resolution["blocked_tools"],
-                "tool_resolution": tool_resolution,
-                "turn_tool_context": turn_tool_context_for_persona(agent),
-                "permission_state": permission_state_for_persona(agent),
-                # DEPRECATED: legacy per-persona tools/permissions HUD, due for
-                # migration to the situational-HUD fed path (see runtime_hud.py
-                # and agent_hud_state_for_persona's docstring). Emission kept
-                # until the launcher Agent-HUD dialog is retired.
-                "agent_hud_state": agent_hud_state_for_persona(agent),
+                "effective_toolsets": tool_resolution["effective_toolsets"],
+                "visibility_ref": persona_instance_visibility_ref(agent.id),
             }
         )
     return summary

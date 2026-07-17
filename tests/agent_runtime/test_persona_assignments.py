@@ -22,6 +22,7 @@ from agent_runtime.persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
     persona_instance_summary,
+    persona_instance_tool_detail,
     persona_instance_id_for,
     persona_instance_id_for_placement,
 )
@@ -599,15 +600,27 @@ def test_status_and_snapshot_expose_persona_instances_when_enabled(monkeypatch, 
     status_lane_agents = {item["persona_id"]: item for item in status["agents"]}
     assert "personainst_dev" in status_lane_agents
     assert status_lane_agents["personainst_dev"]["source_persona_id"] == "dev"
-    assert isinstance(status_lane_agents["personainst_dev"]["agent_hud_state"], dict)
-    assert isinstance(status_lane_agents["personainst_dev"]["tool_resolution"], dict)
+    # Residue-slim R2: the fat tool payloads (tool_resolution) + the retired
+    # agent_hud_state leave the row; the head keeps a typed visibility_ref pointer
+    # + the always-visible scalars, fetched in full via `harness persona-instance
+    # detail`.
+    assert "agent_hud_state" not in status_lane_agents["personainst_dev"]
+    assert "tool_resolution" not in status_lane_agents["personainst_dev"]
+    assert isinstance(status_lane_agents["personainst_dev"]["visibility_ref"], dict)
+    assert status_lane_agents["personainst_dev"]["visibility_ref"]["evicted"] is True
+    assert isinstance(status_lane_agents["personainst_dev"]["mutation_boundary"], dict)
     assert snapshot["persona_instance_runtime"]["enabled"] is True
     assert {item["persona_id"] for item in list(snapshot["persona_instances"].values())} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
     snapshot_lane_agents = {item["persona_id"]: item for item in snapshot["agents"]}
     assert "personainst_dev" in snapshot_lane_agents
     assert snapshot_lane_agents["personainst_dev"]["source_persona_id"] == "dev"
-    assert isinstance(snapshot_lane_agents["personainst_dev"]["agent_hud_state"], dict)
-    assert isinstance(snapshot_lane_agents["personainst_dev"]["tool_resolution"], dict)
+    # The eviction guarantee holds unconditionally (the fat payloads + retired
+    # agent_hud_state never ride the row). visibility_ref + head scalars are added
+    # whenever a backing visibility persona resolves (always true on the live
+    # runtime; the status lane above exercises the resolved path — this synthetic
+    # snapshot config may not persist the backing persona).
+    assert "agent_hud_state" not in snapshot_lane_agents["personainst_dev"]
+    assert "tool_resolution" not in snapshot_lane_agents["personainst_dev"]
 
 
 def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, isolate_agent_runtime_root):
@@ -3568,14 +3581,35 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
 
     summary = persona_instance_summary(instance)
 
-    assert summary["tool_resolution"]["persona_id"] == "profile:alice"
-    assert summary["turn_tool_context"]["persona_id"] == "profile:alice"
-    assert "read_file" in summary["tool_resolution"]["final_model_tools"]
-    assert "terminal" in summary["tool_resolution"]["final_model_tools"]
-    assert "execute_code" in summary["tool_resolution"]["final_model_tools"]
-    assert "send_message" in summary["tool_resolution"]["blocked_tool_names"]
-    assert summary["permission_state"]["mode"] == "profile_default"
-    assert summary["agent_hud_state"]["tool_count"] == len(summary["tool_resolution"]["final_model_tools"])
+    # Residue-slim R2: the summary keeps only the head SCALARS + a typed
+    # visibility_ref pointer; the heavy payloads (and the retired agent_hud_state)
+    # leave the wire row.
+    assert "tool_resolution" not in summary
+    assert "turn_tool_context" not in summary
+    assert "permission_state" not in summary
+    assert "agent_hud_state" not in summary
+    assert "blocked_tools" not in summary
+    assert summary["permission_mode"] == "profile_default"
+    assert isinstance(summary["mutation_boundary"], dict)
+    assert isinstance(summary["tool_count"], int)
+    assert summary["blocked_tools_count"] >= 0
+    assert summary["visibility_ref"]["evicted"] is True
+    assert summary["visibility_ref"]["id"] == "personainst_profile_alice"
+    assert "agent_hud_state" not in summary["visibility_ref"]["fields"]
+
+    # The full payloads are rebuilt on demand by persona_instance_tool_detail (the
+    # `harness persona-instance detail` body) — the same bytes the frame used to
+    # carry, minus the retired agent_hud_state.
+    detail = persona_instance_tool_detail(instance)
+    assert detail["tool_resolution"]["persona_id"] == "profile:alice"
+    assert detail["turn_tool_context"]["persona_id"] == "profile:alice"
+    assert "read_file" in detail["tool_resolution"]["final_model_tools"]
+    assert "terminal" in detail["tool_resolution"]["final_model_tools"]
+    assert "execute_code" in detail["tool_resolution"]["final_model_tools"]
+    assert "send_message" in detail["tool_resolution"]["blocked_tool_names"]
+    assert detail["permission_state"]["mode"] == "profile_default"
+    assert "agent_hud_state" not in detail
+    assert summary["tool_count"] == len(detail["tool_resolution"]["final_model_tools"])
 
 
 def test_tick_observe_only_links_assignment_to_run_and_worker(monkeypatch, isolate_agent_runtime_root):

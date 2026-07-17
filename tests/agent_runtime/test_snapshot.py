@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 from hermes_time import now
 from utils import atomic_json_write
-from agent_runtime.blueprints.runs import BlueprintRunStore
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore, PersonaInstanceStore
@@ -259,44 +258,11 @@ def test_snapshot_coalesces_progress_events_by_event_id(isolate_agent_runtime_ro
     assert timeline[0]["display_summary"] == "proof is still_running"
 
 
-def test_snapshot_projects_blueprint_run_records(isolate_agent_runtime_root):
-    n = now()
-    task = Task(
-        id="task_blueprint_snapshot",
-        title="Blueprint snapshot",
-        description="record projection",
-        state=TaskState.DONE,
-        created_at=n,
-        updated_at=n,
-        requested_by="tony",
-        mission_plan=MissionPlan(
-            mission_intent=MissionIntent(title="Blueprint snapshot", objective="record projection"),
-            blueprint_id="one_agent_smoke",
-            blueprint_version=1,
-            bindings={"builder": "dev"},
-            binding_sources={"builder": "persona:dev"},
-            stages=[
-                MissionPlanStage(
-                    id="build",
-                    title="Build",
-                    objective="Build",
-                    owner="builder",
-                    owner_slot="builder",
-                    repo="hermes-agent",
-                    kind="implementation",
-                    status=StageStatus.PASSED,
-                )
-            ],
-        ),
-    )
-    BlueprintRunStore().record_task_terminal(task, result="passed", ended_at=n)
-
-    snap = build_snapshot()
-
-    assert snap["blueprint_runs"][0]["task_id"] == "task_blueprint_snapshot"
-    assert snap["blueprint_runs"][0]["blueprint_id"] == "one_agent_smoke"
-    assert snap["blueprint_runs"][0]["per_stage_outcomes"] == {"build": "passed"}
-    assert any(item["id"] == "one_agent_smoke" for item in snap["blueprints"])
+# ``test_snapshot_projects_blueprint_run_records`` was REMOVED in the snapshot
+# residue-slim R1 (2026-07-17): the ``blueprints`` / ``blueprint_runs`` FRAME
+# sections were deleted (zero readers in all three repos). The disk stores
+# (BlueprintRunStore / BlueprintStore) + the ``hermes harness blueprint`` CLI read
+# path are unchanged; blueprint-store behaviour is covered by the blueprint suites.
 
 
 def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_root):
@@ -384,7 +350,7 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     snap = build_snapshot(event_log=events)
     row = next(item for item in list(snap["goals"].values()) if item["task_id"] == "stage38")
 
-    assert snap["parity"]["contract_version"] == 43
+    assert snap["parity"]["contract_version"] == 44
     assert "mission_level_state" in snap["parity"]["capabilities"]
     assert "agent_topology" in snap["parity"]["capabilities"]
     assert row["mission_level_state"]["blueprint_id"] == "neko_dev_qa_basic"

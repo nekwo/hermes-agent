@@ -2,7 +2,6 @@ from agent_runtime.models import AgentPersona
 from agent_runtime.personas import default_personas
 from agent_runtime.tool_visibility import (
     ToolVisibilityOptions,
-    agent_hud_state_for_persona,
     permission_state_for_persona,
     resolve_tool_visibility,
     turn_tool_context_for_persona,
@@ -75,7 +74,10 @@ def test_unbounded_permission_mode_expands_neko_visibility():
     assert visibility["permission_mode"] == "unbounded"
 
 
-def test_turn_context_permission_state_and_hud_share_the_same_resolution():
+def test_turn_context_and_permission_state_share_the_same_resolution():
+    # ``agent_hud_state_for_persona`` was RETIRED (residue-slim R2, 2026-07-17);
+    # the turn-context and permission-state lanes plus the head-scalar count now
+    # all derive from the ONE ``resolve_tool_visibility`` resolution.
     persona = _persona("dev")
     options = ToolVisibilityOptions(
         permission_mode="operator_one_turn",
@@ -89,7 +91,7 @@ def test_turn_context_permission_state_and_hud_share_the_same_resolution():
 
     turn_context = turn_tool_context_for_persona(persona, options)
     permission_state = permission_state_for_persona(persona, options)
-    hud_state = agent_hud_state_for_persona(persona, options)
+    resolution = resolve_tool_visibility(persona, options)
 
     assert turn_context["preview"]["permission_mode"] == "operator_one_turn"
     assert turn_context["preview"]["session_id"] == "session_35"
@@ -98,8 +100,11 @@ def test_turn_context_permission_state_and_hud_share_the_same_resolution():
     assert permission_state["mode"] == "operator_one_turn"
     assert permission_state["turns_remaining"] == 1
     assert permission_state["can_run_terminal"] is False
-    assert hud_state["tool_count"] == len(turn_context["preview"]["final_model_tools"])
-    assert hud_state["model_tool_tokens"] == turn_context["preview"]["model_tool_tokens"]
+    # The head-scalar ``tool_count`` (resolution["final_tool_count"]) the agents
+    # drawer now renders equals the resolved model-callable tool set — the same
+    # fact the retired hud_state["tool_count"] carried.
+    assert resolution["final_tool_count"] == len(turn_context["preview"]["final_model_tools"])
+    assert resolution["model_tool_tokens"] == turn_context["preview"]["model_tool_tokens"]
 
 
 def test_chat_permission_store_can_narrow_dev_chat_to_read_only(tmp_path):
