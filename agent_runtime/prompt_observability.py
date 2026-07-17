@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -320,6 +321,159 @@ def _safe_persona_id(value: Any) -> str:
     return safe_assignment_token(raw) or "unknown"
 
 
+# --------------------------------------------------------------------------- #
+# S3 read-model — hoist duplicated globals + evict on-demand debug payloads.
+#
+# The skills catalog is a GLOBAL (one installed catalog per config; one
+# accessible set per persona), yet the pre-S3 frame stored ``available_skills``
+# / ``skills_catalog`` (installed catalog, ~19KB) AND ``accessible_skills`` /
+# ``skills`` (per-persona set, ~8KB) INLINE on EVERY ``chat_contexts`` row —
+# byte-identical across rows (S1 audit: 1.91 MiB wasted of a 6.05 MiB frame).
+# S3 stores each distinct skill list ONCE, content-addressed, under
+# ``prompt_observability.skills_catalogs`` and replaces the four inline fields
+# with two hash refs (``available_skills_ref`` / ``accessible_skills_ref``); the
+# two byte-identical alias pairs collapse to their canonical ref.
+#
+# ``final_model_input`` (~30KB/row) is a per-turn DEBUG artifact read only when
+# an operator opens the Context peek — it has no steady-state reader yet rode
+# every frame. S3 evicts it to a typed stub carrying the recorded byte count +
+# message count + fetch verb; the full payload stays on disk in the persisted
+# observability row (archive-never-delete) and is fetched on demand.
+#
+# Both are gated by ``read_model.inline_prompt_payloads`` (default False =
+# hoist/evict; True restores the inline payloads for one release for A/B parity).
+# --------------------------------------------------------------------------- #
+
+#: Length of the content-hash refs (sha256 prefix). Short enough to be cheap on
+#: every row, wide enough that a collision across a frame's skill lists is
+#: astronomically unlikely.
+SKILLS_REF_HASH_LEN = 16
+
+#: The inline per-row skill-list fields hoisted out of each ``chat_contexts``
+#: row in the default (hoisted) shape. ``skills_catalog`` aliases
+#: ``available_skills`` and ``skills`` aliases ``accessible_skills`` — all four
+#: leave the row; the two canonical lists are recoverable by resolving the two
+#: refs against ``skills_catalogs``.
+HOISTED_SKILL_LIST_FIELDS = (
+    "available_skills",
+    "skills_catalog",
+    "accessible_skills",
+    "skills",
+)
+
+
+def _skills_list_content_hash(rows: Any) -> str:
+    """Stable content hash of a skill list (compact, sorted, non-ASCII-safe).
+
+    Byte-identical lists hash to the same ref, so the global installed catalog
+    (identical on every row) and any two personas sharing an accessible set map
+    to one stored blob."""
+
+    payload = json.dumps(
+        to_jsonable(rows),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:SKILLS_REF_HASH_LEN]
+
+
+def _hoist_skills_catalogs(
+    chat_contexts: list[dict[str, Any]], catalogs: dict[str, Any]
+) -> None:
+    """Replace each row's inline skill lists with content-hash refs into
+    ``catalogs`` (stored once). Mutates ``chat_contexts`` and ``catalogs`` in
+    place. A row missing a list simply carries no ref for it — never a fake
+    empty catalog (an absent ref resolves to nothing, honestly)."""
+
+    for row in chat_contexts:
+        if not isinstance(row, dict):
+            continue
+        available = row.get("available_skills")
+        if isinstance(available, list):
+            ref = _skills_list_content_hash(available)
+            catalogs.setdefault(ref, available)
+            row["available_skills_ref"] = ref
+        accessible = row.get("accessible_skills")
+        if isinstance(accessible, list):
+            ref = _skills_list_content_hash(accessible)
+            catalogs.setdefault(ref, accessible)
+            row["accessible_skills_ref"] = ref
+        for field in HOISTED_SKILL_LIST_FIELDS:
+            row.pop(field, None)
+
+
+def _final_model_input_stub(final_model_input: dict[str, Any], context_id: Any) -> dict[str, Any]:
+    """The evicted ``final_model_input`` frame value: a typed accounting stub.
+
+    Carries the recorded byte size (so the operator knows the payload exists and
+    how large it is), the message count (so the peek can still say "N messages"),
+    and the addressable fetch verb. Never a silent absence, never a fake-empty
+    payload."""
+
+    payload = json.dumps(
+        to_jsonable(final_model_input),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    message_count = final_model_input.get("message_count")
+    if not isinstance(message_count, int):
+        messages = final_model_input.get("messages")
+        message_count = len(messages) if isinstance(messages, list) else 0
+    token = safe_assignment_token(context_id)
+    return {
+        "evicted": True,
+        "bytes": len(payload.encode("utf-8")),
+        "message_count": message_count,
+        "context_id": token or None,
+        "fetch": "harness prompt-context final-model-input --context-id <id> --json",
+    }
+
+
+def _evict_final_model_input(chat_contexts: list[dict[str, Any]]) -> None:
+    """Replace each row's heavy ``final_model_input`` with the accounting stub.
+
+    Mutates ``chat_contexts`` in place. The persisted row on disk is untouched —
+    only the FRAME copy is stubbed."""
+
+    for row in chat_contexts:
+        if not isinstance(row, dict):
+            continue
+        final_model_input = row.get("final_model_input")
+        if isinstance(final_model_input, dict) and not final_model_input.get("evicted"):
+            row["final_model_input"] = _final_model_input_stub(
+                final_model_input, row.get("context_id")
+            )
+
+
+def load_final_model_input_for_context(context_id: str) -> dict[str, Any] | None:
+    """On-demand read of a persisted context's ``final_model_input``.
+
+    The S3 frame ships an eviction stub; the FULL payload stays on disk in the
+    persisted observability row (``persist_prompt_observability_context``). This
+    is the read the Context peek's on-demand fetch resolves — the launcher fetch
+    lane and a future ``harness prompt-context final-model-input`` CLI verb both
+    call through here (verb handoff filed; harness_cli is not this stage's to
+    edit). Returns the redaction-safe payload, or None when the row/field is
+    absent."""
+
+    token = safe_assignment_token(context_id)
+    if not token:
+        return None
+    path = paths.prompt_observability_dir() / f"{token}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    final_model_input = data.get("final_model_input")
+    if isinstance(final_model_input, dict) and not final_model_input.get("evicted"):
+        return final_model_input
+    return None
+
+
 def snapshot_prompt_observability(
     *,
     personas: Iterable[Any],
@@ -330,6 +484,7 @@ def snapshot_prompt_observability(
     daemon: dict[str, Any] | None = None,
     realm: str | None = None,
     workspace: str | None = None,
+    inline_payloads: bool = False,
 ) -> dict[str, Any]:
     # Deferred import: context_builder pulls a large dependency graph, and this
     # module is imported very early. A function-local import keeps module load
@@ -414,6 +569,14 @@ def snapshot_prompt_observability(
                     )
                 )
                 break
+    chat_contexts = _merge_latest_contexts(contexts, session_db=session_db)
+    # S3: hoist the duplicated skills catalogs to one content-addressed table
+    # and evict the heavy per-turn debug payload, unless the kill-switch restores
+    # the inline shape. ``skills_catalogs`` stays empty in inline mode.
+    skills_catalogs: dict[str, Any] = {}
+    if not inline_payloads:
+        _hoist_skills_catalogs(chat_contexts, skills_catalogs)
+        _evict_final_model_input(chat_contexts)
     return {
         "schema_version": 1,
         "default_flow": {
@@ -423,7 +586,11 @@ def snapshot_prompt_observability(
             "qa_default": False,
         },
         "surface_prompt_default": "",
-        "chat_contexts": _merge_latest_contexts(contexts, session_db=session_db),
+        "chat_contexts": chat_contexts,
+        # One fact, one owner: the deduplicated skill lists live here once,
+        # keyed by content hash; rows reference them by ``*_ref``. Empty when
+        # inline payloads are restored (kill-switch on).
+        "skills_catalogs": skills_catalogs,
     }
 
 

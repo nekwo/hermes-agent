@@ -528,6 +528,9 @@ def _read_model_config(raw: dict[str, Any]) -> ReadModelConfig:
         db_filename=filename,
         history_in_frame=bool(raw.get("history_in_frame", defaults.history_in_frame)),
         delta_patches=bool(raw.get("delta_patches", defaults.delta_patches)),
+        inline_prompt_payloads=bool(
+            raw.get("inline_prompt_payloads", defaults.inline_prompt_payloads)
+        ),
     )
 
 

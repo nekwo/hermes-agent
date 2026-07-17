@@ -3240,6 +3240,12 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
             )
         ],
         session_db=db,
+        # This test asserts the accessible-skills RESOLUTION content (the
+        # profile-snapshot fallback), not the frame shape. S3 hoists those
+        # lists to refs by default; restore the inline shape via the
+        # kill-switch so the content assertions below read the payload directly.
+        # The hoisted shape (+ ref→content parity) is covered by the S3 goldens.
+        inline_payloads=True,
     )
 
     context = snapshot["chat_contexts"][0]

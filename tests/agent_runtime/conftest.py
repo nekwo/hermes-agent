@@ -28,3 +28,27 @@ def history_in_frame_config(monkeypatch):
 
     monkeypatch.setattr(snapshot_module, "load_agent_runtime_config", _loader)
     return _loader
+
+
+@pytest.fixture
+def inline_prompt_payloads_config(monkeypatch):
+    """Opt a snapshot test into the pre-S3 inline prompt-payload shape.
+
+    S3 hoists the duplicated skills catalogs out of every ``chat_contexts`` row
+    (rows carry ``*_ref`` hashes; the lists live once under
+    ``prompt_observability.skills_catalogs``) and evicts ``final_model_input``
+    from the frame by default (read_model.inline_prompt_payloads=False). Tests
+    that assert the FULL inline row content flip the kill-switch on via this
+    fixture; the hoist/eviction itself is exercised by the S3 goldens.
+    """
+
+    from agent_runtime import snapshot as snapshot_module
+    from agent_runtime.config import load_agent_runtime_config as _real_load
+
+    def _loader(*args, **kwargs):
+        cfg = _real_load(*args, **kwargs)
+        cfg.read_model.inline_prompt_payloads = True
+        return cfg
+
+    monkeypatch.setattr(snapshot_module, "load_agent_runtime_config", _loader)
+    return _loader

@@ -366,7 +366,7 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     snap = build_snapshot(event_log=events)
     row = next(item for item in snap["tasks"] if item["task_id"] == "stage38")
 
-    assert snap["parity"]["contract_version"] == 39
+    assert snap["parity"]["contract_version"] == 40
     assert "mission_level_state" in snap["parity"]["capabilities"]
     assert "agent_topology" in snap["parity"]["capabilities"]
     assert row["mission_level_state"]["blueprint_id"] == "neko_dev_qa_basic"

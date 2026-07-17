@@ -107,6 +107,13 @@ def _history_in_frame(cfg) -> bool:
     return bool(getattr(getattr(cfg, "read_model", None), "history_in_frame", False))
 
 
+def _inline_prompt_payloads(cfg) -> bool:
+    """Kill-switch read (S3): True keeps the old inline skills catalogs +
+    per-row ``final_model_input`` (no hoist, no eviction)."""
+
+    return bool(getattr(getattr(cfg, "read_model", None), "inline_prompt_payloads", False))
+
+
 def _archived_tasks_frame(archived_tasks: list, *, evict: bool):
     """The ``archived_tasks`` frame value: the full rows, or a typed pointer stub.
 
@@ -441,6 +448,9 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             daemon=None,
             realm=active_realm_name,
             workspace=active_workspace_name,
+            # S3: hoist duplicated skills catalogs + evict per-turn debug payload
+            # unless the kill-switch restores the inline shape.
+            inline_payloads=_inline_prompt_payloads(cfg),
         ),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
@@ -644,11 +654,13 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         )
     return {
         "envelope_version": PARITY_ENVELOPE_VERSION,
-        # S2 (history out of the live frame): archived_tasks → pointer stub,
-        # incidents windowed (+ incidents_history_ref), persona_chat_history →
-        # recency pointers. Launcher pin (kSupportedMissionContractVersion) moves
-        # in lockstep.
-        "contract_version": 39,
+        # S3 (hoist globals + evict debug payloads): prompt_observability rows
+        # carry ``available_skills_ref`` / ``accessible_skills_ref`` hashes (the
+        # inline catalogs hoisted to ``prompt_observability.skills_catalogs``),
+        # and ``final_model_input`` is a typed eviction stub. S2 shape below
+        # unchanged. Launcher pin (kSupportedMissionContractVersion) moves in
+        # lockstep.
+        "contract_version": 40,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),

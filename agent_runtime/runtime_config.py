@@ -107,6 +107,15 @@ class ReadModelConfig:
     # ``state.patched`` EventLog entry carrying the field-level patch. Log-only:
     # no stream/wire change rides this flag in S6.
     delta_patches: bool = False
+    # S3 read-model kill-switch. When False (default), the duplicated skills
+    # catalogs (``available_skills`` / ``skills_catalog`` / ``accessible_skills``
+    # / ``skills``) are HOISTED out of every ``chat_contexts`` row and stored
+    # once, content-addressed, under ``prompt_observability.skills_catalogs``
+    # (rows carry ``available_skills_ref`` / ``accessible_skills_ref`` hashes),
+    # and the heavy per-turn ``final_model_input`` debug payload is EVICTED from
+    # the frame to a typed stub (the full row stays on disk). Flip True to
+    # restore the old inline payloads for one release for A/B parity.
+    inline_prompt_payloads: bool = False
 
 
 @dataclass(slots=True)
