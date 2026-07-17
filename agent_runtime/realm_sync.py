@@ -188,6 +188,20 @@ def publish_realm_sync(
             update_board_baseline_after_sync(realm.id, published_board_ids)
         except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
             pass
+    # Mission Office: same baseline discipline, per workspace (tokens resolved
+    # from the local office dirs that contributed artifacts).
+    from .office_sync import update_office_baseline_after_sync
+
+    published_office_workspaces = sorted({
+        artifact.source.parent.parent.name if artifact.kind == "office_actor" else artifact.source.parent.name
+        for artifact in artifacts
+        if artifact.kind in ("office", "office_actor")
+    })
+    if published_office_workspaces:
+        try:
+            update_office_baseline_after_sync(realm.id, published_office_workspaces)
+        except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
+            pass
     warnings = _notify_publish(realm, repo=repo, artifacts=artifacts, credential=credential) if changed else []
     git_after = _git_state(repo)
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
@@ -223,6 +237,9 @@ def pull_realm_sync(
     _assert_no_secret_artifacts(artifacts)
     if dry_run:
         return _sync_result(realm, "pull", "dry_run", artifacts, repo=repo, git=_git_state(repo), changed=False)
+    # W-H4 typed accounting: named profiles materialized by this pull are
+    # reported, never a silent side effect (plan §5.1).
+    pulled_profile_tokens, created_profiles = _pulled_profile_tokens(artifacts)
     changed = False
     for artifact in artifacts:
         artifact.destination.parent.mkdir(parents=True, exist_ok=True)
@@ -239,6 +256,13 @@ def pull_realm_sync(
     board_summary = apply_board_pull(realm.id, subtree)
     if board_summary.adopted or board_summary.converged or board_summary.archived:
         changed = True
+    # Mission Office: same exclusion (store/office/*), same shape — the
+    # per-actor 3-way baseline merge owns the office pull (plan §5).
+    from .office_sync import apply_office_pull
+
+    office_summary = apply_office_pull(realm.id, subtree)
+    if office_summary.adopted or office_summary.converged or office_summary.archived:
+        changed = True
     install_results = [
         *install_harness_skills(skills=sorted(HARNESS_SKILLS)),
         *install_harness_skills_for_personas(ensure_persisted_personas(load_agent_runtime_config())),
@@ -247,6 +271,12 @@ def pull_realm_sync(
     git_after = _git_state(repo)
     result = _sync_result(realm, "pull", "pulled", artifacts, repo=repo, git=git_after, changed=changed)
     result["board_sync"] = board_summary.as_dict()
+    result["office_sync"] = office_summary.as_dict()
+    if pulled_profile_tokens:
+        result["profile_sync"] = {
+            "profiles": pulled_profile_tokens,
+            "created": created_profiles,
+        }
     result["skill_reconcile"] = {
         "installed": [item.skill for item in install_results],
         "changed": [item.skill for item in install_results if item.changed],
@@ -302,6 +332,12 @@ def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     artifacts.extend(_skill_artifacts())
     artifacts.extend(_workspace_realm_artifacts(realm, workspaces))
     artifacts.extend(_board_artifacts(workspaces))
+    artifacts.extend(_office_artifacts(workspaces))
+    # Personas referenced by synced office placements travel with the office
+    # (plan §5): an office-only persona must be materializable on pull. The
+    # wanted set was workspace.agent_ids only, which would sync a placement
+    # referencing a persona the member cannot resolve.
+    wanted_persona_ids = list(dict.fromkeys([*wanted_persona_ids, *_office_wanted_persona_ids(workspaces)]))
     for persona_id in wanted_persona_ids:
         persona = personas.get(persona_id)
         if persona is None:
@@ -421,6 +457,105 @@ def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
                     )
                 )
     return artifacts
+
+
+def _office_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
+    """Mission Office artifact family: office.json + active actor files for
+    surfaces whose workspace belongs to this realm. ``archive/``,
+    ``conflicts/`` and the never-synced baseline are all excluded (only
+    ``office.json`` and ``actors/`` are walked). Publish replaces the realm
+    subtree wholesale (see ``publish_realm_sync``), so actor removals/archives
+    propagate as absences; pull applies the per-actor 3-way baseline merge via
+    ``office_sync.apply_office_pull``.
+    """
+
+    from .office_store import OfficeStore
+
+    workspace_ids = {ws.id for ws in workspaces}
+    store = OfficeStore()
+    artifacts: list[RealmSyncArtifact] = []
+    for workspace_token in store.list_workspaces():
+        try:
+            surface = store.get_surface(workspace_token)
+        except Exception:
+            continue
+        if surface.workspace_id not in workspace_ids:
+            continue
+        ws_token = _safe_token(workspace_token)
+        surface_path = paths.office_surface_path(workspace_token)
+        if surface_path.exists():
+            artifacts.append(
+                RealmSyncArtifact(
+                    kind="office",
+                    source=surface_path,
+                    relative_path=f"store/office/{ws_token}/office.json",
+                    destination=surface_path,
+                )
+            )
+        actors_dir = paths.office_actors_dir(workspace_token)
+        if actors_dir.exists():
+            for actor_path in sorted(actors_dir.glob("*.json")):
+                artifacts.append(
+                    RealmSyncArtifact(
+                        kind="office_actor",
+                        source=actor_path,
+                        relative_path=f"store/office/{ws_token}/actors/{actor_path.name}",
+                        destination=actor_path,
+                    )
+                )
+    return artifacts
+
+
+def _office_wanted_persona_ids(workspaces: list[Workspace]) -> list[str]:
+    """Persona ids referenced by office placements in this realm's workspaces
+    (plan §5's one-line union — office-only personas travel with the office)."""
+
+    from .office_store import OfficeStore
+
+    workspace_ids = {ws.id for ws in workspaces}
+    store = OfficeStore()
+    persona_ids: list[str] = []
+    for workspace_token in store.list_workspaces():
+        try:
+            surface = store.get_surface(workspace_token)
+        except Exception:
+            continue
+        if surface.workspace_id not in workspace_ids:
+            continue
+        for actor in store.list_actors(workspace_token):
+            if actor.persona_id and actor.persona_id not in persona_ids:
+                persona_ids.append(actor.persona_id)
+    return persona_ids
+
+
+def _pulled_profile_tokens(artifacts: list[RealmSyncArtifact]) -> tuple[list[str], list[str]]:
+    """(all profile tokens in the pulled artifact set, the subset that does not
+    exist locally yet). The pull write-loop's ``mkdir(parents=True)``
+    materializes missing profile homes; this makes that adoption a typed row
+    (W-H4, plan §5.1), never a silent side effect."""
+
+    tokens = sorted(
+        {
+            Path(artifact.relative_path).parts[1]
+            for artifact in artifacts
+            if len(Path(artifact.relative_path).parts) > 1 and Path(artifact.relative_path).parts[0] == "profiles"
+        }
+    )
+    if not tokens:
+        return [], []
+    created: list[str] = []
+    active_token = _safe_token(active_profile_name())
+    for token in tokens:
+        if token == active_token:
+            continue
+        try:
+            from hermes_cli.profiles import normalize_profile_name, profile_exists
+
+            if not profile_exists(normalize_profile_name(token)):
+                created.append(token)
+        except Exception:
+            continue
+    return tokens, created
 
 
 def _persona_artifacts(persona: AgentPersona) -> list[RealmSyncArtifact]:
@@ -547,8 +682,13 @@ def _destination_for_sync_path(rel: str) -> Path | None:
         return paths.workspaces_dir() / parts[2]
     if len(parts) == 3 and parts[0] == "store" and parts[1] == "realms":
         return paths.realms_dir() / parts[2]
-    if parts and parts[0] == "profiles":
-        profile_home = get_hermes_home() if len(parts) > 1 and parts[1] == _safe_token(active_profile_name()) else get_hermes_home()
+    # store/boards/* and store/office/* deliberately fall through to None: the
+    # generic overwrite loop never touches them — board_sync.apply_board_pull /
+    # office_sync.apply_office_pull own those pulls (3-way baseline merge).
+    if parts and parts[0] == "profiles" and len(parts) > 1:
+        profile_home = _profile_home_for_token(parts[1])
+        if profile_home is None:
+            return None
         if len(parts) == 3 and parts[2] == "config.yaml":
             return profile_home / "config.yaml"
         if "memories" in parts and parts[-1] == "MEMORY.md":
@@ -560,6 +700,33 @@ def _destination_for_sync_path(rel: str) -> Path | None:
     return None
 
 
+def _profile_home_for_token(token: str) -> Path | None:
+    """Profile-aware pull destination (W-H4, plan §5.1).
+
+    Before 2026-07-17 this mapping collapsed EVERY ``profiles/<name>/…``
+    artifact into the active profile home (a degenerate ternary — both
+    branches returned ``get_hermes_home()``), so a multi-profile realm pull
+    last-write-wins'd every profile's config.yaml/MEMORY.md onto one home.
+    Now: the active profile keeps the active home; any other published profile
+    resolves to ITS OWN home via ``get_profile_dir`` (materialized by the pull
+    write-loop's mkdir and reported as a typed ``profile_sync`` row). Untrusted
+    remote component: refuse traversal/absolute/drive-letter shapes.
+    """
+
+    if token in ("", ".", "..") or ":" in token or token.startswith(("/", "\\")):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", token):
+        return None
+    if token == _safe_token(active_profile_name()):
+        return get_hermes_home()
+    try:
+        from hermes_cli.profiles import get_profile_dir, normalize_profile_name
+
+        return get_profile_dir(normalize_profile_name(token))
+    except Exception:
+        return None
+
+
 def _kind_for_sync_path(rel: str) -> str:
     if rel.startswith("skills/"):
         return "skill"
@@ -567,6 +734,8 @@ def _kind_for_sync_path(rel: str) -> str:
         return "workspace"
     if rel.startswith("store/realms/"):
         return "realm"
+    if rel.startswith("store/office/"):
+        return "office_actor" if "/actors/" in rel else "office"
     if rel.endswith("config.yaml"):
         return "persona_config"
     if "/memories/" in rel:

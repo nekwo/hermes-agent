@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -28,94 +27,26 @@ from .events import EventLog
 from .models import Board, BoardCard
 from .serde import from_jsonable, to_jsonable
 
+# The classifier was lifted VERBATIM to ``sync_merge`` on 2026-07-17 when the
+# Mission Office family became its second consumer. These aliases keep every
+# existing import path (and the exhaustive decision-table tests) working
+# unmodified — which is the proof the lift changed nothing.
+from .sync_merge import (
+    PullAction as BoardPullAction,
+    PullDecision as BoardPullDecision,
+    classify_three_way_pull as classify_board_pull,
+)
 
-class BoardPullAction(str, Enum):
-    NOOP = "noop"
-    WRITE_REMOTE = "write_remote"  # adopt/take-remote/converge → write remote + baseline
-    KEEP_LOCAL = "keep_local"  # local changed vs unchanged remote → stays unpublished
-    ARCHIVE_LOCAL = "archive_local"  # remote removed the card → archive (never delete)
-    CONFLICT = "conflict"  # both diverged / edit-vs-remove / archive-vs-edit
-
-
-@dataclass(frozen=True, slots=True)
-class BoardPullDecision:
-    action: BoardPullAction
-    reason: str
-
-
-def _local_state(local_hash: str | None, baseline_hash: str | None, locally_archived: bool) -> str:
-    if locally_archived:
-        return "archived"
-    if local_hash is None:
-        return "absent"
-    if baseline_hash is None:
-        return "new"
-    return "unchanged" if local_hash == baseline_hash else "changed"
-
-
-def _remote_state(remote_hash: str | None, baseline_hash: str | None) -> str:
-    if remote_hash is None:
-        return "absent"
-    if baseline_hash is None:
-        return "new"
-    return "unchanged" if remote_hash == baseline_hash else "changed"
-
-
-def classify_board_pull(
-    local_hash: str | None,
-    remote_hash: str | None,
-    baseline_hash: str | None,
-    *,
-    locally_archived: bool = False,
-) -> BoardPullDecision:
-    """Pure per-card pull decision (§8). ``*_hash`` are semantic content hashes
-    (``board_models.board_content_hash``); ``None`` means the card is absent on
-    that side. ``locally_archived`` is the resurrection-guard ledger membership.
-    """
-
-    ls = _local_state(local_hash, baseline_hash, locally_archived)
-    rs = _remote_state(remote_hash, baseline_hash)
-
-    if ls == "archived":
-        # Ledger blocks resurrection: a pulled remote copy never re-creates a
-        # locally archived card. A remote EDIT of it is a loud conflict.
-        if rs in ("absent", "unchanged"):
-            return BoardPullDecision(BoardPullAction.NOOP, "archived_local")
-        return BoardPullDecision(BoardPullAction.CONFLICT, "archive_vs_edit")
-
-    if ls == "unchanged":
-        if rs == "unchanged":
-            return BoardPullDecision(BoardPullAction.NOOP, "unchanged")
-        if rs == "changed":
-            return BoardPullDecision(BoardPullAction.WRITE_REMOTE, "take_remote")
-        if rs == "absent":
-            return BoardPullDecision(BoardPullAction.ARCHIVE_LOCAL, "remote_removed")
-        return BoardPullDecision(BoardPullAction.WRITE_REMOTE, "take_remote")
-
-    if ls == "changed":
-        if rs == "unchanged":
-            return BoardPullDecision(BoardPullAction.KEEP_LOCAL, "unpublished")
-        if rs == "changed":
-            if local_hash == remote_hash:
-                return BoardPullDecision(BoardPullAction.WRITE_REMOTE, "converged")
-            return BoardPullDecision(BoardPullAction.CONFLICT, "both_changed")
-        if rs == "absent":
-            return BoardPullDecision(BoardPullAction.CONFLICT, "edit_vs_remove")
-        return BoardPullDecision(BoardPullAction.CONFLICT, "both_changed")
-
-    if ls == "new":  # local present, no baseline
-        if rs == "absent":
-            return BoardPullDecision(BoardPullAction.KEEP_LOCAL, "new_local")
-        if rs == "new":
-            if local_hash == remote_hash:
-                return BoardPullDecision(BoardPullAction.WRITE_REMOTE, "converged")
-            return BoardPullDecision(BoardPullAction.CONFLICT, "new_both")
-        return BoardPullDecision(BoardPullAction.CONFLICT, "new_both")
-
-    # ls == "absent"
-    if rs == "absent":
-        return BoardPullDecision(BoardPullAction.NOOP, "absent_both")
-    return BoardPullDecision(BoardPullAction.WRITE_REMOTE, "adopt_remote")
+__all__ = [
+    "BoardPullAction",
+    "BoardPullDecision",
+    "BoardPullSummary",
+    "apply_board_pull",
+    "classify_board_pull",
+    "read_board_baseline",
+    "update_board_baseline_after_sync",
+    "write_board_baseline",
+]
 
 
 # --- baseline sidecar (never synced, never published) --------------------

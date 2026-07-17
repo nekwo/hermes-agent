@@ -117,6 +117,55 @@ def board_baseline_path(realm_id: str) -> Path:
     return store_root() / "realm_sync" / _safe_path_token(realm_id) / "board_baseline.json"
 
 
+def office_root() -> Path:
+    return store_root() / "office"
+
+
+def office_dir(workspace_id: str) -> Path:
+    return office_root() / _safe_path_token(workspace_id)
+
+
+def office_surface_path(workspace_id: str) -> Path:
+    return office_dir(workspace_id) / "office.json"
+
+
+def office_actors_dir(workspace_id: str) -> Path:
+    return office_dir(workspace_id) / "actors"
+
+
+def office_actor_path(workspace_id: str, actor_key: str) -> Path:
+    from .office_models import actor_file_token  # filename authority (plan §4.3)
+
+    return office_actors_dir(workspace_id) / f"{actor_file_token(actor_key)}.json"
+
+
+def office_archive_dir(workspace_id: str) -> Path:
+    # archive-never-delete; NOT published to realms
+    return office_dir(workspace_id) / "archive"
+
+
+def office_archived_actor_path(workspace_id: str, actor_key: str) -> Path:
+    from .office_models import actor_file_token
+
+    return office_archive_dir(workspace_id) / f"{actor_file_token(actor_key)}.json"
+
+
+def office_conflicts_dir(workspace_id: str) -> Path:
+    # per-actor sync conflict sidecars; NOT published to realms
+    return office_dir(workspace_id) / "conflicts"
+
+
+def office_conflict_path(workspace_id: str, actor_key: str) -> Path:
+    from .office_models import actor_file_token
+
+    return office_conflicts_dir(workspace_id) / f"{actor_file_token(actor_key)}.json"
+
+
+def office_baseline_path(realm_id: str) -> Path:
+    # realm-sync baseline sidecar; NEVER synced, NEVER published
+    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "office_baseline.json"
+
+
 def repo_bundles_task_dir(task_id: str) -> Path:
     return repo_bundles_dir() / _safe_path_token(task_id)
 

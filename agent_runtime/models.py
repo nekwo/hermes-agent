@@ -222,6 +222,73 @@ class Board:
 
 
 @dataclass(slots=True)
+class OfficeItem:
+    """One authored Mission Office scene item (agent character or its desk) —
+    a value object living inside its actor's file, never its own file.
+
+    Geometry is scene-space ``[x, y]``; ``scale`` is the operator-authored
+    render scale, clamped to the launcher's authorable range at the store
+    boundary. ``display_name`` is operator text and is validated against the
+    secret-assignment scanner at WRITE time (plan §4.2) so one member's name
+    can never fail another member's realm publish.
+    """
+
+    item_id: str
+    persona_id: str
+    kind: str = "agent"  # "agent" | "desk"
+    position: list[float] = field(default_factory=lambda: [0.0, 0.0])
+    folder: str = ""
+    display_name: str | None = None
+    pet_slug: str | None = None
+    scale: float = 1.0
+
+
+@dataclass(slots=True)
+class OfficeActor:
+    """One Mission Office actor placement — one file each under
+    ``office/<workspace>/actors/`` (the realm-sync merge unit).
+
+    ``actor_key`` is the canonical sync key minted ONLY by ``OfficeStore``
+    (``canonical_persona_instance_id`` for instance-bound actors, else the
+    persona id). The identity triple (persona/instance/profile) is the
+    payload truth — the filename is routing only. All scene items bound to
+    one actor (agent placements + coupled desks) live in this one file, so
+    actor granularity — not item granularity — is the merge unit.
+    """
+
+    actor_key: str
+    workspace_id: str
+    persona_id: str
+    persona_instance_id: str | None = None
+    backing_profile: str | None = None
+    items: list[OfficeItem] = field(default_factory=list)
+    state: str = "active"  # "active" | "archived"
+    revision: int = 1
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    updated_by: str = "operator"
+    schema_version: int = 1
+
+
+@dataclass(slots=True)
+class OfficeSurface:
+    """The per-workspace Mission Office surface definition — shared taxonomy
+    only (folders) + the resurrection-guard ledger. Personal view state
+    (viewport, collapsed docks, hidden ids) never enters this model — it stays
+    launcher-local by design (plan §4.4).
+    """
+
+    workspace_id: str
+    folders: list[str] = field(default_factory=list)
+    archived_actor_keys: list[str] = field(default_factory=list)
+    revision: int = 1
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    updated_by: str = "operator"
+    schema_version: int = 1
+
+
+@dataclass(slots=True)
 class GoalRuntimeInstance:
     id: str
     task_id: str

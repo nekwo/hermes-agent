@@ -86,6 +86,12 @@ def board_lock(board_id: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def office_lock(workspace_id: str) -> Iterator[None]:
+    with _file_lock(paths.lock_dir() / "office" / f"{paths._safe_path_token(workspace_id)}.lock"):
+        yield
+
+
+@contextlib.contextmanager
 def archive_lock() -> Iterator[None]:
     with _file_lock(paths.lock_dir() / "archive.lock"):
         yield
