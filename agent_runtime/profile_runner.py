@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 import hashlib
+import json
 import os
 from pathlib import Path
 from threading import Event, RLock, Timer
@@ -94,6 +95,12 @@ class AgentRunResult:
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
     reasoning_tokens: int | None = None
+    # Per-call canonical usage rows for this turn (call_index/prompt_tokens/…),
+    # in call order. The token fields above are turn-cumulative and answer "what
+    # did this turn burn"; row 1 answers "how big was the assembled context",
+    # which is the only honest source for Mission Control's context budget.
+    # Written at the accrual sites (agent.usage_pricing.record_api_call_usage).
+    usage_ledger: list[dict[str, Any]] = field(default_factory=list)
     latency_ms: int | None = None
     profile_timing: dict[str, int] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -1304,6 +1311,11 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
             "kind": "actual_model_tools",
             "final_model_tools": _agent_tool_names(agent),
             "tool_count": len(_agent_tool_names(agent)),
+            # Wire size of the tool schemas, which ship in FULL on every API call
+            # (agent/conversation_loop.py passes tools=agent.tools each time).
+            # Names alone hid the largest fixed slice of the prompt from the
+            # context inspector. Same measurement as `hermes prompt-size`.
+            "json_bytes": _agent_tools_json_bytes(agent),
         },
         "skip_context_files": bool(request.skip_context_files),
         "skip_memory": bool(request.skip_memory),
@@ -1311,6 +1323,17 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
         "message_count": len(messages),
         "messages": messages,
     }
+
+
+def _agent_tools_json_bytes(agent) -> int | None:
+    """UTF-8 byte size of the serialized tool schemas, or None if unmeasurable."""
+    try:
+        tools = list(getattr(agent, "tools", None) or [])
+        if not tools:
+            return 0
+        return len(json.dumps(tools, ensure_ascii=False, default=str).encode("utf-8"))
+    except Exception:
+        return None
 
 
 def _agent_tool_names(agent) -> list[str]:
@@ -1378,6 +1401,11 @@ def _normalize_result(result: Any, *, agent) -> AgentRunResult:
             cache_read_tokens=result.get("cache_read_tokens"),
             cache_write_tokens=result.get("cache_write_tokens"),
             reasoning_tokens=result.get("reasoning_tokens"),
+            usage_ledger=[
+                row for row in (result.get("usage_ledger") or []) if isinstance(row, dict)
+            ]
+            if isinstance(result.get("usage_ledger"), list)
+            else [],
             raw=dict(result),
         )
     return AgentRunResult(

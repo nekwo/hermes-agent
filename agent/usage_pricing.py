@@ -65,6 +65,45 @@ class CanonicalUsage:
         )
 
 
+# Per-call usage ledger. ``max_iterations`` bounds an agent turn at 90 calls;
+# the cap only guards long-lived CLI sessions, where the ledger is observability
+# and the session_* counters remain the accounting record.
+USAGE_LEDGER_MAX_ROWS = 256
+
+
+def record_api_call_usage(agent: Any, canonical_usage: CanonicalUsage) -> None:
+    """Append one row to the agent's per-call usage ledger.
+
+    Called at each usage-accrual site immediately after the ``session_*``
+    counters are advanced, so the ledger is a per-call breakdown of the same
+    canonical truth the counters aggregate. Consumers (Mission Control's
+    context budget) need the FIRST call's ``prompt_tokens`` — the assembled
+    context including tool schemas — which a cumulative counter cannot answer.
+    """
+    ledger = getattr(agent, "session_usage_ledger", None)
+    if ledger is None:
+        # Agents constructed before this field existed (or test doubles) still
+        # accrue a ledger rather than losing the rows.
+        ledger = []
+        try:
+            agent.session_usage_ledger = ledger
+        except Exception:
+            return
+    if not isinstance(ledger, list) or len(ledger) >= USAGE_LEDGER_MAX_ROWS:
+        return
+    ledger.append(
+        {
+            "call_index": len(ledger) + 1,
+            "prompt_tokens": canonical_usage.prompt_tokens,
+            "input_tokens": canonical_usage.input_tokens,
+            "output_tokens": canonical_usage.output_tokens,
+            "cache_read_tokens": canonical_usage.cache_read_tokens,
+            "cache_write_tokens": canonical_usage.cache_write_tokens,
+            "reasoning_tokens": canonical_usage.reasoning_tokens,
+        }
+    )
+
+
 @dataclass(frozen=True)
 class BillingRoute:
     provider: str

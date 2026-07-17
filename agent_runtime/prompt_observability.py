@@ -108,6 +108,7 @@ def mission_chat_prompt_observability(
     current_message: str | None = None,
     final_model_input: dict[str, Any] | None = None,
     model_selection: dict[str, Any] | None = None,
+    turn_usage: dict[str, Any] | None = None,
     trace_events: Iterable[dict[str, Any]] | None = None,
     prompt_mode: str = "normal_hermes_profile_chat",
     workspace_id: str | None = None,
@@ -257,7 +258,12 @@ def mission_chat_prompt_observability(
         "retrieval_context": [],
         "final_model_input": _safe_final_model_input(final_model_input),
         "model_selection": _safe_model_selection(model_selection),
-        "context_budget": _context_budget(model_selection, final_model_input),
+        # What this ONE operator message actually burned, metered per API call
+        # and summed over the turn's tool loop. Distinct from context_budget,
+        # which is the size of the assembled context for a single call — the
+        # two were conflated, which is how a 6K inspector sat next to a 13K bill.
+        "turn_usage": _safe_turn_usage(turn_usage),
+        "context_budget": _context_budget(model_selection, final_model_input, turn_usage),
         "prompt_flags": {
             "skip_context_files": not bool(getattr(persona, "include_core_context_files", False)),
             "skip_memory": not _mission_chat_memory_loaded(persona),
@@ -679,7 +685,33 @@ def _compaction_ratio(model: str, provider: str | None) -> float:
     return _DEFAULT_COMPACTION_RATIO
 
 
+# How ``context_budget.used_tokens`` was derived. The provider's meter is the
+# only authority; the estimates exist for the window BEFORE a call has returned
+# (or when a turn failed before any call) and must be labeled as such — an
+# unlabeled estimate reads as truth and silently under-reports (it cannot see
+# tool schemas, which are ~12K tokens on a typical mission-chat turn).
+BUDGET_BASIS_METERED_FIRST_CALL = "metered_first_call"
+BUDGET_BASIS_ESTIMATE_WITH_TOOLS = "estimate_messages_plus_tools"
+BUDGET_BASIS_ESTIMATE_MESSAGES_ONLY = "estimate_messages_only"
+
+
+def _tool_schema_json_bytes(final_model_input: dict[str, Any] | None) -> int | None:
+    if not isinstance(final_model_input, dict):
+        return None
+    schema = final_model_input.get("tool_schema")
+    if not isinstance(schema, dict):
+        return None
+    raw = schema.get("json_bytes")
+    return raw if isinstance(raw, int) and raw > 0 else None
+
+
 def _estimate_used_tokens(final_model_input: dict[str, Any] | None) -> int | None:
+    """Heuristic bytes//4 estimate of the assembled prompt.
+
+    Counts the recorded messages PLUS the tool-schema wire size when it is
+    known: the schemas ship on every API call, so an estimate without them is
+    not "roughly right", it is missing the second-largest block.
+    """
     if not isinstance(final_model_input, dict):
         return None
     messages = final_model_input.get("messages")
@@ -694,18 +726,44 @@ def _estimate_used_tokens(final_model_input: dict[str, Any] | None) -> int | Non
             total_bytes += raw
         else:
             total_bytes += len(str(message.get("content") or "").encode("utf-8"))
+    total_bytes += _tool_schema_json_bytes(final_model_input) or 0
     if total_bytes <= 0:
         return None
     return max(1, total_bytes // 4)
 
 
+def _metered_assembled_tokens(turn_usage: dict[str, Any] | None) -> int | None:
+    """The assembled-context size as the provider metered it, or None.
+
+    Row 1 of the usage ledger is the only honest answer: that call carried the
+    system prompt + user message + tool schemas and nothing else. Later calls
+    also carry tool results (loop growth), which is turn burn, not context size.
+    A single-call turn's total is by definition its first call.
+    """
+    if not isinstance(turn_usage, dict):
+        return None
+    first = turn_usage.get("first_call_prompt_tokens")
+    if isinstance(first, int) and first > 0:
+        return first
+    api_calls = turn_usage.get("api_calls")
+    prompt_tokens = turn_usage.get("prompt_tokens")
+    if api_calls == 1 and isinstance(prompt_tokens, int) and prompt_tokens > 0:
+        return prompt_tokens
+    return None
+
+
 def _context_budget(
     model_selection: dict[str, Any] | None,
     final_model_input: dict[str, Any] | None,
+    turn_usage: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Per-model context budget for the Sent-to-model bar: window + compaction line.
 
-    Returns None (UI omits the bar) when the model/window can't be resolved.
+    ``used_tokens`` prefers the provider-metered first-call prompt (the exact
+    assembled context, tool schemas included) and falls back to a labeled
+    estimate only when no call has completed. ``used_basis`` says which, so the
+    UI never renders a guess as a measurement. Returns None (UI omits the bar)
+    when the model/window can't be resolved.
     """
     sel = model_selection if isinstance(model_selection, dict) else {}
     model = sel.get("effective_model") or sel.get("chat_model") or sel.get("default_model")
@@ -716,15 +774,37 @@ def _context_budget(
     if not window:
         return None
     ratio = _compaction_ratio(str(model), provider)
-    return {
+    estimate = _estimate_used_tokens(final_model_input)
+    metered = _metered_assembled_tokens(turn_usage)
+    if metered is not None:
+        used = metered
+        basis = BUDGET_BASIS_METERED_FIRST_CALL
+    else:
+        used = estimate
+        basis = (
+            BUDGET_BASIS_ESTIMATE_WITH_TOOLS
+            if _tool_schema_json_bytes(final_model_input) is not None
+            else BUDGET_BASIS_ESTIMATE_MESSAGES_ONLY
+        )
+    budget = {
         "model": safe_assignment_text(str(model), limit=120),
         "provider": safe_assignment_token(provider) if provider else None,
         "window_tokens": int(window),
         "compaction_ratio": round(float(ratio), 4),
         "compaction_tokens": int(window * ratio),
-        "used_tokens": _estimate_used_tokens(final_model_input),
-        "used_estimated": True,
+        "used_tokens": used,
+        "used_basis": basis,
+        # Back-compat for launcher builds that predate `used_basis`; they render
+        # a tilde off this bool. Derived, never independently decided.
+        "used_estimated": basis != BUDGET_BASIS_METERED_FIRST_CALL,
+        "estimate_tokens": estimate,
     }
+    # Drift is the tripwire the old design lacked: when the estimate and the
+    # meter both exist and disagree badly, the estimator has lost an input class
+    # (as it did with tool schemas) and says so instead of failing silently.
+    if metered is not None and estimate is not None and estimate > 0:
+        budget["estimate_drift_ratio"] = round(metered / estimate, 2)
+    return budget
 
 
 def _profile_snapshot_skill_names(profile: str) -> list[str]:
@@ -1172,6 +1252,60 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
         "system_message_supplied": bool(value.get("system_message_supplied")),
         "message_count": _safe_int(value.get("message_count")) or len(safe_messages),
         "messages": safe_messages,
+        # Tool schemas ship in full on every API call and are the largest fixed
+        # slice of the prompt after the system prompt. This whitelist previously
+        # dropped them, which is why the context budget could not see (or
+        # estimate) them at all.
+        "tool_schema": _safe_tool_schema(value.get("tool_schema")),
+    }
+
+
+_TURN_USAGE_FIELDS = (
+    "api_calls",
+    "prompt_tokens",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "first_call_prompt_tokens",
+)
+
+
+def _safe_turn_usage(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Key-whitelisted, int-coerced turn usage. All ints — nothing to redact."""
+    if not isinstance(value, dict):
+        return None
+    safe = {field: _safe_int(value.get(field)) for field in _TURN_USAGE_FIELDS}
+    if all(number is None for number in safe.values()):
+        return None
+    return safe
+
+
+_SAFE_TOOL_NAME_LIMIT = 120
+
+
+def _safe_tool_schema(value: Any) -> dict[str, Any] | None:
+    """Redaction-safe tool-schema summary: names + count + wire size.
+
+    Never carries the schema bodies (they can embed paths/enums); the byte size
+    is what the context budget needs.
+    """
+    if not isinstance(value, dict):
+        return None
+    names: list[str] = []
+    raw_names = value.get("final_model_tools")
+    if isinstance(raw_names, list):
+        for entry in raw_names[:_SAFE_TOOL_NAME_LIMIT]:
+            token = safe_assignment_token(entry)
+            if token:
+                names.append(token)
+    return {
+        "schema_version": _safe_int(value.get("schema_version")) or 1,
+        "kind": safe_assignment_token(value.get("kind")) or "actual_model_tools",
+        "final_model_tools": names,
+        "tool_count": _safe_int(value.get("tool_count")),
+        "json_bytes": _safe_int(value.get("json_bytes")),
     }
 
 

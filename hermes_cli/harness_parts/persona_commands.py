@@ -1042,6 +1042,9 @@ def _cmd_mission_chat_message(args) -> int:
             current_message=message,
             final_model_input=final_model_input,
             model_selection=model_selection,
+            # Metered truth for this turn, recorded at the injection site next to
+            # the context it describes (never key-matched back on later).
+            turn_usage=_mission_chat_turn_usage(chat_result),
             trace_events=trace_payloads,
             workspace_id=workspace_id,
             workspace_name=workspace_name,
@@ -2827,6 +2830,43 @@ def _persona_pre_trace_ack_text(trace_payload: dict) -> str:
     if tool_name in {"mission_goal_create", "mission_goal"}:
         return "I'll create the real Mission Control goal now, then report back with the task details."
     return "I'll check that now and report back with what I find."
+
+
+def _mission_chat_turn_usage(result) -> dict[str, int] | None:
+    """This turn's metered usage, shaped for the observability envelope.
+
+    Mission Control builds a fresh runtime per turn, so the result's totals ARE
+    this turn's totals, and ``usage_ledger[0]`` is the turn's first API call —
+    the one whose prompt is exactly the assembled context (system + user + tool
+    schemas), with no tool-result loop growth yet. That single number is what
+    the context budget must show; the sums are what the message cost.
+    """
+    if result is None:
+        return None
+    ledger = getattr(result, "usage_ledger", None)
+    first_call_prompt = None
+    if isinstance(ledger, list) and ledger and isinstance(ledger[0], dict):
+        candidate = ledger[0].get("prompt_tokens")
+        if isinstance(candidate, int) and candidate > 0:
+            first_call_prompt = candidate
+    input_tokens = _positive_int_or_zero(getattr(result, "input_tokens", None))
+    cache_read_tokens = _positive_int_or_zero(getattr(result, "cache_read_tokens", None))
+    cache_write_tokens = _positive_int_or_zero(getattr(result, "cache_write_tokens", None))
+    usage = {
+        "api_calls": _positive_int_or_zero(getattr(result, "api_calls", None)),
+        # prompt = input + cache_read + cache_write (CanonicalUsage's own
+        # definition — input_tokens is already the uncached remainder).
+        "prompt_tokens": input_tokens + cache_read_tokens + cache_write_tokens,
+        "input_tokens": input_tokens,
+        "output_tokens": _positive_int_or_zero(getattr(result, "output_tokens", None)),
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "reasoning_tokens": _positive_int_or_zero(getattr(result, "reasoning_tokens", None)),
+        "first_call_prompt_tokens": first_call_prompt,
+    }
+    if not any(value for value in usage.values()):
+        return None
+    return usage
 
 
 def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:
