@@ -242,6 +242,89 @@ def test_ingest_stores_doc_and_reports(isolate_agent_runtime_root):
     assert (isolate_agent_runtime_root / "flow_graphs" / "personainst_lead.json").exists()
 
 
+def test_ingest_removed_agent_sheds_the_maps_wiring(isolate_agent_runtime_root):
+    store, lead, dev, qa = _three_instances()
+    first = _doc(
+        [_node("n_lead", lead.id), _node("n_dev", dev.id), _node("n_qa", qa.id)],
+        [
+            {"from": "n_lead", "to": "n_dev"},
+            {"from": "n_dev", "to": "n_qa"},
+        ],
+    )
+    ingest_flow_graph(json.dumps(first))
+    assert store.get(dev.id).steered_by == [lead.id]
+    assert store.get(qa.id).steered_by == [dev.id]
+
+    # The operator deletes dev's node and wires lead -> qa directly.
+    second = _doc(
+        [_node("n_lead", lead.id), _node("n_qa", qa.id)],
+        [{"from": "n_lead", "to": "n_qa"}],
+    )
+    report = ingest_flow_graph(json.dumps(second))
+
+    assert report["removed_from_map_count"] == 1
+    departed = next(e for e in report["reconciled"] if e.get("removed_from_map"))
+    assert departed["persona_instance_id"] == dev.id
+    assert departed["ok"] and departed["changed"]
+    # dev lost the map's edge; qa follows the new drawing.
+    assert store.get(dev.id).steered_by == []
+    assert store.get(qa.id).steered_by == [lead.id]
+
+
+def test_ingest_departure_preserves_foreign_parents_and_goal(isolate_agent_runtime_root):
+    store, lead, dev, qa = _three_instances()
+    foreign = store.create_free_floating("profile:foreign")
+    ingest_flow_graph(
+        json.dumps(
+            _doc(
+                [_node("n_lead", lead.id), _node("n_dev", dev.id)],
+                [{"from": "n_lead", "to": "n_dev"}],
+            )
+        )
+    )
+    # A parent set OUTSIDE the map (goal engine / another surface) + a goal.
+    store.set_parents(dev.id, [lead.id, foreign.id], goal_id="goal_live")
+
+    ingest_flow_graph(json.dumps(_doc([_node("n_lead", lead.id)], [])))
+
+    after = store.get(dev.id)
+    # Map member (lead) stripped; foreign parent survives; goal untouched.
+    assert after.steered_by == [foreign.id]
+    assert after.goal_id == "goal_live"
+
+
+def test_ingest_first_doc_has_no_departures(isolate_agent_runtime_root):
+    store, lead, dev, _ = _three_instances()
+    report = ingest_flow_graph(
+        json.dumps(
+            _doc(
+                [_node("n_lead", lead.id), _node("n_dev", dev.id)],
+                [{"from": "n_lead", "to": "n_dev"}],
+            )
+        )
+    )
+    assert report["removed_from_map_count"] == 0
+    assert not any(e.get("removed_from_map") for e in report["reconciled"])
+
+
+def test_ingest_departed_agent_gone_from_runtime_is_tolerated(isolate_agent_runtime_root):
+    store, lead, _, _ = _three_instances()
+    ghost = "personainst_soon_gone"
+    # Prior doc claims a binding to an agent that no longer exists at the next
+    # ingest — simulate by storing a doc that binds a never-created id.
+    first = _doc(
+        [_node("n_lead", lead.id), _node("n_ghost", ghost)],
+        [{"from": "n_lead", "to": "n_ghost"}],
+    )
+    ingest_flow_graph(json.dumps(first))
+
+    report = ingest_flow_graph(json.dumps(_doc([_node("n_lead", lead.id)], [])))
+
+    departed = next(e for e in report["reconciled"] if e.get("removed_from_map"))
+    assert departed["persona_instance_id"] == ghost
+    assert departed["ok"] is True and departed["changed"] is False
+
+
 def test_ingest_rejects_invalid_json_and_oversize(isolate_agent_runtime_root):
     with pytest.raises(FlowGraphDocError, match="not valid JSON"):
         ingest_flow_graph("{nope")

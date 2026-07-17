@@ -258,6 +258,67 @@ class FlowGraphStore:
         return sorted(path.stem for path in directory.glob("*.json"))
 
 
+def _bound_agents_of_stored(stored: dict[str, Any] | None) -> set[str]:
+    """The bound-agent id set of a previously stored doc — best-effort: a
+    missing/corrupt prior doc contributes no departures rather than failing
+    this ingest."""
+
+    if not isinstance(stored, dict):
+        return set()
+    try:
+        prev = parse_flow_graph_doc(stored.get("doc"))
+    except FlowGraphDocError:
+        return set()
+    return {agent for agent in prev.node_bindings.values() if agent}
+
+
+def reconcile_departed_agents(
+    *,
+    departed: set[str],
+    map_member_ids: set[str],
+    store: PersonaInstanceStore,
+) -> list[dict[str, Any]]:
+    """An agent REMOVED from the map loses the map's wiring (operator decision
+    2026-07-16: "removing it from the chart removes its steering" — off-map no
+    longer means untouched once the agent was previously part of THIS doc).
+
+    Scope of authority stays the document's own membership: only parents that
+    are/were members of this map are stripped; a foreign parent (set by the
+    goal engine or another surface) is preserved. Goal membership is never
+    touched — same clear_parents/set_parents semantics as the main pass."""
+
+    results: list[dict[str, Any]] = []
+    for agent_id in sorted(departed):
+        entry: dict[str, Any] = {
+            "persona_instance_id": agent_id,
+            "removed_from_map": True,
+        }
+        try:
+            instance = store.get(agent_id)
+        except Exception:
+            # Departed from the map AND gone from the runtime: nothing to strip.
+            entry.update(ok=True, changed=False, steered_by=[])
+            results.append(entry)
+            continue
+        current = [p for p in (instance.steered_by or []) if p]
+        remaining = [p for p in current if p not in map_member_ids]
+        try:
+            if remaining == current:
+                entry.update(ok=True, changed=False, steered_by=current)
+            elif remaining:
+                updated = store.set_parents(agent_id, remaining, goal_id=None)
+                entry.update(ok=True, changed=True, steered_by=list(updated.steered_by))
+            else:
+                updated = store.clear_parents(agent_id)
+                entry.update(ok=True, changed=True, steered_by=list(updated.steered_by))
+        except ValueError as exc:
+            entry.update(ok=False, changed=False, error=str(exc))
+        except Exception as exc:  # defensive: report, never abort the pass
+            entry.update(ok=False, changed=False, error=f"steer failed: {exc}")
+        results.append(entry)
+    return results
+
+
 def ingest_flow_graph(
     payload_text: str,
     *,
@@ -267,7 +328,12 @@ def ingest_flow_graph(
     """The whole ingest, from wire text to per-agent report. Raises
     [FlowGraphDocError] on an invalid document (nothing stored, nothing
     written); a stored doc with per-agent reconcile failures is NOT an error —
-    the report carries them."""
+    the report carries them.
+
+    Ingest also settles DEPARTURES: agents bound in this graph's previously
+    stored doc but absent from the new one get the map's wiring stripped
+    (see [reconcile_departed_agents]) — so deleting a node on the chart
+    removes its steering relations instead of orphaning them runtime-side."""
 
     raw_bytes = payload_text.encode("utf-8", errors="replace")
     if len(raw_bytes) > MAX_FLOW_DOC_BYTES:
@@ -280,8 +346,26 @@ def ingest_flow_graph(
         raise FlowGraphDocError(f"flow graph is not valid JSON: {exc}") from exc
 
     doc = parse_flow_graph_doc(payload)
-    FlowGraphStore().set_doc(doc, requested_by=requested_by)
+    graph_store = FlowGraphStore()
+    # Departure set comes from the doc this one REPLACES — read before storing.
+    previous_bound = _bound_agents_of_stored(graph_store.get(doc.graph_id))
+    graph_store.set_doc(doc, requested_by=requested_by)
+
+    store = store or PersonaInstanceStore()
     reconciled = reconcile_flow_graph_steering(doc, store=store)
+    next_bound = set(desired_parents_by_agent(doc))
+    departed = previous_bound - next_bound
+    if departed:
+        # A departed agent sheds edges to ANY member this map ever declared —
+        # previous members included, so removing two wired nodes in one edit
+        # cannot leave them wired to each other.
+        reconciled.extend(
+            reconcile_departed_agents(
+                departed=departed,
+                map_member_ids=previous_bound | next_bound,
+                store=store,
+            )
+        )
     failed = [entry for entry in reconciled if not entry.get("ok")]
     return {
         "ok": True,
@@ -289,7 +373,8 @@ def ingest_flow_graph(
         "stored": True,
         "node_count": len(doc.node_bindings),
         "edge_count": len(doc.edges),
-        "bound_agent_count": len(desired_parents_by_agent(doc)),
+        "bound_agent_count": len(next_bound),
+        "removed_from_map_count": len(departed),
         "reconciled": reconciled,
         "changed_count": sum(1 for e in reconciled if e.get("changed")),
         "failed_count": len(failed),
