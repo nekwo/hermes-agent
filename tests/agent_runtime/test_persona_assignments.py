@@ -1298,6 +1298,11 @@ def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_age
     import agent_runtime.snapshot as snapshot_module
 
     cfg = _assignment_config()
+    # This test asserts the FULL pre-S2 in-frame history rows (the kill-switch
+    # shape); the S2 eviction itself is covered by the S2 goldens. It pins its
+    # own config loader, so flip the flag on that cfg directly — the
+    # history_in_frame_config fixture would be overridden by this monkeypatch.
+    cfg.read_model.history_in_frame = True
     monkeypatch.setattr("agent_runtime.snapshot.load_agent_runtime_config", lambda: cfg)
     db = _FakeSessionDB(
         [
@@ -3537,7 +3542,9 @@ def test_tick_reuses_task_flagged_diagnostic_assignment(isolate_agent_runtime_ro
     assert worker.current_assignment_id == assignment.id
 
 
-def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(isolate_agent_runtime_root):
+def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(
+    isolate_agent_runtime_root, history_in_frame_config
+):
     cfg = _assignment_config()
     tasks = TaskStore()
     proofs = ProofStore()
