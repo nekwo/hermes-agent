@@ -38,6 +38,58 @@ def test_run_progress_sink_updates_run_and_appends_safe_event(tmp_path, monkeypa
     assert updated.last_heartbeat_at >= run.last_heartbeat_at
 
 
+def test_run_progress_sink_prunes_timing_progress_from_durable_log(tmp_path, monkeypatch):
+    """``phase: timing`` run.progress is telemetry, not a durable authority fact.
+
+    The event must NOT be appended to the durable EventLog (no reader consumes
+    it; its durations live in the observability timing aggregate), but the run's
+    live progress snapshot and heartbeat MUST still update so liveness/real-time
+    telemetry is unaffected. A non-timing progress event in the same session
+    still persists — proving the prune is phase-scoped, not a blanket drop.
+    """
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    store = RunStore()
+    run = store.open_run("dev", "task_1", None)
+    baseline = EventLog().tail(50)
+    sink = RunProgressSink(run_store=store, event_log=EventLog(), run_id=run.id)
+
+    before_heartbeat = store.get(run.id).last_heartbeat_at
+    sink.emit(
+        "run.progress",
+        {
+            "phase": "timing",
+            "step": "provider_stream_consume",
+            "status": "completed",
+            "summary": "Provider Stream Consume completed in 18138ms.",
+            "duration_ms": 18138,
+            "timing_key": "provider_stream_consume_ms",
+        },
+    )
+
+    # Live snapshot + heartbeat updated…
+    after_timing = store.get(run.id)
+    assert after_timing.progress["phase"] == "timing"
+    assert after_timing.progress["duration_ms"] == 18138
+    assert after_timing.last_heartbeat_at >= before_heartbeat
+    # …but nothing was appended to the durable authority log.
+    assert EventLog().tail(50) == baseline
+
+    # A non-timing progress event in the same run still persists.
+    sink.emit(
+        "run.progress",
+        {
+            "phase": "inspect",
+            "step": "repo_context_loaded",
+            "status": "running",
+            "summary": "Repo context loaded",
+        },
+    )
+    tail = EventLog().tail(50)
+    assert len(tail) == len(baseline) + 1
+    assert tail[-1].type == "run.progress"
+    assert tail[-1].payload.get("phase") == "inspect"
+
+
 def test_run_progress_sink_ignores_late_progress_after_terminal_run(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     store = RunStore()

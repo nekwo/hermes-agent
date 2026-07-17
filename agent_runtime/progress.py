@@ -88,19 +88,40 @@ class RunProgressSink:
             persisted = self.run_store.get(self.run_id)
             if persisted.state in {RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED}:
                 return None
-            _append_bounded_event(
-                self.event_log,
-                Event(
-                    ts=now(),
-                    type=event_type,
-                    task_id=run.task_id,
-                    run_id=run.id,
-                    persona_id=run.persona_id,
-                    payload=safe_payload,
-                ),
+            # ``phase: timing`` run.progress is pure performance telemetry, not a
+            # state-changing fact. Its durations are already rolled up, per turn,
+            # into the observability ``timing`` / ``profile_timing`` aggregate
+            # (persona_runtime / profile_runner build them independently of this
+            # event), and NO durable reader consumes the per-measurement events:
+            # persona_chat_history keeps only signal-bearing progress and
+            # observability keeps only ``reasoning_summary``/``decision_summary``
+            # steps — timing carries neither. So it was ~74% of events.jsonl read
+            # by nothing. The live ``run.progress`` snapshot + heartbeat were
+            # already updated above (liveness/real-time telemetry unaffected); the
+            # durable event log is the state-fact authority, and timing does not
+            # belong in it. Prune it at this one chokepoint — the only place run
+            # timing is persisted (the chat sink already drops it via the
+            # signal-key gate). This is a policy, not a silent drop: the value is
+            # retained in the aggregate, and the run's live progress still carries
+            # the latest timing.
+            is_timing_progress = (
+                event_type == "run.progress"
+                and str((payload or {}).get("phase") or "") == "timing"
             )
-            if event_type == "run.progress":
-                emit_child_progress(run=persisted, payload=safe_payload, config=self.config, event_log=self.event_log)
+            if not is_timing_progress:
+                _append_bounded_event(
+                    self.event_log,
+                    Event(
+                        ts=now(),
+                        type=event_type,
+                        task_id=run.task_id,
+                        run_id=run.id,
+                        persona_id=run.persona_id,
+                        payload=safe_payload,
+                    ),
+                )
+                if event_type == "run.progress":
+                    emit_child_progress(run=persisted, payload=safe_payload, config=self.config, event_log=self.event_log)
         except Exception:
             return None
 
