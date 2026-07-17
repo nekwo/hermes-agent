@@ -211,11 +211,15 @@ def test_snapshot_prompt_observability_hoists_by_default(isolate_agent_runtime_r
     )
     row = next(r for r in section["chat_contexts"] if r["context_id"] == "ctx_alice")
 
-    # Hoisted: no inline lists, two refs, one shared catalog table.
+    # Hoisted: no inline lists, two refs. S8: the ``skills_catalogs`` TABLE
+    # leaves the frame entirely — rows keep only the ``*_ref`` hashes and the
+    # bodies resolve on demand (content-addressed, cached forever launcher-side).
     for field in po.HOISTED_SKILL_LIST_FIELDS:
         assert field not in row
-    assert row["available_skills_ref"] in section["skills_catalogs"]
-    assert row["accessible_skills_ref"] in section["skills_catalogs"]
+    assert "skills_catalogs" not in section
+    assert section["skills_catalogs_ref"]["evicted"] is True
+    assert po.skills_catalog_by_hash(row["available_skills_ref"]) is not None
+    assert po.skills_catalog_by_hash(row["accessible_skills_ref"]) is not None
     # final_model_input evicted to a stub carrying its size.
     assert row["final_model_input"]["evicted"] is True
     assert row["final_model_input"]["bytes"] > 0
@@ -233,7 +237,6 @@ def test_hoisted_refs_resolve_to_the_persisted_lists(isolate_agent_runtime_root)
         personas=[], persona_instances=[_profile_instance("persona_chat_alice")]
     )
     hoisted_row = next(r for r in hoisted["chat_contexts"] if r["context_id"] == "ctx_alice")
-    catalogs = hoisted["skills_catalogs"]
 
     # The exact lists _persist_alice_row wrote (available catalog + accessible set).
     available = [
@@ -241,12 +244,15 @@ def test_hoisted_refs_resolve_to_the_persisted_lists(isolate_agent_runtime_root)
         _skill("b", "installed_skill_catalog"),
     ]
     accessible = [_skill("mission-lead")]
-    assert catalogs[hoisted_row["available_skills_ref"]] == available
-    assert catalogs[hoisted_row["accessible_skills_ref"]] == accessible
+    # S8: the frame ships only ``*_ref`` hashes; the on-demand resolver
+    # (`skills_catalog_by_hash`, the read behind `harness skills catalog --hash`)
+    # reproduces the persisted lists byte-for-byte.
+    assert po.skills_catalog_by_hash(hoisted_row["available_skills_ref"]) == available
+    assert po.skills_catalog_by_hash(hoisted_row["accessible_skills_ref"]) == accessible
     # `skills_catalog`/`skills` were pure aliases of `available`/`accessible` —
     # they collapse to the same two refs (no third/fourth stored blob).
     assert hoisted_row["available_skills_ref"] != hoisted_row["accessible_skills_ref"]
-    assert len(catalogs) == 2
+    assert len(hoisted["skills_catalogs_ref"]["hashes"]) == 2
 
 
 # --------------------------------------------------------------------------- #

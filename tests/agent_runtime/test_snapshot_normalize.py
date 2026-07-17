@@ -80,6 +80,8 @@ def test_goals_is_keyed_map_and_tasks_wire_section_retired(isolate_agent_runtime
 
 
 def test_goals_single_owner_carries_union_of_both_projections(isolate_agent_runtime_root):
+    from agent_runtime.snapshot import GOAL_DETAIL_ONLY_FIELDS, goal_detail_for_task
+
     store = TaskStore()
     store.create(_task("g1", now()))
     snap = build_snapshot(task_store=store)
@@ -92,22 +94,36 @@ def test_goals_single_owner_carries_union_of_both_projections(isolate_agent_runt
     # goal_id == id (same fact under two names); both retained for either caller.
     assert row["goal_id"] == row["id"] == "g1"
 
-    # Every rich lane the retired `tasks` section carried lives once here.
+    # S8: the HEAD keeps identity + the mission-level fields the always-visible
+    # surfaces render (office / roster / HUD), plus a typed detail pointer.
     for key in (
         "task_id",
         "mission_level_state",
+        "mission_flow_timeline",
+        "proof_gate_state",
+        "stage_verification",
+        "detail_ref",
+    ):
+        assert key in row, key
+    # The heavy detail lanes leave the head entirely.
+    for key in GOAL_DETAIL_ONLY_FIELDS:
+        assert key not in row, key
+    assert row["detail_ref"]["evicted"] is True
+    assert sorted(row["detail_ref"]["fields"]) == sorted(GOAL_DETAIL_ONLY_FIELDS)
+
+    # S8: the detail body is served on demand, carrying every evicted lane the
+    # retired in-frame row held (rebuilt read-only from the same stores).
+    detail = goal_detail_for_task("g1")
+    for key in (
         "role_streams",
         "role_envelopes",
         "role_checklists",
         "proof_batches",
         "self_test_summaries",
-        "stage_verification",
-        "mission_flow_timeline",
-        "proof_gate_state",
         "operator_capabilities",
         "timeline",
     ):
-        assert key in row, key
+        assert key in detail, key
 
 
 def test_parent_child_tasks_are_not_collapsed(isolate_agent_runtime_root):

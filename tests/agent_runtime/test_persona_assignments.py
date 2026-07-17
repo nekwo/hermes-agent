@@ -3226,14 +3226,26 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
     assert context["chat_id"] == "persona_chat_personainst_profile_alice"
     assert context["chat_title"] == "Alice Agent chat"
     assert context["used_skills"] == []
-    # S7-B: accessible skills are hoisted to a content-addressed ref (the only
-    # shape). This test pins the accessible-skills RESOLUTION content (the
-    # profile-snapshot fallback), so resolve the ref against the catalog table.
-    # (`skills` aliased `accessible_skills`; both collapse to this one ref — the
-    # alias collapse is covered by the S3 hoist golden.)
-    accessible = snapshot["skills_catalogs"][context["accessible_skills_ref"]]
-    assert [item["name"] for item in accessible] == ["alice-profile-skill"]
-    assert accessible[0]["source"] == "profile_skills_snapshot"
+    # S8: the ``skills_catalogs`` table is evicted from the frame; rows keep only
+    # the content hash. The accessible set here is the profile-snapshot fallback
+    # (backfilled at merge time — distinct from the persisted persona_definition
+    # skills), so this pins the RESOLUTION content by proving the ref equals the
+    # content hash of the expected backfilled list (`skills` aliases it → same
+    # ref). The on-disk resolver covers persisted lists; this in-memory backfill
+    # is pinned by hash equality instead.
+    expected_accessible = [
+        {
+            "name": "alice-profile-skill",
+            "kind": "skill",
+            "status": "accessible",
+            "hash_tracked": False,
+            "source": "profile_skills_snapshot",
+        }
+    ]
+    assert "skills_catalogs" not in snapshot
+    assert context["accessible_skills_ref"] == prompt_observability._skills_list_content_hash(
+        expected_accessible
+    )
 
 
 def test_persona_instance_close_cli_closes_only_free_floating_assignment(monkeypatch, isolate_agent_runtime_root):
