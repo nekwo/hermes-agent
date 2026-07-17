@@ -957,6 +957,143 @@ def test_tool_call_messages_carry_operator_detail():
     ]
 
 
+def test_tool_call_message_carries_dispatch_target_and_order():
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[
+            {
+                "session_id": "20260705_dev_session",
+                "persona_id": "dev",
+                "persona_instance_id": "personainst_dev",
+                "task_id": "task_goal",
+                "entries": [
+                    {
+                        "event": "tool_started",
+                        "tool_name": "agent_chat_send",
+                        "summary": "Started tool agent_chat_send: → backend_dev: run a bounded check",
+                        "status": "started",
+                        "run_id": "run_a",
+                        "target": "→ backend_dev: run a bounded check",
+                        "dispatch_target": "backend_dev",
+                        "dispatch_order": (
+                            "From Neko: run a bounded backend health check.\n"
+                            "Keep it lightweight; no repo commits."
+                        ),
+                        "ts": "2026-07-05T05:48:03Z",
+                    },
+                    {
+                        # The finished row carries NO dispatch fields — the merge
+                        # must preserve the started row's values, not erase them.
+                        "event": "tool_finished",
+                        "tool_name": "agent_chat_send",
+                        "summary": "Finished tool agent_chat_send: passed",
+                        "status": "passed",
+                        "run_id": "run_a",
+                        "ts": "2026-07-05T05:48:09Z",
+                    },
+                ],
+            }
+        ],
+        tasks=[_goal_task(ts)],
+        run_summaries=[],
+    )
+
+    tool_calls = [
+        message
+        for message in channels[0]["conversation"]["messages"]
+        if message["kind"] == "tool_call"
+    ]
+    dispatch = next(m for m in tool_calls if m["tool"]["tool_name"] == "agent_chat_send")
+    assert dispatch["tool"]["dispatch_target"] == "backend_dev"
+    assert dispatch["tool"]["dispatch_order"] == (
+        "From Neko: run a bounded backend health check.\n"
+        "Keep it lightweight; no repo commits."
+    )
+    # The pair collapsed to one ok row with the fields intact after finish.
+    assert dispatch["status"] == "ok"
+
+
+def test_native_reasoning_mints_thinking_row_and_reply_echo_is_deduped():
+    session_id = "persona_chat_personainst_neko_fanout"
+    reply_text = "Dispatched to backend_dev, dev, and qa; each got a one-line bounded check."
+    channels = operator_channel_summary(
+        persona_instances=[
+            _instance(
+                "personainst_neko",
+                session_id=session_id,
+                updated_at="2026-07-17T14:00:08Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_neko",
+                "title": "Neko chat",
+                "message_count": 2,
+                "messages": [
+                    {
+                        "id": "operator_1",
+                        "role": "operator",
+                        "text": "fan out a bounded check to backend_dev, dev, qa",
+                        "client_message_id": "op-1",
+                        "timestamp": "2026-07-17T14:00:00Z",
+                    },
+                    {
+                        "id": "agent_1",
+                        "role": "agent",
+                        "text": reply_text,
+                        "client_message_id": "op-1",
+                        "timestamp": "2026-07-17T14:00:08Z",
+                    },
+                ],
+                "updated_at": "2026-07-17T14:00:08Z",
+            }
+        ],
+        persona_chat_trace=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_neko",
+                "entries": [
+                    {
+                        # Native model reasoning (distinct from the reply) — this
+                        # is the G3 emit; it must mint a first-class thinking row.
+                        "event": "progress",
+                        "summary": "Agent thinking process updated",
+                        "reasoning_summary": "I'll fan out one bounded order to each teammate, then summarize who I told what.",
+                        "status": "running",
+                        "turn_id": "op-1",
+                        "ts": "2026-07-17T14:00:01Z",
+                    },
+                    {
+                        # A trailing reasoning step whose text IS the reply (the
+                        # content echo) — dedup must drop it against reply_texts.
+                        "event": "progress",
+                        "summary": "Agent thinking process updated",
+                        "reasoning_summary": reply_text,
+                        "status": "running",
+                        "turn_id": "op-1",
+                        "ts": "2026-07-17T14:00:07Z",
+                    },
+                ],
+            }
+        ],
+    )
+
+    messages = channels[0]["conversation"]["messages"]
+    thinking_texts = [m["display_text"] for m in messages if m["kind"] == "thinking_summary"]
+    # The native reasoning surfaced as a thinking row.
+    assert any(t.startswith("I'll fan out one bounded order") for t in thinking_texts)
+    # The reply-echo thinking row was deduped against the real reply.
+    assert reply_text not in thinking_texts
+    # And the real reply survives exactly once.
+    replies = [m for m in messages if m["kind"] == "reply" and m["display_text"] == reply_text]
+    assert len(replies) == 1
+
+
 def test_trace_empty_warning_suppressed_when_flow_messages_exist_without_trace():
     ts = now()
     channels = operator_channel_summary(

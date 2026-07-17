@@ -321,6 +321,92 @@ class TestThinkingCallback:
         assert len(calls) == 0
 
 
+class TestNativeReasoningEmit:
+    """Tests for the fork-addition native-reasoning emit in the conversation
+    loop (trace-visibility G3). Mirrors the exact code path added to
+    ``agent/conversation_loop.py`` right after the content-echo block — the same
+    simulation idiom :class:`TestThinkingCallback` uses for its sibling block."""
+
+    def _simulate_native_reasoning_emit(
+        self, native_reasoning, content, callback, delegate_depth=0
+    ):
+        """Faithful copy of the conversation-loop native-reasoning emit.
+
+        ``native_reasoning`` stands in for ``agent._extract_reasoning(...)``;
+        ``content`` for ``assistant_message.content``.
+        """
+        import re
+        if callback and delegate_depth == 0:
+            _native = native_reasoning.strip() if native_reasoning else ""
+            _echoed = re.sub(
+                r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '',
+                content.strip(),
+            ).strip() if content else ""
+            if _native and _native != _echoed:
+                try:
+                    callback("reasoning.available", "_thinking", _native[:500], None)
+                except Exception:
+                    pass
+
+    def test_native_reasoning_emitted_once_on_normal_turn(self):
+        calls = []
+        self._simulate_native_reasoning_emit(
+            "Let me plan the fan-out: one bounded order per teammate, then summarize.",
+            "I'll dispatch to backend_dev, dev, and qa now.",
+            lambda *args: calls.append(args),
+        )
+        assert len(calls) == 1
+        assert calls[0][0] == "reasoning.available"
+        assert calls[0][1] == "_thinking"
+        assert "plan the fan-out" in calls[0][2]
+
+    def test_native_reasoning_fires_on_empty_content_turn(self):
+        # Reasoning-only codex turn: content is empty, native reasoning present.
+        # This is the case the OLD code dropped (emit was inside the content gate).
+        calls = []
+        self._simulate_native_reasoning_emit(
+            "Thinking through the plan; no visible reply text yet.",
+            "",
+            lambda *args: calls.append(args),
+        )
+        assert len(calls) == 1
+        assert "Thinking through the plan" in calls[0][2]
+
+    def test_native_reasoning_truncated_to_500(self):
+        calls = []
+        self._simulate_native_reasoning_emit(
+            "z" * 900, "a reply", lambda *args: calls.append(args)
+        )
+        assert len(calls) == 1
+        assert len(calls[0][2]) == 500
+
+    def test_native_reasoning_not_double_emitted_when_equal_to_echo(self):
+        # A provider that inlines reasoning into content: native == the echo the
+        # content-echo emit already forwarded — one emit is enough.
+        text = "This is the whole message, reasoning and reply fused together."
+        calls = []
+        self._simulate_native_reasoning_emit(
+            text, text, lambda *args: calls.append(args)
+        )
+        assert len(calls) == 0
+
+    def test_native_reasoning_skipped_for_subagent(self):
+        # depth > 0 keeps its existing first-line _thinking relay untouched.
+        calls = []
+        self._simulate_native_reasoning_emit(
+            "child reasoning", "child reply",
+            lambda *args: calls.append(args), delegate_depth=1,
+        )
+        assert len(calls) == 0
+
+    def test_native_reasoning_skipped_when_absent(self):
+        calls = []
+        self._simulate_native_reasoning_emit(
+            None, "just a reply", lambda *args: calls.append(args)
+        )
+        assert len(calls) == 0
+
+
 # =========================================================================
 # Gateway batch flush tests
 # =========================================================================

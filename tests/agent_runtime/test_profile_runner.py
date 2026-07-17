@@ -4,7 +4,14 @@ from pathlib import Path
 
 import pytest
 
-from agent_runtime.profile_runner import AgentRunRequest, ProfileAgentRunner, ProfileRunnerError, RunBudgetExceeded, _progress_adapter
+from agent_runtime.profile_runner import (
+    AgentRunRequest,
+    ProfileAgentRunner,
+    ProfileRunnerError,
+    RunBudgetExceeded,
+    _agent_chat_target_label,
+    _progress_adapter,
+)
 
 
 class FakeAgent:
@@ -449,6 +456,71 @@ def test_progress_adapter_records_target_for_read_and_search_tools():
     assert read_payload["summary"] == "Started tool read_file: lib/features/library/petdex_menu.dart"
     assert search_payload["target_label"] == "PetdexTile in lib/features/library"
     assert search_payload["summary"] == "Started tool search_files: PetdexTile in lib/features/library"
+
+
+def test_progress_adapter_agent_chat_send_carries_structured_dispatch_fields():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.started")
+
+    order = (
+        "From Neko Mission Lead: run a bounded backend health check.\n"
+        "Keep it lightweight; no repo commits.\n"
+        "Report the one-line result back."
+    )
+    invocation = {"persona_id": "backend_dev", "message": order}
+    cb("call_1", "agent_chat_send", invocation)
+
+    payload = events[0]
+    # G2 structured fields: the target chip + the FULL order, newlines preserved
+    # (NOT whitespace-collapsed like the prose target_label).
+    assert payload["dispatch_target"] == "backend_dev"
+    assert payload["dispatch_order"] == order
+    assert "\n" in payload["dispatch_order"]
+    # Backward-compat: the prose target_label + summary are byte-identical to
+    # what the (unchanged) label helper produces — the new keys are additive.
+    expected_label = _agent_chat_target_label("agent_chat_send", invocation)
+    assert payload["target_label"] == expected_label
+    assert payload["summary"] == f"Started tool agent_chat_send: {expected_label}"
+    # The prose label is still a single, 90-char-excerpted line.
+    assert "\n" not in payload["target_label"]
+    assert len(payload["target_label"]) <= len("→ backend_dev: ") + 90
+
+
+def test_agent_chat_dispatch_order_drops_secret_lines_and_target_is_capped():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.started")
+
+    order = "Line one is fine.\napi_key=SUPERSECRET must be dropped\nLine three is fine."
+    cb("call_1", "agent_chat_send", {"persona_id": "q" * 200, "message": order})
+
+    payload = events[0]
+    # Secret-bearing line dropped whole; the surrounding lines survive in order.
+    assert payload["dispatch_order"] == "Line one is fine.\nLine three is fine."
+    assert "SUPERSECRET" not in payload["dispatch_order"]
+    # Target persona capped at 120.
+    assert len(payload["dispatch_target"]) == 120
+
+
+def test_agent_chat_dispatch_order_caps_at_1500_with_ellipsis():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.started")
+
+    cb("call_1", "agent_chat_send", {"persona_id": "dev", "message": "x" * 4000})
+
+    order = events[0]["dispatch_order"]
+    assert len(order) == 1500
+    assert order.endswith("…")
+    assert order[:1499] == "x" * 1499
+
+
+def test_non_dispatch_tool_has_no_dispatch_fields():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.started")
+
+    cb("call_1", "read_file", {"path": "lib/features/library/petdex_menu.dart"})
+
+    assert "dispatch_target" not in events[0]
+    assert "dispatch_order" not in events[0]
 
 
 def test_progress_adapter_recovers_patch_files_from_diff_headers():

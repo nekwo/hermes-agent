@@ -235,6 +235,108 @@ def test_safe_progress_payload_bounds_operator_output_tail():
     assert "line 399" in payload["output"]
 
 
+def test_safe_progress_payload_passes_dispatch_fields():
+    payload = _safe_progress_payload(
+        "run.tool.started",
+        {
+            "type": "run.tool.started",
+            "tool_name": "agent_chat_send",
+            "status": "started",
+            "target_label": "→ backend_dev: run a bounded backend health check",
+            "dispatch_target": "backend_dev",
+            "dispatch_order": (
+                "Run a bounded backend health check.\n"
+                "api_key=SECRET-VALUE must be dropped\n"
+                "Report the one-line result."
+            ),
+        },
+    )
+
+    assert payload["dispatch_target"] == "backend_dev"
+    # The full order keeps its newline structure; the secret LINE is dropped
+    # (not redacted-in-place), the surrounding lines survive.
+    assert payload["dispatch_order"] == (
+        "Run a bounded backend health check.\nReport the one-line result."
+    )
+    assert "SECRET-VALUE" not in payload["dispatch_order"]
+    # The prose target_label is untouched by the new handlers.
+    assert payload["target_label"] == "→ backend_dev: run a bounded backend health check"
+
+
+def test_safe_progress_payload_bounds_dispatch_order_at_1500():
+    payload = _safe_progress_payload(
+        "run.tool.started",
+        {"type": "run.tool.started", "tool_name": "agent_chat_send", "dispatch_order": "y" * 4000},
+    )
+
+    assert len(payload["dispatch_order"]) == 1500
+    assert payload["dispatch_order"].endswith("…")
+
+
+def test_append_bounded_event_sheds_output_before_dispatch_order(isolate_agent_runtime_root):
+    log = EventLog()
+    payload = {
+        "type": "run.tool.started",
+        "tool_name": "agent_chat_send",
+        "status": "started",
+        "dispatch_target": "backend_dev",
+        "dispatch_order": "run a bounded backend health check",
+        "output": "x" * 5000,
+    }
+    _append_bounded_event(
+        log,
+        Event(
+            ts=now(),
+            type="run.tool.started",
+            task_id="task_shed_output",
+            run_id="run_a",
+            persona_id="neko",
+            payload=payload,
+        ),
+    )
+
+    rows = log.for_task("task_shed_output")
+    assert len(rows) == 1
+    # Output shed first; the dispatch target + order survive untouched.
+    assert "output" not in rows[0].payload
+    assert rows[0].payload["output_truncated"] is True
+    assert rows[0].payload["dispatch_target"] == "backend_dev"
+    assert rows[0].payload["dispatch_order"] == "run a bounded backend health check"
+    assert "dispatch_order_truncated" not in rows[0].payload
+
+
+def test_append_bounded_event_sheds_dispatch_order_when_output_not_enough(isolate_agent_runtime_root):
+    log = EventLog()
+    payload = {
+        "type": "run.tool.started",
+        "tool_name": "agent_chat_send",
+        "status": "started",
+        "dispatch_target": "backend_dev",
+        "dispatch_order": "y" * 4200,
+        "output": "x" * 4200,
+    }
+    _append_bounded_event(
+        log,
+        Event(
+            ts=now(),
+            type="run.tool.started",
+            task_id="task_shed_both",
+            run_id="run_a",
+            persona_id="neko",
+            payload=payload,
+        ),
+    )
+
+    rows = log.for_task("task_shed_both")
+    assert len(rows) == 1
+    # Both variable-size fields shed; the tool row (target/status) still survives.
+    assert "output" not in rows[0].payload
+    assert "dispatch_order" not in rows[0].payload
+    assert rows[0].payload["output_truncated"] is True
+    assert rows[0].payload["dispatch_order_truncated"] is True
+    assert rows[0].payload["dispatch_target"] == "backend_dev"
+
+
 def test_append_bounded_event_degrades_oversized_output(isolate_agent_runtime_root):
     from hermes_time import now
 
