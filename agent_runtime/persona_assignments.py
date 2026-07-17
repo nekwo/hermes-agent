@@ -413,6 +413,27 @@ class PersonaInstanceStore:
         self._commit_steer(instance, updates, added=[], removed=removed, detached=True)
         return self.get(instance.id)
 
+    def clear_parents(self, persona_instance_id: str) -> PersonaInstance:
+        """Clear a child's steering set WITHOUT leaving its mission.
+
+        The flow-doc reconcile's "drawn standalone" verb: an operator's chart
+        states who steers whom — never goal membership. [detach_parents] above
+        is a different statement ("leave the mission": it also strips goal_id /
+        current_task_id and task-bound mode), and using it for a chart ingest
+        would unbind a root agent from its live goal. Same single write path
+        ([_commit_steer]) and event as every other steer mutation."""
+
+        instance = self.get(persona_instance_id)
+        removed = list(instance.steered_by)
+        self._commit_steer(
+            instance,
+            {"steered_by": [], "spawned_by": None},
+            added=[],
+            removed=removed,
+            detached=True,
+        )
+        return self.get(instance.id)
+
     def _apply_steer_edges(
         self,
         persona_instance_id: str,

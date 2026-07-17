@@ -493,6 +493,22 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(realm_sync_publish, mutation=True)
     realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
 
+    flow = subs.add_parser("flow", help="Operator flow-graph documents: ingest the Launcher's authored agent map whole and set the referenced instances' steering relations")
+    flow_subs = flow.add_subparsers(dest="flow_command", required=True)
+    flow_set = flow_subs.add_parser("set", help="Store one flow-graph JSON doc and reconcile steering for the EXISTING instances it references (never creates instances; never touches goal membership)")
+    flow_set.add_argument("--graph", default=None, help="The flow-graph JSON document, inline")
+    flow_set.add_argument("--graph-file", default=None, help="Path to a file holding the flow-graph JSON document")
+    flow_set.add_argument("--requested-by", default="operator")
+    flow_set.add_argument("--json", action="store_true")
+    flow_set.set_defaults(func=_cmd_flow_set)
+    flow_show = flow_subs.add_parser("show", help="Show the runtime's stored copy of one flow-graph doc")
+    flow_show.add_argument("graph_id")
+    flow_show.add_argument("--json", action="store_true")
+    flow_show.set_defaults(func=_cmd_flow_show)
+    flow_list = flow_subs.add_parser("list", help="List stored flow-graph doc ids")
+    flow_list.add_argument("--json", action="store_true")
+    flow_list.set_defaults(func=_cmd_flow_list)
+
     skills = subs.add_parser("skills", help="Inspect the shared skills substrate the Launcher's Skills console consumes")
     skills_subs = skills.add_subparsers(dest="skills_command", required=True)
     skills_inventory_cmd = skills_subs.add_parser(
@@ -2879,7 +2895,7 @@ def _cmd_serve(args) -> int:
 
 def _load_command_parts() -> None:
     parts_dir = Path(__file__).with_name("harness_parts")
-    for filename in ("persona_commands.py", "runtime_commands.py", "board.py"):
+    for filename in ("persona_commands.py", "runtime_commands.py", "board.py", "flow_commands.py"):
         path = parts_dir / filename
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), globals())
 
