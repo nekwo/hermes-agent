@@ -246,6 +246,13 @@ def build_parser(parent_subparsers) -> None:
     goal_history.add_argument("--limit", type=int, default=50)
     _add_stage42_global_args(goal_history)
     goal_history.set_defaults(func=_cmd_goal_history)
+    goal_detail = goal_subs.add_parser(
+        "detail",
+        help="S8: the heavy goal DETAIL body (role streams, envelopes, checklists, per-event timelines, mission plan) evicted from the steady-state frame; rebuilt read-only on demand",
+    )
+    goal_detail.add_argument("goal_id", help="Goal id or task id (parent/child tasks share a goal_id)")
+    goal_detail.add_argument("--json", action="store_true")
+    goal_detail.set_defaults(func=_cmd_goal_detail)
     goal_create = goal_subs.add_parser("create", help="Create a Harness goal")
     goal_create.add_argument("--title")
     goal_create.add_argument("--description")
@@ -546,6 +553,26 @@ def build_parser(parent_subparsers) -> None:
     )
     skills_inventory_cmd.add_argument("--json", action="store_true", help="Emit the skills_inventory/v1 contract as JSON")
     skills_inventory_cmd.set_defaults(func=_cmd_skills_inventory)
+    skills_catalog_cmd = skills_subs.add_parser(
+        "catalog",
+        help="S8: resolve ONE content-addressed skills catalog by its hash (the frame ships only *_ref hashes; bodies are fetched once and cached forever)",
+    )
+    skills_catalog_cmd.add_argument("--hash", dest="content_hash", required=True, help="The content hash carried by a chat_contexts row's available_skills_ref / accessible_skills_ref")
+    skills_catalog_cmd.add_argument("--json", action="store_true")
+    skills_catalog_cmd.set_defaults(func=_cmd_skills_catalog)
+
+    prompt_context = subs.add_parser(
+        "prompt-context",
+        help="S8: on-demand prompt-observability contexts (the frame ships only LIVE persona instances' current-session rows; historical rows are fetched here)",
+    )
+    prompt_context_subs = prompt_context.add_subparsers(dest="prompt_context_command", required=True)
+    prompt_context_show = prompt_context_subs.add_parser(
+        "show",
+        help="Show one persisted prompt-observability context by id (read-only; the persisted files stay on disk after frame eviction)",
+    )
+    prompt_context_show.add_argument("--context-id", dest="context_id", required=True)
+    prompt_context_show.add_argument("--json", action="store_true")
+    prompt_context_show.set_defaults(func=_cmd_prompt_context_show)
 
     board = subs.add_parser("board", help="Manage Mission Board planning boards + cards (planning only — cards never mutate goals)")
     board_subs = board.add_subparsers(dest="board_command", required=True)
@@ -707,6 +734,15 @@ def build_parser(parent_subparsers) -> None:
 
     run = subs.add_parser("run", help="Manage harness runs")
     run_subs = run.add_subparsers(dest="run_command")
+    run_list = run_subs.add_parser(
+        "list",
+        help="S8: paged run history — the frame ships only ACTIVE runs; historical/terminal runs are fetched here",
+    )
+    run_list.add_argument("--task", dest="task_id", default=None, help="Filter to one task id")
+    run_list.add_argument("--state", default=None, help="Filter to one run state (e.g. done, failed, cancelled)")
+    run_list.add_argument("--limit", type=int, default=50, help="Max rows (clamped 1..500), newest-first")
+    run_list.add_argument("--json", action="store_true")
+    run_list.set_defaults(func=_cmd_run_list)
     run_show = run_subs.add_parser("show", help="Show one harness run with task-scoped proof/event context")
     run_show.add_argument("run_id")
     run_show.add_argument("--events", type=int, default=25)
@@ -1553,6 +1589,107 @@ def _cmd_goal_list(args) -> int:
         rows = rows[:limit]
         truncated = True
     _print_stage42(_list_envelope("goal", rows, cursor=getattr(args, "cursor", None), truncated=truncated), args=args)
+    return 0
+
+
+def _cmd_goal_detail(args) -> int:
+    """S8: serve the heavy goal DETAIL body evicted from the steady-state frame.
+
+    Read-only rebuild of the exact bytes the pre-S8 in-frame goal row carried, so
+    a goal detail drawer / blueprint / replay view fetches identical data on
+    open. A miss (unknown goal/task id) is an honest ``not_found`` error, never a
+    fabricated empty goal."""
+
+    from agent_runtime.snapshot import goal_detail_for_task
+
+    detail = goal_detail_for_task(str(getattr(args, "goal_id", "") or ""))
+    if detail is None:
+        return emit_harness_error(
+            ValueError(f"goal/task '{getattr(args, 'goal_id', '')}' did not resolve"),
+            args=args,
+            code="not_found",
+        )
+    print(emit_json(detail))
+    return 0
+
+
+def _cmd_skills_catalog(args) -> int:
+    """S8: resolve one content-addressed skills catalog by hash (frame-evicted)."""
+
+    from agent_runtime.prompt_observability import skills_catalog_by_hash
+
+    content_hash = str(getattr(args, "content_hash", "") or "").strip()
+    catalog = skills_catalog_by_hash(content_hash)
+    payload = {
+        "hash": content_hash,
+        "found": catalog is not None,
+        "skills": catalog or [],
+    }
+    if getattr(args, "json", False):
+        print(emit_json(payload))
+        return 0
+    if catalog is None:
+        print(f"skills catalog {content_hash}: (not resolvable from persisted contexts)")
+        return 0
+    print(f"skills catalog {content_hash}: {len(catalog)} skill(s)")
+    for skill in catalog:
+        if isinstance(skill, dict):
+            print(f"  {skill.get('name')} — {skill.get('status', 'accessible')}")
+    return 0
+
+
+def _cmd_run_list(args) -> int:
+    """S8: paged run history — the frame ships only ACTIVE runs; historical/
+    terminal runs are fetched here (newest-first, id/state filtered)."""
+
+    from agent_runtime.snapshot import _run_summary
+    from agent_runtime.store import RunStore
+
+    limit = max(1, min(500, int(getattr(args, "limit", 50) or 50)))
+    task_id = str(getattr(args, "task_id", "") or "").strip() or None
+    state_filter = str(getattr(args, "state", "") or "").strip().lower() or None
+    runs = RunStore().list_all()
+
+    def _sort_key(run):
+        return str(getattr(run, "started_at", "") or getattr(run, "created_at", "") or "")
+
+    runs = sorted(runs, key=_sort_key, reverse=True)
+    rows: list[dict] = []
+    for run in runs:
+        if task_id is not None and getattr(run, "task_id", None) != task_id:
+            continue
+        row = _run_summary(run)
+        if state_filter is not None and str(row.get("state", "")).lower() != state_filter:
+            continue
+        rows.append(row)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    _print_stage42(_list_envelope("run", rows, truncated=truncated), args=args)
+    return 0
+
+
+def _cmd_prompt_context_show(args) -> int:
+    """S8: show one persisted prompt-observability context by id (frame-evicted
+    historical rows stay on disk and are fetched here). Honest miss on absence."""
+
+    from agent_runtime import paths as _paths
+
+    token = str(getattr(args, "context_id", "") or "").strip()
+    if not token:
+        return emit_harness_error(ValueError("--context-id is required"), args=args, code="invalid_request")
+    path = _paths.prompt_observability_dir() / f"{token}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return emit_harness_error(
+            ValueError(f"prompt context '{token}' not found on disk"),
+            args=args,
+            code="not_found",
+        )
+    if getattr(args, "json", False):
+        print(emit_json(data))
+        return 0
+    print(f"prompt context {token}: persona={data.get('persona_id')} session={data.get('session_id')}")
     return 0
 
 

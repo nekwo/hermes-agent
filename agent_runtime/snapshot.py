@@ -105,6 +105,65 @@ STAGE_VERIFICATION_PATH_CAP = 6
 ARCHIVED_TASKS_REF_RECENT_CAP = 25
 
 
+# S8 read-model — DEEP SLIM inside live rows (operator ruling 2026-07-17: "one
+# file per goal + log; the UI parses it when relevant"). The goal row is a
+# fusion of a compact HEAD (identity/state/current-stage/counts/delivery
+# pointers + the mission-level fields the ALWAYS-VISIBLE surfaces render) and a
+# heavy DETAIL body (per-role streams, envelopes, checklists, per-event
+# timelines, the mission plan, the per-run persona streams). The detail body has
+# no steady-state launcher reader: it was verified 2026-07-17 that
+# ``MissionGoalSummary`` (the launcher's goal fold) never renders any of these
+# fields off a goal — ``role_streams`` / ``stage_streams`` / ``timeline`` /
+# ``mission_plan`` / ``persona_streams`` are not even parsed, and
+# ``role_envelopes`` / ``role_checklists`` / ``proof_batches`` parse to unread
+# fields (the top-level ``role_envelopes`` / ``role_checklists`` sections feed
+# the roster; the goal-row copies are dead). They leave the head and are served
+# on demand by ``harness goal detail <task_id> --json``. The KEPT mission-level
+# fields (``mission_level_state`` → office/roster/page; ``mission_flow_timeline``
+# / ``proof_gate_state`` / ``stage_verification`` → office scene) stay in the
+# head because they render on every frame. Archive-never-delete: nothing leaves
+# disk — the detail is rebuilt from the same stores + EventLog on demand.
+GOAL_DETAIL_ONLY_FIELDS = frozenset(
+    {
+        "role_streams",
+        "role_envelopes",
+        "role_checklists",
+        "stage_streams",
+        "timeline",
+        "mission_plan",
+        "persona_streams",
+        "proof_summaries",
+        "self_test_summaries",
+        "proof_batches",
+        "verification_status",
+        "operator_capabilities",
+        "repo_bundles",
+    }
+)
+
+
+def _goal_head(row: dict) -> dict:
+    """Split a full goal projection into its compact frame HEAD.
+
+    The heavy detail-only fields (``GOAL_DETAIL_ONLY_FIELDS``) leave the row and
+    are replaced by a single typed ``detail_ref`` pointer carrying the fetch verb
+    + which fields were evicted (never a silent absence — a consumer that opens a
+    goal detail drawer/blueprint/replay view fetches them, an unfetched detail
+    renders a loading/fetch affordance). The head still carries every field the
+    always-visible surfaces read, including the mission-level state the office /
+    roster / HUD render each frame."""
+
+    head = {key: value for key, value in row.items() if key not in GOAL_DETAIL_ONLY_FIELDS}
+    evicted = sorted(key for key in GOAL_DETAIL_ONLY_FIELDS if key in row)
+    head["detail_ref"] = {
+        "evicted": True,
+        "task_id": row.get("task_id"),
+        "fields": evicted,
+        "fetch": "harness goal detail <task_id> --json",
+    }
+    return head
+
+
 def _archived_tasks_frame(archived_tasks: list):
     """The ``archived_tasks`` frame value: a typed pointer stub.
 
@@ -441,7 +500,14 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     # LISTS are still needed as an ordered input to the operator-channel
     # projection (``run_summaries`` feeds the goal-turn flow), so build them once
     # here and key them into the frame.
+    # ``run_rows`` (ALL runs) still feeds the operator-channel goal-turn flow
+    # below; the FRAME ``runs`` map (S8) keeps only ACTIVE runs (attached to a
+    # live lane/goal). Historical/terminal runs are old residue — evicted to a
+    # count + pointer, fetched on demand via ``harness run list``. No disk
+    # change: the run store keeps every row.
     run_rows = [_run_summary(r) for r in runs]
+    active_run_id_set = {r.id for r in active_runs}
+    frame_run_rows = [row for row in run_rows if row.get("run_id") in active_run_id_set]
     incident_rows = [_incident_summary(i) for i in incident_frame_rows]
     data = {
         "schema_version": 2,
@@ -504,7 +570,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         # launcher folds the map's values, so the map key is never a lookup key.
         "goals": _keyed(
             [
-                _goal_projection_from_task(
+                _goal_head(_goal_projection_from_task(
                     t,
                     proof_store.list_for_task(t.id),
                     tasks,
@@ -523,7 +589,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
                     persona_instances=topology_persona_instances,
                     stage_verification_accountant=stage_verification_accountant,
                     workspaces=workspaces,
-                )
+                ))
                 for t in tasks
             ],
             "task_id",
@@ -565,7 +631,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "runtime_instances": [runtime_instance_summary(item) for item in runtime_instances],
         "event_contracts": event_catalog(),
-        "runs": _keyed(run_rows, "run_id"),
+        "runs": _keyed(frame_run_rows, "run_id"),
         "incidents": _keyed(incident_rows, "incident_id"),
         "proofs": [_proof_summary(p) for p in proofs],
         "self_tests": [self_test_summary(item) for item in self_tests],
@@ -579,6 +645,16 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "closed_evicted": True,
         "count": incidents_evicted_count,
         "fetch": "harness incident list --state closed --json",
+    }
+    # S8: historical (non-active) runs are evicted from the ``runs`` frame map —
+    # a typed pointer accounts them, never a silent absence. Served on demand by
+    # the paged ``harness run list`` query.
+    data["runs_history_ref"] = {
+        "evicted": True,
+        "count": len(run_rows) - len(frame_run_rows),
+        "active_count": len(frame_run_rows),
+        "total_count": len(run_rows),
+        "fetch": "harness run list --json",
     }
     if persona_instance_runtime_enabled(cfg):
         data["persona_instance_runtime"] = {
@@ -646,9 +722,27 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             ],
             "channel_id",
         )
+        # S8: the ``recent`` lane (last 50 assignments, ~86 KB of old residue)
+        # leaves the frame — the launcher roster only needs the ACTIVE
+        # assignments (a live instance's current assignment is always active).
+        # ``recent`` stays an (empty) list so the launcher fold that concatenates
+        # ``active`` + ``recent`` never trips; the eviction is accounted by
+        # ``recent_ref`` and served on demand by ``harness persona assignments``.
+        active_assignments = [
+            persona_assignment_summary(item)
+            for item in persona_assignments
+            if item.state in ACTIVE_ASSIGNMENT_STATES
+        ]
+        recent_count = len(persona_assignments[-50:])
         data["persona_assignments"] = {
-            "active": [persona_assignment_summary(item) for item in persona_assignments if item.state in ACTIVE_ASSIGNMENT_STATES],
-            "recent": [persona_assignment_summary(item) for item in persona_assignments[-50:]],
+            "active": active_assignments,
+            "recent": [],
+            "recent_ref": {
+                "evicted": True,
+                "count": recent_count,
+                "active_count": len(active_assignments),
+                "fetch": "harness persona assignments --json",
+            },
         }
         completeness = {
             "persona_chat_history": history_accountant.summary(),
@@ -2575,6 +2669,75 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         }
     )
     return row
+
+
+def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
+    """The FULL goal projection for ONE task, rebuilt read-only from the stores.
+
+    S8: the steady-state frame ships only the goal HEAD (``_goal_head``); the
+    heavy detail (``GOAL_DETAIL_ONLY_FIELDS``) is served on demand here — the
+    exact bytes ``_goal_projection_from_task`` produced before the split, so the
+    launcher's goal-detail drawer / blueprint / replay views fetch identical data
+    to what the pre-S8 in-frame row carried. Read-only: lists stores + the
+    EventLog, mutates nothing. Returns ``None`` when the task id does not resolve
+    (an honest miss, never a fabricated empty goal)."""
+
+    token = str(task_id or "").strip()
+    if not token:
+        return None
+    event_log = event_log or CachedEventLog()
+    task_store = TaskStore()
+    # ``get_goal`` resolves BOTH a task id and a goal id (parent/child tasks can
+    # share one goal_id), raising NotFound on a genuine miss.
+    from .errors import NotFound
+
+    try:
+        task = task_store.get_goal(token)
+    except NotFound:
+        return None
+    tasks = task_store.list_all()
+    run_store = RunStore()
+    runs = run_store.list_all()
+    proof_store = ProofStore()
+    incident_store = IncidentStore()
+    incidents = incident_store.list_all()
+    worker_session_store = WorkerSessionStore(event_log=event_log)
+    workers = worker_session_store.list_all()
+    role_envelope_store = RoleEnvelopeStore(event_log=event_log)
+    role_checklist_store = RoleChecklistStore(event_log=event_log)
+    proof_batch_store = ProofBatchStore(event_log=event_log)
+    repo_bundle_store = RepoBundleStore(event_log=event_log)
+    runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
+    workspace_store = WorkspaceStore()
+    workspaces = workspace_store.list_all(include_archived=True)
+    cfg = load_agent_runtime_config()
+    persona_instances: list = []
+    persona_assignments: list = []
+    if persona_instance_runtime_enabled(cfg):
+        agents = AgentStore().list_all() or seed_personas()
+        persona_instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, workers)
+        if persona_assignment_store_enabled(cfg):
+            persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
+    return _goal_projection_from_task(
+        task,
+        proof_store.list_for_task(task.id),
+        tasks,
+        incidents,
+        runs,
+        event_log.for_task(task.id, limit=200),
+        workers=workers,
+        run_store=run_store,
+        self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id),
+        role_envelopes=[item for item in role_envelope_store.list_all() if item.task_id == task.id],
+        role_checklists=[item for item in role_checklist_store.list_all() if item.task_id == task.id],
+        proof_batches=[item for item in proof_batch_store.list_all() if item.task_id == task.id],
+        persona_assignments=[item for item in persona_assignments if item.task_id == task.id],
+        repo_bundles=[item for item in repo_bundle_store.list_all() if item.task_id == task.id],
+        runtime_instances=[item for item in runtime_instance_store.list_all() if item.task_id == task.id],
+        persona_instances=persona_instances,
+        stage_verification_accountant=None,
+        workspaces=workspaces,
+    )
 
 
 def _workspace_summary(workspace, *, tasks, active_id: str | None = None) -> dict:
