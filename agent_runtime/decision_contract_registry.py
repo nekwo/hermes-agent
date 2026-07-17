@@ -1306,6 +1306,15 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "board.card.restored": EventContract("board.card.restored", "Board card restored", ("board_id", "card_id"), ("column_id",)),
     "board.card.conflict_resolved": EventContract("board.card.conflict_resolved", "Board card sync conflict resolved", ("board_id", "card_id", "take"), ("revision",)),
     "board.rebalanced": EventContract("board.rebalanced", "Board column order keys rebalanced", ("board_id", "column_id"), ("card_count",)),
+    # Mission Office events — the OfficeStore chokepoint emits one on EVERY
+    # mutation (same standing store rule as boards; realm-synced the same way).
+    # See EterniaLauncher docs/mission_control/OFFICE_LAYOUT_REALM_SYNC_PLAN_2026-07-17.md.
+    "office.surface.created": EventContract("office.surface.created", "Office surface created", ("workspace_id",), ()),
+    "office.surface.updated": EventContract("office.surface.updated", "Office surface updated", ("workspace_id", "change"), ("revision",)),
+    "office.actor.upserted": EventContract("office.actor.upserted", "Office actor placement upserted", ("workspace_id", "actor_key"), ("persona_id", "items", "revision")),
+    "office.actor.removed": EventContract("office.actor.removed", "Office actor placement archived", ("workspace_id", "actor_key", "reason"), ()),
+    "office.actor.restored": EventContract("office.actor.restored", "Office actor placement restored", ("workspace_id", "actor_key"), ()),
+    "office.actor.conflict_resolved": EventContract("office.actor.conflict_resolved", "Office actor sync conflict resolved", ("workspace_id", "actor_key", "take"), ("revision",)),
     "blueprint.saved": EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title")),
     "persona.updated": EventContract("persona.updated", "Persona updated", ("persona_id",), ("display_name",)),
     # Synthetic watchdog event: appended by stream_frames when the scope/catalog
