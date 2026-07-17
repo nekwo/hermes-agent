@@ -794,16 +794,18 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         )
     return {
         "envelope_version": PARITY_ENVELOPE_VERSION,
-        # S4 (normalize + delete derived copies): keyed id maps replace list
-        # sections (persona_instances / runs / incidents / boards /
-        # operator_channels / goals -> ``{id: row}``); the goals/tasks dual
-        # projection collapses to ONE keyed ``goals`` map (GOAL is the wire
-        # name) and the ``tasks`` wire section retires; ``agent_topology`` (a
-        # derived copy of steering truth) leaves the frame; cross-entity
-        # disagreements become typed ``fk_miss`` parity reports. S2/S3 shape
-        # (history eviction, prompt hoist) unchanged. Launcher pin
+        # S8 (DEEP SLIM inside live rows): the same history-eviction knife one
+        # level deeper. Goal rows become compact HEADS (heavy detail →
+        # ``harness goal detail``); the ``skills_catalogs`` table leaves the frame
+        # (rows keep ``*_ref`` hashes → ``harness skills catalog --hash``); the
+        # ``runs`` map keeps only ACTIVE runs (history → ``harness run list``);
+        # ``persona_assignments.recent`` and stale ``chat_contexts`` rows are
+        # evicted to pointers; archived operator channels become pointer stubs
+        # (transcript → ``harness task history``). Every eviction is accounted
+        # (typed ``*_ref`` / ``detail_ref`` / ``evicted`` markers), never a silent
+        # absence. S2/S3/S4 shape unchanged. Launcher pin
         # (kSupportedMissionContractVersion) moves in lockstep.
-        "contract_version": 41,
+        "contract_version": 42,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
@@ -1485,8 +1487,18 @@ def _archived_operator_channel(archived: dict) -> dict | None:
     for seq, message in enumerate(messages, start=1):
         message["seq"] = seq
     updated_at = _latest_archived_message_timestamp(messages) or archived.get("updated_at") or archived.get("archived_at")
-    conversation_status = "complete" if messages else "incomplete"
-    incomplete_reason = None if messages else "Archived task did not contain projectable conversation messages."
+    # S8: an archived channel is a POINTER STUB — the embedded transcript
+    # (~20-25 KB/row of dead-mission messages) leaves the frame (operator ruling
+    # 2026-07-17: "old residue and runs need to be purged — it should just be
+    # pointers to chat history"). The full transcript stays on disk in the
+    # deleted-archive batch and is fetched on demand via ``harness task history``
+    # (or the persona chat-history query). The stub keeps identity + recency +
+    # message_count so the console renders an honest archived row + a fetch
+    # affordance, never a fake-empty conversation. ``messages`` is an explicit
+    # empty list flagged ``messages_evicted`` so the launcher conversation parser
+    # distinguishes an evicted transcript from a genuinely empty one.
+    message_count = len(messages)
+    fetch = f"harness task history {task_id} --json"
     conversation = {
         "schema_version": OPERATOR_CONVERSATION_SCHEMA_VERSION,
         "thread_id": channel_id,
@@ -1500,9 +1512,12 @@ def _archived_operator_channel(archived: dict) -> dict | None:
         "title": _archived_conversation_text(archived.get("title"), limit=240) or "Archived mission",
         "state": "archived",
         "updated_at": updated_at,
-        "status": conversation_status,
-        "incomplete_reason": incomplete_reason,
-        "messages": messages,
+        "status": "archived",
+        "incomplete_reason": None,
+        "messages": [],
+        "messages_evicted": True,
+        "message_count": message_count,
+        "fetch": fetch,
     }
     return {
         "schema_version": OPERATOR_CHANNELS_SCHEMA_VERSION,
@@ -1519,8 +1534,10 @@ def _archived_operator_channel(archived: dict) -> dict | None:
         "history": None,
         "trace": None,
         "conversation": conversation,
-        "conversation_status": conversation_status,
-        "message_count": len(messages),
+        "conversation_status": "archived",
+        "message_count": message_count,
+        "messages_evicted": True,
+        "fetch": fetch,
         "trace_count": 0,
         "tool_trace_count": 0,
         "warnings": [],
