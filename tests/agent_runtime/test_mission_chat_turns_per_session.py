@@ -246,3 +246,48 @@ def test_write_after_migration_appends_without_reviving_monolith(isolate_agent_r
     }
     assert keys == {"client_a1", "client_a2", "client_a3"}
     assert not (isolate_agent_runtime_root / "mission_chat_turns.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# serve read-cache fingerprint (the split's one out-of-store dependency)
+
+
+def test_serve_fingerprint_flips_on_turn_flushes(isolate_agent_runtime_root):
+    """A streamed-turn flush rewrites ONE session file in place and emits no
+    EventLog event — the serve read-cache fingerprint must still flip, or a
+    cached snapshot serves stale turn elements (the monolith stat went dead
+    with the per-session split)."""
+
+    from hermes_cli.harness_parts.serve import _runtime_state_fingerprint
+
+    persist_mission_chat_turn(
+        session_id="chat_fp_session",
+        client_message_id="msg_1",
+        turn_id="turn_1",
+        elements=[{"type": "text", "text": "first"}],
+        state="running",
+        write_ahead=True,
+    )
+    fp1 = _runtime_state_fingerprint()
+
+    # In-place rewrite of the SAME session file (an incremental stream flush).
+    persist_mission_chat_turn(
+        session_id="chat_fp_session",
+        client_message_id="msg_1",
+        turn_id="turn_1",
+        elements=[{"type": "text", "text": "first"}, {"type": "text", "text": "second"}],
+        state="running",
+    )
+    fp2 = _runtime_state_fingerprint()
+    assert fp1 != fp2
+
+    # A NEW session file must flip it too.
+    persist_mission_chat_turn(
+        session_id="chat_fp_other",
+        client_message_id="msg_2",
+        turn_id="turn_2",
+        elements=[{"type": "text", "text": "hello"}],
+        state="completed",
+    )
+    fp3 = _runtime_state_fingerprint()
+    assert fp2 != fp3

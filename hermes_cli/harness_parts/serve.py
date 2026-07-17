@@ -141,6 +141,31 @@ def _stat_board_tree(root: Any, _stat) -> None:
             _stat(card_path)
 
 
+_FINGERPRINT_TURN_FILE_CAP = 200  # session cap is 50; defensive bound only
+
+
+def _stat_turn_store_tree(root: Any, _stat) -> None:
+    """Bounded stat of the per-session turn store (mission_chat_turns/<key>.json).
+
+    The turn-store split (one file per chat session) made the legacy
+    `mission_chat_turns.json` root-file stat a dead signal: after migration the
+    monolith is renamed aside and every streamed-turn flush rewrites ONE
+    session file in place — which does not reliably move the directory mtime.
+    Stat each session file individually (the board-tree pattern) so a cached
+    snapshot can never serve stale turn elements. The legacy root file stays in
+    _FINGERPRINT_ROOT_FILES so the one-time migration rename also flips the
+    fingerprint."""
+
+    turns_root = root / "mission_chat_turns"
+    _stat(turns_root)
+    try:
+        session_files = sorted(turns_root.glob("*.json"))
+    except OSError:
+        return
+    for session_path in session_files[:_FINGERPRINT_TURN_FILE_CAP]:
+        _stat(session_path)
+
+
 def _runtime_state_fingerprint() -> tuple | None:
     """Cheap stat-based sequence check over the harness read-model inputs.
 
@@ -172,6 +197,10 @@ def _runtime_state_fingerprint() -> tuple | None:
     # (already fingerprinted), but a bounded subtree walk here keeps cached
     # snapshots honest even for event-less file materialization (realm pull).
     _stat_board_tree(root, _stat)
+    # Per-session turn store: streamed-turn flushes rewrite one session file in
+    # place and emit NO EventLog event, so without these stats a cached snapshot
+    # would serve stale turn elements.
+    _stat_turn_store_tree(root, _stat)
     try:
         from hermes_state import SessionDB
 
