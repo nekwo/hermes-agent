@@ -93,6 +93,13 @@ class ReadModelConfig:
     enabled: bool = False
     serve_snapshot_from_db: bool = True
     db_filename: str = "read_model.db"
+    # S2 read-model kill-switch. When False (default), history sections
+    # (``archived_tasks``, closed/ancient ``incidents``, persona-chat message
+    # tails) are EVICTED from the steady-state frame and served via paged
+    # on-demand queries; the frame carries typed pointer stubs in their place.
+    # Flip True to restore the old full-in-frame shape for one release so a
+    # surface that regressed can be caught against the previous shape.
+    history_in_frame: bool = False
 
 
 @dataclass(slots=True)

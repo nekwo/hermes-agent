@@ -526,6 +526,7 @@ def _read_model_config(raw: dict[str, Any]) -> ReadModelConfig:
         enabled=bool(raw.get("enabled", defaults.enabled)),
         serve_snapshot_from_db=bool(raw.get("serve_snapshot_from_db", defaults.serve_snapshot_from_db)),
         db_filename=filename,
+        history_in_frame=bool(raw.get("history_in_frame", defaults.history_in_frame)),
     )
 
 

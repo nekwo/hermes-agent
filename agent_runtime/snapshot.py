@@ -81,6 +81,108 @@ AGENT_TOPOLOGY_NODE_ID_CAP = 20
 STAGE_VERIFICATION_STAGE_CAP = 12
 STAGE_VERIFICATION_PROOF_ID_CAP = 8
 STAGE_VERIFICATION_PATH_CAP = 6
+
+# S2 read-model — history out of the live frame (operator move 6).
+# ``archived_tasks`` (all dead), the closed/ancient tail of ``incidents``, and
+# the persona-chat message tails are append-only HISTORY: read on demand at
+# most, never advancing. They are evicted from the steady-state frame and served
+# via paged on-demand queries over the EventLog / stores (``harness task
+# history`` / ``goal history`` / ``incident list`` / ``persona chat history``).
+# Archive-never-delete: eviction removes rows from the FRAME, never from disk —
+# archived tasks stay in ``deleted_archive/``, closed incidents stay in
+# ``incidents/``. The kill-switch ``read_model.history_in_frame`` (default False
+# = evict) restores the old full-in-frame shape for one release.
+# Incident retention is OPEN-ONLY (operator decision 2026-07-16, supersedes the
+# plan's closed-within-TTL recommendation): a closed incident is history the
+# moment it closes and is served exclusively by the paged history query. Only
+# OPEN incidents (live state) ship in the frame.
+# Newest-N archived-task ids carried on the ``archived_tasks`` pointer stub so a
+# consumer can name the most recent dead missions without shipping their rows.
+ARCHIVED_TASKS_REF_RECENT_CAP = 25
+
+
+def _history_in_frame(cfg) -> bool:
+    """Kill-switch read: True keeps the old full-in-frame history shape."""
+
+    return bool(getattr(getattr(cfg, "read_model", None), "history_in_frame", False))
+
+
+def _archived_tasks_frame(archived_tasks: list, *, evict: bool):
+    """The ``archived_tasks`` frame value: the full rows, or a typed pointer stub.
+
+    Evicting replaces the 25-dead-row array (≈1.27 MB live) with a small honest
+    marker carrying the count + newest-N ids + the fetch verb — never a silent
+    absence. Full rows are fetched via ``harness task history <task_id> --json``
+    (which already reads archived batches).
+    """
+
+    if not evict:
+        return archived_tasks
+    recent_ids = [
+        str(row.get("task_id"))
+        for row in archived_tasks[:ARCHIVED_TASKS_REF_RECENT_CAP]
+        if isinstance(row, dict) and row.get("task_id")
+    ]
+    return {
+        "evicted": True,
+        "count": len(archived_tasks),
+        "recent_ids": recent_ids,
+        "fetch": "harness task history <task_id> --json",
+    }
+
+
+def _open_incidents_frame(incidents: list, *, evict: bool) -> tuple[list, int]:
+    """Split incidents into (in-frame rows, closed-evicted count).
+
+    Open incidents are live state and always in-frame. Closed incidents are
+    history the moment they close (operator decision 2026-07-16: open-only, no
+    TTL window) — evicted from the frame and served by the paged history query.
+    Not evicting keeps every row."""
+
+    if not evict:
+        return list(incidents), 0
+    kept = [incident for incident in incidents if getattr(incident, "closed_at", None) is None]
+    return kept, len(incidents) - len(kept)
+
+
+def _persona_chat_history_frame(rows: list, *, evict: bool) -> list:
+    """The ``persona_chat_history`` frame rows. Evicting keeps every recency
+    pointer (session id + last-message anchors + counts + timestamps) but drops
+    the heavy ``messages`` tail, flagging each row so a consumer distinguishes an
+    evicted tail from a genuinely empty chat. The tail is fetched per session via
+    ``harness persona chat history --session-id <id> --json``."""
+
+    if not evict:
+        return rows
+    pointers: list = []
+    for row in rows:
+        if not isinstance(row, dict):
+            pointers.append(row)
+            continue
+        pointer = {key: value for key, value in row.items() if key != "messages"}
+        pointer["messages"] = []
+        pointer["messages_evicted"] = True
+        pointers.append(pointer)
+    return pointers
+
+
+def snapshot_section_bytes(data: dict, key: str) -> int:
+    """Compact-JSON byte size of one top-level snapshot section (S2 byte-budget
+    goldens; deliberately independent of the parallel snapshot-audit module)."""
+
+    if key not in data:
+        return 0
+    try:
+        return len(
+            json.dumps(
+                to_jsonable(data.get(key)),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    except Exception:
+        return 0
 _ARCHIVED_CONVERSATION_SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
 )
@@ -219,6 +321,9 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     cfg = load_agent_runtime_config()
+    # S2 read-model: evict history from the steady-state frame unless the
+    # kill-switch (read_model.history_in_frame) restores the old shape.
+    evict_history = not _history_in_frame(cfg)
     # The background Mission Daemon was retired; execution is always operator/
     # goal-runner driven ("manual").
     execution_mode = "manual"
@@ -285,6 +390,13 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     session_db = _default_persona_session_db()
+    # S2 read-model: keep only OPEN incidents (live state) in-frame; every
+    # closed incident is history, evicted to the paged query. The full
+    # ``incidents`` list still feeds summary/observability/dirty/tasks — only the
+    # ``incidents`` frame key is filtered to open.
+    incident_frame_rows, incidents_evicted_count = _open_incidents_frame(
+        incidents, evict=evict_history
+    )
     data = {
         "schema_version": 2,
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
@@ -392,7 +504,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
-        "archived_tasks": archived_tasks,
+        "archived_tasks": _archived_tasks_frame(archived_tasks, evict=evict_history),
         "agents": agent_summaries,
         "available_personas": available_personas,
         "blueprints": [blueprint_summary(bp) for bp in BlueprintStore().list()],
@@ -407,10 +519,21 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "runtime_instances": [runtime_instance_summary(item) for item in runtime_instances],
         "event_contracts": event_catalog(),
         "runs": [_run_summary(r) for r in runs],
-        "incidents": [_incident_summary(i) for i in incidents],
+        "incidents": [_incident_summary(i) for i in incident_frame_rows],
         "proofs": [_proof_summary(p) for p in proofs],
         "self_tests": [self_test_summary(item) for item in self_tests],
     }
+    if evict_history:
+        # Honest accounting for the closed incidents evicted from the
+        # ``incidents`` section — a typed pointer, never a silent absence. Only
+        # OPEN incidents remain in ``incidents`` as live state; every closed one
+        # is history-only (open-only retention, operator decision 2026-07-16).
+        data["incidents_history_ref"] = {
+            "evicted": True,
+            "closed_evicted": True,
+            "count": incidents_evicted_count,
+            "fetch": "harness incident list --state closed --json",
+        }
     if persona_instance_runtime_enabled(cfg):
         data["persona_instance_runtime"] = {
             "enabled": True,
@@ -426,12 +549,19 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         data["identity_map"] = identity_aliases_for_rows(data["persona_instances"])
         history_accountant = ProjectionAccountant("persona_chat_history")
         trace_accountant = ProjectionAccountant("persona_chat_trace")
-        data["persona_chat_history"] = persona_chat_history_summary(
+        # Full history (with message tails) is computed once and used to build the
+        # operator_channels conversations (their tail slimming is S4's concern).
+        # The FRAME carries recency pointers only when evicting (S2) — the tail
+        # bytes leave, the anchors stay.
+        persona_chat_history_full = persona_chat_history_summary(
             persona_instances=persona_instances,
             session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=history_accountant,
             persona_assignments=persona_assignments,
+        )
+        data["persona_chat_history"] = _persona_chat_history_frame(
+            persona_chat_history_full, evict=evict_history
         )
         data["persona_chat_trace"] = persona_chat_trace_summary(
             persona_instances=persona_instances,
@@ -442,7 +572,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         conversation_accountant = ProjectionAccountant("operator_conversation")
         live_operator_channels = operator_channel_summary(
             persona_instances=persona_instances,
-            persona_chat_history=data["persona_chat_history"],
+            persona_chat_history=persona_chat_history_full,
             persona_chat_trace=data["persona_chat_trace"],
             tasks=tasks,
             run_summaries=data["runs"],
@@ -514,7 +644,11 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         )
     return {
         "envelope_version": PARITY_ENVELOPE_VERSION,
-        "contract_version": 38,
+        # S2 (history out of the live frame): archived_tasks → pointer stub,
+        # incidents windowed (+ incidents_history_ref), persona_chat_history →
+        # recency pointers. Launcher pin (kSupportedMissionContractVersion) moves
+        # in lockstep.
+        "contract_version": 39,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),

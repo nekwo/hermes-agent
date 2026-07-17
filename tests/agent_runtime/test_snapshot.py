@@ -281,7 +281,7 @@ def test_snapshot_projects_blueprint_run_records(isolate_agent_runtime_root):
     assert any(item["id"] == "one_agent_smoke" for item in snap["blueprints"])
 
 
-def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_root):
+def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_root, history_in_frame_config):
     n = now()
     task = Task(
         id="stage38",
@@ -366,7 +366,7 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     snap = build_snapshot(event_log=events)
     row = next(item for item in snap["tasks"] if item["task_id"] == "stage38")
 
-    assert snap["parity"]["contract_version"] == 38
+    assert snap["parity"]["contract_version"] == 39
     assert "mission_level_state" in snap["parity"]["capabilities"]
     assert "agent_topology" in snap["parity"]["capabilities"]
     assert row["mission_level_state"]["blueprint_id"] == "neko_dev_qa_basic"
@@ -1307,7 +1307,7 @@ def test_snapshot_exposes_canonical_persona_instance_ids(monkeypatch, isolate_ag
     assert by_id[created.id]["lifecycle_mode"] == "free_floating"
 
 
-def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root):
+def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root, history_in_frame_config):
     archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
     (archive / "tasks").mkdir(parents=True)
     atomic_json_write(
@@ -1331,7 +1331,7 @@ def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root):
     assert archived["archived_at"] == "2026-06-01T01:02:03Z"
 
 
-def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isolate_agent_runtime_root):
+def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isolate_agent_runtime_root, history_in_frame_config):
     archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
     (archive / "tasks").mkdir(parents=True)
     (archive / "runs").mkdir(parents=True)
@@ -1581,7 +1581,7 @@ def test_snapshot_projects_archived_goal_as_operator_channel(monkeypatch, isolat
     assert "archived operator channel should remain recallable" in transcript
 
 
-def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root):
+def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root, history_in_frame_config):
     archive = isolate_agent_runtime_root / "deleted_archive" / "20260601T010203Z_clear_ready"
     (archive / "tasks").mkdir(parents=True)
     (archive / "runs").mkdir(parents=True)
@@ -1638,7 +1638,7 @@ def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(i
     assert roles["qa"]["events"][0]["payload"]["display_title"] == "QA Agent archived"
 
 
-def test_snapshot_masks_secret_assignments_but_keeps_pathful_decision_text(isolate_agent_runtime_root):
+def test_snapshot_masks_secret_assignments_but_keeps_pathful_decision_text(isolate_agent_runtime_root, history_in_frame_config):
     """Decision text is operator-grade: paths survive verbatim; only
     secret-shaped assignments are masked, in place, without nulling the rest
     of the rationale (the old behavior dropped the whole text and starved the

@@ -218,6 +218,44 @@ def persona_chat_history_summary(
     return rows
 
 
+def persona_chat_session_messages(
+    *,
+    session_id: str,
+    limit: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+    session_db: Any | None = None,
+) -> dict[str, Any]:
+    """Paged on-demand read of one persona chat session's message tail.
+
+    Backs ``harness persona chat history`` — the fetch that replaces the message
+    tail S2 evicts from the steady-state frame. Reuses the exact curation the
+    in-frame projection used (``_safe_recent_messages``), so the fetched tail is
+    identical to what ``persona_chat_history[].messages`` used to carry. The log
+    IS the history: no new storage, just a per-session read of the durable
+    SessionDB the frame previously projected inline.
+    """
+
+    bounded = _bounded_message_tail(limit)
+    db = session_db or _default_session_db()
+    if db is None:
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "limit": bounded,
+            "count": 0,
+            "redaction_status": "safe",
+            "messages": [],
+        }
+    messages, status = _safe_recent_messages(db, session_id=session_id, limit=bounded)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "limit": bounded,
+        "count": len(messages),
+        "redaction_status": status,
+        "messages": messages,
+    }
+
+
 def persona_chat_trace_summary(
     *,
     persona_instances: Iterable[PersonaInstance],

@@ -1087,9 +1087,102 @@ def _cmd_issue_triage(args) -> int:
     return 0
 
 
+def _incident_cursor_ts(incident):
+    """The timestamp an incident is ordered/paged by: when it closed (history)
+    or when it opened (still live)."""
+
+    return getattr(incident, "closed_at", None) or getattr(incident, "opened_at", None)
+
+
+def _incident_history_row(incident) -> dict:
+    cursor = _incident_cursor_ts(incident)
+    return {
+        "incident_id": incident.id,
+        "task_id": incident.task_id,
+        "run_id": incident.run_id,
+        "kind": incident.kind,
+        "summary": incident.summary,
+        "is_open": incident.closed_at is None,
+        "opened_at": incident.opened_at,
+        "closed_at": incident.closed_at,
+        "cursor": cursor,
+    }
+
+
 def _cmd_incident_list(args) -> int:
-    store=IncidentStore(); incidents=store.list_all() if getattr(args, "all", False) else store.list_open()
-    print(emit_json(incidents) if args.json else "\n".join(f"{i.id} {i.kind} {i.summary}" for i in incidents))
+    """List incidents, or page the closed/ancient HISTORY tail S2 evicts from the
+    frame. ``--state {open,closed,all}`` selects the lane; ``--before <iso>`` +
+    ``--limit`` page newest-first over the incident store (the store IS the
+    history — no new storage). Back-compat: ``--all`` == ``--state all``,
+    default == open-only."""
+
+    store = IncidentStore()
+    incidents = store.list_all()
+    state = getattr(args, "state", None)
+    if not state:
+        state = "all" if getattr(args, "all", False) else "open"
+    if state == "open":
+        incidents = [i for i in incidents if i.closed_at is None]
+    elif state == "closed":
+        incidents = [i for i in incidents if i.closed_at is not None]
+    # Newest-first by cursor (closed_at for closed, opened_at for open) so
+    # `--before` walks backwards through history one page at a time.
+    incidents = sorted(
+        incidents,
+        key=lambda i: (_incident_cursor_ts(i) is not None, _incident_cursor_ts(i)),
+        reverse=True,
+    )
+    before_text = getattr(args, "before", None)
+    if before_text:
+        try:
+            before = datetime.fromisoformat(str(before_text).replace("Z", "+00:00"))
+        except ValueError:
+            data = {"ok": False, "error": "invalid_before", "message": "--before must be an ISO-8601 timestamp"}
+            print(emit_json(data) if getattr(args, "json", False) else data["message"])
+            return 1
+        incidents = [i for i in incidents if (_incident_cursor_ts(i) is not None and _incident_cursor_ts(i) < before)]
+    truncated = False
+    limit = getattr(args, "limit", None)
+    if limit is not None:
+        limit = max(1, min(500, int(limit)))
+        if len(incidents) > limit:
+            incidents = incidents[:limit]
+            truncated = True
+    rows = [_incident_history_row(i) for i in incidents]
+    if getattr(args, "json", False):
+        next_before = rows[-1]["cursor"] if (truncated and rows) else None
+        data = {
+            "ok": True,
+            "state": state,
+            "count": len(rows),
+            "truncated": truncated,
+            "next_before": next_before,
+            "incidents": rows,
+        }
+        print(emit_json(data))
+    else:
+        print("\n".join(f"{r['incident_id']} {r['kind']} {'open' if r['is_open'] else 'closed'} {r['summary']}" for r in rows))
+    return 0
+
+
+def _cmd_persona_chat_history(args) -> int:
+    """Paged on-demand read of one persona chat session's message tail — the
+    fetch that replaces the tail S2 evicts from the frame. The frame carries the
+    recency pointer (session id + anchors); this returns the messages."""
+
+    from agent_runtime.persona_chat_history import persona_chat_session_messages
+
+    limit = max(1, min(40, int(getattr(args, "limit", 40) or 40)))
+    data = persona_chat_session_messages(session_id=args.session_id, limit=limit)
+    if getattr(args, "json", False):
+        print(emit_json(data))
+    else:
+        lines = []
+        for message in data["messages"]:
+            text = str(message.get("text") or "").splitlines()
+            head = text[0][:120] if text else ""
+            lines.append(f"{message.get('timestamp') or '-'} {message.get('role')}: {head}")
+        print("\n".join(lines) if lines else f"no messages for {args.session_id}")
     return 0
 
 
