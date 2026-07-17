@@ -2234,7 +2234,11 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
     assert lines[2]["seq"] == 1
     assert lines[-1]["ok"] is True
     assert lines[-1]["protocol_version"] == 2
-    assert lines[-1]["turn_elements"][0]["text"] == "Hello"
+    # C3: `turn_elements` no longer ride the terminal frame — the turn store is
+    # the element/replay authority (asserted below) and the incremental v2
+    # frames already carried the turn structure. Dropping the wire copy retires
+    # the double carriage.
+    assert "turn_elements" not in lines[-1]
     assert lines[-1]["execution_state"] == "completed"
     assert lines[-1]["reply"] == "Hello"
     assert lines[-1]["run_ids"] == []
@@ -2246,7 +2250,7 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
         session_id=lines[-1]["session_id"],
         client_message_id="client_1",
     )
-    assert [item["id"] for item in persisted] == [lines[-1]["turn_elements"][0]["id"]]
+    assert [item["text"] for item in persisted] == ["Hello"]
     assert persisted[0]["text"] == "Hello"
 
 
@@ -2814,7 +2818,109 @@ def test_mission_chat_message_generates_client_message_id_when_missing(
         item["platform_message_id"]
         for item in db.messages["persona_chat_personainst_dev"]
     } == {client_message_id}
-    assert payload["prompt_observability"]["turn_id"] == client_message_id
+    # C3: the terminal frame's `prompt_observability` is the slim subset — the
+    # turn id lives at the top level (asserted above); the slim block links to
+    # the persisted record-at-injection row only by `context_id`.
+    assert payload["prompt_observability"]["context_id"] == payload["prompt_context_id"]
+    assert "turn_id" not in payload["prompt_observability"]
+
+
+def test_mission_chat_message_stream_terminal_frame_is_slim(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    """C3 emission-shape sabotage anchor (main handler, streaming lane).
+
+    The terminal ``chat.final`` frame carries the slim typed observability subset
+    and NO ``turn_elements``. Re-adding ``turn_elements`` to the emit path, or
+    restoring the full row, turns this red."""
+    from agent_runtime.prompt_observability import CHAT_FINAL_OBSERVABILITY_FIELDS
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            callback = kwargs.get("stream_callback")
+            if callback is not None:
+                callback("He")
+                callback("llo")
+            return SimpleNamespace(
+                final_response="Hello",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                api_calls=1,
+                model="gpt-test",
+                raw={
+                    "model_input_observability": {
+                        "kind": "redaction_safe_final_model_input",
+                        "message_count": 1,
+                        "messages": [],
+                    }
+                },
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="hi",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_slim_1",
+            stream=True,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    lines = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    final = lines[-1]
+    assert final["type"] == "chat.final"
+    assert final["ok"] is True
+    # The double carriage is gone: no full turn-element echo on the wire.
+    assert "turn_elements" not in final
+    obs = final["prompt_observability"]
+    # ONE shape: exactly the slim field set — no more, no less.
+    assert set(obs) == set(CHAT_FINAL_OBSERVABILITY_FIELDS)
+    # The heavy record-at-injection payloads never ride the terminal frame.
+    for dropped in (
+        "final_model_input",
+        "prompt_layers",
+        "context_files",
+        "chat_history_context",
+        "accessible_skills",
+        "available_skills",
+        "accessible_skills_ref",
+        "available_skills_ref",
+    ):
+        assert dropped not in obs, dropped
+    # The kept fields carry real content for the launcher's peek fallback +
+    # usage overlay.
+    assert obs["context_id"] == final["prompt_context_id"]
+    assert isinstance(obs["situational_hud"], dict)
+    assert isinstance(obs["used_skills"], list)
+    assert isinstance(obs["model_selection"], dict)
 
 
 def test_mission_chat_message_persists_pre_trace_ack_before_final_reply(

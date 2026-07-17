@@ -1102,7 +1102,8 @@ def _cmd_mission_chat_message(args) -> int:
             "session_id": session_id,
             "blocker": safe_assignment_text(str(exc), limit=240),
             "prompt_context_id": prompt_context["context_id"],
-            "prompt_observability": prompt_context,
+            # C3: failure frames carry the SAME slim block, never the full row.
+            "prompt_observability": slim_chat_final_observability(prompt_context),
             "model_selection": model_selection,
             "next_expected": "fix the runtime blocker and retry the mission chat turn",
         }
@@ -1177,7 +1178,12 @@ def _cmd_mission_chat_message(args) -> int:
             "latency_ms": getattr(chat_result, "latency_ms", None),
             "profile_timing": dict(getattr(chat_result, "profile_timing", None) or {}) or None,
             "prompt_context_id": prompt_context["context_id"],
-            "prompt_observability": prompt_context,
+            # C3 (2026-07-17): the terminal frame carries the turn's facts ONCE,
+            # small — the slim typed subset (ruling §7.3), not the full ~26 KB
+            # record-at-injection row. The launcher reads exactly these fields
+            # off the live frame; the complete row stays on disk (persisted +
+            # archived). Same slim shape on stream and non-stream (one dict).
+            "prompt_observability": slim_chat_final_observability(prompt_context),
             "queued_skills_loaded": preloaded_skills_loaded,
             "queued_skills_missing": preloaded_skills_missing,
             "model_selection": model_selection,
@@ -1201,7 +1207,10 @@ def _cmd_mission_chat_message(args) -> int:
         if write_ahead_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_write_ahead_outcome"] = write_ahead_outcome.value
         if stream:
-            data["turn_elements"] = stream_emitter.elements
+            # C3: `turn_elements` DROPPED from the terminal frame — the launcher
+            # never decoded them (turn structure arrives via the incremental v2
+            # frames), and the turn store is the element/replay authority for
+            # reconnect. Emitting them here was a pure duplicate carriage.
             _emit_chat_final(data)
         else:
             print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
@@ -1248,6 +1257,10 @@ def _cmd_mission_chat_message(args) -> int:
             "reply": reply_text,
             "blocker": safe_assignment_text(str(exc), limit=240),
             "prompt_context_id": prompt_context["context_id"],
+            # C3: same slim block on this failure lane too, so the peek's live
+            # fallback (situational HUD + turn usage) still resolves when the
+            # agent replied but the record settle failed.
+            "prompt_observability": slim_chat_final_observability(prompt_context),
             "model_selection": model_selection,
             "next_expected": "the agent replied but recording the turn failed; inspect the blocker and retry the message",
         }
@@ -3219,7 +3232,9 @@ def _run_free_floating_assignment_once(
             data["turn_write_ahead_outcome"] = write_ahead_outcome.value
         if stream:
             data["protocol_version"] = 2
-            data["turn_elements"] = stream_emitter.elements
+            # C3: `turn_elements` DROPPED here too — this free-floating lane
+            # never carried an observability row, and the turn store is the
+            # element/replay authority. The wire keeps only the v2 protocol tag.
         return 0, data, _deferred_auto_title
     except Exception as exc:
         if terminal_outcome is not None:

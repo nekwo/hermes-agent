@@ -334,6 +334,63 @@ def attach_prompt_observability_turn_results(
     return context
 
 
+#: C3 (2026-07-17): the slim typed subset of the per-turn observability row that
+#: the terminal ``chat.final`` frame — and the mission-chat failure frames that
+#: carry observability — embed on the wire. The FULL row used to ride every
+#: terminal frame (~26 KB post-C1, still mostly ``final_model_input`` + prompt
+#: layers + context files + chat history), yet the launcher decodes only these
+#: fields off the LIVE frame: the Context peek's primary source is the snapshot
+#: frame's ``chat_contexts``, and this block is its zero-fetch live fallback
+#: (situational HUD + turn usage), while the Skills HUD prefers the frame
+#: context and degrades honestly to ``instance.skills`` when the fallback lacks
+#: skill lists. Ruling §7.3 (settled by the operator): keep EXACTLY these keys.
+#: ``chat_id`` / ``chat_title`` are included because the launcher
+#: ``MissionPromptChatContext`` parser consumes them (chat identity in the
+#: fallback window). Deliberately NOT shipped: the skill LISTS
+#: (``accessible_skills`` / ``available_skills`` + their refs),
+#: ``final_model_input``, ``prompt_layers``, ``context_files``,
+#: ``chat_history_context`` — the complete record-at-injection truth stays on
+#: disk in the persisted ctx row (archive-never-delete) and the turn store keeps
+#: the element/replay authority.
+CHAT_FINAL_OBSERVABILITY_FIELDS: tuple[str, ...] = (
+    "context_id",
+    "chat_id",
+    "chat_title",
+    "turn_usage",
+    "model_selection",
+    "context_budget",
+    "situational_hud",
+    "used_skills",
+)
+
+
+def slim_chat_final_observability(
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Project a built observability row down to the ``chat.final`` wire subset.
+
+    Pure and side-effect-free (``persona_commands.py`` is exec'd into harness
+    globals, so this lives here where it is importable/unit-testable and is
+    called at the emit site). ONE shape (ruling 0): always returns the same key
+    set, and the collection-typed fields keep their empty shape (``{}`` / ``[]``)
+    even if the row lacked them, so the launcher never decodes a ``null`` where
+    it expects a map or list. Never mutates ``context`` and never re-derives
+    anything — the record-at-injection fields it reads were resolved once,
+    upstream, on the row this projects from.
+    """
+
+    if not isinstance(context, dict):
+        return {}
+    slim: dict[str, Any] = {key: context.get(key) for key in CHAT_FINAL_OBSERVABILITY_FIELDS}
+    if slim.get("situational_hud") is None:
+        slim["situational_hud"] = {}
+    if slim.get("used_skills") is None:
+        slim["used_skills"] = []
+    if slim.get("model_selection") is None:
+        slim["model_selection"] = {}
+    return slim
+
+
 def _safe_model_selection(value: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
