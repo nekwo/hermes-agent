@@ -16,7 +16,7 @@ from .events import EventLog
 from .models import AgentPersona, Event, PersonaAssignment, PersonaInstance, WorkerSession
 from .personas import profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
-from .state_patches import emit_state_patch
+from .state_patches import emit_persona_instance_patch, emit_persona_instance_remove
 from .states import RunState, WorkerSessionState
 from .tool_visibility import (
     agent_hud_state_for_persona,
@@ -775,6 +775,10 @@ class PersonaInstanceStore:
                         "reason": safe_assignment_text(reason, limit=240),
                     },
                 )
+                # S7-A producer: the instance left the active frame, so its keyed
+                # row is a REMOVE the launcher deletes (never a stale live agent).
+                # Dark by default (read_model.delta_patches off).
+                emit_persona_instance_remove(self.event_log, instance, reason=reason)
         remaining = self.list_for_task(task_id, goal_id=goal_id)
         return {
             "task_id": safe_optional_token(task_id),
@@ -817,6 +821,8 @@ class PersonaInstanceStore:
                         "owner_state": owner_state,
                     },
                 )
+                # S7-A producer: janitor reap also removes the keyed row.
+                emit_persona_instance_remove(self.event_log, instance, reason=reason)
         after = [instance for instance in self.list_all() if instance.mode == "task_bound"]
         return {
             "before_task_bound_count": len(before),
@@ -1135,18 +1141,14 @@ class PersonaInstanceStore:
         }
 
     def _emit_state_patch(self, instance: PersonaInstance, changed: dict[str, Any]) -> None:
-        """Emit a ``state.patched`` entry for a persona-instance field change
-        (S6 producer; dark unless ``read_model.delta_patches`` is on)."""
+        """Emit an ``upsert`` ``state.patched`` entry for a persona-instance
+        field change (S7-A producer; dark unless ``read_model.delta_patches`` is
+        on). The store field NAMES that changed drive a WIRE-LEVEL projection
+        (see :func:`emit_persona_instance_patch`) so the derived wire fields the
+        launcher reads (``effective_model`` / ``skills`` / the display-name
+        mirror / …) ship recomputed, not stale."""
 
-        emit_state_patch(
-            self.event_log,
-            entity="persona_instance",
-            entity_id=instance.id,
-            changed=changed,
-            task_id=instance.current_task_id,
-            run_id=instance.active_run_id,
-            persona_id=instance.persona_id,
-        )
+        emit_persona_instance_patch(self.event_log, instance, list(changed.keys()))
 
 
 class PersonaAssignmentStore:

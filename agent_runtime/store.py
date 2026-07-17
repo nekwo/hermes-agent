@@ -21,7 +21,7 @@ from .persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from .proof_rules import ProofType
 from .recovery_flags import mark_incident_closed_for_recovery
 from .serde import from_jsonable, to_jsonable
-from .state_patches import emit_state_patch
+from .state_patches import emit_incident_remove, emit_task_refresh
 from .simplified_contract import public_decision_type_value
 from .states import RunState, TaskState
 
@@ -246,16 +246,16 @@ class TaskStore:
                         },
                     )
                 )
-                # S6 producer: task state transitions ride this single funnel
-                # (the terminal-transition chokepoint every writer persists
-                # through). The field patch carries the one field that changed —
-                # ``state``. Dark by default (read_model.delta_patches off).
-                emit_state_patch(
+                # S7-A producer: a task/goal wire row (~80 KB: role_streams,
+                # role_envelopes, mission_level_state, derived actor/stage labels)
+                # cannot fold as a sub-4 KB op, so a transition emits an accounted
+                # ``refresh`` — its coalesced batch falls back to a full core
+                # (patch_coverage), which also carries the terminal-transition
+                # fan-out (persona-instance removes, assignment closes). Dark by
+                # default (read_model.delta_patches off).
+                emit_task_refresh(
                     self.event_log,
-                    entity="task",
-                    entity_id=task.id,
-                    changed={"state": str(task.state)},
-                    task_id=task.id,
+                    task.id,
                     persona_id=actor if actor != "harness" else None,
                 )
         if reached_terminal:
@@ -1535,17 +1535,12 @@ class IncidentStore:
                     payload=payload,
                 )
             )
-            # S6 producer: incidents ship open-only in the frame (settled), so a
-            # close is the field patch that removes it from the open set. Emit the
-            # ``closed_at`` transition through this single close funnel. Dark by
-            # default (read_model.delta_patches off).
-            emit_state_patch(
+            # S7-A producer: incidents ship open-only in the frame (settled), so a
+            # close is a ``remove`` op — the launcher deletes the keyed row. Dark
+            # by default (read_model.delta_patches off).
+            emit_incident_remove(
                 self.event_log,
-                entity="incident",
-                entity_id=incident.id,
-                changed={"closed_at": incident.closed_at},
-                task_id=incident.task_id,
-                run_id=incident.run_id,
+                incident,
             )
             return incident
 

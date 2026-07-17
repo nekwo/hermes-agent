@@ -19,12 +19,14 @@ from .state_patches import STATE_PATCHED_EVENT_TYPE, delta_patches_enabled
 
 STREAM_SCHEMA_VERSION = 1
 
-#: S6: the field-patch ``patch`` frame is the v2 stream frame. It ships ALONGSIDE
+#: S7-A: the op-based ``patch`` frame is the v2 stream frame. It ships ALONGSIDE
 #: the v1 full-core frames (hydrate + uncovered/resync delta batches) — the plan
 #: staged this additive, exactly as W1 staged coalescing: a v1 consumer keeps
-#: reading full cores; a v2-aware consumer folds patch frames. The existing
-#: frame builders stay ``schema_version 1`` so flag-off behavior is byte-identical
-#: (Ruling 0: the flag is a new-lane activation gate, not an old-shape toggle).
+#: reading full cores; a v2-aware consumer folds patch frames. Each patch entry
+#: carries ``{seq, ts, entity, id, op, changed?}`` (op ∈ upsert/remove/refresh —
+#: the producer's WIRE-LEVEL contract). The existing frame builders stay
+#: ``schema_version 1`` so flag-off behavior is byte-identical (Ruling 0: the
+#: flag is a new-lane activation gate, not an old-shape toggle).
 STREAM_PATCH_SCHEMA_VERSION = 2
 
 _SECRET_ASSIGNMENT_RE = re.compile(
@@ -156,9 +158,9 @@ def patch_batch_frame(
     batch: list[tuple[int, Event]], *, base_offset: int
 ) -> dict[str, Any]:
     """One coalesced batch of foldable ``state.patched`` entries as a v2 ``patch``
-    frame — field patches only, **no full core** (F7's ~9MB rebuild is gone on
-    this lane; the per-update transfer drops from a fused megabyte core to a
-    sub-4KB patch, the ~99.96% reduction the plan's S6 acceptance names).
+    frame — op-based wire patches only, **no full core** (F7's ~9MB rebuild is
+    gone on this lane; the per-update transfer drops from a fused megabyte core to
+    a sub-4KB patch, the ~99.96% reduction the plan's S6/S7 acceptance names).
 
     ``base_offset`` is the watermark the batch applies FROM (the offset before
     its first entry); the launcher folds only when its held watermark equals
@@ -166,7 +168,8 @@ def patch_batch_frame(
     ``watermark.event_offset`` is the post-batch offset the fold advances to,
     keeping the launcher's ``>``-only sequence gate applicable exactly as the
     full-core lane does. ``patches`` is the ordered list of the batch's
-    ``{seq, ts, entity, id, changed}`` entries; ``coalesced_count`` is the whole
+    ``{seq, ts, entity, id, op, changed?}`` entries (the op-based wire contract —
+    ``changed`` present only for ``upsert``); ``coalesced_count`` is the whole
     batch length (parity with :func:`delta_batch_frame`).
     """
 
@@ -210,11 +213,12 @@ def select_batch_frame(
       (re)connecting client that asked for a fresh baseline gets one full core
       before any fold, so it never folds onto a stale/absent base.
     * flag on + batch fully coverable (:func:`batch_is_patch_coverable`) → the
-      v2 ``patch`` frame.
+      v2 ``patch`` frame (steer/profile ``upsert``, incident/instance ``remove``).
     * flag on + any uncovered event in the batch → the **honest fallback**: a
-      full-core frame (e.g. a task transition, an incident close, a
-      ``state.reconciled`` watchdog, or any planning.py chokepoint-less
-      mutation rides the whole state through the core).
+      full-core frame (e.g. a task transition — its ``refresh`` op plus the
+      persona_assignment closes it fans out are uncovered — a ``state.reconciled``
+      watchdog, or any planning.py chokepoint-less mutation rides the whole state
+      through the core).
     """
 
     if delta_patches and not resync and batch_is_patch_coverable(event for _, event in batch):

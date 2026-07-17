@@ -1313,12 +1313,15 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # slipped the Stage 12 rule. Advances the watermark so gated consumers
     # converge; every occurrence names a producer bug to fix at the source.
     "state.reconciled": EventContract("state.reconciled", "Read model reconciled after event-less write", ("fingerprint",), ("source",)),
-    # S6 read-model producer: a state-carrying field-patch entry. Payload is
-    # ``{entity, id, changed:{field: new_value}}`` — a keyed entity's field-level
-    # delta, sized to the 4KB payload cap (oversize values become accounted
-    # {oversize,bytes} markers so the consumer refetches the checkpoint for that
-    # actor). ``changed`` is the summary field every emission carries; ``seq``/
-    # ``ts`` ride the EventLog envelope, not the payload. Emitted only when
-    # ``read_model.delta_patches`` is on (default off → this type never appears).
-    "state.patched": EventContract("state.patched", "State patched", ("entity", "id", "changed"), ()),
+    # S7-A read-model producer: an op-based, WIRE-LEVEL state-patch entry.
+    # Payload is ``{entity, id, op, changed?}`` where op ∈ {upsert, remove,
+    # refresh}. ``upsert`` carries ``changed`` — the projected wire fields the
+    # mutation affected (derived dependents recomputed), sized to the 4KB cap
+    # (oversize values become accounted {oversize,bytes} markers; an unavoidable
+    # overflow degrades the op to ``refresh``). ``remove``/``refresh`` carry no
+    # ``changed``. ``entity``/``id``/``op`` are the summary fields every emission
+    # carries; ``changed`` is optional (detail). ``seq``/``ts`` ride the EventLog
+    # envelope, not the payload. Emitted only when ``read_model.delta_patches``
+    # is on (default off → this type never appears).
+    "state.patched": EventContract("state.patched", "State patched", ("entity", "id", "op"), ("changed",)),
 }
