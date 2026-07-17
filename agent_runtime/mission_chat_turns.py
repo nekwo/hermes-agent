@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -11,16 +12,54 @@ from typing import Any, Callable, Iterator, TypeVar
 from . import paths
 from .persona_assignments import safe_assignment_text, safe_assignment_token
 
-_STORE_NAME = "mission_chat_turns.json"
-_LOCK_NAME = "mission_chat_turns.lock"
+# ---------------------------------------------------------------------------
+# Storage layout (one file per chat session)
+# ---------------------------------------------------------------------------
+# Each chat session owns exactly one file
+#   ``mission_chat_turns/<safe_session_key>.json``
+# holding that session's ``{client_message_id: record}`` map, plus a co-located
+# per-session lock ``mission_chat_turns/<safe_session_key>.lock``. Concurrent
+# turns in DIFFERENT chats never contend (they touch different files/locks);
+# same-session concurrency keeps today's exclusive read-modify-write semantics.
+# This retires the old single ``mission_chat_turns.json`` monolith, whose every
+# incremental flush rewrote the WHOLE store under one global lock — the store
+# now aligns with the per-actor "the store IS the checkpoint" model (operator
+# ruling 2026-07-17: "one file per chat is a good method for storage").
+_STORE_DIR_NAME = "mission_chat_turns"
+_ARCHIVE_DIR_NAME = "mission_chat_turns_archive"
+# Legacy monolith. Split ONCE into per-session files on first read/write that
+# finds it, then renamed aside (kept, never deleted).
+_LEGACY_STORE_NAME = "mission_chat_turns.json"
+_LEGACY_MIGRATED_NAME = "mission_chat_turns.legacy.json"
+_MIGRATE_LOCK_NAME = "mission_chat_turns.migrate.lock"
+_GC_LOCK_NAME = "mission_chat_turns.gc.lock"
+_SESSION_FILE_SUFFIX = ".json"
+_SESSION_LOCK_SUFFIX = ".lock"
+# Filename scheme: a sanitized, human-readable prefix of the session key plus a
+# sha256 suffix so long/odd session ids stay filesystem-safe AND collision-free
+# (two keys with the same sanitized prefix still get distinct files). 80 + 1 +
+# 12 + 5 (".json") = 98 chars keeps us well under the Windows MAX_PATH budget
+# for any sane runtime root.
+_SESSION_KEY_PREFIX_MAX = 80
+_SESSION_KEY_HASH_LEN = 12
+
 _LOCK_TIMEOUT_SECONDS = 2.0
 _LOCK_POLL_SECONDS = 0.01
+# Migration is a one-time, bounded split — wait comfortably for whichever
+# process is doing it rather than racing a partial layout.
+_MIGRATE_LOCK_TIMEOUT_SECONDS = 10.0
+# The max-sessions GC is opportunistic (retention "can transiently exceed its
+# bound rather than lose live state"), so both its own lock and the per-file
+# probes it takes are short/non-blocking — a busy session is simply skipped and
+# retried on the next new-session write.
+_GC_LOCK_TIMEOUT_SECONDS = 1.0
 _MAX_ELEMENTS = 80
 _MAX_TEXT = 20000
-# Retention bounds, applied on every write inside the _mutate_store lock.
-# The per-session bound must stay comfortably above the projection's
-# displayable message tail (MAX_PERSONA_CHAT_MESSAGE_TAIL = 40 in
-# persona_chat_history.py) so no displayable agent row loses turn_elements.
+# Retention bounds, applied on every write inside the per-session lock (turn
+# cap) and after each new-session-file creation (session-file GC). The
+# per-session bound must stay comfortably above the projection's displayable
+# message tail (MAX_PERSONA_CHAT_MESSAGE_TAIL = 40 in persona_chat_history.py)
+# so no displayable agent row loses turn_elements.
 _RETENTION_MAX_TURNS_PER_SESSION = 100
 _RETENTION_MAX_SESSIONS = 50
 _SENSITIVE_FILE_MARKERS = ("private_token", "secret_token", "api_key", "apikey", "credential")
@@ -97,8 +136,8 @@ def persist_mission_chat_turn(
     if state is None and not safe_elements:
         return MissionChatTurnPersistOutcome.SKIPPED_EMPTY_LEGACY
 
-    def _mutate(store: dict[str, Any]) -> tuple[bool, MissionChatTurnPersistOutcome]:
-        existing = (store.get(session_key) or {}).get(message_key)
+    def _mutate(session: dict[str, Any]) -> tuple[bool, MissionChatTurnPersistOutcome]:
+        existing = session.get(message_key)
         resolved_state = next_turn_state(
             _record_state(existing),
             requested_state,
@@ -106,7 +145,7 @@ def persist_mission_chat_turn(
         )
         if resolved_state is None:
             return False, MissionChatTurnPersistOutcome.REJECTED_STALE_TRANSITION
-        store.setdefault(session_key, {})[message_key] = {
+        session[message_key] = {
             "schema_version": 1,
             "turn_id": safe_assignment_token(turn_id) or safe_assignment_token(message_key),
             "state": resolved_state,
@@ -115,10 +154,10 @@ def persist_mission_chat_turn(
         }
         return True, MissionChatTurnPersistOutcome.PERSISTED
 
-    return _mutate_store(
+    return _mutate_session(
+        session_key,
         _mutate,
         timeout_result=MissionChatTurnPersistOutcome.SKIPPED_LOCK_TIMEOUT,
-        protected_session=session_key,
         protected_message=message_key,
     )
 
@@ -132,7 +171,7 @@ def mission_chat_turn_elements(
     message_key = safe_assignment_text(client_message_id, limit=240)
     if not session_key or not message_key:
         return []
-    record = (_read_store().get(session_key) or {}).get(message_key)
+    record = _read_session(session_key).get(message_key)
     if not isinstance(record, dict):
         return []
     return _safe_elements(record.get("elements"))
@@ -147,7 +186,7 @@ def mission_chat_turn_record(
     message_key = safe_assignment_text(client_message_id, limit=240)
     if not session_key or not message_key:
         return None
-    record = (_read_store().get(session_key) or {}).get(message_key)
+    record = _read_session(session_key).get(message_key)
     if not isinstance(record, dict):
         return None
     return _safe_record(record, client_message_id=message_key)
@@ -160,7 +199,7 @@ def mission_chat_turn_records(
     session_key = safe_assignment_text(session_id, limit=240)
     if not session_key:
         return []
-    raw_session = _read_store().get(session_key)
+    raw_session = _read_session(session_key)
     if not isinstance(raw_session, dict):
         return []
     records: list[dict[str, Any]] = []
@@ -192,13 +231,10 @@ def mark_stale_running_turns_interrupted(
     if not session_key:
         return []
 
-    def _mutate(store: dict[str, Any]) -> tuple[bool, list[str]]:
-        raw_session = store.get(session_key)
-        if not isinstance(raw_session, dict):
-            return False, []
+    def _mutate(session: dict[str, Any]) -> tuple[bool, list[str]]:
         flipped: list[str] = []
         now_iso = _utc_now_iso()
-        for message_key, record in raw_session.items():
+        for message_key, record in session.items():
             safe_key = safe_assignment_text(message_key, limit=240)
             if not safe_key or safe_key == active_key or not isinstance(record, dict):
                 continue
@@ -211,121 +247,204 @@ def mark_stale_running_turns_interrupted(
 
     # Lock timeout returns [] — this repair is opportunistic by design
     # (repair-on-next-write); the next send in the session retries it.
-    return _mutate_store(
+    return _mutate_session(
+        session_key,
         _mutate,
         timeout_result=[],
-        protected_session=session_key,
         protected_message=active_key,
     )
 
 
-def _mutate_store(
+def _mutate_session(
+    session_key: str,
     mutator: Callable[[dict[str, Any]], tuple[bool, _T]],
     *,
     timeout_result: _T,
-    protected_session: str | None = None,
     protected_message: str | None = None,
 ) -> _T:
-    """Single write chokepoint for the turn store.
+    """Single write chokepoint for one chat session's turn file.
 
-    Holds an exclusive cross-process file lock for the whole
-    read-modify-write window so concurrent CLI turns can never lose each
-    other's records. On lock timeout the mutation is skipped and
+    Holds that session's exclusive cross-process file lock for the whole
+    read-modify-write window so concurrent CLI turns in the SAME chat can never
+    lose each other's records — while turns in DIFFERENT chats take different
+    locks and never contend. On lock timeout the mutation is skipped and
     ``timeout_result`` is returned — a chat turn must never hang on a stuck
     lock; the skip is surfaced through the typed persist outcome.
 
-    Every changed write also applies retention (same lock, same atomic
-    tmp-replace) so the store cannot grow without bound. Retention never
-    evicts ``running`` records or the protected record/session being
-    written, and it is invisible to the mutator's result.
+    Every changed write applies the per-session turn cap (same lock, same
+    atomic tmp-replace). When the write CREATES a new session file, a
+    best-effort directory GC bounds the session count (see
+    ``_gc_session_files``). Retention never evicts ``running`` records or the
+    protected record being written, and it is invisible to the mutator result.
     """
 
-    with _store_lock() as acquired:
+    _migrate_legacy_if_present()
+    path = _session_file_path(session_key)
+    changed = False
+    created = False
+    with _file_lock(_session_lock_path(session_key)) as acquired:
         if not acquired:
             return timeout_result
-        store = _read_store()
-        changed, result = mutator(store)
+        created = not path.exists()
+        session = _read_session_map(path)
+        changed, result = mutator(session)
         if changed:
-            _apply_retention(
-                store,
-                protected_session=protected_session,
-                protected_message=protected_message,
-            )
-            _write_store(store)
-        return result
+            _apply_session_turn_cap(session, protected_message=protected_message)
+            _write_session_file(path, session)
+    # Bound the session-file count only when a new session file appeared — the
+    # only moment the directory can grow. Runs OUTSIDE the session lock (it
+    # takes the GC lock + non-blocking per-candidate locks; the just-written
+    # session is protected), so the hot per-flush path (rewrites of an existing
+    # session file) never pays for a directory scan.
+    if changed and created:
+        _gc_session_files(protected_session_key=session_key)
+    return result
 
 
-def _apply_retention(
-    store: dict[str, Any],
+def _apply_session_turn_cap(
+    session: dict[str, Any],
     *,
-    protected_session: str | None = None,
     protected_message: str | None = None,
 ) -> None:
-    """Bound the store deterministically on write.
+    """Per-session tail bound, applied in place inside the session lock.
 
-    Per-session tail: keep the ``_RETENTION_MAX_TURNS_PER_SESSION`` most
-    recent records by ``updated_at``. Session bound: keep the
-    ``_RETENTION_MAX_SESSIONS`` most recently updated sessions; older
-    sessions drop wholesale. ``running`` records are never evicted (a live
-    concurrent turn must not lose its write-ahead marker) and neither is the
-    record/session being written, so a session can transiently exceed its
-    bound rather than lose live state.
+    Keep the ``_RETENTION_MAX_TURNS_PER_SESSION`` most recent records by
+    ``updated_at``. ``running`` records are never evicted (a live turn must not
+    lose its write-ahead marker) and neither is the record being written, so a
+    session can transiently exceed its bound rather than lose live state.
     """
 
-    for session_key, session in store.items():
-        if not isinstance(session, dict):
-            continue
-        excess = len(session) - _RETENTION_MAX_TURNS_PER_SESSION
-        if excess <= 0:
-            continue
-        evictable = sorted(
-            (
-                str(record.get("updated_at") or "") if isinstance(record, dict) else "",
-                str(message_key),
-            )
-            for message_key, record in session.items()
-            if not (
-                (session_key == protected_session and str(message_key) == str(protected_message))
-                or _record_state(record) == "running"
-            )
-        )
-        for _, message_key in evictable[:excess]:
-            session.pop(message_key, None)
-
-    session_keys = [key for key, value in store.items() if isinstance(value, dict)]
-    excess = len(session_keys) - _RETENTION_MAX_SESSIONS
+    excess = len(session) - _RETENTION_MAX_TURNS_PER_SESSION
     if excess <= 0:
         return
-
-    def _session_recency(key: str) -> str:
-        return max(
-            (
-                str(record.get("updated_at") or "")
-                for record in store[key].values()
-                if isinstance(record, dict)
-            ),
-            default="",
+    evictable = sorted(
+        (
+            str(record.get("updated_at") or "") if isinstance(record, dict) else "",
+            str(message_key),
         )
+        for message_key, record in session.items()
+        if not (
+            str(message_key) == str(protected_message)
+            or _record_state(record) == "running"
+        )
+    )
+    for _, message_key in evictable[:excess]:
+        session.pop(message_key, None)
 
-    dropped = 0
-    for key in sorted(session_keys, key=lambda item: (_session_recency(item), item)):
-        if dropped >= excess:
-            break
-        if key == protected_session:
-            continue
-        if any(_record_state(record) == "running" for record in store[key].values()):
-            continue
-        store.pop(key, None)
-        dropped += 1
+
+def _gc_session_files(*, protected_session_key: str | None = None) -> None:
+    """Bound the number of session FILES on disk (archive-never-delete).
+
+    When ``mission_chat_turns/`` exceeds ``_RETENTION_MAX_SESSIONS`` live files,
+    move the oldest-updated session files under ``mission_chat_turns_archive/``.
+    Never archives the protected session (the one just written) nor any file
+    holding a ``running`` record (a live concurrent turn). Best-effort by
+    design: it runs under its own GC lock and probes each candidate's session
+    lock non-blocking, so it can never deadlock against a live write and simply
+    skips (and retries on the next new-session write) whatever it cannot safely
+    claim. Any failure is swallowed — retention is invisible to the caller.
+    """
+
+    try:
+        if len(_iter_session_files()) <= _RETENTION_MAX_SESSIONS:
+            return
+        protected_path = (
+            _session_file_path(protected_session_key) if protected_session_key else None
+        )
+        with _file_lock(_gc_lock_path(), timeout_seconds=_GC_LOCK_TIMEOUT_SECONDS) as acquired:
+            if not acquired:
+                return
+            files = _iter_session_files()
+            excess = len(files) - _RETENTION_MAX_SESSIONS
+            if excess <= 0:
+                return
+            dropped = 0
+            for path in sorted(files, key=lambda item: (_session_file_recency(item), item.name)):
+                if dropped >= excess:
+                    break
+                if protected_path is not None and path == protected_path:
+                    continue
+                with _file_lock(_lock_path_for_session_file(path), timeout_seconds=0.0) as got:
+                    if not got:
+                        continue
+                    session = _read_session_map(path)
+                    if any(_record_state(record) == "running" for record in session.values()):
+                        continue
+                    if _archive_session_file(path):
+                        dropped += 1
+    except Exception:
+        return
+
+
+def _migrate_legacy_if_present() -> None:
+    """Split the legacy monolith into per-session files ONCE, crash-safely.
+
+    A single stat fast-paths the common case (no monolith). When the monolith
+    exists, the split runs under a global migration lock so two processes never
+    race it. For each legacy session, a per-session file is written ONLY when it
+    does not already exist — so a per-session file written by a live turn (or by
+    a partially-completed prior migration) is authoritative and never clobbered.
+    The monolith is then renamed aside (kept, not deleted). This is idempotent
+    and converges from a half-migrated state: a re-run skips the files already
+    split, writes the rest, and completes the rename.
+    """
+
+    legacy = _legacy_store_path()
+    try:
+        if not legacy.exists():
+            return
+    except OSError:
+        return
+    with _file_lock(_migrate_lock_path(), timeout_seconds=_MIGRATE_LOCK_TIMEOUT_SECONDS) as acquired:
+        if not acquired:
+            return
+        try:
+            if not legacy.exists():
+                return
+        except OSError:
+            return
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            _store_dir().mkdir(parents=True, exist_ok=True)
+            for raw_session_key, session_map in data.items():
+                if not isinstance(session_map, dict):
+                    continue
+                session_key = safe_assignment_text(raw_session_key, limit=240)
+                if not session_key:
+                    continue
+                target = _session_file_path(session_key)
+                if target.exists():
+                    # Authoritative per-session file already present (live write
+                    # or a prior partial migration) — never clobber it.
+                    continue
+                _write_session_file(target, session_map)
+        # Rename the monolith aside even if it was unreadable, so migration
+        # always converges instead of re-attempting a corrupt file forever.
+        try:
+            os.replace(str(legacy), str(_migrated_legacy_path()))
+        except OSError:
+            pass
+    # A legacy store could carry more sessions than the current bound; enforce
+    # it once after the split (best-effort, nothing is live under the migration
+    # lock we just released).
+    _gc_session_files(protected_session_key=None)
+
+
+# ---------------------------------------------------------------------------
+# Cross-process file lock (per session, plus migrate/GC coordination locks)
+# ---------------------------------------------------------------------------
 
 
 @contextmanager
-def _store_lock(
+def _file_lock(
+    lock_path: Path,
     timeout_seconds: float | None = None,
 ) -> Iterator[bool]:
     if timeout_seconds is None:
         timeout_seconds = _LOCK_TIMEOUT_SECONDS
-    lock_path = paths.store_root() / _LOCK_NAME
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     acquired = False
@@ -374,12 +493,78 @@ def _unlock_fd(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
 
 
-def _store_path() -> Path:
-    return paths.store_root() / _STORE_NAME
+# ---------------------------------------------------------------------------
+# Paths + per-file I/O
+# ---------------------------------------------------------------------------
 
 
-def _read_store() -> dict[str, Any]:
-    path = _store_path()
+def _store_dir() -> Path:
+    return paths.store_root() / _STORE_DIR_NAME
+
+
+def _archive_dir() -> Path:
+    return paths.store_root() / _ARCHIVE_DIR_NAME
+
+
+def _legacy_store_path() -> Path:
+    return paths.store_root() / _LEGACY_STORE_NAME
+
+
+def _migrated_legacy_path() -> Path:
+    return paths.store_root() / _LEGACY_MIGRATED_NAME
+
+
+def _migrate_lock_path() -> Path:
+    return paths.store_root() / _MIGRATE_LOCK_NAME
+
+
+def _gc_lock_path() -> Path:
+    return paths.store_root() / _GC_LOCK_NAME
+
+
+def _session_filename_stem(session_key: str) -> str:
+    """Deterministic, filesystem-safe, collision-free file stem for a session.
+
+    A sanitized prefix keeps the file human-recognizable; a sha256 suffix over
+    the exact (already length-bounded) session key guarantees two keys that
+    sanitize to the same prefix still land in distinct files.
+    """
+
+    sanitized = "".join(
+        ch if (ch.isalnum() or ch in "_.-") else "_" for ch in session_key
+    ).strip("._-")[:_SESSION_KEY_PREFIX_MAX]
+    digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()[:_SESSION_KEY_HASH_LEN]
+    return f"{sanitized or 'session'}_{digest}"
+
+
+def _session_file_path(session_key: str) -> Path:
+    return _store_dir() / f"{_session_filename_stem(session_key)}{_SESSION_FILE_SUFFIX}"
+
+
+def _session_lock_path(session_key: str) -> Path:
+    return _store_dir() / f"{_session_filename_stem(session_key)}{_SESSION_LOCK_SUFFIX}"
+
+
+def _lock_path_for_session_file(path: Path) -> Path:
+    return path.with_name(path.name[: -len(_SESSION_FILE_SUFFIX)] + _SESSION_LOCK_SUFFIX)
+
+
+def _iter_session_files() -> list[Path]:
+    store_dir = _store_dir()
+    try:
+        return sorted(p for p in store_dir.glob(f"*{_SESSION_FILE_SUFFIX}") if p.is_file())
+    except OSError:
+        return []
+
+
+def _read_session(session_key: str) -> dict[str, Any]:
+    """Read one session's ``{client_message_id: record}`` map (migrate first)."""
+    _migrate_legacy_if_present()
+    return _read_session_map(_session_file_path(session_key))
+
+
+def _read_session_map(path: Path) -> dict[str, Any]:
+    """Pure single-file read — never triggers migration (used by GC/migration)."""
     try:
         if not path.exists():
             return {}
@@ -389,15 +574,59 @@ def _read_store() -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _write_store(data: dict[str, Any]) -> None:
-    path = _store_path()
+def _write_session_file(path: Path, session: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(
-        json.dumps(data, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        json.dumps(session, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
         encoding="utf-8",
     )
     tmp.replace(path)
+
+
+def _session_file_recency(path: Path) -> tuple[str, float]:
+    """Rank key for eviction (oldest first): newest ``updated_at`` in the file,
+    falling back to the file mtime when the file carries no timestamps."""
+    session = _read_session_map(path)
+    recency = max(
+        (
+            str(record.get("updated_at") or "")
+            for record in session.values()
+            if isinstance(record, dict)
+        ),
+        default="",
+    )
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    return (recency, mtime)
+
+
+def _archive_session_file(path: Path) -> bool:
+    """Move a session file under the archive dir (archive-never-delete).
+
+    Returns True on success. A name collision (a session evicted, recreated,
+    evicted again) is preserved with a nanosecond suffix rather than clobbered.
+    A concurrent GC that already moved the file yields FileNotFoundError → False.
+    """
+    try:
+        archive_dir = _archive_dir()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / path.name
+        if target.exists():
+            target = archive_dir / f"{path.stem}.{time.time_ns()}{path.suffix}"
+        os.replace(str(path), str(target))
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Record / element normalization (unchanged from the monolith design)
+# ---------------------------------------------------------------------------
 
 
 def _safe_record(

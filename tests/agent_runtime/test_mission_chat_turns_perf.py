@@ -3,9 +3,11 @@
 P1: streamed deltas debounce the incremental on_update flush to at most one
     store rewrite per interval; segment boundaries and tool events flush
     immediately; no accumulated text is ever lost to suppression.
-P2: retention bounds the store on write (per-session tail + session count)
-    inside the _mutate_store lock, never evicting running records or the
-    record being written, invisibly to the caller's typed outcome.
+P2: retention bounds the store on write — the per-session tail inside the
+    per-session lock (_mutate_session) and the session-file count via a
+    best-effort directory GC (_gc_session_files) — never evicting running
+    records or the record/session being written, invisibly to the caller's
+    typed outcome.
 
 The durable lane (write-ahead ``running`` marker, terminal
 ``completed``/``failed`` persists, ``mark_stale`` repair) is handler-owned and
@@ -39,16 +41,20 @@ class _FakeClock:
 
 @pytest.fixture
 def store_write_counter(monkeypatch):
-    """Count REAL turn-store file writes (post-lock, post-mutation)."""
+    """Count REAL turn-store file writes (post-lock, post-mutation).
+
+    Now one file per chat session — the perf slices all drive a single session,
+    so the per-flush write count is unchanged from the monolith design (each
+    flush rewrites exactly that one session file)."""
 
     counter = {"writes": 0}
-    original = mission_chat_turns._write_store
+    original = mission_chat_turns._write_session_file
 
-    def _counting_write(data):
+    def _counting_write(path, data):
         counter["writes"] += 1
-        original(data)
+        original(path, data)
 
-    monkeypatch.setattr(mission_chat_turns, "_write_store", _counting_write)
+    monkeypatch.setattr(mission_chat_turns, "_write_session_file", _counting_write)
     return counter
 
 
@@ -201,13 +207,28 @@ def test_per_session_tail_bound_keeps_most_recent(monkeypatch):
     assert kept == ["m3", "m4", "m5", "m6", "m7"]
 
 
-def test_session_bound_drops_oldest_sessions_wholesale(monkeypatch):
-    monkeypatch.setattr(mission_chat_turns, "_RETENTION_MAX_SESSIONS", 3)
-    for index in range(5):
-        _persist_completed(f"s{index}", "m1")
+def _live_session_keys(candidate_keys):
+    return [key for key in candidate_keys if mission_chat_turns._session_file_path(key).exists()]
 
-    store = mission_chat_turns._read_store()
-    assert sorted(store.keys()) == ["s2", "s3", "s4"]
+
+def _archived(session_key):
+    return (
+        mission_chat_turns._archive_dir()
+        / mission_chat_turns._session_file_path(session_key).name
+    ).exists()
+
+
+def test_session_bound_evicts_oldest_session_files_to_archive(monkeypatch):
+    monkeypatch.setattr(mission_chat_turns, "_RETENTION_MAX_SESSIONS", 3)
+    keys = [f"s{index}" for index in range(5)]
+    for key in keys:
+        _persist_completed(key, "m1")
+
+    # Newest three session files remain live; the oldest two were evicted.
+    assert _live_session_keys(keys) == ["s2", "s3", "s4"]
+    # Eviction is archive-never-delete: the dropped session files are preserved.
+    assert _archived("s0")
+    assert _archived("s1")
 
 
 def test_running_records_survive_per_session_retention(monkeypatch):
@@ -232,7 +253,7 @@ def test_running_records_survive_per_session_retention(monkeypatch):
     assert set(records) == {"m_live", "m3", "m4"}
 
 
-def test_session_with_running_record_never_dropped_wholesale(monkeypatch):
+def test_session_file_with_running_record_never_evicted(monkeypatch):
     monkeypatch.setattr(mission_chat_turns, "_RETENTION_MAX_SESSIONS", 2)
     persist_mission_chat_turn(
         session_id="s_live",
@@ -245,52 +266,47 @@ def test_session_with_running_record_never_dropped_wholesale(monkeypatch):
     for index in range(3):
         _persist_completed(f"s{index}", "m1")
 
-    store = mission_chat_turns._read_store()
-    assert "s_live" in store
+    # s_live is the OLDEST session file, yet its running record keeps its file
+    # off the GC's chopping block — a newer completed session is evicted instead.
+    assert mission_chat_turns._session_file_path("s_live").exists()
+    assert not _archived("s_live")
     record = mission_chat_turn_record(session_id="s_live", client_message_id="m_live")
     assert record["state"] == "running"
 
 
 def test_active_record_immune_even_when_oldest():
-    # Direct retention unit: the record being written is protected even when
-    # its timestamp ranks it for eviction.
-    store = {
-        "s1": {
-            "m_old_active": {"state": "completed", "updated_at": "2026-01-01T00:00:00Z"},
-            "m_mid": {"state": "completed", "updated_at": "2026-01-02T00:00:00Z"},
-            "m_new": {"state": "completed", "updated_at": "2026-01-03T00:00:00Z"},
-        }
+    # Direct per-session tail unit: the record being written is protected even
+    # when its timestamp ranks it for eviction.
+    session = {
+        "m_old_active": {"state": "completed", "updated_at": "2026-01-01T00:00:00Z"},
+        "m_mid": {"state": "completed", "updated_at": "2026-01-02T00:00:00Z"},
+        "m_new": {"state": "completed", "updated_at": "2026-01-03T00:00:00Z"},
     }
     original_turns = mission_chat_turns._RETENTION_MAX_TURNS_PER_SESSION
     mission_chat_turns._RETENTION_MAX_TURNS_PER_SESSION = 2
     try:
-        mission_chat_turns._apply_retention(
-            store, protected_session="s1", protected_message="m_old_active"
-        )
+        mission_chat_turns._apply_session_turn_cap(session, protected_message="m_old_active")
     finally:
         mission_chat_turns._RETENTION_MAX_TURNS_PER_SESSION = original_turns
 
-    assert sorted(store["s1"].keys()) == ["m_new", "m_old_active"]
+    assert sorted(session.keys()) == ["m_new", "m_old_active"]
 
 
-def test_active_session_immune_to_session_bound():
-    store = {
-        "s_old_active": {
-            "m1": {"state": "completed", "updated_at": "2026-01-01T00:00:00Z"}
-        },
-        "s_mid": {"m1": {"state": "completed", "updated_at": "2026-01-02T00:00:00Z"}},
-        "s_new": {"m1": {"state": "completed", "updated_at": "2026-01-03T00:00:00Z"}},
-    }
+def test_protected_session_immune_to_session_file_gc():
+    # The session being written is never archived by its own write's GC, even
+    # when it ranks oldest by recency. A newer, unprotected session is evicted.
+    _persist_completed("s_old", "m1")
+    _persist_completed("s_new", "m1")
     original_sessions = mission_chat_turns._RETENTION_MAX_SESSIONS
-    mission_chat_turns._RETENTION_MAX_SESSIONS = 2
+    mission_chat_turns._RETENTION_MAX_SESSIONS = 1
     try:
-        mission_chat_turns._apply_retention(
-            store, protected_session="s_old_active", protected_message="m1"
-        )
+        mission_chat_turns._gc_session_files(protected_session_key="s_old")
     finally:
         mission_chat_turns._RETENTION_MAX_SESSIONS = original_sessions
 
-    assert sorted(store.keys()) == ["s_new", "s_old_active"]
+    assert mission_chat_turns._session_file_path("s_old").exists()
+    assert not mission_chat_turns._session_file_path("s_new").exists()
+    assert _archived("s_new")
 
 
 def test_retention_is_invisible_to_the_typed_outcome(monkeypatch):

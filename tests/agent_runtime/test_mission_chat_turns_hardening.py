@@ -254,15 +254,24 @@ def test_concurrent_processes_do_not_lose_writes(isolate_agent_runtime_root):
         assert process.returncode == 0, stderr
         assert "done" in stdout
 
-    store_path = isolate_agent_runtime_root / "mission_chat_turns.json"
-    store = json.loads(store_path.read_text(encoding="utf-8"))
-    assert len(store.get("sess_a") or {}) == 25
-    assert len(store.get("sess_b") or {}) == 25
+    # Per-session isolation: the two concurrent writers land in DIFFERENT files
+    # behind DIFFERENT locks, and neither loses a record.
+    path_a = mission_chat_turns._session_file_path("sess_a")
+    path_b = mission_chat_turns._session_file_path("sess_b")
+    assert path_a != path_b
+    assert path_a.exists() and path_b.exists()
+    assert len(json.loads(path_a.read_text(encoding="utf-8"))) == 25
+    assert len(json.loads(path_b.read_text(encoding="utf-8"))) == 25
+    # Directory-enumeration reader parity: exactly the two session files exist.
+    assert {p.name for p in mission_chat_turns._iter_session_files()} == {
+        path_a.name,
+        path_b.name,
+    }
 
 
 def test_persist_skips_with_typed_outcome_when_lock_is_held(monkeypatch):
     monkeypatch.setattr(mission_chat_turns, "_LOCK_TIMEOUT_SECONDS", 0.05)
-    lock_path = mission_chat_turns.paths.store_root() / mission_chat_turns._LOCK_NAME
+    lock_path = mission_chat_turns._session_lock_path("s1")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     mission_chat_turns._lock_fd_exclusive_nonblocking(fd)
@@ -299,3 +308,46 @@ def test_persist_skips_with_typed_outcome_when_lock_is_held(monkeypatch):
         write_ahead=True,
     )
     assert outcome is MissionChatTurnPersistOutcome.PERSISTED
+
+
+def test_lock_on_one_session_never_blocks_another_session(monkeypatch):
+    # The whole point of one-file-per-chat: a stuck/held turn in session A must
+    # not stall (or corrupt) a concurrent turn in session B. They take DIFFERENT
+    # locks, so B proceeds while A's lock is held.
+    monkeypatch.setattr(mission_chat_turns, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    assert mission_chat_turns._session_lock_path("sess_a") != mission_chat_turns._session_lock_path(
+        "sess_b"
+    )
+    lock_path = mission_chat_turns._session_lock_path("sess_a")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    mission_chat_turns._lock_fd_exclusive_nonblocking(fd)
+    try:
+        # Session A cannot be written — its lock is held.
+        assert (
+            persist_mission_chat_turn(
+                session_id="sess_a",
+                client_message_id="m1",
+                turn_id="t1",
+                elements=[],
+                state="running",
+                write_ahead=True,
+            )
+            is MissionChatTurnPersistOutcome.SKIPPED_LOCK_TIMEOUT
+        )
+        # Session B goes straight through despite A's lock being held.
+        assert (
+            persist_mission_chat_turn(
+                session_id="sess_b",
+                client_message_id="m1",
+                turn_id="t1",
+                elements=[],
+                state="running",
+                write_ahead=True,
+            )
+            is MissionChatTurnPersistOutcome.PERSISTED
+        )
+        assert mission_chat_turn_record(session_id="sess_b", client_message_id="m1")["state"] == "running"
+    finally:
+        mission_chat_turns._unlock_fd(fd)
+        os.close(fd)
