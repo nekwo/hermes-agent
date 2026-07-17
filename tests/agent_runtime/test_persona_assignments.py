@@ -2230,18 +2230,18 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
         for line in capsys.readouterr().out.splitlines()
         if line.strip()
     ]
+    # C8: the legacy chat.delta lane is RETIRED — one wire shape per token
+    # (protocol-v2 segment.delta only).
     assert [line["type"] for line in lines] == [
         "turn.start",
-        "chat.delta",
         "segment.start",
         "segment.delta",
-        "chat.delta",
         "segment.delta",
         "segment.end",
         "turn.end",
         "chat.final",
     ]
-    assert [line.get("text") for line in lines if line["type"] == "chat.delta"] == ["He", "llo"]
+    assert all(line["type"] != "chat.delta" for line in lines)
     assert [line.get("text") for line in lines if line["type"] == "segment.delta"] == ["He", "llo"]
     assert lines[0]["protocol_version"] == 2
     assert lines[2]["seq"] == 1
@@ -2936,12 +2936,21 @@ def test_mission_chat_message_stream_terminal_frame_is_slim(
     assert isinstance(obs["model_selection"], dict)
 
 
-def test_mission_chat_message_persists_pre_trace_ack_before_final_reply(
+def test_mission_chat_pre_trace_ack_is_presentation_only(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
 ):
+    """C8: the pre-trace ack NEVER enters the durable record.
+
+    It rides the stream as a presentation-only protocol-v2 ``turn.ack`` frame:
+    no SessionDB assistant row, no turn-store element — replay after the fact
+    shows no ack. (Pre-C8 the ack was injected into SessionDB and then
+    marker-suppressed launcher-side; that inject-then-hide seam is retired.)
+    """
+
     from hermes_cli import harness
+    from agent_runtime.mission_chat_turns import mission_chat_turn_elements
 
     cfg = _assignment_config()
     db = _TranscriptDB()
@@ -2963,6 +2972,7 @@ def test_mission_chat_message_persists_pre_trace_ack_before_final_reply(
                     "tool_name": "skill_view",
                 }
             )
+            kwargs["stream_callback"]("The guidance is loaded.")
             return SimpleNamespace(
                 final_response="The guidance is loaded; this is the right place.",
                 input_tokens=1,
@@ -2987,27 +2997,43 @@ def test_mission_chat_message_persists_pre_trace_ack_before_final_reply(
             intent_hint="chat",
             requested_by="test",
             client_message_id="client_pre_trace_1",
-            stream=False,
+            stream=True,
             max_seconds=5.0,
             json=True,
         )
     )
 
     assert code == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    messages = db.messages["persona_chat_personainst_dev"]
-    assert [item["role"] for item in messages] == [
-        "user",
-        "assistant",
-        "assistant",
+    lines = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
     ]
-    assert messages[1]["content"] == (
+    # The ack IS on the live stream (typed, presentation-only), before content.
+    ack_frames = [line for line in lines if line["type"] == "turn.ack"]
+    assert len(ack_frames) == 1
+    assert ack_frames[0]["protocol_version"] == 2
+    assert ack_frames[0]["turn_id"] == "client_pre_trace_1"
+    assert ack_frames[0]["text"] == (
         "I'll load the relevant guidance first, then report back with the useful part."
     )
-    assert messages[2]["content"] == "The guidance is loaded; this is the right place."
-    assert messages[1].get("platform_message_id") is None
-    assert messages[2].get("platform_message_id") == "client_pre_trace_1"
+    assert lines.index(ack_frames[0]) < min(
+        index for index, line in enumerate(lines) if line["type"] == "segment.start"
+    )
+    # The DURABLE record carries no ack: SessionDB has exactly the operator
+    # message and the real reply…
+    messages = db.messages["persona_chat_personainst_dev"]
+    assert [item["role"] for item in messages] == ["user", "assistant"]
+    assert messages[1]["content"] == "The guidance is loaded; this is the right place."
+    assert messages[1].get("platform_message_id") == "client_pre_trace_1"
+    # …and the turn store's elements hold only real content (replay shows no ack).
+    persisted = mission_chat_turn_elements(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_pre_trace_1",
+    )
+    assert persisted, "turn store must hold the streamed segment"
+    assert all(item["kind"] in {"segment", "tool"} for item in persisted)
+    assert all("report back" not in str(item.get("text") or "") for item in persisted)
 
 
 def test_persona_chat_auto_title_waits_for_session_title_write(monkeypatch, isolate_agent_runtime_root):

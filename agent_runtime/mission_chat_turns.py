@@ -145,11 +145,25 @@ def persist_mission_chat_turn(
         )
         if resolved_state is None:
             return False, MissionChatTurnPersistOutcome.REJECTED_STALE_TRANSITION
+        # C8 turn-start anchor: stamped ONCE at write-ahead (the moment the turn
+        # begins) and carried unchanged through every later flush/terminal
+        # persist, so replay can order turns by when they STARTED instead of
+        # when they settled. Records that predate the anchor never get one
+        # retro-stamped — they fall back to settle-time order (honest fallback,
+        # no fabricated keys).
+        started_at = (
+            safe_assignment_text((existing or {}).get("started_at"), limit=80)
+            if isinstance(existing, dict)
+            else None
+        )
+        if write_ahead and not started_at:
+            started_at = _utc_now_iso()
         session[message_key] = {
             "schema_version": 1,
             "turn_id": safe_assignment_token(turn_id) or safe_assignment_token(message_key),
             "state": resolved_state,
             "updated_at": _utc_now_iso(),
+            **({"started_at": started_at} if started_at else {}),
             "elements": safe_elements,
         }
         return True, MissionChatTurnPersistOutcome.PERSISTED
@@ -212,10 +226,14 @@ def mission_chat_turn_records(
         safe_record = _safe_record(record, client_message_id=safe_key)
         if safe_record is not None:
             records.append(safe_record)
+    # C8 replay order: turn START, not `updated_at` settle time — a long turn
+    # that settles after a quick later one must not replay after it (F17 seam
+    # d). `started_at` is stamped at write-ahead; records that predate the
+    # anchor fall back to their settle time (pre-C8 behavior, honest fallback).
     return sorted(
         records,
         key=lambda item: (
-            str(item.get("updated_at") or ""),
+            str(item.get("started_at") or item.get("updated_at") or ""),
             str(item.get("client_message_id") or ""),
         ),
     )
@@ -637,11 +655,15 @@ def _safe_record(
     turn_id = safe_assignment_token(record.get("turn_id")) or safe_assignment_token(client_message_id)
     if not turn_id:
         return None
+    started_at = safe_assignment_text(record.get("started_at"), limit=80)
     return {
         "client_message_id": client_message_id,
         "turn_id": turn_id,
         "state": _record_state(record) or "completed",
         "updated_at": safe_assignment_text(record.get("updated_at"), limit=80),
+        # C8 turn-start anchor (write-ahead stamp). Absent on pre-C8 records —
+        # consumers fall back to `updated_at`, never fabricate a start.
+        **({"started_at": started_at} if started_at else {}),
         "elements": _safe_elements(record.get("elements")),
     }
 

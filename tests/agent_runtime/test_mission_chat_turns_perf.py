@@ -378,7 +378,10 @@ def test_frames_from_worker_thread_carry_construction_context(monkeypatch):
             # worker under serve.
             assert request_id.get() is None
             emitter.delta("Hello")
-            emitter.emit_legacy_delta("Hello")
+            # C8: the legacy chat.delta lane is retired; the presentation-only
+            # turn.ack frame is the other worker-thread emit and must carry the
+            # same construction context.
+            emitter.ack({"type": "run.tool.started", "tool_name": "terminal"})
         except BaseException as exc:  # pragma: no cover - surfaced below
             worker_error.append(exc)
 
@@ -392,3 +395,4 @@ def test_frames_from_worker_thread_carry_construction_context(monkeypatch):
     frame_types = [frame_type for (frame_type, _) in seen]
     assert "turn.start" in frame_types
     assert "segment.delta" in frame_types
+    assert "turn.ack" in frame_types

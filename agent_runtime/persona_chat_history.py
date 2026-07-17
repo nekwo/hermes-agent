@@ -9,6 +9,11 @@ from .mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_re
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction_mode import redaction_observe_enabled
+from .transcript_order import (
+    TURN_SEQ_OPERATOR,
+    TURN_SEQ_TERMINAL,
+    order_transcript_rows,
+)
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 # Structural marker for the canned "I'll … then report back with …" pre-trace
@@ -817,16 +822,29 @@ def _safe_recent_messages(
             ),
             "redaction_status": status,
         }
-        # Typed marker for the canned pre-trace ack (finish_reason stamped at
-        # persist time). Downstream projections re-emit this kind so the Launcher
-        # collapses/drops the ack structurally instead of matching its prose.
-        if role == "agent" and (
+        # PRE-C8 RESIDUE PATH: acks stopped entering SessionDB with C8 (they
+        # are a presentation-only `turn.ack` stream frame now), but rows
+        # persisted before that still carry the finish_reason marker
+        # (archive-never-delete). Keep re-emitting the typed kind so the
+        # Launcher's persisted-row render path can keep suppressing them
+        # structurally. New turns can never take this branch.
+        is_pre_trace_ack = role == "agent" and (
             safe_assignment_token(raw.get("finish_reason"))
             == PERSONA_PRE_TRACE_ACK_FINISH_REASON
-        ):
+        )
+        if is_pre_trace_ack:
             row["kind"] = PERSONA_PRE_TRACE_ACK_KIND
         if client_message_id:
             row["client_message_id"] = client_message_id
+            # C8 ordering key: the turn anchor is the client_message_id; the
+            # intra-turn position is stamped HERE (one authority) — the
+            # operator message opens its turn, the recorded reply closes it.
+            # Elements between them carry the emitter's 1..N seq. Pre-C8 ack
+            # rows carry no anchor and stay on the fallback order.
+            if role == "operator":
+                row["turn_seq"] = TURN_SEQ_OPERATOR
+            elif role == "agent" and not is_pre_trace_ack:
+                row["turn_seq"] = TURN_SEQ_TERMINAL
         if role == "agent" and client_message_id:
             elements = mission_chat_turn_elements(
                 session_id=session_id,
@@ -873,24 +891,39 @@ def _interrupted_turn_rows(
                 "redaction_status": "safe",
                 "client_message_id": client_message_id,
                 "turn_id": turn_id,
+                # C8 ordering key: the interrupt marker is the turn's terminal
+                # row (a turn has a reply or an interrupt, never both).
+                "turn_seq": TURN_SEQ_TERMINAL,
             }
         )
     return rows
 
 
 def _ordered_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # Merge synthesized rows into the transcript by timestamp, keeping the
-    # original order as the tie-breaker. A row without a parseable timestamp
-    # inherits the preceding row's, so it holds its transcript position instead
-    # of front-loading (where the tail bound would evict it first).
-    keyed: list[tuple[str, int, dict[str, Any]]] = []
+    # C8: ONE ordering authority. Rows carrying the turn key (anchor =
+    # client_message_id, position = turn_seq) sort by that key inside their
+    # turn — the operator row first, elements by emitter seq, the terminal
+    # reply/interrupt last — regardless of clock skew between SessionDB stamps
+    # and turn-store settle times (the F17 reorder seam). Rows that predate the
+    # key keep the pre-C8 fallback: timestamp order with the original index as
+    # tie-breaker, a row without a parseable timestamp inheriting the preceding
+    # row's so it holds its transcript position instead of front-loading.
+    fallback: list[tuple[str, int]] = []
     last_timestamp = ""
     for index, row in enumerate(rows):
         timestamp = str(row.get("timestamp") or "") or last_timestamp
         last_timestamp = timestamp
-        keyed.append((timestamp, index, row))
-    keyed.sort(key=lambda item: (item[0], item[1]))
-    return [row for _, _, row in keyed]
+        fallback.append((timestamp, index))
+    return order_transcript_rows(
+        rows,
+        # Token-normalized so the anchor is byte-equal to the `turn_id` the
+        # emitter/turn store mint from the same client_message_id.
+        anchor=lambda row: safe_assignment_token(row.get("client_message_id")) or None,
+        turn_seq=lambda row: row.get("turn_seq")
+        if isinstance(row.get("turn_seq"), int)
+        else None,
+        fallback_key=lambda _row, index: fallback[index],
+    )
 
 
 def _iso_timestamp(value: Any) -> str | None:

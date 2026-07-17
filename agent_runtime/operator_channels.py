@@ -8,6 +8,7 @@ from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .persona_chat_history import _canonical_persona_id, PERSONA_PRE_TRACE_ACK_KIND
 from .simplified_contract import public_decision_type_value
+from .transcript_order import TURN_SEQ_CONTENT, order_transcript_rows
 
 OPERATOR_CHANNELS_SCHEMA_VERSION = 1
 # v2: goal-run turn flow — thinking_summary / turn / tool_call / turns_collapsed
@@ -579,7 +580,7 @@ def _conversation_contract(
 
     _settle_interrupted_tool_calls(messages, history=history)
 
-    messages.sort(key=_conversation_message_sort_key)
+    messages = _order_conversation_messages(messages)
     messages = _dedupe_conversation_messages(messages)
     messages = _apply_conversation_cap(messages, channel_id=channel_id, accountant=accountant)
     for seq, message in enumerate(messages, start=1):
@@ -749,6 +750,7 @@ def _conversation_history_message(
             message["client_message_id"] = client_message_id
         if turn_id:
             message["turn_id"] = turn_id
+        _carry_turn_seq(message, row)
         return message
     # A canned pre-trace ack keeps its typed kind end-to-end so the Launcher
     # collapses/drops it structurally (never as a settled reply bubble ahead of
@@ -782,7 +784,17 @@ def _conversation_history_message(
     if role == "agent" and client_message_id:
         message["turn_id"] = safe_assignment_token(client_message_id) or client_message_id
         message["client_message_id"] = client_message_id
+    # C8 ordering key: the history projection stamps the intra-turn position
+    # (operator opens, terminal reply/interrupt closes); carry it through this
+    # contract unchanged so every representation sorts on the same key.
+    _carry_turn_seq(message, row)
     return message
+
+
+def _carry_turn_seq(message: dict[str, Any], row: dict[str, Any]) -> None:
+    turn_seq = row.get("turn_seq")
+    if isinstance(turn_seq, int) and not isinstance(turn_seq, bool):
+        message["turn_seq"] = turn_seq
 
 
 def _conversation_trace_message(
@@ -832,6 +844,7 @@ def _conversation_trace_message(
         }
         if turn_id:
             message["turn_id"] = turn_id
+            message["turn_seq"] = TURN_SEQ_CONTENT
         return message
     summary = _safe_conversation_text(
         entry.get("summary") or entry.get("rationale"),
@@ -864,6 +877,7 @@ def _conversation_trace_message(
     }
     if turn_id:
         message["turn_id"] = turn_id
+        message["turn_seq"] = TURN_SEQ_CONTENT
     return message
 
 
@@ -1178,6 +1192,10 @@ def _tool_call_message(
     }
     if turn_id:
         message["turn_id"] = turn_id
+        # C8 ordering key: turn-anchored content without an emitter seq sits in
+        # the content band — after the turn's operator row, before its terminal
+        # reply — keeping its relative order among band peers from the fallback.
+        message["turn_seq"] = TURN_SEQ_CONTENT
     return message
 
 
@@ -1253,9 +1271,7 @@ def _apply_conversation_cap(
     if accountant is not None:
         accountant.drop("turn_cap_trimmed", count=len(dropped), entity_id=channel_id)
         accountant.mark_truncated()
-    result = [*protected, marker, *kept]
-    result.sort(key=_conversation_message_sort_key)
-    return result
+    return _order_conversation_messages([*protected, marker, *kept])
 
 
 def _conversation_kind_from_status(status: str) -> str:
@@ -1317,6 +1333,33 @@ def _conversation_message_sort_key(message: dict[str, Any]) -> tuple[int, str, s
     if parsed is not None:
         return (1, parsed.isoformat(), str(message.get("id") or ""))
     return (2, str(message.get("timestamp") or ""), str(message.get("id") or ""))
+
+
+def _order_conversation_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """C8: order the conversation by the ONE turn-scoped key.
+
+    Turn-anchored rows (anchor = token(client_message_id | turn_id), position =
+    ``turn_seq``) sort inside their turn by the stamped position — operator row
+    first, content band between, terminal reply/interrupt last — immune to the
+    two-clock skew between SessionDB stamps and trace ``ts`` values (F17). Rows
+    without the key (pre-C8 history, goal_input, warnings) keep the pre-C8
+    timestamp fallback, which also anchors where each turn sits among them.
+    """
+
+    return order_transcript_rows(
+        messages,
+        anchor=lambda message: safe_assignment_token(
+            message.get("client_message_id") or message.get("turn_id")
+        )
+        or None,
+        turn_seq=lambda message: message.get("turn_seq")
+        if isinstance(message.get("turn_seq"), int)
+        and not isinstance(message.get("turn_seq"), bool)
+        else None,
+        fallback_key=lambda message, _index: _conversation_message_sort_key(message),
+    )
 
 
 def _dedupe_conversation_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

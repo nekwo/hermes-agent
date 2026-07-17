@@ -930,11 +930,11 @@ def _cmd_mission_chat_message(args) -> int:
         ),
     )
 
-    def _stream_delta(delta: str | None) -> None:
-        # Route through the emitter so the legacy frame also carries the
-        # serve request context (deltas fire on the provider worker thread).
-        stream_emitter.emit_legacy_delta(delta)
-        stream_emitter.delta(delta)
+    # C8: the legacy `chat.delta` lane is RETIRED (ruling 0 — one wire shape per
+    # token). Deltas ride the v2 `segment.delta` frame only; the emitter runs
+    # every frame inside the captured request context, so worker-thread deltas
+    # keep their serve request id.
+    _stream_delta = stream_emitter.delta
 
     trace_payloads: list[dict[str, object]] = []
 
@@ -1011,11 +1011,10 @@ def _cmd_mission_chat_message(args) -> int:
                 surface_prompt=getattr(args, "surface_prompt", "") or "",
                 max_wall_seconds=relay_wall_seconds,
                 stream_callback=_stream_delta if getattr(args, "stream", False) else None,
-                pre_trace_callback=lambda payload: _append_persona_pre_trace_ack(
-                    session_db=session_db,
-                    session_id=session_id,
-                    trace_payload=payload,
-                ),
+                # C8: pre-trace acks are presentation-only. The emitter turns the
+                # payload into a v2 `turn.ack` stream frame — never a SessionDB
+                # row, never a turn-store element; replay never shows it.
+                pre_trace_callback=stream_emitter.ack,
                 trace_callback=_stream_progress,
                 agent_ready_callback=_agent_ready_for_steer,
                 preloaded_skill_prompt=preloaded_skill_prompt,
@@ -2072,13 +2071,6 @@ def _queue_free_floating_assignment(
     return exit_code
 
 
-def _emit_chat_delta(delta: str | None) -> None:
-    if not delta:
-        return
-    sys.stdout.write(json.dumps({"type": "chat.delta", "text": str(delta)}, ensure_ascii=False, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
-
-
 def _emit_chat_final(payload: dict[str, object]) -> None:
     data = dict(payload)
     data["type"] = "chat.final"
@@ -2100,10 +2092,12 @@ _CHAT_TURN_INCREMENTAL_FLUSH_INTERVAL_SECONDS = 0.25
 
 
 class _ChatProtocolV2Emitter:
-    """Additive Mission Control chat stream protocol.
+    """Mission Control chat stream protocol v2 — the ONLY delta wire shape.
 
-    Legacy ``chat.delta``/``chat.final`` frames are still emitted by callers.
-    These v2 frames give the Launcher stable ids and per-turn sequence order.
+    C8 retired the legacy ``chat.delta`` lane (ruling 0: one shape per token);
+    callers still emit the terminal ``chat.final`` envelope themselves. These
+    v2 frames carry the one ordering authority: ``turn_id`` (the turn anchor,
+    minted from ``client_message_id``) plus a per-turn element ``seq``.
     """
 
     def __init__(
@@ -2384,14 +2378,27 @@ class _ChatProtocolV2Emitter:
         except Exception:
             pass
 
-    def emit_legacy_delta(self, delta: str | None) -> None:
-        """Emit the legacy ``chat.delta`` frame inside the turn's request
-        context (see ``__init__`` — worker-thread writes lose the serve
-        request id otherwise)."""
-        if not delta:
+    def ack(self, trace_payload: dict | None) -> None:
+        """Presentation-only pre-trace acknowledgment frame (C8).
+
+        The moment the model commits to a tool path, the console gets a typed
+        ``turn.ack`` v2 frame carrying the canned "about to work" copy. It is
+        NEVER durable: not an element, not a turn-store flush, not a SessionDB
+        row — live content supersedes it and replay never shows it. When
+        frames are suppressed (non-stream turns) this is a no-op.
+        """
+        if not isinstance(trace_payload, dict):
             return
-        with self._emit_lock:
-            self._turn_context.run(_emit_chat_delta, delta)
+        from agent_runtime.transcript_order import pre_trace_ack_text
+
+        self._emit_chat_frame(
+            {
+                "type": "turn.ack",
+                "protocol_version": 2,
+                "turn_id": self.turn_id,
+                "text": pre_trace_ack_text(trace_payload),
+            }
+        )
 
     def _emit_chat_frame(self, payload: dict[str, object]) -> None:
         if not self._emit_frames:
@@ -2790,8 +2797,14 @@ def _append_persona_assistant_text(
     session_id: str,
     text: str,
     client_message_id: str | None = None,
-    finish_reason: str | None = None,
 ) -> None:
+    # C8: the ONLY assistant rows this writes are real recorded replies. The
+    # pre-trace ack lane that used to inject a canned assistant row here (with
+    # a finish_reason marker the projections then had to suppress) is retired —
+    # acks are a presentation-only `turn.ack` v2 stream frame now (see
+    # _ChatProtocolV2Emitter.ack). Pre-C8 ack rows persisted before this change
+    # stay in SessionDB (archive-never-delete) and keep their typed kind on the
+    # read side.
     if session_db is None or not session_id:
         return
     safe = _redact_persona_chat_text(text, limit=PERSONA_CHAT_REPLY_LIMIT)
@@ -2810,54 +2823,9 @@ def _append_persona_assistant_text(
             role="assistant",
             content=safe,
             platform_message_id=safe_client_message_id or None,
-            finish_reason=finish_reason,
         )
     except Exception:
         return
-
-
-def _append_persona_pre_trace_ack(
-    *,
-    session_db,
-    session_id: str,
-    trace_payload: dict,
-) -> None:
-    # Persist the canned ack with a structural marker (finish_reason) so the
-    # history/conversation projections re-emit it as a typed ``pre_trace_ack``
-    # kind. The Launcher then collapses/drops it by kind instead of matching the
-    # tool-specific prose (which drifts — see _persona_pre_trace_ack_text).
-    from agent_runtime.persona_chat_history import (
-        PERSONA_PRE_TRACE_ACK_FINISH_REASON,
-    )
-
-    text = _persona_pre_trace_ack_text(trace_payload)
-    _append_persona_assistant_text(
-        session_db=session_db,
-        session_id=session_id,
-        text=text,
-        client_message_id=None,
-        finish_reason=PERSONA_PRE_TRACE_ACK_FINISH_REASON,
-    )
-
-
-def _persona_pre_trace_ack_text(trace_payload: dict) -> str:
-    tool_name = safe_assignment_token(
-        trace_payload.get("tool_name") or trace_payload.get("tool")
-    )
-    command_label = safe_assignment_text(
-        trace_payload.get("command_label"), limit=160
-    )
-    if tool_name in {"skill_view", "skills_list", "skill_search"}:
-        return "I'll load the relevant guidance first, then report back with the useful part."
-    if tool_name in {"terminal", "shell_command", "execute_code"}:
-        if command_label:
-            return f"I'll run `{command_label}` now, then report back with the result."
-        return "I'll run the check now, then report back with the result."
-    if tool_name in {"read_file", "search_files", "find_files", "session_search"}:
-        return "I'll inspect the relevant context now, then report back with what I find."
-    if tool_name in {"mission_goal_create", "mission_goal"}:
-        return "I'll create the real Mission Control goal now, then report back with the task details."
-    return "I'll check that now and report back with what I find."
 
 
 def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:
@@ -3089,11 +3057,9 @@ def _run_free_floating_assignment_once(
         ),
     )
 
-    def _stream_delta(delta: str | None) -> None:
-        # Route through the emitter so the legacy frame also carries the
-        # serve request context (deltas fire on the provider worker thread).
-        stream_emitter.emit_legacy_delta(delta)
-        stream_emitter.delta(delta)
+    # C8: legacy `chat.delta` lane retired — v2 `segment.delta` is the one wire
+    # shape per token (the emitter already carries the serve request context).
+    _stream_delta = stream_emitter.delta
 
     def _stream_progress(payload: dict[str, object] | None) -> None:
         stream_emitter.progress(payload)
