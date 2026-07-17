@@ -11,6 +11,11 @@ and parses them through its real decode + read-model pipeline
   either drifts.
 - `delta_batch.json` pins the W1 coalescing shape (`events[]`,
   `coalesced_count`, `entity` = last event, watermark at final offset).
+- `patch.json` pins the S6 v2 field-patch frame (`type:"patch"`,
+  `schema_version:2`, `base_offset`, `patches[] = {seq,ts,entity,id,changed}`,
+  `coalesced_count`, **no `core`**). Shipped only when
+  `read_model.delta_patches` is on and the batch is fully coverable; the
+  launcher folds it into its keyed tables (`mission_read_model_test.dart`).
 
 **Update rule:** these fixtures change only in a cross-stack change that lands
 hermes **and** the launcher together (regenerate, copy bytes, update both

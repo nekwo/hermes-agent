@@ -1219,6 +1219,10 @@ def _cmd_stream(args) -> int:
                 0.0, float(getattr(args, "delta_debounce_ms", 200) or 0) / 1000.0
             ),
             max_frames=getattr(args, "max_frames", None),
+            # S6: a reconnecting client that lost its fold base asks for a fresh
+            # full-core baseline before it folds any patch (else it would fold
+            # onto stale/absent state). Off by default → normal patch/delta lane.
+            resync=bool(getattr(args, "resync", False)),
         ):
             sys.stdout.write(json.dumps(to_jsonable(frame), ensure_ascii=False, separators=(",", ":")) + "\n")
             sys.stdout.flush()

@@ -12,29 +12,48 @@ from hermes_time import now
 from . import paths
 from .events import EventLog
 from .models import Event
+from .patch_coverage import batch_is_patch_coverable
 from .serde import to_jsonable
 from .snapshot import build_snapshot
+from .state_patches import STATE_PATCHED_EVENT_TYPE, delta_patches_enabled
 
 STREAM_SCHEMA_VERSION = 1
+
+#: S6: the field-patch ``patch`` frame is the v2 stream frame. It ships ALONGSIDE
+#: the v1 full-core frames (hydrate + uncovered/resync delta batches) — the plan
+#: staged this additive, exactly as W1 staged coalescing: a v1 consumer keeps
+#: reading full cores; a v2-aware consumer folds patch frames. The existing
+#: frame builders stay ``schema_version 1`` so flag-off behavior is byte-identical
+#: (Ruling 0: the flag is a new-lane activation gate, not an old-shape toggle).
+STREAM_PATCH_SCHEMA_VERSION = 2
 
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b((?:[A-Za-z0-9]+_)*(?:SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL|API_?KEY|KEY)(?:_[A-Za-z0-9]+)*)\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s'\"]+)"
 )
 
 
-def hydrate_frame(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+def hydrate_frame(
+    snapshot: dict[str, Any] | None = None, *, delta_patches: bool = False
+) -> dict[str, Any]:
     """Build the initial warm-stream hydrate frame.
 
     The hydrate carries the existing full snapshot as the read model payload so
     the stream is additive: the one-shot snapshot remains the canonical fallback
     and consumers can converge by applying this frame exactly like a fresh
     snapshot response.
+
+    S6: when the ``read_model.delta_patches`` lane is on, the hydrate carries an
+    additive ``delta_patches: true`` marker — the signal that tells a fold-aware
+    launcher to RETAIN this frame's raw core as the patch base (so the next
+    ``patch`` frame folds instead of resyncing). The marker is absent when the
+    flag is off, so a flag-off hydrate stays byte-identical (its golden asserts
+    the key-set, Ruling 0).
     """
 
     snap = snapshot if snapshot is not None else build_snapshot()
     parity = snap.get("parity") if isinstance(snap.get("parity"), dict) else {}
     watermark = parity.get("watermark") if isinstance(parity.get("watermark"), dict) else {}
-    return {
+    frame: dict[str, Any] = {
         "type": "hydrate",
         "schema_version": STREAM_SCHEMA_VERSION,
         "generated_at": snap.get("generated_at") or now(),
@@ -45,6 +64,9 @@ def hydrate_frame(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
         "drops": parity.get("drops") or [],
         "parity_warnings": parity.get("warnings") or [],
     }
+    if delta_patches:
+        frame["delta_patches"] = True
+    return frame
 
 
 def heartbeat_frame(*, offset: int) -> dict[str, Any]:
@@ -130,6 +152,76 @@ def delta_batch_frame(
     return frame
 
 
+def patch_batch_frame(
+    batch: list[tuple[int, Event]], *, base_offset: int
+) -> dict[str, Any]:
+    """One coalesced batch of foldable ``state.patched`` entries as a v2 ``patch``
+    frame — field patches only, **no full core** (F7's ~9MB rebuild is gone on
+    this lane; the per-update transfer drops from a fused megabyte core to a
+    sub-4KB patch, the ~99.96% reduction the plan's S6 acceptance names).
+
+    ``base_offset`` is the watermark the batch applies FROM (the offset before
+    its first entry); the launcher folds only when its held watermark equals
+    ``base_offset`` — a mismatch is a **sequence gap** → checkpoint resync.
+    ``watermark.event_offset`` is the post-batch offset the fold advances to,
+    keeping the launcher's ``>``-only sequence gate applicable exactly as the
+    full-core lane does. ``patches`` is the ordered list of the batch's
+    ``{seq, ts, entity, id, changed}`` entries; ``coalesced_count`` is the whole
+    batch length (parity with :func:`delta_batch_frame`).
+    """
+
+    if not batch:
+        raise ValueError("patch_batch_frame requires a non-empty batch")
+    last_offset, last_event = batch[-1]
+    patches = [
+        {"seq": int(offset or 0), "ts": event.ts, **_redaction_safe_json(event.payload)}
+        for offset, event in batch
+        if event.type == STATE_PATCHED_EVENT_TYPE
+    ]
+    return {
+        "type": "patch",
+        "schema_version": STREAM_PATCH_SCHEMA_VERSION,
+        "generated_at": now(),
+        "watermark": {
+            "event_offset": int(last_offset or 0),
+            "last_event_ts": last_event.ts,
+            "captured_at": now(),
+        },
+        "base_offset": int(base_offset or 0),
+        "patches": patches,
+        "coalesced_count": len(batch),
+    }
+
+
+def select_batch_frame(
+    batch: list[tuple[int, Event]],
+    *,
+    base_offset: int,
+    delta_patches: bool,
+    resync: bool = False,
+    snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Choose the frame shape for one drained batch — the S6 fork in the road.
+
+    * ``delta_patches`` off (default / flag off) → the W1 full-core batch frame,
+      **byte-identical** to today. This is the only path a flag-off stream ever
+      takes, so the flag-off wire is provably unchanged.
+    * ``resync`` requested → a full-core frame even for a coverable batch. A
+      (re)connecting client that asked for a fresh baseline gets one full core
+      before any fold, so it never folds onto a stale/absent base.
+    * flag on + batch fully coverable (:func:`batch_is_patch_coverable`) → the
+      v2 ``patch`` frame.
+    * flag on + any uncovered event in the batch → the **honest fallback**: a
+      full-core frame (e.g. a task transition, an incident close, a
+      ``state.reconciled`` watchdog, or any planning.py chokepoint-less
+      mutation rides the whole state through the core).
+    """
+
+    if delta_patches and not resync and batch_is_patch_coverable(event for _, event in batch):
+        return patch_batch_frame(batch, base_offset=base_offset)
+    return delta_batch_frame(batch, snapshot=snapshot)
+
+
 #: Upper bound on events carried by one batched delta frame. Bounds both the
 #: frame's `events` list and the drain's in-memory buffer; a longer backlog
 #: emits multiple batch frames, each with its own (single) core.
@@ -143,8 +235,9 @@ def stream_frames(
     heartbeat_interval_seconds: float = 5.0,
     delta_debounce_seconds: float = 0.2,
     max_frames: int | None = None,
+    resync: bool = False,
 ) -> Iterator[dict[str, Any]]:
-    """Yield hydrate, delta, and heartbeat frames for ``hermes harness stream``.
+    """Yield hydrate, delta/patch, and heartbeat frames for ``hermes harness stream``.
 
     Freshness backstop (Stage 12): every store mutation is supposed to append
     an EventLog event (enforced by test_store_event_invariant), but a write
@@ -156,11 +249,21 @@ def stream_frames(
     event, which flows out as an ordinary full-core delta. Declared SLO:
     client staleness ≤ 2× heartbeat interval for ANY write. Every
     ``state.reconciled`` in the log names a producer bug to fix at source.
+
+    S6: when ``read_model.delta_patches`` is on, a fully-coverable batch ships
+    as a sub-4KB v2 ``patch`` frame instead of a full-core delta (see
+    :func:`select_batch_frame`); uncovered batches keep the full-core lane. Each
+    batch carries the ``base_offset`` it applies from so the launcher's fold can
+    detect a gap. ``resync=True`` forces the FIRST post-hydrate batch to a full
+    core — the "explicit resync request" a reconnecting client makes to re-baseline
+    before folding. Flag off → every batch is the byte-identical full-core frame.
     """
 
     log = event_log or EventLog()
+    delta_patches = delta_patches_enabled()
+    resync_pending = bool(resync)
     emitted = 0
-    hydrate = hydrate_frame()
+    hydrate = hydrate_frame(delta_patches=delta_patches)
     offset = int(((hydrate.get("watermark") or {}).get("event_offset")) or 0)
     # Memoize BEFORE the first yield: a generator body pauses at yield, so a
     # memo taken after it would absorb any write racing the consumer's first
@@ -183,11 +286,19 @@ def stream_frames(
         fingerprint_candidate = _scope_fingerprint()
         emitted_delta = False
         pending: list[tuple[int, Event]] = []
+        # The offset a flushed batch applies FROM (S6 gap detection): the cursor
+        # before the batch's first entry. Advanced to the flushed offset after
+        # every emit so contiguous batches chain base→watermark→base with no gap.
+        batch_base = offset
         for next_offset, event in log.iter_from_offset(offset):
             offset = int(next_offset)
             pending.append((offset, event))
             if len(pending) >= _DELTA_BATCH_CAP:
-                yield delta_batch_frame(pending)
+                yield select_batch_frame(
+                    pending, base_offset=batch_base, delta_patches=delta_patches, resync=resync_pending
+                )
+                resync_pending = False
+                batch_base = offset
                 pending = []
                 emitted += 1
                 emitted_delta = True
@@ -204,7 +315,11 @@ def stream_frames(
                 offset = int(next_offset)
                 pending.append((offset, event))
                 if len(pending) >= _DELTA_BATCH_CAP:
-                    yield delta_batch_frame(pending)
+                    yield select_batch_frame(
+                        pending, base_offset=batch_base, delta_patches=delta_patches, resync=resync_pending
+                    )
+                    resync_pending = False
+                    batch_base = offset
                     pending = []
                     emitted += 1
                     emitted_delta = True
@@ -212,7 +327,10 @@ def stream_frames(
                     if max_frames is not None and emitted >= max_frames:
                         return
         if pending:
-            yield delta_batch_frame(pending)
+            yield select_batch_frame(
+                pending, base_offset=batch_base, delta_patches=delta_patches, resync=resync_pending
+            )
+            resync_pending = False
             emitted += 1
             emitted_delta = True
             last_heartbeat = time.monotonic()

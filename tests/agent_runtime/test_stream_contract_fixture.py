@@ -55,6 +55,7 @@ def test_manifest_pins_fixture_bytes():
         "delta.json",
         "heartbeat.json",
         "delta_batch.json",
+        "patch.json",
     }
     for name, digest in entries.items():
         actual = hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest()
