@@ -60,6 +60,11 @@ def order_transcript_rows(
     3. Final order: ``(group position, intra-turn seq, fallback rank)`` —
        within a turn the stamped position wins over any clock; everything
        else keeps the fallback order.
+
+    A keyed turn therefore renders as ONE contiguous block: an unkeyed row
+    whose fallback rank fell inside a turn's clock span follows the block.
+    Post-C8 writers never produce that mix (a live turn's rows are all keyed);
+    the only real case is pre-C8 ack residue, which consumers collapse anyway.
     """
 
     indexed = list(enumerate(rows))
