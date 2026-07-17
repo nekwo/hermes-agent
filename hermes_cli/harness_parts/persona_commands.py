@@ -1141,12 +1141,6 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             result=chat_result,
         )
-        _maybe_auto_title_persona_chat(
-            session_db=session_db,
-            session_id=session_id,
-            user_message=message,
-            assistant_response=reply_text,
-        )
         try:
             instance.active_run_id = None
             instance.current_assignment_id = None
@@ -1221,6 +1215,25 @@ def _cmd_mission_chat_message(args) -> int:
             _emit_chat_final(data)
         else:
             print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
+        # Auto-title is a SessionDB-only side effect that NOTHING in the
+        # emitted frame depends on, and it costs a synchronous auxiliary-LLM
+        # RTT on a session's first turn. Run it AFTER the terminal frame so
+        # that RTT stays off the turn's critical path (last delta ->
+        # chat.final) while remaining in this command's lifetime. It MUST NOT
+        # raise here: the terminal record is already settled, so the crash-tail
+        # guard below (`terminal_outcome is not None -> raise`) would turn any
+        # exception into a duplicate-emit / non-zero exit. The helper swallows
+        # internally; this wrap is defense-in-depth so a title failure can
+        # never add to stdout or change the return code.
+        try:
+            _maybe_auto_title_persona_chat(
+                session_db=session_db,
+                session_id=session_id,
+                user_message=message,
+                assistant_response=reply_text,
+            )
+        except Exception:
+            pass
         return 0
     except Exception as exc:
         if terminal_outcome is not None:
@@ -2015,8 +2028,9 @@ def _queue_free_floating_assignment(
         "next_expected": "agent turn queued; run harness persona instance run-once if auto_run is false",
     }
     exit_code = 0
+    deferred_title: Callable[[], None] | None = None
     if auto_run:
-        run_exit, run_payload = _run_free_floating_assignment_once(
+        run_exit, run_payload, deferred_title = _run_free_floating_assignment_once(
             cfg=cfg,
             assignment_id=assignment.id,
             persona_instance_id=assignment.persona_instance_id,
@@ -2041,6 +2055,17 @@ def _queue_free_floating_assignment(
         _emit_chat_final(data)
     else:
         print(emit_json(data) if json_output else f"queued free-floating {assignment.id} for {assignment.persona_id}")
+    # Auto-title runs AFTER the terminal frame is emitted above (this is the
+    # emit site for the free-floating lane; the runner never writes stdout). It
+    # is a SessionDB-only side effect nothing in the frame depends on and costs
+    # a synchronous auxiliary-LLM RTT — running it post-emit keeps that RTT off
+    # the turn's critical path. Wrapped so a title failure can never add to
+    # stdout or change the exit code.
+    if deferred_title is not None:
+        try:
+            deferred_title()
+        except Exception:
+            pass
     return exit_code
 
 
@@ -3004,8 +3029,15 @@ def _run_free_floating_assignment_once(
     max_seconds: float,
     client_message_id: str | None = None,
     stream: bool = False,
-) -> tuple[int, dict[str, object]]:
-    """Run one bounded sandbox turn for an already-queued persona chat message."""
+) -> tuple[int, dict[str, object], Callable[[], None] | None]:
+    """Run one bounded sandbox turn for an already-queued persona chat message.
+
+    Returns ``(exit_code, payload, deferred_title)``. The caller emits the
+    terminal ``chat.final`` frame from ``payload``; ``deferred_title`` (when not
+    None) is a zero-arg thunk the caller runs AFTER that emit so the synchronous
+    auxiliary-LLM title call stays off the turn's critical path. This runner
+    never writes stdout, so the title cannot be run post-emit from in here.
+    """
 
     os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     session_db = _default_persona_session_db()
@@ -3031,7 +3063,7 @@ def _run_free_floating_assignment_once(
             "session_id": session_id,
             "blocker": f"unknown persona {safe_assignment_token(persona_id)}",
             "next_expected": "configure the persona before chatting",
-        }
+        }, None
 
     # Chat-first: run a plain conversational turn (no decision contract, no task
     # scoping). Continuity comes from the prepended session history; the agent
@@ -3112,7 +3144,7 @@ def _run_free_floating_assignment_once(
         }
         if failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_persist_outcome"] = failed_outcome.value
-        return 2, data
+        return 2, data, None
 
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
     # Provider replied: every exit below must settle the turn record. The
@@ -3147,12 +3179,21 @@ def _run_free_floating_assignment_once(
         except Exception:
             pass
 
-        _maybe_auto_title_persona_chat(
-            session_db=session_db,
-            session_id=session_id,
-            user_message=message,
-            assistant_response=reply_text,
-        )
+        # Auto-title is a SessionDB-only side effect nothing in the emitted
+        # frame depends on, and it costs a synchronous auxiliary-LLM RTT on a
+        # session's first turn. This runner never writes stdout — the caller
+        # emits the terminal chat.final — so it cannot run the title post-emit
+        # itself. Package it as a deferred thunk the caller runs AFTER the emit,
+        # keeping that RTT off the turn's critical path. The captured session_db
+        # handle stays open (this runner never closes it).
+        def _deferred_auto_title() -> None:
+            _maybe_auto_title_persona_chat(
+                session_db=session_db,
+                session_id=session_id,
+                user_message=message,
+                assistant_response=reply_text,
+            )
+
         data = {
             "ok": True,
             "execution_state": "completed",
@@ -3189,7 +3230,7 @@ def _run_free_floating_assignment_once(
         if stream:
             data["protocol_version"] = 2
             data["turn_elements"] = stream_emitter.elements
-        return 0, data
+        return 0, data, _deferred_auto_title
     except Exception as exc:
         if terminal_outcome is not None:
             raise
@@ -3218,7 +3259,7 @@ def _run_free_floating_assignment_once(
         }
         if failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_persist_outcome"] = failed_outcome.value
-        return 2, data
+        return 2, data, None
 
 
 def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, json_output: bool, terminal_state: str) -> int:
