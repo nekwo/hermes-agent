@@ -10,6 +10,7 @@ from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction_mode import redaction_observe_enabled
 from .transcript_order import (
+    TURN_SEQ_CONTENT,
     TURN_SEQ_OPERATOR,
     TURN_SEQ_TERMINAL,
     order_transcript_rows,
@@ -1004,12 +1005,20 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
     summary = _trace_summary(event_type, payload)
     status = _safe_trace_text(payload.get("status") or payload.get("to") or payload.get("exit_code"), limit=80)
     files = _safe_trace_file_labels(payload.get("changed_files") or payload.get("files_touched"))
+    turn_id = safe_assignment_text(
+        getattr(event, "turn_id", None) or payload.get("turn_id"), limit=160
+    )
     return {
         "kind": "harness_trace",
         "task_id": safe_assignment_text(getattr(event, "task_id", None), limit=160),
         "persona_id": safe_assignment_token(getattr(event, "persona_id", None)) or "unknown",
         "run_id": safe_assignment_text(getattr(event, "run_id", None), limit=160),
-        "turn_id": safe_assignment_text(getattr(event, "turn_id", None) or payload.get("turn_id"), limit=160),
+        "turn_id": turn_id,
+        # C8 ordering key: turn-anchored trace content sits in the content band
+        # (after the turn's operator row, before its terminal reply) so the
+        # launcher's history+trace merge sorts on the key, never on the skew
+        # between SessionDB stamps and this trace clock (F17).
+        **({"turn_seq": TURN_SEQ_CONTENT} if turn_id else {}),
         "stage_id": _safe_trace_text(payload.get("stage_id"), limit=120),
         "event": trace_event,
         "tool_name": tool_name,
