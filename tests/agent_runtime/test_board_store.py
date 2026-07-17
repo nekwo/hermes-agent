@@ -243,7 +243,7 @@ def test_projection_masks_secrets_and_flags_truncation():
     store.add_card(workspace_id=ws, title="Big", description=long_desc)
     store.add_card(workspace_id=ws, title="Leak", description="api_key=DEADBEEFDEADBEEF12345 secret here")
     snap = build_snapshot()
-    board = next(b for b in snap["boards"] if b["workspace_id"] == ws)
+    board = next(b for b in list(snap["boards"].values()) if b["workspace_id"] == ws)
     big = next(c for c in board["cards"] if c["title"] == "Big")
     assert big["description_truncated"] is True
     assert len(big["description"]) == 2048

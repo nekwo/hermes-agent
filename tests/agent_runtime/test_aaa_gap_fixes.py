@@ -89,7 +89,7 @@ def test_snapshot_summarizes_without_raw_errors_paths_or_decisions(tmp_path):
     assert "API_KEY=SECRET" not in encoded
     assert "C:/secret" not in encoded
     assert "raw model output" not in encoded
-    assert snap["tasks"][0]["open_incident_count"] == 1
+    assert list(snap["goals"].values())[0]["open_incident_count"] == 1
     assert snap["proofs"][0]["has_artifact"] is True
 
 

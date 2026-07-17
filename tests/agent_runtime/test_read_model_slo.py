@@ -29,7 +29,7 @@ def test_synthetic_snapshot_full_build_within_rd0_slo(isolate_agent_runtime_root
     snapshot = build_snapshot()
     build_ms = int((time.perf_counter() - started) * 1000)
 
-    assert len(snapshot["tasks"]) == SYNTHETIC_TASK_COUNT
+    assert len(snapshot["goals"]) == SYNTHETIC_TASK_COUNT
     assert snapshot["parity"]["snapshot_bytes"] > 0
     assert snapshot["parity"]["event_log_bytes"] > 0
     assert snapshot["parity"]["projection_age_ms"] is not None

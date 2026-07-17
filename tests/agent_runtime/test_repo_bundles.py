@@ -483,7 +483,7 @@ def test_snapshot_projects_repo_bundles_and_qa_waiting_on(isolate_agent_runtime_
     bundles = RepoBundleStore().create_or_update_from_task(task)
 
     snapshot = build_snapshot(task_store=task_store)
-    task_summary = snapshot["tasks"][0]
+    task_summary = list(snapshot["goals"].values())[0]
 
     assert task_summary["simplified_phase"] == "working"
     assert sorted(task_summary["repo_bundle_ids"]) == sorted(bundle.id for bundle in bundles)
@@ -509,7 +509,7 @@ def test_done_task_repo_bundle_closeout_labels_staged_not_applied(isolate_agent_
     task_store.update(task, actor="test", reason="done with staged bundles")
 
     snapshot = build_snapshot(task_store=task_store)
-    task_summary = snapshot["tasks"][0]
+    task_summary = list(snapshot["goals"].values())[0]
 
     assert task_summary["state"] == "done"
     assert task_summary["repo_bundle_closeout"]["checkout_status"] == "not_applied"

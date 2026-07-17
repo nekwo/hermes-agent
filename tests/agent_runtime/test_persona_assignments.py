@@ -602,7 +602,7 @@ def test_status_and_snapshot_expose_persona_instances_when_enabled(monkeypatch, 
     assert isinstance(status_lane_agents["personainst_dev"]["agent_hud_state"], dict)
     assert isinstance(status_lane_agents["personainst_dev"]["tool_resolution"], dict)
     assert snapshot["persona_instance_runtime"]["enabled"] is True
-    assert {item["persona_id"] for item in snapshot["persona_instances"]} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
+    assert {item["persona_id"] for item in list(snapshot["persona_instances"].values())} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
     snapshot_lane_agents = {item["persona_id"]: item for item in snapshot["agents"]}
     assert "personainst_dev" in snapshot_lane_agents
     assert snapshot_lane_agents["personainst_dev"]["source_persona_id"] == "dev"
@@ -616,7 +616,7 @@ def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, is
     created = PersonaInstanceStore().create_free_floating("profile:reviewer")
 
     snapshot = build_snapshot()
-    by_id = {item["persona_instance_id"]: item for item in snapshot["persona_instances"]}
+    by_id = {item["persona_instance_id"]: item for item in list(snapshot["persona_instances"].values())}
 
     assert created.id in by_id
     assert by_id[created.id]["agent_profile_id"] == created.id
@@ -1337,7 +1337,7 @@ def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_age
     PersonaInstanceStore().open_chat(persona_id="dev", session_id="chat_old_123")
 
     snapshot = build_snapshot()
-    by_instance = {item["persona_instance_id"]: item for item in snapshot["persona_instances"]}
+    by_instance = {item["persona_instance_id"]: item for item in list(snapshot["persona_instances"].values())}
 
     assert by_instance["personainst_dev"]["mode"] == "chat"
     assert by_instance["personainst_dev"]["session_id"] == "chat_old_123"

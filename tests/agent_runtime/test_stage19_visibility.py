@@ -58,7 +58,7 @@ def test_snapshot_exposes_goal_timeline_proof_summaries_and_why_not_done():
     )
 
     snap = build_snapshot(task_store=tasks, proof_store=proofs, incident_store=incidents, event_log=events)
-    summary = next(item for item in snap["tasks"] if item["task_id"] == task.id)
+    summary = next(item for item in list(snap["goals"].values()) if item["task_id"] == task.id)
 
     assert summary["why_not_done"][0]["kind"] == "open_incident"
     assert summary["next_action"]["action"] == "blocked_by_incident"

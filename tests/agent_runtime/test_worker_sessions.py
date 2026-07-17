@@ -324,7 +324,7 @@ def test_snapshot_status_and_observability_surface_worker_sessions():
 
     assert status["active_worker_sessions"] == 1
     assert snapshot["summary"]["active_worker_sessions"] == 1
-    assert snapshot["tasks"][0]["active_worker_session_ids"] == [worker.id]
+    assert list(snapshot["goals"].values())[0]["active_worker_session_ids"] == [worker.id]
     assert obs["signals"]["stale_worker_sessions"] == 1
     assert obs["interventions"][0]["kind"] == "worker_stale_heartbeat"
 

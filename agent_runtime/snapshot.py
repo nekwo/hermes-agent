@@ -173,6 +173,54 @@ def _persona_chat_history_frame(rows: list, *, evict: bool) -> list:
     return pointers
 
 
+# S4 read-model — normalize (operator moves 4 + 5). The on-disk stores are
+# already file-per-entity keyed by id; the fuser used to de-key them into lists
+# every consumer re-keyed. S4 exposes the keyed shape directly: list sections
+# whose rows carry a canonical id become ``{id -> row}`` maps. GOAL is the wire
+# entity name (operator decision 2026-07-16): the goals/tasks dual projection
+# collapses to ONE keyed ``goals`` map and the ``tasks`` wire section retires.
+# This is a NAMING/projection change only — the internal ``TaskStore`` machinery
+# keeps its Task names (the 45E store rename stays deferred). Emitted
+# unconditionally (no kill-switch): the rollback story is ``git revert`` of the
+# landing, not a runtime legacy-shape flag.
+def _keyed(rows, id_key: str) -> dict:
+    """A list of id-carrying rows -> an id-keyed ``{id -> row}`` map.
+
+    One owner per fact: the frame exposes the store's existing keyed shape
+    instead of a list every consumer re-keys. First occurrence wins on a
+    duplicate id (a duplicate is a parity concern surfaced elsewhere, never a
+    silent overwrite); a row missing the id is dropped rather than silently
+    keyed under ``""`` (no silent-drop-without-accounting — a missing canonical
+    id is itself a bug the parity envelope's warnings catch).
+    """
+
+    keyed: dict = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = row.get(id_key)
+        key = str(raw) if raw is not None else ""
+        if not key or key in keyed:
+            continue
+        keyed[key] = row
+    return keyed
+
+
+def _rows(value) -> list:
+    """Read a frame section that S4 emits as an id-keyed map as an ordered list
+    of rows (map values), for the snapshot's OWN parity/self-check readers.
+
+    The wire ships keyed maps; this is an internal convenience for the builder's
+    downstream self-checks, not a legacy-shape tolerance path — it also accepts
+    a plain list (sections not keyed by S4) and ``None`` (absent section)."""
+
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, list):
+        return list(value)
+    return []
+
+
 def snapshot_section_bytes(data: dict, key: str) -> int:
     """Compact-JSON byte size of one top-level snapshot section (S2 byte-budget
     goldens; deliberately independent of the parallel snapshot-audit module)."""
@@ -404,6 +452,12 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     incident_frame_rows, incidents_evicted_count = _open_incidents_frame(
         incidents, evict=evict_history
     )
+    # S4: the frame carries these as id-keyed maps (``_keyed`` below). The row
+    # LISTS are still needed as an ordered input to the operator-channel
+    # projection (``run_summaries`` feeds the goal-turn flow), so build them once
+    # here and key them into the frame.
+    run_rows = [_run_summary(r) for r in runs]
+    incident_rows = [_incident_summary(i) for i in incident_frame_rows]
     data = {
         "schema_version": 2,
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
@@ -454,46 +508,44 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         ),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
-        "tasks": [
-            _task_summary(
-                t,
-                proof_store.list_for_task(t.id),
-                tasks,
-                incidents,
-                runs,
-                event_log.for_task(t.id, limit=200),
-                workers=workers,
-                run_store=run_store,
-                self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(t.id),
-                role_envelopes=[item for item in role_envelopes if item.task_id == t.id],
-                role_checklists=[item for item in role_checklists if item.task_id == t.id],
-                proof_batches=[item for item in proof_batches if item.task_id == t.id],
-                persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
-                repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
-                runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
-                persona_instances=topology_persona_instances,
-                stage_verification_accountant=stage_verification_accountant,
-            )
-            for t in tasks
-        ],
-        "goals": [
-            _goal_projection_from_task(
-                t,
-                proof_store.list_for_task(t.id),
-                tasks,
-                incidents,
-                runs,
-                event_log.for_task(t.id, limit=200),
-                workers=workers,
-                run_store=run_store,
-                persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
-                repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
-                runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
-                persona_instances=topology_persona_instances,
-                workspaces=workspaces,
-            )
-            for t in tasks
-        ],
+        # S4: ONE keyed ``goals`` map is the wire entity (operator decision:
+        # GOAL is the wire name). The old ``tasks`` wire section retires; every
+        # field BOTH projections carried lives once here — the merged goal row
+        # is the full ``_task_summary`` (self_tests / role_envelopes /
+        # role_checklists / proof_batches / stage_verification all threaded, as
+        # the old ``tasks`` section had them) PLUS the goal-only fields (``id``,
+        # ``kind``, resolved ``realm_id``). Keyed by ``task_id`` — the unique
+        # per-row id, matching the on-disk ``task_*.json`` store keying. NOT
+        # ``goal_id``/``id``: several tasks can share one goal_id (parent/child
+        # under one mission), which would collapse rows. Each row still carries
+        # ``id`` (goal identity) + ``goal_id`` for goal-addressed consumers; the
+        # launcher folds the map's values, so the map key is never a lookup key.
+        "goals": _keyed(
+            [
+                _goal_projection_from_task(
+                    t,
+                    proof_store.list_for_task(t.id),
+                    tasks,
+                    incidents,
+                    runs,
+                    event_log.for_task(t.id, limit=200),
+                    workers=workers,
+                    run_store=run_store,
+                    self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(t.id),
+                    role_envelopes=[item for item in role_envelopes if item.task_id == t.id],
+                    role_checklists=[item for item in role_checklists if item.task_id == t.id],
+                    proof_batches=[item for item in proof_batches if item.task_id == t.id],
+                    persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
+                    repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
+                    runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
+                    persona_instances=topology_persona_instances,
+                    stage_verification_accountant=stage_verification_accountant,
+                    workspaces=workspaces,
+                )
+                for t in tasks
+            ],
+            "task_id",
+        ),
         # Rows carry a resolved ``active`` flag alongside the top-level
         # ``active_*_id`` keys — consumers (launcher scope switcher) key
         # selection off the row flag and must not re-derive it.
@@ -510,7 +562,10 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         # snapshot path (conflict state comes from local sidecar files, never a
         # git call). Cards never carry goal state; a linked_goal_id is resolved
         # against the snapshot's goals at render time on the client.
-        "boards": _boards_summary(BoardStore(event_log=event_log), {getattr(w, "id", None) for w in workspaces}),
+        "boards": _keyed(
+            _boards_summary(BoardStore(event_log=event_log), {getattr(w, "id", None) for w in workspaces}),
+            "board_id",
+        ),
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
@@ -528,8 +583,8 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "runtime_instances": [runtime_instance_summary(item) for item in runtime_instances],
         "event_contracts": event_catalog(),
-        "runs": [_run_summary(r) for r in runs],
-        "incidents": [_incident_summary(i) for i in incident_frame_rows],
+        "runs": _keyed(run_rows, "run_id"),
+        "incidents": _keyed(incident_rows, "incident_id"),
         "proofs": [_proof_summary(p) for p in proofs],
         "self_tests": [self_test_summary(item) for item in self_tests],
     }
@@ -549,14 +604,19 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             "enabled": True,
             "assignment_store_enabled": persona_assignment_store_enabled(cfg),
         }
-        data["persona_instances"] = [
+        # S4: persona_instances ships as an id-keyed map (the identity substrate
+        # the whole roster keys on — the store is already keyed on disk). The
+        # ROW LIST is built first because the identity_map alias resolver derives
+        # from the ordered rows; the frame then keys it by ``persona_instance_id``.
+        persona_instance_rows = [
             persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
             for instance in persona_instances
         ]
         # Legacy persona-instance id -> canonical id aliases (durable
         # reconciler registry + structurally derivable drift still live in
         # this snapshot). Consumers key dedup on this instead of heuristics.
-        data["identity_map"] = identity_aliases_for_rows(data["persona_instances"])
+        data["identity_map"] = identity_aliases_for_rows(persona_instance_rows)
+        data["persona_instances"] = _keyed(persona_instance_rows, "persona_instance_id")
         history_accountant = ProjectionAccountant("persona_chat_history")
         trace_accountant = ProjectionAccountant("persona_chat_trace")
         # Full history (with message tails) is computed once and used to build the
@@ -585,7 +645,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             persona_chat_history=persona_chat_history_full,
             persona_chat_trace=data["persona_chat_trace"],
             tasks=tasks,
-            run_summaries=data["runs"],
+            run_summaries=run_rows,
             accountant=conversation_accountant,
         )
         live_channel_task_ids = {
@@ -593,13 +653,20 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             for channel in live_operator_channels
             if channel.get("task_id")
         }
-        data["operator_channels"] = [
-            *live_operator_channels,
-            *_archived_operator_channels(
-                archived_tasks,
-                live_task_ids=live_channel_task_ids,
-            ),
-        ]
+        # S4: operator_channels ships as an id-keyed map (channel_id). Live
+        # channels first, then the archived-task channels that don't collide —
+        # ``_keyed`` keeps the first occurrence, so a live channel is never
+        # shadowed by an archived one sharing an id.
+        data["operator_channels"] = _keyed(
+            [
+                *live_operator_channels,
+                *_archived_operator_channels(
+                    archived_tasks,
+                    live_task_ids=live_channel_task_ids,
+                ),
+            ],
+            "channel_id",
+        )
         data["persona_assignments"] = {
             "active": [persona_assignment_summary(item) for item in persona_assignments if item.state in ACTIVE_ASSIGNMENT_STATES],
             "recent": [persona_assignment_summary(item) for item in persona_assignments[-50:]],
@@ -654,13 +721,16 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         )
     return {
         "envelope_version": PARITY_ENVELOPE_VERSION,
-        # S3 (hoist globals + evict debug payloads): prompt_observability rows
-        # carry ``available_skills_ref`` / ``accessible_skills_ref`` hashes (the
-        # inline catalogs hoisted to ``prompt_observability.skills_catalogs``),
-        # and ``final_model_input`` is a typed eviction stub. S2 shape below
-        # unchanged. Launcher pin (kSupportedMissionContractVersion) moves in
-        # lockstep.
-        "contract_version": 40,
+        # S4 (normalize + delete derived copies): keyed id maps replace list
+        # sections (persona_instances / runs / incidents / boards /
+        # operator_channels / goals -> ``{id: row}``); the goals/tasks dual
+        # projection collapses to ONE keyed ``goals`` map (GOAL is the wire
+        # name) and the ``tasks`` wire section retires; ``agent_topology`` (a
+        # derived copy of steering truth) leaves the frame; cross-entity
+        # disagreements become typed ``fk_miss`` parity reports. S2/S3 shape
+        # (history eviction, prompt hoist) unchanged. Launcher pin
+        # (kSupportedMissionContractVersion) moves in lockstep.
+        "contract_version": 41,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
@@ -824,7 +894,7 @@ def _boards_summary(board_store, workspace_ids: set) -> list[dict]:
 
 def _board_parity_warnings(data) -> list[dict]:
     warnings: list[dict] = []
-    for board in data.get("boards") or []:
+    for board in _rows(data.get("boards")):
         if board.get("orphaned"):
             warnings.append(
                 {
@@ -867,7 +937,7 @@ def _parity_warnings(data) -> list[dict]:
         )
         return warnings
 
-    instances = data.get("persona_instances") or []
+    instances = _rows(data.get("persona_instances"))
     for group in duplicate_persona_instance_groups(instances):
         warnings.append(
             {
@@ -1011,17 +1081,51 @@ def _parity_warnings(data) -> list[dict]:
                 "detail": "persona runtime is enabled but the Agent Console channel projection is absent",
             }
         )
-    elif not isinstance(channels, list):
+    elif not isinstance(channels, dict):
+        # S4: operator_channels is now an id-keyed map (channel_id -> row).
         warnings.append(
             {
                 "code": "operator_channels_invalid",
-                "detail": "operator_channels must be a list; Launcher Agent Console cannot render this snapshot",
+                "detail": "operator_channels must be an id-keyed map; Launcher Agent Console cannot render this snapshot",
             }
         )
     else:
-        for channel in channels:
+        # S4 (delete derived copies -> FK-miss reports): each operator channel
+        # carries FK ids into the owner entities (persona_instances) rather than
+        # restating them. A ``persona_instance_id`` that does not resolve in the
+        # keyed persona_instances map is a typed, resolvable pointer miss — not a
+        # cross-projection "contract error" reconciling two copies of a fact.
+        # Archived channels reference archived (frame-evicted) instances by
+        # design, so they are exempt from the live-roster FK check.
+        live_instance_ids = {
+            str(row.get("persona_instance_id") or "")
+            for row in instances
+            if isinstance(row, dict) and row.get("persona_instance_id")
+        }
+        for channel in _rows(channels):
             if not isinstance(channel, dict):
                 continue
+            fk_target = str(channel.get("persona_instance_id") or "").strip()
+            if (
+                fk_target
+                and str(channel.get("state") or "") != "archived"
+                and fk_target not in live_instance_ids
+            ):
+                warnings.append(
+                    {
+                        "code": "fk_miss",
+                        "from_entity": "operator_channel",
+                        "from_id": channel.get("channel_id"),
+                        "fk_field": "persona_instance_id",
+                        "target_entity": "persona_instances",
+                        "target_id": fk_target,
+                        "detail": (
+                            f"operator_channel '{channel.get('channel_id')}' "
+                            f"persona_instance_id -> {fk_target} does not resolve in "
+                            "persona_instances"
+                        ),
+                    }
+                )
             for warning in channel.get("warnings") or []:
                 if not isinstance(warning, dict):
                     continue
@@ -1035,11 +1139,11 @@ def _parity_warnings(data) -> list[dict]:
                 )
 
     summary = data.get("summary") or {}
-    if (summary.get("open_tasks") or 0) > 0 and not (data.get("tasks")):
+    if (summary.get("open_tasks") or 0) > 0 and not (data.get("goals")):
         warnings.append(
             {
                 "code": "open_tasks_without_task_rows",
-                "detail": "summary reports open tasks but no task rows were mapped",
+                "detail": "summary reports open tasks but no goal rows were mapped",
             }
         )
     try:
@@ -2450,7 +2554,13 @@ def _task_current_stage_id(task) -> str | None:
     return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
 
 
-def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, workspaces=None) -> dict:
+def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, workspaces=None) -> dict:
+    # S4 goals/tasks merge: the goal entity is the FULL task summary (all the
+    # rich lanes the old ``tasks`` section carried — self_tests, role_envelopes,
+    # role_checklists, proof_batches, accounted stage_verification) UNIONED with
+    # the goal-only fields below. The old ``goals`` projection omitted these
+    # lanes; the merged single owner must carry them so no field the retired
+    # ``tasks`` section held is lost.
     row = _task_summary(
         task,
         proofs,
@@ -2460,10 +2570,15 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         events,
         workers=workers,
         run_store=run_store,
+        self_tests=self_tests,
+        role_envelopes=role_envelopes,
+        role_checklists=role_checklists,
+        proof_batches=proof_batches,
         persona_assignments=persona_assignments,
         repo_bundles=repo_bundles,
         runtime_instances=runtime_instances,
         persona_instances=persona_instances,
+        stage_verification_accountant=stage_verification_accountant,
     )
     workspace_id = getattr(task, "workspace_id", None)
     realm_id = None
@@ -2631,16 +2746,91 @@ def _mission_level_state(task, *, active_runs, active_workers, events, runtime_i
         "blueprint_version": getattr(plan, "blueprint_version", None),
         "active_stage_id": active_stage_id,
         "actors": actors,
-        "agent_topology": _agent_topology(
-            task,
-            active_runs=active_runs,
-            active_workers=active_workers,
-            runtime_instances=runtime_instances,
-            persona_instances=persona_instances,
-            role_streams=role_streams,
-        ),
+        # S4 (delete derived copies): ``agent_topology`` was a DERIVED copy of
+        # steering truth (``persona_instances[].steered_by``). It leaves the
+        # frame entirely — the launcher already derives both directions from
+        # ``steered_by`` (missionAgentInstanceParentIds /
+        # missionAgentSteeredInstances) and its runtime-graph projection falls
+        # back to that steered_by path when no topology is present. Zero
+        # ``agent_topology`` bytes ship; the ``_agent_topology`` builder is now
+        # unreferenced (its removal is S7 cleanup, kept out of this shrink stage
+        # to bound the diff).
         "updated_at": getattr(task, "updated_at", None),
     }
+
+
+def agent_topology_for_task(task) -> dict:
+    """Re-derive the steering topology (incl. ``steer_actions``) for one task.
+
+    S4 deleted the derived ``agent_topology`` copy from the snapshot frame. The
+    steering executor (``steering.execute_steer_action``) was the one live
+    reader of its ``steer_actions`` — it validated an operator's requested steer
+    against the frame's copy. Rather than ship that derived copy on EVERY frame
+    for a reader that fires only on an operator action, the executor re-derives
+    it on demand here from the stores, so there is still exactly ONE producer
+    (``_agent_topology``) and no per-frame duplicate. Not a hot path (one steer
+    action), so a per-call store read is acceptable.
+    """
+
+    event_log = CachedEventLog()
+    cfg = load_agent_runtime_config()
+    all_runs = RunStore().list_all()
+    runs = [run for run in all_runs if run.task_id == task.id]
+    active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
+    all_workers = WorkerSessionStore(event_log=event_log).list_all()
+    workers = [w for w in all_workers if getattr(w, "task_id", None) == task.id]
+    active_workers = [
+        w
+        for w in workers
+        if str(getattr(getattr(w, "state", ""), "value", getattr(w, "state", "")))
+        not in {"completed", "blocked", "closed"}
+    ]
+    runtime_instances = [
+        item
+        for item in GoalRuntimeInstanceStore(event_log=event_log).list_all()
+        if item.task_id == task.id
+    ]
+    agents = AgentStore().list_all() or seed_personas()
+    if persona_instance_runtime_enabled(cfg):
+        persona_instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, all_workers)
+    else:
+        persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
+    persona_assignments = (
+        [
+            item
+            for item in PersonaAssignmentStore(event_log=event_log).list_all()
+            if item.task_id == task.id
+        ]
+        if persona_assignment_store_enabled(cfg)
+        else []
+    )
+    role_envelopes = [
+        item for item in RoleEnvelopeStore(event_log=event_log).list_all() if item.task_id == task.id
+    ]
+    role_checklists = [
+        item for item in RoleChecklistStore(event_log=event_log).list_all() if item.task_id == task.id
+    ]
+    proof_batches = [
+        item for item in ProofBatchStore(event_log=event_log).list_all() if item.task_id == task.id
+    ]
+    role_streams = _role_streams(
+        task,
+        event_log.for_task(task.id, limit=200),
+        runs,
+        workers,
+        persona_assignments=persona_assignments,
+        role_envelopes=role_envelopes,
+        role_checklists=role_checklists,
+        proof_batches=proof_batches,
+    )
+    return _agent_topology(
+        task,
+        active_runs=active_runs,
+        active_workers=active_workers,
+        runtime_instances=runtime_instances,
+        persona_instances=persona_instances,
+        role_streams=role_streams,
+    )
 
 
 def _agent_topology(task, *, active_runs, active_workers, runtime_instances, persona_instances, role_streams) -> dict:

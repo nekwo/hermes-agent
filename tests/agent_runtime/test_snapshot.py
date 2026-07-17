@@ -53,7 +53,7 @@ def test_agent_topology_collapses_multi_turn_instances_to_one_node_per_persona(i
 def test_snapshot_contains_task_summary_and_no_raw_logs(isolate_agent_runtime_root):
     ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
     snap=build_snapshot(task_store=ts)
-    assert snap["tasks"][0]["task_id"] == "t"
+    assert list(snap["goals"].values())[0]["task_id"] == "t"
     assert "stdout" not in str(snap).lower()
     assert snap["summary"]["dirty"] is True
     assert snap["dirty_state"]["runtime"]["open_task_ids"] == ["t"]
@@ -235,7 +235,7 @@ def test_snapshot_coalesces_progress_events_by_event_id(isolate_agent_runtime_ro
         )
 
     snap = build_snapshot()
-    timeline = [item for item in snap["tasks"][0]["timeline"] if item["type"] == "run.progress"]
+    timeline = [item for item in list(snap["goals"].values())[0]["timeline"] if item["type"] == "run.progress"]
 
     assert len(timeline) == 1
     assert timeline[0]["display_summary"] == "proof is still_running"
@@ -364,36 +364,17 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     )
 
     snap = build_snapshot(event_log=events)
-    row = next(item for item in snap["tasks"] if item["task_id"] == "stage38")
+    row = next(item for item in list(snap["goals"].values()) if item["task_id"] == "stage38")
 
-    assert snap["parity"]["contract_version"] == 40
+    assert snap["parity"]["contract_version"] == 41
     assert "mission_level_state" in snap["parity"]["capabilities"]
     assert "agent_topology" in snap["parity"]["capabilities"]
     assert row["mission_level_state"]["blueprint_id"] == "neko_dev_qa_basic"
-    topology = row["mission_level_state"]["agent_topology"]
-    assert topology["root_node_id"] == "slot_lead"
-    assert [(node["node_id"], node["persona_id"]) for node in topology["nodes"]] == [
-        ("slot_lead", "neko_supervisor"),
-        ("slot_builder", "dev"),
-        ("slot_verifier", "qa"),
-    ]
-    assert [(edge["source_node_id"], edge["target_node_id"], edge["kind"]) for edge in topology["edges"]] == [
-        ("slot_lead", "slot_builder", "steers"),
-        ("slot_builder", "slot_verifier", "steers"),
-    ]
-    assert topology["control_node_id"] == "slot_lead"
-    route_action = next(action for action in topology["steer_actions"] if action["verb"] == "route" and action["target_node_id"] == "slot_builder")
-    assert route_action["available_now"] is True
-    assert route_action["capability_id"] == "goal.steer"
-    assert route_action["capability_args"] == {
-        "task_id": "stage38",
-        "verb": "route",
-        "source_node_id": "slot_lead",
-        "target_node_id": "slot_builder",
-    }
-    assert any(action["recommended_steer"] for action in topology["steer_actions"])
-    assert topology["completeness"]["stream_event_cap_per_node"] == 3
-    assert len(topology["nodes"][0]["progress_peek"]) <= 3
+    # S4: agent_topology (a derived copy of steering truth) no longer ships in
+    # the frame — the launcher derives it from persona_instances[].steered_by.
+    # The `_agent_topology` builder itself is still unit-tested directly (see
+    # test_multi_parent_fanin); here we prove the derived copy is gone.
+    assert "agent_topology" not in row["mission_level_state"]
     assert [(actor["persona_id"], actor["presence"]) for actor in row["mission_level_state"]["actors"]] == [
         ("neko_supervisor", "waiting"),
         ("dev", "queued"),
@@ -477,7 +458,7 @@ def test_mission_level_actors_emit_typed_persona_instance_id(monkeypatch, isolat
     )
 
     snap = build_snapshot()
-    row = next(item for item in snap["tasks"] if item["task_id"] == "task_actor_contract")
+    row = next(item for item in list(snap["goals"].values()) if item["task_id"] == "task_actor_contract")
     actors = {actor["persona_id"]: actor for actor in row["mission_level_state"]["actors"]}
 
     # Indexing (not .get) so a dropped field fails the contract loudly.
@@ -710,7 +691,7 @@ def test_snapshot_projects_bounded_stage_verification_with_parity(isolate_agent_
     )
 
     snap = build_snapshot()
-    row = next(item for item in snap["tasks"] if item["task_id"] == task.id)
+    row = next(item for item in list(snap["goals"].values()) if item["task_id"] == task.id)
     verification = row["stage_verification"]
 
     assert len(verification["stages"]) == 12
@@ -798,16 +779,13 @@ def test_snapshot_agent_topology_runtime_spawned_by_overrides_blueprint(isolate_
     )
 
     snap = build_snapshot()
-    row = next(item for item in snap["tasks"] if item["task_id"] == task.id)
+    row = next(item for item in list(snap["goals"].values()) if item["task_id"] == task.id)
 
-    topology = row["mission_level_state"]["agent_topology"]
-    assert topology["source"] == "runtime_spawned_by"
-    assert [(edge["source_node_id"], edge["target_node_id"]) for edge in topology["edges"]] == [
-        ("personainst_topology_spawned_by_neko_supervisor", "personainst_topology_spawned_by_backend_dev"),
-        ("personainst_topology_spawned_by_backend_dev", "personainst_topology_spawned_by_dev"),
-    ]
-    backend_node = next(node for node in topology["nodes"] if node["persona_id"] == "backend_dev")
-    assert backend_node["spawned_by"] == "personainst_topology_spawned_by_neko_supervisor"
+    # S4: agent_topology is deleted from the frame (derived copy of steering
+    # truth). The builder's runtime_spawned_by-overrides-blueprint behavior is
+    # still covered by the direct `_agent_topology` unit tests; the frame just
+    # no longer carries the derived copy.
+    assert "agent_topology" not in row["mission_level_state"]
 
 
 def _topology_persona(persona_id: str, display_name: str, role: str) -> AgentPersona:
@@ -839,7 +817,7 @@ def test_snapshot_unscoped_task_keeps_all_canonical_role_streams_visible(isolate
     )
 
     snap = build_snapshot(task_store=ts)
-    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+    roles = {stream["persona_id"]: stream for stream in list(snap["goals"].values())[0]["role_streams"]}
 
     assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
     assert all(stream["events"] for stream in roles.values())
@@ -882,7 +860,7 @@ def test_snapshot_role_stream_projects_decision_summary_thinking_fields(isolate_
     )
 
     snap = build_snapshot(task_store=ts, event_log=events)
-    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+    roles = {stream["persona_id"]: stream for stream in list(snap["goals"].values())[0]["role_streams"]}
     event = roles["dev"]["events"][0]
 
     assert event["payload"]["display_kind"] == "thinking_summary"
@@ -901,7 +879,7 @@ def test_snapshot_exposes_terminal_and_active_run_execution_truth(isolate_agent_
     runs.open_run("dev", "active", stage_id=None)
 
     snap = build_snapshot(task_store=ts, run_store=runs)
-    by_id = {task["task_id"]: task for task in snap["tasks"]}
+    by_id = {task["task_id"]: task for task in list(snap["goals"].values())}
 
     assert by_id["done"]["execution_status"] == "complete"
     assert by_id["done"]["can_start_run"] is False
@@ -1010,7 +988,7 @@ def test_snapshot_exposes_typed_mission_role_and_stage_streams(isolate_agent_run
     events.append(Event(n, "run.tool.finished", task.id, "run_launcher", "dev", {"stage_id": "launcher_implementation", "tool_name": "terminal", "summary": "flutter test passed"}))
 
     snap = build_snapshot(task_store=ts, event_log=events)
-    item = snap["tasks"][0]
+    item = list(snap["goals"].values())[0]
 
     assert item["mission_plan"]["current_stage_id"] == "launcher_implementation"
     roles = {stream["persona_id"]: stream for stream in item["role_streams"]}
@@ -1061,7 +1039,7 @@ def test_snapshot_typed_plan_keeps_empty_backend_stream_selectable(isolate_agent
     ts.create(task)
 
     snap = build_snapshot(task_store=ts)
-    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+    roles = {stream["persona_id"]: stream for stream in list(snap["goals"].values())[0]["role_streams"]}
 
     assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
     assert roles["backend_dev"]["display_name"] == "Backend Dev Agent"
@@ -1118,7 +1096,7 @@ def test_snapshot_role_streams_use_task_window_not_global_tail(isolate_agent_run
         events.append(Event(n, "run.tool.finished", task.id, "run_slot", "dev", {"summary": f"Dev tool event {index}"}))
 
     snap = build_snapshot(task_store=ts, event_log=events)
-    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+    roles = {stream["persona_id"]: stream for stream in list(snap["goals"].values())[0]["role_streams"]}
 
     assert roles["neko_supervisor"]["events"][0]["type"] == "mission_plan.updated"
     assert roles["dev"]["events"]
@@ -1152,8 +1130,8 @@ def test_snapshot_next_action_owner_reports_backend_specialist_for_backend_stage
 
     snap = build_snapshot(task_store=ts)
 
-    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
-    assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "backend_dev"
+    assert list(snap["goals"].values())[0]["next_action"]["action"] == "run_slot"
+    assert list(snap["goals"].values())[0]["next_action"]["stopped_progress"]["owner"] == "backend_dev"
 
 
 def test_snapshot_routes_budget_approval_to_neko_before_cap(isolate_agent_runtime_root):
@@ -1170,8 +1148,8 @@ def test_snapshot_routes_budget_approval_to_neko_before_cap(isolate_agent_runtim
 
     snap = build_snapshot(task_store=ts, run_store=runs, incident_store=incidents)
 
-    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
-    assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
+    assert list(snap["goals"].values())[0]["next_action"]["action"] == "run_slot"
+    assert list(snap["goals"].values())[0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
 
 
 def test_snapshot_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_agent_runtime_root):
@@ -1195,9 +1173,9 @@ def test_snapshot_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_
 
     snap = build_snapshot(task_store=ts, run_store=runs, incident_store=incidents)
 
-    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
-    assert snap["tasks"][0]["next_action"]["reason"] == "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
-    assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
+    assert list(snap["goals"].values())[0]["next_action"]["action"] == "run_slot"
+    assert list(snap["goals"].values())[0]["next_action"]["reason"] == "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
+    assert list(snap["goals"].values())[0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
 
 
 def test_snapshot_exposes_specialist_agent_repo_scope_labels(isolate_agent_runtime_root):
@@ -1299,7 +1277,7 @@ def test_snapshot_exposes_canonical_persona_instance_ids(monkeypatch, isolate_ag
     created = PersonaInstanceStore().create_free_floating("profile:reviewer")
 
     snap = build_snapshot()
-    by_id = {item["persona_instance_id"]: item for item in snap["persona_instances"]}
+    by_id = {item["persona_instance_id"]: item for item in list(snap["persona_instances"].values())}
 
     assert created.id == "personainst_profile_reviewer"
     assert by_id[created.id]["agent_profile_id"] == "personainst_profile_reviewer"
@@ -1561,7 +1539,7 @@ def test_snapshot_projects_archived_goal_as_operator_channel(monkeypatch, isolat
 
     channel = next(
         item
-        for item in snap["operator_channels"]
+        for item in list(snap["operator_channels"].values())
         if item["task_id"] == "task_archived"
     )
     conversation = channel["conversation"]

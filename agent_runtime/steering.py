@@ -98,7 +98,7 @@ def execute_steer_action(
     requested_by: str = "operator",
     reason: str = "operator steer",
 ) -> dict[str, Any]:
-    from .snapshot import build_snapshot
+    from .snapshot import agent_topology_for_task
 
     task_store = TaskStore()
     event_log = EventLog()
@@ -116,9 +116,10 @@ def execute_steer_action(
     if ref is None:
         return _steer_failed(task, None, "invalid_request", "A steer action id or verb/source/target is required.", event_log=event_log)
 
-    snap = build_snapshot()
-    task_row = next((item for item in snap.get("tasks", []) if item.get("task_id") == task.id), None)
-    topology = ((task_row or {}).get("mission_level_state") or {}).get("agent_topology") or {}
+    # S4: agent_topology is no longer shipped in the snapshot frame (it was a
+    # derived copy of steering truth). Re-derive it on demand from the stores —
+    # one producer (``_agent_topology``), computed only when an operator steers.
+    topology = agent_topology_for_task(task)
     action = _matching_available_action(topology.get("steer_actions") or [], ref)
     if action is None:
         return _steer_failed(task, ref, "action_unavailable", "Steer action is not available in the current topology/state.", event_log=event_log)

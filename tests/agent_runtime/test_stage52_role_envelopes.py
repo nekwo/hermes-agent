@@ -583,7 +583,7 @@ def test_snapshot_surfaces_stage52_state_for_mission_control():
     ).tick_once(task_id=task.id)
 
     snap = build_snapshot(task_store=tasks, proof_store=proofs)
-    item = snap["tasks"][0]
+    item = list(snap["goals"].values())[0]
 
     assert snap["role_envelopes"]
     assert snap["role_checklists"]

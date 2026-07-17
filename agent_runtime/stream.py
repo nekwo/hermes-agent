@@ -330,9 +330,20 @@ def _delta_op(event: Event) -> str:
     return "event.appended"
 
 
+def _rows(value: Any) -> list:
+    """A snapshot section S4 emits as an id-keyed map, read as an ordered list
+    of rows (map values). Also accepts a plain list / ``None``."""
+
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, list):
+        return list(value)
+    return []
+
+
 def _identity_map(snapshot: dict[str, Any]) -> dict[str, str]:
     identity: dict[str, str] = {}
-    for instance in snapshot.get("persona_instances") or []:
+    for instance in _rows(snapshot.get("persona_instances")):
         if not isinstance(instance, dict):
             continue
         canonical = _first_text(instance, "persona_instance_id", "instance_id", "id")
@@ -345,7 +356,7 @@ def _identity_map(snapshot: dict[str, Any]) -> dict[str, str]:
         persona_id = _text(instance.get("persona_id"))
         if persona_id and persona_id.startswith("profile:"):
             identity[persona_id.replace(":", "_")] = persona_id
-    for channel in snapshot.get("operator_channels") or []:
+    for channel in _rows(snapshot.get("operator_channels")):
         if not isinstance(channel, dict):
             continue
         canonical = _first_text(channel, "persona_instance_id", "channel_id", "id")

@@ -150,7 +150,7 @@ def test_incidents_open_only_and_history_ref(isolate_agent_runtime_root):
     _seed_incident(store, "inc_ancient", closed_delta_hours=1000)  # closed → history
 
     snap = build_snapshot()
-    frame_ids = {row["incident_id"] for row in snap["incidents"]}
+    frame_ids = {row["incident_id"] for row in list(snap["incidents"].values())}
     assert frame_ids == {"inc_open"}, "only open incidents ship in the frame"
 
     ref = snap["incidents_history_ref"]
@@ -170,7 +170,7 @@ def test_incidents_full_frame_when_flag_on(isolate_agent_runtime_root, history_i
     _seed_incident(store, "inc_open")
     _seed_incident(store, "inc_closed", closed_delta_hours=1)
     snap = build_snapshot()
-    frame_ids = {row["incident_id"] for row in snap["incidents"]}
+    frame_ids = {row["incident_id"] for row in list(snap["incidents"].values())}
     assert frame_ids == {"inc_open", "inc_closed"}
     assert "incidents_history_ref" not in snap
 

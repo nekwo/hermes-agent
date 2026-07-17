@@ -72,9 +72,10 @@ def test_parity_warnings_clean_when_trace_matches_instance():
         "persona_chat_trace": [
             {"persona_id": "profile:alice", "persona_instance_id": "personainst_profile_alice", "entries": []},
         ],
-        "operator_channels": [],
+        # S4: operator_channels is an id-keyed map (empty here).
+        "operator_channels": {},
         "summary": {"open_tasks": 0},
-        "tasks": [],
+        "goals": {},
     }
     assert _parity_warnings(data) == []
 

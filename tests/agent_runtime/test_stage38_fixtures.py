@@ -71,7 +71,7 @@ def test_stage38_runtime_snapshot_matches_fixture_contract_shape(isolate_agent_r
 
     response = create_mission_goal_from_request(_load("goal_create_request.valid.json"))
     snapshot = build_snapshot()
-    row = next(item for item in snapshot["tasks"] if item["task_id"] == response["task_id"])
+    row = next(item for item in list(snapshot["goals"].values()) if item["task_id"] == response["task_id"])
 
     fixture = _load("mission_snapshot.neko_to_dev_running.json")
     fixture_goal = fixture["goals"][0]
@@ -89,7 +89,7 @@ def test_stage38_runtime_snapshot_matches_fixture_contract_shape(isolate_agent_r
 
     # Envelope: real parity carries every Stage 38 field the Launcher consumes.
     parity = snapshot["parity"]
-    assert parity["contract_version"] == 40
+    assert parity["contract_version"] == 41
     assert {"runtime_root", "profile", "capabilities", "freshness"} <= set(parity.keys())
     assert row["proof_gate_state"]["gate_state"] in {
         "not_required", "incomplete", "running", "blocked", "failed", "passed", "waived",
