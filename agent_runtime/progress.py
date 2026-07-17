@@ -46,6 +46,10 @@ _SAFE_PROGRESS_KEYS = {
     # as streamed work, not turn overviews. Secrets are scrubbed per-line;
     # sizes are bounded below to respect the 4KB event payload cap.
     "command_full", "output", "target_label", "changed_paths", "skill_name",
+    # First-class agent-to-agent dispatch (agent_chat_send): the target persona
+    # and the FULL order, so the operator console shows exactly what each
+    # teammate was told without parsing the 90-char-excerpted target_label prose.
+    "dispatch_target", "dispatch_order",
 }
 
 # Bounds for the operator-detail fields (event payload cap is 4096 bytes).
@@ -53,6 +57,8 @@ _OPERATOR_COMMAND_FULL_MAX = 500
 _OPERATOR_TARGET_MAX = 300
 _OPERATOR_OUTPUT_TAIL_MAX = 1200
 _OPERATOR_PATHS_MAX = 12
+_OPERATOR_DISPATCH_TARGET_MAX = 120
+_OPERATOR_DISPATCH_ORDER_MAX = 1500
 
 _INTERNAL_RUN_PROGRESS_KEYS = {
     "repo_baseline",
@@ -234,30 +240,47 @@ def _chat_progress_has_signal(payload: dict[str, Any]) -> bool:
 def _append_bounded_event(event_log: EventLog, event: Event) -> None:
     """Append, degrading oversized payloads instead of silently dropping them.
 
-    The operator ``output`` tail is the one variable-size field that can push a
-    payload past the 4KB event cap; a too-large event previously vanished into
-    the sink's bare except. Retry without ``output`` so the tool row itself
-    (command, target, status, files) always survives.
+    The operator ``output`` tail and the full ``dispatch_order`` are the two
+    variable-size fields that can push a payload past the 4KB event cap; a
+    too-large event previously vanished into the sink's bare except. Shed the
+    largest optional field first (``output``), then ``dispatch_order``, so the
+    tool row itself (command, target, status, files, the ``→ target`` chip)
+    always survives. If the row is still too large after both, the final append
+    re-raises to the sink's best-effort boundary (unchanged terminal behavior).
     """
 
     try:
         event_log.append(event)
+        return
     except EventPayloadTooLarge:
         payload = dict(event.payload or {})
-        payload.pop("output", None)
-        payload["output_truncated"] = True
-        event_log.append(
-            Event(
-                ts=event.ts,
-                type=event.type,
-                task_id=event.task_id,
-                run_id=event.run_id,
-                persona_id=event.persona_id,
-                payload=payload,
-                session_id=event.session_id,
-                turn_id=event.turn_id,
-            )
-        )
+    for drop_key, marker in (
+        ("output", "output_truncated"),
+        ("dispatch_order", "dispatch_order_truncated"),
+    ):
+        if drop_key not in payload:
+            continue
+        payload.pop(drop_key, None)
+        payload[marker] = True
+        try:
+            event_log.append(_rebuild_event_payload(event, payload))
+            return
+        except EventPayloadTooLarge:
+            continue
+    event_log.append(_rebuild_event_payload(event, payload))
+
+
+def _rebuild_event_payload(event: Event, payload: dict[str, Any]) -> Event:
+    return Event(
+        ts=event.ts,
+        type=event.type,
+        task_id=event.task_id,
+        run_id=event.run_id,
+        persona_id=event.persona_id,
+        payload=payload,
+        session_id=event.session_id,
+        turn_id=event.turn_id,
+    )
 
 
 def _maybe_record_self_test(run, event_type: str, payload: dict[str, Any], *, event_log: EventLog) -> None:
@@ -321,6 +344,22 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
             elif observe:
                 safe[key] = _observe_text(value, limit=_OPERATOR_TARGET_MAX)
                 _mark_would_redact(safe, key, "operator_target")
+            continue
+        if isinstance(value, str) and key == "dispatch_target":
+            text = " ".join(value.strip().split())
+            if text and not _looks_sensitive(text):
+                safe[key] = text[:_OPERATOR_DISPATCH_TARGET_MAX]
+            elif observe and text:
+                safe[key] = _observe_text(value, limit=_OPERATOR_DISPATCH_TARGET_MAX)
+                _mark_would_redact(safe, key, "dispatch_target")
+            continue
+        if isinstance(value, str) and key == "dispatch_order":
+            text = _safe_dispatch_order(value)
+            if text:
+                safe[key] = text
+            elif observe:
+                safe[key] = _observe_text(value, limit=_OPERATOR_DISPATCH_ORDER_MAX)
+                _mark_would_redact(safe, key, "dispatch_order")
             continue
         if isinstance(value, str) and key == "output":
             text = _safe_operator_output_tail(value)
@@ -407,6 +446,23 @@ def _safe_operator_line(value: str, *, limit: int) -> str | None:
     if not text or _looks_sensitive(text):
         return None
     return f"{text[: limit - 1]}…" if len(text) > limit else text
+
+
+def _safe_dispatch_order(value: str) -> str | None:
+    """Redaction boundary for the full agent-to-agent order: drop any secret-
+    bearing line, keep the rest with newline structure intact (never whitespace-
+    collapsed), bounded at :data:`_OPERATOR_DISPATCH_ORDER_MAX`. Consistent with
+    the profile-runner scrub that produces the field; idempotent when re-applied.
+    """
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    kept = [line for line in text.split("\n") if not _looks_sensitive(line)]
+    order = "\n".join(kept).strip()
+    if not order:
+        return None
+    if len(order) > _OPERATOR_DISPATCH_ORDER_MAX:
+        order = f"{order[: _OPERATOR_DISPATCH_ORDER_MAX - 1]}…"
+    return order
 
 
 def _safe_operator_output_tail(value: str) -> str | None:

@@ -4429,7 +4429,32 @@ def run_conversation(
                         agent.tool_progress_callback("reasoning.available", "_thinking", _think_text[:500], None)
                     except Exception:
                         pass
-            
+
+            # Fork addition (trace-visibility G3): the block above forwards the
+            # reply text (assistant_message.content) as reasoning; the model's
+            # NATIVE reasoning is parsed onto assistant_message.reasoning but was
+            # never emitted, so no thinking row reached the operator console.
+            # Emit it once per turn on the harness/top-level path — OUTSIDE the
+            # content gate above so a reasoning-only (empty-content) codex turn
+            # still surfaces a thinking row. Subagent relay (depth > 0) keeps its
+            # existing first-line-only behavior, untouched. Guarded so a provider
+            # that inlines reasoning into content is not double-emitted.
+            if agent.tool_progress_callback and getattr(agent, '_delegate_depth', 0) == 0:
+                try:
+                    _native_reasoning = agent._extract_reasoning(assistant_message)
+                except Exception:
+                    _native_reasoning = None
+                _native_reasoning = _native_reasoning.strip() if _native_reasoning else ""
+                _echoed_reasoning = re.sub(
+                    r'</?(?:REASONING_SCRATCHPAD|think|reasoning)>', '',
+                    assistant_message.content.strip(),
+                ).strip() if assistant_message.content else ""
+                if _native_reasoning and _native_reasoning != _echoed_reasoning:
+                    try:
+                        agent.tool_progress_callback("reasoning.available", "_thinking", _native_reasoning[:500], None)
+                    except Exception:
+                        pass
+
             # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
             # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
             if has_incomplete_scratchpad(assistant_message.content or ""):

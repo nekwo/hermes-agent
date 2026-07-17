@@ -1041,6 +1041,12 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
             else _safe_trace_operator_line(payload.get("reasoning_summary"), limit=500)
         ),
         "target": _safe_trace_operator_line(payload.get("target_label"), limit=300),
+        # First-class agent-to-agent dispatch (G2): structured target persona +
+        # the FULL order, carried straight from the agent_chat_send progress
+        # payload. dispatch_order keeps its newline structure (block scrub), so
+        # the console renders the whole briefing, not the 90-char target excerpt.
+        "dispatch_target": _safe_trace_operator_line(payload.get("dispatch_target"), limit=120),
+        "dispatch_order": _safe_trace_operator_block(payload.get("dispatch_order"), limit=1500),
         "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
         "output": _safe_trace_operator_block(payload.get("output"), limit=1600),
         "paths": _safe_trace_operator_paths(payload.get("changed_paths")),

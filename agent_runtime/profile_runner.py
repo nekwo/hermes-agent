@@ -750,6 +750,46 @@ def _agent_chat_target_label(tool_name: str | None, invocation: Any) -> str | No
     return f"→ {persona}: {excerpt}" if excerpt else f"→ {persona}"
 
 
+_DISPATCH_TARGET_MAX = 120
+_DISPATCH_ORDER_MAX = 1500
+
+
+def _scrub_dispatch_order(message: Any) -> str | None:
+    """The FULL relay order for the operator console's dispatch tile: per-line
+    secret drop (any line matching :func:`_line_has_secret` is removed, the rest
+    kept), newlines PRESERVED (never whitespace-collapsed like ``target_label``),
+    capped at :data:`_DISPATCH_ORDER_MAX` chars with a trailing ellipsis."""
+
+    text = str(message or "").replace("\r\n", "\n").replace("\r", "\n")
+    kept = [line for line in text.split("\n") if not _line_has_secret(line)]
+    order = "\n".join(kept).strip()
+    if not order:
+        return None
+    if len(order) > _DISPATCH_ORDER_MAX:
+        order = f"{order[: _DISPATCH_ORDER_MAX - 1]}…"
+    return order
+
+
+def _agent_chat_dispatch_fields(tool_name: str | None, invocation: Any) -> dict[str, str]:
+    """Structured dispatch fields for an ``agent_chat_send`` relay so the
+    operator console renders a first-class ``→ target`` chip and the FULL order
+    without re-parsing the prose ``target_label`` (which excerpts to 90 chars).
+    ``target_label``/``summary`` prose stay byte-identical — these are additive
+    keys alongside them. Consistent with :func:`_agent_chat_target_label`: when
+    the persona carries a secret, both the label and these fields drop it."""
+
+    if tool_name != "agent_chat_send" or not isinstance(invocation, dict):
+        return {}
+    fields: dict[str, str] = {}
+    persona = str(invocation.get("persona_id") or "").strip()
+    if persona and not _line_has_secret(persona):
+        fields["dispatch_target"] = persona[:_DISPATCH_TARGET_MAX]
+    order = _scrub_dispatch_order(invocation.get("message"))
+    if order:
+        fields["dispatch_order"] = order
+    return fields
+
+
 def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation: Any = None) -> dict[str, Any]:
     payload = {"type": event_type, "phase": "tool", "step": "tool_started", "status": "started"}
     if tool_name:
@@ -761,6 +801,10 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
     if agent_chat_label:
         payload["target_label"] = agent_chat_label
         payload["summary"] = f"Started tool {tool_name}: {agent_chat_label}"
+        # Additive G2 dispatch fields (structured target + full order). The
+        # started event is the authoritative carrier; the launcher merges the
+        # started/finished pair so finished-only is not needed here.
+        payload.update(_agent_chat_dispatch_fields(tool_name, invocation))
         return payload
     command_label = _safe_command_label(invocation)
     if command_label:

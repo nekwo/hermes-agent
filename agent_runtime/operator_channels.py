@@ -1202,7 +1202,13 @@ def _tool_call_message(
 # Operator-detail fields carried from a trace entry onto the tool_call payload.
 # The values were already operator-sanitized (secret-scrubbed, bounded) when the
 # trace entry was rendered; this is a straight, newest-wins merge.
-_TOOL_DETAIL_STR_FIELDS = ("command", "target", "detail", "output")
+_TOOL_DETAIL_STR_FIELDS = (
+    "command", "target", "detail", "output",
+    # First-class agent-to-agent dispatch (G2): the target persona chip + the
+    # full order, carried onto the tool{} payload under the same names the
+    # launcher reads. Already operator-sanitized upstream; straight newest-wins.
+    "dispatch_target", "dispatch_order",
+)
 _TOOL_DETAIL_INT_FIELDS = ("duration_ms", "exit_code")
 
 
