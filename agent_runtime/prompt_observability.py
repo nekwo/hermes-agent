@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -251,10 +252,14 @@ def mission_chat_prompt_observability(
             *([workspace_agents.receipt] if workspace_agents is not None else []),
         ],
         "used_skills": used_skills,
+        # C1 RECORD-ONCE (2026-07-17): the built row carries ONE copy of each
+        # fact — the pre-C1 alias keys (``skills_catalog`` ≡ available_skills,
+        # ``skills`` ≡ accessible_skills) are DELETED, no compat emission
+        # (ruling 0). Readers were audited and retargeted to the canonical two;
+        # legacy persisted rows that still carry the aliases are normalized at
+        # the read/persist boundaries.
         "accessible_skills": accessible_skills,
         "available_skills": available_skills,
-        "skills_catalog": available_skills,
-        "skills": accessible_skills,
         "chat_history_context": history,
         "retrieval_context": [],
         "final_model_input": _safe_final_model_input(final_model_input),
@@ -286,6 +291,47 @@ def mission_chat_prompt_observability(
             ],
         },
     }
+
+
+def attach_prompt_observability_turn_results(
+    context: dict[str, Any],
+    *,
+    final_model_input: dict[str, Any] | None = None,
+    model_selection: dict[str, Any] | None = None,
+    turn_usage: dict[str, Any] | None = None,
+    trace_events: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """C1 build-once seam: PATCH the pre-turn row with the turn's results.
+
+    The mission-chat turn used to build the observability row TWICE per turn —
+    a pre-turn build (record-at-injection: history, skills, context files,
+    HUD) and a post-turn FULL rebuild that re-read SessionDB history and
+    re-scanned the skill catalog just to attach what the turn produced. This
+    attaches exactly the turn-result fields (``final_model_input``,
+    ``turn_usage``, trace-derived ``used_skills``, ``model_selection``, and the
+    recomputed ``context_budget``) onto the pre-turn object instead. The
+    record-at-injection fields are deliberately NOT touched: the peek shows
+    exactly what was fed, never a post-hoc re-derivation.
+
+    Lives here (not in the CLI part) because ``persona_commands.py`` is exec'd
+    into harness globals — nothing defined there is importable or unit-testable.
+    Mutates ``context`` in place and returns it.
+    """
+
+    context["final_model_input"] = _safe_final_model_input(final_model_input)
+    if model_selection is not None:
+        context["model_selection"] = _safe_model_selection(model_selection)
+    context["turn_usage"] = _safe_turn_usage(turn_usage)
+    context["used_skills"] = used_skills_context(
+        final_model_input=final_model_input,
+        trace_events=trace_events,
+    )
+    context["context_budget"] = _context_budget(
+        model_selection if model_selection is not None else context.get("model_selection"),
+        final_model_input,
+        turn_usage,
+    )
+    return context
 
 
 def _safe_model_selection(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -459,14 +505,7 @@ def load_final_model_input_for_context(context_id: str) -> dict[str, Any] | None
     edit). Returns the redaction-safe payload, or None when the row/field is
     absent."""
 
-    token = safe_assignment_token(context_id)
-    if not token:
-        return None
-    path = paths.prompt_observability_dir() / f"{token}.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    data = load_persisted_context_row(context_id)
     if not isinstance(data, dict):
         return None
     final_model_input = data.get("final_model_input")
@@ -569,7 +608,6 @@ def snapshot_prompt_observability(
                     )
                 )
                 break
-    chat_contexts = _merge_latest_contexts(contexts, session_db=session_db)
     # S8: the frame keeps only LIVE persona instances' current-session context
     # rows; historical/stale rows (departed instances, closed sessions) leave the
     # frame (operator ruling 2026-07-17: "old residue and runs need to be
@@ -591,18 +629,43 @@ def snapshot_prompt_observability(
         )
         if session
     }
+    # C2: roster-keyed read — the latest-pointer index resolves the live lanes
+    # and the build reads exactly those rows (typed glob fallback on index
+    # miss/corruption; the read never writes).
+    disk_rows, ctx_read = load_live_prompt_observability_contexts(
+        built_keys=built_keys,
+        live_instance_ids=live_instance_ids,
+        live_session_ids=live_session_ids,
+    )
+    chat_contexts = _merge_latest_contexts(contexts, session_db=session_db, disk_rows=disk_rows)
     chat_contexts, chat_contexts_evicted = _filter_live_chat_contexts(
         chat_contexts,
         built_keys=built_keys,
         live_instance_ids=live_instance_ids,
         live_session_ids=live_session_ids,
     )
+    # Index-mode reads never load the stale lanes at all — fold them into the
+    # same eviction count the post-merge filter feeds (one accounting, both
+    # read modes).
+    chat_contexts_evicted += int(ctx_read.get("stale_lanes") or 0)
     # S3: hoist the duplicated skills catalogs to one content-addressed table and
     # evict the heavy per-turn debug payload. This is the only shape (S7-B
     # RULING-0: no inline legacy fallback).
     skills_catalogs: dict[str, Any] = {}
     _hoist_skills_catalogs(chat_contexts, skills_catalogs)
     _evict_final_model_input(chat_contexts)
+    # C1: ref-shaped persisted rows reach the frame already carrying their
+    # ``*_ref`` hashes (no inline lists for the hoist to fold) — the frame's
+    # catalog accounting must include those refs too, or the pointer stub would
+    # under-report the resolvable hashes.
+    frame_catalog_hashes = set(skills_catalogs)
+    for row in chat_contexts:
+        if not isinstance(row, dict):
+            continue
+        for ref_key in ("available_skills_ref", "accessible_skills_ref"):
+            token = safe_assignment_token(row.get(ref_key))
+            if token:
+                frame_catalog_hashes.add(token)
     # S8: the ``skills_catalogs`` table LEAVES the frame entirely (operator ruling
     # 2026-07-17: "skills catalog should just be pointers to the skills"). Rows
     # keep their ``*_ref`` content hashes; the catalog bodies are served on demand
@@ -621,21 +684,32 @@ def snapshot_prompt_observability(
         "chat_contexts": chat_contexts,
         # S8: honest accounting for the historical/stale context rows evicted
         # from the frame — their persisted files remain on disk and are fetched
-        # on demand (never a silent absence).
+        # on demand (never a silent absence). C2 adds the retention accounting
+        # (``archived_count``: rows MOVED to the archive dir, still fetchable)
+        # and the typed read receipt (index hit vs glob fallback — a degraded
+        # read is visible, never silent).
         "chat_contexts_ref": {
             "evicted": True,
             "count": chat_contexts_evicted,
             "live_count": len(chat_contexts),
+            "archived_count": int(ctx_read.get("archived_count") or 0),
             "fetch": "harness prompt-context show --context-id <id> --json",
+            "read": {
+                "source": ctx_read.get("source"),
+                "index_status": ctx_read.get("index_status"),
+                "files_read": int(ctx_read.get("files_read") or 0),
+                "index_misses": int(ctx_read.get("index_misses") or 0),
+            },
         },
         # One fact, one owner, one COPY: the deduplicated skill lists are no
         # longer shipped in-frame. Rows carry ``available_skills_ref`` /
         # ``accessible_skills_ref``; the bodies are content-addressed and fetched
-        # once by hash. This pointer accounts the eviction.
+        # once by hash. This pointer accounts the eviction (hoist-folded catalogs
+        # plus the refs already carried by C1 ref-shaped persisted rows).
         "skills_catalogs_ref": {
             "evicted": True,
-            "count": len(skills_catalogs),
-            "hashes": sorted(skills_catalogs),
+            "count": len(frame_catalog_hashes),
+            "hashes": sorted(frame_catalog_hashes),
             "fetch": "harness skills catalog --hash <hash> --json",
         },
     }
@@ -644,19 +718,23 @@ def snapshot_prompt_observability(
 def skills_catalog_by_hash(content_hash: str) -> list[dict[str, Any]] | None:
     """On-demand resolve of one content-addressed skills catalog by its hash.
 
-    S8: the steady-state frame evicts the ``skills_catalogs`` table and rows keep
-    only ``*_ref`` hashes; this resolves a hash back to its skill list. The lists
-    are content-addressed (immutable), so any persisted observability row carrying
-    a byte-identical list resolves it — the same global installed catalog / per-
-    persona accessible set that produced the ref. Read-only: it walks the
-    persisted prompt-observability rows on disk (archive-never-delete leaves them
-    there) and never rebuilds live runtime. Returns ``None`` on an honest miss
-    (the launcher renders a pending state and retries next frame), never a fake
-    empty catalog."""
+    S8 evicted the ``skills_catalogs`` table from the frame; rows keep only
+    ``*_ref`` hashes. C1 (2026-07-17) made the resolve O(1): the catalog bodies
+    are stored ONCE, content-addressed, in the persist-time catalog store
+    (``prompt_observability_catalogs/<hash>.json``) and read back directly. The
+    pre-C1 walk over the newest persisted rows remains as the LEGACY-ROW
+    fallback — rows persisted before the store existed still carry inline lists
+    (archive-never-delete means they exist) and still resolve. Read-only: the
+    store is written only by the persist chokepoint. Returns ``None`` on an
+    honest miss (the launcher renders a pending state and retries next frame),
+    never a fake empty catalog."""
 
     token = str(content_hash or "").strip()
     if not token:
         return None
+    stored = load_skills_catalog_from_store(token)
+    if stored is not None:
+        return stored
     for row in load_latest_prompt_observability_contexts():
         if not isinstance(row, dict):
             continue
@@ -667,13 +745,379 @@ def skills_catalog_by_hash(content_hash: str) -> list[dict[str, Any]] | None:
     return None
 
 
+def load_skills_catalog_from_store(content_hash: str) -> list[dict[str, Any]] | None:
+    """O(1) read of one catalog from the content-addressed store.
+
+    Integrity-checked: the loaded list must hash back to its own address — a
+    corrupt or tampered store file is a typed miss (never fake content), and
+    the caller's legacy fallback walk still gets its chance."""
+
+    token = safe_assignment_token(content_hash)
+    if not token:
+        return None
+    path = paths.prompt_observability_catalogs_dir() / f"{token}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    if _skills_list_content_hash(data) != token:
+        return None
+    return data
+
+
+def _store_skills_catalog(ref: str, rows: list) -> None:
+    """Write one content-addressed catalog iff absent (a content hash is
+    immutable, so an existing file is already the right bytes). Compact."""
+
+    path = paths.prompt_observability_catalogs_dir() / f"{ref}.json"
+    if path.exists():
+        return
+    atomic_json_write(
+        path,
+        to_jsonable(rows),
+        indent=None,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# C1/C2 record-once store (2026-07-17, console-chat plan stages C1+C2).
+#
+# C1 — the persisted per-turn RECORD carries one copy of each fact: the two
+# byte-identical alias key-pairs (57.8% of every pre-C1 file) are gone from the
+# built row, and the two canonical skill lists leave the row as content-hash
+# refs into a persist-time catalog store. ``final_model_input`` STAYS in the
+# row, compact (operator ruling 2026-07-17 §7.2). Writes are compact JSON.
+#
+# C2 — the live dir is bounded and reads are roster-keyed: the persist
+# chokepoint (ONE owner) maintains a latest-pointer index mapping
+# (persona_instance_id, session_id) -> newest context ids and enforces per-lane
+# retention (newest K live; older rows MOVE to the archive dir —
+# archive-never-delete, accounted via ``archived_count``). The frame build
+# resolves the live roster's lanes through the index and reads exactly those
+# rows; an absent/corrupt index or a dangling pointer falls back to the legacy
+# glob path with typed accounting. The READ path never writes — the heal
+# happens at the next persist (emit-path projections are READ-ONLY).
+# --------------------------------------------------------------------------- #
+
+#: C2 retention: newest K rows per (persona_instance_id, session_id) lane stay
+#: live; older rows move to ``prompt_observability_archive/``.
+PROMPT_OBSERVABILITY_RETAIN_PER_LANE = 2
+
+#: C1 persisted-row shape: (canonical inline field, legacy alias field,
+#: persisted ref field). The alias is normalized into the canonical value when
+#: a legacy-shaped input carries only the alias — data is never dropped.
+_PERSIST_REF_FIELDS = (
+    ("available_skills", "skills_catalog", "available_skills_ref"),
+    ("accessible_skills", "skills", "accessible_skills_ref"),
+)
+
+
 def persist_prompt_observability_context(context: dict[str, Any]) -> None:
+    """THE persist chokepoint (one owner): ref-transform, compact write,
+    latest-pointer index, and retention happen here and nowhere else.
+
+    The caller's dict is NEVER mutated — the live ``chat.final`` wire echo
+    still carries the built row with its inline canonical lists (slimming that
+    echo is stage C3's lane, not this one)."""
+
     context_id = safe_assignment_token(context.get("context_id"))
     if not context_id:
         return
+    # Deep JSON copy (to_jsonable rebuilds every dict/list) — mutations below
+    # cannot touch the caller's object.
+    row = to_jsonable(context)
+    for canonical_field, alias_field, ref_field in _PERSIST_REF_FIELDS:
+        value = row.pop(canonical_field, None)
+        alias = row.pop(alias_field, None)
+        if not isinstance(value, list):
+            value = alias if isinstance(alias, list) else None
+        if value is None:
+            # No list, no ref — an absent catalog is honest absence, never a
+            # fake empty one. A re-persisted ref-shaped row keeps its refs.
+            continue
+        ref = _skills_list_content_hash(value)
+        _store_skills_catalog(ref, value)
+        row[ref_field] = ref
     root = paths.prompt_observability_dir()
     root.mkdir(parents=True, exist_ok=True)
-    atomic_json_write(root / f"{context_id}.json", to_jsonable(context), indent=2, sort_keys=True)
+    atomic_json_write(
+        root / f"{context_id}.json",
+        row,
+        indent=None,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    _index_and_retain_after_persist(row, context_id=context_id)
+
+
+def _lane_key_for_row(row: dict[str, Any]) -> tuple[str, str]:
+    """The (instance, session) retention/index lane a persisted row belongs to."""
+
+    return (
+        safe_assignment_token(row.get("persona_instance_id")) or "",
+        safe_assignment_text(row.get("session_id"), limit=200) or "",
+    )
+
+
+def _load_prompt_observability_index() -> dict[str, Any] | None:
+    """The latest-pointer index, or ``None`` when absent/corrupt.
+
+    ``None`` is the typed fallback signal: readers glob instead, and the next
+    persist rebuilds the index (its one owner). Never raises."""
+
+    path = paths.prompt_observability_index_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+        return None
+    return data
+
+
+def _archived_context_count() -> int:
+    archive = paths.prompt_observability_archive_dir()
+    if not archive.exists():
+        return 0
+    return sum(1 for _ in archive.glob("*.json"))
+
+
+def _rebuild_prompt_observability_index() -> dict[str, Any]:
+    """Full index rebuild from the live dir (the heal path; persist-time only).
+
+    Parses every live row once — the one-time O(dir) cost that makes every
+    subsequent frame read roster-sized — orders each lane newest-first by file
+    mtime, and recounts the archive. Unreadable/mis-named files are counted
+    (typed, never silent) and left alone: nothing here deletes."""
+
+    root = paths.prompt_observability_dir()
+    unreadable = 0
+    files: list[tuple[float, str, dict[str, Any]]] = []
+    if root.exists():
+        for path in root.glob("*.json"):
+            try:
+                mtime = path.stat().st_mtime
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                unreadable += 1
+                continue
+            context_id = safe_assignment_token(data.get("context_id")) if isinstance(data, dict) else None
+            if not context_id or path.name != f"{context_id}.json":
+                unreadable += 1
+                continue
+            files.append((mtime, context_id, data))
+    lanes: dict[tuple[str, str], dict[str, Any]] = {}
+    for _mtime, context_id, data in sorted(files, key=lambda item: item[0], reverse=True):
+        key = _lane_key_for_row(data)
+        entry = lanes.setdefault(
+            key,
+            {
+                "instance_id": key[0],
+                "session_id": key[1],
+                "persona_id": safe_assignment_token(data.get("persona_id")) or "",
+                "context_ids": [],
+            },
+        )
+        entry["context_ids"].append(context_id)
+    return {
+        "schema_version": 1,
+        "archived_count": _archived_context_count(),
+        "unreadable_count": unreadable,
+        "entries": list(lanes.values()),
+    }
+
+
+def _index_and_retain_after_persist(row: dict[str, Any], *, context_id: str) -> None:
+    """Update the latest-pointer index for this persist and enforce retention.
+
+    One owner: only this persist-time hook moves rows out of the live dir or
+    writes the index. An absent/corrupt index is healed here by a full rebuild
+    (which also folds in any pre-index legacy rows, so the first persist after
+    landing performs the one-time bounded-store sweep)."""
+
+    index = _load_prompt_observability_index()
+    if index is None:
+        index = _rebuild_prompt_observability_index()
+    entries = [entry for entry in index.get("entries", []) if isinstance(entry, dict)]
+    key = _lane_key_for_row(row)
+    entry = next(
+        (
+            candidate
+            for candidate in entries
+            if (
+                str(candidate.get("instance_id") or ""),
+                str(candidate.get("session_id") or ""),
+            )
+            == key
+        ),
+        None,
+    )
+    if entry is None:
+        entry = {
+            "instance_id": key[0],
+            "session_id": key[1],
+            "persona_id": "",
+            "context_ids": [],
+        }
+        entries.append(entry)
+    known = [str(item) for item in entry.get("context_ids", []) if str(item or "").strip()]
+    entry["context_ids"] = [context_id] + [item for item in known if item != context_id]
+    entry["persona_id"] = (
+        safe_assignment_token(row.get("persona_id")) or str(entry.get("persona_id") or "")
+    )
+    archived = int(index.get("archived_count") or 0)
+    root = paths.prompt_observability_dir()
+    archive_dir = paths.prompt_observability_archive_dir()
+    for candidate in entries:
+        ids = [str(item) for item in candidate.get("context_ids", []) if str(item or "").strip()]
+        keep = ids[:PROMPT_OBSERVABILITY_RETAIN_PER_LANE]
+        for stale_id in ids[PROMPT_OBSERVABILITY_RETAIN_PER_LANE:]:
+            source = root / f"{stale_id}.json"
+            try:
+                if source.exists():
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    os.replace(source, archive_dir / f"{stale_id}.json")
+                    archived += 1
+            except OSError:
+                # The move failed — keep the row indexed AND live rather than
+                # losing track of it. Retention retries on the next persist.
+                keep.append(stale_id)
+        # Dangling-pointer heal: a kept id whose live file vanished outside the
+        # chokepoint (sabotage/manual deletion) is dropped here — the READ path
+        # reported the typed miss and fell back; THIS is where the index heals
+        # (its one owner). An id that was legitimately archived is not "kept".
+        candidate["context_ids"] = [
+            item for item in keep if (root / f"{item}.json").exists()
+        ]
+    # A lane with no live rows left has nothing to point at — prune the entry
+    # (its archived rows remain fetchable by id; the index only maps LIVE rows).
+    index["entries"] = [entry for entry in entries if entry.get("context_ids")]
+    index["archived_count"] = archived
+    atomic_json_write(
+        paths.prompt_observability_index_path(),
+        index,
+        indent=None,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def load_live_prompt_observability_contexts(
+    *,
+    built_keys: set[tuple[str, str, str]],
+    live_instance_ids: set[str],
+    live_session_ids: set[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Roster-keyed frame read (C2): read EXACTLY the live lanes' newest rows.
+
+    Resolves the live roster's (instance, session) lanes through the
+    latest-pointer index and reads one file per live lane, instead of the
+    legacy glob+stat+parse of the newest 50 files (4.51 MB measured) on every
+    full core. The index is a cache, never authority: an absent/corrupt index
+    or a pointer at a missing/corrupt file degrades to the legacy glob path
+    with typed accounting in the returned receipt — and this READ path never
+    writes (the heal happens at the next persist, the index's one owner).
+
+    Returns ``(rows, receipt)`` — rows newest-first (the legacy ordering
+    contract), receipt = {source, index_status, files_read, index_misses,
+    stale_lanes, archived_count}."""
+
+    receipt: dict[str, Any] = {
+        "source": "index",
+        "index_status": "hit",
+        "files_read": 0,
+        "index_misses": 0,
+        "stale_lanes": 0,
+        "archived_count": 0,
+    }
+    index = _load_prompt_observability_index()
+    if index is None:
+        receipt["source"] = "glob_fallback"
+        receipt["index_status"] = "absent_or_corrupt"
+        rows = load_latest_prompt_observability_contexts()
+        receipt["files_read"] = len(rows)
+        receipt["archived_count"] = _archived_context_count()
+        return rows, receipt
+    receipt["archived_count"] = int(index.get("archived_count") or 0)
+    root = paths.prompt_observability_dir()
+    targets: list[Path] = []
+    for entry in index.get("entries", []):
+        if not isinstance(entry, dict):
+            continue
+        instance_id = safe_assignment_token(entry.get("instance_id")) or ""
+        session_id = safe_assignment_text(entry.get("session_id"), limit=200) or ""
+        persona_id = safe_assignment_token(entry.get("persona_id")) or ""
+        is_live = (
+            (instance_id, session_id, persona_id) in built_keys
+            or (instance_id and instance_id in live_instance_ids)
+            or (session_id and session_id in live_session_ids)
+        )
+        if not is_live:
+            # Counted, never silently skipped: these lanes' rows stay on disk
+            # and feed the frame's ``chat_contexts_ref`` eviction accounting.
+            receipt["stale_lanes"] += 1
+            continue
+        newest = next(
+            (
+                token
+                for token in (
+                    safe_assignment_token(item) for item in entry.get("context_ids", [])
+                )
+                if token
+            ),
+            None,
+        )
+        if newest:
+            targets.append(root / f"{newest}.json")
+    loaded: list[tuple[float, str, dict[str, Any]]] = []
+    for path in targets:
+        try:
+            mtime = path.stat().st_mtime
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            receipt["index_misses"] += 1
+            continue
+        receipt["files_read"] += 1
+        if isinstance(data, dict) and safe_assignment_token(data.get("context_id")):
+            loaded.append((mtime, path.name, data))
+    if receipt["index_misses"]:
+        # A pointer aimed at a deleted/corrupt file: typed miss, and the frame
+        # still gets CORRECT output via the legacy glob. Heal at next persist.
+        receipt["source"] = "glob_fallback"
+        receipt["index_status"] = "miss"
+        receipt["stale_lanes"] = 0
+        rows = load_latest_prompt_observability_contexts()
+        receipt["files_read"] += len(rows)
+        return rows, receipt
+    # Newest-first with the file name as a stable tiebreak — the same recency
+    # order the legacy glob path produced, so the frame section stays
+    # deterministic across both read modes.
+    loaded.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in loaded], receipt
+
+
+def load_persisted_context_row(context_id: str) -> dict[str, Any] | None:
+    """One persisted observability row by id — live dir first, then the C2
+    archive. Archive-never-delete means retention MOVES rows; the fetch lane
+    (``harness prompt-context show``) must keep resolving them. Honest ``None``
+    on absence/corruption, never a fabricated row."""
+
+    token = safe_assignment_token(context_id)
+    if not token:
+        return None
+    for root in (paths.prompt_observability_dir(), paths.prompt_observability_archive_dir()):
+        path = root / f"{token}.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def load_latest_prompt_observability_contexts() -> list[dict[str, Any]]:
@@ -751,7 +1195,14 @@ def _merge_latest_contexts(
     contexts: list[dict[str, Any]],
     *,
     session_db: Any | None = None,
+    disk_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Merge persisted rows (newest-first) over the freshly built contexts.
+
+    ``disk_rows`` lets the C2 roster-keyed loader supply exactly the live
+    lanes' rows; when omitted (legacy callers/tests) the newest-50 glob load
+    is used."""
+
     merged: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
@@ -761,7 +1212,9 @@ def _merge_latest_contexts(
     for item in contexts:
         built_by_key.setdefault(key_for(item), item)
 
-    for item in load_latest_prompt_observability_contexts():
+    if disk_rows is None:
+        disk_rows = load_latest_prompt_observability_contexts()
+    for item in disk_rows:
         key = key_for(item)
         if key in seen:
             continue
@@ -783,12 +1236,19 @@ def _backfill_derived_fields(
     *,
     session_db: Any | None = None,
 ) -> None:
-    """Add `skills` / `context_budget` to persisted contexts that predate them.
+    """Repair persisted contexts that predate the current row shape.
 
     Persisted observability rows are written at chat time, so rows captured
-    before these fields existed lack them. Backfill skills from the freshly
+    before newer fields existed lack them. Backfill skills from the freshly
     built context (correct per-persona set) or the profile snapshot, and
     recompute the budget from the row's own model selection + final input.
+
+    C1 shape rules: the alias keys (``skills`` ≡ accessible, ``skills_catalog``
+    ≡ available) are READ from legacy rows for normalization but never written
+    back — one copy of each fact. A row carrying ``accessible_skills_ref`` /
+    ``available_skills_ref`` was persisted by the C1 chokepoint and is correct
+    by construction: its skills are present BY REF, so the legacy re-inflation
+    paths must not fabricate inline lists over them.
     """
     if built:
         # Persisted rows are written at chat time and never carry the typed
@@ -806,8 +1266,6 @@ def _backfill_derived_fields(
             "used_skills",
             "accessible_skills",
             "available_skills",
-            "skills_catalog",
-            "skills",
             "chat_id",
             "chat_title",
             "chat_name",
@@ -827,13 +1285,27 @@ def _backfill_derived_fields(
             item["chat_title"] = chat.get("title")
             item["chat_name"] = chat.get("name")
             item["chat"] = chat
+    # Legacy alias normalization (READ then retire): rows persisted before C1
+    # may carry only the alias keys. Fold them into the canonical fields and
+    # drop them — the frame carries one copy of each fact.
     if not item.get("accessible_skills") and item.get("skills"):
         item["accessible_skills"] = item.get("skills")
+    if not item.get("available_skills") and item.get("skills_catalog"):
+        item["available_skills"] = item.get("skills_catalog")
+    item.pop("skills", None)
+    item.pop("skills_catalog", None)
     if item.get("used_skills") is None:
         item["used_skills"] = used_skills_context(
             final_model_input=item.get("final_model_input")
         )
-    if not item.get("accessible_skills") or _profile_prompt_skills_need_snapshot(item):
+    # C1 ref-shaped rows carry their skills by content-hash ref — present, not
+    # missing. Re-inflating them from the profile snapshot / installed catalog
+    # would overwrite the recorded truth with a re-derivation.
+    has_accessible_ref = bool(safe_assignment_token(item.get("accessible_skills_ref")))
+    has_available_ref = bool(safe_assignment_token(item.get("available_skills_ref")))
+    if not has_accessible_ref and (
+        not item.get("accessible_skills") or _profile_prompt_skills_need_snapshot(item)
+    ):
         profile = safe_assignment_token(item.get("profile"))
         names = _profile_snapshot_skill_names(profile) if profile else []
         if names:
@@ -847,18 +1319,13 @@ def _backfill_derived_fields(
                 }
                 for name in names[:80]
             ]
-            item["skills"] = item["accessible_skills"]
             item["available_skills"] = available_skills_context(
                 accessible_skills=item["accessible_skills"]
             )
-            item["skills_catalog"] = item["available_skills"]
-    elif item.get("skills") is None:
-        item["skills"] = item["accessible_skills"]
-    if item.get("available_skills") is None:
+    if item.get("available_skills") is None and not has_available_ref:
         item["available_skills"] = available_skills_context(
-            accessible_skills=item.get("accessible_skills") or item.get("skills") or []
+            accessible_skills=item.get("accessible_skills") or []
         )
-        item["skills_catalog"] = item["available_skills"]
     if _context_budget_needs_refresh(item):
         budget = _context_budget(item.get("model_selection"), item.get("final_model_input"))
         if budget is not None:

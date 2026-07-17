@@ -1029,29 +1029,19 @@ def _cmd_mission_chat_message(args) -> int:
             relay_policy.RELAY_CHAIN.reset(_relay_chain_token)
             relay_policy.RELAY_DEADLINE.reset(_relay_deadline_token)
         final_model_input = (getattr(chat_result, "raw", {}) or {}).get("model_input_observability")
-        prompt_context = mission_chat_prompt_observability(
-            persona=persona,
-            persona_instance_id=instance.id,
-            session_id=session_id,
-            task_id=task_id,
-            goal_id=goal_id,
-            turn_id=safe_assignment_token(client_message_id),
-            surface_prompt=getattr(args, "surface_prompt", "") or "",
-            limiting_wrapper_active=False,
-            session_db=session_db,
-            current_message=message,
+        # C1 build-once: the row was built ONCE before the turn (record-at-
+        # injection: history, skills, context files, the very situational_hud
+        # dict rendered into the fed block). Attach the turn's results onto that
+        # object instead of a full rebuild — the pre-C1 second build re-read
+        # SessionDB history and re-scanned the skill catalog per turn. The
+        # metered turn_usage is recorded at the injection site next to the
+        # context it describes (never key-matched back on later).
+        prompt_context = attach_prompt_observability_turn_results(
+            prompt_context,
             final_model_input=final_model_input,
             model_selection=model_selection,
-            # Metered truth for this turn, recorded at the injection site next to
-            # the context it describes (never key-matched back on later).
             turn_usage=turn_usage_from_result(chat_result),
             trace_events=trace_payloads,
-            workspace_id=workspace_id,
-            workspace_name=workspace_name,
-            workspace_agents=workspace_agents,
-            # The very dict rendered into this turn's fed block above — recorded
-            # at injection so the peek's row IS what the model received.
-            situational_hud=situational_hud,
         )
         if preloaded_skills_loaded:
             prompt_context["used_skills"] = prompt_context.get("used_skills") or []

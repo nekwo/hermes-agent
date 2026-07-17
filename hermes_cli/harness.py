@@ -90,7 +90,7 @@ from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, sub
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.personas import profile_chat_toolsets, seed_personas
-from agent_runtime.prompt_observability import load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context, turn_usage_from_result
+from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context, turn_usage_from_result
 from agent_runtime.queued_skills import consume_skills_for_next_turn, queue_skill_for_next_turn
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
@@ -1709,17 +1709,17 @@ def _cmd_run_list(args) -> int:
 
 def _cmd_prompt_context_show(args) -> int:
     """S8: show one persisted prompt-observability context by id (frame-evicted
-    historical rows stay on disk and are fetched here). Honest miss on absence."""
+    historical rows stay on disk and are fetched here; C2 retention MOVES older
+    rows to the archive dir, which this verb resolves too — archive-never-delete
+    means the fetch lane keeps working). Honest miss on absence."""
 
-    from agent_runtime import paths as _paths
+    from agent_runtime.prompt_observability import load_persisted_context_row
 
     token = str(getattr(args, "context_id", "") or "").strip()
     if not token:
         return emit_harness_error(ValueError("--context-id is required"), args=args, code="invalid_request")
-    path = _paths.prompt_observability_dir() / f"{token}.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    data = load_persisted_context_row(token)
+    if data is None:
         return emit_harness_error(
             ValueError(f"prompt context '{token}' not found on disk"),
             args=args,

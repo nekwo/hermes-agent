@@ -241,6 +241,27 @@ def prompt_observability_dir() -> Path:
     return store_root() / "prompt_observability"
 
 
+def prompt_observability_catalogs_dir() -> Path:
+    """C1 content-addressed skills-catalog store: one ``<hash>.json`` per
+    distinct skill list, written iff absent at persist time (a content hash is
+    immutable). Persisted ctx rows carry ``*_ref`` hashes into this store."""
+    return store_root() / "prompt_observability_catalogs"
+
+
+def prompt_observability_archive_dir() -> Path:
+    """C2 retention target: rows evicted from the live observability dir MOVE
+    here (archive-never-delete); ``harness prompt-context show`` still resolves
+    them."""
+    return store_root() / "prompt_observability_archive"
+
+
+def prompt_observability_index_path() -> Path:
+    """C2 latest-pointer index: (instance, session) -> newest context ids.
+    A CACHE, never authority — the persist chokepoint is its only writer; a
+    missing/corrupt index falls back to the directory scan."""
+    return store_root() / "prompt_observability_index.json"
+
+
 def queued_skills_dir() -> Path:
     return store_root() / "queued_skills"
 

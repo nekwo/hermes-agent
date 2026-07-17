@@ -2021,7 +2021,10 @@ def test_prompt_observability_reports_redaction_safe_available_skill_catalog(
         }
     ]
     assert "content" not in context["available_skills"][0]
-    assert context["skills_catalog"] == context["available_skills"]
+    # C1 record-once (2026-07-17): the `skills_catalog` alias key is retired —
+    # the row carries ONE canonical copy (`available_skills`), no compat
+    # emission (ruling 0).
+    assert "skills_catalog" not in context
 
 
 def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, capsys, isolate_agent_runtime_root):
@@ -3022,7 +3025,9 @@ def test_profile_prompt_observability_uses_profile_skills_and_chat_title(
         "agent-runtime-harness",
         "creative-ideation",
     ]
-    assert context["skills"] == context["accessible_skills"]
+    # C1 record-once (2026-07-17): the `skills` alias key is retired — one
+    # canonical copy (`accessible_skills`), no compat emission (ruling 0).
+    assert "skills" not in context
     assert {item["source"] for item in context["accessible_skills"]} == {
         "profile_skills_snapshot"
     }
@@ -3162,7 +3167,10 @@ def test_prompt_observability_refreshes_stale_derived_fields(
     assert refreshed["chat_title"] == "Alice Agent chat"
     assert refreshed["used_skills"] == []
     assert [item["name"] for item in refreshed["accessible_skills"]] == ["fresh-profile-skill"]
-    assert refreshed["skills"] == refreshed["accessible_skills"]
+    # C1 record-once (2026-07-17): the `skills` alias key is retired — the row
+    # carries ONE canonical copy (`accessible_skills`); the legacy alias on the
+    # persisted input is normalized in, never re-emitted.
+    assert "skills" not in refreshed
     assert refreshed["accessible_skills"][0]["source"] == "profile_skills_snapshot"
     assert refreshed["context_budget"]["used_tokens"] == 25
 
