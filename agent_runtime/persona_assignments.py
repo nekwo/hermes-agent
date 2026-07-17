@@ -16,6 +16,7 @@ from .events import EventLog
 from .models import AgentPersona, Event, PersonaAssignment, PersonaInstance, WorkerSession
 from .personas import profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
+from .state_patches import emit_state_patch
 from .states import RunState, WorkerSessionState
 from .tool_visibility import (
     agent_hud_state_for_persona,
@@ -497,12 +498,12 @@ class PersonaInstanceStore:
         removed: list[str],
         detached: bool,
     ) -> None:
-        changed = False
+        changed_fields: dict[str, Any] = {}
         for attr, value in updates.items():
             if getattr(instance, attr) != value:
                 setattr(instance, attr, value)
-                changed = True
-        if not changed:
+                changed_fields[attr] = value
+        if not changed_fields:
             return
         instance.updated_at = now()
         self._write(instance)
@@ -518,6 +519,11 @@ class PersonaInstanceStore:
                 "detached": bool(detached),
             },
         )
+        # S6 producer: the flagship field-patch case. ``changed_fields`` is the
+        # exact set this steer mutation wrote (steered_by/spawned_by, plus
+        # goal_id/mode/current_task_id when the re-route changed them). Dark by
+        # default (read_model.delta_patches off).
+        self._emit_state_patch(instance, changed_fields)
 
     def update_profile(
         self,
@@ -551,6 +557,7 @@ class PersonaInstanceStore:
         clobbering the newer value.
         """
         instance = self.get(persona_instance_id)
+        before_patch_fields = self._profile_patch_snapshot(instance)
         changed = False
         model_lane_touched = clear_model_override or any(
             value is not None for value in (provider, model, api_mode, reasoning_effort)
@@ -633,6 +640,18 @@ class PersonaInstanceStore:
             if requested_by:
                 payload["requested_by"] = str(requested_by)[:80]
             self._event("persona_instance.profile_updated", instance, payload)
+            # S6 producer: the persona-instance profile/model write funnel. Emit
+            # only the operator-editable fields this call actually changed. Dark
+            # by default (read_model.delta_patches off).
+            after_patch_fields = self._profile_patch_snapshot(instance)
+            self._emit_state_patch(
+                instance,
+                {
+                    field_name: after_patch_fields[field_name]
+                    for field_name in after_patch_fields
+                    if after_patch_fields[field_name] != before_patch_fields.get(field_name)
+                },
+            )
         return self.get(instance.id)
 
     def _validate_no_steering_cycle(self, persona_instance_id: str, parent_instance_id: str) -> None:
@@ -1095,6 +1114,39 @@ class PersonaInstanceStore:
 
     def _event(self, event_type: str, instance: PersonaInstance, payload: dict[str, Any]) -> None:
         self.event_log.append(Event(ts=now(), type=event_type, task_id=instance.current_task_id, run_id=instance.active_run_id, persona_id=instance.persona_id, payload={**payload, "persona_instance_id": instance.id}))
+
+    @staticmethod
+    def _profile_patch_snapshot(instance: PersonaInstance) -> dict[str, Any]:
+        """Operator-editable runtime fields watched for S6 field-patch diffs.
+
+        Lists are copied so a before/after comparison is not fooled by in-place
+        mutation of the same underlying object."""
+
+        return {
+            "display_name": instance.display_name,
+            "current_chat_goal": instance.current_chat_goal,
+            "goal_id": instance.goal_id,
+            "current_task_id": instance.current_task_id,
+            "skill_overrides": list(instance.skill_overrides or []),
+            "provider": instance.provider,
+            "model": instance.model,
+            "api_mode": instance.api_mode,
+            "reasoning_effort": instance.reasoning_effort,
+        }
+
+    def _emit_state_patch(self, instance: PersonaInstance, changed: dict[str, Any]) -> None:
+        """Emit a ``state.patched`` entry for a persona-instance field change
+        (S6 producer; dark unless ``read_model.delta_patches`` is on)."""
+
+        emit_state_patch(
+            self.event_log,
+            entity="persona_instance",
+            entity_id=instance.id,
+            changed=changed,
+            task_id=instance.current_task_id,
+            run_id=instance.active_run_id,
+            persona_id=instance.persona_id,
+        )
 
 
 class PersonaAssignmentStore:

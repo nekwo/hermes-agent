@@ -100,6 +100,13 @@ class ReadModelConfig:
     # Flip True to restore the old full-in-frame shape for one release so a
     # surface that regressed can be caught against the previous shape.
     history_in_frame: bool = False
+    # S6 producer kill-switch. When False (default), store chokepoints emit NO
+    # ``state.patched`` field-patch entries — the producer lane is dark until the
+    # launcher fold exists (the consumer + stream wire land after S4). Flip True
+    # to have steer/profile/task-transition/incident-close chokepoints append a
+    # ``state.patched`` EventLog entry carrying the field-level patch. Log-only:
+    # no stream/wire change rides this flag in S6.
+    delta_patches: bool = False
 
 
 @dataclass(slots=True)

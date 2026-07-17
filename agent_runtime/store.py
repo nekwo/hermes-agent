@@ -21,6 +21,7 @@ from .persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from .proof_rules import ProofType
 from .recovery_flags import mark_incident_closed_for_recovery
 from .serde import from_jsonable, to_jsonable
+from .state_patches import emit_state_patch
 from .simplified_contract import public_decision_type_value
 from .states import RunState, TaskState
 
@@ -244,6 +245,18 @@ class TaskStore:
                             "reason": reason,
                         },
                     )
+                )
+                # S6 producer: task state transitions ride this single funnel
+                # (the terminal-transition chokepoint every writer persists
+                # through). The field patch carries the one field that changed —
+                # ``state``. Dark by default (read_model.delta_patches off).
+                emit_state_patch(
+                    self.event_log,
+                    entity="task",
+                    entity_id=task.id,
+                    changed={"state": str(task.state)},
+                    task_id=task.id,
+                    persona_id=actor if actor != "harness" else None,
                 )
         if reached_terminal:
             # Terminal-transition chokepoint: every writer that lands a task in a
@@ -1521,6 +1534,18 @@ class IncidentStore:
                     persona_id=None,
                     payload=payload,
                 )
+            )
+            # S6 producer: incidents ship open-only in the frame (settled), so a
+            # close is the field patch that removes it from the open set. Emit the
+            # ``closed_at`` transition through this single close funnel. Dark by
+            # default (read_model.delta_patches off).
+            emit_state_patch(
+                self.event_log,
+                entity="incident",
+                entity_id=incident.id,
+                changed={"closed_at": incident.closed_at},
+                task_id=incident.task_id,
+                run_id=incident.run_id,
             )
             return incident
 
