@@ -509,6 +509,35 @@ def build_parser(parent_subparsers) -> None:
     flow_list.add_argument("--json", action="store_true")
     flow_list.set_defaults(func=_cmd_flow_list)
 
+    checkpoint = subs.add_parser(
+        "checkpoint",
+        help="Per-actor read-model checkpoint: bundle the on-disk entity-class stores into a keyed transport envelope (the store IS the checkpoint)",
+    )
+    checkpoint_subs = checkpoint.add_subparsers(dest="checkpoint_command", required=True)
+    checkpoint_fetch = checkpoint_subs.add_parser(
+        "fetch",
+        help="Bundle the per-actor store files into a keyed checkpoint envelope (entity class -> actor id -> row read verbatim); read-only, writes nothing",
+    )
+    checkpoint_fetch.add_argument(
+        "--classes",
+        default=None,
+        help="Comma-separated entity-class filter (default: all discovered classes); absent/unknown names are accounted in requested_absent",
+    )
+    checkpoint_fetch.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help="Optional per-class row cap; truncation is accounted ({truncated,total,returned}), never silent",
+    )
+    checkpoint_fetch.add_argument("--json", action="store_true")
+    checkpoint_fetch.set_defaults(func=_cmd_checkpoint_fetch)
+    checkpoint_classes = checkpoint_subs.add_parser(
+        "classes",
+        help="List discovered entity classes with per-class actor counts and byte sizes (stat only; contents not read)",
+    )
+    checkpoint_classes.add_argument("--json", action="store_true")
+    checkpoint_classes.set_defaults(func=_cmd_checkpoint_classes)
+
     skills = subs.add_parser("skills", help="Inspect the shared skills substrate the Launcher's Skills console consumes")
     skills_subs = skills.add_subparsers(dest="skills_command", required=True)
     skills_inventory_cmd = skills_subs.add_parser(
@@ -2903,7 +2932,7 @@ def _cmd_serve(args) -> int:
 
 def _load_command_parts() -> None:
     parts_dir = Path(__file__).with_name("harness_parts")
-    for filename in ("persona_commands.py", "runtime_commands.py", "board.py", "flow_commands.py"):
+    for filename in ("persona_commands.py", "runtime_commands.py", "board.py", "flow_commands.py", "checkpoint_commands.py"):
         path = parts_dir / filename
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), globals())
 
