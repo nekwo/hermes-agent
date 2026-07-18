@@ -93,6 +93,9 @@ def load_workspace_agents_context(value: str | None) -> WorkspaceAgentsContext |
         bytes=len(raw),
         preview=_safe_preview(content),
     )
+    estimate = _token_estimate_from_bytes(len(raw))
+    if estimate is not None:
+        receipt["token_estimate"] = estimate
     return WorkspaceAgentsContext(content=content, receipt=receipt)
 
 
@@ -197,9 +200,14 @@ def mission_chat_prompt_observability(
                 "summary": (
                     "First-person 'you are "
                     + (safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id)
-                    + "' identity block; the isolated chat lane does not load the profile SOUL, so this "
-                    "names the persona and forbids self-relay."
+                    + "' identity block. The persona's OWN configured soul overlay "
+                    "(config soul_overlay_path, resolved in its profile home) IS "
+                    "loaded since hermes deafb825e; the OPERATOR profile's SOUL is "
+                    "not. Names the persona and forbids self-relay."
                 ),
+                # persona_identity / system_core text is assembled later in the
+                # turn (not at this observability seam), so they carry no
+                # per-layer estimate and the launcher folds them into the residual.
             },
             {
                 "name": "Hermes core prompt",
@@ -213,6 +221,7 @@ def mission_chat_prompt_observability(
                 "status": "blank" if surface == "" else "configured",
                 "summary": "Blank by default; no limiting wrapper is applied.",
                 "preview": surface[:SAFE_PREVIEW_LIMIT],
+                **_layer_text_size(surface),
             },
             {
                 "name": "Profile memory",
@@ -223,6 +232,8 @@ def mission_chat_prompt_observability(
                     if _mission_chat_memory_loaded(persona)
                     else "Profile memory skipped; this persona does not opt into its bound profile's memory."
                 ),
+                # Its bytes are attributed via the MEMORY.md / USER.md context-file
+                # rows; no per-layer estimate here so the launcher never double-counts.
             },
             *(
                 [
@@ -235,6 +246,9 @@ def mission_chat_prompt_observability(
                             if workspace_agents.content is not None
                             else "Workspace instructions were not injected; see the file receipt."
                         ),
+                        # Its bytes are attributed via the AGENTS.md context-file
+                        # row (which carries the token_estimate), so this layer
+                        # deliberately carries no per-layer estimate — no double count.
                     }
                 ]
                 if workspace_agents is not None
@@ -1983,6 +1997,42 @@ def _profile_context_files(profile: str) -> list[dict[str, Any]]:
     return files
 
 
+# --------------------------------------------------------------------------- #
+# Per-item token attribution (2026-07-18): the operator asked to "see how many
+# tokens each thing takes". Provider meters only whole API calls, so per-item
+# numbers are necessarily ``bytes // 4`` (context files) / ``chars // 4``
+# (prompt-layer text) ESTIMATES — labeled as such by the launcher, which
+# reconciles them against the metered ``turn_usage.first_call_prompt_tokens``
+# with one clamped residual row. Hermes emits the raw sizes because the launcher
+# only receives redaction-safe previews, not the underlying files/layer text.
+# --------------------------------------------------------------------------- #
+
+def _token_estimate_from_bytes(byte_count: int | None) -> int | None:
+    """Rough token estimate for a stored file: ``bytes // 4``.
+
+    ``None`` (no estimate) when the byte count is unknown — an absent estimate
+    is honest; a fabricated one would masquerade as a measurement.
+    """
+    if not isinstance(byte_count, int) or byte_count <= 0:
+        return None
+    return byte_count // 4
+
+
+def _layer_text_size(text: str | None) -> dict[str, int]:
+    """``{chars, token_estimate}`` for a prompt-layer's actual text.
+
+    Returns an EMPTY dict when the layer's text is not available at this seam
+    (e.g. the persona-identity / Hermes-core blocks are assembled later in the
+    turn) — the launcher then attributes those layers to the residual instead of
+    inventing a number. A present-but-empty layer (a blank surface prompt) is a
+    real ``0``, distinct from absent.
+    """
+    if not isinstance(text, str):
+        return {}
+    chars = len(text)
+    return {"chars": chars, "token_estimate": chars // 4}
+
+
 def _context_file_summary(path: Path, *, included: bool) -> dict[str, Any]:
     data: dict[str, Any] = {
         "path": str(path),
@@ -2001,6 +2051,9 @@ def _context_file_summary(path: Path, *, included: bool) -> dict[str, Any]:
         return data
     data["sha256"] = hashlib.sha256(raw).hexdigest().upper()
     data["bytes"] = len(raw)
+    estimate = _token_estimate_from_bytes(len(raw))
+    if estimate is not None:
+        data["token_estimate"] = estimate
     if path.name in {"SOUL.md", "MEMORY.md", "USER.md", "AGENTS.md"}:
         text = raw.decode("utf-8", errors="replace")
         data["preview"] = _safe_preview(text)

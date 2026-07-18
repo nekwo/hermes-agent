@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from agent_runtime.prompt_observability import (
     MAX_WORKSPACE_AGENTS_BYTES,
     _backfill_derived_fields,
+    _context_file_summary,
+    _layer_text_size,
     load_workspace_agents_context,
     mission_chat_prompt_observability,
     snapshot_prompt_observability,
@@ -108,6 +110,111 @@ def test_workspace_agents_context_is_loaded_and_reported_from_selected_file(tmp_
     assert context["workspace_name"] == "Launcher"
     assert receipt["path"] == str(agents_file.resolve())
     assert receipt["sha256"]
+    # Per-item token attribution: the workspace receipt carries bytes // 4.
+    assert receipt["token_estimate"] == receipt["bytes"] // 4
+
+
+def test_context_file_summary_carries_bytes_over_four_token_estimate(tmp_path):
+    soul = tmp_path / "SOUL.md"
+    soul.write_bytes(b"x" * 2867)  # today's live SOUL.md size
+
+    summary = _context_file_summary(soul, included=True)
+
+    assert summary["bytes"] == 2867
+    # bytes // 4 — an integer-floor estimate, presented as ~N by the launcher.
+    assert summary["token_estimate"] == 2867 // 4 == 716
+    assert summary["token_estimate"] == summary["bytes"] // 4
+
+
+def test_context_file_summary_absent_file_has_no_token_estimate(tmp_path):
+    missing = tmp_path / "USER.md"  # never created
+
+    summary = _context_file_summary(missing, included=False)
+
+    # Absent file → no bytes, no fabricated token estimate (never a crash).
+    assert summary["included"] is False
+    assert "bytes" not in summary
+    assert "token_estimate" not in summary
+
+
+def test_layer_text_size_helper_relationship():
+    # A present layer text → chars + chars // 4; an empty (blank) layer is a real
+    # 0, distinct from an absent layer (no text seam) which degrades to {}.
+    assert _layer_text_size("abcdefgh") == {"chars": 8, "token_estimate": 2}
+    assert _layer_text_size("") == {"chars": 0, "token_estimate": 0}
+    assert _layer_text_size(None) == {}
+
+
+def test_prompt_layers_surface_carries_chars_and_token_estimate():
+    surface_text = "Keep answers terse and cite the runbook."
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev",
+            hermes_profile="dev",
+            display_name="Launcher Dev",
+            role="dev",
+        ),
+        surface_prompt=surface_text,
+    )
+    layers = {layer["kind"]: layer for layer in context["prompt_layers"]}
+    surface = layers["surface"]
+    assert surface["chars"] == len(surface_text)
+    assert surface["token_estimate"] == len(surface_text) // 4
+
+
+def test_prompt_layers_blank_surface_is_zero_not_absent():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev",
+            hermes_profile="dev",
+            display_name="Launcher Dev",
+            role="dev",
+        ),
+        surface_prompt="",
+    )
+    surface = {layer["kind"]: layer for layer in context["prompt_layers"]}["surface"]
+    # Blank surface is present-but-empty: an explicit 0, never a missing key.
+    assert surface["chars"] == 0
+    assert surface["token_estimate"] == 0
+
+
+def test_prompt_layers_without_available_text_degrade_to_no_estimate():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev",
+            hermes_profile="dev",
+            display_name="Launcher Dev",
+            role="dev",
+        ),
+    )
+    layers = {layer["kind"]: layer for layer in context["prompt_layers"]}
+    # persona_identity / system_core / profile_context text is assembled later in
+    # the turn (or attributed via context files) — no fabricated per-layer number.
+    for kind in ("persona_identity", "system_core", "profile_context"):
+        assert kind in layers
+        assert "token_estimate" not in layers[kind]
+        assert "chars" not in layers[kind]
+
+
+def test_persona_identity_summary_reflects_own_soul_overlay():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="neko_supervisor",
+            hermes_profile="neko",
+            display_name="Neko Mission Lead",
+            role="alice_supervisor",
+        ),
+    )
+    identity = {layer["kind"]: layer for layer in context["prompt_layers"]}[
+        "persona_identity"
+    ]
+    summary = identity["summary"]
+    # Post-deafb825e: a persona's OWN configured soul overlay IS loaded; only the
+    # OPERATOR profile's SOUL is not. The stale "does not load the profile SOUL"
+    # absolute must be gone.
+    assert "does not load the profile SOUL" not in summary
+    assert "soul_overlay_path" in summary
+    assert "OPERATOR profile's SOUL is" in summary
 
 
 def test_workspace_agents_context_refuses_oversized_file_without_blocking_receipt(tmp_path):
