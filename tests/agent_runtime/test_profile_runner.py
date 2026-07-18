@@ -1117,10 +1117,30 @@ def test_todo_state_payload_returns_none_for_non_todo_tool():
     assert _todo_state_payload("terminal", _todo_result([{"id": "1", "content": "c", "status": "pending"}]), None) is None
 
 
-def test_todo_state_payload_returns_none_when_no_list():
+def test_todo_state_payload_returns_none_when_unrecoverable():
+    # Absence (None) is reserved for a non-todo tool or an unrecoverable payload:
+    # neither the result nor the invocation yields a list. A cleared list is a
+    # DIFFERENT case (see test_todo_state_payload_emits_explicit_empty_on_clear).
     assert _todo_state_payload("todo", "just a string", invocation=None) is None
     assert _todo_state_payload("todo", {"summary": {}}, invocation=None) is None
-    assert _todo_state_payload("todo", _todo_result([]), invocation=None) is None
+    assert _todo_state_payload("todo", "not-json{", invocation="also bad") is None
+
+
+def test_todo_state_payload_emits_explicit_empty_on_clear():
+    # T9d: a todo WRITE whose resulting list is empty emits an explicit `[]` — the
+    # cleared-checklist signal the launcher resolver uses to hide the panel —
+    # distinct from absence (None). Both the JSON-string and bare-list shapes of
+    # a cleared result recover an empty list.
+    assert _todo_state_payload("todo", _todo_result([]), invocation=None) == []
+    assert _todo_state_payload("todo", {"todos": []}, invocation=None) == []
+    assert _todo_state_payload("todo", "[]", invocation=None) == []
+    # A cleared result is NOT masked by a stale invocation fallback: the result's
+    # empty list wins (the fallback only triggers on an unparseable result).
+    assert _todo_state_payload(
+        "todo", _todo_result([]), invocation={"todos": [{"id": "1", "content": "stale", "status": "pending"}]}
+    ) == []
+    # But a non-todo tool with an empty result is still absent, never `[]`.
+    assert _todo_state_payload("terminal", _todo_result([]), invocation=None) is None
 
 
 def test_todo_state_payload_normalizes_status_and_caps_content():

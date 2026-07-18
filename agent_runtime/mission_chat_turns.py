@@ -739,10 +739,14 @@ def _safe_elements(value: Any) -> list[dict[str, Any]]:
             )
             # T7: preserve the todo tool's structured checklist (id/content/status)
             # so the operator console can render it after the turn persists. Bounded
-            # again here (defence in depth over the producer cap) and only kept when
-            # present, so non-todo tool elements gain no new key.
+            # again here (defence in depth over the producer cap).
+            # T9d: keep an explicit EMPTY list too (`is not None`, not truthiness) —
+            # a cleared checklist persists as `todo_state: []` so a reloaded turn
+            # clears the panel exactly like the live lane. `_safe_todo_state`
+            # returns None only for a truly absent/non-list value, so non-todo
+            # elements still gain no key.
             todo_state = _safe_todo_state(raw.get("todo_state"))
-            if todo_state:
+            if todo_state is not None:
                 base["todo_state"] = todo_state
         elements.append(base)
     return sorted(elements, key=lambda item: (int(item.get("seq") or 0), str(item.get("id") or "")))
@@ -760,8 +764,14 @@ def _safe_todo_state(value: Any) -> list[dict[str, str]] | None:
     """Bounded, validated todo checklist for persistence.
 
     Keeps only ``{id, content, status}`` per item, caps item count and content
-    length, and normalises unknown statuses to ``pending``. Returns ``None`` when
-    nothing valid is present so a non-todo element never gains the key."""
+    length, and normalises unknown statuses to ``pending``. Returns ``None`` only
+    when ``value`` is not a list (absent / non-todo element), so a non-todo
+    element never gains the key.
+
+    T9d: a list ``value`` — including an explicit empty one — returns a list
+    (possibly ``[]``). The empty list is the cleared-checklist signal and must
+    survive persistence so a reloaded turn clears the panel exactly like the live
+    lane; ``items or None`` would have collapsed it back to absence."""
 
     if not isinstance(value, list):
         return None
@@ -775,7 +785,7 @@ def _safe_todo_state(value: Any) -> list[dict[str, str]] | None:
         if status not in _TODO_STATE_VALID_STATUS:
             status = "pending"
         items.append({"id": item_id, "content": content, "status": status})
-    return items or None
+    return items
 
 
 def _safe_int(value: Any) -> int | None:

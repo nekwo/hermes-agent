@@ -1311,14 +1311,21 @@ def _todo_state_payload(tool_name: str | None, result: Any, invocation: Any) -> 
     statuses) returned by :func:`tools.todo_tool.todo_tool` — onto the finished
     event, bounded and validated. Falls back to the invocation's ``todos`` when
     the result is unparseable. Returns ``None`` for any non-todo tool or when no
-    list is recoverable (never fabricate)."""
+    list is recoverable (unparseable result AND invocation) — absence means "no
+    todo involvement", never fabricate. A recovered but EMPTY list returns an
+    explicit ``[]`` (T9d): a todo write that clears the checklist must tell the
+    operator console to clear it, a state distinct from absence."""
 
     if (tool_name or "").lower() != "todo":
         return None
     todos = _todo_items_from(result)
     if todos is None:
         todos = _todo_items_from(invocation)
-    if not todos:
+    if todos is None:
+        # Neither the result nor the invocation yielded a list — unrecoverable,
+        # so stay silent (absent). This is NOT an empty checklist: a cleared list
+        # comes back as ``[]`` from _todo_items_from and falls through to the
+        # explicit-empty return below (T9d cleared-todo contract).
         return None
     items: list[dict[str, str]] = []
     for raw in todos[:_TODO_STATE_MAX_ITEMS]:
@@ -1338,7 +1345,10 @@ def _todo_state_payload(tool_name: str | None, result: Any, invocation: Any) -> 
         elif len(content) > _TODO_STATE_MAX_CONTENT:
             content = content[: _TODO_STATE_MAX_CONTENT - 1] + "…"
         items.append({"id": item_id, "content": content, "status": status})
-    return items or None
+    # T9d: return ``items`` directly (NOT ``items or None``) so a recovered but
+    # empty list stays an explicit ``[]`` — the cleared-checklist signal. ``None``
+    # is reserved for non-todo tools / unrecoverable payloads (handled above).
+    return items
 
 
 def _collapse_todo_ws(value: Any) -> str:

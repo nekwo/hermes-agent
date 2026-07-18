@@ -2468,8 +2468,12 @@ class _ChatProtocolV2Emitter:
         # operator console can render it (the store is otherwise in-memory only).
         # Producer-bounded already (profile_runner `_todo_state_payload`); the
         # turn-store re-bounds it in `_safe_elements`.
+        # T9d: carry an explicit EMPTY list too (`isinstance(...)`, not
+        # `and todo_state`) — a cleared checklist emits `todo_state: []`, which the
+        # launcher resolver distinguishes from absence to clear the panel. A
+        # non-todo tool never carries the key (the producer returns None for it).
         todo_state = payload.get("todo_state")
-        if isinstance(todo_state, list) and todo_state:
+        if isinstance(todo_state, list):
             tool["todo_state"] = todo_state
         self._emit_chat_frame(
             {
@@ -2486,7 +2490,7 @@ class _ChatProtocolV2Emitter:
                 "detail": tool.get("detail"),
                 "output": tool.get("output"),
                 "exit_code": tool.get("exit_code"),
-                **({"todo_state": tool["todo_state"]} if tool.get("todo_state") else {}),
+                **({"todo_state": tool["todo_state"]} if "todo_state" in tool else {}),
             }
         )
 

@@ -380,11 +380,21 @@ def test_safe_todo_state_caps_item_count():
     assert len(result) == mission_chat_turns._TODO_STATE_MAX_ITEMS
 
 
-def test_safe_todo_state_returns_none_when_absent_or_empty():
+def test_safe_todo_state_returns_none_only_when_absent_or_non_list():
+    # Absence / non-list values stay None so a non-todo element never gains the
+    # key. An explicit empty list is a DIFFERENT case (T9d cleared-checklist).
     assert mission_chat_turns._safe_todo_state(None) is None
     assert mission_chat_turns._safe_todo_state("nope") is None
-    assert mission_chat_turns._safe_todo_state([]) is None
-    assert mission_chat_turns._safe_todo_state(["only-non-dicts"]) is None
+
+
+def test_safe_todo_state_preserves_explicit_empty_for_cleared_checklist():
+    # T9d: a list value — including an explicit empty one — persists as a list so
+    # a reloaded turn carries the cleared-checklist signal (`[]`) exactly like the
+    # live lane, instead of collapsing back to absence.
+    assert mission_chat_turns._safe_todo_state([]) == []
+    # A list of only-non-dict junk reduces to empty (also a cleared signal),
+    # never None — the value WAS a list (present), just carried nothing valid.
+    assert mission_chat_turns._safe_todo_state(["only-non-dicts"]) == []
 
 
 def test_safe_elements_preserves_todo_state_only_on_todo_tools():
@@ -412,3 +422,40 @@ def test_safe_elements_preserves_todo_state_only_on_todo_tools():
     )
     assert elements[0]["todo_state"] == todo_items
     assert "todo_state" not in elements[1]  # non-todo tool gains no key
+
+
+def test_chat_emitter_carries_explicit_empty_todo_state_on_both_lanes():
+    # T9d end-to-end on the emit path: a cleared todo checklist arrives as an
+    # explicit empty list, and it must ride BOTH the turn-store element and the
+    # live tool.finished frame so the launcher can clear its panel. A non-todo
+    # tool still gains no key on either lane.
+    # The emitter is exec'd into the `harness` namespace (harness_parts pattern),
+    # so it resolves as `harness._ChatProtocolV2Emitter`, not a standalone import.
+    from hermes_cli import harness
+
+    def _drive(payload):
+        frames: list[dict] = []
+        emitter = harness._ChatProtocolV2Emitter(
+            turn_id="turn_todo", client_message_id="m1", emit_frames=False
+        )
+        emitter._emit_chat_frame = lambda frame: frames.append(frame)  # capture frames
+        emitter._tool_finished(payload)
+        tool_elements = [e for e in emitter.elements if e.get("kind") == "tool"]
+        finished = [f for f in frames if f.get("type") == "tool.finished"]
+        return tool_elements[-1], finished[-1]
+
+    # Cleared checklist -> explicit [] on the element AND the frame.
+    element, frame = _drive({"tool_name": "todo", "status": "ok", "todo_state": []})
+    assert element["todo_state"] == []
+    assert frame["todo_state"] == []
+
+    # Populated checklist still rides both lanes verbatim.
+    todos = [{"id": "1", "content": "do it", "status": "in_progress"}]
+    element, frame = _drive({"tool_name": "todo", "status": "ok", "todo_state": todos})
+    assert element["todo_state"] == todos
+    assert frame["todo_state"] == todos
+
+    # A non-todo tool never carries the key on either lane.
+    element, frame = _drive({"tool_name": "terminal", "status": "ok"})
+    assert "todo_state" not in element
+    assert "todo_state" not in frame
