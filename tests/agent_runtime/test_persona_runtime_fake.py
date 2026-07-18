@@ -1387,6 +1387,75 @@ def test_mission_chat_reply_sets_cache_scope_id_but_keeps_session_none(tmp_path,
     assert request.session_id is None
 
 
+def test_chat_reply_threads_cache_scope_id_to_run_request(tmp_path, monkeypatch):
+    # T10c follow-up: the FREE-FLOATING lane (operator console chats +
+    # agent_chat relays) calls chat_reply with session_id=None while holding a
+    # bound stable chat session id. chat_reply must thread that id through as
+    # the header-only cache_scope_id — this lane was cache-cold on every turn
+    # without it (live-observed: fmi.session_id='' and cache_read=0 post-T10c).
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="persona_chat_personainst_neko_free_1",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.chat_reply(
+        neko,
+        "hi",
+        session_id=None,
+        cache_scope_id="persona_chat_personainst_neko_free_1",
+    )
+
+    request = captured["request"]
+    assert request.cache_scope_id == "persona_chat_personainst_neko_free_1"
+    assert request.session_id is None
+
+
+def test_chat_reply_cache_scope_defaults_to_none(tmp_path, monkeypatch):
+    # Callers that pass a REAL session_id (transcript-loading chat lanes) get
+    # header routing via session_id at the transport seam; chat_reply must not
+    # invent a scope for them — absent stays absent.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="s2",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.chat_reply(neko, "hi", session_id="real-session-7")
+
+    request = captured["request"]
+    assert request.cache_scope_id is None
+    assert request.session_id == "real-session-7"
+
+
 def test_mission_chat_reply_cache_scope_falls_back_to_session_when_no_perm(tmp_path, monkeypatch):
     # perm_session_id = permission_session_id or session_id. When only session_id
     # is supplied (no separate permission id), the cache scope still resolves to

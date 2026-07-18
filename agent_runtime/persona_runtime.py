@@ -202,6 +202,12 @@ class GPTPersonaRuntime:
         stream_callback: Callable[[str | None], None] | None = None,
         pre_trace_callback: Callable[[dict], None] | None = None,
         trace_callback: Callable[[dict], None] | None = None,
+        # T10c follow-up: header-only cache-scope routing identity (codex
+        # cache-scope headers), NEVER a transcript/session-load key. The
+        # free-floating lane binds its chat session but calls with
+        # session_id=None (history is baked into the message) — without this,
+        # that lane ships no cache-scope headers and every turn is cache-cold.
+        cache_scope_id: str | None = None,
     ) -> AgentRunResult:
         """Run one plain conversational turn for an operator persona chat.
 
@@ -243,6 +249,7 @@ class GPTPersonaRuntime:
                 skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
                 session_id=session_id,
+                cache_scope_id=cache_scope_id,
                 max_wall_seconds=max_wall_seconds,
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,

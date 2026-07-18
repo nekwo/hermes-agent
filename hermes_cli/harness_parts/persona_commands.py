@@ -3309,6 +3309,13 @@ def _run_free_floating_assignment_once(
             persona,
             chat_message,
             session_id=None,
+            # T10c follow-up: the free-floating lane (operator console chats +
+            # agent_chat relays) binds a stable chat session above but runs with
+            # session_id=None (history is baked into chat_message). Feed that
+            # stable id as the header-only cache scope so the codex cache-scope
+            # headers ride and the persona's warm prefix survives across turns —
+            # without it this lane was cache-cold on every turn.
+            cache_scope_id=session_id,
             turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
             max_wall_seconds=max_seconds,
             stream_callback=_stream_delta if stream else None,
