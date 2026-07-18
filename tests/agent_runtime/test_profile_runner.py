@@ -110,7 +110,17 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
     assert result.final_response == "ok"
     assert result.session_id == "session_1"
     assert FakeAgent.last_kwargs["enabled_toolsets"] == ["terminal"]
-    assert FakeAgent.last_kwargs["blocked_tool_names"] == ["send_message"]
+    # T6c: the requested blocks are preserved AND the fork registry-hygiene set
+    # (kanban + feishu) is unioned in at agent construction, so no lane can resolve
+    # those toolsets. delegate_task / memory are deliberately NOT force-blocked
+    # here (operator ruling: keep them registered).
+    from agent_runtime.personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
+
+    passed_blocked = FakeAgent.last_kwargs["blocked_tool_names"]
+    assert "send_message" in passed_blocked
+    assert REGISTRY_HYGIENE_BLOCKED_TOOLS.issubset(set(passed_blocked))
+    assert "delegate_task" not in passed_blocked
+    assert "memory" not in passed_blocked
     assert FakeAgent.last_kwargs["api_mode"] == "codex_responses"
     assert result.profile_timing["runtime_resolve_ms"] >= 0
     assert result.profile_timing["agent_construct_ms"] >= 0

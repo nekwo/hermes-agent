@@ -14,7 +14,28 @@ import re
 from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
+from .personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
 from .profile_context import PersonaProfileBinding, persona_profile_context
+
+
+def _blocked_tool_names_with_registry_hygiene(requested: list[str] | None) -> list[str]:
+    """Union the fork registry-hygiene block into a request's ``blocked_tool_names``.
+
+    This is the single fork-owned chokepoint that makes the deregistered upstream
+    toolsets (``kanban`` + ``feishu_doc`` / ``feishu_drive``) unresolvable on EVERY
+    agent-runtime lane — the persona chat/run lanes already carry them via
+    ``PERSONA_BLOCKED_TOOLS``, but the worker / root-node lanes construct their
+    request with ``blocked_tool_names=[]`` and would otherwise resolve them. Applied
+    here (agent construction) so no call site can opt out. Order-preserving; the
+    downstream tool-def cache keys on the set, so duplicates/order are harmless."""
+
+    names = list(requested or [])
+    seen = set(names)
+    for name in sorted(REGISTRY_HYGIENE_BLOCKED_TOOLS):
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
 
 
 class ProfileRunnerError(RuntimeError):
@@ -216,7 +237,7 @@ class ProfileAgentRunner:
                 **reasoning_kwargs,
                 enabled_toolsets=request.enabled_toolsets,
                 disabled_toolsets=request.disabled_toolsets,
-                blocked_tool_names=request.blocked_tool_names,
+                blocked_tool_names=_blocked_tool_names_with_registry_hygiene(request.blocked_tool_names),
                 quiet_mode=request.quiet_mode,
                 skip_context_files=request.skip_context_files,
                 skip_memory=request.skip_memory,

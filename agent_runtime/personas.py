@@ -107,13 +107,25 @@ PROFILE_CHAT_FALLBACK_TOOLSETS = (
 )
 
 
-PERSONA_BLOCKED_TOOLS = frozenset(
+# Fork registry hygiene (T6c, 2026-07-18). Upstream toolsets the fork's effective
+# registry must never resolve on ANY agent-runtime lane: the whole ``kanban``
+# toolset (9 tools — superseded by the fork board/mission system) and the
+# ``feishu_doc`` + ``feishu_drive`` toolsets (5 tools — an irrelevant Feishu/Lark
+# integration). The upstream tool files stay untouched (fork-sync cleanliness);
+# this fork-owned constant is the deregistration mechanism. It is enforced in TWO
+# places so no lane escapes:
+#   1. folded into ``PERSONA_BLOCKED_TOOLS`` below → the persona chat/run lanes and
+#      the ``tool_visibility`` permission-preview surface, and
+#   2. unioned at the ``profile_runner`` agent-construction chokepoint → every
+#      lane, including the worker / root-node lanes that pass
+#      ``blocked_tool_names=[]`` (node_tools.py / root_node_engine.py).
+# ``delegate_task`` and ``memory`` are deliberately NOT here — operator ruling:
+# keep them registered (both are parallel-authority surfaces; a future lane that
+# enables either owns reconciling delegation-vs-harness-dispatch / upstream-memory-
+# vs-profile-memory).
+REGISTRY_HYGIENE_BLOCKED_TOOLS = frozenset(
     {
-        "delegate_task",
-        "clarify",
-        "memory",
-        "send_message",
-        "cronjob",
+        # kanban toolset (9)
         "kanban_show",
         "kanban_list",
         "kanban_create",
@@ -123,8 +135,26 @@ PERSONA_BLOCKED_TOOLS = frozenset(
         "kanban_comment",
         "kanban_unblock",
         "kanban_heartbeat",
+        # feishu_doc toolset (1)
+        "feishu_doc_read",
+        # feishu_drive toolset (4)
+        "feishu_drive_list_comments",
+        "feishu_drive_list_comment_replies",
+        "feishu_drive_reply_comment",
+        "feishu_drive_add_comment",
     }
 )
+
+
+PERSONA_BLOCKED_TOOLS = frozenset(
+    {
+        "delegate_task",
+        "clarify",
+        "memory",
+        "send_message",
+        "cronjob",
+    }
+) | REGISTRY_HYGIENE_BLOCKED_TOOLS
 
 PER_ROLE_TOOL_DENIES: dict[AgentRole, frozenset[str]] = {
     AgentRole.PM: frozenset({"write_file", "patch", "terminal"}),
