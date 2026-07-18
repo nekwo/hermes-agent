@@ -732,9 +732,13 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
     # Toolsets resolved through the supervisor ceiling; mission_goal augmentation
     # (the operator-channel goal capability) is available to the profile chat.
     assert "mission_goal" in request.enabled_toolsets
-    assert set(["file", "search", "session_search", "todo", "skills"]).issubset(
+    # The chat lane keeps the supervision toolsets; the T6a cost policy drops the
+    # `file` dev toolkit (patch/read/write/search_files) from the conversational
+    # lane, so it is no longer present even though the persona configured it.
+    assert set(["search", "session_search", "todo", "skills"]).issubset(
         set(request.enabled_toolsets)
     )
+    assert "file" not in request.enabled_toolsets
 
 
 def test_mission_chat_reply_has_no_api_call_cap_and_keeps_iteration_failsafe(

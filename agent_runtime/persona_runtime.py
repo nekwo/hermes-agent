@@ -9,7 +9,7 @@ from typing import Callable, Protocol
 from hermes_constants import get_hermes_home
 
 from . import paths
-from .chat_lane_toolsets import scope_chat_lane_toolsets
+from .chat_lane_toolsets import chat_lane_blocked_tools, scope_chat_lane_toolsets
 from .config import chat_lane_restore_toolsets, load_agent_runtime_config
 from .context_builder import AgentContext, build_context, render_context
 from .decision_contract_registry import prompt_contract_markdown
@@ -759,6 +759,13 @@ def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | Non
         return []
     names = set(blocked_tool_names(persona))
     names.update(extra_blocked_tools_for_permission_mode(options.permission_mode))
+    # T6a chat-lane cost policy: drop single heavy tools whose whole toolset must
+    # stay enabled. ``skill_manage`` (skill authoring) rides here so the ``skills``
+    # toolset keeps skill_search / skill_view / skills_list for read-only recall.
+    # Shares the per-persona ``chat_lane_restore_toolsets`` knob with the toolset
+    # exclusion, so an operator can restore it the same way. This applies only on
+    # the bounded lane — the unbounded escape hatch returned above unfiltered.
+    names.update(chat_lane_blocked_tools(restore=chat_lane_restore_toolsets(persona.id)))
     # clarify is globally blocked (PERSONA_BLOCKED_TOOLS) because autonomous
     # runs have no interactive callback to answer it — but the operator/relay
     # chat lane provides a non-blocking clarify bridge (MissionChatClarifyCapture),
