@@ -900,12 +900,23 @@ def _cmd_mission_chat_message(args) -> int:
             )
         return 0
 
+    # Relay sender attribution: resolve who sent this incoming message ONCE
+    # (agent_chat_send relays carry requested_by="agent:<caller session>"), so
+    # the persisted role="user" row records the sending agent instead of reading
+    # as the operator on the target's chat. Operator/CLI sends resolve to None →
+    # no marker → byte-identical persistence.
+    relay_marker = _resolve_relay_sender_marker(
+        getattr(args, "requested_by", None),
+        instance_store=instance_store,
+        relay_chain_in=relay_chain_in,
+    )
     _append_persona_operator_turn(
         session_db=session_db,
         session_id=session_id,
         message=message,
         client_message_id=client_message_id,
         skip_if_present=bool(replay.get("operator")),
+        relay_marker=relay_marker,
     )
     chat_message = _persona_chat_message_with_history(
         session_db=session_db,
@@ -2892,6 +2903,70 @@ def _persona_chat_existing_turn(
     return result
 
 
+def _resolve_relay_sender_marker(
+    requested_by,
+    *,
+    instance_store,
+    relay_chain_in,
+) -> str | None:
+    """Resolve a relayed incoming message's sender into a finish_reason marker.
+
+    Only an ``agent_chat_send`` relay carries ``requested_by = "agent:<caller
+    session id>"`` (set by tools/agent_chat_tool.py from the CALLER's session).
+    Operator / CLI / coordinator sends do NOT, and must persist byte-identically
+    to today (this returns ``None`` for them → no marker). Resolution is tiered
+    most-to-least specific; each tier is a deliberate source of truth and the
+    bare ``relay_from::`` marker is the honest unknown, never a guessed operator.
+    """
+    if not isinstance(requested_by, str) or not requested_by.startswith("agent:"):
+        return None
+    token = requested_by[len("agent:"):].strip()
+    if not token:
+        return None
+
+    from agent_runtime import relay_policy
+
+    persona_id: str | None = None
+    instance_id: str | None = None
+    instances = instance_store.list_all()
+    by_id = {instance.id: instance for instance in instances}
+
+    # Tier 1 — the caller session is a minted chat session; its exact-mint owner
+    # is the sending instance (sibling-safe: personainst_<p>_agent_2 survives).
+    # Resolve the persona from the store row, never by string-parsing the
+    # instance id (placement suffixes make that fragile).
+    owner = chat_session_owner_instance_id(token)
+    if owner and owner in by_id:
+        instance_id = owner
+        persona_id = safe_assignment_token(by_id[owner].persona_id) or None
+    elif owner and owner.startswith(PERSONA_INSTANCE_ID_PREFIX):
+        # A real instance handle whose row is absent from this snapshot (e.g.
+        # reaped): keep the instance identity, leave the persona honestly
+        # unknown rather than guessing.
+        instance_id = owner
+
+    # Tier 2 — worker/task-lane callers: the caller session is the instance's
+    # active worker/bound session, not a chat-shaped id.
+    if instance_id is None and persona_id is None:
+        for instance in instances:
+            candidates = {
+                safe_assignment_text(instance.active_worker_session_id, limit=200),
+                safe_assignment_text(instance.session_id, limit=200),
+            }
+            if token in candidates:
+                instance_id = instance.id
+                persona_id = safe_assignment_token(instance.persona_id) or None
+                break
+
+    # Tier 3 — persona-level fallback: the immediate caller is the LAST entry of
+    # the pre-target-append relay chain (canonical persona id; no instance).
+    if instance_id is None and persona_id is None and relay_chain_in:
+        persona_id = relay_chain_in[-1] or None
+
+    # Tier 4 — nothing resolved → the honest bare marker relay_from::.
+    return relay_policy.build_relay_sender_marker(persona_id, instance_id)
+
+
 def _append_persona_operator_turn(
     *,
     session_db,
@@ -2899,6 +2974,7 @@ def _append_persona_operator_turn(
     message: str,
     client_message_id: str | None = None,
     skip_if_present: bool = False,
+    relay_marker: str | None = None,
 ) -> None:
     if session_db is None or not session_id:
         return
@@ -2912,6 +2988,10 @@ def _append_persona_operator_turn(
             session_id=session_id,
             role="user",
             content=safe_message,
+            # Relayed incoming rows carry the sending agent's identity here (the
+            # pre_trace_ack typed-marker-in-finish_reason precedent); operator/CLI
+            # sends pass relay_marker=None → finish_reason stays None, unchanged.
+            finish_reason=relay_marker,
             platform_message_id=safe_assignment_text(client_message_id, limit=200)
             or None,
         )

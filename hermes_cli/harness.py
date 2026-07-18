@@ -60,6 +60,7 @@ from agent_runtime.models import AgentPersona, Event, Task, apply_instance_model
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     ChatBusyError,
+    PERSONA_INSTANCE_ID_PREFIX,
     PersonaAssignmentSpec,
     PersonaInstanceRetireError,
     StaleModelOverrideWrite,

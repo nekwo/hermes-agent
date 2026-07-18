@@ -6,7 +6,11 @@ from typing import Any, Iterable
 
 from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
-from .persona_chat_history import _canonical_persona_id, PERSONA_PRE_TRACE_ACK_KIND
+from .persona_chat_history import (
+    _canonical_persona_id,
+    PERSONA_PRE_TRACE_ACK_KIND,
+    PERSONA_RELAYED_MESSAGE_KIND,
+)
 from .simplified_contract import public_decision_type_value
 from .transcript_order import TURN_SEQ_CONTENT, order_transcript_rows
 
@@ -67,6 +71,11 @@ def operator_channel_summary(
     channels: dict[str, _OperatorChannelBuilder] = {}
     by_session: dict[str, _OperatorChannelBuilder] = {}
     by_instance: dict[str, _OperatorChannelBuilder] = {}
+    # instance id → display name, built once from the FULL roster so a relayed
+    # message can name the sending agent (the sender may be any instance, not
+    # just this channel's owner). Threaded down to the history projection as an
+    # additive lookup; never re-derived per row.
+    display_names: dict[str, str] = {}
 
     for instance in persona_instances:
         key = _channel_key_for_instance(instance)
@@ -81,6 +90,9 @@ def operator_channel_summary(
             by_session[session_id] = builder
         if instance_id:
             by_instance[instance_id] = builder
+            name = safe_assignment_text(getattr(instance, "display_name", None), limit=120)
+            if name:
+                display_names[instance_id] = name
 
     for row in persona_chat_history:
         session_id = _safe_session(row.get("session_id"))
@@ -119,7 +131,12 @@ def operator_channel_summary(
     return [
         channel
         for channel in (
-            builder.build(task_lookup=task_lookup, run_lookup=run_lookup, accountant=accountant)
+            builder.build(
+                task_lookup=task_lookup,
+                run_lookup=run_lookup,
+                accountant=accountant,
+                display_names=display_names,
+            )
             for builder in channels.values()
         )
         if channel is not None
@@ -183,6 +200,7 @@ class _OperatorChannelBuilder:
         task_lookup: "_TaskLookup",
         run_lookup: "_RunLookup | None" = None,
         accountant: Any = None,
+        display_names: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         history = self._bound_history() or _latest_history(self.history_rows)
         trace = _merged_trace(self.trace_rows)
@@ -279,6 +297,7 @@ class _OperatorChannelBuilder:
             trace=trace,
             runs=channel_runs,
             accountant=accountant,
+            display_names=display_names,
         )
         if _turn_identity_dropped(entries, conversation.get("messages") or []):
             warnings.append(
@@ -546,6 +565,7 @@ def _conversation_contract(
     trace: dict[str, Any] | None,
     runs: list[dict[str, Any]] | None = None,
     accountant: Any = None,
+    display_names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     if task is not None:
@@ -565,6 +585,7 @@ def _conversation_contract(
                 index=index,
                 persona_id=persona_id,
                 persona_instance_id=persona_instance_id,
+                display_names=display_names,
             )
             if message is not None:
                 messages.append(message)
@@ -731,6 +752,7 @@ def _conversation_history_message(
     index: int,
     persona_id: str,
     persona_instance_id: str | None,
+    display_names: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     text = _safe_conversation_text(row.get("text"), limit=20000)
     if not text:
@@ -779,18 +801,40 @@ def _conversation_history_message(
         role == "agent"
         and safe_assignment_token(row.get("kind")) == PERSONA_PRE_TRACE_ACK_KIND
     )
-    if role == "agent":
-        default_kind = PERSONA_PRE_TRACE_ACK_KIND if is_pre_trace_ack else "reply"
-    elif role == "operator":
-        default_kind = "operator_message"
+    # A relayed incoming message is a role="operator" row that persona_chat_history
+    # tagged with the SENDING agent's identity (finish_reason marker). Attribute
+    # it to that agent, but keep role="operator" so the lane semantics — and any
+    # consumer that ignores the typed kind — degrade to today's operator render.
+    is_relayed_message = (
+        role == "operator"
+        and safe_assignment_token(row.get("kind")) == PERSONA_RELAYED_MESSAGE_KIND
+    )
+    relay_sender_instance_id = (
+        safe_assignment_text(row.get("relay_sender_instance_id"), limit=160)
+        if is_relayed_message
+        else None
+    )
+    if is_relayed_message:
+        default_kind = PERSONA_RELAYED_MESSAGE_KIND
+        actor_persona_id = (
+            safe_assignment_text(row.get("relay_sender_persona_id"), limit=160) or "agent"
+        )
+        actor_instance_id = relay_sender_instance_id or None
     else:
-        default_kind = "system_message"
+        if role == "agent":
+            default_kind = PERSONA_PRE_TRACE_ACK_KIND if is_pre_trace_ack else "reply"
+        elif role == "operator":
+            default_kind = "operator_message"
+        else:
+            default_kind = "system_message"
+        actor_persona_id = "operator" if role == "operator" else persona_id
+        actor_instance_id = None if role == "operator" else persona_instance_id
     message = {
         "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
         "seq": 0,
         "timestamp": row.get("timestamp"),
-        "actor_persona_id": "operator" if role == "operator" else persona_id,
-        "actor_instance_id": None if role == "operator" else persona_instance_id,
+        "actor_persona_id": actor_persona_id,
+        "actor_instance_id": actor_instance_id,
         "role": role,
         "kind": default_kind,
         "status": "delivered",
@@ -799,6 +843,12 @@ def _conversation_history_message(
         "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
         "refs": {"source": "persona_chat_history"},
     }
+    # Name the sending agent ONLY when its instance id resolves in the roster —
+    # never fabricate a name for an instance we cannot see.
+    if is_relayed_message and relay_sender_instance_id:
+        resolved_name = (display_names or {}).get(relay_sender_instance_id)
+        if resolved_name:
+            message["actor_display_name"] = resolved_name
     if role == "operator" and client_message_id:
         message["client_message_id"] = client_message_id
     if role == "agent" and client_message_id:

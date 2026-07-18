@@ -9,6 +9,7 @@ from .mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_re
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction_mode import redaction_observe_enabled
+from .relay_policy import parse_relay_sender_marker
 from .transcript_order import (
     TURN_SEQ_CONTENT,
     TURN_SEQ_OPERATOR,
@@ -25,6 +26,12 @@ PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 # the Launcher) key on the kind instead of matching the prose.
 PERSONA_PRE_TRACE_ACK_FINISH_REASON = "pre_trace_ack"
 PERSONA_PRE_TRACE_ACK_KIND = "pre_trace_ack"
+
+# Typed kind for an incoming role="user" row that a relay tagged with the
+# sending agent's identity (finish_reason=relay_from:<persona>:<instance>). The
+# conversation projection keys on this to attribute the message to the sending
+# AGENT instead of the operator. See agent_runtime/relay_policy.py.
+PERSONA_RELAYED_MESSAGE_KIND = "relayed_message"
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
 DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
 MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
@@ -835,6 +842,20 @@ def _safe_recent_messages(
         )
         if is_pre_trace_ack:
             row["kind"] = PERSONA_PRE_TRACE_ACK_KIND
+        # RELAY SENDER ATTRIBUTION: an incoming role="user" row persisted by the
+        # agent_chat_send relay lane carries the sending agent's identity in
+        # finish_reason (relay_from:<persona>:<instance>) — the same typed-marker
+        # -in-finish_reason precedent as the pre_trace_ack rows above. Surface it
+        # as a typed kind + sender fields so the conversation projection can
+        # attribute the message to the sending AGENT rather than the operator.
+        # Operator/CLI sends (finish_reason=None) parse to None → skipped, so the
+        # operator row is byte-identical to today.
+        if role == "operator":
+            relay_sender = parse_relay_sender_marker(raw.get("finish_reason"))
+            if relay_sender is not None:
+                row["kind"] = PERSONA_RELAYED_MESSAGE_KIND
+                row["relay_sender_persona_id"] = relay_sender.persona_id
+                row["relay_sender_instance_id"] = relay_sender.instance_id
         if client_message_id:
             row["client_message_id"] = client_message_id
             # C8 ordering key: the turn anchor is the client_message_id; the

@@ -150,3 +150,58 @@ def evaluate_relay(
             chain=normalized,
         )
     return RelayDecision(allowed=True, chain=normalized + ((target,) if target else ()))
+
+
+# ── Relayed-message sender attribution ──────────────────────────────
+#
+# A relayed incoming chat message (agent A -> agent B via agent_chat_send) is
+# persisted as a bare role="user" SessionDB row — at rest indistinguishable
+# from a real operator ("Tony") message. Without a sender marker the target's
+# chat renders the relay AS the operator, erasing that another AGENT sent it.
+#
+# The sender identity rides the row's ``finish_reason`` column — the same
+# typed-marker-in-``finish_reason`` precedent the pre_trace_ack ack rows use
+# (see persona_chat_history._safe_recent_messages) — so no SessionDB schema
+# change is needed and operator/CLI sends (``finish_reason`` stays None) keep
+# byte-identical persistence. This module is the SINGLE build/parse authority
+# for the marker: no second parse site exists anywhere else in the codebase.
+
+RELAY_SENDER_FINISH_REASON_PREFIX = "relay_from:"
+
+
+@dataclass(frozen=True)
+class RelaySender:
+    """Sender identity decoded from a relay marker.
+
+    Either field is ``None`` when that segment was unresolvable at persist time
+    — the honest unknown, never a fabricated identity."""
+
+    persona_id: str | None = None
+    instance_id: str | None = None
+
+
+def build_relay_sender_marker(persona_id: str | None, instance_id: str | None) -> str:
+    """Encode a relayed message's sender into a ``finish_reason`` marker.
+
+    Shape: ``relay_from:<persona_id>:<instance_id>``. Either segment is emitted
+    empty when unresolvable; the fully-unknown sender is the bare marker
+    ``relay_from::`` (a deliberate honest-unknown, not a guessed operator)."""
+    persona = (persona_id or "").strip()
+    instance = (instance_id or "").strip()
+    return f"{RELAY_SENDER_FINISH_REASON_PREFIX}{persona}:{instance}"
+
+
+def parse_relay_sender_marker(value) -> "RelaySender | None":
+    """Decode a ``finish_reason`` value into a :class:`RelaySender`, or ``None``.
+
+    Non-marker values (``None``, ``""``, ``"stop"``, ``"pre_trace_ack"``, any
+    arbitrary text) return ``None`` so only genuinely relay-tagged rows project
+    as relayed. Parsing is defensive: split the remainder after the prefix at
+    most twice; empty segments become ``None`` fields."""
+    if not isinstance(value, str) or not value.startswith(RELAY_SENDER_FINISH_REASON_PREFIX):
+        return None
+    remainder = value[len(RELAY_SENDER_FINISH_REASON_PREFIX):]
+    parts = remainder.split(":", 2)
+    persona = parts[0].strip() if parts else ""
+    instance = parts[1].strip() if len(parts) > 1 else ""
+    return RelaySender(persona_id=persona or None, instance_id=instance or None)
