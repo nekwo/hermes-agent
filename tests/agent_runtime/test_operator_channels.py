@@ -1540,3 +1540,132 @@ def test_duplicate_instances_warning_fires_only_on_true_canonical_collision():
         warning["code"] == "duplicate_instances_same_channel"
         for warning in channel["warnings"]
     )
+
+
+# --------------------------------------------------------------------------- #
+# Relayed-message conversation projection (sender attribution)                  #
+# --------------------------------------------------------------------------- #
+
+
+def _relayed_row(*, sender_persona_id, sender_instance_id, text="From Neko: hi"):
+    return {
+        "id": "row-relay",
+        "role": "operator",
+        "kind": "relayed_message",
+        "relay_sender_persona_id": sender_persona_id,
+        "relay_sender_instance_id": sender_instance_id,
+        "text": text,
+        "timestamp": "2026-07-18T00:00:00Z",
+        "client_message_id": "cm-relay-1",
+    }
+
+
+def test_conversation_history_message_relayed_attributes_sender_and_names_it():
+    message = _conversation_history_message(
+        _relayed_row(sender_persona_id="neko", sender_instance_id="personainst_neko"),
+        channel_id="qa::sess",
+        index=0,
+        persona_id="qa",
+        persona_instance_id="personainst_qa",
+        display_names={"personainst_neko": "Neko Mission Lead"},
+    )
+    assert message["kind"] == "relayed_message"
+    assert message["actor_persona_id"] == "neko"
+    assert message["actor_instance_id"] == "personainst_neko"
+    assert message["actor_display_name"] == "Neko Mission Lead"
+    # Lane semantics unchanged: an old consumer ignoring the typed kind still
+    # renders it on the operator lane.
+    assert message["role"] == "operator"
+
+
+def test_conversation_history_message_relayed_omits_name_when_instance_absent():
+    # The sender instance is not in the roster map → no fabricated name; and an
+    # unresolvable sender persona degrades to the honest "agent".
+    message = _conversation_history_message(
+        _relayed_row(sender_persona_id=None, sender_instance_id=None),
+        channel_id="qa::sess",
+        index=0,
+        persona_id="qa",
+        persona_instance_id="personainst_qa",
+        display_names={"personainst_neko": "Neko Mission Lead"},
+    )
+    assert message["kind"] == "relayed_message"
+    assert message["actor_persona_id"] == "agent"
+    assert message["actor_instance_id"] is None
+    assert "actor_display_name" not in message
+
+
+def test_conversation_history_message_true_operator_row_is_unchanged():
+    message = _conversation_history_message(
+        {"id": "row-op", "role": "operator", "text": "ping", "client_message_id": "cm-op"},
+        channel_id="qa::sess",
+        index=0,
+        persona_id="qa",
+        persona_instance_id="personainst_qa",
+        display_names={"personainst_neko": "Neko Mission Lead"},
+    )
+    assert message["kind"] == "operator_message"
+    assert message["actor_persona_id"] == "operator"
+    assert message["actor_instance_id"] is None
+    assert "actor_display_name" not in message
+
+
+def test_operator_channel_summary_names_relayed_sender_from_full_roster():
+    # display_names is built from the FULL roster, so a relay INTO qa's channel
+    # can name neko even though neko is a different channel's owner.
+    session_id = "persona_chat_personainst_qa_relaya1b2c3d4"
+    channels = operator_channel_summary(
+        persona_instances=[
+            PersonaInstance(
+                id="personainst_qa",
+                persona_id="qa",
+                role="seed",
+                display_name="QA Agent",
+                profile_id=None,
+                runtime_root="test-runtime",
+                state=WorkerSessionState.IDLE,
+                mode="chat",
+                session_id=session_id,
+                updated_at="2026-07-18T00:00:00Z",
+            ),
+            PersonaInstance(
+                id="personainst_neko",
+                persona_id="neko",
+                role="seed",
+                display_name="Neko Mission Lead",
+                profile_id=None,
+                runtime_root="test-runtime",
+                state=WorkerSessionState.IDLE,
+                mode="chat",
+                session_id="persona_chat_personainst_neko_ffff0000ffff",
+                updated_at="2026-07-18T00:00:00Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa",
+                "title": "QA Agent chat",
+                "message_count": 1,
+                "messages": [
+                    _relayed_row(
+                        sender_persona_id="neko",
+                        sender_instance_id="personainst_neko",
+                        text="From Neko: status?",
+                    )
+                ],
+                "updated_at": "2026-07-18T00:00:00Z",
+            }
+        ],
+        persona_chat_trace=[],
+    )
+    qa_channel = [c for c in channels if c["session_id"] == session_id]
+    assert len(qa_channel) == 1
+    relayed = [
+        m for m in qa_channel[0]["conversation"]["messages"] if m.get("kind") == "relayed_message"
+    ]
+    assert len(relayed) == 1
+    assert relayed[0]["actor_persona_id"] == "neko"
+    assert relayed[0]["actor_instance_id"] == "personainst_neko"
+    assert relayed[0]["actor_display_name"] == "Neko Mission Lead"

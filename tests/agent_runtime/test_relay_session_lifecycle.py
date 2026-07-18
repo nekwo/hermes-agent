@@ -428,3 +428,248 @@ def test_head_home_is_the_outermost_across_nested_relay_hops(
             assert get_hermes_home() == qa_home  # deepest override
             assert get_hermes_head_home() == head_home  # still the operator home
             assert Path(harness._default_persona_session_db().db_path) == head_home / "state.db"
+
+
+# --------------------------------------------------------------------------- #
+# Relay SENDER attribution (finish_reason marker → relayed_message projection)  #
+#                                                                             #
+# A relayed incoming message persists as a role="user" row. Without a sender    #
+# marker the target's chat renders it as the OPERATOR ("Tony") instead of the   #
+# sending agent. The handler resolves the caller once and stamps the sending    #
+# identity onto the row's finish_reason; the read side + conversation           #
+# projection attribute the message to the sending agent, role stays "operator". #
+# --------------------------------------------------------------------------- #
+
+
+def _target_channel(channels, session_id):
+    matches = [channel for channel in channels if channel.get("session_id") == session_id]
+    assert len(matches) == 1, f"expected one channel for {session_id}, got {len(matches)}"
+    return matches[0]
+
+
+def test_resolve_sender_none_for_operator_and_non_relay_requests(isolate_agent_runtime_root):
+    # Only requested_by="agent:<token>" is a relay. Operator/CLI/coordinator
+    # sends resolve to None → no marker → byte-identical persistence.
+    from hermes_cli import harness
+
+    store = PersonaInstanceStore()
+    for requested_by in ("operator", "cli", "agent-chat-relay", None, "agent:"):
+        assert (
+            harness._resolve_relay_sender_marker(
+                requested_by, instance_store=store, relay_chain_in=("neko",)
+            )
+            is None
+        ), requested_by
+
+
+def test_resolve_sender_tier1_chat_session_owner_full_identity(isolate_agent_runtime_root):
+    # The caller session is the SENDER's minted chat session; its exact-mint
+    # owner + store row give the full sender identity (persona + instance).
+    from hermes_cli import harness
+    from agent_runtime.relay_policy import build_relay_sender_marker
+
+    store = PersonaInstanceStore()
+    sender_session = default_chat_session_id_for_instance(store, persona_id="neko")
+    store.open_chat(persona_id="neko", session_id=sender_session, display_name="Neko Mission Lead")
+    sender_id = persona_instance_id_for("neko")
+
+    marker = harness._resolve_relay_sender_marker(
+        f"agent:{sender_session}", instance_store=store, relay_chain_in=("neko",)
+    )
+    assert marker == build_relay_sender_marker("neko", sender_id)
+
+
+def test_resolve_sender_tier2_worker_session_scan(isolate_agent_runtime_root):
+    # A worker/task-lane caller: the token is the instance's active worker
+    # session (not chat-shaped), matched by the store scan — full identity, and
+    # it wins over the tier-3 chain fallback.
+    from hermes_cli import harness
+    from agent_runtime.relay_policy import build_relay_sender_marker
+
+    store = PersonaInstanceStore()
+    inst = store.open_chat(
+        persona_id="dev", session_id="persona_chat_seed_000000000000", display_name="Dev"
+    )
+    inst.active_worker_session_id = "worker_dev_task_7"
+    store.update(inst)
+
+    marker = harness._resolve_relay_sender_marker(
+        "agent:worker_dev_task_7", instance_store=store, relay_chain_in=("neko",)
+    )
+    assert marker == build_relay_sender_marker("dev", inst.id)
+
+
+def test_resolve_sender_tier3_persona_chain_fallback(isolate_agent_runtime_root):
+    # The token resolves to no instance, but the relay chain names the immediate
+    # caller persona → persona-only marker (no instance).
+    from hermes_cli import harness
+    from agent_runtime.relay_policy import build_relay_sender_marker
+
+    store = PersonaInstanceStore()
+    marker = harness._resolve_relay_sender_marker(
+        "agent:unresolvable_token", instance_store=store, relay_chain_in=("dev", "neko")
+    )
+    assert marker == build_relay_sender_marker("neko", None)
+
+
+def test_relay_incoming_row_carries_marker_and_projects_relayed_with_sender_name(
+    isolate_agent_runtime_root,
+):
+    # (a) the relay-persisted row carries the sender marker with the caller's
+    # instance identity; (c) the conversation projection exposes
+    # kind=relayed_message + actor_persona_id/actor_instance_id/actor_display_name.
+    from hermes_state import SessionDB
+
+    from hermes_cli import harness
+    from agent_runtime.operator_channels import operator_channel_summary
+    from agent_runtime.persona_chat_history import PERSONA_RELAYED_MESSAGE_KIND
+
+    store = PersonaInstanceStore()
+    sender_session = default_chat_session_id_for_instance(store, persona_id="neko")
+    store.open_chat(persona_id="neko", session_id=sender_session, display_name="Neko Mission Lead")
+    sender_id = persona_instance_id_for("neko")
+
+    target_session = default_chat_session_id_for_instance(store, persona_id="qa")
+    store.open_chat(persona_id="qa", session_id=target_session, display_name="QA")
+
+    marker = harness._resolve_relay_sender_marker(
+        f"agent:{sender_session}", instance_store=store, relay_chain_in=("neko",)
+    )
+
+    db = SessionDB()
+    harness._ensure_persona_chat_session(
+        session_db=db, session_id=target_session, persona_id="qa", title="QA chat"
+    )
+    harness._append_persona_operator_turn(
+        session_db=db,
+        session_id=target_session,
+        message="From Neko: status?",
+        client_message_id="cm-relay-1",
+        relay_marker=marker,
+    )
+
+    # Read side: the target history row is tagged relayed with the sender ids.
+    rows = persona_chat_history_summary(persona_instances=store.list_all(), session_db=db)
+    target_rows = [row for row in rows if row["session_id"] == target_session]
+    assert len(target_rows) == 1
+    relayed_history = [
+        message
+        for message in target_rows[0]["messages"]
+        if message.get("kind") == PERSONA_RELAYED_MESSAGE_KIND
+    ]
+    assert len(relayed_history) == 1
+    assert relayed_history[0]["relay_sender_persona_id"] == "neko"
+    assert relayed_history[0]["relay_sender_instance_id"] == sender_id
+
+    # Conversation projection: attributed to the SENDING agent, named, role
+    # still "operator".
+    channels = operator_channel_summary(
+        persona_instances=store.list_all(),
+        persona_chat_history=rows,
+        persona_chat_trace=[],
+    )
+    messages = _target_channel(channels, target_session)["conversation"]["messages"]
+    relayed = [m for m in messages if m.get("kind") == PERSONA_RELAYED_MESSAGE_KIND]
+    assert len(relayed) == 1
+    message = relayed[0]
+    assert message["actor_persona_id"] == "neko"
+    assert message["actor_instance_id"] == sender_id
+    assert message["actor_display_name"] == "Neko Mission Lead"
+    assert message["role"] == "operator"
+
+
+def test_operator_row_carries_no_marker_and_projects_as_operator(isolate_agent_runtime_root):
+    # (b) an operator-persisted row carries NO marker and projects exactly as
+    # today: actor_persona_id="operator", kind="operator_message", no name.
+    from hermes_state import SessionDB
+
+    from hermes_cli import harness
+    from agent_runtime.operator_channels import operator_channel_summary
+
+    store = PersonaInstanceStore()
+    target_session = default_chat_session_id_for_instance(store, persona_id="qa")
+    store.open_chat(persona_id="qa", session_id=target_session, display_name="QA")
+
+    marker = harness._resolve_relay_sender_marker(
+        "operator", instance_store=store, relay_chain_in=()
+    )
+    assert marker is None
+
+    db = SessionDB()
+    harness._ensure_persona_chat_session(
+        session_db=db, session_id=target_session, persona_id="qa", title="QA chat"
+    )
+    harness._append_persona_operator_turn(
+        session_db=db,
+        session_id=target_session,
+        message="Operator: ping",
+        client_message_id="cm-op-1",
+        relay_marker=marker,
+    )
+
+    stored = db.get_messages(target_session)
+    user_rows = [row for row in stored if row.get("role") == "user"]
+    assert user_rows and all(row.get("finish_reason") in (None, "") for row in user_rows)
+
+    rows = persona_chat_history_summary(persona_instances=store.list_all(), session_db=db)
+    channels = operator_channel_summary(
+        persona_instances=store.list_all(),
+        persona_chat_history=rows,
+        persona_chat_trace=[],
+    )
+    messages = _target_channel(channels, target_session)["conversation"]["messages"]
+    operator_messages = [m for m in messages if m.get("role") == "operator"]
+    assert operator_messages
+    message = operator_messages[0]
+    assert message["kind"] == "operator_message"
+    assert message["actor_persona_id"] == "operator"
+    assert message["actor_instance_id"] is None
+    assert "actor_display_name" not in message
+
+
+def test_unresolvable_sender_projects_as_agent_without_a_name(isolate_agent_runtime_root):
+    # (d) an unresolvable sender (bogus token + empty chain) yields the bare
+    # marker and projects actor_persona_id="agent" with no actor_display_name —
+    # the honest unknown, never the operator.
+    from hermes_state import SessionDB
+
+    from hermes_cli import harness
+    from agent_runtime.operator_channels import operator_channel_summary
+    from agent_runtime.persona_chat_history import PERSONA_RELAYED_MESSAGE_KIND
+    from agent_runtime.relay_policy import build_relay_sender_marker
+
+    store = PersonaInstanceStore()
+    target_session = default_chat_session_id_for_instance(store, persona_id="qa")
+    store.open_chat(persona_id="qa", session_id=target_session, display_name="QA")
+
+    marker = harness._resolve_relay_sender_marker(
+        "agent:worker_session_bogus_999", instance_store=store, relay_chain_in=()
+    )
+    assert marker == build_relay_sender_marker(None, None)  # relay_from::
+
+    db = SessionDB()
+    harness._ensure_persona_chat_session(
+        session_db=db, session_id=target_session, persona_id="qa", title="QA chat"
+    )
+    harness._append_persona_operator_turn(
+        session_db=db,
+        session_id=target_session,
+        message="From ???: hi",
+        client_message_id="cm-relay-x",
+        relay_marker=marker,
+    )
+
+    rows = persona_chat_history_summary(persona_instances=store.list_all(), session_db=db)
+    channels = operator_channel_summary(
+        persona_instances=store.list_all(),
+        persona_chat_history=rows,
+        persona_chat_trace=[],
+    )
+    messages = _target_channel(channels, target_session)["conversation"]["messages"]
+    relayed = [m for m in messages if m.get("kind") == PERSONA_RELAYED_MESSAGE_KIND]
+    assert len(relayed) == 1
+    message = relayed[0]
+    assert message["actor_persona_id"] == "agent"
+    assert message["actor_instance_id"] is None
+    assert "actor_display_name" not in message
+    assert message["role"] == "operator"

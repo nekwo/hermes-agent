@@ -1437,3 +1437,47 @@ def _chat_persona_instance(instance_id: str, persona_id: str, session_id: str) -
         mode="chat",
         session_id=session_id,
     )
+
+
+def test_safe_recent_messages_tags_relay_marker_on_operator_row():
+    # A relayed incoming row (role=user) carries the sender identity in
+    # finish_reason; the read side surfaces it as a typed kind + sender fields,
+    # while a plain operator row (finish_reason=None) is byte-identical to today.
+    from agent_runtime.persona_chat_history import PERSONA_RELAYED_MESSAGE_KIND
+
+    db = FakeSessionDB(
+        [
+            {
+                "id": "m1",
+                "role": "user",
+                "content": "From Neko: status?",
+                "finish_reason": "relay_from:neko:personainst_neko",
+                "platform_message_id": "cm-relay-1",
+                "created_at": "2026-07-18T00:00:00Z",
+            },
+            {
+                "id": "m2",
+                "role": "user",
+                "content": "Operator: ping",
+                "platform_message_id": "cm-op-1",
+                "created_at": "2026-07-18T00:01:00Z",
+            },
+        ]
+    )
+    rows, status = _safe_recent_messages(
+        db, session_id="persona_chat_personainst_qa_abc123def456"
+    )
+    assert status == "safe"
+
+    relayed = [row for row in rows if row.get("kind") == PERSONA_RELAYED_MESSAGE_KIND]
+    assert len(relayed) == 1
+    assert relayed[0]["role"] == "operator"
+    assert relayed[0]["relay_sender_persona_id"] == "neko"
+    assert relayed[0]["relay_sender_instance_id"] == "personainst_neko"
+
+    plain = [row for row in rows if row.get("client_message_id") == "cm-op-1"]
+    assert len(plain) == 1
+    assert "kind" not in plain[0]
+    assert "relay_sender_persona_id" not in plain[0]
+    # Both are turn openers on the operator lane — turn_seq stamping unchanged.
+    assert relayed[0]["turn_seq"] == plain[0]["turn_seq"]
