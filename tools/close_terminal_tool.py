@@ -38,12 +38,7 @@ def check_close_terminal_requirements() -> bool:
 CLOSE_TERMINAL_SCHEMA = {
     "name": "close_terminal",
     "description": (
-        "Close the read-only terminal tab for one of your background processes in "
-        "the Hermes desktop GUI (the tabs mirroring terminal(background=true) runs). "
-        "This does NOT kill the process — it only drops the tab/view; the output "
-        "keeps buffering and the user can reopen it from the status stack. Use it "
-        "to tidy up when a background process's live terminal is no longer worth "
-        "showing. To actually stop the process, use process(action='kill') instead."
+        "Close the read-only GUI tab for a background process (desktop only): drops the view, does NOT kill the process (output keeps buffering; reopen from the status stack). Disambiguator: to stop the process use process(action='kill')."
     ),
     "parameters": {
         "type": "object",

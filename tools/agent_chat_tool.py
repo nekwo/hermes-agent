@@ -55,26 +55,7 @@ _MESSAGE_LIMIT = 12000
 AGENT_CHAT_SEND_SCHEMA = {
     "name": "agent_chat_send",
     "description": (
-        "Send a chat message to ANOTHER Harness persona (agent-to-agent chat). Use this when the "
-        "operator asks you to brief, prompt, deploy, hand off to, or check in with another agent "
-        "conversationally — e.g. 'have Neko look at X', 'tell the dev agent to prepare Y'. The "
-        "message lands in that persona's own Mission Control chat session and their reply is "
-        "returned to you. This does NOT create a tracked goal, start the Mission Daemon, or run "
-        "proof gates — use mission_goal_create when the operator wants real tracked work to start. "
-        "Prefer the persona id (e.g. neko_supervisor, dev, backend_dev, qa), which reaches that "
-        "persona's canonical primary instance. When a persona runs MORE THAN ONE live instance, "
-        "pass the specific @personainst_* handle from your Runtime Situation HUD to reach THAT "
-        "instance exactly (its own thread), not the primary. Display names are not accepted.\n"
-        "\n"
-        "Thread control — one durable thread per pair is the norm:\n"
-        "- OMIT session_id → continue the target's default pair thread (repeated sends thread into "
-        "one conversation). This is what you almost always want.\n"
-        "- session_id=<id> → continue that specific thread (e.g. one agent_chat_threads listed).\n"
-        "- new_session=true → start a fresh clean thread with the target. Use SPARINGLY — only when "
-        "the current thread is genuinely a different topic; it becomes the new default going "
-        "forward. Passing new_session=true together with session_id is contradictory and refused.\n"
-        "Use agent_chat_threads to list your threads and agent_chat_open to review a thread's recent "
-        "messages before continuing it."
+        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Omit session_id to continue the durable pair thread; new_session=true starts a fresh one. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
     ),
     "parameters": {
         "type": "object",
@@ -319,14 +300,7 @@ def _parse_last_json_object(raw: str):
 AGENT_CHAT_THREADS_SCHEMA = {
     "name": "agent_chat_threads",
     "description": (
-        "List your agent-to-agent chat threads with the teammates on your level (the personas "
-        "agent_chat_send can reach — the same @personainst_* handles shown in your Runtime "
-        "Situation HUD). For each teammate: persona id, display name, canonical personainst_* "
-        "handle, and the shared default thread's session id + title + last activity + message "
-        "count when one exists. A teammate you have never chatted with is listed honestly with "
-        "no thread yet (no session is created just to answer this). Read-only. Use this to see "
-        "who you can talk to and which conversations already exist before deciding whether to "
-        "continue a thread (agent_chat_send, omitted session) or review one first (agent_chat_open)."
+        "List your agent-to-agent chat threads with teammates on your level: persona id, display name, @personainst_* handle, and the default thread's session/title/activity when one exists. Read-only. Disambiguator: lists threads; agent_chat_open reads one, agent_chat_send sends."
     ),
     "parameters": {
         "type": "object",
@@ -347,15 +321,7 @@ AGENT_CHAT_THREADS_SCHEMA = {
 AGENT_CHAT_OPEN_SCHEMA = {
     "name": "agent_chat_open",
     "description": (
-        "Review the recent message tail of your shared chat thread with ONE teammate before "
-        "continuing it — 'what did we last say to each other?'. Returns the newest messages (role, "
-        "text, timestamp) of the default thread with that persona, or of a specific session_id you "
-        "pass (which must belong to that teammate's chat lane — this is not a transcript browser, "
-        "foreign sessions are refused). Read-only, never creates a session: if you have never "
-        "chatted with the target, it says so. Prefer the persona id (e.g. dev, qa, neko_supervisor) "
-        "to review the canonical primary instance's thread; pass a personainst_* handle to review a "
-        "SPECIFIC instance's thread when a persona runs several. Pair with agent_chat_threads (to "
-        "find your threads) and agent_chat_send (to reply)."
+        "Read the recent message tail of your shared thread with ONE teammate (persona id, or a @personainst_* handle for a specific instance). Read-only; never creates a session. Disambiguator: agent_chat_open READS a thread; agent_chat_send replies; agent_chat_threads lists your threads."
     ),
     "parameters": {
         "type": "object",

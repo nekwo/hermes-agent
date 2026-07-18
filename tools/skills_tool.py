@@ -1771,7 +1771,7 @@ if __name__ == "__main__":
 
 SKILLS_LIST_SCHEMA = {
     "name": "skills_list",
-    "description": "List available skills (name + description). Use skill_search(query) to find matching skills or skill_view(name) to load full content.",
+    "description": "List available skills (name + description). Disambiguator: skill_search(query) finds matches; skill_view(name) loads full content.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1786,7 +1786,7 @@ SKILLS_LIST_SCHEMA = {
 
 SKILL_SEARCH_SCHEMA = {
     "name": "skill_search",
-    "description": "Search installed skills and the Hermes Skills Hub by query without loading full SKILL.md bodies. Returns compact identifiers/descriptions only; use skill_view for installed matches or hermes skills install for external matches.",
+    "description": "Search installed skills + the Hermes Skills Hub by query without loading SKILL.md bodies (compact ids/descriptions). Disambiguator: skill_view loads an installed match; `hermes skills install` fetches an external one.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1826,7 +1826,7 @@ SKILL_SEARCH_SCHEMA = {
 
 SKILL_VIEW_SCHEMA = {
     "name": "skill_view",
-    "description": "Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' dict showing available references/templates/scripts. To access those, call again with file_path parameter.",
+    "description": "Load a skill's full SKILL.md plus its linked files (references/templates/scripts). First call returns SKILL.md + a linked_files dict; call again with file_path to fetch one. Disambiguator: skill_view READS a skill; skill_manage writes.",
     "parameters": {
         "type": "object",
         "properties": {

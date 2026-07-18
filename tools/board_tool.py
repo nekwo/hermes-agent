@@ -29,12 +29,7 @@ logger = logging.getLogger(__name__)
 BOARD_CARD_ADD_SCHEMA = {
     "name": "board_card_add",
     "description": (
-        "Add a planning CARD to the Mission Board (a kanban board scoped to the workspace). "
-        "Use this to track follow-up work you noticed — a TODO, a loose end, a next step — that "
-        "is worth remembering but is not itself a goal to start now. A card is planning state "
-        "only: it NEVER starts work and NEVER changes any goal. To actually start real tracked "
-        "work, use mission_goal_create instead. The card lands in the board's Queued column and "
-        "is attributed to you. Optional, advisory: only add a card when it is genuinely useful."
+        "Add a planning CARD to the workspace Mission Board (Queued column, attributed to you) for follow-up work worth remembering. Advisory. Disambiguator: a card is planning state only -- it never starts or changes a goal; use mission_goal_create to start real work."
     ),
     "parameters": {
         "type": "object",
@@ -52,9 +47,7 @@ BOARD_CARD_ADD_SCHEMA = {
 BOARD_CARDS_SCHEMA = {
     "name": "board_cards",
     "description": (
-        "List the active cards on the Mission Board for the current workspace (or an explicit "
-        "board_id): title, column, priority, and any linked goal. Read-only. Use it to check "
-        "what is already tracked before adding a card."
+        "List active cards on the workspace Mission Board (title, column, priority, linked goal). Read-only -- check what is already tracked before adding a card."
     ),
     "parameters": {
         "type": "object",
