@@ -355,16 +355,20 @@ class GPTPersonaRuntime:
                 max_wall_seconds=max_wall_seconds,
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,
-                # Byte-stable system prompt (T5): the volatile Runtime Situation
-                # HUD rides the operator's user turn, not the codex
-                # ``instructions``, so the cross-turn prompt cache prefix survives
-                # every follow-up turn. See ``_mission_chat_user_message`` /
-                # ``_mission_chat_surface_message``.
-                user_message=_mission_chat_user_message(message, situational_hud_content),
+                # Byte-stable system prompt (T5 + T9a): the volatile Runtime
+                # Situation HUD *and* the queued-skill preload ride the operator's
+                # user turn, not the codex ``instructions``, so the cross-turn
+                # prompt cache prefix survives every follow-up turn — including a
+                # turn on which the operator loads a skill mid-conversation. See
+                # ``_mission_chat_user_message`` / ``_mission_chat_surface_message``.
+                user_message=_mission_chat_user_message(
+                    message,
+                    situational_hud_content,
+                    preloaded_skill_prompt=preloaded_skill_prompt,
+                ),
                 system_message=_mission_chat_surface_message(
                     persona,
                     surface_prompt,
-                    preloaded_skill_prompt=preloaded_skill_prompt,
                     workspace_agents_content=workspace_agents_content,
                 ),
                 stream_callback=stream_callback,
@@ -554,7 +558,6 @@ def _mission_chat_surface_message(
     persona: AgentPersona,
     surface_prompt: str | None,
     *,
-    preloaded_skill_prompt: str | None = None,
     workspace_agents_content: str | None = None,
 ) -> str:
     """Compose the operator-chat system message (the codex ``instructions``):
@@ -576,13 +579,14 @@ def _mission_chat_surface_message(
     turn — is deliberately NOT here anymore: it rides the operator's user turn
     instead (see ``_mission_chat_user_message``). Do NOT reintroduce per-turn
     volatile text into this builder; it re-bills the whole prefix every turn.
-    (The queued-skill preload still layers here when the operator loads a skill;
-    that is content-driven, not per-turn churn, and is a known secondary
-    invalidation vector tracked for a follow-up move to the user turn.)"""
+    (T9a, 2026-07-18: the queued-skill preload — the secondary content-driven
+    invalidation vector T5 flagged — was likewise moved OUT of this builder onto
+    the operator user turn via ``_mission_chat_user_message``. It must NOT come
+    back here: loading a skill mid-conversation would otherwise rotate the whole
+    stable prefix for that turn.)"""
 
     identity = _mission_chat_identity_prompt(persona)
     operator_surface = (surface_prompt or "").strip()
-    skill_prompt = (preloaded_skill_prompt or "").strip()
     workspace_agents = (workspace_agents_content or "").strip()
     rules = _mission_chat_operative_rules()
     # The persona's OWN soul overlay (config `soul_overlay_path`) is the one
@@ -595,8 +599,6 @@ def _mission_chat_surface_message(
         hermes_profile=getattr(persona, "hermes_profile", None),
     )
     parts = [identity, soul or "", rules]
-    if skill_prompt:
-        parts.append(skill_prompt)
     if workspace_agents:
         parts.append(MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE + workspace_agents)
     if operator_surface:
@@ -607,45 +609,51 @@ def _mission_chat_surface_message(
 def _mission_chat_user_message(
     message: str,
     situational_hud_content: str | None = None,
+    *,
+    preloaded_skill_prompt: str | None = None,
 ) -> str:
     """Compose the operator turn's user message: the operator's message (which
     already carries the redaction-safe rolling chat history baked in by
-    ``_persona_chat_message_with_history``) followed by the per-turn Runtime
-    Situation HUD.
+    ``_persona_chat_message_with_history``), then the queued-skill preload (when
+    the operator loaded a skill this turn), then the per-turn Runtime Situation
+    HUD.
 
-    Why the HUD rides here and not in the system prompt: the codex transport
-    keys its cross-turn prompt cache on ``sha256(instructions + tools)``. A HUD
-    whose roster / scope / mission state rotates every turn — e.g. ``QA Agent``
-    vs ``QA Agent (2)`` — would evict the ~13K-token stable prefix on every
-    follow-up turn's first call. Riding it in the operator's user turn keeps the
-    system prompt byte-stable for the life of the conversation while still
-    giving the model the same live picture the operator sees.
+    Why the HUD *and* the skill preload ride here and not in the system prompt:
+    the codex transport keys its cross-turn prompt cache on
+    ``sha256(instructions + tools)``. A HUD whose roster / scope / mission state
+    rotates every turn — e.g. ``QA Agent`` vs ``QA Agent (2)`` — would evict the
+    ~13K-token stable prefix on every follow-up turn's first call; likewise a
+    skill preload layered into ``instructions`` (T5's flagged secondary
+    invalidation vector) would rotate the whole prefix on any turn the operator
+    loads a skill. Riding both in the operator's user turn keeps the system
+    prompt byte-stable for the life of the conversation while still giving the
+    model the loaded skill and the same live picture the operator sees.
 
-    Placement is load-bearing: the HUD TRAILS the history + current operator
-    message rather than leading it. The user turn is already per-turn volatile
-    (history grows, the message changes), so appending the HUD at its tail keeps
-    the append-only, cache-friendly ordering the spec requires — a HUD ahead of
-    the history would push the volatile block earlier in the (already uncached)
-    input. This mirrors Hermes's own per-turn ephemeral-context injection, which
-    appends recall / plugin context onto the current user turn rather than
-    mutating the cached system prompt (agent/conversation_loop.py), and the
-    skill-command pattern that injects as a user message to preserve caching.
+    Placement is load-bearing: the skill preload and HUD TRAIL the history +
+    current operator message rather than leading it, and the HUD stays last. The
+    user turn is already per-turn volatile (history grows, the message changes),
+    so appending these at its tail keeps the append-only, cache-friendly ordering
+    the spec requires — a volatile block ahead of the history would push it
+    earlier in the (already uncached) input. This mirrors Hermes's own per-turn
+    ephemeral-context injection, which appends recall / plugin context onto the
+    current user turn rather than mutating the cached system prompt
+    (agent/conversation_loop.py), and the skill-command pattern that injects the
+    loaded skill as a user message to preserve caching (agent/skill_commands.py).
 
     Transport note: on the codex Responses path a mid-conversation ``system``
     message is dropped by the input converter and two consecutive ``user`` items
-    violate the role-alternation invariant, so the HUD cannot be a distinct
-    non-user message without either vanishing or breaking alternation. Folding
-    it onto the operator user turn is the transport-safe realization of "a
-    per-turn message adjacent to the current operator message."
+    violate the role-alternation invariant, so neither the HUD nor the skill
+    preload can be a distinct non-user message without either vanishing or
+    breaking alternation. Folding them onto the operator user turn is the
+    transport-safe realization of "a per-turn message adjacent to the current
+    operator message."
     """
 
+    skill_prompt = (preloaded_skill_prompt or "").strip()
     hud = (situational_hud_content or "").strip()
     body = message if isinstance(message, str) else ("" if message is None else str(message))
-    if not hud:
-        return body
-    if not body:
-        return hud
-    return f"{body}\n\n{hud}"
+    parts = [body, skill_prompt, hud]
+    return "\n\n".join(part for part in parts if part)
 
 
 def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:

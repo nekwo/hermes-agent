@@ -616,6 +616,88 @@ def test_mission_chat_reply_rides_hud_on_user_turn_not_system_prompt(tmp_path, m
     assert hud_block not in request.system_message
 
 
+def test_mission_chat_user_message_orders_skill_then_hud_after_message():
+    # T9a placement unit: the operator message leads, then the queued-skill
+    # preload, then the live Runtime HUD (HUD stays last). Backward-compatible
+    # shapes (no skill / no HUD / HUD-only) match the T5 behaviour exactly.
+    from agent_runtime.persona_runtime import _mission_chat_user_message
+
+    body = "operator message with baked history"
+    skill = "Loaded skill: deep-audit\nFollow this procedure."
+    hud = "## Runtime Situation\n- Scope: realm default"
+
+    composed = _mission_chat_user_message(body, hud, preloaded_skill_prompt=skill)
+    assert composed.index(body) < composed.index(skill) < composed.index(hud)
+
+    assert _mission_chat_user_message(body) == body
+    assert _mission_chat_user_message(body, hud) == f"{body}\n\n{hud}"
+    assert (
+        _mission_chat_user_message(body, preloaded_skill_prompt=skill)
+        == f"{body}\n\n{skill}"
+    )
+
+
+def test_mission_chat_reply_skill_preload_rides_user_turn_byte_stable(tmp_path, monkeypatch):
+    # T9a byte-stability: the queued-skill preload — T5's flagged secondary
+    # cache-invalidation vector — now rides the operator USER turn with the HUD,
+    # never the codex ``instructions``. Two turns of one conversation that differ
+    # ONLY in preloaded-skill state must produce BYTE-IDENTICAL instructions so
+    # the cross-turn prompt cache prefix survives a mid-conversation skill load;
+    # the skill content lands on the user turn instead.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+
+    captured: list = []
+
+    class CapturingRunner:
+        def run(self, request):
+            captured.append(request)
+            return AgentRunResult(
+                final_response="ok",
+                session_id="session_mission_chat",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    skill_block = (
+        "Loaded skill: deep-audit\nFollow this procedure when auditing the harness."
+    )
+    # Turn 1: operator loads a skill this turn.
+    runtime.mission_chat_reply(
+        neko,
+        "run the audit",
+        permission_session_id="session_mission_chat",
+        preloaded_skill_prompt=skill_block,
+    )
+    # Turn 2: same conversation, no skill loaded.
+    runtime.mission_chat_reply(
+        neko,
+        "and the next step?",
+        permission_session_id="session_mission_chat",
+        preloaded_skill_prompt=None,
+    )
+
+    with_skill, without_skill = captured
+    # Instructions (system message) are byte-identical regardless of skill state.
+    assert with_skill.system_message == without_skill.system_message
+    # The skill preload is NOT in the byte-stable system prompt...
+    assert "deep-audit" not in with_skill.system_message
+    assert "Loaded skill" not in with_skill.system_message
+    # ...it rides the operator USER turn instead, trailing the operator message.
+    assert skill_block in with_skill.user_message
+    assert with_skill.user_message.index(skill_block) > with_skill.user_message.index(
+        "run the audit"
+    )
+    # No skill this turn -> nothing leaks onto the user turn.
+    assert "deep-audit" not in without_skill.user_message
+
+
 def test_mission_chat_reply_honors_include_profile_memory(tmp_path, monkeypatch):
     # A persona bound to a profile for CAPABILITIES must not also inherit that
     # profile's MEMORY.md/USER.md worldview unless it opts in. skip_memory now
