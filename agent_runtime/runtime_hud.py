@@ -309,15 +309,18 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
             who_bits.append(f"role {lane['role']}")
         lines.append(f"- You: {' · '.join(who_bits)}")
 
+    # Shared "Name (@personainst_...)" formatter: the handle IS the address the
+    # chat/steer verbs accept, so every line naming a teammate must carry it —
+    # a name without its handle is visible but not actionable.
+    def _handle(entry: dict[str, Any]) -> str:
+        name = entry.get("display_name")
+        ref = entry.get("persona_instance_id") or entry.get("ref")
+        if _clean(name) and _clean(ref) and name != ref:
+            return f"{name} (@{ref})"
+        return f"@{ref}" if _clean(ref) else str(name or "unknown")
+
     steering = hud.get("steering") if isinstance(hud.get("steering"), dict) else None
     if steering is not None:
-        def _handle(entry: dict[str, Any]) -> str:
-            name = entry.get("display_name")
-            ref = entry.get("persona_instance_id") or entry.get("ref")
-            if _clean(name) and _clean(ref) and name != ref:
-                return f"{name} (@{ref})"
-            return f"@{ref}" if _clean(ref) else str(name or "unknown")
-
         steered_by = steering.get("steered_by") if isinstance(steering.get("steered_by"), list) else []
         steers = steering.get("steers") if isinstance(steering.get("steers"), list) else []
         if steered_by:
@@ -333,7 +336,7 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
 
     roster = hud.get("roster") if isinstance(hud.get("roster"), list) else []
     if roster:
-        names = ", ".join(str(entry.get("display_name") or entry.get("persona_instance_id")) for entry in roster)
+        names = ", ".join(_handle(entry) for entry in roster if isinstance(entry, dict))
         lines.append(f"- On level ({len(roster)}): {names}")
 
     mission_hud = hud.get("mission_hud") if isinstance(hud.get("mission_hud"), dict) else {}

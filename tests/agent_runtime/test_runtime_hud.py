@@ -117,6 +117,17 @@ def test_render_situational_hud_block_is_readonly_and_mirrors_widget_lines():
     assert "- On level (1):" in block
 
 
+def test_roster_line_carries_addressable_handles():
+    # The handle IS the address the agent-chat/steer verbs accept: every roster
+    # teammate renders as "Name (@personainst_...)" so a name is never visible
+    # but unaddressable. (Steering lines already did this; the roster lagged.)
+    me = _instance()
+    teammate = _instance(id="personainst_qa", display_name="QA Agent")
+    hud = resolve_situational_hud(me, roster=[me, teammate])
+    block = render_situational_hud_block(hud)
+    assert "QA Agent (@personainst_qa)" in block
+
+
 def test_render_situational_hud_block_says_no_mission_when_unbound():
     hud = resolve_situational_hud(
         _instance(),
