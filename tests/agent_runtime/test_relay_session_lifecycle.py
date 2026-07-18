@@ -17,6 +17,8 @@ canonical-id use (no phantom mints), and end-to-end visibility in the projection
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agent_runtime.persona_assignments import (
@@ -29,6 +31,7 @@ from agent_runtime.persona_chat_history import (
     PERSONA_CHAT_SESSION_SOURCE,
     persona_chat_history_summary,
 )
+from agent_runtime.profile_context import PersonaProfileBinding, persona_profile_context
 
 
 def test_omitted_session_reuses_targets_existing_default_chat_session(
@@ -306,3 +309,122 @@ def test_resolve_default_ignores_a_foreign_pointer_and_self_heals(
     store.open_chat(persona_id="qa", session_id=healed)
     assert store.get(persona_instance_id_for("qa")).session_id == healed
     assert store.get("personainst_qa_agent_2").session_id == sibling.session_id
+
+
+# --------------------------------------------------------------------------- #
+# Relay-target transcript persists to the HEAD home (2026-07-18 incident A)     #
+#                                                                             #
+# An in-process ``agent_chat_send`` relay runs inside the caller/target        #
+# persona's profile-home override (``persona_profile_context`` diverts          #
+# ``get_hermes_home()``). A bare ``SessionDB()`` there wrote the chat session   #
+# row + messages into the PROFILE's ``state.db`` — invisible to Mission         #
+# Control, whose projection reads the OPERATOR/head home. The runtime-root-     #
+# scoped turn store + trace survived (they are not diverted by the override),   #
+# so the console showed only trace thinking rows while the relayed message +    #
+# reply never rendered. The persona-chat SessionDB must bind to the head home   #
+# regardless of the active override.                                           #
+# --------------------------------------------------------------------------- #
+
+
+def _qa_profile_binding(profile_home: Path) -> PersonaProfileBinding:
+    # A profile-backed relay caller/target: binding.profile_home set (so
+    # persona_profile_context pushes the override) without needing a real
+    # on-disk profile to exist.
+    return PersonaProfileBinding(
+        persona_id="qa",
+        hermes_profile="qa_fake_profile",
+        profile_home=profile_home,
+    )
+
+
+def test_persona_session_db_binds_to_head_home_under_profile_override(
+    isolate_agent_runtime_root, tmp_path
+):
+    from hermes_cli import harness
+    from hermes_constants import get_hermes_head_home, get_hermes_home
+
+    head_home = get_hermes_home()  # hermetic HERMES_HOME — the projection's home
+    profile_home = tmp_path / "qa_profile"
+    profile_home.mkdir()
+
+    # Top level (no override): ordinary default DB, head resolves to itself.
+    assert get_hermes_head_home() == head_home
+    assert Path(harness._default_persona_session_db().db_path) == head_home / "state.db"
+
+    # Inside the relay's profile-home override: get_hermes_home() is diverted to
+    # the profile, but the operator-visible chat DB still binds to the head home.
+    with persona_profile_context(_qa_profile_binding(profile_home)):
+        assert get_hermes_home() == profile_home  # the override IS active
+        assert get_hermes_head_home() == head_home  # …but head is preserved
+        db = harness._default_persona_session_db()
+        assert Path(db.db_path) == head_home / "state.db"
+        assert Path(db.db_path) != profile_home / "state.db"
+
+
+def test_relay_under_profile_override_persists_transcript_to_the_projection_home(
+    isolate_agent_runtime_root, tmp_path
+):
+    # End-to-end: run the handler-equivalent persistence UNDER a profile-home
+    # override, then read the projection from the head home. The relayed message
+    # + reply must render as conversation, and the profile home must hold NO
+    # chat state.db at all.
+    from hermes_state import SessionDB
+
+    from hermes_cli import harness
+    from hermes_constants import get_hermes_home
+
+    head_home = get_hermes_home()
+    profile_home = tmp_path / "qa_profile"
+    profile_home.mkdir()
+    store = PersonaInstanceStore()
+
+    with persona_profile_context(_qa_profile_binding(profile_home)):
+        session_id = default_chat_session_id_for_instance(store, persona_id="qa")
+        store.open_chat(persona_id="qa", session_id=session_id, default_display_name="QA Agent")
+        db = harness._default_persona_session_db()
+        # The write path resolved the head home even though the override is live.
+        assert Path(db.db_path) == head_home / "state.db"
+        harness._ensure_persona_chat_session(
+            session_db=db,
+            session_id=session_id,
+            persona_id="qa",
+            title="QA Agent chat",
+        )
+        db.append_message(session_id=session_id, role="user", content="From Neko: status?")
+        db.append_message(session_id=session_id, role="assistant", content="QA here — all green.")
+
+    # The profile home never received a chat DB — the whole point.
+    assert not (profile_home / "state.db").exists()
+
+    # The projection (head home) sees the relayed exchange as one visible row.
+    rows = persona_chat_history_summary(persona_instances=store.list_all(), session_db=SessionDB())
+    qa_rows = [row for row in rows if row["persona_id"] == "qa"]
+    assert len(qa_rows) == 1, "the relay exchange must project as one visible chat row"
+    row = qa_rows[0]
+    assert row["session_id"] == session_id
+    texts = [message["text"] for message in row["messages"]]
+    assert "From Neko: status?" in texts and "QA here — all green." in texts
+
+
+def test_head_home_is_the_outermost_across_nested_relay_hops(
+    isolate_agent_runtime_root, tmp_path
+):
+    # operator -> Neko -> QA: each hop pushes its own profile-home override, but
+    # the head home stays the OUTERMOST (operator) home the projection reads.
+    from hermes_cli import harness
+    from hermes_constants import get_hermes_head_home, get_hermes_home
+
+    head_home = get_hermes_home()
+    neko_home = tmp_path / "neko_profile"
+    neko_home.mkdir()
+    qa_home = tmp_path / "qa_profile"
+    qa_home.mkdir()
+
+    with persona_profile_context(
+        PersonaProfileBinding(persona_id="neko", hermes_profile="neko", profile_home=neko_home)
+    ):
+        assert get_hermes_head_home() == head_home
+        with persona_profile_context(_qa_profile_binding(qa_home)):
+            assert get_hermes_home() == qa_home  # deepest override
+            assert get_hermes_head_home() == head_home  # still the operator home
+            assert Path(harness._default_persona_session_db().db_path) == head_home / "state.db"

@@ -21,6 +21,7 @@ from agent_runtime.persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    default_chat_session_id_for_instance,
     persona_instance_summary,
     persona_instance_tool_detail,
     persona_instance_id_for,
@@ -974,6 +975,53 @@ def test_open_chat_cli_targets_the_session_owner_not_the_canonical(monkeypatch, 
     except Exception:
         primary_adopted = False
     assert not primary_adopted
+
+
+def test_open_chat_default_display_name_never_renames_an_existing_named_instance(
+    isolate_agent_runtime_root,
+):
+    # DEFECT B: the send path stamps the persona DEFAULT display_name. It must
+    # NEVER rename an existing instance — the placement sibling reads "QA Agent
+    # (2)" and the "(2)" is load-bearing (launcher conversational fold keys on
+    # persona+displayName). Two "sends" (open_chat with default_display_name)
+    # must both preserve the deliberate name.
+    store = PersonaInstanceStore()
+    sibling = store.add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
+    )
+    assert sibling.display_name == "QA Agent (2)"
+
+    for _ in range(2):  # repeated sends thread onto the same instance
+        store.open_chat(
+            persona_id="qa",
+            persona_instance_id="personainst_qa_agent_2",
+            session_id=sibling.session_id,
+            default_display_name="QA Agent",  # the persona default the send path passes
+        )
+    assert store.get("personainst_qa_agent_2").display_name == "QA Agent (2)"
+
+
+def test_open_chat_default_display_name_names_a_first_ever_holder(isolate_agent_runtime_root):
+    # A brand-new chat holder with no name yet DOES take the persona default —
+    # stamping only happens when the instance has none.
+    store = PersonaInstanceStore()
+    minted = default_chat_session_id_for_instance(store, persona_id="qa")
+    instance = store.open_chat(
+        persona_id="qa", session_id=minted, default_display_name="QA Agent"
+    )
+    assert instance.display_name == "QA Agent"
+
+
+def test_open_chat_authoritative_display_name_still_renames(isolate_agent_runtime_root):
+    # An AUTHORITATIVE display_name (create_operator_chat / add_instance / an
+    # explicit name) is unchanged by the fix — it always applies, so deliberate
+    # (re)naming through those paths keeps working.
+    store = PersonaInstanceStore()
+    first = store.create_operator_chat(persona_id="qa", display_name="QA One")
+    assert first.display_name == "QA One"
+    second = store.create_operator_chat(persona_id="qa", display_name="QA Two")
+    assert second.id == first.id
+    assert second.display_name == "QA Two"  # authoritative rename honored
 
 
 def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runtime_root):
