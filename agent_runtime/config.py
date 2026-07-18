@@ -244,6 +244,38 @@ def describe_runtime_default_authority(config_path: Path | None = None) -> dict[
     }
 
 
+def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> list[str]:
+    """Per-persona operator override for the chat-lane toolset cost policy.
+
+    Read from ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` in
+    ``config.yaml``: a list of toolsets to RESTORE onto that persona's operator /
+    mission chat lane after the default policy
+    (``chat_lane_toolsets.DEFAULT_CHAT_LANE_EXCLUDED_TOOLSETS``) would exclude
+    them (browser / vision / heavy-dev). Restore is un-exclusion, not a grant —
+    a restored toolset is only kept if the persona's role/permission layer
+    already resolved it into the lane.
+
+    Honors the legacy ``alice_supervisor`` ⇄ ``neko_supervisor`` alias so an
+    older config keyed on either name is respected. Absent / malformed → ``[]``
+    (the default policy applies unchanged)."""
+
+    persona_id = str(persona_id or "").strip()
+    if not persona_id:
+        return []
+    cfg = cfg or load_agent_runtime_config()
+    personas = cfg.personas if isinstance(getattr(cfg, "personas", None), dict) else {}
+    keys = [persona_id]
+    if persona_id == "neko_supervisor":
+        keys.append("alice_supervisor")
+    elif persona_id == "alice_supervisor":
+        keys.append("neko_supervisor")
+    for key in keys:
+        raw = personas.get(key)
+        if isinstance(raw, dict) and "chat_lane_restore_toolsets" in raw:
+            return _string_list(raw.get("chat_lane_restore_toolsets"))
+    return []
+
+
 def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
     # Full resolvable catalog: the typed pipeline personas remain here (dormant, so the

@@ -9,7 +9,8 @@ from typing import Callable, Protocol
 from hermes_constants import get_hermes_home
 
 from . import paths
-from .config import load_agent_runtime_config
+from .chat_lane_toolsets import scope_chat_lane_toolsets
+from .config import chat_lane_restore_toolsets, load_agent_runtime_config
 from .context_builder import AgentContext, build_context, render_context
 from .decision_contract_registry import prompt_contract_markdown
 from .decision_schema import (
@@ -741,10 +742,26 @@ def _chat_trace_callback(
 
 
 def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
+    """The single chat-lane toolset chokepoint (both the free-chat and operator/
+    mission chat call sites funnel through here).
+
+    Resolution order: permission mode → role/persona toolset resolution → chat
+    capability augmentation → the chat-lane cost policy
+    (``scope_chat_lane_toolsets``) that drops browser / vision / heavy-dev from a
+    conversational lane. ``unbounded`` permission mode is the operator's explicit
+    "full capability" escape hatch and is returned unfiltered; a persona that
+    wants a specific excluded toolset back on its *bounded* chat lane restores it
+    via ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` (see
+    ``config.chat_lane_restore_toolsets``). Worker/dev task lanes never call this
+    — they resolve toolsets via ``effective_toolsets`` directly."""
+
     options = permission_options_for_chat(persona, session_id=session_id)
     if permission_mode_is_unbounded(options.permission_mode):
         return all_registered_toolsets()
-    return _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+    resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+    return scope_chat_lane_toolsets(
+        resolved, restore=chat_lane_restore_toolsets(persona.id)
+    )
 
 
 # Operator-chat-only first-class capabilities that a persona's role is allowed to
