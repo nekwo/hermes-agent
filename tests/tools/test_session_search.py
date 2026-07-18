@@ -86,12 +86,16 @@ class TestSchema:
         assert params["sort"]["enum"] == ["newest", "oldest"]
 
     def test_schema_description_teaches_scroll(self):
-        desc = SESSION_SEARCH_SCHEMA["description"]
-        assert "SCROLL" in desc
-        assert "DISCOVERY" in desc
-        assert "BROWSE" in desc
-        # Must explain how to scroll
-        assert "scroll FORWARD" in desc or "messages[-1]" in desc
+        """T6b: the wire brief names the calling shapes compactly; the detailed
+        scroll mechanics are preserved in the full docs (served via
+        tool_describe from the fork-owned mirror)."""
+        desc = SESSION_SEARCH_SCHEMA["description"].lower()
+        assert "scroll" in desc
+        assert "discover" in desc
+        from tools.tool_full_descriptions import full_tool_description
+        full = full_tool_description("session_search")
+        assert "SCROLL" in full and "DISCOVERY" in full and "BROWSE" in full
+        assert "scroll FORWARD" in full or "messages[-1]" in full
 
     def test_no_llm_promise_in_description(self):
         # The new design never calls an LLM
@@ -99,12 +103,18 @@ class TestSchema:
         assert "no llm" in desc
 
     def test_schema_description_enforces_source_first_limit(self):
+        """T6b: the SOURCE-FIRST caveat is compressed to one wire clause; the
+        full SOURCE-FIRST LIMIT block is preserved in the full docs."""
         desc = SESSION_SEARCH_SCHEMA["description"].lower()
-        assert "source-first limit" in desc
-        assert "conversation history only" in desc
-        assert "direct source" in desc
-        assert "session_search as secondary" in desc
-        assert "not found" in desc
+        # Compressed disambiguator survives on the wire.
+        assert "history" in desc
+        assert "live source" in desc or "inspect that first" in desc
+        from tools.tool_full_descriptions import full_tool_description
+        full = full_tool_description("session_search").lower()
+        assert "source-first limit" in full
+        assert "conversation history only" in full
+        assert "session_search as secondary" in full
+        assert "not found" in full
 
 
 class TestHiddenSources:
