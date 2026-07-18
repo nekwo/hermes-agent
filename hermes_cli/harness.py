@@ -65,6 +65,7 @@ from agent_runtime.persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
     canonical_persona_instance_id,
+    chat_session_owner_instance_id,
     default_chat_session_id_for_instance,
     persona_assignment_store_enabled,
     persona_assignment_summary,

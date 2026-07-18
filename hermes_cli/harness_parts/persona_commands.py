@@ -357,11 +357,39 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 data = {"ok": False, "error": "session_id is required unless add_instance is true"}
                 print(emit_json(data) if args.json else data["error"])
                 return 2
-            instance = PersonaInstanceStore().open_chat(
-                persona_id=persona_id,
-                session_id=args.session_id,
-                kill_active=bool(getattr(args, "kill_active", False)),
+            # Target the instance the session was MINTED FOR, not always the
+            # canonical primary. A chat session encodes its owning instance
+            # (``persona_chat_<instance>_<hex>``); opening a placement sibling's
+            # session (``personainst_qa_agent_2``) must rebind THAT sibling, never
+            # overwrite ``personainst_qa``'s pointer with it (the live 2026-07-18
+            # channel-fold poison). Same-persona ownership only — a cross-persona
+            # or legacy/opaque session falls back to the canonical primary, and the
+            # open_chat write-guard refuses any genuinely foreign binding.
+            session_owner = chat_session_owner_instance_id(args.session_id)
+            target_instance_id = (
+                session_owner
+                if session_owner
+                and session_owner.startswith(persona_instance_id_for(persona_id))
+                else None
             )
+            try:
+                instance = PersonaInstanceStore().open_chat(
+                    persona_id=persona_id,
+                    persona_instance_id=target_instance_id,
+                    session_id=args.session_id,
+                    kill_active=bool(getattr(args, "kill_active", False)),
+                )
+            except ValueError as exc:
+                data = {
+                    "ok": False,
+                    "error_kind": "foreign_chat_session",
+                    "error": safe_assignment_text(str(exc), limit=320),
+                    "persona_id": persona_id,
+                    "session_id": args.session_id,
+                    "next_expected": "open the instance that owns this chat session, or start a fresh thread",
+                }
+                print(emit_json(data) if args.json else data["error"])
+                return 2
     except ChatBusyError as exc:
         data = _chat_busy_payload(exc)
         print(emit_json(data) if args.json else data["error"])

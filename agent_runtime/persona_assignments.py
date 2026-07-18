@@ -887,6 +887,23 @@ class PersonaInstanceStore:
             else None
         )
         instance_id = normalized_instance or persona_instance_id_for(normalized_persona)
+        # A chat session encodes the instance it was minted for; binding one
+        # instance's session onto ANOTHER instance's pointer is the sibling steal
+        # that overwrote ``personainst_qa``'s default-chat pointer with a
+        # placement sibling's session (live 2026-07-18: the console's open-chat of
+        # a sibling bound its session onto the canonical primary, then a
+        # bare-persona relay adopted the poisoned pointer — both instances folded
+        # onto ONE operator channel). Refuse loudly at the write chokepoint every
+        # send/open flows through — the existing ``_session_owned_by_other_instance``
+        # guard only covered ``add_instance``. Legacy/opaque ``persona_chat_*``
+        # sessions (no encoded owner) and the instance's own sessions bind freely.
+        if chat_session_is_foreign_to_instance(normalized_session, instance_id):
+            owner = chat_session_owner_instance_id(normalized_session)
+            raise ValueError(
+                f"chat session {normalized_session!r} belongs to instance {owner!r}; "
+                f"it cannot be bound onto {instance_id!r} — open that instance's own "
+                "chat lane instead of adopting a sibling's session"
+            )
         safe_display_name = safe_assignment_text(display_name, limit=120) if display_name is not None else None
         safe_profile_id = safe_assignment_token(profile_id) if profile_id is not None else None
         try:
@@ -1508,6 +1525,56 @@ def persona_chat_session_id_for(persona_instance_id: str) -> str:
 # keys on this prefix.
 _PERSONA_CHAT_SESSION_PREFIX = "persona_chat_"
 
+# A minted chat session ends in a bare 12-hex suffix (``uuid4().hex[:12]``); the
+# body between the prefix and that suffix is the OWNING instance id. This is the
+# same exact-mint discrimination ``agent_chat_open`` uses to keep a sibling's
+# session (``persona_chat_<inst>_agent_2_<hex>``) from being swallowed by the
+# primary's ``persona_chat_<inst>_`` prefix.
+_CHAT_SESSION_HEX_SUFFIX_LEN = 12
+
+
+def chat_session_owner_instance_id(session_id: str | None) -> str | None:
+    """The persona-instance id a minted chat session belongs to, or ``None``.
+
+    ``persona_chat_<instance>_<12 hex>`` → ``<instance>``. A legacy/opaque
+    ``persona_chat_*`` id whose tail is not a bare 12-hex block has no derivable
+    owner and returns ``None`` (treated as un-owned, never foreign)."""
+    token = safe_assignment_text(session_id, limit=200)
+    if not token or not token.startswith(_PERSONA_CHAT_SESSION_PREFIX):
+        return None
+    body = token[len(_PERSONA_CHAT_SESSION_PREFIX) :]
+    owner, sep, tail = body.rpartition("_")
+    if (
+        sep
+        and owner
+        and len(tail) == _CHAT_SESSION_HEX_SUFFIX_LEN
+        and all(ch in "0123456789abcdef" for ch in tail.lower())
+    ):
+        return owner
+    return None
+
+
+def chat_session_is_foreign_to_instance(session_id: str | None, instance_id: str | None) -> bool:
+    """True when ``session_id`` is a chat session MINTED FOR a DIFFERENT instance.
+
+    Chat sessions encode their owning instance, so a session whose exact-mint
+    owner resolves to some OTHER real ``personainst_*`` instance must never be
+    adopted as ``instance_id``'s default chat lane nor bound onto its pointer —
+    that sibling-session steal is what folded two live QA instances onto one
+    operator channel and overwrote the canonical instance's default-chat pointer
+    with a placement sibling's session (live 2026-07-18).
+
+    Deliberately narrow to avoid false positives: only an owner that is itself a
+    canonical ``personainst_*`` handle counts. Legacy/seed/opaque sessions whose
+    middle token is a bare persona id (``persona_chat_qa_<hex>``) or a synthetic
+    seed (``persona_chat_seed_<hex>``) have no real sibling to steal from and bind
+    freely, as does a session this instance already owns."""
+    owner = chat_session_owner_instance_id(session_id)
+    if owner is None or not owner.startswith(PERSONA_INSTANCE_ID_PREFIX):
+        return False
+    target = safe_assignment_token(instance_id)
+    return bool(target) and owner != target
+
 
 def canonical_chat_instance_id(persona_id: str, persona_instance_id: str | None = None) -> str:
     """Canonical persona-instance id a chat lane threads onto.
@@ -1548,7 +1615,18 @@ def resolve_default_chat_session_id_for_instance(
         # Reuse only a chat-shaped session: a task/worker session on the pointer
         # (task_bound mode) is not the persona's chat lane and must never absorb
         # a chat relay's transcript.
-        if existing_session and existing_session.startswith(_PERSONA_CHAT_SESSION_PREFIX):
+        #
+        # AND only when it is THIS instance's own session. A pointer poisoned with
+        # a SIBLING's session (``persona_chat_<other-instance>_<hex>``) must not be
+        # adopted as this instance's default — that adoption is the sibling steal
+        # that folded ``personainst_qa`` onto ``personainst_qa_agent_2``'s chat
+        # lane (2026-07-18). A foreign pointer falls through to a fresh own mint,
+        # self-healing the corrupted pointer on the next send.
+        if (
+            existing_session
+            and existing_session.startswith(_PERSONA_CHAT_SESSION_PREFIX)
+            and not chat_session_is_foreign_to_instance(existing_session, instance_id)
+        ):
             return existing_session
     return None
 
