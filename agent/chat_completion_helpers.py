@@ -758,6 +758,11 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
             tools=tools_for_api,
             reasoning_config=agent.reasoning_config,
             session_id=getattr(agent, "session_id", None),
+            # Header-only codex cache-scope override (T10c). Absent on every lane
+            # except the persona-chat runtime (set post-construction by
+            # agent_runtime._default_agent_factory), so getattr defaults None and
+            # the transport falls back to session_id — no behavior change here.
+            cache_scope_id=getattr(agent, "cache_scope_id", None),
             max_tokens=agent.max_tokens,
             timeout=agent._resolved_api_call_timeout(),
             request_overrides=agent.request_overrides,

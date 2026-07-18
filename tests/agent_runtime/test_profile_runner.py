@@ -1276,3 +1276,88 @@ def test_rendered_skills_prompt_chars_swallows_render_failure(monkeypatch):
     monkeypatch.setattr(run_agent, "build_skills_system_prompt", _boom)
     agent = SimpleNamespace(valid_tool_names={"skill_view"}, platform="cli")
     assert _rendered_skills_prompt_chars(agent) is None
+
+
+# ── T10c: cache_scope_id threading (request → factory → agent) ───────────────
+
+def test_runner_threads_cache_scope_id_to_agent_factory(monkeypatch):
+    """AgentRunRequest.cache_scope_id reaches the agent factory as a distinct
+    kwarg while session_id is left None (persona-chat shape). It must not be
+    conflated with session_id — the transcript-load key stays untouched."""
+    monkeypatch.setattr(
+        "agent_runtime.profile_runner.resolve_runtime_provider",
+        lambda requested, target_model: {"provider": requested, "model": target_model, "api_mode": "codex_responses"},
+    )
+    runner = ProfileAgentRunner(agent_factory=FakeAgent)
+
+    runner.run(
+        AgentRunRequest(
+            profile=None,
+            provider="openai-codex",
+            model="gpt-5.6-luna",
+            api_mode="codex_responses",
+            session_id=None,               # persona-chat: no transcript reload
+            cache_scope_id="chat-persona-abc",
+            user_message="hello",
+            system_message="system",
+            task_id="run_scope",
+        )
+    )
+
+    assert FakeAgent.last_kwargs["cache_scope_id"] == "chat-persona-abc"
+    # session_id (the transcript/session-load key) is independent and stays None.
+    assert FakeAgent.last_kwargs["session_id"] is None
+
+
+def test_runner_defaults_cache_scope_id_none_for_worker_lanes(monkeypatch):
+    """Lanes that don't set cache_scope_id thread None — the codex transport
+    then falls back to session_id, so worker/mission-run behavior is unchanged."""
+    monkeypatch.setattr(
+        "agent_runtime.profile_runner.resolve_runtime_provider",
+        lambda requested, target_model: {"provider": requested, "model": target_model, "api_mode": "codex_responses"},
+    )
+    runner = ProfileAgentRunner(agent_factory=FakeAgent)
+
+    runner.run(
+        AgentRunRequest(
+            profile=None,
+            provider="openai-codex",
+            model="gpt-5.6-luna",
+            session_id="worker-session-1",
+            user_message="hello",
+            task_id="run_worker",
+        )
+    )
+
+    assert FakeAgent.last_kwargs["cache_scope_id"] is None
+    assert FakeAgent.last_kwargs["session_id"] == "worker-session-1"
+
+
+def test_default_agent_factory_applies_cache_scope_without_ctor_kwarg(monkeypatch):
+    """_default_agent_factory pops cache_scope_id and sets it on the constructed
+    agent — it is NEVER forwarded to the (upstream) AIAgent constructor, and it
+    never touches the session_id the agent loads its transcript from."""
+    from agent_runtime import profile_runner as pr
+
+    seen_kwargs = {}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            seen_kwargs.update(kwargs)
+            self.session_id = kwargs.get("session_id")
+
+    monkeypatch.setattr("run_agent.AIAgent", _RecordingAgent, raising=False)
+
+    agent = pr._default_agent_factory(session_id=None, cache_scope_id="chat-persona-xyz")
+
+    # Applied as an attribute the codex seam reads…
+    assert agent.cache_scope_id == "chat-persona-xyz"
+    # …but NOT passed into the upstream constructor, and session_id untouched.
+    assert "cache_scope_id" not in seen_kwargs
+    assert seen_kwargs.get("session_id") is None
+
+    # Unset scope leaves no attribute (getattr default None at the seam).
+    seen_kwargs.clear()
+    agent2 = pr._default_agent_factory(session_id="worker-1", cache_scope_id=None)
+    assert getattr(agent2, "cache_scope_id", None) is None
+    assert "cache_scope_id" not in seen_kwargs

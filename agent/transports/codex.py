@@ -110,6 +110,14 @@ class ResponsesApiTransport(ProviderTransport):
                 x-grok-conv-id header and the Codex cache-scope headers, and is
                 the fallback prompt_cache_key when there is no static prefix to
                 content-address
+            cache_scope_id: str | None — header-only override for the Codex
+                cache-scope headers (session_id / x-client-request-id). Used when
+                the caller keeps session_id=None to avoid transcript reload (the
+                Mission Control persona-chat lane bakes history into the message)
+                yet still needs a STABLE per-conversation cache-scope. Takes
+                precedence over session_id for those headers ONLY; it never
+                affects transcript/session loading or the prompt_cache_key body
+                field. Falls back to session_id when unset.
             max_tokens: int | None — max_output_tokens
             timeout: float | None — per-request timeout forwarded to the SDK
             request_overrides: dict | None — extra kwargs merged in
@@ -250,6 +258,12 @@ class ResponsesApiTransport(ProviderTransport):
             kwargs["parallel_tool_calls"] = True
 
         session_id = params.get("session_id")
+        # Header-only cache-scope override (persona-chat lane, T10c): distinct
+        # from session_id so a caller can keep session_id=None (no transcript
+        # reload) while still routing a STABLE per-conversation cache scope. Used
+        # only for the Codex cache-scope headers below — NOT for prompt_cache_key
+        # (kept content-addressed) or any session/transcript loading.
+        cache_scope_id = params.get("cache_scope_id")
         # prompt_cache_key is content-addressed from the static prefix
         # (instructions + tools), NOT session_id — recurring cron jobs carry a
         # per-fire timestamp in session_id (cron_<id>_<ts>) that made every run
@@ -329,8 +343,14 @@ class ResponsesApiTransport(ProviderTransport):
             # remain high.  Send session_id / x-client-request-id as HTTP
             # headers while keeping ``prompt_cache_key`` in the body for
             # standard OpenAI routing as a belt-and-braces fallback.
-            cache_scope_id = str(session_id or "").strip()
-            if cache_scope_id:
+            #
+            # cache_scope_id (T10c) takes precedence over session_id so the
+            # persona-chat lane — which passes session_id=None to avoid
+            # transcript reload — can still route a STABLE per-conversation cache
+            # scope. Falls back to session_id (worker/mission-run lanes carry a
+            # real one, so their headers are unchanged). Empty ⇒ no headers.
+            scope_header_value = str(cache_scope_id or session_id or "").strip()
+            if scope_header_value:
                 existing_extra_headers = kwargs.get("extra_headers")
                 merged_extra_headers: Dict[str, str] = {}
                 if isinstance(existing_extra_headers, dict):
@@ -341,8 +361,8 @@ class ResponsesApiTransport(ProviderTransport):
                             if key and value is not None
                         }
                     )
-                merged_extra_headers["session_id"] = cache_scope_id
-                merged_extra_headers["x-client-request-id"] = cache_scope_id
+                merged_extra_headers["session_id"] = scope_header_value
+                merged_extra_headers["x-client-request-id"] = scope_header_value
                 kwargs["extra_headers"] = merged_extra_headers
 
         max_tokens = params.get("max_tokens")

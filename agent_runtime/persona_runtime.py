@@ -361,6 +361,15 @@ class GPTPersonaRuntime:
                 skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
                 session_id=session_id,
+                # session_id stays None on this lane (the transcript is already
+                # baked into the message), but the ChatGPT-Codex prompt cache is
+                # scoped by the session_id / x-client-request-id HTTP headers.
+                # Feed the STABLE chat session identity (perm_session_id — the id
+                # that names the turn store / observability session) as the
+                # header-only cache_scope_id so the warm prefix survives across
+                # turns. Header/routing value ONLY — never a transcript-load key
+                # (T10c). Worker/mission-run lanes leave this unset.
+                cache_scope_id=perm_session_id,
                 max_wall_seconds=max_wall_seconds,
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,

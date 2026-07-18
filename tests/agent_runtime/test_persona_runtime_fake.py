@@ -1344,3 +1344,73 @@ def test_dev_grounding_overrides_default_blueprint_placeholder_repo(isolate_agen
     ctx = type("Ctx", (), {"task": task, "current_stage": None})()
 
     assert _stage_repo_scope_for_persona(persona, ctx) == "hermes-agent"
+
+
+def test_mission_chat_reply_sets_cache_scope_id_but_keeps_session_none(tmp_path, monkeypatch):
+    # T10c: the persona-chat lane must feed the STABLE chat session id as the
+    # header-only cache_scope_id (so the codex cache-scope headers stay stable
+    # across turns) WHILE keeping session_id=None (so the runtime never re-loads
+    # the transcript it already baked into the message). The two ids must not be
+    # conflated — cache_scope_id is a routing value, session_id is the
+    # transcript/session-load key.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="chat-neko-stable-1",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.mission_chat_reply(
+        neko,
+        "status?",
+        session_id=None,
+        permission_session_id="chat-neko-stable-1",
+    )
+
+    request = captured["request"]
+    # The header-only cache scope is the stable chat session identity…
+    assert request.cache_scope_id == "chat-neko-stable-1"
+    # …and the transcript/session-load key is left None (no re-bake).
+    assert request.session_id is None
+
+
+def test_mission_chat_reply_cache_scope_falls_back_to_session_when_no_perm(tmp_path, monkeypatch):
+    # perm_session_id = permission_session_id or session_id. When only session_id
+    # is supplied (no separate permission id), the cache scope still resolves to
+    # that same stable chat id — never left empty on the chat lane.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="s",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.mission_chat_reply(neko, "status?", session_id="chat-only-2")
+
+    assert captured["request"].cache_scope_id == "chat-only-2"

@@ -70,6 +70,16 @@ class AgentRunRequest:
     blocked_tool_names: list[str] | None = None
     skills: list[str] | None = None
     session_id: str | None = None
+    # Codex cache-scope routing hint (header-only), DISTINCT from ``session_id``.
+    # The persona-chat lane passes ``session_id=None`` so the runtime does not
+    # re-load a transcript it already baked into the message, but the
+    # ChatGPT-Codex backend routes its prompt cache on the ``session_id`` /
+    # ``x-client-request-id`` HTTP headers. ``cache_scope_id`` supplies a STABLE
+    # per-conversation value for those headers without ever touching transcript
+    # or session loading (which stay keyed on ``session_id``). None ⇒ the codex
+    # transport falls back to ``session_id`` (worker/mission-run lanes carry a
+    # real one, so their behavior is unchanged). See T10c / codex.py header seam.
+    cache_scope_id: str | None = None
     platform: str = "agent_runtime"
     quiet_mode: bool = True
     skip_context_files: bool = True
@@ -243,6 +253,9 @@ class ProfileAgentRunner:
                 skip_memory=request.skip_memory,
                 platform=request.platform,
                 session_id=request.session_id,
+                # Header-only codex cache-scope hint; the default factory applies
+                # it to the constructed agent (never to session/transcript load).
+                cache_scope_id=request.cache_scope_id,
                 credential_pool=self._credential_pool,
                 session_db=self._session_db,
                 status_callback=status_callback,
@@ -1663,4 +1676,13 @@ def _normalize_result(result: Any, *, agent) -> AgentRunResult:
 def _default_agent_factory(**kwargs):
     from run_agent import AIAgent
 
-    return AIAgent(**kwargs)
+    # ``cache_scope_id`` is a fork-runtime, header-only codex cache-scope hint —
+    # NOT part of the upstream AIAgent constructor. Pop it before construction so
+    # the upstream signature is untouched, then apply it as an attribute the
+    # codex build seam reads via ``getattr(agent, "cache_scope_id", None)``. It
+    # never participates in session/transcript loading.
+    cache_scope_id = kwargs.pop("cache_scope_id", None)
+    agent = AIAgent(**kwargs)
+    if cache_scope_id:
+        agent.cache_scope_id = cache_scope_id
+    return agent
