@@ -676,6 +676,40 @@ def test_set_skill_selection_rejects_malformed_slug(isolate_agent_runtime_root, 
     assert RealmStore().get(realm.id).skill_publish_mode == "all"
 
 
+def test_set_skill_selection_names_every_malformed_slug(isolate_agent_runtime_root, tmp_path):
+    # A batch save reports ALL offenders in one typed error, not just the first
+    # — the launcher sends the whole checkbox set in one --skills batch.
+    realm, _repo = _realm_with_repo(tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        RealmStore().set_skill_selection(
+            realm.id, mode="selected", selection=["bad/slug", ".hidden", "fine"]
+        )
+    message = str(excinfo.value)
+    assert "bad/slug" in message
+    assert ".hidden" in message
+    assert "fine" not in message
+    assert RealmStore().get(realm.id).skill_publish_mode == "all"  # untouched
+
+
+def test_set_skill_selection_dry_run_does_not_mutate(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["alpha"])
+
+    would_be = RealmStore().set_skill_selection(
+        realm.id, mode="selected", selection=[], dry_run=True
+    )
+    assert would_be.skill_selection == []  # the preview reflects the request
+
+    stored = RealmStore().get(realm.id)
+    assert stored.skill_selection == ["alpha"]  # disk untouched
+    events = [
+        event
+        for event in EventLog().tail(50)
+        if event.type == "realm.updated" and event.payload.get("change") == "skill_selection"
+    ]
+    assert len(events) == 1  # only the seeding write emitted
+
+
 def test_set_skill_selection_emits_store_event(isolate_agent_runtime_root, tmp_path):
     realm, _repo = _realm_with_repo(tmp_path)
     RealmStore().set_skill_selection(realm.id, mode="selected", selection=["a", "b"])
@@ -775,6 +809,22 @@ def test_realm_skills_set_cli_none(isolate_agent_runtime_root, tmp_path):
     assert proc.returncode == 0
     assert payload["mode"] == "selected"
     assert payload["selection"] == []
+
+
+def test_realm_skills_set_cli_dry_run_previews_without_mutating(isolate_agent_runtime_root, tmp_path):
+    _make_shared_skill("alpha")
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["alpha"])
+
+    proc = _run_harness("realm", "skills", "set", realm.id, "--none", "--dry-run", "--json")
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == 0
+    assert payload["dry_run"] is True
+    assert payload["mode"] == "selected"
+    assert payload["selection"] == []  # the previewed would-be state
+
+    stored = RealmStore().get(realm.id)
+    assert stored.skill_selection == ["alpha"]  # nothing was written
 
 
 def test_realm_skills_set_cli_malformed_slug_is_typed_error(isolate_agent_runtime_root, tmp_path):

@@ -2472,8 +2472,14 @@ def _cmd_realm_skills_set(args) -> int:
     else:
         mode = "selected"
         selection = [slug.strip() for slug in str(args.skills).split(",") if slug.strip()]
-    realm = RealmStore().set_skill_selection(args.realm_id, mode=mode, selection=selection)
-    _print_stage42(_realm_skill_selection_envelope(realm), args=args, default_output="json")
+    dry_run = bool(getattr(args, "dry_run", False))
+    realm = RealmStore().set_skill_selection(
+        args.realm_id, mode=mode, selection=selection, dry_run=dry_run
+    )
+    envelope = _realm_skill_selection_envelope(realm)
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
     return 0
 
 

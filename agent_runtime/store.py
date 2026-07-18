@@ -829,26 +829,33 @@ def _normalize_skill_selection(selection: list[str] | None) -> list[str]:
     Shape rules (per REALM_SKILL_SELECTION_DESIGN §2): non-empty, no leading
     dot, no path separator, and identical to their ``_safe_token`` form — the
     same tokenizer the realm publisher uses for skill directory names, so a
-    valid slug round-trips to its published path. Malformed slugs raise
-    ``ValueError`` (mapped to a typed ``invalid_request`` at the CLI seam).
-    Slugs unknown to the local catalog are NOT filtered here — that is realm
-    truth another member may own.
+    valid slug round-trips to its published path. Every malformed slug is
+    collected and reported in ONE ``ValueError`` (mapped to a typed
+    ``invalid_request`` at the CLI seam) so a batch save names all offenders
+    instead of failing on the first. Slugs unknown to the local catalog are
+    NOT filtered here — that is realm truth another member may own.
     """
     # Function-local import breaks the module cycle (realm_sync imports store).
     from agent_runtime.realm_sync import _safe_token
 
     cleaned: set[str] = set()
+    rejected: list[str] = []
     for raw in selection or []:
         slug = str(raw).strip()
-        if not slug:
-            raise ValueError("skill selection slug must be non-empty")
-        if slug.startswith("."):
-            raise ValueError(f"skill selection slug must not start with a dot: {slug!r}")
-        if "/" in slug or "\\" in slug:
-            raise ValueError(f"skill selection slug must not contain a path separator: {slug!r}")
-        if slug != _safe_token(slug):
-            raise ValueError(f"malformed skill selection slug: {slug!r}")
+        if (
+            not slug
+            or slug.startswith(".")
+            or "/" in slug
+            or "\\" in slug
+            or slug != _safe_token(slug)
+        ):
+            rejected.append(slug or repr(raw))
+            continue
         cleaned.add(slug)
+    if rejected:
+        raise ValueError(
+            "malformed skill selection slug(s): " + ", ".join(repr(slug) for slug in sorted(set(rejected)))
+        )
     return sorted(cleaned)
 
 
@@ -918,7 +925,9 @@ class RealmStore:
         )
         return item
 
-    def set_skill_selection(self, realm_id: str, *, mode: str, selection: list[str]) -> Realm:
+    def set_skill_selection(
+        self, realm_id: str, *, mode: str, selection: list[str], dry_run: bool = False
+    ) -> Realm:
         """Single write chokepoint for a realm's shared-skill publish selection.
 
         ``mode == "all"`` publishes every shared skill and PRESERVES the stored
@@ -934,6 +943,9 @@ class RealmStore:
         realm truth; unknown slugs are reported (``missing``) by the CLI, never
         stripped. Emits ``realm.updated``/``skill_selection`` so the read-model
         pipeline sees the mutation (Stage 12 watermark discipline).
+
+        ``dry_run`` runs the full validation and returns the WOULD-BE realm
+        (in-memory only) without saving and without emitting the store event.
         """
         if mode not in {"all", "selected"}:
             raise ValueError(f"invalid skill_publish_mode: {mode!r}")
@@ -941,6 +953,8 @@ class RealmStore:
         if mode == "selected":
             item.skill_selection = _normalize_skill_selection(selection)
         item.skill_publish_mode = mode
+        if dry_run:
+            return item
         item = self.save(item, emit_event=False)
         _append_store_event(
             self.event_log,
