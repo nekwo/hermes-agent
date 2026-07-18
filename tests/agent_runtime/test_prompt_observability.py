@@ -64,6 +64,41 @@ def test_prompt_observability_reports_persona_identity_layer_and_memory_flag():
     assert with_memory["prompt_flags"]["skip_memory"] is False
 
 
+def test_prompt_layers_situational_hud_reports_operator_turn_placement():
+    # T5 observability coherence: after the HUD moved out of the system prompt,
+    # the frame carries a `situational_hud` prompt layer whose status/summary
+    # reflect the NEW placement — injected on the operator's user turn, not the
+    # system prompt. The top-level `situational_hud` block still rides for the
+    # launcher's HUD peek. The layer carries no per-layer token estimate (its
+    # bytes are counted via the user-turn message; a per-layer estimate would
+    # double-count).
+    persona = SimpleNamespace(
+        id="neko_supervisor",
+        hermes_profile="neko",
+        display_name="Neko Mission Lead",
+        role="alice_supervisor",
+    )
+    hud = {"preview": True, "scope": {"realm": "default", "workspace": "alpha"}}
+    with_hud = mission_chat_prompt_observability(
+        persona=persona, session_id="persona_chat_neko", situational_hud=hud
+    )
+    layers = {layer["kind"]: layer for layer in with_hud["prompt_layers"]}
+    assert "situational_hud" in layers
+    hud_layer = layers["situational_hud"]
+    assert hud_layer["status"] == "loaded"
+    assert "user turn" in hud_layer["summary"]
+    assert "NOT the system prompt" in hud_layer["summary"]
+    assert "token_estimate" not in hud_layer
+    # The block still carries the full dict for the launcher's HUD peek.
+    assert with_hud["situational_hud"] == hud
+
+    without_hud = mission_chat_prompt_observability(
+        persona=persona, session_id="persona_chat_neko"
+    )
+    empty_layer = {layer["kind"]: layer for layer in without_hud["prompt_layers"]}["situational_hud"]
+    assert empty_layer["status"] == "empty"
+
+
 def test_prompt_observability_names_live_task_bound_chat_without_session_row():
     context = mission_chat_prompt_observability(
         persona=SimpleNamespace(

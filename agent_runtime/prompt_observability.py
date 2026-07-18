@@ -260,6 +260,26 @@ def mission_chat_prompt_observability(
                 "status": "loaded" if history else "empty",
                 "summary": f"{len(history)} prior redaction-safe chat message(s) supplied before this turn.",
             },
+            {
+                "name": "Runtime Situation HUD",
+                "kind": "situational_hud",
+                "status": "loaded" if (isinstance(situational_hud, dict) and situational_hud) else "empty",
+                "summary": (
+                    "Runtime situational HUD (runtime · scope · mission · lane · "
+                    "roster) injected as per-turn context on the operator's user "
+                    "turn — NOT the system prompt. Its roster/scope/mission state "
+                    "rotates every turn, so keeping it out of the codex "
+                    "instructions preserves the byte-stable cross-turn "
+                    "prompt-cache prefix (T5, 2026-07-18)."
+                    if (isinstance(situational_hud, dict) and situational_hud)
+                    else "No runtime situational HUD resolved for this lane this "
+                    "turn; nothing injected."
+                ),
+                # Its bytes ride in the operator user-turn message
+                # (``final_model_input`` messages), so this layer carries no
+                # per-layer token estimate — the launcher already counts them via
+                # that message and would otherwise double-count the HUD.
+            },
         ],
         "context_files": [
             *_profile_context_files(profile),

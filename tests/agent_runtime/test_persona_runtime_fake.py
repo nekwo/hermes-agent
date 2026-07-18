@@ -558,6 +558,55 @@ def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path
     assert captured["request"].agent_ready_callback is agent_ready
 
 
+def test_mission_chat_reply_rides_hud_on_user_turn_not_system_prompt(tmp_path, monkeypatch):
+    # T5 wiring guard: the caller passes the resolved situational HUD block; it
+    # must land on the operator's USER turn (after the message), never in the
+    # system prompt (the codex instructions), so the byte-stable cross-turn
+    # cache prefix survives. Pins the mission_chat_reply -> _mission_chat_user_message
+    # / _mission_chat_surface_message wiring against a silent regression.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="session_mission_chat",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    hud_block = (
+        "## Runtime Situation\nThis mirrors the operator's Mission Control "
+        "runtime HUD.\n- Scope: realm default · workspace alpha\n"
+        "- On level (1): QA Agent (@personainst_qa)"
+    )
+    runtime.mission_chat_reply(
+        neko,
+        "what's the state?",
+        permission_session_id="session_mission_chat",
+        situational_hud_content=hud_block,
+    )
+
+    request = captured["request"]
+    # HUD is on the user turn, after the operator's message.
+    assert hud_block in request.user_message
+    assert request.user_message.index(hud_block) > request.user_message.index(
+        "what's the state?"
+    )
+    # HUD is NOT in the system prompt — the instructions stay byte-stable.
+    assert "## Runtime Situation" not in request.system_message
+    assert hud_block not in request.system_message
+
+
 def test_mission_chat_reply_honors_include_profile_memory(tmp_path, monkeypatch):
     # A persona bound to a profile for CAPABILITIES must not also inherit that
     # profile's MEMORY.md/USER.md worldview unless it opts in. skip_memory now

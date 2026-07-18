@@ -242,26 +242,100 @@ def _chat_persona():
     )
 
 
-def test_mission_chat_surface_message_injects_runtime_situation_block():
+def test_mission_chat_surface_message_never_carries_runtime_situation_block():
+    # T5: the volatile Runtime Situation HUD is NO LONGER injected into the
+    # system prompt (the codex ``instructions``). It rides the operator's user
+    # turn instead so the cross-turn prompt-cache prefix stays byte-stable. The
+    # surface message therefore never contains the HUD, and the builder no
+    # longer even accepts a situational_hud argument.
+    import inspect
+
     from agent_runtime.persona_runtime import _mission_chat_surface_message
 
-    block = (
-        "## Runtime Situation\nThis mirrors the operator's Mission Control "
-        "runtime HUD.\n- Runtime: state starting · loop 0"
-    )
-    message = _mission_chat_surface_message(
-        _chat_persona(), "", situational_hud_content=block
-    )
-    assert "## Runtime Situation" in message
-    # The block sits after the "you ARE Neko" identity hat so the agent has its
-    # situational context, and the anti-fabrication rules still lead.
-    assert message.index("## Runtime Situation") > message.index("Neko Mission Lead")
-
-
-def test_mission_chat_surface_message_omits_block_when_empty():
-    from agent_runtime.persona_runtime import _mission_chat_surface_message
-
-    message = _mission_chat_surface_message(
-        _chat_persona(), "", situational_hud_content=""
-    )
+    message = _mission_chat_surface_message(_chat_persona(), "")
     assert "## Runtime Situation" not in message
+    # The situational_hud_content parameter is gone from the system-prompt builder.
+    assert "situational_hud_content" not in inspect.signature(
+        _mission_chat_surface_message
+    ).parameters
+
+
+def test_mission_chat_system_prompt_is_byte_stable_across_hud_and_roster_state():
+    # THE T5 byte-stability proof: two simulated turns whose HUD/roster/scope
+    # differ (e.g. `QA Agent` ↔ `QA Agent (2)`, a new mission, a changed realm)
+    # must produce a BYTE-IDENTICAL system prompt, so the codex
+    # prompt_cache_key = sha256(instructions + tools) does not rotate turn to
+    # turn. The HUD content that used to poison the prefix is exercised through
+    # the real renderer to make the guard honest.
+    from agent_runtime.persona_runtime import (
+        _mission_chat_surface_message,
+        _mission_chat_user_message,
+    )
+
+    persona = _chat_persona()
+
+    hud_turn_1 = render_situational_hud_block(
+        {
+            "preview": True,
+            "scope": {"realm": "default", "workspace": "alpha"},
+            "roster": [{"display_name": "QA Agent", "persona_instance_id": "personainst_qa"}],
+        }
+    )
+    hud_turn_2 = render_situational_hud_block(
+        {
+            "preview": True,
+            "scope": {"realm": "staging", "workspace": "beta"},
+            "mission": {"goal_id": "goal_x", "title": "Ship it", "state": "running"},
+            "roster": [
+                {"display_name": "QA Agent (2)", "persona_instance_id": "personainst_qa2"},
+                {"display_name": "Dev", "persona_instance_id": "personainst_dev"},
+            ],
+        }
+    )
+    assert hud_turn_1 != hud_turn_2  # the two turns really do differ
+
+    system_1 = _mission_chat_surface_message(persona, "")
+    system_2 = _mission_chat_surface_message(persona, "")
+    assert system_1 == system_2  # byte-identical instructions across turns
+
+    # And the diverging state lives entirely in the (per-turn, uncached) user
+    # turn, never the system prompt.
+    assert hud_turn_1 not in system_1
+    assert hud_turn_2 not in system_2
+    user_1 = _mission_chat_user_message("hi", hud_turn_1)
+    user_2 = _mission_chat_user_message("hi", hud_turn_2)
+    assert user_1 != user_2
+    assert hud_turn_1 in user_1
+    assert hud_turn_2 in user_2
+
+
+def test_mission_chat_user_message_rides_hud_after_the_operator_message():
+    # Placement is load-bearing: the HUD trails the operator's message (which
+    # already carries the rolling chat history), so it sits AFTER chat history,
+    # adjacent to the current operator message — the append-only ordering the
+    # caching design requires.
+    from agent_runtime.persona_runtime import _mission_chat_user_message
+
+    baked = (
+        "Prior persona chat context (oldest to newest):\n"
+        "Operator: earlier\nAgent: ok\n\nCurrent operator message:\nwhat now?"
+    )
+    hud = render_situational_hud_block(
+        {"preview": True, "scope": {"realm": "default", "workspace": "alpha"}}
+    )
+    user = _mission_chat_user_message(baked, hud)
+    assert baked in user
+    assert hud in user
+    # HUD strictly after the whole operator/history block.
+    assert user.index(hud) > user.index("Current operator message:")
+    assert user.index(hud) > user.index("what now?")
+
+
+def test_mission_chat_user_message_is_bare_message_without_hud():
+    # No HUD resolved (best-effort {}/'' from situational_hud_for_instance) -> the
+    # operator turn is exactly the message, no dangling separators.
+    from agent_runtime.persona_runtime import _mission_chat_user_message
+
+    assert _mission_chat_user_message("just this", "") == "just this"
+    assert _mission_chat_user_message("just this", None) == "just this"
+    assert _mission_chat_user_message("just this", "   ") == "just this"
