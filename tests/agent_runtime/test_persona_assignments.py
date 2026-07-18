@@ -3979,3 +3979,223 @@ def test_contention_warning_self_heals_assignment_for_archived_goal():
 
     assert warnings == []
     assert assignment_store.get(stale.id).state == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Instance end-of-life: `harness persona instance retire` (placement removal).
+# The operator ruling — deleting a deliberate placement IS the instance's
+# end-of-life — needs a sanctioned verb that archives the ROW (not an
+# assignment), emits an evented mutation, guards a working agent, and drops the
+# row from every instance-fed projection while leaving chat history on disk.
+# ---------------------------------------------------------------------------
+
+
+def _placement_instance(persona_id: str = "dev", placement_id: str = "scene_child_2", display_name: str = "Dev (2)") -> PersonaInstance:
+    return PersonaInstanceStore().add_instance(
+        persona_id=persona_id,
+        placement_id=placement_id,
+        display_name=display_name,
+    )
+
+
+def test_retire_archives_placement_row_and_emits_event(isolate_agent_runtime_root):
+    from agent_runtime import paths
+
+    store = PersonaInstanceStore()
+    instance = _placement_instance()
+    assert instance.id == "personainst_scene_child_2"
+    session_id = instance.session_id
+    assert session_id  # a real chat session pointer we must NOT destroy
+
+    result = store.retire(instance.id, reason="placement deleted", requested_by="operator")
+
+    # Row left the live dir ...
+    assert not paths.persona_instance_path(instance.id).exists()
+    assert instance.id not in {row.id for row in store.list_all()}
+    # ... and landed in the archive (never deleted); its session pointer survives.
+    archived = list(paths.persona_instances_archive_dir().rglob(f"{instance.id}.json"))
+    assert len(archived) == 1
+    archived_payload = json.loads(archived[0].read_text(encoding="utf-8"))
+    assert archived_payload["session_id"] == session_id
+    assert Path(result["archive_path"]) == archived[0]
+    assert result["persona_id"] == "dev"
+
+    events = [event for event in EventLog().tail(50) if event.type == "persona_instance.retired"]
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["persona_instance_id"] == instance.id
+    assert payload["reason"] == "placement deleted"
+    assert payload["requested_by"] == "operator"
+    assert payload["persona_id"] == "dev"
+
+
+def test_retire_refuses_canonical_persona_channel(isolate_agent_runtime_root):
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import PersonaInstanceRetireError
+
+    store = PersonaInstanceStore()
+    canonical = store.ensure_for_persona(_persona("dev"))
+    assert canonical.id == "personainst_dev"
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        store.retire(canonical.id)
+    assert excinfo.value.code == "canonical_persona_channel"
+    # Refusal is a no-op: the canonical channel stays live on disk.
+    assert paths.persona_instance_path(canonical.id).exists()
+    assert canonical.id in {row.id for row in store.list_all()}
+
+
+def test_retire_refuses_active_run_binding(isolate_agent_runtime_root):
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import PersonaInstanceRetireError
+
+    store = PersonaInstanceStore()
+    instance = _placement_instance()
+    run = RunStore().open_run("dev", "task_live", "stage_1", session_id="session_live")
+    instance.active_run_id = run.id
+    store.update(instance)
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        store.retire(instance.id)
+    assert excinfo.value.code == "instance_active"
+    assert excinfo.value.detail["active_run_id"] == run.id
+    assert paths.persona_instance_path(instance.id).exists()
+
+
+def test_retire_refuses_active_assignment(isolate_agent_runtime_root):
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import PersonaInstanceRetireError
+
+    store = PersonaInstanceStore()
+    instance = _placement_instance()
+    assignment = PersonaAssignmentStore().create_or_resume(
+        PersonaAssignmentSpec(
+            persona_id="dev",
+            persona_instance_id=instance.id,
+            kind="free_floating_message",
+            title="Live work",
+            message="Working.",
+            task_id=None,
+        )
+    )
+    assert assignment.state in ACTIVE_ASSIGNMENT_STATES
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        store.retire(instance.id)
+    assert excinfo.value.code == "assignment_active"
+    assert assignment.id in excinfo.value.detail["active_assignment_ids"]
+    assert paths.persona_instance_path(instance.id).exists()
+
+
+def test_retire_refuses_missing_instance(isolate_agent_runtime_root):
+    from agent_runtime.persona_assignments import PersonaInstanceRetireError
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        PersonaInstanceStore().retire("personainst_does_not_exist")
+    assert excinfo.value.code == "not_found"
+
+
+def test_retire_excludes_instance_from_snapshot_projection(monkeypatch, isolate_agent_runtime_root):
+    cfg = _assignment_config()
+    monkeypatch.setattr("agent_runtime.snapshot.load_agent_runtime_config", lambda: cfg)
+    store = PersonaInstanceStore()
+    instance = _placement_instance()
+
+    before = build_snapshot()
+    assert instance.id in before["persona_instances"]
+
+    store.retire(instance.id, reason="placement deleted")
+
+    after = build_snapshot()
+    assert instance.id not in after["persona_instances"]
+    # The chat-history projection reads the live instances, so it drops too.
+    history = persona_chat_history_summary(persona_instances=store.list_all())
+    assert instance.id not in {row.get("persona_instance_id") for row in history}
+
+
+def test_retire_cli_happy_path_archives_row(monkeypatch, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from agent_runtime import paths
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    instance = _placement_instance()
+
+    code = harness._cmd_persona_instance_retire(
+        Namespace(
+            persona_instance_id=instance.id,
+            reason="placement deleted",
+            requested_by="operator",
+            coordinator_id=None,
+            coordinator_max_spawns=None,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=None,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    assert not paths.persona_instance_path(instance.id).exists()
+    assert instance.id not in {row.id for row in PersonaInstanceStore().list_all()}
+
+
+def test_retire_cli_canonical_refusal_returns_typed_error(monkeypatch, capsys, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    canonical = PersonaInstanceStore().ensure_for_persona(_persona("dev"))
+
+    code = harness._cmd_persona_instance_retire(
+        Namespace(
+            persona_instance_id=canonical.id,
+            reason="placement deleted",
+            requested_by="operator",
+            coordinator_id=None,
+            coordinator_max_spawns=None,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=None,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "canonical_persona_channel"
+    assert payload["persona_instance_id"] == canonical.id
+
+
+def test_retire_cli_coordinator_operator_placed_needs_confirm(monkeypatch, capsys, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    # A placement dropped by the operator is not owned by a coordinator, so a
+    # coordinator cannot end-of-life it (KILL_ACTIONS gate -> operator confirm).
+    instance = _placement_instance()
+
+    code = harness._cmd_persona_instance_retire(
+        Namespace(
+            persona_instance_id=instance.id,
+            reason="coordinator tried retiring operator placement",
+            requested_by="coordinator:neko_supervisor",
+            coordinator_id="neko_supervisor",
+            coordinator_max_spawns=0,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=True,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=True,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "needs_operator_confirm"

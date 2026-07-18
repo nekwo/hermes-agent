@@ -61,6 +61,7 @@ from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     ChatBusyError,
     PersonaAssignmentSpec,
+    PersonaInstanceRetireError,
     StaleModelOverrideWrite,
     PersonaAssignmentStore,
     PersonaInstanceStore,
@@ -1029,6 +1030,13 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_archive.add_argument("--requested-by", default="cli")
     persona_instance_archive.add_argument("--json", action="store_true")
     persona_instance_archive.set_defaults(func=_cmd_persona_instance_archive)
+    persona_instance_retire = persona_instance_subs.add_parser("retire", help="Retire (end-of-life) a placement-backed persona instance: archive its row (chat history preserved)")
+    persona_instance_retire.add_argument("persona_instance_id")
+    persona_instance_retire.add_argument("--reason", default="placement removed")
+    persona_instance_retire.add_argument("--requested-by", default="cli")
+    _add_coordinator_permission_args(persona_instance_retire)
+    persona_instance_retire.add_argument("--json", action="store_true")
+    persona_instance_retire.set_defaults(func=_cmd_persona_instance_retire)
     persona_instance_sweep = persona_instance_subs.add_parser("sweep-orphans", help="Reap stale task-bound persona instances with no live worker/run")
     persona_instance_sweep.add_argument("--reason", default="operator persona instance janitor")
     persona_instance_sweep.add_argument("--json", action="store_true")

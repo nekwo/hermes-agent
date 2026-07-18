@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -131,6 +132,37 @@ class StaleModelOverrideWrite(AgentRuntimeError):
         self.instance = instance
         self.issued_at = issued_at
         self.applied_issued_at = applied_issued_at
+
+
+class PersonaInstanceRetireError(AgentRuntimeError):
+    """A persona-instance retire (end-of-life) was refused by a state guard.
+
+    ``code`` is the machine-readable typed reason every surface (CLI JSON,
+    launcher bridge) keys on — never a bare string:
+
+    - ``not_found`` — no such live row.
+    - ``canonical_persona_channel`` — the row IS the persona/profile's canonical
+      operator channel (the global singleton ``persona_instance_id_for(persona)``).
+      Its retirement is the queued workspace-scoping redesign, not this verb.
+    - ``instance_active`` — a live run/worker still resolves for the instance;
+      never archive a working agent.
+    - ``assignment_active`` — an active persona assignment is bound to the
+      instance; complete/close it first.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        persona_instance_id: str,
+        detail: dict[str, Any] | None = None,
+    ):
+        super().__init__(code)
+        self.code = code
+        self.message = message
+        self.persona_instance_id = persona_instance_id
+        self.detail = detail or {}
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -851,6 +883,140 @@ class PersonaInstanceStore:
             "remaining_count": len(after),
         }
 
+    def retire(
+        self,
+        persona_instance_id: str,
+        *,
+        reason: str = "placement removed",
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Instance end-of-life: archive a placement-backed (or otherwise
+        deliberate) persona-instance ROW and emit an EventLog event.
+
+        The operator ruling is that a deliberate placement IS the instance:
+        deleting the placement ends the instance's life. This is the sanctioned
+        verb for that transition — the row file MOVES to
+        ``persona_instances_archive/<ts>_retire/`` (archive-never-delete), an
+        evented mutation (no silent row move). Chat sessions and turn stores
+        stay untouched on disk (history is never destroyed); the projection
+        simply stops listing the row because ``list_all`` only globs the live
+        dir, so every instance-fed surface (snapshot, roster, chat history,
+        flow node dropdown) drops it on the next frame.
+
+        Refuses with a typed :class:`PersonaInstanceRetireError` (never a silent
+        no-op) when the row is the canonical persona/profile channel
+        (``canonical_persona_channel`` — the global-singleton retirement is the
+        queued workspace-scoping redesign), when a live run/worker still
+        resolves (``instance_active`` — never archive a working agent), or when
+        an active persona assignment is bound (``assignment_active``)."""
+        try:
+            instance = self.get(persona_instance_id)
+        except Exception as exc:
+            raise PersonaInstanceRetireError(
+                "not_found",
+                f"persona instance not found: {persona_instance_id}",
+                persona_instance_id=safe_assignment_token(persona_instance_id) or str(persona_instance_id),
+            ) from exc
+
+        if is_canonical_persona_channel(instance):
+            raise PersonaInstanceRetireError(
+                "canonical_persona_channel",
+                (
+                    f"{instance.id} is the canonical persona channel for "
+                    f"{instance.persona_id!r}; the global-singleton channel cannot be "
+                    "retired here (that is the queued workspace-scoping redesign) — "
+                    "retire a placement-backed instance instead"
+                ),
+                persona_instance_id=instance.id,
+                detail={"persona_id": instance.persona_id},
+            )
+
+        if self._has_live_binding(instance):
+            raise PersonaInstanceRetireError(
+                "instance_active",
+                f"{instance.id} has a live run/worker binding; never retire a working agent",
+                persona_instance_id=instance.id,
+                detail={
+                    "active_run_id": safe_optional_token(instance.active_run_id),
+                    "active_worker_session_id": safe_optional_token(instance.active_worker_session_id),
+                },
+            )
+
+        active_assignment_ids = self._active_assignment_ids_for_instance(instance.id)
+        if active_assignment_ids:
+            raise PersonaInstanceRetireError(
+                "assignment_active",
+                (
+                    f"{instance.id} has {len(active_assignment_ids)} active assignment(s); "
+                    "complete or close them before retiring"
+                ),
+                persona_instance_id=instance.id,
+                detail={"active_assignment_ids": active_assignment_ids},
+            )
+
+        archive_dir = paths.persona_instances_archive_dir() / f"{now().strftime('%Y%m%dT%H%M%SZ')}_retire"
+        archived_path = self._archive_instance_row(instance, archive_dir)
+        if archived_path is None:
+            raise PersonaInstanceRetireError(
+                "not_found",
+                f"persona instance row is not on disk: {instance.id}",
+                persona_instance_id=instance.id,
+            )
+        safe_reason = safe_assignment_text(reason, limit=240) or "placement removed"
+        normalized_requested_by = str(requested_by)[:80] if requested_by else None
+        payload: dict[str, Any] = {
+            "reason": safe_reason,
+            "persona_id": instance.persona_id,
+            "mode": instance.mode,
+            "archive_dir": str(archive_dir),
+        }
+        if normalized_requested_by:
+            payload["requested_by"] = normalized_requested_by
+        self._event("persona_instance.retired", instance, payload)
+        # S7-A producer: the retired row leaves the active frame, so the launcher
+        # deletes the keyed row (never renders it as a live idle agent). Dark by
+        # default (read_model.delta_patches off).
+        emit_persona_instance_remove(self.event_log, instance, reason=safe_reason)
+        # Prune-lane hook (mirrors close_for_task / the janitor): a retired
+        # instance must not leave a phantom office desk. Best-effort; office
+        # archival never fails the retire.
+        self._archive_office_placements(instance)
+        return {
+            "persona_instance_id": instance.id,
+            "persona_id": instance.persona_id,
+            "display_name": instance.display_name,
+            "mode": instance.mode,
+            "reason": safe_reason,
+            "requested_by": normalized_requested_by,
+            "archive_path": str(archived_path),
+            "archive_dir": str(archive_dir),
+        }
+
+    def _active_assignment_ids_for_instance(self, instance_id: str) -> list[str]:
+        """Ids of active persona assignments bound to this instance (guard input
+        for :meth:`retire`). A retire must never orphan a live assignment."""
+        try:
+            assignments = PersonaAssignmentStore(event_log=self.event_log).list_all()
+        except Exception:
+            return []
+        return [
+            assignment.id
+            for assignment in assignments
+            if assignment.persona_instance_id == instance_id
+            and assignment.state in ACTIVE_ASSIGNMENT_STATES
+        ]
+
+    def _archive_instance_row(self, instance: PersonaInstance, archive_dir) -> Any:
+        """Move the instance's row file into ``archive_dir`` (archive-never-delete).
+        Returns the archived path, or ``None`` when the live row is already gone."""
+        source = paths.persona_instance_path(instance.id)
+        if not source.exists():
+            return None
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / source.name
+        shutil.move(str(source), str(target))
+        return target
+
     def update(self, instance: PersonaInstance) -> PersonaInstance:
         instance.updated_at = now()
         self._write(instance)
@@ -1499,6 +1665,22 @@ def persona_instance_id_for(persona_id: str) -> str:
 
 def persona_instance_id_for_placement(placement_id: str) -> str:
     return f"{PERSONA_INSTANCE_ID_PREFIX}{safe_assignment_token(placement_id) or 'persona'}"
+
+
+def is_canonical_persona_channel(instance: PersonaInstance) -> bool:
+    """True when a row IS the persona/profile's canonical operator channel.
+
+    The canonical channel is the global-singleton id
+    ``persona_instance_id_for(persona_id)`` (e.g. ``personainst_qa`` for persona
+    ``qa``, ``personainst_profile_alice`` for ``profile:alice``). A
+    placement-backed or otherwise deliberate instance carries a distinct
+    placement-derived id (``personainst_qa_agent_2``) whose tail is the scene
+    itemId, so it never collapses onto the canonical id — that is exactly the
+    discriminator the retire verb uses to protect the queued global-singleton
+    redesign while ending placement-backed rows."""
+    if not safe_assignment_token(instance.persona_id):
+        return False
+    return instance.id == persona_instance_id_for(instance.persona_id)
 
 
 def canonical_persona_instance_id(raw_id: Any, *, persona_id: str | None = None) -> str | None:

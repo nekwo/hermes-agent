@@ -1412,6 +1412,64 @@ def _cmd_persona_instance_archive(args) -> int:
     return _close_free_floating_assignments(args.persona_instance_id, reason=args.reason, json_output=args.json, terminal_state="completed")
 
 
+def _cmd_persona_instance_retire(args) -> int:
+    """Instance end-of-life: archive a placement-backed persona-instance ROW.
+
+    Unlike ``close``/``archive`` (which act on free-floating ASSIGNMENTS), this
+    verb ends the deliberate instance itself — the operator ruling that deleting
+    a placement is the instance's end-of-life. Refusals surface the typed
+    ``PersonaInstanceRetireError.code`` so the launcher/operator can distinguish
+    canonical-channel / active-binding / active-assignment / not-found."""
+    cfg = load_agent_runtime_config()
+    store = PersonaInstanceStore()
+    coordinator_id = _coordinator_actor_id(args)
+    if coordinator_id:
+        try:
+            target = store.get(args.persona_instance_id)
+            persona = _persona_by_id(cfg, target.persona_id)
+        except Exception:
+            target = None
+            persona = None
+        scope = _coordinator_scope_from_args(args, cfg, persona)
+        auth = authorize_coordinator_action(
+            "persona.instance.retire",
+            scope,
+            target,
+            actor=coordinator_id,
+            coordinator_id=coordinator_id,
+        )
+        if not auth.ok:
+            data = _coordinator_confirm_payload("persona.instance.retire", coordinator_id, auth)
+            print(emit_json(data) if args.json else data["status"])
+            return 2
+    try:
+        result = store.retire(
+            args.persona_instance_id,
+            reason=args.reason,
+            requested_by=args.requested_by,
+        )
+    except PersonaInstanceRetireError as exc:
+        data = {
+            "ok": False,
+            "error": exc.code,
+            "code": exc.code,
+            "message": exc.message,
+            "persona_instance_id": exc.persona_instance_id,
+            **exc.detail,
+        }
+        print(emit_json(data) if args.json else f"{exc.code}: {exc.message}")
+        return 2
+    data = {"ok": True, "persona_instance_retired": result}
+    if args.json:
+        print(emit_json(data))
+    else:
+        print(
+            f"retired {result['persona_instance_id']} "
+            f"({result['display_name']}) -> {result['archive_path']}"
+        )
+    return 0
+
+
 def _cmd_persona_instance_sweep_orphans(args) -> int:
     result = PersonaInstanceStore().sweep_orphaned_task_bound_instances(
         reason=str(getattr(args, "reason", "") or "operator persona instance janitor"),
