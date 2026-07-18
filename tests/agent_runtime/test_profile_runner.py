@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+import json
+
 from agent_runtime.profile_runner import (
     AgentRunRequest,
     ProfileAgentRunner,
@@ -11,6 +13,11 @@ from agent_runtime.profile_runner import (
     RunBudgetExceeded,
     _agent_chat_target_label,
     _progress_adapter,
+    _tool_finished_payload,
+    _todo_items_from,
+    _todo_state_payload,
+    _TODO_STATE_MAX_CONTENT,
+    _TODO_STATE_MAX_ITEMS,
 )
 
 
@@ -1074,3 +1081,96 @@ def test_normalize_result_carries_canonical_cache_and_reasoning():
     assert result.cache_read_tokens == 1432576
     assert result.cache_write_tokens == 300
     assert result.reasoning_tokens == 128
+
+
+# ── T7: todo checklist state on the finished event ───────────────────────────
+
+
+def _todo_result(items):
+    """The JSON-string result shape `todo_tool` returns."""
+    return json.dumps({"todos": items, "summary": {"total": len(items)}})
+
+
+def test_todo_state_payload_from_json_string_result():
+    items = [
+        {"id": "1", "content": "Verify the data lane", "status": "completed"},
+        {"id": "2", "content": "Ship the checklist panel", "status": "in_progress"},
+        {"id": "3", "content": "Land it", "status": "pending"},
+    ]
+    payload = _todo_state_payload("todo", _todo_result(items), invocation={"todos": items})
+    assert payload == items
+
+
+def test_todo_state_payload_from_dict_result():
+    items = [{"id": "a", "content": "one", "status": "pending"}]
+    payload = _todo_state_payload("todo", {"todos": items}, invocation=None)
+    assert payload == items
+
+
+def test_todo_state_payload_falls_back_to_invocation_when_result_unparseable():
+    items = [{"id": "x", "content": "draft", "status": "pending"}]
+    payload = _todo_state_payload("todo", "not-json{", invocation={"todos": items})
+    assert payload == items
+
+
+def test_todo_state_payload_returns_none_for_non_todo_tool():
+    assert _todo_state_payload("terminal", _todo_result([{"id": "1", "content": "c", "status": "pending"}]), None) is None
+
+
+def test_todo_state_payload_returns_none_when_no_list():
+    assert _todo_state_payload("todo", "just a string", invocation=None) is None
+    assert _todo_state_payload("todo", {"summary": {}}, invocation=None) is None
+    assert _todo_state_payload("todo", _todo_result([]), invocation=None) is None
+
+
+def test_todo_state_payload_normalizes_status_and_caps_content():
+    long_content = "x" * (_TODO_STATE_MAX_CONTENT + 50)
+    items = [
+        {"id": "1", "content": long_content, "status": "bogus"},
+        {"id": "", "content": "", "status": "completed"},
+    ]
+    payload = _todo_state_payload("todo", _todo_result(items), None)
+    assert payload is not None
+    assert payload[0]["status"] == "pending"  # unknown → pending
+    assert len(payload[0]["content"]) == _TODO_STATE_MAX_CONTENT
+    assert payload[0]["content"].endswith("…")
+    assert payload[1]["id"] == "?"  # empty id → placeholder
+    assert payload[1]["content"] == "(no description)"
+
+
+def test_todo_state_payload_caps_item_count():
+    items = [{"id": str(i), "content": f"item {i}", "status": "pending"} for i in range(_TODO_STATE_MAX_ITEMS + 20)]
+    payload = _todo_state_payload("todo", _todo_result(items), None)
+    assert len(payload) == _TODO_STATE_MAX_ITEMS
+
+
+def test_todo_items_from_accepts_bare_list():
+    items = [{"id": "1", "content": "c", "status": "pending"}]
+    assert _todo_items_from(items) == items
+    assert _todo_items_from(None) is None
+    assert _todo_items_from(42) is None
+
+
+def test_tool_finished_payload_carries_todo_state():
+    items = [{"id": "1", "content": "do it", "status": "in_progress"}]
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "todo",
+        duration=None,
+        is_error=False,
+        result=_todo_result(items),
+        invocation={"todos": items},
+    )
+    assert payload["todo_state"] == items
+
+
+def test_tool_finished_payload_omits_todo_state_for_other_tools():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "skill_view",
+        duration=None,
+        is_error=False,
+        result={"ok": True},
+        invocation={"skill": "x"},
+    )
+    assert "todo_state" not in payload

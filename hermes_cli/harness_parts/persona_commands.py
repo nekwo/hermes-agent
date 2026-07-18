@@ -2464,6 +2464,13 @@ class _ChatProtocolV2Emitter:
         exit_code = _safe_exit_code_value(payload.get("exit_code"))
         if exit_code is not None:
             tool["exit_code"] = exit_code
+        # T7: the todo tool's structured checklist rides the finished event so the
+        # operator console can render it (the store is otherwise in-memory only).
+        # Producer-bounded already (profile_runner `_todo_state_payload`); the
+        # turn-store re-bounds it in `_safe_elements`.
+        todo_state = payload.get("todo_state")
+        if isinstance(todo_state, list) and todo_state:
+            tool["todo_state"] = todo_state
         self._emit_chat_frame(
             {
                 "type": "tool.finished",
@@ -2479,6 +2486,7 @@ class _ChatProtocolV2Emitter:
                 "detail": tool.get("detail"),
                 "output": tool.get("output"),
                 "exit_code": tool.get("exit_code"),
+                **({"todo_state": tool["todo_state"]} if tool.get("todo_state") else {}),
             }
         )
 

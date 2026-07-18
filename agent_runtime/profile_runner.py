@@ -888,6 +888,9 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
     output = _safe_operator_output(tool_name, result)
     if output:
         payload["output"] = output
+    todo_state = _todo_state_payload(tool_name, result, invocation)
+    if todo_state is not None:
+        payload["todo_state"] = todo_state
     return payload
 
 
@@ -1272,6 +1275,74 @@ def _is_error_result(result: Any) -> bool:
         lowered = result.strip().lower()
         return lowered.startswith(("error", "traceback", "exception")) or '"success": false' in lowered
     return False
+
+
+# Bounds for the todo checklist mirrored onto the trace/turn-store lane. The
+# store itself caps content at MAX_TODO_CONTENT_CHARS (4000) / MAX_TODO_ITEMS
+# (256); the operator-console projection is a COMPACT checklist, so the wire
+# copy is tighter — a checklist row is a short line, and the frame must stay
+# minimal (T7: smallest honest emit, no snapshot-frame growth beyond a bounded
+# payload). Over-cap content is marked with an ellipsis, never dropped silently.
+_TODO_STATE_MAX_ITEMS = 64
+_TODO_STATE_MAX_CONTENT = 240
+_TODO_STATE_VALID_STATUS = {"pending", "in_progress", "completed", "cancelled"}
+
+
+def _todo_state_payload(tool_name: str | None, result: Any, invocation: Any) -> list[dict[str, str]] | None:
+    """Minimal structured todo-checklist state for the operator console (T7).
+
+    The ``todo`` tool keeps its list in-memory per session and re-injects it into
+    the prompt; nothing on the trace/turn-store lane carried the list itself (the
+    element ``args`` is a human summary and ``output`` is gated to terminal
+    tools). This copies the tool RESULT — the authoritative post-write list (all
+    statuses) returned by :func:`tools.todo_tool.todo_tool` — onto the finished
+    event, bounded and validated. Falls back to the invocation's ``todos`` when
+    the result is unparseable. Returns ``None`` for any non-todo tool or when no
+    list is recoverable (never fabricate)."""
+
+    if (tool_name or "").lower() != "todo":
+        return None
+    todos = _todo_items_from(result)
+    if todos is None:
+        todos = _todo_items_from(invocation)
+    if not todos:
+        return None
+    items: list[dict[str, str]] = []
+    for raw in todos[:_TODO_STATE_MAX_ITEMS]:
+        if not isinstance(raw, dict):
+            continue
+        item_id = str(raw.get("id", "")).strip() or "?"
+        content = str(raw.get("content", "")).strip()
+        status = str(raw.get("status", "")).strip().lower()
+        if status not in _TODO_STATE_VALID_STATUS:
+            status = "pending"
+        if not content:
+            content = "(no description)"
+        elif len(content) > _TODO_STATE_MAX_CONTENT:
+            content = content[: _TODO_STATE_MAX_CONTENT - 1] + "…"
+        items.append({"id": item_id, "content": content, "status": status})
+    return items or None
+
+
+def _todo_items_from(source: Any) -> list[Any] | None:
+    """Recover the ``todos`` list from a todo tool result/invocation.
+
+    Accepts the JSON-string result (``{"todos": [...], "summary": {...}}``), a
+    dict result/invocation carrying ``todos``, or a bare list. Returns ``None``
+    when no list is recoverable."""
+
+    value: Any = source
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+    if isinstance(value, dict):
+        todos = value.get("todos")
+        return todos if isinstance(todos, list) else None
+    if isinstance(value, list):
+        return value
+    return None
 
 
 def _duration_ms(value: Any) -> int | None:

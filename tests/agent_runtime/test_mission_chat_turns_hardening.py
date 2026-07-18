@@ -351,3 +351,64 @@ def test_lock_on_one_session_never_blocks_another_session(monkeypatch):
     finally:
         mission_chat_turns._unlock_fd(fd)
         os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# T7 — todo checklist state survives the turn-store safety pass
+# ---------------------------------------------------------------------------
+
+
+def test_safe_todo_state_bounds_and_validates():
+    long_content = "x" * (mission_chat_turns._TODO_STATE_MAX_CONTENT + 40)
+    raw = [
+        {"id": "1", "content": "verify lane", "status": "completed"},
+        {"id": "", "content": "", "status": "weird"},
+        {"id": "3", "content": long_content, "status": "in_progress"},
+        "not-a-dict",
+    ]
+    result = mission_chat_turns._safe_todo_state(raw)
+    assert result is not None
+    assert [item["id"] for item in result] == ["1", "?", "3"]  # non-dict dropped, empty→"?"
+    assert result[1]["content"] == "(no description)"
+    assert result[1]["status"] == "pending"  # unknown status normalised
+    assert len(result[2]["content"]) <= mission_chat_turns._TODO_STATE_MAX_CONTENT
+
+
+def test_safe_todo_state_caps_item_count():
+    raw = [{"id": str(i), "content": f"c{i}", "status": "pending"} for i in range(mission_chat_turns._TODO_STATE_MAX_ITEMS + 10)]
+    result = mission_chat_turns._safe_todo_state(raw)
+    assert len(result) == mission_chat_turns._TODO_STATE_MAX_ITEMS
+
+
+def test_safe_todo_state_returns_none_when_absent_or_empty():
+    assert mission_chat_turns._safe_todo_state(None) is None
+    assert mission_chat_turns._safe_todo_state("nope") is None
+    assert mission_chat_turns._safe_todo_state([]) is None
+    assert mission_chat_turns._safe_todo_state(["only-non-dicts"]) is None
+
+
+def test_safe_elements_preserves_todo_state_only_on_todo_tools():
+    todo_items = [{"id": "1", "content": "do it", "status": "in_progress"}]
+    elements = mission_chat_turns._safe_elements(
+        [
+            {
+                "kind": "tool",
+                "id": "t1_tool_1",
+                "turn_id": "t1",
+                "seq": 1,
+                "state": "settled",
+                "name": "todo",
+                "todo_state": todo_items,
+            },
+            {
+                "kind": "tool",
+                "id": "t1_tool_2",
+                "turn_id": "t1",
+                "seq": 2,
+                "state": "settled",
+                "name": "skill_view",
+            },
+        ]
+    )
+    assert elements[0]["todo_state"] == todo_items
+    assert "todo_state" not in elements[1]  # non-todo tool gains no key

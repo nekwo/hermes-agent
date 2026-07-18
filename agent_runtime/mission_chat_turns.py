@@ -737,8 +737,45 @@ def _safe_elements(value: Any) -> list[dict[str, Any]]:
                     "redacted": bool(raw.get("redacted")),
                 }
             )
+            # T7: preserve the todo tool's structured checklist (id/content/status)
+            # so the operator console can render it after the turn persists. Bounded
+            # again here (defence in depth over the producer cap) and only kept when
+            # present, so non-todo tool elements gain no new key.
+            todo_state = _safe_todo_state(raw.get("todo_state"))
+            if todo_state:
+                base["todo_state"] = todo_state
         elements.append(base)
     return sorted(elements, key=lambda item: (int(item.get("seq") or 0), str(item.get("id") or "")))
+
+
+# Turn-store caps for the T7 todo checklist. Compact by design — a checklist row
+# is a short line and the elements ride the snapshot frame; the producer already
+# bounds this, and this is the defence-in-depth boundary for foreign/legacy rows.
+_TODO_STATE_MAX_ITEMS = 64
+_TODO_STATE_MAX_CONTENT = 240
+_TODO_STATE_VALID_STATUS = {"pending", "in_progress", "completed", "cancelled"}
+
+
+def _safe_todo_state(value: Any) -> list[dict[str, str]] | None:
+    """Bounded, validated todo checklist for persistence.
+
+    Keeps only ``{id, content, status}`` per item, caps item count and content
+    length, and normalises unknown statuses to ``pending``. Returns ``None`` when
+    nothing valid is present so a non-todo element never gains the key."""
+
+    if not isinstance(value, list):
+        return None
+    items: list[dict[str, str]] = []
+    for raw in value[:_TODO_STATE_MAX_ITEMS]:
+        if not isinstance(raw, dict):
+            continue
+        item_id = safe_assignment_text(raw.get("id"), limit=120) or "?"
+        content = safe_assignment_text(raw.get("content"), limit=_TODO_STATE_MAX_CONTENT) or "(no description)"
+        status = str(raw.get("status") or "").strip().lower()
+        if status not in _TODO_STATE_VALID_STATUS:
+            status = "pending"
+        items.append({"id": item_id, "content": content, "status": status})
+    return items or None
 
 
 def _safe_int(value: Any) -> int | None:
