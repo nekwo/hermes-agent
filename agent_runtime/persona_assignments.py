@@ -1502,6 +1502,54 @@ def persona_chat_session_id_for(persona_instance_id: str) -> str:
     return f"persona_chat_{normalized}_{uuid.uuid4().hex[:12]}"
 
 
+# A chat session id is, by construction, ``persona_chat_<instance>_<hex>`` (see
+# ``persona_chat_session_id_for``) or a legacy ``persona_chat_*`` id. Reusing a
+# chat lane must never thread onto a task/worker session id, so the reuse guard
+# keys on this prefix.
+_PERSONA_CHAT_SESSION_PREFIX = "persona_chat_"
+
+
+def default_chat_session_id_for_instance(
+    store: "PersonaInstanceStore",
+    *,
+    persona_id: str,
+    persona_instance_id: str | None = None,
+) -> str:
+    """Resolve the target's DEFAULT chat session id for an omitted-session send.
+
+    ``agent_chat_send`` (and any first-turn open) omits ``session_id``; the tool
+    contract promises repeated sends "thread into one conversation". That means:
+    CONTINUE the target instance's current chat session when it already has one,
+    and mint a fresh session ONLY when the target has never chatted — never a
+    new random session per send.
+
+    The instance pointer is the single source of truth for "the default chat
+    session"; this reads it (through the canonical instance id) instead of
+    minting a parallel ``persona_chat_*`` id every call, which is exactly the
+    defect that left agent-to-agent relays orphaned (a fresh unpointed session
+    per send, invisible to the snapshot projection). This is the same
+    resolve-or-mint rule ``_bind_free_floating_chat_session`` applies for
+    free-floating assignments — one id scheme, not a parallel pipeline.
+    """
+    instance_id = (
+        canonical_persona_instance_id(persona_instance_id, persona_id=persona_id)
+        if persona_instance_id
+        else None
+    ) or persona_instance_id_for(persona_id)
+    try:
+        existing = store.get(instance_id)
+    except Exception:
+        existing = None
+    if existing is not None:
+        existing_session = safe_assignment_text(getattr(existing, "session_id", None), limit=200)
+        # Reuse only a chat-shaped session: a task/worker session on the pointer
+        # (task_bound mode) is not the persona's chat lane and must never absorb
+        # a chat relay's transcript.
+        if existing_session and existing_session.startswith(_PERSONA_CHAT_SESSION_PREFIX):
+            return existing_session
+    return persona_chat_session_id_for(instance_id)
+
+
 def _live_chat_bindings(instance: PersonaInstance) -> tuple[str | None, str | None]:
     active_run_id = None
     active_worker_session_id = None

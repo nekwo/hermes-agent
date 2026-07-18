@@ -40,6 +40,31 @@ def test_instance_shaped_ids_are_relayed_for_canonical_resolution(monkeypatch):
     assert seen["persona_id"] == "personainst_dev"
 
 
+def test_omitted_session_is_forwarded_as_none_so_the_handler_threads(monkeypatch):
+    # The tool must NOT invent a session id: omitting session_id forwards None,
+    # so the mission-chat handler's default-session resolution owns "continue the
+    # target's default chat session" (repeated relays thread into one). A
+    # tool-side mint would be a parallel authority and re-open the orphaned-relay
+    # defect.
+    seen = {}
+
+    def fake_handler(args):
+        seen["session_id"] = args.session_id
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi"))["ok"]
+    assert seen["session_id"] is None
+    # An explicit session id still passes through untouched (continue THAT thread).
+    assert json.loads(
+        agent_chat_send(persona_id="qa", message="hi", session_id="persona_chat_personainst_qa_abc")
+    )["ok"]
+    assert seen["session_id"] == "persona_chat_personainst_qa_abc"
+
+
 def test_scope_off_disables_the_tool(monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_CHAT_SCOPE", "off")
     data = json.loads(agent_chat_send(persona_id="dev", message="hi"))

@@ -699,10 +699,26 @@ def _cmd_mission_chat_message(args) -> int:
     session_db = _default_persona_session_db()
     instance_store = PersonaInstanceStore()
     instance_store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
-    persona_instance_id = safe_assignment_token(getattr(args, "persona_instance_id", None))
+    # Canonicalize a caller-supplied instance id at THIS boundary (the same
+    # chokepoint open_chat uses), so an instance-shaped target can never mint a
+    # variant row.
+    persona_instance_id = canonical_persona_instance_id(
+        getattr(args, "persona_instance_id", None), persona_id=normalized_persona
+    )
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
     if not session_id:
-        session_id = _persona_chat_session_id(persona_instance_id or persona_instance_id_for(normalized_persona))
+        # Omitted session (agent_chat_send relay lane, and any first-turn open):
+        # CONTINUE the target's default chat session so repeated relays thread
+        # into ONE conversation — the tool contract's "omit to continue the
+        # target's default chat session". Resolve the canonical instance's
+        # current chat session (mint a fresh one only when it has never
+        # chatted); never a new random session per send, which orphaned the
+        # relay lane (unpointed session, invisible to the snapshot projection).
+        session_id = default_chat_session_id_for_instance(
+            instance_store,
+            persona_id=normalized_persona,
+            persona_instance_id=persona_instance_id or None,
+        )
     display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or _display_name_for_profile(normalized_persona)
     try:
         instance = instance_store.open_chat(

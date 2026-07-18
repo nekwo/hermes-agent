@@ -162,3 +162,59 @@ def test_direct_operator_send_carries_no_relay_refusal(tmp_path, monkeypatch, ca
         except json.JSONDecodeError:
             continue
         assert not str(data.get("error_kind") or "").startswith("relay_")
+
+
+# --------------------------------------------------------------------------- #
+# Omitted-session default resolution (relay threading)                        #
+#                                                                             #
+# persona_commands.py is an exec'd command part, so the wiring is pinned with #
+# an AST guard over the exact bytes exec'd — the same pattern the other       #
+# mission-chat handler guards use (test_mission_chat_records_injection.py).   #
+# --------------------------------------------------------------------------- #
+
+
+def _mission_chat_message_call_names():
+    import ast
+    from pathlib import Path
+
+    import hermes_cli.harness as harness
+
+    path = Path(harness.__file__).with_name("harness_parts") / "persona_commands.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    func = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_cmd_mission_chat_message"
+    )
+    names = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call):
+            callee = node.func
+            name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
+            if name:
+                names.add(name)
+    return names
+
+
+def test_omitted_session_routes_through_the_default_resolver():
+    # An omitted session must CONTINUE the target's default chat session so
+    # repeated relays thread into one conversation — resolved through the single
+    # chokepoint, never minted per send.
+    calls = _mission_chat_message_call_names()
+    assert "default_chat_session_id_for_instance" in calls, (
+        "the omitted-session path must resolve the target's default chat session "
+        "via default_chat_session_id_for_instance (relay threading + visibility)"
+    )
+
+
+def test_handler_no_longer_mints_a_fresh_session_per_send():
+    # _persona_chat_session_id / persona_chat_session_id_for append a fresh uuid
+    # every call; calling either directly from the handler is exactly the defect
+    # that orphaned relays (a new unpointed session per send). The resolver owns
+    # the mint-only-when-absent decision.
+    calls = _mission_chat_message_call_names()
+    assert "_persona_chat_session_id" not in calls, (
+        "the handler must not mint a fresh session id per send — route omitted "
+        "sessions through default_chat_session_id_for_instance"
+    )
+    assert "persona_chat_session_id_for" not in calls
