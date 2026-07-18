@@ -425,7 +425,10 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
     )
     # Same soul lane as the mission-chat surface: the persona's own configured
     # soul overlay rides along; absent for personas that don't set one.
-    soul = _safe_read_soul_overlay(getattr(persona, "soul_overlay_path", None))
+    soul = _safe_read_soul_overlay(
+        getattr(persona, "soul_overlay_path", None),
+        hermes_profile=getattr(persona, "hermes_profile", None),
+    )
     return f"{base}\n\n{soul}" if soul else base
 
 
@@ -552,9 +555,13 @@ def _mission_chat_surface_message(
     rules = _mission_chat_operative_rules()
     # The persona's OWN soul overlay (config `soul_overlay_path`) is the one
     # identity document this isolated lane does load — who-you-are sits between
-    # the identity hat and the surface rules, mirroring how a profile's SOUL.md
-    # anchors a profile agent. The bound profile's SOUL.md stays not-loaded.
-    soul = _safe_read_soul_overlay(getattr(persona, "soul_overlay_path", None))
+    # the identity hat and the surface rules. For a profile-backed persona it
+    # resolves inside that persona's own profile home (single source), so this
+    # IS the persona's SOUL.md — the OPERATOR profile's SOUL stays not-loaded.
+    soul = _safe_read_soul_overlay(
+        getattr(persona, "soul_overlay_path", None),
+        hermes_profile=getattr(persona, "hermes_profile", None),
+    )
     parts = [identity, soul or "", rules]
     if situational_hud:
         parts.append(situational_hud)
@@ -1001,7 +1008,10 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
     overlay = Path(__file__).with_name("prompts") / "shared_harness_overlay.md"
     if overlay.exists():
         parts.append(overlay.read_text(encoding="utf-8").strip())
-    soul_overlay = _safe_read_soul_overlay(persona.soul_overlay_path)
+    soul_overlay = _safe_read_soul_overlay(
+        persona.soul_overlay_path,
+        hermes_profile=getattr(persona, "hermes_profile", None),
+    )
     if soul_overlay:
         parts.append(soul_overlay)
     skill_guidance = _recommended_skill_guidance(list(persona.skills))
@@ -1255,22 +1265,61 @@ def _recommended_skill_guidance(skill_names: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _safe_read_soul_overlay(path_value: str | None) -> str | None:
+def _safe_read_soul_overlay(
+    path_value: str | None, *, hermes_profile: str | None = None
+) -> str | None:
     if not path_value:
         return None
     raw = Path(path_value)
     if raw.is_absolute() or not _is_safe_soul_overlay_path(raw):
         return None
-    candidates = [
-        Path(__file__).with_name("prompts") / raw.name,
-        get_hermes_home() / raw,
-    ]
+    if hermes_profile:
+        # A profile-backed persona owns its soul in ITS OWN profile home —
+        # `profiles/<hermes_profile>/SOUL.md` is the single source (realm sync
+        # already models soul_overlay as profile-home-relative). Repo prompts
+        # stay as the shipped-default fallback. Deliberately NO operator-home
+        # fallthrough here: on a miss, a bare `SOUL.md` must never resolve to
+        # the OPERATOR profile's SOUL (the persona-identity-leak class).
+        home = _persona_profile_home(hermes_profile)
+        candidates = [
+            *( [home / raw] if home is not None else [] ),
+            Path(__file__).with_name("prompts") / raw.name,
+        ]
+    else:
+        candidates = [
+            Path(__file__).with_name("prompts") / raw.name,
+            get_hermes_home() / raw,
+        ]
     for candidate in candidates:
         try:
             if candidate.exists() and candidate.is_file():
                 return candidate.read_text(encoding="utf-8").strip()
         except OSError:
             continue
+    return None
+
+
+def _persona_profile_home(name: str) -> Path | None:
+    """Home directory of the named hermes profile, or None when unresolvable.
+
+    Prefers the canonical CLI resolver; falls back to the standard
+    ``<profiles root>/<name>`` layout beside the operator home. Kept as its own
+    seam so tests can pin the home without touching global profile state."""
+
+    try:
+        from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
+
+        normalized = normalize_profile_name(name)
+        if profile_exists(normalized):
+            return Path(get_profile_dir(normalized))
+    except Exception:
+        pass
+    try:
+        candidate = get_hermes_home().parent / name
+        if candidate.exists():
+            return candidate
+    except OSError:
+        pass
     return None
 
 

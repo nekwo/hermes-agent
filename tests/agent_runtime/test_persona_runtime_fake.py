@@ -393,27 +393,34 @@ def test_mission_chat_ack_is_the_first_hard_rule():
     assert "never open a turn with a silent tool call" in first
 
 
-def test_persona_soul_overlay_layers_between_identity_and_rules():
-    # A persona configured with `soul_overlay_path` gets its own soul document
-    # in BOTH chat lanes — after the identity hat, before the operative rules
-    # on the mission-chat surface — mirroring how a profile's SOUL.md anchors a
-    # profile agent. Personas without one keep the exact legacy composition.
+def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkeypatch):
+    # A profile-backed persona configured with `soul_overlay_path` reads its
+    # soul from ITS OWN profile home (single source — realm sync already models
+    # soul_overlay as profile-home-relative) and layers it into BOTH chat lanes
+    # — after the identity hat, before the operative rules on the mission-chat
+    # surface. Personas without one keep the exact legacy composition.
     from dataclasses import replace
 
-    from agent_runtime.persona_runtime import (
-        _mission_chat_identity_prompt,
-        _mission_chat_operative_rules,
-        _mission_chat_surface_message,
-        _persona_chat_system_prompt,
+    import agent_runtime.persona_runtime as pr
+
+    profile_home = tmp_path / "profiles" / "neko"
+    profile_home.mkdir(parents=True)
+    (profile_home / "SOUL.md").write_text(
+        "You are Neko, the Mission Lead — test soul.\n"
+        "- Before your first tool call in any turn, tell Tony what you're about to do.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        pr, "_persona_profile_home", lambda name: profile_home if name == "neko" else None
     )
 
     neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
-    souled = replace(neko, soul_overlay_path="prompts/neko_soul.md")
+    souled = replace(neko, soul_overlay_path="SOUL.md", hermes_profile="neko")
 
-    composed = _mission_chat_surface_message(souled, "")
-    identity = _mission_chat_identity_prompt(souled)
-    rules = _mission_chat_operative_rules()
-    soul_marker = "You are Neko, the Mission Lead"
+    composed = pr._mission_chat_surface_message(souled, "")
+    identity = pr._mission_chat_identity_prompt(souled)
+    rules = pr._mission_chat_operative_rules()
+    soul_marker = "You are Neko, the Mission Lead — test soul."
     ack_habit = "Before your first tool call in any turn"
     assert soul_marker in composed
     assert ack_habit in composed
@@ -425,18 +432,42 @@ def test_persona_soul_overlay_layers_between_identity_and_rules():
     assert rules in composed
 
     # Persona-chat lane carries the same soul.
-    chat_prompt = _persona_chat_system_prompt(souled)
+    chat_prompt = pr._persona_chat_system_prompt(souled)
     assert soul_marker in chat_prompt
     assert chat_prompt.index("operator-channel agent") < chat_prompt.index(soul_marker)
 
     # No soul configured -> byte-identical legacy composition.
     assert (
-        _mission_chat_surface_message(neko, "")
-        == _mission_chat_identity_prompt(neko) + "\n\n" + rules
+        pr._mission_chat_surface_message(neko, "")
+        == pr._mission_chat_identity_prompt(neko) + "\n\n" + rules
     )
     # A bogus path degrades to no soul, never an error.
-    bogus = replace(neko, soul_overlay_path="prompts/does_not_exist.md")
-    assert _mission_chat_surface_message(bogus, "") == _mission_chat_surface_message(neko, "")
+    bogus = replace(neko, soul_overlay_path="does_not_exist.md", hermes_profile="neko")
+    assert pr._mission_chat_surface_message(bogus, "") == pr._mission_chat_surface_message(neko, "")
+
+
+def test_profile_backed_soul_never_falls_through_to_operator_home(tmp_path, monkeypatch):
+    # Identity-leak guard: when a profile-backed persona's soul misses, a bare
+    # `SOUL.md` path must NOT resolve to the OPERATOR profile's SOUL.md via the
+    # operator-home fallback (that would put Alice's soul on Neko).
+    from dataclasses import replace
+
+    import agent_runtime.persona_runtime as pr
+
+    operator_home = tmp_path / "profiles" / "alice"
+    operator_home.mkdir(parents=True)
+    (operator_home / "SOUL.md").write_text("OPERATOR SOUL — must not leak", encoding="utf-8")
+    monkeypatch.setattr(pr, "get_hermes_home", lambda: operator_home)
+    monkeypatch.setattr(pr, "_persona_profile_home", lambda name: None)
+
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    souled = replace(neko, soul_overlay_path="SOUL.md", hermes_profile="neko")
+    composed = pr._mission_chat_surface_message(souled, "")
+    assert "OPERATOR SOUL" not in composed
+
+    # A persona WITHOUT a bound profile keeps the legacy operator-home lane.
+    legacy = replace(neko, soul_overlay_path="SOUL.md", hermes_profile=None)
+    assert "OPERATOR SOUL" in pr._mission_chat_surface_message(legacy, "")
 
 
 def test_mission_chat_identity_prompt_names_persona_and_forbids_self_relay():
