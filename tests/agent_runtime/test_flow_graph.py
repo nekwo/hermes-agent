@@ -1,12 +1,17 @@
-"""The flow-doc ingest lane: one authored chart document in, steering relations
-set on EXISTING instances, per-agent report out.
+"""The flow-doc ingest lane: one authored chart document in, OWNER-scoped
+steering set on EXISTING instances, per-agent report out.
 
-Contract pins (2026-07-16 operator-decided design):
-  * ingest NEVER creates an instance — unknown references are report entries;
-  * ingest NEVER touches goal membership — drawn-standalone uses the
-    goal-preserving clear_parents, not detach_parents (which strips goal_id);
-  * re-ingesting an unchanged doc is a no-op (no writes, changed=False);
-  * one agent's failure never aborts the pass.
+Contract pins:
+  * (2026-07-16) ingest NEVER creates an instance — unknown references are
+    report entries; ingest NEVER touches goal membership (goal-preserving
+    clear_parents, not detach_parents); one agent's failure never aborts the
+    pass; re-ingesting an unchanged doc is a no-op.
+  * (2026-07-18 per-instance blueprint ownership) graph identity IS the owner
+    instance id (``runtime:<owner>``); a map asserts ONLY its owner's outbound
+    edges — set/clear just the owner in each child's ``steered_by``, preserving
+    every other parent; two leads' maps COMPOSE into fan-in on a shared child;
+    departure strips only the owner edge; non-owner edges are reported
+    (``ignored_non_owner_edges``), never applied.
 """
 
 from __future__ import annotations
@@ -18,15 +23,19 @@ import pytest
 from agent_runtime.flow_graph import (
     FlowGraphDocError,
     FlowGraphStore,
+    bound_agent_ids,
     desired_parents_by_agent,
+    ignored_non_owner_edges,
     ingest_flow_graph,
+    owner_instance_id_of,
+    owner_scoped_children,
     parse_flow_graph_doc,
     reconcile_flow_graph_steering,
 )
 from agent_runtime.persona_assignments import PersonaInstanceStore
 
 
-def _doc(nodes, edges, graph_id="personainst_lead"):
+def _doc(nodes, edges, graph_id="runtime:personainst_lead"):
     return {"graph_id": graph_id, "nodes": nodes, "edges": edges}
 
 
@@ -44,7 +53,9 @@ def test_parse_accepts_launcher_shape_and_ignores_layout_keys():
             [{"from": "n1", "to": "n2"}],
         )
     )
-    assert doc.graph_id == "personainst_lead"
+    # The launcher's `runtime:<owner>` id survives parse — the `:` is normalized
+    # to `_` by safe_assignment_token, which owner_instance_id_of accounts for.
+    assert doc.graph_id == "runtime_personainst_lead"
     assert doc.node_bindings == {"n1": "personainst_a", "n2": None}
     assert doc.edges == [("n1", "n2")]
 
@@ -69,10 +80,47 @@ def test_parse_rejects_invalid_docs(payload, fragment):
         parse_flow_graph_doc(payload)
 
 
-# ------------------------------------------------- desired parents (pure)
+# ------------------------------------------------- owner derivation (pure)
+
+
+def test_owner_instance_id_of_strips_either_prefix():
+    # Raw launcher id (with `:`) and the parsed/normalized id (with `_`) both
+    # resolve to the same owner; an id without either prefix is verbatim.
+    assert owner_instance_id_of("runtime:personainst_neko") == "personainst_neko"
+    assert owner_instance_id_of("runtime_personainst_neko") == "personainst_neko"
+    assert owner_instance_id_of("personainst_neko") == "personainst_neko"
+    assert owner_instance_id_of("") == ""
+
+
+def test_owner_scoped_children_flags_only_owner_edges():
+    # owner = personainst_lead; lead draws lead->dev but NOT lead->qa; the
+    # dev->qa edge is non-owner, so qa is not flagged steered by the owner.
+    doc = parse_flow_graph_doc(
+        _doc(
+            [
+                _node("lead", "personainst_lead"),
+                _node("dev", "personainst_dev"),
+                _node("qa", "personainst_qa"),
+                _node("ghost", None),
+            ],
+            [
+                {"from": "lead", "to": "dev"},
+                {"from": "dev", "to": "qa"},  # non-owner edge
+            ],
+            graph_id="runtime:personainst_lead",
+        )
+    )
+    children = owner_scoped_children(doc, "personainst_lead")
+    # The owner itself is never its own child; unbound nodes contribute nothing.
+    assert children == {"personainst_dev": True, "personainst_qa": False}
+
+
+# ------------------------------------------ desired parents (pure, whole-doc)
 
 
 def test_desired_parents_fan_in_preserves_edge_order_and_skips_unbound():
+    # This pure helper is the WHOLE-doc intent — NOT what ingest applies (ingest
+    # is owner-scoped). Kept as an analysis primitive; asserted so it stays honest.
     doc = parse_flow_graph_doc(
         _doc(
             [
@@ -92,13 +140,13 @@ def test_desired_parents_fan_in_preserves_edge_order_and_skips_unbound():
     )
     desired = desired_parents_by_agent(doc)
     assert desired == {
-        "personainst_lead": [],  # drawn standalone (root)
+        "personainst_lead": [],
         "personainst_dev": ["personainst_lead"],
         "personainst_qa": ["personainst_dev", "personainst_lead"],
     }
 
 
-# ---------------------------------------------------------- reconcile
+# ---------------------------------------------------- reconcile (owner-scoped)
 
 
 def _three_instances():
@@ -109,40 +157,44 @@ def _three_instances():
     return store, lead, dev, qa
 
 
-def _wired_doc(lead_id, dev_id, qa_id):
+def _owned_doc(owner_id, nodes, edges):
     return parse_flow_graph_doc(
-        _doc(
-            [
-                _node("n_lead", lead_id),
-                _node("n_dev", dev_id),
-                _node("n_qa", qa_id),
-            ],
-            [
-                {"from": "n_lead", "to": "n_dev"},
-                {"from": "n_lead", "to": "n_qa"},
-                {"from": "n_dev", "to": "n_qa"},
-            ],
-        )
+        {"graph_id": f"runtime:{owner_id}", "nodes": nodes, "edges": edges}
     )
 
 
-def test_reconcile_sets_parents_from_the_drawing(isolate_agent_runtime_root):
+def test_reconcile_applies_only_owner_edges(isolate_agent_runtime_root):
+    # lead's map draws lead->dev, lead->qa, AND dev->qa. Only the two OWNER edges
+    # apply; the dev->qa edge is non-owner and is NOT applied (qa is steered by
+    # lead alone — the old whole-doc ingest would have made it [lead, dev]).
     store, lead, dev, qa = _three_instances()
-    doc = _wired_doc(lead.id, dev.id, qa.id)
+    doc = _owned_doc(
+        lead.id,
+        [_node("n_lead", lead.id), _node("n_dev", dev.id), _node("n_qa", qa.id)],
+        [
+            {"from": "n_lead", "to": "n_dev"},
+            {"from": "n_lead", "to": "n_qa"},
+            {"from": "n_dev", "to": "n_qa"},  # non-owner: ignored
+        ],
+    )
 
     results = {r["persona_instance_id"]: r for r in reconcile_flow_graph_steering(doc, store=store)}
 
-    assert results[dev.id]["ok"] and results[dev.id]["changed"]
+    # No entry for the owner — a map never steers its own owner.
+    assert lead.id not in results
     assert store.get(dev.id).steered_by == [lead.id]
-    # Fan-in lands whole, edge order preserved (primary parent first).
-    assert store.get(qa.id).steered_by == [lead.id, dev.id]
-    # The root drew no parents and had none: honest no-op, not a detach.
-    assert results[lead.id]["ok"] and results[lead.id]["changed"] is False
+    assert store.get(qa.id).steered_by == [lead.id]
+    assert results[dev.id]["ok"] and results[dev.id]["changed"]
+    assert results[qa.id]["owner"] == lead.id and results[qa.id]["owner_steers"] is True
 
 
 def test_reconcile_is_idempotent_second_pass_writes_nothing(isolate_agent_runtime_root):
     store, lead, dev, qa = _three_instances()
-    doc = _wired_doc(lead.id, dev.id, qa.id)
+    doc = _owned_doc(
+        lead.id,
+        [_node("n_lead", lead.id), _node("n_dev", dev.id), _node("n_qa", qa.id)],
+        [{"from": "n_lead", "to": "n_dev"}, {"from": "n_lead", "to": "n_qa"}],
+    )
     reconcile_flow_graph_steering(doc, store=store)
 
     second = reconcile_flow_graph_steering(doc, store=store)
@@ -151,18 +203,14 @@ def test_reconcile_is_idempotent_second_pass_writes_nothing(isolate_agent_runtim
     assert all(entry["changed"] is False for entry in second)
 
 
-def test_reconcile_drawn_standalone_clears_parents_but_keeps_goal(isolate_agent_runtime_root):
+def test_reconcile_drawn_standalone_clears_owner_but_keeps_goal(isolate_agent_runtime_root):
     store, lead, dev, _ = _three_instances()
-    # dev is steered AND bound to a goal (the mode the root agent lives in).
     store.set_parents(dev.id, [lead.id], goal_id="goal_live")
     assert store.get(dev.id).goal_id == "goal_live"
 
-    # The operator redraws dev standalone. The chart states steering, not goal
-    # membership: parents clear, the goal binding MUST survive (detach_parents
-    # here would strip goal_id — the trap this lane exists to avoid).
-    doc = parse_flow_graph_doc(
-        _doc([_node("n_lead", lead.id), _node("n_dev", dev.id)], [])
-    )
+    # lead redraws dev standalone (dev still a node, no owner edge). The owner
+    # edge clears; the goal binding MUST survive (clear_parents, not detach).
+    doc = _owned_doc(lead.id, [_node("n_lead", lead.id), _node("n_dev", dev.id)], [])
     results = {r["persona_instance_id"]: r for r in reconcile_flow_graph_steering(doc, store=store)}
 
     assert results[dev.id]["ok"] and results[dev.id]["changed"]
@@ -174,11 +222,10 @@ def test_reconcile_drawn_standalone_clears_parents_but_keeps_goal(isolate_agent_
 
 def test_reconcile_unknown_instance_is_reported_never_created(isolate_agent_runtime_root):
     store, lead, _, _ = _three_instances()
-    doc = parse_flow_graph_doc(
-        _doc(
-            [_node("n_lead", lead.id), _node("n_ghost", "personainst_never_made")],
-            [{"from": "n_lead", "to": "n_ghost"}],
-        )
+    doc = _owned_doc(
+        lead.id,
+        [_node("n_lead", lead.id), _node("n_ghost", "personainst_never_made")],
+        [{"from": "n_lead", "to": "n_ghost"}],
     )
 
     results = {r["persona_instance_id"]: r for r in reconcile_flow_graph_steering(doc, store=store)}
@@ -186,109 +233,192 @@ def test_reconcile_unknown_instance_is_reported_never_created(isolate_agent_runt
     ghost = results["personainst_never_made"]
     assert ghost["ok"] is False
     assert "never creates" in ghost["error"]
-    # And it truly was not created.
     with pytest.raises(Exception):
         store.get("personainst_never_made")
 
 
-def test_reconcile_cycle_fails_that_agent_and_continues(isolate_agent_runtime_root):
+# ------------------------------------------ two maps compose (the headline)
+
+
+def test_two_maps_compose_fan_in_on_one_child(isolate_agent_runtime_root):
+    # A and B each own their OWN blueprint; both steer the same child C. Their
+    # maps compose into fan-in [A, B] instead of clobbering each other — the fix
+    # for "two Neko instances show the SAME blueprint".
+    store = PersonaInstanceStore()
+    a = store.create_free_floating("profile:a")
+    b = store.create_free_floating("profile:b")
+    c = store.create_free_floating("profile:c")
+
+    # A's map: A -> C.
+    ingest_flow_graph(
+        json.dumps(
+            {
+                "graph_id": f"runtime:{a.id}",
+                "nodes": [_node("n_a", a.id), _node("n_c", c.id)],
+                "edges": [{"from": "n_a", "to": "n_c"}],
+            }
+        ),
+        store=store,
+    )
+    assert store.get(c.id).steered_by == [a.id]
+
+    # B's map: B -> C. A's edge must SURVIVE — C is now steered by both.
+    ingest_flow_graph(
+        json.dumps(
+            {
+                "graph_id": f"runtime:{b.id}",
+                "nodes": [_node("n_b", b.id), _node("n_c", c.id)],
+                "edges": [{"from": "n_b", "to": "n_c"}],
+            }
+        ),
+        store=store,
+    )
+    assert store.get(c.id).steered_by == [a.id, b.id]
+
+    # Re-ingesting A's map is a no-op — it does not drop B's edge.
+    report = ingest_flow_graph(
+        json.dumps(
+            {
+                "graph_id": f"runtime:{a.id}",
+                "nodes": [_node("n_a", a.id), _node("n_c", c.id)],
+                "edges": [{"from": "n_a", "to": "n_c"}],
+            }
+        ),
+        store=store,
+    )
+    assert report["changed_count"] == 0
+    assert store.get(c.id).steered_by == [a.id, b.id]
+
+    # A un-draws its edge (C still a node on A's map). Only A is stripped; B stays.
+    ingest_flow_graph(
+        json.dumps(
+            {
+                "graph_id": f"runtime:{a.id}",
+                "nodes": [_node("n_a", a.id), _node("n_c", c.id)],
+                "edges": [],
+            }
+        ),
+        store=store,
+    )
+    assert store.get(c.id).steered_by == [b.id]
+
+
+# ------------------------------------------ ignored non-owner edges
+
+
+def test_ignored_non_owner_edges_reports_and_never_applies(isolate_agent_runtime_root):
     store, lead, dev, qa = _three_instances()
-    # A drawing with a 2-cycle: lead→dev and dev→lead. Whichever write lands
-    # second trips the store's cycle guard; the third agent still reconciles.
-    doc = parse_flow_graph_doc(
-        _doc(
-            [_node("n_lead", lead.id), _node("n_dev", dev.id), _node("n_qa", qa.id)],
-            [
-                {"from": "n_lead", "to": "n_dev"},
-                {"from": "n_dev", "to": "n_lead"},
-                {"from": "n_lead", "to": "n_qa"},
-            ],
-        )
+    # owner=lead. lead->dev is the owner edge; dev->qa is non-owner (a deeper
+    # tree drawn on lead's canvas). The non-owner edge is reported, not applied.
+    report = ingest_flow_graph(
+        json.dumps(
+            {
+                "graph_id": f"runtime:{lead.id}",
+                "nodes": [
+                    _node("n_lead", lead.id),
+                    _node("n_dev", dev.id),
+                    _node("n_qa", qa.id),
+                ],
+                "edges": [
+                    {"from": "n_lead", "to": "n_dev"},
+                    {"from": "n_dev", "to": "n_qa"},
+                ],
+            }
+        ),
+        store=store,
     )
 
-    results = {r["persona_instance_id"]: r for r in reconcile_flow_graph_steering(doc, store=store)}
+    assert report["owner_instance_id"] == lead.id
+    assert report["ignored_non_owner_edge_count"] == 1
+    ignored = report["ignored_non_owner_edges"][0]
+    assert ignored["from_node"] == "n_dev" and ignored["to_node"] == "n_qa"
+    assert ignored["parent_agent"] == dev.id and ignored["child_agent"] == qa.id
+    assert "non-owner edge" in ignored["reason"]
+    # The owner edge applied; the non-owner edge did NOT (qa steered by nobody).
+    assert store.get(dev.id).steered_by == [lead.id]
+    assert store.get(qa.id).steered_by == []
 
-    outcomes = sorted(results[i]["ok"] for i in (lead.id, dev.id))
-    assert outcomes == [False, True], "exactly one side of the cycle must fail"
-    assert results[qa.id]["ok"] is True
-    assert store.get(qa.id).steered_by == [lead.id]
+
+def test_ignored_non_owner_edges_pure_helper():
+    doc = parse_flow_graph_doc(
+        _doc(
+            [
+                _node("n_lead", "personainst_lead"),
+                _node("n_dev", "personainst_dev"),
+                _node("n_ghost", None),
+            ],
+            [
+                {"from": "n_lead", "to": "n_dev"},  # owner edge
+                {"from": "n_dev", "to": "n_lead"},  # non-owner (bound source)
+                {"from": "n_ghost", "to": "n_dev"},  # unbound source
+            ],
+            graph_id="runtime:personainst_lead",
+        )
+    )
+    ignored = ignored_non_owner_edges(doc, "personainst_lead")
+    reasons = {(e["from_node"], e["to_node"]): e["reason"] for e in ignored}
+    assert set(reasons) == {("n_dev", "n_lead"), ("n_ghost", "n_dev")}
+    assert "non-owner edge" in reasons[("n_dev", "n_lead")]
+    assert "unbound" in reasons[("n_ghost", "n_dev")]
 
 
 # ------------------------------------------------------------- ingest
 
 
-def test_ingest_stores_doc_and_reports(isolate_agent_runtime_root):
+def test_ingest_stores_doc_and_reports_owner(isolate_agent_runtime_root):
     store, lead, dev, qa = _three_instances()
-    payload = _doc(
-        [_node("n_lead", lead.id), _node("n_dev", dev.id), _node("n_qa", qa.id)],
-        [
-            {"from": "n_lead", "to": "n_dev"},
-            {"from": "n_lead", "to": "n_qa"},
-            {"from": "n_dev", "to": "n_qa"},
-        ],
-    )
+    payload = {
+        "graph_id": f"runtime:{lead.id}",
+        "nodes": [_node("n_lead", lead.id), _node("n_dev", dev.id), _node("n_qa", qa.id)],
+        "edges": [{"from": "n_lead", "to": "n_dev"}, {"from": "n_lead", "to": "n_qa"}],
+    }
 
-    report = ingest_flow_graph(json.dumps(payload), requested_by="launcher")
+    report = ingest_flow_graph(json.dumps(payload), requested_by="launcher", store=store)
 
-    assert report["ok"] is True
-    assert report["stored"] is True
+    assert report["ok"] is True and report["stored"] is True
+    assert report["owner_instance_id"] == lead.id
     assert report["bound_agent_count"] == 3
     assert report["failed_count"] == 0
-    assert report["changed_count"] == 2  # lead is a no-op root
-    stored = FlowGraphStore().get("personainst_lead")
+    assert report["changed_count"] == 2  # dev + qa; the owner has no entry
+    assert report["ignored_non_owner_edge_count"] == 0
+    # Stored under the NORMALIZED id (`:` -> `_`); layout preserved verbatim.
+    stored = FlowGraphStore().get(f"runtime_{lead.id}")
     assert stored is not None
     assert stored["requested_by"] == "launcher"
-    assert stored["doc"]["nodes"][0]["x"] == 10.0  # layout preserved verbatim
-    assert (isolate_agent_runtime_root / "flow_graphs" / "personainst_lead.json").exists()
+    assert stored["doc"]["nodes"][0]["x"] == 10.0
+    assert (isolate_agent_runtime_root / "flow_graphs" / f"runtime_{lead.id}.json").exists()
 
 
-def test_ingest_removed_agent_sheds_the_maps_wiring(isolate_agent_runtime_root):
+def test_ingest_removed_node_strips_only_owner_edge(isolate_agent_runtime_root):
     store, lead, dev, qa = _three_instances()
-    first = _doc(
-        [_node("n_lead", lead.id), _node("n_dev", dev.id), _node("n_qa", qa.id)],
-        [
-            {"from": "n_lead", "to": "n_dev"},
-            {"from": "n_dev", "to": "n_qa"},
-        ],
-    )
-    ingest_flow_graph(json.dumps(first))
-    assert store.get(dev.id).steered_by == [lead.id]
-    assert store.get(qa.id).steered_by == [dev.id]
-
-    # The operator deletes dev's node and wires lead -> qa directly.
-    second = _doc(
-        [_node("n_lead", lead.id), _node("n_qa", qa.id)],
-        [{"from": "n_lead", "to": "n_qa"}],
-    )
-    report = ingest_flow_graph(json.dumps(second))
-
-    assert report["removed_from_map_count"] == 1
-    departed = next(e for e in report["reconciled"] if e.get("removed_from_map"))
-    assert departed["persona_instance_id"] == dev.id
-    assert departed["ok"] and departed["changed"]
-    # dev lost the map's edge; qa follows the new drawing.
-    assert store.get(dev.id).steered_by == []
-    assert store.get(qa.id).steered_by == [lead.id]
-
-
-def test_ingest_departure_preserves_foreign_parents_and_goal(isolate_agent_runtime_root):
-    store, lead, dev, qa = _three_instances()
+    # A foreign parent set outside the map + a goal on qa.
     foreign = store.create_free_floating("profile:foreign")
     ingest_flow_graph(
         json.dumps(
-            _doc(
-                [_node("n_lead", lead.id), _node("n_dev", dev.id)],
-                [{"from": "n_lead", "to": "n_dev"}],
-            )
-        )
+            {
+                "graph_id": f"runtime:{lead.id}",
+                "nodes": [_node("n_lead", lead.id), _node("n_qa", qa.id)],
+                "edges": [{"from": "n_lead", "to": "n_qa"}],
+            }
+        ),
+        store=store,
     )
-    # A parent set OUTSIDE the map (goal engine / another surface) + a goal.
-    store.set_parents(dev.id, [lead.id, foreign.id], goal_id="goal_live")
+    store.set_parents(qa.id, [lead.id, foreign.id], goal_id="goal_live")
 
-    ingest_flow_graph(json.dumps(_doc([_node("n_lead", lead.id)], [])))
+    # lead deletes qa's node entirely. Departure strips ONLY the owner (lead);
+    # the foreign parent AND the goal survive.
+    report = ingest_flow_graph(
+        json.dumps(
+            {"graph_id": f"runtime:{lead.id}", "nodes": [_node("n_lead", lead.id)], "edges": []}
+        ),
+        store=store,
+    )
 
-    after = store.get(dev.id)
-    # Map member (lead) stripped; foreign parent survives; goal untouched.
+    assert report["removed_from_map_count"] == 1
+    departed = next(e for e in report["reconciled"] if e.get("removed_from_map"))
+    assert departed["persona_instance_id"] == qa.id
+    assert departed["owner"] == lead.id and departed["changed"]
+    after = store.get(qa.id)
     assert after.steered_by == [foreign.id]
     assert after.goal_id == "goal_live"
 
@@ -297,11 +427,13 @@ def test_ingest_first_doc_has_no_departures(isolate_agent_runtime_root):
     store, lead, dev, _ = _three_instances()
     report = ingest_flow_graph(
         json.dumps(
-            _doc(
-                [_node("n_lead", lead.id), _node("n_dev", dev.id)],
-                [{"from": "n_lead", "to": "n_dev"}],
-            )
-        )
+            {
+                "graph_id": f"runtime:{lead.id}",
+                "nodes": [_node("n_lead", lead.id), _node("n_dev", dev.id)],
+                "edges": [{"from": "n_lead", "to": "n_dev"}],
+            }
+        ),
+        store=store,
     )
     assert report["removed_from_map_count"] == 0
     assert not any(e.get("removed_from_map") for e in report["reconciled"])
@@ -310,15 +442,23 @@ def test_ingest_first_doc_has_no_departures(isolate_agent_runtime_root):
 def test_ingest_departed_agent_gone_from_runtime_is_tolerated(isolate_agent_runtime_root):
     store, lead, _, _ = _three_instances()
     ghost = "personainst_soon_gone"
-    # Prior doc claims a binding to an agent that no longer exists at the next
-    # ingest — simulate by storing a doc that binds a never-created id.
-    first = _doc(
-        [_node("n_lead", lead.id), _node("n_ghost", ghost)],
-        [{"from": "n_lead", "to": "n_ghost"}],
+    ingest_flow_graph(
+        json.dumps(
+            {
+                "graph_id": f"runtime:{lead.id}",
+                "nodes": [_node("n_lead", lead.id), _node("n_ghost", ghost)],
+                "edges": [{"from": "n_lead", "to": "n_ghost"}],
+            }
+        ),
+        store=store,
     )
-    ingest_flow_graph(json.dumps(first))
 
-    report = ingest_flow_graph(json.dumps(_doc([_node("n_lead", lead.id)], [])))
+    report = ingest_flow_graph(
+        json.dumps(
+            {"graph_id": f"runtime:{lead.id}", "nodes": [_node("n_lead", lead.id)], "edges": []}
+        ),
+        store=store,
+    )
 
     departed = next(e for e in report["reconciled"] if e.get("removed_from_map"))
     assert departed["persona_instance_id"] == ghost
@@ -330,5 +470,11 @@ def test_ingest_rejects_invalid_json_and_oversize(isolate_agent_runtime_root):
         ingest_flow_graph("{nope")
     with pytest.raises(FlowGraphDocError, match="too large"):
         ingest_flow_graph('{"pad": "' + "x" * (256 * 1024) + '"}')
-    # Nothing stored on either failure.
     assert FlowGraphStore().list_ids() == []
+
+
+def test_bound_agent_ids_excludes_unbound():
+    doc = parse_flow_graph_doc(
+        _doc([_node("n1", "personainst_a"), _node("n2", None), _node("n3", "personainst_b")], [])
+    )
+    assert bound_agent_ids(doc) == {"personainst_a", "personainst_b"}
