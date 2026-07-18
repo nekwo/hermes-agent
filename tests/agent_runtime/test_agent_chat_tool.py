@@ -5,7 +5,14 @@ import json
 import pytest
 
 from agent_runtime.relay_policy import RELAY_CHAIN, RELAY_DEADLINE
-from tools.agent_chat_tool import AGENT_CHAT_SEND_SCHEMA, agent_chat_send
+from tools.agent_chat_tool import (
+    AGENT_CHAT_OPEN_SCHEMA,
+    AGENT_CHAT_SEND_SCHEMA,
+    AGENT_CHAT_THREADS_SCHEMA,
+    agent_chat_open,
+    agent_chat_send,
+    agent_chat_threads,
+)
 from tools.registry import registry
 
 
@@ -314,3 +321,240 @@ def test_conversation_drops_thinking_rows_that_echo_the_reply():
         ("reply", "3"),
         ("thinking_summary", "4"),
     ]
+
+
+# --------------------------------------------------------------------------- #
+# new_session lane + read-only companions (agent_chat_threads / agent_chat_open)
+# --------------------------------------------------------------------------- #
+
+
+def test_read_only_companions_are_registered_on_the_agent_chat_toolset():
+    for name in ("agent_chat_threads", "agent_chat_open"):
+        entry = registry.get_entry(name)
+        assert entry is not None, name
+        assert entry.toolset == "agent_chat", name
+    assert AGENT_CHAT_THREADS_SCHEMA["parameters"]["required"] == []
+    assert AGENT_CHAT_OPEN_SCHEMA["parameters"]["required"] == ["persona_id"]
+
+
+def test_send_schema_teaches_the_verb_set():
+    # The scope addition: the send description teaches the whole verb set + the
+    # @handle addressing model, and exposes the new_session parameter.
+    text = AGENT_CHAT_SEND_SCHEMA["description"]
+    assert "new_session" in text
+    assert "agent_chat_threads" in text and "agent_chat_open" in text
+    assert "personainst_" in text  # @handle addressing is taught
+    props = AGENT_CHAT_SEND_SCHEMA["parameters"]["properties"]
+    assert "new_session" in props and props["new_session"]["type"] == "boolean"
+
+
+def test_read_tool_descriptions_say_when_to_use_them():
+    threads = AGENT_CHAT_THREADS_SCHEMA["description"].lower()
+    opened = AGENT_CHAT_OPEN_SCHEMA["description"].lower()
+    assert "read-only" in threads and "read-only" in opened
+    assert "list" in threads  # threads → list your threads
+    assert "review" in opened  # open → review before continuing
+
+
+def test_new_session_flag_is_forwarded_to_the_handler(monkeypatch):
+    # The tool forwards new_session; the handler owns the mint (through the
+    # default-session chokepoint). The tool must NOT invent a session id here.
+    seen = {}
+
+    def fake_handler(args):
+        seen["new_session"] = getattr(args, "new_session", None)
+        seen["session_id"] = args.session_id
+        print(json.dumps({"ok": True, "reply": "ack", "session_id": "persona_chat_personainst_qa_fresh"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    # Default: new_session absent → forwarded as False, session omitted.
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi"))["ok"]
+    assert seen["new_session"] is False and seen["session_id"] is None
+    # new_session=True forwarded; session stays None so the handler mints via the
+    # chokepoint (one minting authority), not a tool-side mint.
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi", new_session=True))["ok"]
+    assert seen["new_session"] is True and seen["session_id"] is None
+
+
+def test_new_session_with_explicit_session_is_a_typed_refusal(monkeypatch):
+    def fake_handler(args):  # pragma: no cover - must not be reached
+        raise AssertionError("contradictory thread target must refuse before dispatch")
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    data = json.loads(
+        agent_chat_send(
+            persona_id="qa",
+            message="hi",
+            new_session=True,
+            session_id="persona_chat_personainst_qa_abc",
+        )
+    )
+    assert data["ok"] is False
+    assert data["error_kind"] == "contradictory_thread_target"
+
+
+def test_threads_lists_default_thread_without_minting_for_never_chatted(isolate_agent_runtime_root):
+    from agent_runtime.persona_assignments import (
+        PersonaInstanceStore,
+        resolve_default_chat_session_id_for_instance,
+    )
+
+    data = json.loads(agent_chat_threads())
+    assert data["ok"] is True
+    by_persona = {row["persona_id"]: row for row in data["threads"]}
+    assert "qa" in by_persona, "reachable teammates must be listed"
+    qa = by_persona["qa"]
+    assert qa["handle"] == "personainst_qa"
+    assert qa["has_thread"] is False and qa["session_id"] is None
+    # Listing must not have created a session for qa.
+    assert resolve_default_chat_session_id_for_instance(PersonaInstanceStore(), persona_id="qa") is None
+
+
+def test_threads_shows_the_thread_with_a_count_after_a_send(isolate_agent_runtime_root):
+    session_id = _seed_persona_chat("qa", [("From Neko: hi", "QA here — hi."), ("again", "ack")])
+
+    data = json.loads(agent_chat_threads(persona_id="qa"))
+    rows = [row for row in data["threads"] if row["persona_id"] == "qa"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["has_thread"] is True
+    assert row["session_id"] == session_id
+    assert row["message_count"] == 4  # 2 operator + 2 agent
+
+
+def test_open_returns_the_bounded_tail_and_canonicalizes_handle_input(isolate_agent_runtime_root):
+    session_id = _seed_persona_chat("qa", [("From Neko: hi", "QA here — hi."), ("more", "ack")])
+
+    # Handle input canonicalizes to the persona (the resolution send already does).
+    data = json.loads(agent_chat_open(persona_id="personainst_qa", limit=1))
+    assert data["ok"] is True
+    assert data["target_persona"] == "qa"
+    assert data["session_id"] == session_id
+    assert data["has_thread"] is True
+    assert data["count"] == 1  # bounded by limit
+    assert set(data["messages"][0]) >= {"role", "text", "timestamp"}
+
+
+def test_open_refuses_a_foreign_session(isolate_agent_runtime_root):
+    _seed_persona_chat("qa", [("hi", "ack")])
+    # A session belonging to a different teammate's chat lane is refused — this is
+    # "review OUR thread", not a transcript browser.
+    data = json.loads(
+        agent_chat_open(persona_id="qa", session_id="persona_chat_personainst_dev_deadbeef0000")
+    )
+    assert data["ok"] is False
+    assert data["error_kind"] == "foreign_session"
+
+
+def test_send_forwards_a_personainst_handle_as_the_target_instance(monkeypatch):
+    # Multi-instance targeting: a personainst_* handle in the persona slot must be
+    # forwarded as persona_instance_id so the handler threads THAT instance (not
+    # the persona's canonical channel). A bare persona id forwards no handle.
+    seen = {}
+
+    def fake_handler(args):
+        seen["persona_id"] = args.persona_id
+        seen["persona_instance_id"] = args.persona_instance_id
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+
+    assert json.loads(agent_chat_send(persona_id="personainst_qa_agent_2", message="hi"))["ok"]
+    assert seen["persona_id"] == "personainst_qa_agent_2"
+    assert seen["persona_instance_id"] == "personainst_qa_agent_2"
+
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi"))["ok"]
+    assert seen["persona_id"] == "qa"
+    assert seen["persona_instance_id"] is None
+
+
+def test_threads_lists_each_instance_of_a_persona_distinctly(isolate_agent_runtime_root):
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    sibling = PersonaInstanceStore().add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent 2"
+    )
+    primary_session = _seed_persona_chat("qa", [("primary hi", "primary ack")])
+    sibling_session = _seed_persona_chat(
+        "qa", [("sibling hi", "sibling ack")], persona_instance_id=sibling.id
+    )
+    assert primary_session != sibling_session
+
+    data = json.loads(agent_chat_threads(persona_id="qa"))
+    by_handle = {row["handle"]: row for row in data["threads"] if row["persona_id"] == "qa"}
+    assert {"personainst_qa", "personainst_qa_agent_2"} <= set(by_handle)
+    assert by_handle["personainst_qa"]["session_id"] == primary_session
+    assert by_handle["personainst_qa_agent_2"]["session_id"] == sibling_session
+
+    # A handle filter narrows to that one instance.
+    only = json.loads(agent_chat_threads(persona_id=sibling.id))
+    handles = [row["handle"] for row in only["threads"]]
+    assert handles == ["personainst_qa_agent_2"]
+
+
+def test_open_targets_the_specific_instance_not_the_canonical_channel(isolate_agent_runtime_root):
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    sibling = PersonaInstanceStore().add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent 2"
+    )
+    primary_session = _seed_persona_chat("qa", [("primary hi", "primary ack")])
+    sibling_session = _seed_persona_chat(
+        "qa", [("sibling hi", "sibling ack")], persona_instance_id=sibling.id
+    )
+
+    # The handle reviews the SIBLING's thread; the bare persona reviews the primary.
+    opened_sibling = json.loads(agent_chat_open(persona_id=sibling.id))
+    assert opened_sibling["session_id"] == sibling_session
+    assert [m["text"] for m in opened_sibling["messages"]] == ["sibling hi", "sibling ack"]
+
+    opened_primary = json.loads(agent_chat_open(persona_id="qa"))
+    assert opened_primary["session_id"] == primary_session
+
+    # The primary must NOT be able to open the sibling's session (prefix-collision
+    # guard: personainst_qa must not swallow personainst_qa_agent_2's session).
+    refused = json.loads(agent_chat_open(persona_id="qa", session_id=sibling_session))
+    assert refused["ok"] is False and refused["error_kind"] == "foreign_session"
+
+
+def _seed_persona_chat(persona_id: str, turns, *, persona_instance_id=None):
+    """Handler-equivalent persistence (no LLM turn): resolve the default session
+    through the chokepoint (optionally for a SPECIFIC instance), bind it via
+    open_chat, and write the SessionDB row + messages the projection keys on.
+    Mirrors test_relay_session_lifecycle's end-to-end helper."""
+    from agent_runtime.persona_assignments import (
+        PersonaInstanceStore,
+        default_chat_session_id_for_instance,
+    )
+    from agent_runtime.persona_chat_history import PERSONA_CHAT_SESSION_SOURCE
+    from hermes_state import SessionDB
+
+    store = PersonaInstanceStore()
+    db = SessionDB()
+    session_id = default_chat_session_id_for_instance(
+        store, persona_id=persona_id, persona_instance_id=persona_instance_id
+    )
+    store.open_chat(
+        persona_id=persona_id,
+        persona_instance_id=persona_instance_id,
+        session_id=session_id,
+        display_name=persona_id.upper(),
+    )
+    db.create_session(
+        session_id=session_id,
+        source=PERSONA_CHAT_SESSION_SOURCE,
+        model=None,
+        system_prompt=f"Mission Control persona chat for {persona_id}",
+    )
+    for message, reply in turns:
+        db.append_message(session_id=session_id, role="user", content=message)
+        db.append_message(session_id=session_id, role="assistant", content=reply)
+    return session_id

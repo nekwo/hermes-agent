@@ -489,6 +489,10 @@ def _mission_chat_operative_rules() -> str:
         "- When an agent you briefed replies with a clarifying question of their own, answer it by sending the choice back to "
         "them (agent_chat_send into that same session) so the exchange continues as one conversation — don't drop their "
         "question or answer it by guessing.\n"
+        "- Teammates on your level are addressable by the `@personainst_*` handles in your Runtime Situation HUD. With "
+        "`agent_chat_send`: omit the session to continue your durable pair thread (the norm — one thread per teammate); pass "
+        "`session_id` to continue a specific thread; pass `new_session: true` only to start a clean thread (sparingly). Use "
+        "`agent_chat_open` to review a teammate's recent thread before continuing it, and `agent_chat_threads` to list your threads.\n"
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
         "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane."
     )

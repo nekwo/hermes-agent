@@ -23,6 +23,7 @@ from agent_runtime.persona_assignments import (
     PersonaInstanceStore,
     default_chat_session_id_for_instance,
     persona_instance_id_for,
+    resolve_default_chat_session_id_for_instance,
 )
 from agent_runtime.persona_chat_history import (
     PERSONA_CHAT_SESSION_SOURCE,
@@ -152,3 +153,72 @@ def test_relay_exchange_is_visible_in_the_snapshot_projection(
     texts = [message["text"] for message in row["messages"]]
     assert "From Neko: hi" in texts and "QA here — hi Neko." in texts
     assert "From Neko: follow up" in texts and "QA here — ack." in texts
+
+
+# --------------------------------------------------------------------------- #
+# new_session lane (mint= mode) + the read verbs' non-minting resolve          #
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_default_never_mints_for_a_never_chatted_target(
+    isolate_agent_runtime_root,
+):
+    # The read verbs (agent_chat_threads / agent_chat_open) resolve WITHOUT
+    # minting: a never-chatted target reports None, and no instance row is written.
+    store = PersonaInstanceStore()
+    assert resolve_default_chat_session_id_for_instance(store, persona_id="qa") is None
+    assert PersonaInstanceStore().list_all() == [], "resolving must not create a session/row"
+
+
+def test_mint_mode_forces_a_fresh_canonical_session_even_with_a_default(
+    isolate_agent_runtime_root,
+):
+    # new_session=True routes through the SAME chokepoint with mint=True: force a
+    # fresh canonical session even when a default already exists — no parallel
+    # pipeline, just skip the reuse read.
+    store = PersonaInstanceStore()
+    existing = store.create_operator_chat(persona_id="qa", display_name="QA")
+
+    assert default_chat_session_id_for_instance(store, persona_id="qa") == existing.session_id
+    fresh = default_chat_session_id_for_instance(store, persona_id="qa", mint=True)
+    assert fresh != existing.session_id
+    assert fresh.startswith(f"persona_chat_{persona_instance_id_for('qa')}_")
+    tail = fresh[len(f"persona_chat_{persona_instance_id_for('qa')}_"):]
+    assert len(tail) == 12 and all(ch in "0123456789abcdef" for ch in tail)
+
+
+def test_new_session_mint_is_canonical_and_visible_in_the_projection(
+    isolate_agent_runtime_root,
+):
+    # End-to-end: minting a fresh session (new_session lane) and running the
+    # handler-equivalent steps repoints the canonical instance and renders as a
+    # visible chat row under the canonical instance id — no orphaned session.
+    from hermes_state import SessionDB
+
+    store = PersonaInstanceStore()
+    db = SessionDB()
+
+    def _relay(message: str, reply: str, *, mint: bool) -> str:
+        session_id = default_chat_session_id_for_instance(store, persona_id="qa", mint=mint)
+        store.open_chat(persona_id="qa", session_id=session_id, display_name="QA")
+        db.create_session(
+            session_id=session_id,
+            source=PERSONA_CHAT_SESSION_SOURCE,
+            model=None,
+            system_prompt="Mission Control persona chat for qa",
+        )
+        db.append_message(session_id=session_id, role="user", content=message)
+        db.append_message(session_id=session_id, role="assistant", content=reply)
+        return session_id
+
+    first = _relay("thread one", "ack one", mint=False)
+    fresh = _relay("thread two — clean", "ack two", mint=True)
+    assert fresh != first, "new_session must start a distinct thread"
+    # The fresh session became the instance's default going forward.
+    assert resolve_default_chat_session_id_for_instance(store, persona_id="qa") == fresh
+    assert default_chat_session_id_for_instance(store, persona_id="qa") == fresh
+
+    rows = persona_chat_history_summary(persona_instances=store.list_all(), session_db=db)
+    fresh_rows = [row for row in rows if row["session_id"] == fresh]
+    assert len(fresh_rows) == 1, "the fresh thread must render as a visible chat row"
+    assert fresh_rows[0]["persona_instance_id"] == persona_instance_id_for("qa")

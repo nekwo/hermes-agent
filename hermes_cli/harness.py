@@ -1083,6 +1083,7 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--persona", dest="persona_id", required=True)
     mission_chat_message.add_argument("--persona-instance-id", default=None)
     mission_chat_message.add_argument("--session-id", default=None)
+    mission_chat_message.add_argument("--new-session", dest="new_session", action="store_true", help="Force a fresh canonical chat session for the target instead of continuing the default thread (agent_chat_send new_session lane); ignored when --session-id is given")
     mission_chat_message.add_argument("--task", dest="task_id", default=None)
     mission_chat_message.add_argument("--goal", dest="goal_id", default=None)
     mission_chat_message.add_argument("--title", default="Operator message")

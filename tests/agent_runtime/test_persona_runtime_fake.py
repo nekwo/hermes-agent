@@ -393,6 +393,28 @@ def test_mission_chat_ack_is_the_first_hard_rule():
     assert "never open a turn with a silent tool call" in first
 
 
+def test_mission_chat_operative_rules_teach_the_chat_session_verbs():
+    # The chat-session verb set is taught in the busy operative-rules prompt (not
+    # only the tool schemas): teammates are addressable by @personainst_* handles,
+    # and the three thread lanes of agent_chat_send (omit / session_id /
+    # new_session) plus the read verbs are spelled out. Rule #1 must STILL be the
+    # ack rule — the new bullet may not displace it.
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    bullets = [line for line in rules.splitlines() if line.startswith("- ")]
+    assert "HARD RULE" in bullets[0], "the acknowledge-before-acting rule must remain first"
+
+    verbs_bullet = next(
+        (line for line in bullets if "agent_chat_threads" in line and "agent_chat_open" in line),
+        None,
+    )
+    assert verbs_bullet is not None, "operative rules must teach the chat-session verb set"
+    assert "@personainst_" in verbs_bullet
+    assert "new_session" in verbs_bullet
+    assert "session_id" in verbs_bullet
+
+
 def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkeypatch):
     # A profile-backed persona configured with `soul_overlay_path` reads its
     # soul from ITS OWN profile home (single source — realm sync already models

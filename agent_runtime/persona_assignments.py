@@ -1509,11 +1509,56 @@ def persona_chat_session_id_for(persona_instance_id: str) -> str:
 _PERSONA_CHAT_SESSION_PREFIX = "persona_chat_"
 
 
+def canonical_chat_instance_id(persona_id: str, persona_instance_id: str | None = None) -> str:
+    """Canonical persona-instance id a chat lane threads onto.
+
+    One derivation shared by every chat-session resolver here (default resolve,
+    non-minting resolve, mint) so an instance-shaped target and a bare persona id
+    always land on the SAME instance row — no variant rows, no parallel scheme.
+    """
+    return (
+        canonical_persona_instance_id(persona_instance_id, persona_id=persona_id)
+        if persona_instance_id
+        else None
+    ) or persona_instance_id_for(persona_id)
+
+
+def resolve_default_chat_session_id_for_instance(
+    store: "PersonaInstanceStore",
+    *,
+    persona_id: str,
+    persona_instance_id: str | None = None,
+) -> str | None:
+    """Return the target's EXISTING default chat session id WITHOUT minting.
+
+    The read-only counterpart to :func:`default_chat_session_id_for_instance`:
+    read the canonical instance pointer and return its bound session ONLY when it
+    is a chat-shaped ``persona_chat_*`` session. Returns ``None`` when the target
+    has never chatted (or its pointer is a task/worker session) — the honest
+    "no thread yet" answer the read verbs (``agent_chat_threads`` /
+    ``agent_chat_open``) surface instead of fabricating a session. Never writes.
+    """
+    instance_id = canonical_chat_instance_id(persona_id, persona_instance_id)
+    try:
+        existing = store.get(instance_id)
+    except Exception:
+        existing = None
+    if existing is not None:
+        existing_session = safe_assignment_text(getattr(existing, "session_id", None), limit=200)
+        # Reuse only a chat-shaped session: a task/worker session on the pointer
+        # (task_bound mode) is not the persona's chat lane and must never absorb
+        # a chat relay's transcript.
+        if existing_session and existing_session.startswith(_PERSONA_CHAT_SESSION_PREFIX):
+            return existing_session
+    return None
+
+
 def default_chat_session_id_for_instance(
     store: "PersonaInstanceStore",
     *,
     persona_id: str,
     persona_instance_id: str | None = None,
+    mint: bool = False,
 ) -> str:
     """Resolve the target's DEFAULT chat session id for an omitted-session send.
 
@@ -1530,24 +1575,21 @@ def default_chat_session_id_for_instance(
     per send, invisible to the snapshot projection). This is the same
     resolve-or-mint rule ``_bind_free_floating_chat_session`` applies for
     free-floating assignments — one id scheme, not a parallel pipeline.
+
+    ``mint=True`` is the ``agent_chat_send new_session`` lane: FORCE a fresh
+    canonical session even when a default already exists, using the same mint the
+    never-chatted branch uses (``persona_chat_session_id_for`` on the canonical
+    instance id) — no parallel pipeline, just skip the reuse read. The handler's
+    ``open_chat`` then repoints the instance at this session, so the pair's new
+    thread becomes the default going forward.
     """
-    instance_id = (
-        canonical_persona_instance_id(persona_instance_id, persona_id=persona_id)
-        if persona_instance_id
-        else None
-    ) or persona_instance_id_for(persona_id)
-    try:
-        existing = store.get(instance_id)
-    except Exception:
-        existing = None
-    if existing is not None:
-        existing_session = safe_assignment_text(getattr(existing, "session_id", None), limit=200)
-        # Reuse only a chat-shaped session: a task/worker session on the pointer
-        # (task_bound mode) is not the persona's chat lane and must never absorb
-        # a chat relay's transcript.
-        if existing_session and existing_session.startswith(_PERSONA_CHAT_SESSION_PREFIX):
-            return existing_session
-    return persona_chat_session_id_for(instance_id)
+    if not mint:
+        existing = resolve_default_chat_session_id_for_instance(
+            store, persona_id=persona_id, persona_instance_id=persona_instance_id
+        )
+        if existing:
+            return existing
+    return persona_chat_session_id_for(canonical_chat_instance_id(persona_id, persona_instance_id))
 
 
 def _live_chat_bindings(instance: PersonaInstance) -> tuple[str | None, str | None]:

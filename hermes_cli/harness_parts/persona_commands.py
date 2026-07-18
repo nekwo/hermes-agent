@@ -714,10 +714,16 @@ def _cmd_mission_chat_message(args) -> int:
         # current chat session (mint a fresh one only when it has never
         # chatted); never a new random session per send, which orphaned the
         # relay lane (unpointed session, invisible to the snapshot projection).
+        #
+        # new_session=True (agent_chat_send's clean-thread lane) forces a fresh
+        # canonical mint through the SAME chokepoint (mint= mode), never a
+        # parallel pipeline; open_chat then repoints the instance so the pair's
+        # new thread becomes the default going forward.
         session_id = default_chat_session_id_for_instance(
             instance_store,
             persona_id=normalized_persona,
             persona_instance_id=persona_instance_id or None,
+            mint=bool(getattr(args, "new_session", False)),
         )
     display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or _display_name_for_profile(normalized_persona)
     try:
