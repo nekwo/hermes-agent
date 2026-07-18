@@ -1458,7 +1458,73 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
         "system_message_supplied": request.system_message is not None,
         "message_count": len(messages),
         "messages": messages,
+        # T8 (2026-07-18): the rendered compact skills-index text's char count —
+        # what ``.skills_prompt_snapshot.json`` ACTUALLY contributed to the
+        # prompt this turn, distinct from the loaded-file byte estimate the
+        # context-file row carries (the 41 KB snapshot renders to ~9 KB of index
+        # text in the prompt). Measured against the AGENT's own resolved tool
+        # set so the launcher attributes the real in-prompt cost, not the file
+        # size. Omitted (never fabricated) when unmeasurable. See
+        # ``_rendered_skills_prompt_chars``.
+        **(
+            {"skills_prompt_chars": _skills_chars}
+            if (_skills_chars := _rendered_skills_prompt_chars(agent)) is not None
+            else {}
+        ),
     }
+
+
+def _rendered_skills_prompt_chars(agent) -> int | None:
+    """Char count of the compact skills index this turn actually rendered.
+
+    Recomputes ``build_skills_system_prompt`` with the AGENT's own resolved tool
+    set — byte-for-byte the same call ``agent/system_prompt.py`` made while
+    assembling this turn's system prompt, so it is a guaranteed in-process LRU
+    cache HIT: zero re-scan, zero disk I/O, zero snapshot write (this runs inside
+    the persona profile-home override, so the cache key matches the turn's). The
+    result is the EXACT rendered text, not a size heuristic.
+
+    Returns ``None`` (the launcher then omits the in-prompt chip and keeps the
+    loaded-file estimate) when the lane ships no skills tools, the render is
+    empty, or anything is unmeasurable — never a fabricated number."""
+
+    try:
+        valid = getattr(agent, "valid_tool_names", None)
+        if not valid:
+            return None
+        # Mirror the gate in agent/system_prompt.py: the skills index only
+        # renders when the lane ships one of the skills tools.
+        if not any(name in valid for name in ("skills_list", "skill_view", "skill_manage")):
+            return None
+        import run_agent
+
+        avail_toolsets = {
+            toolset
+            for toolset in (run_agent.get_toolset_for_tool(name) for name in valid)
+            if toolset
+        }
+        try:
+            from agent.coding_context import coding_compact_skill_categories
+            from agent.runtime_cwd import resolve_context_cwd
+
+            compact = (
+                coding_compact_skill_categories(
+                    platform=getattr(agent, "platform", None), cwd=resolve_context_cwd()
+                )
+                or None
+            )
+        except Exception:
+            compact = None
+        rendered = run_agent.build_skills_system_prompt(
+            available_tools=valid,
+            available_toolsets=avail_toolsets,
+            compact_categories=compact,
+        )
+        if not isinstance(rendered, str):
+            return None
+        return len(rendered)
+    except Exception:
+        return None
 
 
 def _agent_tools_json_bytes(agent) -> int | None:

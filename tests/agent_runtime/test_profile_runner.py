@@ -1174,3 +1174,50 @@ def test_tool_finished_payload_omits_todo_state_for_other_tools():
         invocation={"skill": "x"},
     )
     assert "todo_state" not in payload
+
+
+# T8 (2026-07-18): the rendered skills-index chars captured on final_model_input.
+
+
+def test_rendered_skills_prompt_chars_guards_and_measures(monkeypatch):
+    from types import SimpleNamespace
+    from agent_runtime.profile_runner import _rendered_skills_prompt_chars
+    import run_agent
+
+    # No tool set at all -> None (never fabricated).
+    assert _rendered_skills_prompt_chars(SimpleNamespace(valid_tool_names=None)) is None
+    # A lane with no skills tools -> None (the index does not render).
+    assert (
+        _rendered_skills_prompt_chars(
+            SimpleNamespace(valid_tool_names={"web_search", "terminal"}, platform="cli")
+        )
+        is None
+    )
+
+    # A lane that ships skill_view renders -> the length of the rendered index,
+    # measured against the agent's OWN resolved tool set (mirrors
+    # agent/system_prompt.py; a guaranteed in-process cache hit at runtime).
+    rendered_text = "## Skills (mandatory)\n" + "x" * 9000
+    monkeypatch.setattr(run_agent, "get_toolset_for_tool", lambda name: "skills")
+    monkeypatch.setattr(
+        run_agent, "build_skills_system_prompt", lambda **kwargs: rendered_text
+    )
+    agent = SimpleNamespace(
+        valid_tool_names={"skill_view", "skills_list", "web_search"}, platform="cli"
+    )
+    assert _rendered_skills_prompt_chars(agent) == len(rendered_text)
+
+
+def test_rendered_skills_prompt_chars_swallows_render_failure(monkeypatch):
+    from types import SimpleNamespace
+    from agent_runtime.profile_runner import _rendered_skills_prompt_chars
+    import run_agent
+
+    monkeypatch.setattr(run_agent, "get_toolset_for_tool", lambda name: "skills")
+
+    def _boom(**kwargs):
+        raise RuntimeError("render exploded")
+
+    monkeypatch.setattr(run_agent, "build_skills_system_prompt", _boom)
+    agent = SimpleNamespace(valid_tool_names={"skill_view"}, platform="cli")
+    assert _rendered_skills_prompt_chars(agent) is None

@@ -539,6 +539,17 @@ def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
     )
 
 
+#: Fixed preamble prepended to the operator-selected workspace ``AGENTS.md``
+#: body inside the surface message. Kept as one constant so the per-file
+#: in-prompt attribution in ``prompt_observability`` can measure the workspace
+#: part's contributed chars (preamble + body) WITHOUT drifting from the text
+#: actually pasted here (T8, 2026-07-18).
+MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE = (
+    "Workspace instructions from the operator-selected AGENTS.md "
+    "(apply these instructions to this turn):\n\n"
+)
+
+
 def _mission_chat_surface_message(
     persona: AgentPersona,
     surface_prompt: str | None,
@@ -587,10 +598,7 @@ def _mission_chat_surface_message(
     if skill_prompt:
         parts.append(skill_prompt)
     if workspace_agents:
-        parts.append(
-            "Workspace instructions from the operator-selected AGENTS.md "
-            "(apply these instructions to this turn):\n\n" + workspace_agents
-        )
+        parts.append(MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE + workspace_agents)
     if operator_surface:
         parts.append(operator_surface)
     return "\n\n".join(part for part in parts if part)

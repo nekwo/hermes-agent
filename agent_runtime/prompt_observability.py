@@ -161,6 +161,23 @@ def mission_chat_prompt_observability(
         final_model_input=final_model_input,
         trace_events=trace_events,
     )
+    # T8 per-item in-prompt attribution — the parts reachable at THIS pre-turn
+    # seam (T5 made the surface-message parts explicit). The persona-identity
+    # layer counts the identity+rules TEMPLATE only (soul/memory ride file rows);
+    # SOUL.md / workspace-AGENTS.md rows get their pasted-part chars; config.yaml
+    # gets a deliberate 0. .skills_prompt_snapshot.json is attached post-turn.
+    persona_template_chars = _mission_chat_template_prompt_chars(persona)
+    soul_prompt_chars = _soul_overlay_prompt_chars(persona)
+    workspace_prompt_chars = _workspace_agents_prompt_chars(workspace_agents)
+    context_files: list[dict[str, Any]] = [
+        *_profile_context_files(profile),
+        *([workspace_agents.receipt] if workspace_agents is not None else []),
+    ]
+    _attach_context_file_prompt_contributions(
+        context_files,
+        soul_chars=soul_prompt_chars,
+        workspace_chars=workspace_prompt_chars,
+    )
     return {
         "context_id": context_id,
         "prompt_mode": prompt_mode,
@@ -203,11 +220,26 @@ def mission_chat_prompt_observability(
                     + "' identity block. The persona's OWN configured soul overlay "
                     "(config soul_overlay_path, resolved in its profile home) IS "
                     "loaded since hermes deafb825e; the OPERATOR profile's SOUL is "
-                    "not. Names the persona and forbids self-relay."
+                    "not. Names the persona and forbids self-relay. The per-layer "
+                    "estimate counts the identity + operative-rules TEMPLATE only; "
+                    "the soul overlay and any profile memory are attributed to "
+                    "their own SOUL.md / MEMORY.md / USER.md rows so nothing is "
+                    "double-counted (T8, 2026-07-18)."
                 ),
-                # persona_identity / system_core text is assembled later in the
-                # turn (not at this observability seam), so they carry no
-                # per-layer estimate and the launcher folds them into the residual.
+                # T8: the identity + operative-rules TEMPLATE is measurable at the
+                # T5 surface-message seam, so this layer now carries its own
+                # per-layer estimate (template only). system_core text is still
+                # assembled later in the turn and folds into the residual; the
+                # soul overlay / memory ride their file rows (never double-counted
+                # — the launcher sums this non-mirror layer AND those file rows).
+                **(
+                    {
+                        "chars": persona_template_chars,
+                        "token_estimate": persona_template_chars // 4,
+                    }
+                    if persona_template_chars is not None
+                    else {}
+                ),
             },
             {
                 "name": "Hermes core prompt",
@@ -281,10 +313,7 @@ def mission_chat_prompt_observability(
                 # that message and would otherwise double-count the HUD.
             },
         ],
-        "context_files": [
-            *_profile_context_files(profile),
-            *([workspace_agents.receipt] if workspace_agents is not None else []),
-        ],
+        "context_files": context_files,
         "used_skills": used_skills,
         # C1 RECORD-ONCE (2026-07-17): the built row carries ONE copy of each
         # fact — the pre-C1 alias keys (``skills_catalog`` ≡ available_skills,
@@ -352,6 +381,11 @@ def attach_prompt_observability_turn_results(
     Mutates ``context`` in place and returns it.
     """
 
+    # T8: the rendered skills-index chars are only knowable once the agent is
+    # constructed (they depend on its resolved tool set) — attach them to the
+    # .skills_prompt_snapshot.json row here, from the raw turn result, before
+    # final_model_input is sanitized/evicted.
+    _attach_skills_prompt_contribution(context, final_model_input)
     context["final_model_input"] = _safe_final_model_input(final_model_input)
     if model_selection is not None:
         context["model_selection"] = _safe_model_selection(model_selection)
@@ -2066,6 +2100,142 @@ def _layer_text_size(text: str | None) -> dict[str, int]:
         return {}
     chars = len(text)
     return {"chars": chars, "token_estimate": chars // 4}
+
+
+# --------------------------------------------------------------------------- #
+# T8 (2026-07-18): per-file IN-PROMPT contribution. The loaded-file
+# ``token_estimate`` (``bytes // 4``) answers "how big is the file"; these
+# additive ``prompt_chars`` / ``prompt_token_estimate`` fields answer "how much
+# of that file actually landed in the assembled prompt this turn" — wildly
+# different for the 41 KB skills snapshot (renders to ~9 KB of index text) and
+# ``config.yaml`` (never pasted → a deliberate 0). Only files whose contributed
+# text is REACHABLE at the T5 assembly seam get the fields; everything else is
+# left untouched so the launcher keeps the honest loaded-file chip rather than a
+# guess. Both numbers ride the row.
+# --------------------------------------------------------------------------- #
+
+def _set_row_prompt_contribution(row: dict[str, Any], chars: int | None) -> None:
+    """Attach ``prompt_chars`` + ``prompt_token_estimate`` (``chars // 4``) to a
+    context-file row. A ``None``/negative char count leaves the row untouched
+    (the field stays ABSENT → the launcher omits the in-prompt chip); a real 0
+    (config.yaml) is a deliberate zero, distinct from absent."""
+
+    if not isinstance(row, dict) or chars is None or chars < 0:
+        return
+    row["prompt_chars"] = chars
+    row["prompt_token_estimate"] = chars // 4
+
+
+def _soul_overlay_prompt_chars(persona: Any) -> int | None:
+    """Chars of the persona's own soul overlay as PASTED into the surface
+    message, or ``None`` when no overlay resolves. Uses the SAME function the
+    assembly pastes with (``persona_runtime._safe_read_soul_overlay``), so the
+    SOUL.md row's in-prompt number is exact, not a re-derivation."""
+
+    try:
+        from .persona_runtime import _safe_read_soul_overlay
+
+        soul = _safe_read_soul_overlay(
+            getattr(persona, "soul_overlay_path", None),
+            hermes_profile=getattr(persona, "hermes_profile", None),
+        )
+        return len(soul) if isinstance(soul, str) and soul else None
+    except Exception:
+        return None
+
+
+def _workspace_agents_prompt_chars(
+    workspace_agents: "WorkspaceAgentsContext | None",
+) -> int | None:
+    """Chars of the workspace-AGENTS.md PART pasted into the surface message
+    (fixed preamble + stripped body), or ``None`` when nothing was injected.
+    Reuses ``persona_runtime.MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE`` so the
+    measured part can never drift from the text actually pasted."""
+
+    if workspace_agents is None or workspace_agents.content is None:
+        return None
+    try:
+        from .persona_runtime import MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE
+
+        body = str(workspace_agents.content or "").strip()
+        return len(MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE) + len(body)
+    except Exception:
+        return None
+
+
+def _mission_chat_template_prompt_chars(persona: Any) -> int | None:
+    """Chars of the persona-identity + operative-rules TEMPLATE fed into the
+    surface message (the codex ``instructions``), EXCLUDING the soul overlay and
+    any profile memory — those ride their own file rows. This is the
+    ``persona_identity`` prompt layer's own contribution: the launcher resolver
+    sums it as a non-mirror layer, so it MUST be template-only or it would
+    double-count the SOUL.md / MEMORY.md / USER.md rows. Reachable because T5
+    made the surface-message parts explicit. ``None`` on any failure (the layer
+    then folds into the residual, as before)."""
+
+    try:
+        from .persona_runtime import (
+            _mission_chat_identity_prompt,
+            _mission_chat_operative_rules,
+        )
+
+        identity = _mission_chat_identity_prompt(persona)
+        rules = _mission_chat_operative_rules()
+        return len(identity) + len(rules)
+    except Exception:
+        return None
+
+
+def _attach_context_file_prompt_contributions(
+    context_files: list[dict[str, Any]],
+    *,
+    soul_chars: int | None,
+    workspace_chars: int | None,
+) -> None:
+    """Attach the per-file in-prompt contribution to the rows reachable at this
+    PRE-turn seam: SOUL.md (soul overlay), the workspace AGENTS.md row (workspace
+    part), and config.yaml (a deliberate 0 — consumed as configuration, never
+    pasted). MEMORY.md / USER.md are left untouched: their in-prompt text is
+    rendered later through the memory tool's dedup/sanitize pipeline and is not
+    reproducible here, so the launcher keeps their loaded-file chip rather than a
+    guess. ``.skills_prompt_snapshot.json`` is attached POST-turn (it needs the
+    constructed agent's resolved tool set — see
+    ``attach_prompt_observability_turn_results``)."""
+
+    for row in context_files:
+        if not isinstance(row, dict):
+            continue
+        if row.get("kind") == "workspace_context":
+            _set_row_prompt_contribution(row, workspace_chars)
+            continue
+        name = row.get("name")
+        if name == "SOUL.md":
+            _set_row_prompt_contribution(row, soul_chars)
+        elif name == "config.yaml":
+            _set_row_prompt_contribution(row, 0)
+
+
+def _attach_skills_prompt_contribution(
+    context: dict[str, Any], final_model_input: dict[str, Any] | None
+) -> None:
+    """Attach the rendered skills-index chars (recorded on ``final_model_input``
+    by the profile runner, measured against the agent's real tool set) to the
+    ``.skills_prompt_snapshot.json`` row. POST-turn only: the render needs the
+    constructed agent, which does not exist at the pre-turn build. Absent field →
+    the row keeps its loaded-file chip (never fabricated)."""
+
+    if not isinstance(final_model_input, dict):
+        return
+    chars = _safe_int(final_model_input.get("skills_prompt_chars"))
+    if chars is None:
+        return
+    files = context.get("context_files")
+    if not isinstance(files, list):
+        return
+    for row in files:
+        if isinstance(row, dict) and row.get("name") == ".skills_prompt_snapshot.json":
+            _set_row_prompt_contribution(row, chars)
+            break
 
 
 def _context_file_summary(path: Path, *, included: bool) -> dict[str, Any]:
