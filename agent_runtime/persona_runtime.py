@@ -396,7 +396,7 @@ PERSONA_CHAT_SCRATCH_SOURCE = "agent_runtime_persona_chat_scratch"
 def _persona_chat_system_prompt(persona: AgentPersona) -> str:
     display = getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")
     role = role_from_persona(persona).value
-    return (
+    base = (
         f"You are {display}, a Mission Control operator-channel agent (role: {role}). "
         "You are in a direct, real-time chat with a single human operator — your teammate, not an end user. "
         "You are embodied in the Mission Control office — a 2D/3D space shared with the other agents — and the "
@@ -423,6 +423,10 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         "something specific from a past session you can't already see, and consult your durable memory only when it actually "
         "bears on the reply — don't fish."
     )
+    # Same soul lane as the mission-chat surface: the persona's own configured
+    # soul overlay rides along; absent for personas that don't set one.
+    soul = _safe_read_soul_overlay(getattr(persona, "soul_overlay_path", None))
+    return f"{base}\n\n{soul}" if soul else base
 
 
 def _persona_chat_voice(role: str, display: str) -> str:
@@ -458,8 +462,10 @@ def _mission_chat_operative_rules() -> str:
 
     return (
         "Mission Control operator-chat rules (these govern this live operator channel):\n"
+        "- HARD RULE, FIRST IN EVERY TURN THAT USES TOOLS: before your first tool call, send one short sentence saying "
+        "what you are about to do. The operator watches the console live — never open a turn with a silent tool call. "
+        "Acknowledge, then act, then report the result.\n"
         "- You are talking directly to your operator — a trusted teammate, not an end user.\n"
-        "- If you need tools, acknowledge the action first in one short sentence, then use the tools, then report the result.\n"
         "- You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
         "change state — actually use your tools and report the real result. The operator's current permission grant is the "
         "only gate on what you can do; there is no separate 'hand it off first' step.\n"
@@ -544,7 +550,12 @@ def _mission_chat_surface_message(
     workspace_agents = (workspace_agents_content or "").strip()
     situational_hud = (situational_hud_content or "").strip()
     rules = _mission_chat_operative_rules()
-    parts = [identity, rules]
+    # The persona's OWN soul overlay (config `soul_overlay_path`) is the one
+    # identity document this isolated lane does load — who-you-are sits between
+    # the identity hat and the surface rules, mirroring how a profile's SOUL.md
+    # anchors a profile agent. The bound profile's SOUL.md stays not-loaded.
+    soul = _safe_read_soul_overlay(getattr(persona, "soul_overlay_path", None))
+    parts = [identity, soul or "", rules]
     if situational_hud:
         parts.append(situational_hud)
     if skill_prompt:

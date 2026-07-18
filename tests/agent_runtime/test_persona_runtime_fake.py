@@ -378,6 +378,67 @@ def test_mission_chat_surface_message_always_carries_operative_rules():
     assert workspace_composed.endswith("Use its conventions.")
 
 
+def test_mission_chat_ack_is_the_first_hard_rule():
+    # §7 acknowledge-before-acting promotion: the ack requirement is the FIRST
+    # bullet of the operative rules and phrased as a hard requirement, so a
+    # model that skims the rules still meets it before its first tool call.
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    bullets = [line for line in rules.splitlines() if line.startswith("- ")]
+    assert bullets, "operative rules must be a bulleted list"
+    first = bullets[0]
+    assert "HARD RULE" in first
+    assert "before your first tool call" in first
+    assert "never open a turn with a silent tool call" in first
+
+
+def test_persona_soul_overlay_layers_between_identity_and_rules():
+    # A persona configured with `soul_overlay_path` gets its own soul document
+    # in BOTH chat lanes — after the identity hat, before the operative rules
+    # on the mission-chat surface — mirroring how a profile's SOUL.md anchors a
+    # profile agent. Personas without one keep the exact legacy composition.
+    from dataclasses import replace
+
+    from agent_runtime.persona_runtime import (
+        _mission_chat_identity_prompt,
+        _mission_chat_operative_rules,
+        _mission_chat_surface_message,
+        _persona_chat_system_prompt,
+    )
+
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    souled = replace(neko, soul_overlay_path="prompts/neko_soul.md")
+
+    composed = _mission_chat_surface_message(souled, "")
+    identity = _mission_chat_identity_prompt(souled)
+    rules = _mission_chat_operative_rules()
+    soul_marker = "You are Neko, the Mission Lead"
+    ack_habit = "Before your first tool call in any turn"
+    assert soul_marker in composed
+    assert ack_habit in composed
+    assert composed.index(identity[:60]) < composed.index(soul_marker) < composed.index(
+        "Mission Control operator-chat rules"
+    )
+    # The rules still ride after the soul — soul shapes voice, never displaces
+    # the surface invariants.
+    assert rules in composed
+
+    # Persona-chat lane carries the same soul.
+    chat_prompt = _persona_chat_system_prompt(souled)
+    assert soul_marker in chat_prompt
+    assert chat_prompt.index("operator-channel agent") < chat_prompt.index(soul_marker)
+
+    # No soul configured -> byte-identical legacy composition.
+    assert (
+        _mission_chat_surface_message(neko, "")
+        == _mission_chat_identity_prompt(neko) + "\n\n" + rules
+    )
+    # A bogus path degrades to no soul, never an error.
+    bogus = replace(neko, soul_overlay_path="prompts/does_not_exist.md")
+    assert _mission_chat_surface_message(bogus, "") == _mission_chat_surface_message(neko, "")
+
+
 def test_mission_chat_identity_prompt_names_persona_and_forbids_self_relay():
     # Root-cause guard for the "Neko messages itself" incident: the isolated
     # chat lane does not load the profile SOUL, so this block is the ONLY place
