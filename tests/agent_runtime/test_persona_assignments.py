@@ -945,6 +945,37 @@ def test_persona_instance_open_chat_can_target_additional_placement(monkeypatch,
     assert additional.mode == "chat"
 
 
+def test_open_chat_cli_targets_the_session_owner_not_the_canonical(monkeypatch, isolate_agent_runtime_root):
+    # Poison origin fix: the console's open-chat of a sibling passes the sibling's
+    # session with a bare persona id. The CLI must rebind the instance the session
+    # was minted FOR (personainst_qa_agent_2), never overwrite the canonical
+    # primary's (personainst_qa) pointer with it.
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    sibling = PersonaInstanceStore().add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
+    )
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(persona_id="qa", session_id=sibling.session_id, kill_active=False, json=True)
+    )
+
+    assert code == 0
+    fresh = PersonaInstanceStore()
+    # The sibling was rebound to its own session; the canonical primary never
+    # adopted it.
+    assert fresh.get("personainst_qa_agent_2").session_id == sibling.session_id
+    primary_adopted = False
+    try:
+        primary_adopted = fresh.get("personainst_qa").session_id == sibling.session_id
+    except Exception:
+        primary_adopted = False
+    assert not primary_adopted
+
+
 def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runtime_root):
     instance_store = PersonaInstanceStore()
     workers = WorkerSessionStore()

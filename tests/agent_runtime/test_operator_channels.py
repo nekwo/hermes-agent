@@ -1400,3 +1400,143 @@ def test_conversation_history_message_normal_reply_kind_is_reply():
     )
     assert message is not None
     assert message["kind"] == "reply"
+
+
+def _qa_instance(instance_id: str, *, session_id: str, display_name: str, updated_at: str) -> PersonaInstance:
+    return PersonaInstance(
+        id=instance_id,
+        persona_id="qa",
+        role="qa",
+        display_name=display_name,
+        profile_id=None,
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="chat",
+        session_id=session_id,
+        updated_at=updated_at,
+    )
+
+
+def test_operator_channels_are_instance_scoped_for_same_persona_siblings():
+    # 2026-07-18 channel-fold regression: two live instances of ONE persona, each
+    # threading its OWN session, must project TWO channels, each carrying only its
+    # own turns — no cross-bleed, no duplicate_instances_same_channel warning.
+    primary_session = "persona_chat_personainst_qa_84406cdb480e"
+    sibling_session = "persona_chat_personainst_qa_agent_2_32063a99b165"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _qa_instance(
+                "personainst_qa",
+                session_id=primary_session,
+                display_name="QA Agent",
+                updated_at="2026-07-18T06:50:26Z",
+            ),
+            _qa_instance(
+                "personainst_qa_agent_2",
+                session_id=sibling_session,
+                display_name="QA Agent (2)",
+                updated_at="2026-07-18T06:48:15Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": primary_session,
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa",
+                "title": "QA Agent chat",
+                "message_count": 2,
+                "messages": [
+                    {"role": "operator", "text": "Hi test test"},
+                    {"role": "agent", "text": "Hi! QA Agent online and ready."},
+                ],
+                "updated_at": "2026-07-18T06:50:26Z",
+            },
+            {
+                "session_id": sibling_session,
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa_agent_2",
+                "title": "QA Agent (2) chat",
+                "message_count": 2,
+                "messages": [
+                    {"role": "operator", "text": "Hi test test"},
+                    {"role": "agent", "text": "QA Agent (2) here."},
+                ],
+                "updated_at": "2026-07-18T06:48:15Z",
+            },
+        ],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 2
+    by_instance = {channel["persona_instance_id"]: channel for channel in channels}
+    assert set(by_instance) == {"personainst_qa", "personainst_qa_agent_2"}
+
+    primary = by_instance["personainst_qa"]
+    sibling = by_instance["personainst_qa_agent_2"]
+    # Distinct channel identities keyed on the instance's own session.
+    assert primary["channel_id"] != sibling["channel_id"]
+    assert primary["session_id"] == primary_session
+    assert sibling["session_id"] == sibling_session
+
+    # Each channel carries ONLY its own instance's turns — the canonical reply
+    # must not leak into the sibling's channel.
+    primary_texts = [m.get("display_text") for m in primary["conversation"]["messages"]]
+    sibling_texts = [m.get("display_text") for m in sibling["conversation"]["messages"]]
+    assert "Hi! QA Agent online and ready." in primary_texts
+    assert "Hi! QA Agent online and ready." not in sibling_texts
+    assert "QA Agent (2) here." in sibling_texts
+    assert "QA Agent (2) here." not in primary_texts
+
+    for channel in channels:
+        assert channel["source_instance_ids"] == [channel["persona_instance_id"]]
+        assert not any(
+            warning["code"] == "duplicate_instances_same_channel"
+            for warning in channel["warnings"]
+        )
+
+
+def test_duplicate_instances_warning_fires_only_on_true_canonical_collision():
+    # Two DIFFERENT canonical instance ids resolving onto ONE session is a genuine
+    # identity collision (they should never share a chat lane) — the guard fires.
+    # This is distinct from the legitimate-sibling case above, where distinct
+    # sessions keep the instances in distinct channels.
+    session_id = "persona_chat_personainst_qa_84406cdb480e"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _qa_instance(
+                "personainst_qa",
+                session_id=session_id,
+                display_name="QA Agent",
+                updated_at="2026-07-18T06:50:26Z",
+            ),
+            _qa_instance(
+                "personainst_qa_agent_2",
+                session_id=session_id,
+                display_name="QA Agent (2)",
+                updated_at="2026-07-18T06:48:15Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa",
+                "title": "QA Agent chat",
+                "message_count": 1,
+                "messages": [{"role": "operator", "text": "collision"}],
+                "updated_at": "2026-07-18T06:50:26Z",
+            }
+        ],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert set(channel["source_instance_ids"]) == {
+        "personainst_qa",
+        "personainst_qa_agent_2",
+    }
+    assert any(
+        warning["code"] == "duplicate_instances_same_channel"
+        for warning in channel["warnings"]
+    )

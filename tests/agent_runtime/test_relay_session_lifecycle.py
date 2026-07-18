@@ -222,3 +222,87 @@ def test_new_session_mint_is_canonical_and_visible_in_the_projection(
     fresh_rows = [row for row in rows if row["session_id"] == fresh]
     assert len(fresh_rows) == 1, "the fresh thread must render as a visible chat row"
     assert fresh_rows[0]["persona_instance_id"] == persona_instance_id_for("qa")
+
+
+# --------------------------------------------------------------------------- #
+# Sibling-instance chat-session ownership (2026-07-18 channel-fold incident)   #
+#                                                                             #
+# Two live instances of one persona (canonical personainst_qa + placement      #
+# personainst_qa_agent_2) folded onto ONE operator channel: the console's      #
+# open-chat of the sibling bound its session onto the canonical primary's      #
+# pointer, then a bare-persona relay ADOPTED that poisoned pointer, so both     #
+# instances shared a session. A chat session encodes its owning instance       #
+# (persona_chat_<instance>_<hex>); ownership is enforced at both chokepoints.   #
+# --------------------------------------------------------------------------- #
+
+
+def test_bare_persona_relay_never_adopts_a_sibling_session(
+    isolate_agent_runtime_root,
+):
+    # THE live repro, as a fixture: a handle-targeted relay to the sibling, then
+    # a bare-persona relay to the canonical primary. They must resolve to TWO
+    # sessions on TWO pointers — no cross-adoption.
+    store = PersonaInstanceStore()
+    sibling = store.add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
+    )
+    sibling_session = sibling.session_id
+
+    # SEND #1 — handle-targeted at the sibling instance.
+    s1 = default_chat_session_id_for_instance(
+        store, persona_id="qa", persona_instance_id="personainst_qa_agent_2"
+    )
+    store.open_chat(persona_id="qa", persona_instance_id="personainst_qa_agent_2", session_id=s1)
+    assert s1 == sibling_session
+
+    # SEND #2 — bare persona id → the canonical primary. It must NOT adopt the
+    # sibling's session; it mints the primary's own.
+    s2 = default_chat_session_id_for_instance(store, persona_id="qa")
+    store.open_chat(persona_id="qa", session_id=s2)
+
+    assert s2 != sibling_session, "bare-persona send stole the sibling's session"
+    primary = store.get(persona_instance_id_for("qa"))
+    assert primary.session_id == s2
+    assert primary.session_id != store.get("personainst_qa_agent_2").session_id
+    assert store.get("personainst_qa_agent_2").session_id == sibling_session
+
+
+def test_open_chat_refuses_binding_a_siblings_session_onto_the_canonical(
+    isolate_agent_runtime_root,
+):
+    # The write chokepoint every send/open flows through must refuse to bind a
+    # session minted for ANOTHER instance onto this one — the exact poison write.
+    store = PersonaInstanceStore()
+    sibling = store.add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
+    )
+    with pytest.raises(ValueError, match="belongs to instance"):
+        store.open_chat(persona_id="qa", session_id=sibling.session_id)
+    # The canonical primary's pointer was never written.
+    assert resolve_default_chat_session_id_for_instance(store, persona_id="qa") is None
+
+
+def test_resolve_default_ignores_a_foreign_pointer_and_self_heals(
+    isolate_agent_runtime_root,
+):
+    # A pointer already poisoned with a sibling's session (pre-fix corruption)
+    # must be ignored, and the next send mints the instance's OWN session —
+    # self-healing the corrupted pointer with no manual store repair.
+    store = PersonaInstanceStore()
+    sibling = store.add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
+    )
+    # Poison the canonical pointer directly (bypassing the write-guard) to model
+    # the on-disk corrupted state.
+    primary = store.open_chat(persona_id="qa", session_id=default_chat_session_id_for_instance(store, persona_id="qa"))
+    primary.session_id = sibling.session_id
+    store.update(primary)
+    assert store.get(persona_instance_id_for("qa")).session_id == sibling.session_id
+
+    # Read side ignores the foreign session; send mints the primary's own.
+    assert resolve_default_chat_session_id_for_instance(store, persona_id="qa") is None
+    healed = default_chat_session_id_for_instance(store, persona_id="qa")
+    assert healed.startswith(f"persona_chat_{persona_instance_id_for('qa')}_")
+    store.open_chat(persona_id="qa", session_id=healed)
+    assert store.get(persona_instance_id_for("qa")).session_id == healed
+    assert store.get("personainst_qa_agent_2").session_id == sibling.session_id
