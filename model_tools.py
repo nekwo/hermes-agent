@@ -578,6 +578,20 @@ def _compute_tool_definitions(
     except Exception as e:  # pragma: no cover — never break tool loading
         logger.warning("Tool search assembly skipped: %s", e)
 
+    # ── tool_describe (details-on-demand) ───────────────────────────────
+    # T6b: core tool schemas ship BRIEF descriptions; tool_describe(name) serves
+    # the full docs on demand. Ensure it is present in every resolved lane,
+    # independent of whether tool-search deferral activated above (deferral only
+    # fires when the deferrable surface crosses the threshold). skip_tool_search
+    # _assembly callers want the raw catalog, so they are left untouched; empty
+    # lanes get nothing.
+    if not skip_tool_search_assembly and filtered_tools:
+        try:
+            from tools.tool_search import ensure_tool_describe_present
+            filtered_tools = ensure_tool_describe_present(filtered_tools)
+        except Exception as e:  # pragma: no cover — never break tool loading
+            logger.warning("tool_describe injection skipped: %s", e)
+
     return filtered_tools
 
 

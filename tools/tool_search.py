@@ -511,6 +511,65 @@ def bridge_tool_schemas(deferred_count: int) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Standalone tool_describe (details-on-demand, independent of deferral)
+# ---------------------------------------------------------------------------
+#
+# T6b (Context Cost Workstream, 2026-07-18): the core tool schemas ship BRIEF
+# descriptions to cut the per-call schema cost; the full documentation stays
+# reachable via ``tool_describe``. That means ``tool_describe`` must be present
+# in every resolved lane even when tool-search deferral is NOT active (it is
+# active only when the deferrable surface crosses the threshold). The schema
+# below is fixed and tiny — it rides the wire on every call, so it is kept as
+# small as the three-field bridge schema.
+
+
+def tool_describe_schema() -> Dict[str, Any]:
+    """Return the fixed, always-available ``tool_describe`` schema.
+
+    Injected into every resolved lane by ``model_tools`` independent of
+    tool-search deferral so the model can always pull a brief-trimmed tool's
+    full documentation. Bridge dispatch in ``model_tools.handle_function_call``
+    routes it (``is_bridge_tool`` already recognizes the name), and
+    ``dispatch_tool_describe`` serves the full registry-held docs + live
+    parameter schema.
+    """
+    return {
+        "type": "function",
+        "function": {
+            "name": TOOL_DESCRIBE_NAME,
+            "description": (
+                "Load a tool's full documentation and parameter reference by "
+                "name. Tool descriptions in this list are brief; call "
+                "tool_describe before the first use of an unfamiliar tool."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Exact tool name to describe.",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+    }
+
+
+def ensure_tool_describe_present(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ensure ``tool_describe`` is in the model-facing tool list.
+
+    No-op when it is already present (e.g. tool-search deferral already injected
+    the full bridge trio, which includes ``tool_describe``). Otherwise appends
+    the fixed standalone schema. Returns a new list; never mutates the input.
+    """
+    for td in tool_defs:
+        if (td.get("function") or {}).get("name") == TOOL_DESCRIBE_NAME:
+            return tool_defs
+    return list(tool_defs) + [tool_describe_schema()]
+
+
+# ---------------------------------------------------------------------------
 # Public entry point: assemble tool-defs with optional tool search
 # ---------------------------------------------------------------------------
 
@@ -632,28 +691,63 @@ def dispatch_tool_search(args: Dict[str, Any],
 def dispatch_tool_describe(args: Dict[str, Any],
                            *,
                            current_tool_defs: List[Dict[str, Any]]) -> str:
-    """Execute the ``tool_describe`` bridge tool. Returns a JSON string."""
+    """Execute the ``tool_describe`` bridge tool. Returns a JSON string.
+
+    Serves the FULL documentation for any tool — core or deferrable. This is
+    the details-on-demand backend for T6b brief descriptions: the wire schema
+    ships a brief, and this returns the full original description (from the
+    fork-owned ``tools.tool_full_descriptions`` mirror, when present) plus the
+    live parameter schema off the registry (parameters are never trimmed).
+
+    Resolution order:
+      1. registry schema by name (works for every registered tool, core or
+         MCP) — description falls back to the mirrored full text;
+      2. the assembled deferrable defs (an MCP tool present only in
+         ``current_tool_defs`` and not resolvable from the process registry).
+    """
     name = str(args.get("name") or "").strip()
     if not name:
         return json.dumps({"error": "name is required"}, ensure_ascii=False)
-    if not is_deferrable_tool_name(name):
+
+    # Full (untrimmed) description, if this tool's docs are mirrored (T6b).
+    full_desc: Optional[str] = None
+    try:
+        from tools.tool_full_descriptions import full_tool_description
+        full_desc = full_tool_description(name)
+    except Exception:
+        full_desc = None
+
+    # Standalone path: any registered tool. The wire description may be a
+    # trimmed brief; parameters are never trimmed, so read them live off the
+    # registry schema and prefer the mirrored full description.
+    try:
+        from tools.registry import registry
+        schema = registry.get_schema(name)
+    except Exception:
+        schema = None
+    if schema is not None:
         return json.dumps({
-            "error": (
-                f"'{name}' is not a deferrable tool. If you see it in the tools list "
-                "already, call it directly; otherwise check the spelling against tool_search."
-            ),
+            "name": name,
+            "description": full_desc or schema.get("description", ""),
+            "parameters": schema.get("parameters", {}),
         }, ensure_ascii=False)
+
+    # Fallback: a deferrable tool present only in the assembled defs.
     _, deferrable = classify_tools(current_tool_defs)
     for td in deferrable:
         fn = td.get("function") or {}
         if fn.get("name") == name:
             return json.dumps({
                 "name": name,
-                "description": fn.get("description", ""),
+                "description": full_desc or fn.get("description", ""),
                 "parameters": fn.get("parameters", {}),
             }, ensure_ascii=False)
+
     return json.dumps({
-        "error": f"'{name}' is not currently available. Re-run tool_search to refresh.",
+        "error": (
+            f"'{name}' is not a known tool. Check the spelling; if it is a "
+            "deferred tool, run tool_search first to refresh the catalog."
+        ),
     }, ensure_ascii=False)
 
 
@@ -726,6 +820,8 @@ __all__ = [
     "build_catalog",
     "search_catalog",
     "bridge_tool_schemas",
+    "tool_describe_schema",
+    "ensure_tool_describe_present",
     "assemble_tool_defs",
     "is_bridge_tool",
     "dispatch_tool_search",

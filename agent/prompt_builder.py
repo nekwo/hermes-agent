@@ -184,7 +184,48 @@ SKILLS_GUIDANCE = (
     "skill with skill_manage so you can reuse it next time.\n"
     "When using a skill and finding it outdated, incomplete, or wrong, "
     "patch it immediately with skill_manage(action='patch') — don't wait to be asked. "
-    "Skills that aren't maintained become liabilities."
+    "Skills that aren't maintained become liabilities. "
+    # T6b policy move (from the skill_manage description): confirm-before-delete
+    # is genuine cross-turn policy, so it lives in the byte-stable system prompt
+    # rather than only behind tool_describe.
+    "Confirm with the user before creating or deleting a skill."
+)
+
+# ── T6b tool-guidance / policy blocks (Context Cost Workstream, 2026-07-18) ──
+# The core tool schemas ship BRIEF descriptions to cut per-call schema cost.
+# Genuine cross-tool POLICY that used to live in those descriptions moves here,
+# into the byte-stable system prompt (never per-turn assembled). Each block is
+# tool-gated in agent/system_prompt.py so it only appears in a lane that has the
+# relevant tools. The full per-tool documentation stays one tool_describe call
+# away.
+
+# The static details-on-demand pointer. Present whenever the agent has tools.
+TOOL_DESCRIBE_GUIDANCE = (
+    "Tool descriptions are brief. Before the first use of an unfamiliar tool, "
+    "call tool_describe(<name>) to load its full documentation and parameter "
+    "reference."
+)
+
+# Move 1 — prefer native file tools over shell equivalents (from terminal,
+# read_file, write_file, patch, search_files). Gated on the terminal tool.
+SHELL_TOOL_PREFERENCE_GUIDANCE = (
+    "Prefer the native tools over shell equivalents: read_file (not "
+    "cat/head/tail), search_files (not grep/rg/find/ls), patch (not sed/awk), "
+    "write_file (not echo/heredoc). Reserve terminal for builds, installs, git, "
+    "processes, and scripts."
+)
+
+# Move 2 — clarify choices-array rule (from clarify). Gated on the clarify tool.
+CLARIFY_CHOICES_GUIDANCE = (
+    "When using clarify with options, put each option only in the `choices` "
+    "array — never enumerate them inside the question text (choices render as "
+    "pickable rows)."
+)
+
+# Move 3 — browser precondition (from the browser_* tools). Gated on browser.
+BROWSER_PRECONDITION_GUIDANCE = (
+    "All browser_* tools require a prior browser_navigate; browser_click and "
+    "browser_type also require a prior browser_snapshot."
 )
 
 KANBAN_GUIDANCE = (
