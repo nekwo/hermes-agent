@@ -7,7 +7,9 @@
 # instances it references, in-process — one spawn for the whole chart instead
 # of one `persona instance steer` spawn per agent. Ingest never creates an
 # instance and never touches goal membership (clear_parents, not
-# detach_parents).
+# detach_parents). Steering is OWNER-SCOPED (2026-07-18): the graph id names the
+# owner instance, and the map asserts only that owner's `owner -> child` edges;
+# non-owner edges are reported (ignored_non_owner_edges), never applied.
 
 
 def _cmd_flow_set(args) -> int:
@@ -40,11 +42,16 @@ def _cmd_flow_set(args) -> int:
     if args.json:
         print(emit_json(report))
     else:
-        print(
-            f"flow {report['graph_id']}: stored; "
-            f"{report['changed_count']} changed, {report['failed_count']} failed "
-            f"of {report['bound_agent_count']} bound agents"
+        line = (
+            f"flow {report['graph_id']} (owner {report['owner_instance_id']}): "
+            f"stored; {report['changed_count']} changed, "
+            f"{report['failed_count']} failed of {report['bound_agent_count']} "
+            f"bound agents"
         )
+        ignored = report.get("ignored_non_owner_edge_count", 0)
+        if ignored:
+            line += f"; {ignored} non-owner edge(s) ignored (layout only)"
+        print(line)
     return 0
 
 
