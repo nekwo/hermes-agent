@@ -764,7 +764,10 @@ def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | Non
     # toolset keeps skill_search / skill_view / skills_list for read-only recall.
     # Shares the per-persona ``chat_lane_restore_toolsets`` knob with the toolset
     # exclusion, so an operator can restore it the same way. This applies only on
-    # the bounded lane — the unbounded escape hatch returned above unfiltered.
+    # the bounded lane — the unbounded escape hatch returns [] above, though the
+    # T6c registry-hygiene names are still unioned in at agent construction
+    # (profile_runner) on every lane: hygiene is registry junk removal, not a
+    # permission tier, so unbounded does not resurrect kanban/feishu.
     names.update(chat_lane_blocked_tools(restore=chat_lane_restore_toolsets(persona.id)))
     # clarify is globally blocked (PERSONA_BLOCKED_TOOLS) because autonomous
     # runs have no interactive callback to answer it — but the operator/relay

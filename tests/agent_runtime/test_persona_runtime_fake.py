@@ -14,7 +14,12 @@ from agent_runtime.models import AgentRun, Event, Task
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.persona_runtime import _apply_llm_metadata
 from agent_runtime.profile_runner import AgentRunResult
-from agent_runtime.personas import all_registered_toolsets, default_personas, effective_toolsets
+from agent_runtime.personas import (
+    REGISTRY_HYGIENE_BLOCKED_TOOLS,
+    all_registered_toolsets,
+    default_personas,
+    effective_toolsets,
+)
 from agent_runtime.tool_permissions import ChatToolPermissionStore
 from agent_runtime.states import RunState, TaskState
 
@@ -159,7 +164,10 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
 
     fake = FakeAIAgent.instances[0]
     assert fake.kwargs["enabled_toolsets"] == all_registered_toolsets()
-    assert fake.kwargs["blocked_tool_names"] == []
+    # T6c registry hygiene rides every construction, unbounded included:
+    # kanban/feishu are registry junk, not a permission tier, so the escape
+    # hatch does not resurrect them.
+    assert set(fake.kwargs["blocked_tool_names"]) == set(REGISTRY_HYGIENE_BLOCKED_TOOLS)
 
 
 def test_chat_permission_unbounded_one_turn_expires_after_success(tmp_path, monkeypatch):
@@ -181,7 +189,8 @@ def test_chat_permission_unbounded_one_turn_expires_after_success(tmp_path, monk
 
     fake = FakeAIAgent.instances[0]
     assert fake.kwargs["enabled_toolsets"] == all_registered_toolsets()
-    assert fake.kwargs["blocked_tool_names"] == []
+    # Registry hygiene applies even on the unbounded turn (see the QA test above).
+    assert set(fake.kwargs["blocked_tool_names"]) == set(REGISTRY_HYGIENE_BLOCKED_TOOLS)
     record = store.get(persona_id=neko.id, session_id=session_id)
     assert record is not None
     assert record.mode == "profile_default"
