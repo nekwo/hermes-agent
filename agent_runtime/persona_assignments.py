@@ -1973,6 +1973,15 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
             goal_id=instance.goal_id,
             runtime_root=instance.runtime_root,
         )
+        # T9b: this preview is the persona instance's operator CHAT lane, so it
+        # must reflect the chat-lane scoping (augmentation + cost cuts + restore
+        # knob + registry hygiene) — not the raw effective_toolsets. Lazy import
+        # avoids a module-load cycle; the chat-lane authority stays single.
+        from .persona_runtime import apply_chat_lane_tool_scope
+
+        apply_chat_lane_tool_scope(
+            visibility_persona, tool_options, session_id=instance.session_id
+        )
     summary = {
         "agent_profile_id": instance.id,
         "agent_profile_display_name": instance.display_name,
@@ -2101,6 +2110,13 @@ def persona_instance_tool_detail(
         task_id=instance.current_task_id,
         goal_id=instance.goal_id,
         runtime_root=instance.runtime_root,
+    )
+    # T9b: this on-demand tool detail is the persona instance's operator CHAT
+    # lane — scope the preview to it (see apply_chat_lane_tool_scope).
+    from .persona_runtime import apply_chat_lane_tool_scope
+
+    apply_chat_lane_tool_scope(
+        visibility_persona, tool_options, session_id=instance.session_id
     )
     tool_resolution = resolve_tool_visibility(visibility_persona, tool_options)
     return {

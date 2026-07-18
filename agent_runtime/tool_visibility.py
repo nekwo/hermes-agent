@@ -49,6 +49,16 @@ class ToolVisibilityOptions:
     runtime_root: str | Path | None = None
     blocked_tool_names: list[str] | None = None
     enabled_toolsets: list[str] | None = None
+    #: Authoritative final block set for a CHAT-lane preview (T9b). When set, it
+    #: is used verbatim as ``final_blocked`` instead of the generic
+    #: ``persona_blocked | requested_blocked`` union — because the chat-lane
+    #: chokepoint has ALREADY resolved the true block (persona blocks + permission
+    #: mode + chat-lane cost cuts + registry hygiene, minus the ``clarify``
+    #: unblock the chat bridge grants). Threading it (with ``enabled_toolsets``)
+    #: makes the operator-facing preview's ``final_model_tools`` byte-match the
+    #: schema the chat lane actually ships. Callers that don't model a chat lane
+    #: leave it ``None`` (unchanged behaviour).
+    chat_lane_blocked_tool_names: list[str] | None = None
     expires_at: str | None = None
     turns_remaining: int | None = None
 
@@ -62,7 +72,15 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
     persona_toolsets = list(getattr(persona, "toolsets", []) or [])
     persona_blocked = frozenset() if unbounded else blocked_tool_names(persona)
     requested_blocked = frozenset(_clean_names(opts.blocked_tool_names or []))
-    final_blocked = persona_blocked | requested_blocked
+    if opts.chat_lane_blocked_tool_names is not None:
+        # T9b chat-lane preview parity: use the chat-lane chokepoint's already
+        # resolved block verbatim (see ToolVisibilityOptions). The generic
+        # ``persona_blocked | requested_blocked`` union would re-add ``clarify``
+        # (a PERSONA_BLOCKED_TOOLS member the chat lane deliberately unblocks) and
+        # would miss the chat-lane cost cuts, so the preview would lie.
+        final_blocked = frozenset(_clean_names(opts.chat_lane_blocked_tool_names))
+    else:
+        final_blocked = persona_blocked | requested_blocked
     candidate_tools = _tool_names_for_toolsets(resolved_toolsets, blocked_tool_names=[])
     final_tools = _tool_names_for_toolsets(resolved_toolsets, blocked_tool_names=sorted(final_blocked))
     blocked_entries = _blocked_tool_entries(

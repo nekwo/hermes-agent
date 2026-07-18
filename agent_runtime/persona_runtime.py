@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 import time
 from urllib.parse import urlparse
-from typing import Callable, Protocol
+from typing import Callable, Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .tool_visibility import ToolVisibilityOptions
 
 from hermes_constants import get_hermes_home
 
@@ -28,7 +31,13 @@ from .mission_plan import current_plan_stage
 from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
-from .profile_runner import AgentRunRequest, AgentRunResult, ProfileAgentRunner, RunBudgetExceeded
+from .profile_runner import (
+    AgentRunRequest,
+    AgentRunResult,
+    ProfileAgentRunner,
+    RunBudgetExceeded,
+    _blocked_tool_names_with_registry_hygiene,
+)
 from .progress import ChatProgressSink, RunProgressSink
 from .repo_context import RepoExecutionContext, capture_repo_baseline, isolated_repo_context_for_run, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
@@ -846,6 +855,38 @@ def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None)
     return scope_chat_lane_toolsets(
         resolved, restore=chat_lane_restore_toolsets(persona.id)
     )
+
+
+def apply_chat_lane_tool_scope(
+    persona: AgentPersona,
+    options: "ToolVisibilityOptions",
+    *,
+    session_id: str | None,
+) -> "ToolVisibilityOptions":
+    """Thread the REAL chat-lane resolution onto a tool-visibility PREVIEW (T9b).
+
+    The operator-facing permission preview (``persona_instance_summary`` /
+    ``persona_instance_tool_detail``) resolved ``effective_toolsets(persona)`` —
+    the persona's raw configured set — so it omitted BOTH the operator-chat
+    capability augmentation (mission_goal / agent_chat / board / clarify) and the
+    T3/T6a chat-lane cost scoping (browser / vision / file / terminal /
+    skill_manage cut). The preview therefore lied about the actual chat lane.
+
+    This mutates ``options`` so the preview reuses the ONE chat-lane authority:
+    ``enabled_toolsets`` becomes the chat-lane-scoped toolset list
+    (``_enabled_toolsets_for_chat``) and ``chat_lane_blocked_tool_names`` becomes
+    the chat lane's authoritative block (``_blocked_tool_names_for_chat`` unioned
+    with the fork registry hygiene the runner enforces on every lane, minus the
+    ``clarify`` unblock the chat bridge grants). ``resolve_tool_visibility`` then
+    emits ``final_model_tools`` byte-identical to the schema the chat lane ships.
+    Display-parity only — no policy change, no parallel resolver.
+    """
+
+    options.enabled_toolsets = _enabled_toolsets_for_chat(persona, session_id=session_id)
+    options.chat_lane_blocked_tool_names = _blocked_tool_names_with_registry_hygiene(
+        _blocked_tool_names_for_chat(persona, session_id=session_id)
+    )
+    return options
 
 
 # Operator-chat-only first-class capabilities that a persona's role is allowed to

@@ -3708,9 +3708,19 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     detail = persona_instance_tool_detail(instance)
     assert detail["tool_resolution"]["persona_id"] == "profile:alice"
     assert detail["turn_tool_context"]["persona_id"] == "profile:alice"
-    assert "read_file" in detail["tool_resolution"]["final_model_tools"]
-    assert "terminal" in detail["tool_resolution"]["final_model_tools"]
-    assert "execute_code" in detail["tool_resolution"]["final_model_tools"]
+    # T9b: this preview is the persona instance's operator CHAT lane, so it now
+    # reflects the chat-lane scoping (augmentation + T3/T6a cost cuts) instead of
+    # the raw effective_toolsets. The dev-toolkit toolsets (file / terminal /
+    # code_execution) are cut from the conversational lane...
+    final_tools = detail["tool_resolution"]["final_model_tools"]
+    assert "read_file" not in final_tools
+    assert "terminal" not in final_tools
+    assert "execute_code" not in final_tools
+    # ...while the operator-chat capability augmentation (mission_goal / agent_chat
+    # / clarify) is present, matching what the chat lane actually ships.
+    assert "mission_goal_create" in final_tools
+    assert "agent_chat_send" in final_tools
+    assert "clarify" in final_tools
     assert "send_message" in detail["tool_resolution"]["blocked_tool_names"]
     assert detail["permission_state"]["mode"] == "profile_default"
     assert "agent_hud_state" not in detail
