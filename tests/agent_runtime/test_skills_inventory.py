@@ -155,3 +155,23 @@ def test_build_skills_inventory_shape_is_stable():
         assert isinstance(realm["skills_drift"], list)
         # None (never checked) or a state string, never a bare bool.
         assert realm["sync_state"] is None or isinstance(realm["sync_state"], str)
+        # Additive per-realm publish-selection fields (design §4).
+        assert realm["skill_publish_mode"] in {"all", "selected"}
+        assert isinstance(realm["skill_selection"], list)
+
+
+def test_realm_publish_states_carry_selection_read_from_store():
+    """build_realm_publish_states reads mode + selection STRAIGHT from the
+    RealmStore realm (design §4) — fresher than the sidecar, present even when
+    the realm has never been sync-checked (no sidecar on disk)."""
+    from agent_runtime.store import RealmStore
+
+    realm = RealmStore().create(name="Inventory Realm")
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["beta", "alpha"])
+
+    row = next(r for r in si.build_realm_publish_states() if r["realm_id"] == realm.id)
+
+    # No sidecar was ever written for this realm.
+    assert row["sync_state"] is None
+    assert row["skill_publish_mode"] == "selected"
+    assert row["skill_selection"] == ["alpha", "beta"]  # sorted + deduped

@@ -154,6 +154,16 @@ class Realm:
     # pull (the Board.archived_card_ids / OfficeSurface.archived_actor_keys
     # idiom, lifted to workspace granularity).
     deleted_workspace_ids: list[str] = field(default_factory=list)
+    # Which shared skills publish to this realm. Mode "all" (default,
+    # back-compat) publishes every skill in the shared catalog including
+    # future ones; "selected" publishes exactly skill_selection (empty list =
+    # publish none). Travels realm-wide via realm sync (NOT an authority
+    # field) — the selection is realm truth, converged last-publisher-wins.
+    # Kept sorted + deduped at every write chokepoint
+    # (RealmStore.set_skill_selection); slugs unknown to a member's local
+    # catalog are preserved, never stripped, on an unrelated save.
+    skill_publish_mode: str = "all"  # "all" | "selected"
+    skill_selection: list[str] = field(default_factory=list)
     sync_manifest_ref: str | None = None
     archived: bool = False
     schema_version: int = 1

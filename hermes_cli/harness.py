@@ -524,6 +524,23 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(realm_sync_publish, mutation=True)
     realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
 
+    realm_skills = realm_subs.add_parser("skills", help="Per-realm selection of which shared skills publish to a realm")
+    realm_skills_subs = realm_skills.add_subparsers(dest="realm_skills_command", required=True)
+    realm_skills_show = realm_skills_subs.add_parser("show", help="Show a realm's shared-skill publish selection (read-only, local store)")
+    realm_skills_show.add_argument("realm_id")
+    _add_stage42_global_args(realm_skills_show)
+    realm_skills_show.set_defaults(func=_cmd_realm_skills_show)
+    realm_skills_set = realm_skills_subs.add_parser(
+        "set",
+        help="Set a realm's shared-skill publish selection (local, reversible store edit — no --yes gate, like `realm use`)",
+    )
+    realm_skills_set.add_argument("realm_id")
+    realm_skills_set.add_argument("--all", dest="publish_all", action="store_true", help="Publish all shared skills (mode=all; the stored selection list is preserved)")
+    realm_skills_set.add_argument("--skills", dest="skills", default=None, help="Comma-separated skill slugs to publish (mode=selected)")
+    realm_skills_set.add_argument("--none", dest="publish_none", action="store_true", help="Publish no skills (mode=selected, empty selection)")
+    _add_stage42_global_args(realm_skills_set, mutation=True)
+    realm_skills_set.set_defaults(func=_cmd_realm_skills_set)
+
     flow = subs.add_parser("flow", help="Operator flow-graph documents: ingest the Launcher's authored agent map whole and set the referenced instances' steering relations")
     flow_subs = flow.add_subparsers(dest="flow_command", required=True)
     flow_set = flow_subs.add_parser("set", help="Store one flow-graph JSON doc and reconcile steering for the EXISTING instances it references (never creates instances; never touches goal membership)")
@@ -2401,6 +2418,61 @@ def _cmd_realm_sync_publish(args) -> int:
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")
+    return 0
+
+
+def _realm_skill_selection_envelope(realm) -> dict:
+    """The realm_skill_selection/v1 envelope (design §5): current mode +
+    selection, the shared-catalog slugs on THIS machine, and the honest
+    ``missing`` accounting (selection − catalog)."""
+    from agent_runtime.skills_inventory import build_shared_catalog
+
+    _root, _exists, catalog = build_shared_catalog()
+    catalog_slugs = sorted({entry["slug"] for entry in catalog})
+    selection = sorted(realm.skill_selection or [])
+    missing = sorted(set(selection) - set(catalog_slugs))
+    return {
+        "schema_version": 1,
+        "id": realm.id,
+        "kind": "realm_skill_selection",
+        "mode": realm.skill_publish_mode,
+        "selection": selection,
+        "catalog": catalog_slugs,
+        "missing": missing,
+    }
+
+
+def _cmd_realm_skills_show(args) -> int:
+    realm = RealmStore().get(args.realm_id)
+    _print_stage42(_realm_skill_selection_envelope(realm), args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_skills_set(args) -> int:
+    chosen = [
+        name
+        for name, present in (
+            ("--all", bool(getattr(args, "publish_all", False))),
+            ("--skills", getattr(args, "skills", None) is not None),
+            ("--none", bool(getattr(args, "publish_none", False))),
+        )
+        if present
+    ]
+    if len(chosen) != 1:
+        return emit_harness_error(
+            ValueError("exactly one of --all, --skills, or --none is required"),
+            args=args,
+            code="invalid_request",
+        )
+    if getattr(args, "publish_all", False):
+        mode, selection = "all", []
+    elif getattr(args, "publish_none", False):
+        mode, selection = "selected", []
+    else:
+        mode = "selected"
+        selection = [slug.strip() for slug in str(args.skills).split(",") if slug.strip()]
+    realm = RealmStore().set_skill_selection(args.realm_id, mode=mode, selection=selection)
+    _print_stage42(_realm_skill_selection_envelope(realm), args=args, default_output="json")
     return 0
 
 

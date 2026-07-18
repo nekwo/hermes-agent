@@ -823,6 +823,35 @@ class WorkspaceStore:
         }
 
 
+def _normalize_skill_selection(selection: list[str] | None) -> list[str]:
+    """Validate (shape only), dedupe, and sort skill selection slugs.
+
+    Shape rules (per REALM_SKILL_SELECTION_DESIGN §2): non-empty, no leading
+    dot, no path separator, and identical to their ``_safe_token`` form — the
+    same tokenizer the realm publisher uses for skill directory names, so a
+    valid slug round-trips to its published path. Malformed slugs raise
+    ``ValueError`` (mapped to a typed ``invalid_request`` at the CLI seam).
+    Slugs unknown to the local catalog are NOT filtered here — that is realm
+    truth another member may own.
+    """
+    # Function-local import breaks the module cycle (realm_sync imports store).
+    from agent_runtime.realm_sync import _safe_token
+
+    cleaned: set[str] = set()
+    for raw in selection or []:
+        slug = str(raw).strip()
+        if not slug:
+            raise ValueError("skill selection slug must be non-empty")
+        if slug.startswith("."):
+            raise ValueError(f"skill selection slug must not start with a dot: {slug!r}")
+        if "/" in slug or "\\" in slug:
+            raise ValueError(f"skill selection slug must not contain a path separator: {slug!r}")
+        if slug != _safe_token(slug):
+            raise ValueError(f"malformed skill selection slug: {slug!r}")
+        cleaned.add(slug)
+    return sorted(cleaned)
+
+
 class RealmStore:
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
@@ -886,6 +915,40 @@ class RealmStore:
         item = self.save(item, emit_event=False)
         _append_store_event(
             self.event_log, "realm.updated", realm_id=item.id, change="server_bound", server_id=item.server_id
+        )
+        return item
+
+    def set_skill_selection(self, realm_id: str, *, mode: str, selection: list[str]) -> Realm:
+        """Single write chokepoint for a realm's shared-skill publish selection.
+
+        ``mode == "all"`` publishes every shared skill and PRESERVES the stored
+        ``skill_selection`` intact (switching back to "selected" restores it, so
+        the passed ``selection`` is ignored in this mode). ``mode == "selected"``
+        replaces the selection with the validated/deduped/sorted slugs (an empty
+        list means "publish none").
+
+        Slugs are validated for shape only (non-empty, no leading dot, no path
+        separators, must equal their ``_safe_token`` form). Slugs unknown to
+        this machine's catalog are NOT filtered here — another member may hold
+        the skill locally, and dropping it on an unrelated save would corrupt
+        realm truth; unknown slugs are reported (``missing``) by the CLI, never
+        stripped. Emits ``realm.updated``/``skill_selection`` so the read-model
+        pipeline sees the mutation (Stage 12 watermark discipline).
+        """
+        if mode not in {"all", "selected"}:
+            raise ValueError(f"invalid skill_publish_mode: {mode!r}")
+        item = self.get(realm_id)
+        if mode == "selected":
+            item.skill_selection = _normalize_skill_selection(selection)
+        item.skill_publish_mode = mode
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log,
+            "realm.updated",
+            realm_id=item.id,
+            change="skill_selection",
+            mode=mode,
+            selection_count=len(item.skill_selection),
         )
         return item
 

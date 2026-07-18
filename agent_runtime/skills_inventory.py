@@ -166,6 +166,10 @@ def build_realm_publish_states() -> list[dict[str, Any]]:
                 "server_bound": bool(getattr(realm, "server_id", None)),
                 "sync_state": sidecar.get("state"),
                 "skills_drift": list(sidecar.get("skills_drift") or []),
+                # Read STRAIGHT from the store realm (fresher than the sidecar,
+                # and already loaded) — the picker mode + current selection.
+                "skill_publish_mode": getattr(realm, "skill_publish_mode", "all") or "all",
+                "skill_selection": sorted(getattr(realm, "skill_selection", None) or []),
                 "last_publish": sidecar.get("last_publish"),
                 "last_pull": sidecar.get("last_pull"),
                 "checked_at": sidecar.get("checked_at"),

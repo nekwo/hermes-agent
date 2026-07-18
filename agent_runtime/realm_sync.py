@@ -115,7 +115,7 @@ def realm_sync_status(
     workspace_statuses = _workspace_sync_statuses(realm, repo)
     skills_drift = _skills_drift_for_artifacts(artifacts)
     state = _sync_state(git)
-    _write_sync_sidecar(realm, repo=repo, git=git, skills_drift=skills_drift, artifact_count=len(artifacts))
+    _write_sync_sidecar(realm, repo=repo, git=git, skills_drift=skills_drift, artifacts=artifacts)
     return {
         "schema_version": 1,
         "id": realm.id,
@@ -124,6 +124,9 @@ def realm_sync_status(
         "ahead": git["ahead"],
         "behind": git["behind"],
         "skills_drift": skills_drift,
+        "skill_publish_mode": realm.skill_publish_mode,
+        "skill_selection": sorted(realm.skill_selection or []),
+        "skills_published": _distinct_skill_package_count(artifacts),
         "conflicts": git["conflicts"],
         "last_pull": _timestamp_file(repo, "last_pull.txt"),
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
@@ -207,7 +210,7 @@ def publish_realm_sync(
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
     if warnings:
         result["warnings"] = warnings
-    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifact_count=len(artifacts))
+    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifacts=artifacts)
     _append_realm_sync_event(
         "realm.sync.published",
         realm,
@@ -290,7 +293,7 @@ def pull_realm_sync(
         "changed": [item.skill for item in install_results if item.changed],
         "ok": all(item.ok for item in install_results),
     }
-    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifact_count=len(artifacts))
+    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifacts=artifacts)
     _append_realm_sync_event(
         "realm.sync.pulled",
         realm,
@@ -392,7 +395,7 @@ def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     personas = {persona.id: persona for persona in ensure_persisted_personas(cfg)}
     wanted_persona_ids = list(dict.fromkeys(persona_id for ws in workspaces for persona_id in (ws.agent_ids or [])))
     artifacts: list[RealmSyncArtifact] = []
-    artifacts.extend(_skill_artifacts())
+    artifacts.extend(_skill_artifacts(realm))
     artifacts.extend(_workspace_realm_artifacts(realm, workspaces))
     artifacts.extend(_board_artifacts(workspaces))
     artifacts.extend(_office_artifacts(workspaces))
@@ -418,7 +421,7 @@ def sync_artifacts_for_workspace_agent(workspace_id: str, persona_id: str) -> li
     return [artifact.row() for artifact in artifacts if needle in f"/{artifact.relative_path}"]
 
 
-def _skill_artifacts() -> list[RealmSyncArtifact]:
+def _skill_artifacts(realm: Realm) -> list[RealmSyncArtifact]:
     # Publish the shared canonical skills root (see get_shared_skills_dir) —
     # the one physical dir every persona references. Walk each skill package
     # WHOLE (not just SKILL.md) so multi-file skills — references/, scripts/,
@@ -427,15 +430,27 @@ def _skill_artifacts() -> list[RealmSyncArtifact]:
     # verbatim (rglob cannot emit ``..``) so files like ``__init__.py`` are not
     # mangled. Junk/VCS/cache/dot components are pruned; the shared secret/state
     # validation still runs over the result (_assert_no_secret_artifacts).
+    #
+    # Per-realm selection: mode "all" (default) publishes every catalog skill;
+    # mode "selected" publishes only skills whose directory name is in
+    # realm.skill_selection. Because publish rebuilds the realm subtree from
+    # scratch, filtering here naturally prunes deselected skills on the next
+    # publish — no extra deletion pass. The selection is matched against the
+    # RAW directory name (== the skills_inventory catalog slug), so it lines up
+    # with what the Launcher picker offers the operator.
     root = get_shared_skills_dir()
     artifacts: list[RealmSyncArtifact] = []
     if not root.exists():
         return artifacts
+    selected_only = realm.skill_publish_mode == "selected"
+    selection = set(realm.skill_selection or [])
     for skill_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         skill = skill_dir.name
         # Skip dotdirs (.archive/.hub/.curator_backups/…) and any folder
         # without a SKILL.md manifest — housekeeping, not a skill.
         if skill.startswith(".") or not (skill_dir / "SKILL.md").is_file():
+            continue
+        if selected_only and skill not in selection:
             continue
         safe_skill = _safe_token(skill)
         for source in sorted(skill_dir.rglob("*")):
@@ -1017,6 +1032,9 @@ def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
         "ahead": raw.get("ahead"),
         "behind": raw.get("behind"),
         "skills_drift": raw.get("skills_drift") or [],
+        "skill_publish_mode": raw.get("skill_publish_mode") or "all",
+        "skill_selection": raw.get("skill_selection") or [],
+        "skills_published": raw.get("skills_published") or 0,
         "conflicts": raw.get("conflicts") or [],
         "last_pull": raw.get("last_pull"),
         "last_publish": raw.get("last_publish"),
@@ -1026,7 +1044,7 @@ def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
     }
 
 
-def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills_drift: list[str], artifact_count: int) -> None:
+def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills_drift: list[str], artifacts: list[RealmSyncArtifact]) -> None:
     payload = {
         "schema_version": 2,
         "realm_id": realm.id,
@@ -1034,10 +1052,13 @@ def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills
         "ahead": git["ahead"],
         "behind": git["behind"],
         "skills_drift": skills_drift,
+        "skill_publish_mode": realm.skill_publish_mode,
+        "skill_selection": sorted(realm.skill_selection or []),
+        "skills_published": _distinct_skill_package_count(artifacts),
         "conflicts": git["conflicts"],
         "last_pull": _timestamp_file(repo, "last_pull.txt"),
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
-        "artifacts": artifact_count,
+        "artifacts": len(artifacts),
         "checked_at": now().astimezone(timezone.utc).isoformat(),
         "workspace_statuses": _workspace_sync_statuses(realm, repo),
     }
@@ -1119,6 +1140,19 @@ def _skills_drift_for_artifacts(artifacts: list[RealmSyncArtifact]) -> list[str]
         if artifact.destination.exists() and artifact.source.exists() and artifact.destination.read_bytes() != artifact.source.read_bytes():
             drift.append(Path(artifact.relative_path).parts[1])
     return sorted(set(drift))
+
+
+def _distinct_skill_package_count(artifacts: list[RealmSyncArtifact]) -> int:
+    """Number of distinct skill *packages* (top-level skill dir names) among
+    resolved artifacts — not the file count. A multi-file skill counts once."""
+    packages: set[str] = set()
+    for artifact in artifacts:
+        if artifact.kind != "skill":
+            continue
+        parts = Path(artifact.relative_path).parts
+        if len(parts) >= 2:
+            packages.add(parts[1])
+    return len(packages)
 
 
 def _timestamp_file(repo: Path, name: str) -> str | None:
