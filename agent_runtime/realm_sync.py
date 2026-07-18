@@ -263,6 +263,12 @@ def pull_realm_sync(
     office_summary = apply_office_pull(realm.id, subtree)
     if office_summary.adopted or office_summary.converged or office_summary.archived:
         changed = True
+    # Workspace deletions: honor the pulled realm's deleted_workspace_ids
+    # resurrection-guard ledger so a member's surviving local copy neither
+    # lingers nor republishes a workspace another member deleted.
+    tombstone_summary = _apply_workspace_tombstones(realm.id)
+    if tombstone_summary["deleted"] or tombstone_summary["archived"]:
+        changed = True
     install_results = [
         *install_harness_skills(skills=sorted(HARNESS_SKILLS)),
         *install_harness_skills_for_personas(ensure_persisted_personas(load_agent_runtime_config())),
@@ -272,6 +278,8 @@ def pull_realm_sync(
     result = _sync_result(realm, "pull", "pulled", artifacts, repo=repo, git=git_after, changed=changed)
     result["board_sync"] = board_summary.as_dict()
     result["office_sync"] = office_summary.as_dict()
+    if tombstone_summary["deleted"] or tombstone_summary["archived"] or tombstone_summary["warnings"]:
+        result["workspace_tombstones"] = tombstone_summary
     if pulled_profile_tokens:
         result["profile_sync"] = {
             "profiles": pulled_profile_tokens,
@@ -317,6 +325,57 @@ def _append_realm_sync_event(event_type: str, realm: Realm, *, changed: bool, ar
         pass
 
 
+def _apply_workspace_tombstones(realm_id: str) -> dict[str, list]:
+    """Apply the realm's ``deleted_workspace_ids`` ledger after a pull.
+
+    A workspace another member deleted must not survive here as a live copy —
+    it would ride this member's next publish straight back into the realm.
+    Hard-delete the local copy through the store chokepoint (cascade + event);
+    a copy that still owns local live-store goals degrades to ARCHIVE instead
+    (evidence is never destroyed by a sync), reported as a warning.
+    """
+    summary: dict[str, list] = {"deleted": [], "archived": [], "warnings": []}
+    try:
+        realm = RealmStore().get(realm_id)  # re-read: the pull may have rewritten it
+    except Exception:  # noqa: BLE001 — no realm, nothing to reconcile
+        return summary
+    ledger = list(getattr(realm, "deleted_workspace_ids", None) or [])
+    if not ledger:
+        return summary
+    from .errors import WorkspaceDeleteBlocked
+    from .store import WorkspaceStore as _WorkspaceStore
+
+    store = _WorkspaceStore()
+    for workspace_id in ledger:
+        if not paths.workspace_path(workspace_id).exists():
+            continue
+        try:
+            store.delete(workspace_id, reason="realm_sync_tombstone")
+            summary["deleted"].append(workspace_id)
+        except WorkspaceDeleteBlocked as exc:
+            try:
+                workspace = store.get(workspace_id)
+                if not workspace.archived:
+                    store.archive(workspace_id)
+                summary["archived"].append(workspace_id)
+                summary["warnings"].append(
+                    {
+                        "code": "workspace_tombstone_archived",
+                        "workspace_id": workspace_id,
+                        "message": f"Deleted in realm but kept archived here: {exc}",
+                    }
+                )
+            except Exception as inner:  # noqa: BLE001 — accounted, never silent
+                summary["warnings"].append(
+                    {"code": "workspace_tombstone_failed", "workspace_id": workspace_id, "message": str(inner)}
+                )
+        except Exception as exc:  # noqa: BLE001 — accounted, never silent
+            summary["warnings"].append(
+                {"code": "workspace_tombstone_failed", "workspace_id": workspace_id, "message": str(exc)}
+            )
+    return summary
+
+
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     realm = RealmStore().get(realm_id)
     workspace_store = WorkspaceStore()
@@ -324,6 +383,10 @@ def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     for workspace in workspace_store.list_all(include_archived=True):
         if workspace.realm_id == realm.id:
             workspace_ids.add(workspace.id)
+    # Tombstoned workspaces never publish (defense-in-depth: the pull already
+    # deletes local copies, but a publish racing ahead of its pull must not
+    # resurrect a deleted workspace into the realm subtree).
+    workspace_ids -= set(realm.deleted_workspace_ids or [])
     workspaces = [workspace_store.get(workspace_id) for workspace_id in sorted(workspace_ids) if paths.workspace_path(workspace_id).exists()]
     cfg = load_agent_runtime_config()
     personas = {persona.id: persona for persona in ensure_persisted_personas(cfg)}

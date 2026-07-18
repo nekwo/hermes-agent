@@ -55,3 +55,17 @@ class ProbeIsolationViolation(AgentRuntimeError):
     resolved runtime root must be a dedicated ``agent-runtime-probe-*`` temp dir won via
     the env layer, so a probe can never persist persona instances into the live store.
     """
+
+
+class WorkspaceDeleteBlocked(AgentRuntimeError):
+    """Raised when a workspace hard-delete is refused by a delete guard.
+
+    ``code`` is the typed machine reason (``workspace_has_goals`` /
+    ``realm_default_workspace``) and rides the CLI error envelope verbatim;
+    ``safe_details`` carries operator-safe counts/hints only, never content.
+    """
+
+    def __init__(self, code: str, message: str, *, safe_details: dict | None = None):
+        super().__init__(message)
+        self.code = code
+        self.safe_details = dict(safe_details or {})

@@ -13,7 +13,7 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
-from .errors import AlreadyExists, NotFound
+from .errors import AlreadyExists, NotFound, WorkspaceDeleteBlocked
 from .events import EventLog, archive_task_events
 from .locks import archive_lock, task_lock, run_lock
 from .models import AgentPersona, AgentRun, Event, Goal, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
@@ -35,6 +35,11 @@ RELEASE_ASSIGNMENT_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED,
 TERMINAL_RUN_STATES = frozenset({RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED})
 ACTIVE_RUN_STATES = frozenset({RunState.QUEUED, RunState.STARTING, RunState.RUNNING, RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL})
 ARCHIVABLE_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED})
+# Bound on Realm.deleted_workspace_ids — the workspace-delete resurrection
+# guard. Oldest entries fall off first; by then every member has long since
+# pulled the tombstone (the bounded-ledger idiom shared with the board/office
+# archived ledgers).
+DELETED_WORKSPACE_LEDGER_CAP = 500
 _ANY_STAGE = object()
 
 
@@ -726,6 +731,96 @@ class WorkspaceStore:
         item = self.save(item, emit_event=False)
         _append_store_event(self.event_log, "workspace.archived", workspace_id=item.id, name=item.name)
         return item
+
+    def delete(self, workspace_id: str, *, reason: str = "operator_delete") -> dict:
+        """Hard-delete a workspace and cascade its scoped content stores.
+
+        The single write chokepoint for workspace deletion (archive stays the
+        reversible path). Guards, in order:
+
+        - ``workspace_has_goals`` — the workspace still owns live-store goals.
+          Evidence is never destroyed implicitly; the operator archives goals
+          first (``harness task archive-ready``), then deletes.
+        - ``realm_default_workspace`` — a SERVER-bound realm's default pointer
+          is backend-adoption authority; promote another default first. A
+          local realm's default pointer is local truth and is cleared here.
+
+        Cascade: the workspace JSON, its Mission Office subtree, and every
+        board owned by the workspace. A realm-bound delete also rewrites realm
+        membership and records the id in the realm's ``deleted_workspace_ids``
+        resurrection-guard ledger, so realm sync propagates the removal
+        instead of letting another member's surviving copy republish it.
+        Emits ``workspace.deleted`` (Stage 12: the mutation must ride its own
+        event or stay invisible to the watermark-gated consumers).
+        """
+        item = self.get(workspace_id)
+        tasks = TaskStore(event_log=self.event_log).list_for_workspace(item.id)
+        if tasks:
+            live = [task for task in tasks if task.state not in RELEASE_ASSIGNMENT_TASK_STATES]
+            raise WorkspaceDeleteBlocked(
+                "workspace_has_goals",
+                "Workspace still owns goals; archive them first (harness task archive-ready), then delete.",
+                safe_details={"goal_count": len(tasks), "live_goal_count": len(live)},
+            )
+        realm: Realm | None = None
+        if item.realm_id:
+            try:
+                realm = RealmStore(event_log=self.event_log).get(item.realm_id)
+            except NotFound:
+                realm = None
+        if realm is not None and realm.server_id and realm.default_workspace_id == item.id:
+            raise WorkspaceDeleteBlocked(
+                "realm_default_workspace",
+                "This workspace is the realm's default; promote another default workspace first.",
+                safe_details={"realm_id": realm.id},
+            )
+
+        # Cascade content stores under their own write locks so a concurrent
+        # office/board write cannot interleave with the removal.
+        from .board_store import BoardStore
+        from .locks import board_lock, office_lock
+
+        with office_lock(item.id):
+            shutil.rmtree(paths.office_dir(item.id), ignore_errors=True)
+        for board in BoardStore(event_log=self.event_log).list_all():
+            if board.workspace_id != item.id:
+                continue
+            with board_lock(board.board_id):
+                shutil.rmtree(paths.board_dir(board.board_id), ignore_errors=True)
+
+        if realm is not None:
+            realm.workspace_ids = [wid for wid in (realm.workspace_ids or []) if wid != item.id]
+            ledger = [wid for wid in (realm.deleted_workspace_ids or []) if wid != item.id]
+            ledger.append(item.id)
+            realm.deleted_workspace_ids = ledger[-DELETED_WORKSPACE_LEDGER_CAP:]
+            if realm.default_workspace_id == item.id:
+                # Only reachable for local realms — the server-bound case is
+                # guarded above.
+                realm.default_workspace_id = None
+            RealmStore(event_log=self.event_log).save(realm, emit_event=False)
+            _append_store_event(
+                self.event_log, "realm.updated", realm_id=realm.id, change="workspace_deleted"
+            )
+
+        paths.workspace_path(item.id).unlink(missing_ok=True)
+        if self.active_id() == item.id:
+            # Clear the dangling pointer; verb-layer callers may re-reconcile
+            # to the realm's default afterwards.
+            self.set_active(None)
+        _append_store_event(
+            self.event_log,
+            "workspace.deleted",
+            workspace_id=item.id,
+            name=item.name,
+            realm_id=item.realm_id,
+            reason=reason,
+        )
+        return {
+            "id": item.id,
+            "name": item.name,
+            "realm_id": item.realm_id,
+            "deleted": True,
+        }
 
 
 class RealmStore:

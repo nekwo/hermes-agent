@@ -41,6 +41,7 @@ from agent_runtime.errors import (
     StaleRun,
     StoreCorrupt,
     SyncConflict,
+    WorkspaceDeleteBlocked,
 )
 from agent_runtime.events import EventLog
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
@@ -409,8 +410,23 @@ def build_parser(parent_subparsers) -> None:
     workspace_create.add_argument("--realm", default=None)
     workspace_create.add_argument("--agent", action="append", default=[])
     workspace_create.add_argument("--blueprint", default=None)
-    workspace_create.add_argument("--isolation", choices=["soft", "hard"], default="soft")
+    # ``None`` (not "soft") so a template's isolation can win when the operator
+    # did not choose one explicitly; WorkspaceStore.create defaults None→soft.
+    workspace_create.add_argument("--isolation", choices=["soft", "hard"], default=None)
     workspace_create.add_argument("--max-lanes", type=int, default=None)
+    workspace_create.add_argument(
+        "--from-workspace",
+        dest="from_workspace",
+        default=None,
+        help="Use this workspace (any realm) as the template: copy the scopes below into the new workspace",
+    )
+    workspace_create.add_argument(
+        "--copy",
+        action="append",
+        choices=["office", "board", "agents", "settings"],
+        default=None,
+        help="Template scope to copy (repeatable). Default with --from-workspace: every scope. Requires --from-workspace.",
+    )
     _add_stage42_global_args(workspace_create, mutation=True)
     workspace_create.set_defaults(func=_cmd_workspace_create)
     workspace_use = workspace_subs.add_parser("use", help="Set active workspace")
@@ -447,6 +463,12 @@ def build_parser(parent_subparsers) -> None:
     workspace_archive.add_argument("workspace_id")
     _add_stage42_global_args(workspace_archive, mutation=True)
     workspace_archive.set_defaults(func=_cmd_workspace_archive)
+    workspace_delete = workspace_subs.add_parser(
+        "delete", help="Permanently delete a workspace and its office/board content (archive is the reversible path)"
+    )
+    workspace_delete.add_argument("workspace_id")
+    _add_stage42_global_args(workspace_delete, mutation=True)
+    workspace_delete.set_defaults(func=_cmd_workspace_delete)
 
     realm = subs.add_parser("realm", help="Manage Harness realms")
     realm_subs = realm.add_subparsers(dest="realm_command", required=True)
@@ -1316,6 +1338,8 @@ def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None
     safe_details = {"error_class": type(exc).__name__}
     if isinstance(exc, RealmSyncError):
         safe_details.update(exc.safe_details)
+    if isinstance(exc, WorkspaceDeleteBlocked):
+        safe_details.update(exc.safe_details)
     envelope = _error_envelope(
         error_code,
         message or _safe_error_message(exc),
@@ -1938,18 +1962,55 @@ def _cmd_workspace_show(args) -> int:
 
 
 def _cmd_workspace_create(args) -> int:
+    from agent_runtime.workspace_template import (
+        CONTENT_COPY_SCOPES,
+        copy_workspace_content,
+        normalize_copy_scopes,
+    )
+
+    template = None
+    scopes: tuple[str, ...] = ()
+    if getattr(args, "from_workspace", None):
+        try:
+            template = WorkspaceStore().get(args.from_workspace)
+        except NotFound as exc:
+            return emit_harness_error(exc, args=args, code="template_workspace_not_found")
+        scopes = normalize_copy_scopes(getattr(args, "copy", None))
+    elif getattr(args, "copy", None):
+        return emit_harness_error(
+            ValueError("--copy requires --from-workspace"), args=args, code="invalid_request"
+        )
     if getattr(args, "dry_run", False):
-        row = {"id": f"ws_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "realm_id": args.realm, "agents": len(args.agent or []), "goals": 0, "isolation": args.isolation, "updated_at": now()}
+        row = {"id": f"ws_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "realm_id": args.realm, "agents": len(args.agent or []), "goals": 0, "isolation": args.isolation or "soft", "updated_at": now()}
+        if template is not None:
+            row["template_workspace_id"] = template.id
+            row["copy_scopes"] = list(scopes)
         _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
         return 0
     if args.realm:
         RealmStore().get(args.realm)
+    # Template settings/roster feed the create itself; explicit flags always
+    # win over the template so the operator can override any copied field.
+    agent_ids = list(args.agent or [])
+    blueprint = args.blueprint
+    isolation = args.isolation
+    max_lanes = args.max_lanes
+    if template is not None:
+        if "agents" in scopes and not agent_ids:
+            agent_ids = list(template.agent_ids or [])
+        if "settings" in scopes:
+            if blueprint is None:
+                blueprint = template.default_blueprint_id
+            if isolation is None:
+                isolation = template.isolation
+            if max_lanes is None:
+                max_lanes = template.max_concurrent_lanes
     item = WorkspaceStore().create(
         name=args.name,
-        agent_ids=list(args.agent or []),
-        default_blueprint_id=args.blueprint,
-        isolation=args.isolation,
-        max_concurrent_lanes=args.max_lanes,
+        agent_ids=agent_ids,
+        default_blueprint_id=blueprint,
+        isolation=isolation or "soft",
+        max_concurrent_lanes=max_lanes,
         realm_id=args.realm,
     )
     if args.realm:
@@ -1957,6 +2018,16 @@ def _cmd_workspace_create(args) -> int:
         if item.id not in realm.workspace_ids:
             realm.workspace_ids.append(item.id)
             RealmStore().save(realm)
+    # Office/board content copies AFTER the workspace exists, through the
+    # store chokepoints, so every copied artifact rides its contract event.
+    warnings: list[dict] = []
+    copied = None
+    if template is not None:
+        content_scopes = tuple(scope for scope in scopes if scope in CONTENT_COPY_SCOPES)
+        if content_scopes:
+            outcome = copy_workspace_content(template.id, item.id, scopes=content_scopes)
+            copied = outcome["copied"]
+            warnings.extend(outcome["warnings"])
     # A workspace created inside the ACTIVE realm becomes active
     # immediately — the operator expects to land in the workspace they
     # just created, not to run a second `workspace use` by hand.
@@ -1964,7 +2035,45 @@ def _cmd_workspace_create(args) -> int:
     # chokepoint — Stage 12.)
     if item.realm_id and item.realm_id == RealmStore().active_id():
         WorkspaceStore().set_active(item.id)
-    _print_stage42(_object_envelope("workspace", _workspace_row(item), warnings=[]), args=args, default_output="json")
+    row = _workspace_row(item)
+    if template is not None:
+        row["template_workspace_id"] = template.id
+        row["copy_scopes"] = list(scopes)
+        if copied is not None:
+            row["copied"] = copied
+    _print_stage42(_object_envelope("workspace", row, warnings=warnings), args=args, default_output="json")
+    return 0
+
+
+def _cmd_workspace_delete(args) -> int:
+    if not _require_yes(args):
+        return 8
+    store = WorkspaceStore()
+    try:
+        item = store.get(args.workspace_id)
+    except NotFound as exc:
+        return emit_harness_error(exc, args=args)
+    if getattr(args, "dry_run", False):
+        row = _workspace_row(item, full=True)
+        row["deleted"] = False
+        row["dry_run"] = True
+        _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
+        return 0
+    was_active = store.active_id() == item.id
+    realm_id = item.realm_id
+    try:
+        row = store.delete(args.workspace_id)
+    except WorkspaceDeleteBlocked as exc:
+        return emit_harness_error(exc, args=args, code=exc.code)
+    # Deleting the ACTIVE workspace falls back to the realm's default (same
+    # reconcile rule as a realm switch) instead of leaving the operator on a
+    # cleared pointer.
+    if was_active and realm_id:
+        try:
+            _reconcile_active_workspace_to_realm(RealmStore().get(realm_id))
+        except Exception:  # noqa: BLE001 — pointer reconcile is best-effort; the delete already landed
+            pass
+    _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
     return 0
 
 

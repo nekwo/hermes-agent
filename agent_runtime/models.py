@@ -148,6 +148,12 @@ class Realm:
     default_workspace_name: str = "Default"
     default_workspace_version: int = 0
     workspace_ids: list[str] = field(default_factory=list)
+    # Resurrection-guard ledger (ids only, bounded): workspaces DELETED from
+    # this realm. Travels inside the realm JSON through realm sync so a member
+    # that still holds a local copy neither republishes it nor re-adopts it on
+    # pull (the Board.archived_card_ids / OfficeSurface.archived_actor_keys
+    # idiom, lifted to workspace granularity).
+    deleted_workspace_ids: list[str] = field(default_factory=list)
     sync_manifest_ref: str | None = None
     archived: bool = False
     schema_version: int = 1

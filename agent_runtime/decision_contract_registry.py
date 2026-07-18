@@ -1288,6 +1288,10 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "workspace.created": EventContract("workspace.created", "Workspace created", ("workspace_id", "name"), ("realm_id",)),
     "workspace.updated": EventContract("workspace.updated", "Workspace updated", ("workspace_id", "change"), ("name", "persona_id")),
     "workspace.archived": EventContract("workspace.archived", "Workspace archived", ("workspace_id",), ("name",)),
+    # Hard delete (archive stays the reversible path). ``reason`` is
+    # "operator_delete" or "realm_sync_tombstone" — the resurrection-guard
+    # ledger application on pull rides the same store chokepoint.
+    "workspace.deleted": EventContract("workspace.deleted", "Workspace deleted", ("workspace_id",), ("name", "realm_id", "reason")),
     "workspace.activated": EventContract("workspace.activated", "Active workspace changed", (), ("workspace_id", "name", "cleared")),
     "realm.sync.pulled": EventContract("realm.sync.pulled", "Realm pulled", ("realm_id", "changed"), ("artifacts",)),
     "realm.sync.published": EventContract("realm.sync.published", "Realm published", ("realm_id", "changed"), ("artifacts", "commit")),
