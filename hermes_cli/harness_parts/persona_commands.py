@@ -759,7 +759,12 @@ def _cmd_mission_chat_message(args) -> int:
             persona_id=normalized_persona,
             persona_instance_id=persona_instance_id or None,
             session_id=session_id,
-            display_name=display_name,
+            # persona DEFAULT name, NOT authoritative: names a first-ever chat
+            # holder but must never rename an existing instance — else the send
+            # path clobbers a deliberate placement name ("QA Agent (2)"), folding
+            # a sibling onto the primary's console channel. Explicit rename lives
+            # in persona.instance.update_profile.
+            default_display_name=display_name,
             profile_id=safe_assignment_token(getattr(persona, "hermes_profile", None)),
             kill_active=False,
         )
@@ -2483,7 +2488,22 @@ def _tool_name_from_progress(payload: dict[str, object]) -> str:
 def _default_persona_session_db():
     try:
         from hermes_state import SessionDB
+        from hermes_constants import get_hermes_head_home, get_hermes_home_override
 
+        # The persona-chat SessionDB is the OPERATOR-visible transcript store —
+        # the exact DB ``persona_chat_history`` (the snapshot projection) reads.
+        # An in-process ``agent_chat_send`` relay runs inside the caller/target
+        # persona's profile-home override (persona_profile_context sets it), so a
+        # bare ``SessionDB()`` here would open — and write the session row +
+        # messages into — that PROFILE's ``state.db``, invisible to Mission
+        # Control (only the runtime-root-scoped trace rows survived, so the
+        # channel showed thinking rows but never the conversation). When an
+        # override is active, bind to the HEAD/operator home instead so the relay
+        # persists exactly where an operator send does (2026-07-18 incident). At
+        # the true top level (no override) this is the ordinary default DB, so
+        # test isolation and the ``DEFAULT_DB_PATH`` pin are untouched.
+        if get_hermes_home_override() is not None:
+            return SessionDB(db_path=get_hermes_head_home() / "state.db")
         return SessionDB()
     except Exception:
         return None

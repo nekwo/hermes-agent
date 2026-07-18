@@ -863,6 +863,7 @@ class PersonaInstanceStore:
         session_id: str,
         persona_instance_id: str | None = None,
         display_name: str | None = None,
+        default_display_name: str | None = None,
         profile_id: str | None = None,
         kill_active: bool = False,
     ) -> PersonaInstance:
@@ -905,6 +906,9 @@ class PersonaInstanceStore:
                 "chat lane instead of adopting a sibling's session"
             )
         safe_display_name = safe_assignment_text(display_name, limit=120) if display_name is not None else None
+        safe_default_display_name = (
+            safe_assignment_text(default_display_name, limit=120) if default_display_name is not None else None
+        )
         safe_profile_id = safe_assignment_token(profile_id) if profile_id is not None else None
         try:
             instance = self.get(instance_id)
@@ -915,7 +919,7 @@ class PersonaInstanceStore:
                 id=instance_id,
                 persona_id=normalized_persona,
                 role=role,
-                display_name=safe_display_name or _display_name_for_template(normalized_persona.split(":", 1)[1] if normalized_persona.startswith("profile:") else normalized_persona),
+                display_name=safe_display_name or safe_default_display_name or _display_name_for_template(normalized_persona.split(":", 1)[1] if normalized_persona.startswith("profile:") else normalized_persona),
                 profile_id=safe_profile_id or (normalized_persona.split(":", 1)[1] if normalized_persona.startswith("profile:") else None),
                 runtime_root=str(paths.store_root()),
                 state=WorkerSessionState.IDLE,
@@ -924,8 +928,22 @@ class PersonaInstanceStore:
         else:
             self._guard_or_replace_chat(instance, kill_active=kill_active)
 
+        # An explicit ``display_name`` is AUTHORITATIVE — an operator naming this
+        # chat (create_operator_chat) or a deliberate placement (add_instance,
+        # "QA Agent (2)"); it always applies. A ``default_display_name`` is the
+        # persona DEFAULT the SEND PATH stamps and must NEVER rename an existing
+        # instance: applying it unconditionally clobbered a placement name —
+        # ``personainst_qa_agent_2`` read "QA Agent" instead of "QA Agent (2)"
+        # (the "(2)" is LOAD-BEARING: the launcher conversational fold keys on
+        # persona+displayName, so the clobber folds a sibling onto the primary's
+        # channel). Stamp the default only when the instance has NO name yet.
+        # The one rename path stays ``persona.instance.update_profile``.
         if safe_display_name:
             instance.display_name = safe_display_name
+        elif safe_default_display_name and not safe_assignment_text(
+            getattr(instance, "display_name", None), limit=120
+        ):
+            instance.display_name = safe_default_display_name
         if safe_profile_id:
             instance.profile_id = safe_profile_id
         elif normalized_persona.startswith("profile:") and not instance.profile_id:

@@ -18,6 +18,18 @@ _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
     "_HERMES_HOME_OVERRIDE", default=_UNSET
 )
+# The OUTERMOST (operator/head) Hermes home — the home resolved BEFORE any
+# persona profile-home override was pushed onto this context. Recorded ONCE, at
+# the first ``persona_profile_context`` entry, and preserved across arbitrarily
+# deep relay nesting (operator -> Neko -> QA). It lets an operator-visible store
+# (the Mission Control persona-chat SessionDB the snapshot projection reads)
+# persist to the head home even while an in-process relay turn runs under a
+# persona's profile-home override — otherwise the relay writes its chat session
+# row + transcript into the caller's profile ``state.db``, invisible to the
+# projection (2026-07-18 relay-SessionDB-persistence incident).
+_HERMES_HEAD_HOME: ContextVar[str | object] = ContextVar(
+    "_HERMES_HEAD_HOME", default=_UNSET
+)
 
 
 def set_hermes_home_override(path: str | Path | None) -> Token:
@@ -41,6 +53,41 @@ def get_hermes_home_override() -> str | None:
     if override is _UNSET or not override:
         return None
     return str(override)
+
+
+def record_hermes_head_home_if_unset(path: str | Path | None) -> Token | None:
+    """Record the OUTERMOST (operator/head) Hermes home for this context, once.
+
+    Returns a reset token when THIS call recorded the head (the caller owns the
+    reset), or ``None`` when an enclosing scope already recorded it — a nested
+    relay hop must NOT overwrite the outermost home. ``None``/empty is ignored.
+    """
+    if path is None or not str(path):
+        return None
+    current = _HERMES_HEAD_HOME.get()
+    if current is not _UNSET and current:
+        return None
+    return _HERMES_HEAD_HOME.set(str(path))
+
+
+def reset_hermes_head_home(token: Token | None) -> None:
+    """Restore the previous head-home recording (no-op when token is ``None``)."""
+    if token is not None:
+        _HERMES_HEAD_HOME.reset(token)
+
+
+def get_hermes_head_home() -> Path:
+    """Return the operator/head Hermes home — the home the Mission Control
+    projection reads — IGNORING any active persona profile-home override.
+
+    When a profile-home override is active this returns the recorded outermost
+    home; at the true top level (no override, nothing recorded) it falls back to
+    the ordinary resolved home, so behavior is unchanged off the relay path.
+    """
+    head = _HERMES_HEAD_HOME.get()
+    if head is not _UNSET and head:
+        return Path(head)
+    return get_hermes_home()
 
 
 def _get_platform_default_hermes_home() -> Path:
