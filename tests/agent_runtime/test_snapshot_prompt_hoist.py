@@ -119,6 +119,15 @@ def test_final_model_input_evicted_to_typed_stub():
         "kind": "redaction_safe_final_model_input",
         "message_count": 3,
         "messages": [{"role": "user", "content": "hello", "bytes": 5}],
+        # Non-evicted rows carry the full tool_schema block (schema summary +
+        # count + wire size). The stub carries the count + size forward.
+        "tool_schema": {
+            "schema_version": 1,
+            "kind": "actual_model_tools",
+            "final_model_tools": ["terminal", "read_file"],
+            "tool_count": 31,
+            "json_bytes": 46216,
+        },
     }
     rows = [_row("ctx_a", available=[], accessible=[], fmi=fmi)]
 
@@ -132,6 +141,27 @@ def test_final_model_input_evicted_to_typed_stub():
         json.dumps(fmi, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
     assert "final-model-input" in stub["fetch"]
+    # The tool-schema size is the largest fixed slice of the prompt after the
+    # system message; the stub carries the count + wire size (and ONLY those two
+    # keys — never the schema bodies) so the context budget can attribute it.
+    assert stub["tool_schema"] == {"tool_count": 31, "json_bytes": 46216}
+
+
+def test_final_model_input_stub_omits_absent_tool_schema():
+    # A row whose final_model_input carried no tool_schema block must not grow a
+    # fabricated one — the stub omits the key entirely (never a fake-empty {}).
+    fmi = {
+        "kind": "redaction_safe_final_model_input",
+        "message_count": 1,
+        "messages": [{"role": "user", "content": "hi", "bytes": 2}],
+    }
+    rows = [_row("ctx_b", available=[], accessible=[], fmi=fmi)]
+
+    po._evict_final_model_input(rows)
+
+    stub = rows[0]["final_model_input"]
+    assert stub["evicted"] is True
+    assert "tool_schema" not in stub
 
 
 def test_evict_is_idempotent_and_skips_absent():

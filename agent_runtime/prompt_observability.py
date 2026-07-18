@@ -527,7 +527,15 @@ def _final_model_input_stub(final_model_input: dict[str, Any], context_id: Any) 
     Carries the recorded byte size (so the operator knows the payload exists and
     how large it is), the message count (so the peek can still say "N messages"),
     and the addressable fetch verb. Never a silent absence, never a fake-empty
-    payload."""
+    payload.
+
+    Also carries a slim ``tool_schema`` accounting block (``tool_count`` +
+    ``json_bytes``) copied from the full row when present — the tool schemas are
+    the single largest fixed slice of the prompt after the system message, and
+    the launcher's context-budget breakdown needs their size on the eviction
+    lane too, not only on the un-evicted row. Copied verbatim from the recorded
+    ``tool_schema`` (never fabricated); omitted entirely when the source row
+    carried no ``tool_schema`` block."""
 
     payload = json.dumps(
         to_jsonable(final_model_input),
@@ -540,13 +548,20 @@ def _final_model_input_stub(final_model_input: dict[str, Any], context_id: Any) 
         messages = final_model_input.get("messages")
         message_count = len(messages) if isinstance(messages, list) else 0
     token = safe_assignment_token(context_id)
-    return {
+    stub: dict[str, Any] = {
         "evicted": True,
         "bytes": len(payload.encode("utf-8")),
         "message_count": message_count,
         "context_id": token or None,
         "fetch": "harness prompt-context final-model-input --context-id <id> --json",
     }
+    tool_schema = final_model_input.get("tool_schema")
+    if isinstance(tool_schema, dict):
+        stub["tool_schema"] = {
+            "tool_count": _safe_int(tool_schema.get("tool_count")),
+            "json_bytes": _safe_int(tool_schema.get("json_bytes")),
+        }
+    return stub
 
 
 def _evict_final_model_input(chat_contexts: list[dict[str, Any]]) -> None:
