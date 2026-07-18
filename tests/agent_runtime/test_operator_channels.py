@@ -276,6 +276,11 @@ def test_operator_conversation_projects_interrupted_turn_marker_and_settles_runn
 
 
 def test_operator_channel_reports_missing_history_loudly():
+    """Genuine projection loss: real content flowed — a live trace with tool
+    activity, which also projects a tool_call conversation message — but no
+    curated chat history row backs it. session_without_history must still fire
+    loudly. (A bare newborn chat with no content is covered separately and
+    stays silent.)"""
     session_id = "persona_chat_personainst_profile_alice_missing"
     channels = operator_channel_summary(
         persona_instances=[
@@ -286,7 +291,23 @@ def test_operator_channel_reports_missing_history_loudly():
             )
         ],
         persona_chat_history=[],
-        persona_chat_trace=[],
+        persona_chat_trace=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "task_id": None,
+                "entries": [
+                    {
+                        "event": "tool_started",
+                        "tool_name": "terminal",
+                        "summary": "Started tool terminal: date",
+                        "status": "started",
+                        "ts": "2026-06-25T21:54:00Z",
+                    }
+                ],
+            }
+        ],
     )
 
     assert len(channels) == 1
@@ -294,7 +315,84 @@ def test_operator_channel_reports_missing_history_loudly():
         warning["code"] == "session_without_history"
         for warning in channels[0]["warnings"]
     )
-    assert any(warning["code"] == "trace_empty" for warning in channels[0]["warnings"])
+    # The trace lane carries real activity, so this is not an empty channel.
+    assert not any(
+        warning["code"] == "trace_empty" for warning in channels[0]["warnings"]
+    )
+
+
+def test_operator_channel_newborn_chat_emits_no_warnings():
+    """A brand-new Mission Control chat has a session id and nothing else yet —
+    no curated history row, no trace, no task binding, zero conversation
+    messages. That NEWBORN state is not a contract breach: neither
+    session_without_history nor trace_empty may fire (live 2026-07-18: creating
+    a fresh neko_supervisor chat surfaced two false-positive 'Channel contract
+    warning' bubbles)."""
+    session_id = "persona_chat_personainst_profile_alice_newborn"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _instance(
+                "personainst_profile_alice",
+                session_id=session_id,
+                updated_at="2026-07-18T09:00:00Z",
+            )
+        ],
+        persona_chat_history=[],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 1
+    codes = {warning["code"] for warning in channels[0]["warnings"]}
+    assert "session_without_history" not in codes
+    assert "trace_empty" not in codes
+
+
+def test_operator_channel_session_without_history_fires_when_turns_flow():
+    """Content flowed as canonical turn messages (a run summary) but no curated
+    history row backs it — session_without_history is genuine projection loss
+    and must fire even when trace_empty is (correctly) suppressed by the flow."""
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[],
+        tasks=[_goal_task(ts)],
+        run_summaries=[
+            _dev_run_summary(
+                "run_flow", started="2026-07-05T05:50:00Z", finished="2026-07-05T05:51:00Z"
+            )
+        ],
+    )
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert any(m["kind"] == "turn" for m in channel["conversation"]["messages"])
+    assert any(
+        warning["code"] == "session_without_history"
+        for warning in channel["warnings"]
+    )
+    # A channel whose turns flow is not an empty-trace anomaly.
+    assert not any(
+        warning["code"] == "trace_empty" for warning in channel["warnings"]
+    )
+
+
+def test_operator_channel_trace_empty_fires_for_task_bound_channel_without_trace():
+    """A task-bound channel with a goal but no trace and no flow messages is a
+    genuine empty-trace anomaly — trace_empty must still fire. The newborn
+    exemption is scoped to session-only channels with no task binding."""
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[],
+        tasks=[_goal_task(ts)],
+    )
+
+    assert len(channels) == 1
+    assert any(
+        warning["code"] == "trace_empty" for warning in channels[0]["warnings"]
+    )
 
 
 def test_operator_channel_dormant_instance_has_no_trace_empty_warning():

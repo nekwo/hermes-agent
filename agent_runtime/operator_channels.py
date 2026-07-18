@@ -239,14 +239,6 @@ class _OperatorChannelBuilder:
                     "entity_ids": source_instance_ids,
                 }
             )
-        if history is None and session_id:
-            warnings.append(
-                {
-                    "code": "session_without_history",
-                    "detail": "operator channel has a session id but no curated chat history row",
-                    "entity_id": session_id,
-                }
-            )
         task_id = _first_text(
             getattr(canonical, "current_task_id", None) if canonical is not None else None,
             history.get("task_id") if history else None,
@@ -296,13 +288,40 @@ class _OperatorChannelBuilder:
                     "entity_id": channel_id,
                 }
             )
-        # trace_empty is evaluated AFTER the conversation: a channel whose goal
-        # turns already flow as canonical messages is not an empty channel, even
-        # when the legacy trace lane happens to be null.
+        # session_without_history and trace_empty are both evaluated AFTER the
+        # conversation is built: a channel whose goal turns already flow as
+        # canonical messages is not an empty channel, even when the legacy trace
+        # lane happens to be null.
+        conversation_messages = conversation.get("messages") or []
         has_flow_messages = any(
             message.get("kind") in {"thinking_summary", "turn", "tool_call"}
-            for message in conversation.get("messages") or []
+            for message in conversation_messages
         )
+        # ONE shared predicate for the NEWBORN channel state: a freshly-created
+        # chat that has a session id but into which nothing has flowed yet — no
+        # curated history row, no trace, no task binding, and zero projected
+        # conversation messages (operator rows included). A newborn is neither a
+        # projection loss nor an empty-trace anomaly; both warnings stay silent
+        # until real content arrives (live 2026-07-18: creating a fresh
+        # neko_supervisor chat surfaced two false-positive contract warnings).
+        is_newborn_channel = (
+            bool(session_id)
+            and history is None
+            and trace is None
+            and task_id is None
+            and not conversation_messages
+        )
+        # session_without_history is the genuine projection-loss signal: real
+        # content flowed (conversation messages or a trace) but no curated
+        # history row backs it. A newborn — nothing has flowed yet — stays silent.
+        if history is None and session_id and not is_newborn_channel:
+            warnings.append(
+                {
+                    "code": "session_without_history",
+                    "detail": "operator channel has a session id but no curated chat history row",
+                    "entity_id": session_id,
+                }
+            )
         # A dormant instance channel — no session, no history, no task binding,
         # and an empty conversation — has never had anything to trace; flagging
         # it would emit a permanent false-positive parity warning for every
@@ -311,13 +330,14 @@ class _OperatorChannelBuilder:
             history is None
             and session_id is None
             and task_id is None
-            and not (conversation.get("messages") or [])
+            and not conversation_messages
         )
         if (
             trace is None
             and not has_flow_messages
             and (history is None or task_id)
             and not dormant_channel
+            and not is_newborn_channel
         ):
             warnings.append(
                 {
