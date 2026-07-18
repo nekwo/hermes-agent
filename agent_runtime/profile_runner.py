@@ -1282,9 +1282,22 @@ def _is_error_result(result: Any) -> bool:
 # (256); the operator-console projection is a COMPACT checklist, so the wire
 # copy is tighter — a checklist row is a short line, and the frame must stay
 # minimal (T7: smallest honest emit, no snapshot-frame growth beyond a bounded
-# payload). Over-cap content is marked with an ellipsis, never dropped silently.
+# payload).
+#
+# Over-cap content is marked with an ellipsis, never dropped silently.
+#
+# T9c: id/content are whitespace-collapsed to the SAME shape the persist
+# re-bound (`mission_chat_turns._safe_todo_state`, via `safe_assignment_text`)
+# produces — whitespace runs collapsed to single spaces. The persist lane
+# re-runs `safe_assignment_text` over THIS output, and that function is
+# idempotent on an already-collapsed string (including the over-cap
+# `…`-terminated form), so the live `tool.finished` frame and the reloaded
+# turn-store element carry byte-identical text. (Before T9c the producer only
+# `.strip()`ped, so multi-line/multi-space content diverged: the live lane kept
+# the internal whitespace the persist lane collapsed.)
 _TODO_STATE_MAX_ITEMS = 64
 _TODO_STATE_MAX_CONTENT = 240
+_TODO_STATE_MAX_ID = 120
 _TODO_STATE_VALID_STATUS = {"pending", "in_progress", "completed", "cancelled"}
 
 
@@ -1311,8 +1324,12 @@ def _todo_state_payload(tool_name: str | None, result: Any, invocation: Any) -> 
     for raw in todos[:_TODO_STATE_MAX_ITEMS]:
         if not isinstance(raw, dict):
             continue
-        item_id = str(raw.get("id", "")).strip() or "?"
-        content = str(raw.get("content", "")).strip()
+        # T9c: collapse whitespace to the persisted `safe_assignment_text` shape
+        # (id is a straight cap; content keeps the over-cap ellipsis, which the
+        # persist re-run preserves because it operates on this already-collapsed
+        # output). See the note on the bound constants above.
+        item_id = _collapse_todo_ws(raw.get("id"))[:_TODO_STATE_MAX_ID] or "?"
+        content = _collapse_todo_ws(raw.get("content"))
         status = str(raw.get("status", "")).strip().lower()
         if status not in _TODO_STATE_VALID_STATUS:
             status = "pending"
@@ -1322,6 +1339,18 @@ def _todo_state_payload(tool_name: str | None, result: Any, invocation: Any) -> 
             content = content[: _TODO_STATE_MAX_CONTENT - 1] + "…"
         items.append({"id": item_id, "content": content, "status": status})
     return items or None
+
+
+def _collapse_todo_ws(value: Any) -> str:
+    """Collapse whitespace runs to single spaces, mirroring the normalization in
+    ``persona_assignments.safe_assignment_text`` (minus its length cap).
+
+    The persist re-bound (``mission_chat_turns._safe_todo_state``) runs
+    ``safe_assignment_text`` over THIS output; that function is idempotent on an
+    already-collapsed string, so the live ``tool.finished`` frame and the
+    reloaded turn-store element carry byte-identical todo text (T9c)."""
+
+    return " ".join(str(value or "").replace("\x00", " ").split())
 
 
 def _todo_items_from(source: Any) -> list[Any] | None:

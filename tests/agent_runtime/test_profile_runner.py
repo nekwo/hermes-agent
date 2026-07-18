@@ -1144,6 +1144,41 @@ def test_todo_state_payload_caps_item_count():
     assert len(payload) == _TODO_STATE_MAX_ITEMS
 
 
+def test_todo_state_payload_collapses_whitespace_matching_persist_lane():
+    # T9c: multi-line / multi-space todo content must be byte-identical on the
+    # live `tool.finished` lane (the producer output) and the reloaded turn-store
+    # lane (which re-bounds via `mission_chat_turns._safe_todo_state`). The
+    # producer now collapses whitespace to the persisted `safe_assignment_text`
+    # shape, so the persist re-run is a no-op and the two lanes match.
+    from agent_runtime.mission_chat_turns import _safe_todo_state
+
+    items = [
+        {"id": "1", "content": "line one\nline two\n\n  trailing", "status": "in_progress"},
+        {"id": "2", "content": "\ttabbed   and   spaced   ", "status": "pending"},
+    ]
+    live = _todo_state_payload("todo", _todo_result(items), None)
+    assert live is not None
+    # Whitespace collapsed (no raw newlines/tabs/double-spaces survive).
+    assert live[0]["content"] == "line one line two trailing"
+    assert live[1]["content"] == "tabbed and spaced"
+    # The reloaded/persisted lane is byte-identical to the live lane.
+    reloaded = _safe_todo_state(live)
+    assert reloaded == live
+
+
+def test_todo_state_payload_ellipsis_survives_persist_rerun():
+    # The over-cap `…` marker must also be lane-stable: the persist re-bound
+    # runs safe_assignment_text over the producer's already-collapsed,
+    # ellipsis-terminated content and leaves it byte-identical.
+    from agent_runtime.mission_chat_turns import _safe_todo_state
+
+    items = [{"id": "1", "content": "word " * 100, "status": "pending"}]
+    live = _todo_state_payload("todo", _todo_result(items), None)
+    assert live[0]["content"].endswith("…")
+    assert len(live[0]["content"]) == _TODO_STATE_MAX_CONTENT
+    assert _safe_todo_state(live) == live
+
+
 def test_todo_items_from_accepts_bare_list():
     items = [{"id": "1", "content": "c", "status": "pending"}]
     assert _todo_items_from(items) == items
