@@ -263,6 +263,12 @@ def agent_chat_send(
         result["clarify_request"] = payload.get("clarify_request")
     if payload.get("relay_chain") is not None:
         result["relay_chain"] = payload.get("relay_chain")
+    # Ambiguous-target refusal: forward the candidate instance handles so the
+    # calling agent can immediately retry against an exact @personainst_ handle
+    # (the whole point of the typed refusal — the CLI error text alone is not
+    # enough for the model to pick a sibling).
+    if payload.get("candidates") is not None:
+        result["candidates"] = payload.get("candidates")
     if not result["ok"]:
         result["error"] = str(payload.get("error") or payload.get("blocker") or "relay turn failed")[:400]
         if payload.get("error_kind"):

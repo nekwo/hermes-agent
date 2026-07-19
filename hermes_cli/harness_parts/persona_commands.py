@@ -734,6 +734,48 @@ def _cmd_mission_chat_message(args) -> int:
         getattr(args, "persona_instance_id", None), persona_id=normalized_persona
     )
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
+
+    # Ambiguous-target guard at the canonical persona chokepoint (sibling of the
+    # relay-chain guard above; same envelope, evaluated for every transport so an
+    # instance-id target cannot dodge it). A BARE persona id names a persona, not
+    # an instance; when the persona runs more than one live instance and the
+    # caller pinned none, the omitted-session default below silently threads onto
+    # the canonical primary and DROPS the message for every sibling (live
+    # 2026-07-19: bare `qa` with two live `qa` instances landed only in
+    # `personainst_qa`). Refuse with the candidate @handles so the caller can
+    # retry against an exact instance. Never fires when the caller already
+    # disambiguated (an explicit `persona_instance_id`, a `personainst_*` target,
+    # or ANY caller-chosen session id — the operator console always carries an
+    # instance-bearing session id, so its chats to every sibling keep working),
+    # for a `profile:<name>` target, or for a single-instance persona.
+    target_decision = _mission_chat_target_decision(
+        instance_store=instance_store,
+        normalized_persona=normalized_persona,
+        raw_persona_id=getattr(args, "persona_id", None),
+        persona_instance_id=persona_instance_id,
+        session_id=session_id,
+        relay_chain=turn_relay_chain,
+    )
+    if not target_decision.allowed:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "rejected",
+            "error_kind": target_decision.error_kind,
+            "error": safe_assignment_text(target_decision.reason, limit=400),
+            "persona_id": normalized_persona,
+            "relay_chain": list(target_decision.chain),
+            "candidates": [candidate.as_dict() for candidate in target_decision.candidates],
+            "next_expected": (
+                "re-send to a specific instance by the @personainst_ handle listed in candidates"
+            ),
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
+
     if not session_id:
         # Omitted session (agent_chat_send relay lane, and any first-turn open):
         # CONTINUE the target's default chat session so repeated relays thread
@@ -3499,6 +3541,59 @@ def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, j
     }
     print(emit_json(data) if json_output else f"closed {len(closed)} free-floating assignments for {normalized_instance}")
     return 0
+
+
+def _mission_chat_target_decision(
+    *,
+    instance_store,
+    normalized_persona: str,
+    raw_persona_id,
+    persona_instance_id,
+    session_id,
+    relay_chain,
+):
+    """Decide the ``ambiguous_target`` refusal for a mission-chat send.
+
+    Reads the persona's live instances from the store (the roster's
+    on-the-level set — retired instances are archived out of ``list_all``) and
+    computes whether the caller already pinned a specific instance, then defers
+    the actual decision to the pure ``target_policy.evaluate_target`` authority
+    (unit-testable in isolation, no store).
+
+    ``caller_pinned`` is True whenever the send is NOT on the silent-fallback
+    path — an explicit ``persona_instance_id``, a ``personainst_*`` target, or
+    ANY caller-chosen ``session_id`` (the operator console always carries an
+    instance-bearing session id, so its sends never trip this). Only the
+    omitted-session + no-instance path can be ambiguous.
+    """
+    from agent_runtime import target_policy
+
+    is_profile = normalized_persona.startswith("profile:")
+    raw_token = safe_assignment_token(raw_persona_id)
+    caller_pinned = bool(
+        persona_instance_id
+        or raw_token.startswith(PERSONA_INSTANCE_ID_PREFIX)
+        or safe_assignment_text(session_id, limit=200)
+    )
+    candidates = sorted(
+        (
+            target_policy.TargetCandidate(
+                instance_id=instance.id,
+                display_name=safe_assignment_text(getattr(instance, "display_name", None), limit=120)
+                or instance.id,
+            )
+            for instance in instance_store.list_all()
+            if getattr(instance, "persona_id", None) == normalized_persona
+        ),
+        key=lambda candidate: candidate.instance_id,
+    )
+    return target_policy.evaluate_target(
+        persona_id=normalized_persona,
+        candidates=candidates,
+        caller_pinned_instance=caller_pinned,
+        is_profile_target=is_profile,
+        relay_chain=relay_chain,
+    )
 
 
 def _persona_id_from_instance_id(persona_instance_id: str) -> str:

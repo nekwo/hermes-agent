@@ -527,6 +527,8 @@ def _mission_chat_operative_rules() -> str:
         "`agent_chat_send`: omit the session to continue your durable pair thread (the norm — one thread per teammate); pass "
         "`session_id` to continue a specific thread; pass `new_session: true` only to start a clean thread (sparingly). Use "
         "`agent_chat_open` to review a teammate's recent thread before continuing it, and `agent_chat_threads` to list your threads.\n"
+        "- When a persona runs more than one instance on your level, a BARE persona id is ambiguous and the send is refused "
+        "(`ambiguous_target`) with the candidate @personainst_* handles — address the exact instance you mean by its @handle.\n"
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
         "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane."
     )
