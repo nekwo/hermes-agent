@@ -56,6 +56,21 @@ SECRET_ASSIGNMENT_RE = re.compile(
     r"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=:-]{16,}"
 )
 
+# Canonical line-ending policy for the realm sync repo. The publisher already
+# canonicalizes every artifact to LF (see ``_canonicalize_text_bytes``); this
+# repo-root ``.gitattributes`` makes member clones keep LF on checkout no matter
+# what their local ``core.autocrlf`` is set to, so nobody re-flips the endings.
+# ``text=auto`` leaves binary assets (skill PNG/JPG/… ) untouched. It is never an
+# artifact, so it neither enters the artifact manifest nor the secret scanner.
+_REALM_SYNC_GITATTRIBUTES = (
+    "# Realm sync canonical line endings (managed by agent_runtime/realm_sync.py).\n"
+    "# Published artifacts are written LF by the publisher; pin eol=lf so member\n"
+    "# clones never re-flip endings on checkout regardless of local core.autocrlf.\n"
+    "# text=auto leaves binary assets untouched.\n"
+    "* text=auto eol=lf\n"
+)
+_REALM_SYNC_GITATTRIBUTES_MARKER = b"managed by agent_runtime/realm_sync.py"
+
 
 class RealmSyncError(RuntimeError):
     def __init__(self, code: str, message: str, *, retryable: bool = False, safe_details: dict[str, Any] | None = None):
@@ -157,22 +172,51 @@ def publish_realm_sync(
         return _sync_result(realm, "publish", "dry_run", artifacts, repo=repo, git=git, changed=False)
 
     subtree = _realm_subtree(repo, realm.id)
-    if subtree.exists():
-        shutil.rmtree(subtree)
-    for artifact in artifacts:
-        target = subtree / artifact.relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(artifact.source, target)
-    _write_sync_metadata(subtree, realm=realm, artifacts=artifacts)
-    _git(repo, "add", "--", f"realms/{_safe_token(realm.id)}")
-    changed = bool(_git(repo, "status", "--porcelain", f"realms/{_safe_token(realm.id)}").strip())
-    if changed:
-        _ensure_git_identity(repo)
-        _git(repo, "commit", "-m", f"Publish realm sync {realm.id}")
-        try:
-            _git(repo, "push", extra_config=_credential_git_config(credential))
-        except RealmSyncError as exc:
-            raise RealmSyncError("sync_remote_unreachable", "Realm sync publish committed locally but could not push upstream.", retryable=True, safe_details=exc.safe_details) from exc
+    subtree_rel = f"realms/{_safe_token(realm.id)}"
+    # Canonicalize every published artifact to LF at this single write/copy
+    # chokepoint (binary assets pass through untouched — see
+    # ``_canonicalize_text_bytes``). The store lane writes CRLF on Windows while
+    # the pull lane writes LF; copying those raw bytes made every publish a
+    # whole-file EOL churn and reported changed=true on no-op runs.
+    desired = {
+        artifact.relative_path.replace("\\", "/"): _canonicalize_text_bytes(artifact.source.read_bytes())
+        for artifact in artifacts
+    }
+    # Content-aware change detection: only (re)write the subtree when the
+    # canonical artifact bytes actually differ from what is already published.
+    # manifest.json is excluded from this comparison because it carries a
+    # volatile generated_at — a timestamp-only rewrite is never a real change.
+    content_changed = _published_artifacts_differ(subtree, desired)
+    # The repo-root .gitattributes is materialized at the ensure chokepoint; make
+    # sure a newly-introduced one still rides this publish even when no artifact
+    # changed. It is never an artifact, so it skips the manifest + secret scan.
+    # Only stage .gitattributes when it actually exists — its write is
+    # best-effort, and ``git add`` errors on a pathspec that matches nothing.
+    add_paths = [subtree_rel]
+    if (repo / ".gitattributes").exists():
+        add_paths.append(".gitattributes")
+    gitattributes_pending = ".gitattributes" in add_paths and bool(
+        _git(repo, "status", "--porcelain", "--", ".gitattributes").strip()
+    )
+    if content_changed:
+        if subtree.exists():
+            shutil.rmtree(subtree)
+        for artifact in artifacts:
+            target = subtree / artifact.relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(desired[artifact.relative_path.replace("\\", "/")])
+        _write_sync_metadata(subtree, realm=realm, artifacts=artifacts)
+    changed = False
+    if content_changed or gitattributes_pending:
+        _git(repo, "add", "--", *add_paths)
+        changed = bool(_git(repo, "status", "--porcelain", "--", *add_paths).strip())
+        if changed:
+            _ensure_git_identity(repo)
+            _git(repo, "commit", "-m", f"Publish realm sync {realm.id}")
+            try:
+                _git(repo, "push", extra_config=_credential_git_config(credential))
+            except RealmSyncError as exc:
+                raise RealmSyncError("sync_remote_unreachable", "Realm sync publish committed locally but could not push upstream.", retryable=True, safe_details=exc.safe_details) from exc
     _write_timestamp(repo, "last_publish.txt")
     # Record the published board+card content hashes as the new sync baseline so
     # a subsequent pull sees local == baseline (no spurious conflict on my own
@@ -248,7 +292,10 @@ def pull_realm_sync(
         artifact.destination.parent.mkdir(parents=True, exist_ok=True)
         before = artifact.destination.read_bytes() if artifact.destination.exists() else None
         data = _pulled_artifact_bytes(artifact, realm=realm)
-        if before != data:
+        # Compare canonically so a CRLF local store file vs an LF published
+        # artifact is not mistaken for a change (the JSON parses identically);
+        # only a real content edit rewrites the destination and flags changed.
+        if before is None or _canonicalize_text_bytes(before) != _canonicalize_text_bytes(data):
             artifact.destination.write_bytes(data)
             changed = True
     # Mission Board: board card files are excluded from the generic overwrite
@@ -876,6 +923,7 @@ def _authorize(realm: Realm, action: str, membership: RealmMembershipProvider | 
 def _ensure_sync_repo(realm: Realm, *, credential: "RealmSyncCredential | None" = None) -> Path:
     repo = _sync_repo_path(realm)
     if repo.exists() and (repo / ".git").exists():
+        _ensure_repo_gitattributes(repo)
         return repo
     if _looks_like_remote(str(realm.sync_manifest_ref or "")):
         repo.parent.mkdir(parents=True, exist_ok=True)
@@ -883,7 +931,30 @@ def _ensure_sync_repo(realm: Realm, *, credential: "RealmSyncCredential | None" 
     else:
         repo.mkdir(parents=True, exist_ok=True)
         _git(repo, "init")
+    _ensure_repo_gitattributes(repo)
     return repo
+
+
+def _ensure_repo_gitattributes(repo: Path) -> None:
+    """Materialize the LF line-ending pin at the realm sync repo root.
+
+    Idempotent: rewrites only the file we manage (identified by our marker) and
+    respects any foreign ``.gitattributes`` a repo already carries. It is written
+    here but committed by ``publish_realm_sync`` (it rides the same publish lane
+    as the realm subtree). Best-effort — a write failure never fails the sync
+    verb (the publisher still canonicalizes bytes to LF regardless)."""
+    path = repo / ".gitattributes"
+    desired = _REALM_SYNC_GITATTRIBUTES.encode("utf-8")
+    try:
+        if path.exists():
+            existing = path.read_bytes()
+            if existing == desired:
+                return
+            if _REALM_SYNC_GITATTRIBUTES_MARKER not in existing:
+                return  # respect a foreign .gitattributes; only manage our own
+        path.write_bytes(desired)
+    except OSError:
+        return
 
 
 def _credential_git_config(credential: "RealmSyncCredential | None") -> list[str] | None:
@@ -1077,7 +1148,9 @@ def _write_sync_metadata(subtree: Path, *, realm: Realm, artifacts: list[RealmSy
         "generated_at": now().isoformat(),
         "artifacts": [artifact.row() for artifact in artifacts],
     }
-    (subtree / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    (subtree / "manifest.json").write_bytes(
+        _canonicalize_text_bytes(json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"))
+    )
 
 
 def _sync_result(realm: Realm, action: str, state: str, artifacts: list[RealmSyncArtifact], *, repo: Path, git: dict[str, Any], changed: bool) -> dict[str, Any]:
@@ -1124,7 +1197,10 @@ def _workspace_sync_statuses(realm: Realm, repo: Path) -> list[dict[str, str]]:
         else:
             published = subtree / f"{_safe_token(workspace_id)}.json"
             try:
-                matches = published.exists() and published.read_bytes() == local.read_bytes()
+                # Canonical compare: the published file is LF while the local
+                # store file is CRLF on Windows — byte-equality would falsely
+                # report a just-published workspace as "unpublished".
+                matches = published.exists() and _canonicalize_text_bytes(published.read_bytes()) == _canonicalize_text_bytes(local.read_bytes())
             except OSError:
                 matches = False
             state = "published" if matches else "unpublished"
@@ -1137,7 +1213,12 @@ def _skills_drift_for_artifacts(artifacts: list[RealmSyncArtifact]) -> list[str]
     for artifact in artifacts:
         if artifact.kind != "skill":
             continue
-        if artifact.destination.exists() and artifact.source.exists() and artifact.destination.read_bytes() != artifact.source.read_bytes():
+        if (
+            artifact.destination.exists()
+            and artifact.source.exists()
+            and _canonicalize_text_bytes(artifact.destination.read_bytes())
+            != _canonicalize_text_bytes(artifact.source.read_bytes())
+        ):
             drift.append(Path(artifact.relative_path).parts[1])
     return sorted(set(drift))
 
@@ -1166,6 +1247,43 @@ def _write_timestamp(repo: Path, name: str) -> None:
     path = repo / ".git" / "hermes" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(now().isoformat(), encoding="utf-8")
+
+
+def _canonicalize_text_bytes(raw: bytes) -> bytes:
+    """Normalize published-artifact line endings to LF — the ONE canonicalization
+    chokepoint for realm sync.
+
+    Realm-sync artifacts are read from stores that write CRLF on Windows
+    (``atomic_json_write`` / ``str.write_text`` use text mode) while the pull
+    lane writes LF (``json.dumps(...).encode()``). Committing those raw bytes
+    turns every publish into a whole-file CRLF<->LF churn and reports
+    ``changed=true`` on no-op runs; diffs/merges between members carry EOL noise.
+    LF-normalizing at the write/copy boundary keeps the repo tree byte-stable.
+
+    Binary/asset artifacts (skill PNG/JPG/…) are detected by a NUL byte — git's
+    own text/binary heuristic — and passed through byte-for-byte untouched. The
+    3-way merge classifiers and office/board baselines hash the PARSED model
+    (EOL-agnostic), so canonicalizing bytes here never desyncs those hashes.
+    """
+    if b"\x00" in raw:
+        return raw
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _published_artifacts_differ(subtree: Path, desired: dict[str, bytes]) -> bool:
+    """True when the canonical published bytes differ from what is already in the
+    realm subtree, ignoring manifest.json (its ``generated_at`` is volatile).
+
+    ``desired`` is canonical (LF); the on-disk bytes are compared RAW, so a legacy
+    CRLF subtree triggers a one-time LF migration on the next publish while an
+    already-canonical subtree is a true no-op (no rewrite, no commit)."""
+    if not subtree.exists():
+        return bool(desired)
+    existing: dict[str, bytes] = {}
+    for path in subtree.rglob("*"):
+        if path.is_file() and path.name != "manifest.json":
+            existing[path.relative_to(subtree).as_posix()] = path.read_bytes()
+    return existing != desired
 
 
 def _dedupe_artifacts(artifacts: list[RealmSyncArtifact]) -> list[RealmSyncArtifact]:
