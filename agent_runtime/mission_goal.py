@@ -364,7 +364,7 @@ def _attach_requested_blueprint_plan(
     except FileNotFoundError:
         return _create_error(
             "blueprint_not_found",
-            "Requested Neko Supervisor blueprint is unavailable.",
+            "Requested Neko Mission Lead blueprint is unavailable.",
             retryable=False,
             safe_details={"requested_blueprint_id": blueprint_id},
         )

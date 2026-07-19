@@ -1695,7 +1695,7 @@ def _archived_operator_channel(archived: dict) -> dict | None:
         "session_id": None,
         "task_id": task_id,
         "goal_id": goal_id,
-        "display_name": "Neko Supervisor",
+        "display_name": _display_name_for_persona("neko_supervisor"),
         "state": "archived",
         "mode": "archived_goal",
         "source_instance_ids": [],
