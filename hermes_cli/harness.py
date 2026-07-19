@@ -992,6 +992,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_open.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_open.add_argument("--add-instance", action="store_true", help="Open the chat on an additional placement-backed instance")
     persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
+    persona_instance_open.add_argument("--display-name", default=None, help="Authoritative name for a deliberately-placed additional instance (e.g. 'QA Agent (2)'); ignored unless --add-instance")
     persona_instance_open.add_argument("--requested-by", default="cli")
     _add_coordinator_permission_args(persona_instance_open)
     persona_instance_open.add_argument("--json", action="store_true")

@@ -1024,6 +1024,128 @@ def test_open_chat_authoritative_display_name_still_renames(isolate_agent_runtim
     assert second.display_name == "QA Two"  # authoritative rename honored
 
 
+def test_add_instance_stores_explicit_placement_name_verbatim(isolate_agent_runtime_root):
+    # PRIMARY FIX: a deliberate placement's distinct name ("QA Agent (2)") is
+    # AUTHORITATIVE and stored verbatim, so the launcher conversational fold
+    # (keyed on persona+display_name) keeps the sibling distinct end to end.
+    store = PersonaInstanceStore()
+    placed = store.add_instance(
+        persona_id="qa",
+        placement_id="qa_agent_2",
+        display_name="QA Agent (2)",
+    )
+    assert placed.id == persona_instance_id_for_placement("qa_agent_2")
+    assert placed.display_name == "QA Agent (2)"
+
+
+def test_add_instance_omitted_name_uses_honest_default_not_title_cased_id(
+    isolate_agent_runtime_root,
+):
+    # DOCUMENTED FALLBACK: when the client omits the placement name the store
+    # takes the persona's honest default ("QA Agent"), NEVER the title-cased
+    # persona id ("Qa") the template fallback would otherwise mint — that was
+    # the live 2026-07-19 personainst_qa_agent_2 == "Qa" defect.
+    store = PersonaInstanceStore()
+    placed = store.add_instance(
+        persona_id="qa",
+        placement_id="qa_agent_2",
+        default_display_name="QA Agent",
+    )
+    assert placed.display_name == "QA Agent"
+    assert placed.display_name != "Qa"
+
+
+def test_add_instance_default_never_overwrites_a_deliberate_name(
+    isolate_agent_runtime_root,
+):
+    # INGEST SAFETY: a later add_instance re-open that carries only the persona
+    # default must NOT rewrite an existing deliberate placement name — the "(2)"
+    # is load-bearing for the fold.
+    store = PersonaInstanceStore()
+    first = store.add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
+    )
+    assert first.display_name == "QA Agent (2)"
+    reopened = store.add_instance(
+        persona_id="qa",
+        placement_id="qa_agent_2",
+        default_display_name="QA Agent",  # the persona default a later open passes
+    )
+    assert reopened.display_name == "QA Agent (2)"
+
+
+def test_open_chat_cli_add_instance_threads_explicit_display_name(
+    monkeypatch, isolate_agent_runtime_root
+):
+    # END-TO-END SEAM: the occupied-chat placement path sends the distinct name
+    # through --display-name; the open-chat CLI must forward it to the new
+    # placement instead of dropping it (the exact seam that minted the live
+    # "Qa" — add_instance was called with no display_name).
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="qa",
+            session_id=None,
+            kill_active=False,
+            add_instance=True,
+            placement_id="qa_agent_2",
+            display_name="QA Agent (2)",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    placed = PersonaInstanceStore().get("personainst_qa_agent_2")
+    assert placed.display_name == "QA Agent (2)"
+
+
+def test_open_chat_cli_add_instance_omitted_name_uses_persona_config_not_title_case(
+    monkeypatch, isolate_agent_runtime_root
+):
+    # HONEST FALLBACK at the CLI seam: with --display-name omitted, the new
+    # placement takes the persona's CONFIGURED display name ("QA Agent"), never
+    # the store template's title-cased persona id ("Qa").
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    qa_persona = AgentPersona(
+        id="qa",
+        display_name="QA Agent",
+        role="qa",
+        model="gpt-test",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        toolsets=["file"],
+        system_prompt_path="agent_runtime/prompts/qa.md",
+        hermes_profile="profile-qa",
+    )
+    monkeypatch.setattr(harness, "_persona_by_id", lambda _cfg, _pid: qa_persona)
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="qa",
+            session_id=None,
+            kill_active=False,
+            add_instance=True,
+            placement_id="qa_agent_2",
+            display_name=None,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    placed = PersonaInstanceStore().get("personainst_qa_agent_2")
+    assert placed.display_name == "QA Agent"
+    assert placed.display_name != "Qa"
+
+
 def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runtime_root):
     instance_store = PersonaInstanceStore()
     workers = WorkerSessionStore()

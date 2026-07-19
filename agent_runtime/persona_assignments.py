@@ -1149,6 +1149,7 @@ class PersonaInstanceStore:
         persona_id: str,
         placement_id: str,
         display_name: str | None = None,
+        default_display_name: str | None = None,
         session_id: str | None = None,
     ) -> PersonaInstance:
         normalized_persona = _normalize_instance_source_persona(persona_id)
@@ -1165,11 +1166,16 @@ class PersonaInstanceStore:
         normalized_session = safe_assignment_text(session_id, limit=200) if session_id is not None else None
         if normalized_session and self._session_owned_by_other_instance(normalized_session, instance_id):
             normalized_session = None
+        # ``display_name`` is the operator's AUTHORITATIVE placement name and
+        # always wins; ``default_display_name`` is the persona's honest default,
+        # stamped only when the instance has no name yet — never enough to clobber
+        # an existing distinct placement name on a re-open (open_chat enforces).
         return self.open_chat(
             persona_id=normalized_persona,
             persona_instance_id=instance_id,
             session_id=normalized_session or persona_chat_session_id_for(instance_id),
             display_name=display_name,
+            default_display_name=default_display_name,
             profile_id=_profile_id_for_persona_or_template(normalized_persona),
             kill_active=False,
         )

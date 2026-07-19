@@ -346,10 +346,24 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 data = {"ok": False, "error": "placement_id is required when add_instance is true"}
                 print(emit_json(data) if args.json else data["error"])
                 return 2
+            # A deliberately-placed additional instance ("QA Agent (2)") carries
+            # its distinct name so the operator's placement cue survives into the
+            # store, the launcher conversational fold (keyed on
+            # persona+display_name), and the HUD roster. When the client omits it
+            # the honest fallback is the persona's OWN configured display name
+            # ("QA Agent"), never the title-cased persona id ("Qa") the store
+            # template fallback would otherwise mint.
+            explicit_display_name = safe_assignment_text(getattr(args, "display_name", None), limit=120)
+            honest_default_display_name = (
+                safe_assignment_text(getattr(persona, "display_name", None), limit=120)
+                or _display_name_for_profile(persona_id)
+            )
             instance = PersonaInstanceStore().add_instance(
                 persona_id=persona_id,
                 placement_id=placement_id,
                 session_id=args.session_id,
+                display_name=explicit_display_name,
+                default_display_name=honest_default_display_name,
             )
             instance = _maybe_stamp_spawned_by(instance, coordinator_id=coordinator_id)
         else:
