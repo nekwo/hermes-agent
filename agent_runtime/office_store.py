@@ -202,13 +202,23 @@ class OfficeStore:
         folders: list[str] | None = None,
         updated_by: str = "operator",
         expect_revision: int | None = None,
+        dry_run: bool = False,
     ) -> OfficeSurface:
         wsid = _safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
-        self.ensure_surface(wsid, created_by=updated_by)
+        if not dry_run:
+            self.ensure_surface(wsid, created_by=updated_by)
         with office_lock(wsid):
-            surface = self.get_surface(wsid)
+            # A dry-run against an unauthored office validates + previews against
+            # the WOULD-BE default surface without persisting it (no ensure_surface
+            # write above), so the preview is honest and the store stays untouched.
+            if self.surface_exists(wsid):
+                surface = self.get_surface(wsid)
+            else:
+                surface = office_models.default_surface(
+                    wsid, created_at=now(), updated_by=_safe_actor_ref(updated_by)
+                )
             _check_revision(surface.revision, expect_revision)
             change = []
             if folders is not None:
@@ -217,6 +227,10 @@ class OfficeStore:
             surface.revision += 1
             surface.updated_at = now()
             surface.updated_by = _safe_actor_ref(updated_by)
+            if dry_run:
+                # Full validation + revision check ran; return the would-be
+                # surface in memory. Write nothing, emit no event.
+                return surface
             _write_surface(surface)
             self._emit(
                 "office.surface.updated",
@@ -268,6 +282,7 @@ class OfficeStore:
         *,
         updated_by: str = "operator",
         expect_revision: int | None = None,
+        dry_run: bool = False,
     ) -> OfficeActor:
         wsid = _safe_id(workspace_id)
         if not wsid:
@@ -286,10 +301,10 @@ class OfficeStore:
             raise ValueError("invalid_request: too many items")
         items = [_normalize_item(item, persona_id=persona_id) for item in raw_items]
 
-        self.ensure_surface(wsid, created_by=updated_by)
+        if not dry_run:
+            self.ensure_surface(wsid, created_by=updated_by)
         with office_lock(wsid):
             self._guard_no_conflict(wsid, actor_key)
-            surface = self.get_surface(wsid)
             existing: OfficeActor | None = None
             if self.actor_exists(wsid, actor_key):
                 existing = self.get_actor(wsid, actor_key)
@@ -316,6 +331,12 @@ class OfficeStore:
                 updated_at=ts,
                 updated_by=_safe_actor_ref(updated_by),
             )
+            if dry_run:
+                # Full validation (payload/items/secret-name), conflict guard, and
+                # revision check ran above; return the would-be actor in memory.
+                # Write nothing, touch no ledger, emit no event.
+                return actor
+            surface = self.get_surface(wsid)
             _write_actor(actor)
             # An explicit local upsert of an archived key is operator intent to
             # re-add: clear the resurrection-guard ledger entry + archive copy
@@ -343,6 +364,7 @@ class OfficeStore:
         reason: str = "operator",
         updated_by: str = "operator",
         expect_revision: int | None = None,
+        dry_run: bool = False,
     ) -> OfficeActor:
         wsid = _safe_id(workspace_id)
         if not wsid:
@@ -354,13 +376,24 @@ class OfficeStore:
                 if archived_path.exists():
                     return from_jsonable(OfficeActor, _read_json(archived_path))
                 raise NotFound(f"office_actor:{actor_key}")
-            surface = self.ensure_surface(wsid, created_by=updated_by)
             actor = self.get_actor(wsid, actor_key)
             _check_revision(actor.revision, expect_revision)
+            if dry_run:
+                # Existence + revision check ran; return the would-be archived
+                # actor in memory (mirrors _archive_actor_locked's mutation) and
+                # persist nothing / emit nothing.
+                actor.state = "archived"
+                actor.revision += 1
+                actor.updated_at = now()
+                actor.updated_by = _safe_actor_ref(updated_by)
+                return actor
+            surface = self.ensure_surface(wsid, created_by=updated_by)
             self._archive_actor_locked(surface, actor, reason=reason, updated_by=updated_by)
         return from_jsonable(OfficeActor, _read_json(paths.office_archived_actor_path(wsid, actor_key)))
 
-    def restore_actor(self, workspace_id: str, actor_key: str, *, updated_by: str = "operator") -> OfficeActor:
+    def restore_actor(
+        self, workspace_id: str, actor_key: str, *, updated_by: str = "operator", dry_run: bool = False
+    ) -> OfficeActor:
         wsid = _safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
@@ -373,6 +406,10 @@ class OfficeStore:
             actor.revision += 1
             actor.updated_at = now()
             actor.updated_by = _safe_actor_ref(updated_by)
+            if dry_run:
+                # Archived-copy existence checked; return the would-be restored
+                # actor in memory without writing / unlinking / emitting.
+                return actor
             _write_actor(actor)
             archive_path.unlink(missing_ok=True)
             surface = self.ensure_surface(wsid, created_by=updated_by)
@@ -390,6 +427,7 @@ class OfficeStore:
         *,
         take: str,
         updated_by: str = "operator",
+        dry_run: bool = False,
     ) -> OfficeActor | None:
         """Resolve a realm-sync conflict sidecar for an actor. ``take=local``
         keeps the local actor; ``take=remote`` adopts the sidecar's remote copy
@@ -420,13 +458,20 @@ class OfficeStore:
                     actor.revision = max(int(actor.revision or 1), 1) + 1
                     actor.updated_at = now()
                     actor.updated_by = _safe_actor_ref(updated_by)
-                    _write_actor(actor)
                     result_actor = actor
+                    if not dry_run:
+                        _write_actor(actor)
                 elif self.actor_exists(wsid, actor_key):
                     # Remote removed the actor (edit-vs-remove) → archive local.
-                    surface = self.ensure_surface(wsid, created_by=updated_by)
                     actor = self.get_actor(wsid, actor_key)
-                    self._archive_actor_locked(surface, actor, reason="remote_removed", updated_by=updated_by, emit=False)
+                    if not dry_run:
+                        surface = self.ensure_surface(wsid, created_by=updated_by)
+                        self._archive_actor_locked(surface, actor, reason="remote_removed", updated_by=updated_by, emit=False)
+            if dry_run:
+                # take value + sidecar existence validated; return the would-be
+                # resolved actor in memory. Leave the sidecar in place and emit
+                # nothing (matches the real return, incl. None for edit-vs-remove).
+                return result_actor
             _archive_conflict_sidecar(wsid, actor_key)
             self._emit(
                 "office.actor.conflict_resolved",

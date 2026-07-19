@@ -54,8 +54,12 @@ def _office_actor_row(actor, *, full: bool = False) -> dict:
     return row
 
 
-def _office_surface_row(store, workspace_id: str, *, full: bool = False) -> dict:
-    surface = store.get_surface(workspace_id)
+def _office_surface_row(store, workspace_id: str, *, full: bool = False, surface=None) -> dict:
+    # ``surface`` lets a dry-run render the WOULD-BE surface (folders/revision the
+    # write would produce) instead of re-reading the untouched on-disk copy. Actor
+    # counts/conflicts stay disk-sourced — a folder edit never touches actors.
+    if surface is None:
+        surface = store.get_surface(workspace_id)
     actors = store.list_actors(workspace_id)
     row = {
         "workspace_id": surface.workspace_id,
@@ -102,13 +106,18 @@ def _cmd_office_actor_upsert(args) -> int:
         return emit_harness_error(exc, args=args, code="invalid_payload")
     if not isinstance(payload, dict):
         return emit_harness_error(ValueError("--actor-json must be an actor object"), args=args, code="invalid_request")
+    dry_run = bool(getattr(args, "dry_run", False))
     actor = store.upsert_actor(
         workspace,
         payload,
         updated_by=getattr(args, "updated_by", None) or "operator",
         expect_revision=getattr(args, "expect_revision", None),
+        dry_run=dry_run,
     )
-    _print_stage42(_object_envelope("office_actor", _office_actor_row(actor, full=True)), args=args, default_output="json")
+    envelope = _object_envelope("office_actor", _office_actor_row(actor, full=True))
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
     return 0
 
 
@@ -117,13 +126,18 @@ def _cmd_office_actor_remove(args) -> int:
     workspace = _office_workspace_for(args)
     if not workspace:
         return emit_harness_error(ValueError("no workspace selected; pass --workspace"), args=args, code="invalid_request")
+    dry_run = bool(getattr(args, "dry_run", False))
     actor = store.remove_actor(
         workspace,
         args.actor,
         reason=getattr(args, "reason", None) or "operator",
         expect_revision=getattr(args, "expect_revision", None),
+        dry_run=dry_run,
     )
-    _print_stage42(_object_envelope("office_actor", _office_actor_row(actor, full=True)), args=args, default_output="json")
+    envelope = _object_envelope("office_actor", _office_actor_row(actor, full=True))
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
     return 0
 
 
@@ -132,8 +146,12 @@ def _cmd_office_actor_restore(args) -> int:
     workspace = _office_workspace_for(args)
     if not workspace:
         return emit_harness_error(ValueError("no workspace selected; pass --workspace"), args=args, code="invalid_request")
-    actor = store.restore_actor(workspace, args.actor)
-    _print_stage42(_object_envelope("office_actor", _office_actor_row(actor, full=True)), args=args, default_output="json")
+    dry_run = bool(getattr(args, "dry_run", False))
+    actor = store.restore_actor(workspace, args.actor, dry_run=dry_run)
+    envelope = _object_envelope("office_actor", _office_actor_row(actor, full=True))
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
     return 0
 
 
@@ -143,12 +161,18 @@ def _cmd_office_set_folders(args) -> int:
     if not workspace:
         return emit_harness_error(ValueError("no workspace selected; pass --workspace"), args=args, code="invalid_request")
     folders = [part.strip() for part in (getattr(args, "folders", None) or "").split(",") if part.strip()]
+    dry_run = bool(getattr(args, "dry_run", False))
     surface = store.update_surface(
         workspace,
         folders=folders,
         expect_revision=getattr(args, "expect_revision", None),
+        dry_run=dry_run,
     )
-    _print_stage42(_object_envelope("office", _office_surface_row(store, surface.workspace_id)), args=args, default_output="json")
+    row = _office_surface_row(store, surface.workspace_id, surface=surface if dry_run else None)
+    envelope = _object_envelope("office", row)
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
     return 0
 
 
@@ -157,11 +181,15 @@ def _cmd_office_resolve_conflict(args) -> int:
     workspace = _office_workspace_for(args)
     if not workspace:
         return emit_harness_error(ValueError("no workspace selected; pass --workspace"), args=args, code="invalid_request")
-    actor = store.resolve_conflict(workspace, args.actor, take=args.take)
+    dry_run = bool(getattr(args, "dry_run", False))
+    actor = store.resolve_conflict(workspace, args.actor, take=args.take, dry_run=dry_run)
     row = (
         _office_actor_row(actor, full=True)
         if actor is not None
         else {"id": args.actor, "workspace_id": workspace, "state": "archived", "take": args.take}
     )
-    _print_stage42(_object_envelope("office_actor", row), args=args, default_output="json")
+    envelope = _object_envelope("office_actor", row)
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
     return 0

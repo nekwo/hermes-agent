@@ -251,3 +251,150 @@ def test_snapshot_offices_section_and_conflict_parity_warning():
     codes = {w.get("code") for w in snap["parity"]["warnings"]}
     assert "office_actor_conflict" in codes
     assert snap["parity"]["contract_version"] == 44
+
+
+# ── dry-run: full validation, zero writes, zero events (mutation-arg trap) ──
+#
+# The Stage-42 mutation scaffolding auto-registers ``--dry-run`` on every office
+# verb; each MUST actually honor it. A dry-run performs full validation incl. the
+# revision guard, returns the WOULD-BE result, and leaves the store byte-identical
+# with no EventLog event (dry-runs are not mutations). Each test asserts the actor
+# / surface file is byte-identical across the dry-run AND that no event was
+# appended, then that the real run mutates + emits.
+
+
+def _office_event_count() -> int:
+    return sum(1 for _ in EventLog().iter_all())
+
+
+def test_upsert_dry_run_is_byte_identical_and_eventless():
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("dev"))
+    path = paths.office_actor_path(ws, "dev")
+    before_bytes = path.read_bytes()
+    before_events = _office_event_count()
+
+    would_be = store.upsert_actor(ws, _actor_payload("dev"), dry_run=True)
+    assert would_be.revision == 2, "dry-run must report the would-be (bumped) revision"
+    assert path.read_bytes() == before_bytes, "dry-run must not rewrite the actor file"
+    assert _office_event_count() == before_events, "dry-run must emit no event"
+
+    # The real run mutates + emits.
+    real = store.upsert_actor(ws, _actor_payload("dev"))
+    assert real.revision == 2
+    assert path.read_bytes() != before_bytes
+    assert _office_event_count() == before_events + 1
+
+
+def test_upsert_dry_run_on_fresh_office_creates_nothing():
+    ws = _make_workspace()
+    store = OfficeStore()
+    before_events = _office_event_count()
+    would_be = store.upsert_actor(ws, _actor_payload("dev"), dry_run=True)
+    assert would_be.actor_key == "dev"
+    assert not store.actor_exists(ws, "dev"), "dry-run created an actor file"
+    assert not store.surface_exists(ws), "dry-run lazily created the surface"
+    assert _office_event_count() == before_events, "dry-run must emit no event"
+
+
+def test_upsert_dry_run_still_enforces_revision_guard_and_validation():
+    ws = _make_workspace()
+    store = OfficeStore()
+    actor = store.upsert_actor(ws, _actor_payload("dev"))
+    with pytest.raises(StaleRevision):
+        store.upsert_actor(ws, _actor_payload("dev"), expect_revision=actor.revision + 5, dry_run=True)
+    with pytest.raises(ValueError):
+        store.upsert_actor(ws, {"persona_id": "dev", "items": []}, dry_run=True)
+
+
+def test_remove_dry_run_is_byte_identical_and_eventless():
+    ws = _make_workspace()
+    store = OfficeStore()
+    created = store.upsert_actor(ws, _actor_payload("dev"))
+    path = paths.office_actor_path(ws, "dev")
+    before_bytes = path.read_bytes()
+    before_events = _office_event_count()
+
+    would_be = store.remove_actor(ws, "dev", dry_run=True)
+    assert would_be.state == "archived"
+    assert would_be.revision == created.revision + 1
+    assert store.actor_exists(ws, "dev"), "dry-run archived the actor for real"
+    assert not paths.office_archived_actor_path(ws, "dev").exists()
+    assert path.read_bytes() == before_bytes
+    assert _office_event_count() == before_events
+
+    removed = store.remove_actor(ws, "dev")
+    assert removed.state == "archived"
+    assert not store.actor_exists(ws, "dev")
+    assert _office_event_count() == before_events + 1
+
+
+def test_restore_dry_run_is_byte_identical_and_eventless():
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("dev"))
+    store.remove_actor(ws, "dev")
+    archive_path = paths.office_archived_actor_path(ws, "dev")
+    before_bytes = archive_path.read_bytes()
+    before_events = _office_event_count()
+
+    would_be = store.restore_actor(ws, "dev", dry_run=True)
+    assert would_be.state == "active"
+    assert archive_path.exists(), "dry-run consumed the archive copy"
+    assert not store.actor_exists(ws, "dev"), "dry-run restored the actor for real"
+    assert archive_path.read_bytes() == before_bytes
+    assert _office_event_count() == before_events
+
+    restored = store.restore_actor(ws, "dev")
+    assert restored.state == "active"
+    assert store.actor_exists(ws, "dev")
+    assert _office_event_count() == before_events + 1
+
+
+def test_set_folders_dry_run_is_byte_identical_and_eventless():
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.ensure_surface(ws)
+    surface_path = paths.office_surface_path(ws)
+    before_bytes = surface_path.read_bytes()
+    before_events = _office_event_count()
+    before_revision = store.get_surface(ws).revision
+
+    would_be = store.update_surface(ws, folders=["West Wing"], dry_run=True)
+    assert "West Wing" in would_be.folders, "dry-run must report the would-be folders"
+    assert would_be.revision == before_revision + 1
+    assert surface_path.read_bytes() == before_bytes
+    assert _office_event_count() == before_events
+    assert store.get_surface(ws).revision == before_revision
+
+    updated = store.update_surface(ws, folders=["West Wing"])
+    assert "West Wing" in updated.folders
+    assert surface_path.read_bytes() != before_bytes
+    assert _office_event_count() == before_events + 1
+
+
+def test_resolve_conflict_dry_run_leaves_sidecar_and_is_eventless():
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("dev"))
+    sidecar = paths.office_conflict_path(ws, "dev")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text('{"actor_key": "dev", "kind": "both_changed", "remote_actor": null}', encoding="utf-8")
+    actor_path = paths.office_actor_path(ws, "dev")
+    before_actor_bytes = actor_path.read_bytes()
+    before_events = _office_event_count()
+
+    would_be = store.resolve_conflict(ws, "dev", take="local", dry_run=True)
+    assert would_be is not None and would_be.actor_key == "dev"
+    assert sidecar.exists(), "dry-run archived the conflict sidecar for real"
+    assert actor_path.read_bytes() == before_actor_bytes
+    assert _office_event_count() == before_events
+    # A dry-run does not unblock writes: the sidecar still guards upserts.
+    with pytest.raises(SyncConflict):
+        store.upsert_actor(ws, _actor_payload("dev"))
+
+    resolved = store.resolve_conflict(ws, "dev", take="local")
+    assert resolved is not None
+    assert not sidecar.exists()
+    assert _office_event_count() == before_events + 1
