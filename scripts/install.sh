@@ -65,6 +65,7 @@ NODE_VERSION="22"
 #   and keeps Docker bind-mounted /root/ volumes lean.
 ROOT_FHS_LAYOUT=false
 DETECTED_BROWSER_EXECUTABLE=""
+INSTALL_LAYOUT_RESOLVED=false
 
 # Options
 USE_VENV=true
@@ -388,6 +389,40 @@ is_termux() {
     [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *"com.termux/files/usr"* ]]
 }
 
+is_valid_hermes_checkout() {
+    local candidate="$1"
+    [ -n "$candidate" ] || return 1
+    [ -d "$candidate" ] || return 1
+    [ -f "$candidate/scripts/install.sh" ] || return 1
+    [ -f "$candidate/pyproject.toml" ] || return 1
+    [ -d "$candidate/.git" ] || return 1
+    git -C "$candidate" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+    git -C "$candidate" rev-parse --verify HEAD >/dev/null 2>&1 || return 1
+}
+
+detect_existing_checkout() {
+    local candidate root
+
+    # Prefer the checkout that owns this installer when the user runs
+    # scripts/install.sh from a fork. For curl|bash, BASH_SOURCE is not a repo
+    # path, so this quietly falls through to the normal clone path.
+    if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+        candidate="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd -P)" || candidate=""
+        if is_valid_hermes_checkout "$candidate"; then
+            echo "$candidate"
+            return 0
+        fi
+    fi
+
+    # Also support running a downloaded installer from inside an existing
+    # checkout. That keeps custom forks on their own origin remote.
+    root="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+    if is_valid_hermes_checkout "$root"; then
+        echo "$root"
+        return 0
+    fi
+}
+
 # Decide where the repo checkout + venv live, and where the `hermes` command
 # symlink goes.  Called after detect_os so $OS/$DISTRO are known.
 #
@@ -403,14 +438,28 @@ is_termux() {
 #
 # Always no-op when the user set --dir or $HERMES_INSTALL_DIR.
 resolve_install_layout() {
+    if [ "$INSTALL_LAYOUT_RESOLVED" = true ]; then
+        return 0
+    fi
+    INSTALL_LAYOUT_RESOLVED=true
+
     if [ "$INSTALL_DIR_EXPLICIT" = true ]; then
         log_info "Install directory: $INSTALL_DIR (explicit)"
         return 0
     fi
 
+    local default_install_dir="$HERMES_HOME/hermes-agent"
+    local existing_checkout=""
+    if [ ! -e "$default_install_dir" ]; then
+        existing_checkout="$(detect_existing_checkout || true)"
+    fi
+
     # Termux: package manager manages /data/data/..., keep code in HERMES_HOME.
     if is_termux; then
-        INSTALL_DIR="$HERMES_HOME/hermes-agent"
+        INSTALL_DIR="${existing_checkout:-$default_install_dir}"
+        if [ -n "$existing_checkout" ]; then
+            log_info "Existing Hermes checkout detected at $INSTALL_DIR - using it"
+        fi
         return 0
     fi
 
@@ -418,10 +467,15 @@ resolve_install_layout() {
     # macOS root installs keep the legacy layout because /usr/local/ on macOS
     # is Homebrew territory and we don't want to fight that.
     if [ "$OS" = "linux" ] && [ "$(id -u)" -eq 0 ]; then
-        if [ -d "$HERMES_HOME/hermes-agent/.git" ]; then
-            INSTALL_DIR="$HERMES_HOME/hermes-agent"
+        if [ -d "$default_install_dir/.git" ]; then
+            INSTALL_DIR="$default_install_dir"
             log_info "Existing install detected at $INSTALL_DIR — keeping legacy layout"
             log_info "  (new root installs use /usr/local/lib/hermes-agent)"
+            return 0
+        fi
+        if [ -n "$existing_checkout" ]; then
+            INSTALL_DIR="$existing_checkout"
+            log_info "Existing Hermes checkout detected at $INSTALL_DIR - using it"
             return 0
         fi
         INSTALL_DIR="/usr/local/lib/hermes-agent"
@@ -442,7 +496,10 @@ resolve_install_layout() {
     fi
 
     # Default: non-root, non-Termux → legacy user-scoped layout.
-    INSTALL_DIR="$HERMES_HOME/hermes-agent"
+    INSTALL_DIR="${existing_checkout:-$default_install_dir}"
+    if [ -n "$existing_checkout" ]; then
+        log_info "Existing Hermes checkout detected at $INSTALL_DIR - using it"
+    fi
 }
 
 get_command_link_dir() {

@@ -145,6 +145,8 @@ $PythonVersion = "3.11"
 # source of truth shared by Test-Python's fallback and Resolve-AvailablePythonVersion.
 $PythonFallbackVersions = @("3.12", "3.13", "3.10")
 $NodeVersion = "22"
+$script:InstallDirExplicit = $PSBoundParameters.ContainsKey("InstallDir")
+$script:InstallDirResolved = $false
 
 # Stage-protocol version.  Bumped only for genuinely breaking changes to the
 # manifest schema, stage-name set semantics, or stdout JSON shape.  Adding a
@@ -335,6 +337,74 @@ function Find-SystemBrowser {
     if ([string]::IsNullOrWhiteSpace($override)) { return $null }
     if (Test-Path $override) { return $override }
     return $null
+}
+
+function Test-HermesCheckout {
+    param([string]$Path)
+    if (-not $Path) { return $false }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $Path "scripts\install.ps1"))) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $Path "pyproject.toml"))) { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $Path ".git"))) { return $false }
+
+    Push-Location $Path
+    try {
+        $global:LASTEXITCODE = 0
+        $inside = & git -c windows.appendAtomically=false rev-parse --is-inside-work-tree 2>$null
+        if (($LASTEXITCODE -ne 0) -or ($inside -notmatch "true")) { return $false }
+
+        $global:LASTEXITCODE = 0
+        $null = & git -c windows.appendAtomically=false rev-parse --verify HEAD 2>$null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        Pop-Location
+    }
+}
+
+function Get-ExistingHermesCheckout {
+    $candidates = @()
+
+    if ($PSScriptRoot) {
+        $candidates += (Resolve-Path (Join-Path $PSScriptRoot "..") -ErrorAction SilentlyContinue |
+            Select-Object -ExpandProperty ProviderPath -First 1)
+    }
+
+    try {
+        $currentPath = (Get-Location).ProviderPath
+        $currentRoot = (& git -c windows.appendAtomically=false -C $currentPath rev-parse --show-toplevel 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $currentRoot) {
+            $candidates += $currentRoot
+        }
+    } catch {}
+
+    foreach ($candidate in $candidates) {
+        if (Test-HermesCheckout -Path $candidate) {
+            return (Resolve-Path -LiteralPath $candidate).ProviderPath
+        }
+    }
+    return $null
+}
+
+function Resolve-InstallDir {
+    if ($script:InstallDirResolved) { return }
+    $script:InstallDirResolved = $true
+
+    if ($script:InstallDirExplicit) {
+        Write-Info "Install directory: $InstallDir (explicit)"
+        return
+    }
+
+    if (Test-Path -LiteralPath $InstallDir) {
+        return
+    }
+
+    $checkout = Get-ExistingHermesCheckout
+    if ($checkout) {
+        $script:InstallDir = $checkout
+        Write-Info "Existing Hermes checkout detected at $InstallDir - using it"
+    }
 }
 
 function Write-BrowserEnv {
@@ -1271,6 +1341,7 @@ function Install-SystemPackages {
 # ============================================================================
 
 function Install-Repository {
+    Resolve-InstallDir
     Write-Info "Installing to $InstallDir..."
 
     $didUpdate = $false
@@ -3335,6 +3406,8 @@ function Get-InstallStage {
 }
 
 function Step-OutOfInstallDir {
+    Resolve-InstallDir
+
     # Windows refuses to delete a directory any shell is currently cd'd
     # inside -- and silently leaves orphan files behind, which then wedge
     # "is this a valid git repo" probes on re-install.  Harmless when the
