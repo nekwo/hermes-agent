@@ -14,7 +14,15 @@ from utils import atomic_json_write
 from . import paths
 from .errors import AgentRuntimeError
 from .events import EventLog
-from .models import AgentPersona, Event, PersonaAssignment, PersonaInstance, WorkerSession
+from .models import (
+    PERSONA_INSTANCE_ID_PREFIX,
+    AgentPersona,
+    Event,
+    PersonaAssignment,
+    PersonaInstance,
+    WorkerSession,
+    looks_like_persona_instance_id,
+)
 from .personas import profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
 from .state_patches import emit_persona_instance_patch, emit_persona_instance_remove
@@ -339,15 +347,27 @@ class PersonaInstanceStore:
             self._event("persona_instance.created", instance, {"mode": "task_bound", "placement_id": placement})
         changed = False
         normalized_spawned_by = safe_optional_token(spawned_by)
+        # ``spawned_by`` is retained as the provenance/primary-parent scalar and
+        # can legitimately be a non-instance principal (the operator adds an
+        # instance ⇒ spawned_by="operator"). The authoritative parent SET is
+        # STEERING, so it is seeded from the spawn parent ONLY when that parent is
+        # instance-shaped; a principal is never a steering parent. Seeding a
+        # principal here was the writer that made the HUD render "steered by
+        # operator" for the add-instance/occupied-chat mint.
+        seed_parents = (
+            [normalized_spawned_by]
+            if looks_like_persona_instance_id(normalized_spawned_by)
+            else []
+        )
         updates = {
             "mode": "task_bound",
             "current_task_id": normalized_goal,
             "goal_id": normalized_goal,
             "spawned_by": normalized_spawned_by,
-            # Keep the authoritative parent set in sync with the spawn parent at
-            # creation, so the on-disk record is self-consistent (not only healed
-            # by the read-time __post_init__ backfill).
-            "steered_by": [normalized_spawned_by] if normalized_spawned_by else [],
+            # Kept in sync with the (instance-shaped) spawn parent at creation, so
+            # the on-disk record is self-consistent — not only healed by the
+            # read-time __post_init__ backfill (which now applies the same guard).
+            "steered_by": seed_parents,
         }
         for attr, value in updates.items():
             if getattr(instance, attr) != value:
@@ -356,7 +376,17 @@ class PersonaInstanceStore:
         if changed:
             instance.updated_at = now()
             self._write(instance)
-            self._event("persona_instance.attributed", instance, {"goal_id": instance.goal_id, "spawned_by": instance.spawned_by})
+            self._event(
+                "persona_instance.attributed",
+                instance,
+                {
+                    "goal_id": instance.goal_id,
+                    "spawned_by": instance.spawned_by,
+                    # Preserve the raw provenance in the durable log even when it
+                    # is a principal that does not enter the steering set.
+                    "steered_by": list(instance.steered_by),
+                },
+            )
         return self.get(instance.id)
 
     def steer(
@@ -466,6 +496,86 @@ class PersonaInstanceStore:
         )
         return self.get(instance.id)
 
+    def repair_non_instance_steering(
+        self,
+        persona_instance_id: str | None = None,
+        *,
+        apply: bool = True,
+    ) -> dict[str, Any]:
+        """Strip non-instance principals out of steering fields (evented, dry-run aware).
+
+        A steering-parent SET (``steered_by``) and its mirror (``spawned_by``)
+        may hold ONLY persona-instance ids. A legacy mint seeded the operator
+        principal into them (``steered_by=["operator"]`` / ``spawned_by=
+        "operator"``), which the HUD then rendered as a phantom "steered by
+        operator" edge. This removes the non-instance entries surgically:
+
+        - ``steered_by`` keeps only its instance-shaped parents;
+        - a NON-instance ``spawned_by`` is re-pointed at the surviving primary
+          parent (``steered_by[0]``) when one remains, else cleared — restoring
+          the mirror invariant. An already instance-shaped ``spawned_by`` is left
+          untouched (the ``__post_init__`` backfill self-heals it into a bare
+          ``steered_by``), so a valid parent is never destroyed.
+
+        Everything else on the row (mode, goal, session) is untouched — this is a
+        steering repair, not a detach. Honors dry-run: with ``apply=False``
+        nothing is written and no event is emitted (the on-disk row stays
+        byte-identical); with ``apply=True`` each repaired row goes through the
+        single steer write path (``_commit_steer`` → one
+        ``persona_instance.steered`` event + state patch).
+        ``persona_instance_id`` targets one row; ``None`` scans every row.
+        """
+        targets = (
+            [self.get(persona_instance_id)]
+            if persona_instance_id
+            else self.list_all()
+        )
+        repairs: list[dict[str, Any]] = []
+        for instance in targets:
+            steered_before = list(instance.steered_by)
+            kept = [p for p in steered_before if looks_like_persona_instance_id(p)]
+            bogus_steered = [p for p in steered_before if not looks_like_persona_instance_id(p)]
+            spawned = instance.spawned_by
+            bogus_spawn = (
+                spawned
+                if (spawned and not looks_like_persona_instance_id(spawned))
+                else None
+            )
+            if not bogus_steered and bogus_spawn is None:
+                continue
+            updates: dict[str, Any] = {"steered_by": kept}
+            # Only rewrite the mirror when it is itself bogus; re-point it at the
+            # surviving primary, or clear it when no instance parent remains.
+            desired_spawn = spawned
+            if bogus_spawn is not None:
+                desired_spawn = kept[0] if kept else None
+                updates["spawned_by"] = desired_spawn
+            record = {
+                "persona_instance_id": instance.id,
+                "steered_by_before": steered_before,
+                "steered_by_after": kept,
+                "spawned_by_before": spawned,
+                "spawned_by_after": desired_spawn,
+                "removed_steered_by": bogus_steered,
+                "removed_spawned_by": bogus_spawn,
+            }
+            repairs.append(record)
+            if not apply:
+                continue
+            self._commit_steer(
+                instance,
+                updates,
+                added=[],
+                removed=bogus_steered,
+                detached=not kept,
+            )
+        return {
+            "applied": bool(apply),
+            "dry_run": not apply,
+            "repaired": repairs,
+            "repaired_count": len(repairs),
+        }
+
     def _apply_steer_edges(
         self,
         persona_instance_id: str,
@@ -489,6 +599,21 @@ class PersonaInstanceStore:
             token = safe_optional_token(parent)
             if not token:
                 continue
+            # Defense in depth for the steering invariant: a steering parent is a
+            # persona-INSTANCE id, never a principal. Reject a non-instance-shaped
+            # token loudly with the reason, BEFORE the store lookup, so no future
+            # caller (a replayed spec, a mangled graph edge) can reintroduce the
+            # "steered by operator" class of bug — and so the failure names the
+            # category error ("not an instance id") rather than a misleading
+            # "not found". Actor-token drift (persona_personainst_x) is first
+            # collapsed to its canonical instance shape, which the store lookup
+            # below then resolves to the real row.
+            shaped = canonical_persona_instance_id(token) or token
+            if not looks_like_persona_instance_id(shaped):
+                raise ValueError(
+                    "steering parent must be a persona-instance id "
+                    f"({PERSONA_INSTANCE_ID_PREFIX}*), not a non-instance principal: {token!r}"
+                )
             try:
                 parent_instance = self.get(token)
             except Exception as exc:
@@ -1657,7 +1782,11 @@ class PersonaAssignmentStore:
         )
 
 
-PERSONA_INSTANCE_ID_PREFIX = "personainst_"
+# ``PERSONA_INSTANCE_ID_PREFIX`` / ``looks_like_persona_instance_id`` are the
+# single id-shape authority, defined in ``models`` (the low layer the store row
+# lives in) and imported at the top of this module. Re-exported here verbatim so
+# existing ``from .persona_assignments import PERSONA_INSTANCE_ID_PREFIX``
+# callers (harness.py, persona_commands.py) keep resolving through one home.
 
 # An operator-channel actor token ('persona_' + instance id) that leaked into
 # a store row id. Live evidence 2026-07-10: persona_personainst_neko_supervisor

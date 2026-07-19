@@ -1055,6 +1055,14 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_steer)
     persona_instance_steer.add_argument("--json", action="store_true")
     persona_instance_steer.set_defaults(func=_cmd_persona_instance_steer)
+    persona_instance_repair = persona_instance_subs.add_parser(
+        "repair-steering",
+        help="Strip non-instance principals (e.g. the operator) out of a persona instance's steering fields; --dry-run previews without writing or emitting",
+    )
+    persona_instance_repair.add_argument("persona_instance_id", nargs="?", default=None, help="Target one row; omit and pass --all to scan every row")
+    persona_instance_repair.add_argument("--all", action="store_true", help="Scan and repair every persona-instance row")
+    _add_stage42_global_args(persona_instance_repair, mutation=True)
+    persona_instance_repair.set_defaults(func=_cmd_persona_instance_repair_steering)
     persona_instance_return = persona_instance_subs.add_parser("return-summary", help="Post a bounded child summary back into a parent chat session")
     persona_instance_return.add_argument("persona_instance_id")
     persona_instance_return.add_argument("--parent-session-id", required=True)

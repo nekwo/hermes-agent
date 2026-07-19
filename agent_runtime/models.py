@@ -9,6 +9,28 @@ from .proof_rules import ProofType
 from .states import PossessionState, RunState, StageStatus, TaskState, WorkerSessionState
 
 
+# The structural prefix every persona-instance id carries. Defined at this low
+# layer (no import back into persona_assignments, which would be a cycle) so the
+# PersonaInstance backfill can recognize instance-shaped tokens. The id authority
+# in ``persona_assignments`` re-exports this constant + predicate; do not fork a
+# second copy.
+PERSONA_INSTANCE_ID_PREFIX = "personainst_"
+
+
+def looks_like_persona_instance_id(token: object) -> bool:
+    """True when ``token`` is structurally a persona-instance id (``personainst_*``).
+
+    A steering-parent SET (``steered_by``) and its denormalized mirror
+    (``spawned_by``) may hold ONLY these. A non-instance principal — the
+    operator, a bare persona/role token, any provenance string — is never a
+    steering parent, so it must never be mirrored into a steering field from
+    provenance. Read projections filter on this predicate so a legacy row that
+    already carries such a value renders as an accounted anomaly, never as a
+    phantom "steered by <principal>" edge.
+    """
+    return isinstance(token, str) and token.strip().startswith(PERSONA_INSTANCE_ID_PREFIX)
+
+
 @dataclass(slots=True)
 class MissionIntent:
     title: str
@@ -505,7 +527,13 @@ class PersonaInstance:
         # set ``steered_by`` (mirroring ``spawned_by`` = steered_by[0]) is a
         # no-op here. Kept out of ``upgrade()`` on purpose: schema_version stays
         # 1 (serde's shared upgrade hook hard-rejects any other version).
-        if not self.steered_by and self.spawned_by:
+        #
+        # Guarded on instance-shape: ``spawned_by`` doubles as a provenance
+        # scalar and can legitimately hold a NON-instance principal (the
+        # operator). Mirroring that into ``steered_by`` is exactly the defect
+        # that made the HUD render "steered by operator" — a principal is not a
+        # steering parent, so only an instance-shaped scalar seeds the set.
+        if not self.steered_by and looks_like_persona_instance_id(self.spawned_by):
             self.steered_by = [self.spawned_by]
 
 

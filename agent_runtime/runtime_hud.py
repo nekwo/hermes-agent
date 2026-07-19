@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from .models import looks_like_persona_instance_id
+
 # Bound the roster so a large level cannot bloat every chat turn. The operator's
 # widget wraps chips; the fed block lists names and notes the overflow count.
 SITUATIONAL_HUD_ROSTER_CAP = 16
@@ -110,7 +112,12 @@ def _parent_refs(instance: Any) -> list[str]:
     """The steering-parent ref set of an instance (fan-in aware): the
     authoritative ``steered_by`` list, falling back to ``[spawned_by]`` for
     un-migrated records. Mirrors the launcher's
-    ``missionAgentInstanceParentIds`` so both ends agree who steers whom."""
+    ``missionAgentInstanceParentIds`` so both ends agree who steers whom.
+
+    Raw refs — a ref may name an instance id, a persona id, or a role, resolved
+    downstream in :func:`_steering_block`. Principals that resolve to nobody AND
+    are not instance-shaped (the operator) are dropped there, not here, so the
+    intentional persona/role resolution is preserved."""
 
     refs = [ref for ref in (_text(item) for item in (getattr(instance, "steered_by", None) or ())) if ref]
     if refs:
@@ -149,6 +156,14 @@ def _steering_block(instance: Any, roster: Iterable[Any], *, self_id: str | None
     steered_by: list[dict[str, Any]] = []
     for ref in _parent_refs(instance):
         parent = _resolve_parent_ref(ref, roster)
+        # Drop a phantom steerer: a ref that resolves to nobody AND is not even
+        # instance-shaped is a non-agent principal (the operator, leaked into a
+        # steering field by a legacy mint), never a real steer parent — so the
+        # HUD must not narrate "steered by operator". A resolved persona/role ref,
+        # or an instance-shaped-but-departed ref ("off level"), is a genuine fact
+        # and is kept.
+        if parent is None and not looks_like_persona_instance_id(ref):
+            continue
         entry: dict[str, Any] = {"ref": ref}
         if parent is not None:
             entry["persona_instance_id"] = _text(getattr(parent, "id", None))

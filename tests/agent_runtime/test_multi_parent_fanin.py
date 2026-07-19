@@ -202,8 +202,9 @@ def test_set_parents_dedupes_a_drift_and_canonical_twin_of_one_parent():
 # --- model: legacy backfill ----------------------------------------------
 
 
-def test_legacy_record_backfills_steered_by_from_spawned_by():
-    # A constructed instance with only the scalar parent seeds the set.
+def test_legacy_record_backfills_steered_by_from_instance_shaped_spawned_by():
+    # A constructed instance with only the scalar parent seeds the set — but ONLY
+    # when that scalar is instance-shaped (a real steer parent), never a principal.
     inst = PersonaInstance(
         id="x",
         persona_id="dev",
@@ -212,16 +213,40 @@ def test_legacy_record_backfills_steered_by_from_spawned_by():
         profile_id=None,
         runtime_root="r",
         state=WorkerSessionState.IDLE,
-        spawned_by="parent_1",
+        spawned_by="personainst_parent_1",
     )
-    assert inst.steered_by == ["parent_1"]
+    assert inst.steered_by == ["personainst_parent_1"]
 
     # A serialized legacy dict (no steered_by key) round-trips with the backfill.
     raw = to_jsonable(inst)
     raw.pop("steered_by", None)
     reloaded = from_jsonable(PersonaInstance, raw)
-    assert reloaded.steered_by == ["parent_1"]
+    assert reloaded.steered_by == ["personainst_parent_1"]
     assert reloaded.schema_version == 1  # not bumped (serde upgrade() hard-gates)
+
+
+def test_backfill_does_not_mirror_a_non_instance_principal_into_steered_by():
+    # Regression: ``spawned_by`` doubles as a provenance scalar and can hold a
+    # principal (operator add-instance ⇒ spawned_by="operator"). Mirroring that
+    # into steered_by is exactly the defect that made the HUD say "steered by
+    # operator" — the set stays empty for a non-instance-shaped scalar.
+    inst = PersonaInstance(
+        id="x",
+        persona_id="neko_supervisor",
+        role="supervisor",
+        display_name="d",
+        profile_id=None,
+        runtime_root="r",
+        state=WorkerSessionState.IDLE,
+        spawned_by="operator",
+    )
+    assert inst.steered_by == []
+    assert inst.spawned_by == "operator"  # provenance preserved, just not steering
+
+    raw = to_jsonable(inst)
+    raw.pop("steered_by", None)
+    reloaded = from_jsonable(PersonaInstance, raw)
+    assert reloaded.steered_by == []
 
 
 # --- snapshot: agent_topology N->1 fan-in --------------------------------

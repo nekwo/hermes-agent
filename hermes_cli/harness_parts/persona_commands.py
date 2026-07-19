@@ -1557,6 +1557,56 @@ def _cmd_persona_instance_sweep_orphans(args) -> int:
     return 0
 
 
+def _cmd_persona_instance_repair_steering(args) -> int:
+    """Strip non-instance principals (e.g. the operator) out of a persona
+    instance's steering fields. A steering parent is a persona-instance id; a
+    principal that leaked into ``steered_by`` / ``spawned_by`` via a legacy mint
+    renders as a phantom "steered by <principal>" edge. Honors --dry-run
+    (validate + preview, write nothing, emit nothing)."""
+    cfg = load_agent_runtime_config()
+    if not persona_assignment_store_enabled(cfg):
+        data = {
+            "ok": False,
+            "feature_enabled": persona_instance_runtime_enabled(cfg),
+            "assignment_store_enabled": False,
+            "error": "persona assignment store is disabled",
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    target = safe_optional_token(getattr(args, "persona_instance_id", None))
+    scan_all = bool(getattr(args, "all", False))
+    if not target and not scan_all:
+        data = {"ok": False, "error": "pass a persona_instance_id or --all"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    if target and scan_all:
+        data = {"ok": False, "error": "pass either a persona_instance_id or --all, not both"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    dry_run = bool(getattr(args, "dry_run", False))
+    store = PersonaInstanceStore()
+    try:
+        result = store.repair_non_instance_steering(target or None, apply=not dry_run)
+    except Exception as exc:
+        data = {"ok": False, "error": safe_assignment_text(str(exc), limit=240) or "repair failed"}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    data = {"ok": True, "dry_run": dry_run, "persona_instance_steering_repair": result}
+    if args.json:
+        print(emit_json(data))
+    else:
+        verb = "would repair" if dry_run else "repaired"
+        print(f"{verb} {result['repaired_count']} row(s) with non-instance steering entries")
+        for rec in result["repaired"]:
+            print(
+                f"  {rec['persona_instance_id']}: "
+                f"steered_by {rec['steered_by_before']} -> {rec['steered_by_after']}; "
+                f"spawned_by {rec['spawned_by_before']!r} -> {rec['spawned_by_after']!r}; "
+                f"removed {rec['removed_steered_by']}"
+            )
+    return 0
+
+
 def _cmd_persona_instance_steer(args) -> int:
     cfg = load_agent_runtime_config()
     if not persona_assignment_store_enabled(cfg):
