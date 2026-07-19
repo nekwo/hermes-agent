@@ -7,12 +7,19 @@ base only, but persona resolvers still find the mothballed dev/qa/neko personas.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
+from hermes_constants import get_default_hermes_root
+
 from agent_runtime.config import (
     ensure_persisted_personas,
     get_persisted_persona,
     persona_records_from_config,
+    provision_bundled_personas,
 )
-from agent_runtime.personas import BASE_PERSONA_ID, PROFILE_ROLE_SENTINEL, seed_personas
+from agent_runtime.personas import BASE_PERSONA_ID, BUNDLED_PERSONA_PROFILES, PROFILE_ROLE_SENTINEL, seed_personas
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.store import AgentStore
 
@@ -59,3 +66,51 @@ def test_catalog_still_contains_typed_pipeline_personas():
     catalog = {p.id for p in persona_records_from_config()}
     assert {"neko_supervisor", "dev", "backend_dev", "qa"}.issubset(catalog)
     assert BASE_PERSONA_ID not in catalog  # base is a seed, not a pipeline template
+
+
+def _create_bundled_profile_dirs(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    for profile in set(BUNDLED_PERSONA_PROFILES.values()):
+        (get_default_hermes_root() / "profiles" / profile).mkdir(parents=True)
+
+
+def test_bundled_persona_provisioning_preflights_every_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (get_default_hermes_root() / "profiles" / "base").mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="bundled persona profiles are missing"):
+        provision_bundled_personas()
+
+    # No typed agent is persisted when even one backing profile is missing.
+    assert AgentStore().list_all() == []
+
+
+def test_bundled_persona_provisioning_persists_only_profile_backed_agents(tmp_path, monkeypatch):
+    _create_bundled_profile_dirs(tmp_path, monkeypatch)
+
+    provisioned = provision_bundled_personas()
+
+    by_id = {persona.id: persona for persona in provisioned}
+    assert set(by_id) == set(BUNDLED_PERSONA_PROFILES)
+    assert {persona_id: persona.hermes_profile for persona_id, persona in by_id.items()} == BUNDLED_PERSONA_PROFILES
+    assert {persona.id for persona in AgentStore().list_all()} == set(BUNDLED_PERSONA_PROFILES)
+
+
+def test_generic_bootstrap_does_not_add_base_after_bundled_team(tmp_path, monkeypatch):
+    _create_bundled_profile_dirs(tmp_path, monkeypatch)
+    provision_bundled_personas()
+
+    ensure_persisted_personas()
+
+    assert {persona.id for persona in AgentStore().list_all()} == set(BUNDLED_PERSONA_PROFILES)
+
+
+def test_bundled_persona_provisioning_repairs_an_unbacked_legacy_agent(tmp_path, monkeypatch):
+    _create_bundled_profile_dirs(tmp_path, monkeypatch)
+    legacy_dev = next(persona for persona in persona_records_from_config() if persona.id == "dev")
+    legacy_dev.hermes_profile = None
+    AgentStore().save(legacy_dev)
+
+    provision_bundled_personas()
+
+    assert AgentStore().get("dev").hermes_profile == "launcher-dev"

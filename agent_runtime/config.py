@@ -10,7 +10,7 @@ import yaml
 from hermes_constants import get_config_path
 from hermes_cli.profiles import profile_exists
 
-from .personas import DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
+from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
 from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, MissionPlanConfig, NormalWorkerFlowConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
@@ -345,10 +345,12 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
     store = AgentStore()
     stored = {persona.id: persona for persona in store.list_all()}
-    # Base-profile foundation: seed ONLY the base profile into the store. AgentStore is
-    # what Mission Control surfaces (snapshot reads store.list_all()), so the store stays
-    # base-only. The typed pipeline personas are NOT persisted/shown.
-    seed = {persona.id: persona for persona in seed_personas()}
+    # Base-profile foundation: seed ONLY the base profile for a generic Hermes
+    # installation. Launcher installations explicitly provision the bundled typed
+    # team; once that team exists, later bootstrap calls must not add a fifth `base`
+    # persona on top of it.
+    has_bundled_team = bool(BUNDLED_PERSONA_IDS.intersection(stored))
+    seed = {} if has_bundled_team else {persona.id: persona for persona in seed_personas()}
     changed = False
     for persona_id, persona in seed.items():
         if persona_id not in stored:
@@ -373,6 +375,61 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
     catalog = {persona.id: persona for persona in persona_records_from_config(cfg)}
     merged = {**catalog, **stored}
     return list(merged.values())
+
+
+def provision_bundled_personas(cfg: AgentRuntimeConfig | None = None):
+    """Persist the Launcher's typed default team after a profile preflight.
+
+    The generic Hermes bootstrap remains base-only. The Launcher explicitly
+    opts into this team during installation, after creating every required
+    profile. Preflighting all bindings before the first store write prevents
+    Mission Control from advertising a half-runnable backend/frontend team.
+    Existing custom bindings are preserved when they still point at a real
+    profile; missing/unbacked legacy rows are repaired to the bundled binding.
+    """
+    from .store import AgentStore
+
+    cfg = cfg or load_agent_runtime_config()
+    resolved = {persona.id: persona for persona in persona_records_from_config(cfg)}
+    missing_definitions = sorted(BUNDLED_PERSONA_IDS.difference(resolved))
+    if missing_definitions:
+        raise ValueError(
+            "bundled persona definitions are missing: "
+            + ", ".join(missing_definitions)
+        )
+
+    # This is the Launcher's explicit bundled-team contract. In particular,
+    # generic Hermes may resolve Neko to a configured head profile, while the
+    # Launcher installer always creates and binds the bundled Neko to `base`.
+    for persona_id, profile in BUNDLED_PERSONA_PROFILES.items():
+        resolved[persona_id].hermes_profile = profile
+
+    missing_profiles = sorted(
+        persona_id
+        for persona_id in BUNDLED_PERSONA_IDS
+        if not str(resolved[persona_id].hermes_profile or "").strip()
+        or not profile_exists(str(resolved[persona_id].hermes_profile))
+    )
+    if missing_profiles:
+        raise ValueError(
+            "bundled persona profiles are missing: " + ", ".join(missing_profiles)
+        )
+
+    store = AgentStore()
+    stored = {persona.id: persona for persona in store.list_all()}
+    provisioned = []
+    for persona_id in sorted(BUNDLED_PERSONA_IDS):
+        desired = resolved[persona_id]
+        current = stored.get(persona_id)
+        if current is None:
+            current = store.save(desired)
+        else:
+            current_profile = str(current.hermes_profile or "").strip()
+            if not current_profile or not profile_exists(current_profile):
+                current.hermes_profile = desired.hermes_profile
+                current = store.save(current)
+        provisioned.append(current)
+    return provisioned
 
 
 def get_persisted_persona(persona_id: str, cfg: AgentRuntimeConfig | None = None):

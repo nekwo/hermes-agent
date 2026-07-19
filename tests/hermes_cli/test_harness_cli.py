@@ -25,6 +25,12 @@ def test_harness_parser_exposes_task_create():
     assert args.command == "harness" and args.task_command == "create"
 
 
+def test_harness_init_exposes_atomic_bundled_persona_opt_in():
+    args = parser().parse_args(["harness", "init", "--with-bundled-personas", "--json"])
+    assert args.harness_command == "init"
+    assert args.with_bundled_personas is True
+
+
 def test_harness_mission_chat_steer_no_active_turn_returns_structured_json(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     args = parser().parse_args(

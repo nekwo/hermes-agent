@@ -94,6 +94,18 @@ ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
 
 DEFAULT_SUPERVISOR_PERSONA_ID = "neko_supervisor"
 
+# The Launcher-owned install path deliberately opts back into the typed Mission
+# Control team. Every advertised agent must have a real Hermes profile behind
+# it; these bindings are the cross-stack install contract consumed by
+# ``harness init --with-bundled-personas`` and the Launcher's verifier.
+BUNDLED_PERSONA_PROFILES: dict[str, str] = {
+    DEFAULT_SUPERVISOR_PERSONA_ID: BASE_PERSONA_ID,
+    "dev": "launcher-dev",
+    "backend_dev": "backend-dev",
+    "qa": "qa",
+}
+BUNDLED_PERSONA_IDS = frozenset(BUNDLED_PERSONA_PROFILES)
+
 PROFILE_CHAT_FALLBACK_TOOLSETS = (
     "file",
     "search",
@@ -227,6 +239,7 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills", "mission_goal"],
             system_prompt_path="personas/neko_supervisor/system.md",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
+            hermes_profile=None,
             skills=["harness-mission-lead", "harness-continuity", "harness-runtime-model"],
         ),
         AgentPersona(
@@ -239,17 +252,8 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
             system_prompt_path="personas/dev/system.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
+            hermes_profile=BUNDLED_PERSONA_PROFILES["dev"],
             skills=[
-                "agent-runtime-harness",
-                "staged-deep-audit-delivery",
-                "aaa-feature-delivery",
-                "test-driven-development",
-                "systematic-debugging",
-                "flutter-ui-development",
-                "eternia-launcher-workflow",
-                "frontend-backend-contract-handoff",
-                "launcher-stagec-mcp-screenshot",
-                "harness-handoff-recovery",
                 "harness-continuity",
                 "harness-dev-delivery",
                 "launcher-analyze-proof",
@@ -266,17 +270,8 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
             system_prompt_path="personas/dev/system.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
-            hermes_profile="backend-dev",
+            hermes_profile=BUNDLED_PERSONA_PROFILES["backend_dev"],
             skills=[
-                "agent-runtime-harness",
-                "staged-deep-audit-delivery",
-                "aaa-feature-delivery",
-                "test-driven-development",
-                "systematic-debugging",
-                "eternia-local-gates",
-                "eternia-backend-tests",
-                "frontend-backend-contract-handoff",
-                "harness-handoff-recovery",
                 "harness-continuity",
                 "harness-dev-delivery",
             ],
@@ -293,6 +288,7 @@ def default_personas() -> list[AgentPersona]:
             toolsets=["file", "search", "terminal", "browser", "vision", "session_search", "skills"],
             system_prompt_path="personas/qa/system.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
+            hermes_profile=BUNDLED_PERSONA_PROFILES["qa"],
             skills=["harness-qa-verdict"],
         ),
     ]

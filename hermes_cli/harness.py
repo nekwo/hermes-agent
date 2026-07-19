@@ -17,7 +17,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
-from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, provision_bundled_personas
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.coordinator_permissions import (
@@ -232,6 +232,11 @@ def build_parser(parent_subparsers) -> None:
     parser.set_defaults(func=harness_command)
 
     init = subs.add_parser("init", help="Initialize harness store and default personas")
+    init.add_argument(
+        "--with-bundled-personas",
+        action="store_true",
+        help="Persist the profile-backed Neko, Launcher Dev, Backend Dev, and QA team",
+    )
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=_cmd_init)
 
@@ -2978,7 +2983,18 @@ def _matrix_binding_cases(base: dict[str, str], variations: dict[str, list[str]]
 
 
 def _cmd_init(args) -> int:
-    personas = ensure_persisted_personas(load_agent_runtime_config())
+    cfg = load_agent_runtime_config()
+    if getattr(args, "with_bundled_personas", False):
+        try:
+            personas = provision_bundled_personas(cfg)
+        except ValueError as exc:
+            return emit_harness_error(
+                exc,
+                args=args,
+                code="bundled_persona_profiles_missing",
+            )
+    else:
+        personas = ensure_persisted_personas(cfg)
     data = {"personas": [p.id for p in personas]}
     print(emit_json(data) if args.json else f"Initialized harness personas: {', '.join(data['personas'])}")
     return 0
