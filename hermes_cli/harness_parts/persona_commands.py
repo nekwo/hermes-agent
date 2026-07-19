@@ -237,6 +237,8 @@ def _cmd_persona_instance_create(args) -> int:
                     placement_id=placement_id,
                     display_name=display_name or safe_assignment_text(args.title, limit=120) or persona_id,
                     session_id=getattr(args, "session_id", None),
+                    workspace_id=safe_assignment_token(getattr(args, "workspace_id", None)) or None,
+                    realm_id=safe_assignment_token(getattr(args, "realm_id", None)) or None,
                 )
             else:
                 instance = PersonaInstanceStore().create_operator_chat(
@@ -364,6 +366,8 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 session_id=args.session_id,
                 display_name=explicit_display_name,
                 default_display_name=honest_default_display_name,
+                workspace_id=safe_assignment_token(getattr(args, "workspace_id", None)) or None,
+                realm_id=safe_assignment_token(getattr(args, "realm_id", None)) or None,
             )
             instance = _maybe_stamp_spawned_by(instance, coordinator_id=coordinator_id)
         else:

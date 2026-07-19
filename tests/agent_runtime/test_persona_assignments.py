@@ -444,6 +444,50 @@ def test_additional_placement_does_not_reuse_another_instance_session(isolate_ag
     assert placed.session_id.startswith(f"persona_chat_{placed.id}_")
 
 
+def test_additional_placement_stamps_scope_pointers(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    placed = store.add_instance(
+        persona_id="qa",
+        placement_id="agent_a1b2c3d4",
+        display_name="QA Agent (2)",
+        workspace_id="ws_testv4",
+        realm_id="realm_test",
+    )
+    assert placed.workspace_id == "ws_testv4"
+    assert placed.realm_id == "realm_test"
+
+    # The pointers survive the store round-trip and ship in the snapshot row.
+    reloaded = store.get(placed.id)
+    assert reloaded.workspace_id == "ws_testv4"
+    assert reloaded.realm_id == "realm_test"
+    summary = persona_instance_summary(reloaded)
+    assert summary["workspace_id"] == "ws_testv4"
+    assert summary["realm_id"] == "realm_test"
+
+    # A plain re-open that carries no scope must NOT clear the pointers —
+    # ordinary chat opens don't know scope and never erase provenance.
+    reopened = store.open_chat(
+        persona_id="qa",
+        persona_instance_id=placed.id,
+        session_id=placed.session_id,
+    )
+    assert reopened.workspace_id == "ws_testv4"
+    assert reopened.realm_id == "realm_test"
+
+
+def test_scope_pointers_default_none_for_unscoped_lanes(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    chat = store.create_operator_chat(
+        persona_id="profile:alice",
+        display_name="Alice Agent",
+    )
+    assert chat.workspace_id is None
+    assert chat.realm_id is None
+    summary = persona_instance_summary(chat)
+    assert summary["workspace_id"] is None
+    assert summary["realm_id"] is None
+
+
 def test_assignment_store_create_or_resume_uses_signal_hash(isolate_agent_runtime_root):
     store = PersonaAssignmentStore()
     spec = PersonaAssignmentSpec(

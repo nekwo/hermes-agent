@@ -479,6 +479,16 @@ class PersonaInstance:
     state: WorkerSessionState
     mode: str = "configured"
     goal_id: str | None = None
+    # Scope-provenance pointers: the Mission Control realm/workspace this
+    # instance belongs to, stamped at placement creation from the operator
+    # client's active scope (a deliberate placement is minted INSIDE one
+    # workspace's scene). None = runtime-global — canonical seeded rows and
+    # pre-pointer records. These are the instance's own "belongs to" claim;
+    # read-side consumers resolve the ids against the live realm/workspace
+    # stores and fall back to roster/goal joins, so a stale pointer degrades
+    # honestly instead of inventing scope.
+    realm_id: str | None = None
+    workspace_id: str | None = None
     # Legacy scalar parent. Retained as a denormalized back-compat MIRROR of the
     # primary steer parent (``steered_by[0]``); the PersonaInstanceStore is the
     # single writer that keeps it in sync. New code reads ``steered_by``.

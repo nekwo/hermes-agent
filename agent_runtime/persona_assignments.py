@@ -1157,6 +1157,8 @@ class PersonaInstanceStore:
         default_display_name: str | None = None,
         profile_id: str | None = None,
         kill_active: bool = False,
+        workspace_id: str | None = None,
+        realm_id: str | None = None,
     ) -> PersonaInstance:
         """Bind a persona instance to a durable chat session without running a turn.
 
@@ -1239,6 +1241,17 @@ class PersonaInstanceStore:
             instance.profile_id = safe_profile_id
         elif normalized_persona.startswith("profile:") and not instance.profile_id:
             instance.profile_id = normalized_persona.split(":", 1)[1]
+        # Scope-provenance pointers: a provided workspace/realm is the caller's
+        # authoritative placement-scope claim (the launcher stamps its active
+        # scope when minting a placement) and applies on create AND re-open; an
+        # omitted one never clears an existing pointer (plain chat re-opens
+        # don't know scope and must not erase it).
+        safe_workspace_id = safe_assignment_token(workspace_id) if workspace_id is not None else None
+        safe_realm_id = safe_assignment_token(realm_id) if realm_id is not None else None
+        if safe_workspace_id:
+            instance.workspace_id = safe_workspace_id
+        if safe_realm_id:
+            instance.realm_id = safe_realm_id
         instance.mode = "chat"
         instance.session_id = normalized_session
         instance.current_assignment_id = None
@@ -1276,6 +1289,8 @@ class PersonaInstanceStore:
         display_name: str | None = None,
         default_display_name: str | None = None,
         session_id: str | None = None,
+        workspace_id: str | None = None,
+        realm_id: str | None = None,
     ) -> PersonaInstance:
         normalized_persona = _normalize_instance_source_persona(persona_id)
         normalized_placement = safe_assignment_token(placement_id)
@@ -1303,6 +1318,8 @@ class PersonaInstanceStore:
             default_display_name=default_display_name,
             profile_id=_profile_id_for_persona_or_template(normalized_persona),
             kill_active=False,
+            workspace_id=workspace_id,
+            realm_id=realm_id,
         )
 
     def _session_owned_by_other_instance(self, session_id: str, instance_id: str) -> bool:
@@ -2154,6 +2171,8 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "lifecycle_mode": instance.mode,
         "mode": instance.mode,
         "goal_id": instance.goal_id,
+        "workspace_id": instance.workspace_id,
+        "realm_id": instance.realm_id,
         "spawned_by": instance.spawned_by,
         "steered_by": list(instance.steered_by),
         "returned_to": instance.returned_to,
