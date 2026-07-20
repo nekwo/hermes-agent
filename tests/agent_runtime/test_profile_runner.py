@@ -154,6 +154,73 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
     ]
 
 
+def test_persona_chat_runner_forces_native_compression_tip_rotation():
+    class CompressionAgent(FakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.compression_in_place = True
+
+        def run_conversation(self, user_message, system_message=None, task_id=None):
+            assert self.compression_in_place is False
+            assert self._persona_chat_root_session_id == "chat_root"
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    result = ProfileAgentRunner(agent_factory=CompressionAgent).run(
+        AgentRunRequest(
+            profile=None,
+            user_message="compress safely",
+            session_id="chat_tip",
+            root_chat_session_id="chat_root",
+        )
+    )
+
+    assert result.final_response == "ok"
+
+
+def test_persona_chat_runner_applies_one_turn_compression_proof_overrides():
+    class Compressor:
+        context_length = 400_000
+        threshold_percent = 0.5
+        threshold_tokens = 200_000
+        protect_first_n = 3
+        protect_last_n = 12
+
+    class CompressionAgent(FakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.compression_in_place = True
+            self.context_compressor = Compressor()
+
+        def run_conversation(self, user_message, system_message=None, task_id=None):
+            assert self.context_compressor.threshold_tokens == 500
+            assert self.context_compressor.threshold_percent == 0.00125
+            assert self.context_compressor.protect_first_n == 0
+            assert self.context_compressor.protect_last_n == 1
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    result = ProfileAgentRunner(agent_factory=CompressionAgent).run(
+        AgentRunRequest(
+            profile=None,
+            user_message="compress safely",
+            session_id="chat_tip",
+            root_chat_session_id="chat_root",
+            compression_threshold_tokens_override=500,
+            compression_protect_first_n_override=0,
+            compression_protect_last_n_override=1,
+        )
+    )
+
+    assert result.final_response == "ok"
+
+
 def test_runner_attaches_redaction_safe_model_input(monkeypatch):
     monkeypatch.setattr(
         "agent_runtime.profile_runner.resolve_runtime_provider",

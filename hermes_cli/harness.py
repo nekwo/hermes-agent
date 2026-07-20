@@ -121,7 +121,7 @@ from agent_runtime.persona_chat_continuity import (
 )
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.observability import build_observability
-from agent_runtime.persona_runtime import GPTPersonaRuntime
+from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_runtime_tool_contract
 from agent_runtime.personas import profile_chat_toolsets, seed_personas
 from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
 from agent_runtime.queued_skills import consume_skills_for_next_turn, queue_skill_for_next_turn
@@ -1169,6 +1169,9 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--idempotency-key", default=None)
     mission_chat_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
+    mission_chat_message.add_argument("--compression-threshold-tokens", type=int, default=None, help="One-turn native-compression proof seam; overrides the compressor token threshold without changing profile config")
+    mission_chat_message.add_argument("--compression-protect-first-n", type=int, default=None, help="One-turn native-compression proof seam; override protected head messages")
+    mission_chat_message.add_argument("--compression-protect-last-n", type=int, default=None, help="One-turn native-compression proof seam; override protected tail messages")
     mission_chat_message.add_argument("--relay-chain", default=None, help="Comma-separated canonical persona ids already on the agent-relay chain (envelope provenance for chained agent_chat_send hops)")
     mission_chat_message.add_argument("--relay-deadline-epoch", type=float, default=None, help="Absolute unix-epoch deadline shared by every hop on the relay chain")
     mission_chat_message.add_argument("--json", action="store_true")

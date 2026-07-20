@@ -110,6 +110,19 @@ class ReadModelConfig:
 
 
 @dataclass(slots=True)
+class PersonaChatConfig:
+    """Process-resident persona-chat cache policy.
+
+    Native SessionDB history, the root lease, and the turn journal remain
+    authoritative when this optimization is disabled.
+    """
+
+    hot_sessions_enabled: bool = False
+    max_hot_sessions: int = 8
+    idle_ttl_seconds: int = 1800
+
+
+@dataclass(slots=True)
 class EventLogConfig:
     """Durable-log hygiene (C6a): size-gated, offset-safe rotation of the
     append-only ``events.jsonl``.
@@ -202,8 +215,8 @@ class RuntimeConfig:
     repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)
     read_model: ReadModelConfig = field(default_factory=ReadModelConfig)
+    persona_chat: PersonaChatConfig = field(default_factory=PersonaChatConfig)
     event_log: EventLogConfig = field(default_factory=EventLogConfig)
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
     supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
-

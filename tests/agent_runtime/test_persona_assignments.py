@@ -14,7 +14,12 @@ from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, PersonaInstance, Proof, Task
-from agent_runtime.mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_record, persist_mission_chat_turn
+from agent_runtime.mission_chat_turns import (
+    mission_chat_turn_elements,
+    mission_chat_turn_record,
+    persist_mission_chat_turn,
+    transition_mission_chat_turn,
+)
 from agent_runtime.persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
     ChatBusyError,
@@ -1521,8 +1526,8 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
             "active_session_id": "chat_old_123",
             "runtime_state": "unknown",
             "last_runtime_transition": None,
-            "observer_identity": "external_cli",
-            "observer_time": None,
+            "runtime_observer_id": "external_cli",
+            "runtime_observed_at": None,
             "continuation_depth": 0,
             "last_resumed_at": None,
         }
@@ -2264,6 +2269,41 @@ def test_persona_chat_delete_reports_missing_without_silent_success(
     assert payload["error"] == "persona chat session not found: missing_chat_123"
 
 
+def test_persona_chat_delete_rejects_foreign_instance_before_mutation(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    store = PersonaInstanceStore()
+    owner = store.create_operator_chat(persona_id="dev", display_name="Owner")
+    foreign = store.add_instance(
+        persona_id="qa", placement_id="foreign-delete", display_name="Foreign"
+    )
+    db.create_session(owner.session_id, "agent_runtime_persona_chat")
+    db.append_message(owner.session_id, "user", "must survive")
+
+    code = harness._cmd_persona_chat_delete(
+        SimpleNamespace(
+            session_id=owner.session_id,
+            persona_id=foreign.persona_id,
+            persona_instance_id=foreign.id,
+            requested_by="test",
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_kind"] == "foreign_chat_session"
+    assert db.get_session(owner.session_id) is not None
+    assert PersonaInstanceStore().get(owner.id).session_id == owner.session_id
+
+
 def test_free_floating_chat_session_binding_reuses_resume_and_opens_fresh_chat(monkeypatch, isolate_agent_runtime_root):
     from hermes_cli import harness
 
@@ -2687,7 +2727,7 @@ def test_prompt_observability_reports_redaction_safe_available_skill_catalog(
 
 
 def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, capsys, isolate_agent_runtime_root):
-    """Chat-first wiring: auto-run uses chat_reply (no decision/task), persists the
+    """Chat-first wiring: auto-run uses native mission chat (no decision/task), persists the
     redacted operator + agent turns, wires SessionDB for recall, and completes
     the assignment with run_ids=[]/task_id=None."""
     from types import SimpleNamespace
@@ -2710,7 +2750,7 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
         def __init__(self, *args, **kwargs):
             captured["runtime_kwargs"] = kwargs
 
-        def chat_reply(self, persona, message, **kwargs):
+        def mission_chat_reply(self, persona, message, **kwargs):
             captured["chat_message"] = message
             return SimpleNamespace(final_response="Hey — doing great, what's up?")
 
@@ -2777,7 +2817,7 @@ def test_profile_backed_operator_chat_auto_run_resolves_profile_persona(monkeypa
         def __init__(self, *args, **kwargs):
             captured["runtime_kwargs"] = kwargs
 
-        def chat_reply(self, persona, message, **kwargs):
+        def mission_chat_reply(self, persona, message, **kwargs):
             captured["persona"] = persona
             captured["chat_message"] = message
             return SimpleNamespace(final_response="Alice is online.")
@@ -2849,7 +2889,7 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
         def __init__(self, *args, **kwargs):
             captured["runtime_kwargs"] = kwargs
 
-        def chat_reply(self, persona, message, **kwargs):
+        def mission_chat_reply(self, persona, message, **kwargs):
             captured["stream_callback"] = kwargs.get("stream_callback")
             kwargs["stream_callback"]("He")
             kwargs["stream_callback"]("llo")
@@ -3081,6 +3121,149 @@ def test_mission_chat_post_boundary_failure_marks_outcome_unknown(monkeypatch, c
     assert record["state"] == "outcome_unknown"
 
 
+def test_mission_chat_retry_recovers_native_reply_before_outcome_unknown(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    instance = PersonaInstanceStore().open_chat(
+        persona_id="dev", session_id="persona_chat_personainst_dev"
+    )
+    db.create_session(instance.session_id, "agent_runtime_persona_chat")
+    db.append_message(
+        instance.session_id,
+        "user",
+        "recover me",
+        platform_message_id="client_recover_native",
+    )
+    db.append_message(
+        instance.session_id,
+        "assistant",
+        "Native reply already committed.",
+        platform_message_id="client_recover_native",
+    )
+    transition_mission_chat_turn(
+        session_id=instance.session_id,
+        client_message_id="client_recover_native",
+        turn_id="client_recover_native",
+        state="pending",
+    )
+    transition_mission_chat_turn(
+        session_id=instance.session_id,
+        client_message_id="client_recover_native",
+        turn_id="client_recover_native",
+        state="executing",
+        metadata={"provider_submitted": True},
+    )
+
+    class _MustNotRun:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("provider must not be called during native recovery")
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _MustNotRun)
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id=instance.id,
+            session_id=instance.session_id,
+            task_id=None,
+            goal_id=None,
+            message="recover me",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_recover_native",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reply"] == "Native reply already committed."
+    assert payload["idempotent_replay"] is True
+    assert mission_chat_turn_record(
+        session_id=instance.session_id,
+        client_message_id="client_recover_native",
+    )["state"] == "projected"
+
+
+def test_mission_chat_turn_resolve_requires_exact_owner_and_records_abandon(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    owner = PersonaInstanceStore().open_chat(
+        persona_id="dev", session_id="persona_chat_personainst_dev"
+    )
+    foreign = PersonaInstanceStore().add_instance(
+        persona_id="qa", placement_id="foreign-placement"
+    )
+    db.create_session(
+        owner.session_id,
+        "agent_runtime_persona_chat",
+        model_config=json.dumps(
+            {
+                "source": "agent_runtime_persona_chat",
+                "persona_instance_id": owner.id,
+            }
+        ),
+    )
+    for state in ("pending", "executing", "outcome_unknown"):
+        transition_mission_chat_turn(
+            session_id=owner.session_id,
+            client_message_id="client_ambiguous",
+            turn_id="client_ambiguous",
+            state=state,
+        )
+
+    bad_code = harness._cmd_mission_chat_turn_resolve(
+        SimpleNamespace(
+            session_id=owner.session_id,
+            client_message_id="client_ambiguous",
+            turn_id="client_ambiguous",
+            action="abandon",
+            persona_instance_id=foreign.id,
+            reason="wrong owner",
+            json=True,
+        )
+    )
+    bad = json.loads(capsys.readouterr().out)
+    assert bad_code == 2
+    assert bad["error_kind"] == "foreign_chat_session"
+    assert mission_chat_turn_record(
+        session_id=owner.session_id, client_message_id="client_ambiguous"
+    )["state"] == "outcome_unknown"
+
+    code = harness._cmd_mission_chat_turn_resolve(
+        SimpleNamespace(
+            session_id=owner.session_id,
+            client_message_id="client_ambiguous",
+            turn_id="client_ambiguous",
+            action="abandon",
+            persona_instance_id=owner.id,
+            reason="operator confirmed unknown outcome",
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+    record = mission_chat_turn_record(
+        session_id=owner.session_id, client_message_id="client_ambiguous"
+    )
+    assert code == 0
+    assert payload["journal_state"] == "abandoned"
+    assert record["state"] == "abandoned"
+    assert record["resolution_actor"] == owner.id
+    assert record["resolution_reason"] == "operator confirmed unknown outcome"
+
+
 def test_mission_chat_new_turn_interrupts_prior_running_turn(
     monkeypatch,
     capsys,
@@ -3234,7 +3417,7 @@ def test_free_floating_post_provider_crash_settles_failed(
         def __init__(self, *args, **kwargs):
             provider_calls.append("constructed")
 
-        def chat_reply(self, persona, message, **kwargs):
+        def mission_chat_reply(self, persona, message, **kwargs):
             provider_calls.append("called")
             return SimpleNamespace(final_response="Still here.")
 
@@ -3706,7 +3889,7 @@ def test_persona_chat_auto_title_waits_for_session_title_write(monkeypatch, isol
     assert db.get_session_title(session_id) == "Shipping Strategy Discussion"
 
 
-def test_persona_chat_context_includes_prior_turns(isolate_agent_runtime_root):
+def test_persona_chat_context_uses_native_structured_prior_turns(isolate_agent_runtime_root):
     from hermes_cli import harness
 
     db = _TranscriptDB()
@@ -3715,16 +3898,14 @@ def test_persona_chat_context_includes_prior_turns(isolate_agent_runtime_root):
     db.append_message(session_id, "user", "remember the blue button")
     db.append_message(session_id, "assistant", "I will remember the blue button.")
 
-    enriched = harness._persona_chat_message_with_history(
-        session_db=db,
-        session_id=session_id,
-        message="what did I mention?",
+    history = harness.safe_native_history(
+        harness._persona_chat_native_history(db, session_id)
     )
 
-    assert "Prior persona chat context" in enriched
-    assert "Operator: remember the blue button" in enriched
-    assert "Agent: I will remember the blue button." in enriched
-    assert enriched.endswith("what did I mention?")
+    assert history == [
+        {"role": "user", "content": "remember the blue button"},
+        {"role": "assistant", "content": "I will remember the blue button."},
+    ]
 
 
 def test_profile_persona_resolution_does_not_borrow_role_skills(monkeypatch, isolate_agent_runtime_root):

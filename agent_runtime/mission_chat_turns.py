@@ -260,7 +260,12 @@ def transition_mission_chat_turn(
 
 
 def abandon_mission_chat_turn(
-    *, session_id: str | None, client_message_id: str | None, turn_id: str | None
+    *,
+    session_id: str | None,
+    client_message_id: str | None,
+    turn_id: str | None,
+    resolution_actor: str | None = None,
+    resolution_reason: str | None = None,
 ) -> MissionChatTurnPersistOutcome:
     session_key = safe_assignment_text(session_id, limit=240)
     message_key = safe_assignment_text(client_message_id, limit=240)
@@ -284,6 +289,14 @@ def abandon_mission_chat_turn(
                 "updated_at": _utc_now_iso(),
                 "resolved_at": _utc_now_iso(),
                 "resolution": "abandon",
+                "resolution_actor": safe_assignment_text(
+                    resolution_actor, limit=160
+                )
+                or "operator",
+                "resolution_reason": safe_assignment_text(
+                    resolution_reason, limit=320
+                )
+                or "explicit abandon",
             }
         )
         session[message_key] = record
@@ -805,6 +818,8 @@ _JOURNAL_TEXT_FIELDS = {
     "stored_reply": _MAX_TEXT,
     "projection_revision": 160,
     "resolution": 80,
+    "resolution_actor": 160,
+    "resolution_reason": 320,
     "resolved_at": 80,
     "pending_user_message": 12000,
 }

@@ -126,6 +126,27 @@ def test_config_loads_live_run_budget_fields(tmp_path):
     assert cfg.live_run_iteration_budget == 9
 
 
+def test_persona_chat_hot_runtime_defaults_dark_and_is_bounded(tmp_path):
+    default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
+    assert default_config.persona_chat.hot_sessions_enabled is False
+    assert default_config.persona_chat.max_hot_sessions == 8
+    assert default_config.persona_chat.idle_ttl_seconds == 1800
+
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "agent_runtime:\n"
+        "  persona_chat:\n"
+        "    hot_sessions_enabled: true\n"
+        "    max_hot_sessions: 3\n"
+        "    idle_ttl_seconds: 45\n",
+        encoding="utf-8",
+    )
+    configured = load_agent_runtime_config(p)
+    assert configured.persona_chat.hot_sessions_enabled is True
+    assert configured.persona_chat.max_hot_sessions == 3
+    assert configured.persona_chat.idle_ttl_seconds == 45
+
+
 def test_config_loads_read_model_flag_defaults_and_filename_guard(tmp_path):
     default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
     assert default_config.read_model.enabled is False

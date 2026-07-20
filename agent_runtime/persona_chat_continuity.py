@@ -19,6 +19,7 @@ import re
 import threading
 import time
 from typing import Any, Callable, Iterator
+from datetime import datetime, timezone
 
 from . import paths
 from .persona_assignments import (
@@ -42,7 +43,12 @@ _MAX_ARGUMENTS = 4_000
 
 def _safe_text(value: Any, *, limit: int = _MAX_CONTENT) -> str:
     text = str(value or "").replace("\x00", " ")
-    text = _SECRET_RE.sub(r"\1: [redacted]", text)
+    try:
+        from agent.redact import redact_sensitive_text
+
+        text = redact_sensitive_text(text, force=True)
+    except Exception:
+        text = _SECRET_RE.sub(r"\1: [redacted]", text)
     if len(text) > limit:
         return text[:limit].rstrip() + " … [truncated]"
     return text
@@ -108,20 +114,90 @@ def safe_native_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in messages
         if isinstance(item, dict) and item.get("abandoned")
     }
+    normalized = [
+        safe_native_message(raw)
+        for raw in messages
+        if isinstance(raw, dict)
+        and str(raw.get("client_message_id") or "") not in abandoned
+    ]
+    # Compression children contain the protected current turn as well as the
+    # preserved parent transcript. Folding a multi-pass lineage can therefore
+    # surface byte-identical copies of one logical user/reply row. Collapse
+    # only rows that share the stable client/role/payload identity; distinct
+    # compaction summaries and tool-call messages remain intact.
+    deduped: list[dict[str, Any]] = []
+    seen_logical_rows: set[tuple[str, str, str]] = set()
+    for item in normalized:
+        client_message_id = str(item.get("client_message_id") or "")
+        if client_message_id:
+            logical_client_id = re.sub(r":assistant:\d+$", "", client_message_id)
+            payload = json.dumps(
+                {
+                    "content": item.get("content"),
+                    "tool_calls": item.get("tool_calls"),
+                    "tool_call_id": item.get("tool_call_id"),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            key = (item["role"], logical_client_id, payload)
+            if key in seen_logical_rows:
+                continue
+            seen_logical_rows.add(key)
+        deduped.append(item)
+    normalized = deduped
+    available_results = {
+        str(item.get("tool_call_id"))
+        for item in normalized
+        if item.get("role") == "tool" and item.get("tool_call_id")
+    }
     safe: list[dict[str, Any]] = []
     live_tool_ids: set[str] = set()
-    for raw in messages:
-        if not isinstance(raw, dict):
-            continue
-        if str(raw.get("client_message_id") or "") in abandoned:
-            continue
-        item = safe_native_message(raw)
+    for item in normalized:
         if item["role"] == "assistant":
-            live_tool_ids.update(str(call["id"]) for call in item.get("tool_calls", []))
+            paired_calls = [
+                call
+                for call in item.get("tool_calls", [])
+                if str(call.get("id") or "") in available_results
+            ]
+            if paired_calls:
+                item["tool_calls"] = paired_calls
+                live_tool_ids.update(str(call["id"]) for call in paired_calls)
+            else:
+                item.pop("tool_calls", None)
         if item["role"] == "tool" and item.get("tool_call_id") not in live_tool_ids:
             continue
         safe.append(item)
     return safe
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def native_lineage_summary(session_db: Any, root_session_id: str) -> dict[str, Any]:
+    """Resolve a root's current native tip and validated compression depth."""
+
+    root = safe_assignment_text(root_session_id, limit=240)
+    tip = session_db.resolve_resume_session_id(root)
+    current = tip
+    depth = 0
+    seen: set[str] = set()
+    while current and current != root:
+        if current in seen:
+            raise ValueError(f"cyclic persona chat lineage for {root}")
+        seen.add(current)
+        row = session_db.get_session(current)
+        if not isinstance(row, dict):
+            raise ValueError(f"missing persona chat lineage node {current}")
+        parent = safe_assignment_text(row.get("parent_session_id"), limit=240)
+        if not parent:
+            raise ValueError(f"persona chat tip {tip} does not descend from {root}")
+        current = parent
+        depth += 1
+    return {"active_session_id": tip, "continuation_depth": depth}
 
 
 def native_history_revision(session_db: Any, root_session_id: str) -> str:
@@ -342,6 +418,7 @@ class ResidentPersonaChatRuntime:
     agent: Any
     last_used_at: float
     created_at: float
+    last_resumed_at: str
     turn_count: int = 0
 
 
@@ -371,9 +448,11 @@ class PersonaChatRuntimeRegistry:
             rebuild_reason = None
             if entry is not None and entry.signature != signature:
                 rebuild_reason = "runtime_signature_changed"
+                self._close_entry(entry)
                 entry = None
             elif entry is not None and (entry.revision != revision or entry.active_session_id != active_session_id):
                 rebuild_reason = "disk_revision_changed"
+                self._close_entry(entry)
                 entry = None
             reused = entry is not None
             if entry is None:
@@ -385,11 +464,19 @@ class PersonaChatRuntimeRegistry:
                     agent=factory(),
                     created_at=now,
                     last_used_at=now,
+                    last_resumed_at=_utc_now_iso(),
+                )
+                self._record_transition(
+                    root_session_id,
+                    "cold",
+                    "rebuilt" if rebuild_reason else "rehydrated",
                 )
             entry.last_used_at = now
             self._entries[root_session_id] = entry
             while len(self._entries) > self.max_entries:
-                self._entries.popitem(last=False)
+                evicted_root, evicted = self._entries.popitem(last=False)
+                self._close_entry(evicted)
+                self._record_transition(evicted_root, "cold", "evicted")
             return entry, reused, rebuild_reason
 
     def finish(self, root_session_id: str, *, active_session_id: str, revision: str) -> None:
@@ -397,12 +484,17 @@ class PersonaChatRuntimeRegistry:
             entry = self._entries.get(root_session_id)
             if entry is None:
                 return
+            tip_advanced = entry.active_session_id != active_session_id
             entry.active_session_id = active_session_id
             entry.revision = revision
             entry.last_used_at = time.monotonic()
             entry.turn_count += 1
             self._entries.move_to_end(root_session_id)
-            self._record_transition(root_session_id, "hot")
+            self._record_transition(
+                root_session_id,
+                "hot",
+                "tip_advanced" if tip_advanced else None,
+            )
 
     def transition(self, root_session_id: str, state: str) -> None:
         """Record process-local lifecycle truth for an owning serve observer."""
@@ -410,17 +502,28 @@ class PersonaChatRuntimeRegistry:
         if state not in {"cold", "busy", "hot", "failed"}:
             raise ValueError(f"invalid persona chat runtime state: {state}")
         with self._lock:
-            self._record_transition(root_session_id, state)
+            self._record_transition(
+                root_session_id,
+                state,
+                "failed" if state == "failed" else None,
+            )
 
     def evict(self, root_session_id: str) -> bool:
         with self._lock:
-            removed = self._entries.pop(root_session_id, None) is not None
-            self._record_transition(root_session_id, "cold")
+            entry = self._entries.pop(root_session_id, None)
+            removed = entry is not None
+            if entry is not None:
+                self._close_entry(entry)
+            self._record_transition(root_session_id, "cold", "evicted")
             return removed
 
     def observation(self, root_session_id: str, *, owning_process: bool) -> dict[str, Any]:
         if not owning_process:
-            return {"runtime_state": "unknown", "observer_identity": "external_cli"}
+            return {
+                "runtime_state": "unknown",
+                "runtime_observer_id": "external_cli",
+                "runtime_observed_at": _utc_now_iso(),
+            }
         with self._lock:
             entry = self._entries.get(root_session_id)
             transition = self._transitions.get(root_session_id) or {}
@@ -428,31 +531,51 @@ class PersonaChatRuntimeRegistry:
             return {
                 "runtime_state": state,
                 "last_runtime_transition": transition.get("transition"),
-                "observer_identity": f"serve:{os.getpid()}",
-                "observer_time": time.time(),
+                "runtime_observer_id": f"serve:{os.getpid()}",
+                "runtime_observed_at": _utc_now_iso(),
                 "active_session_id": entry.active_session_id if entry else None,
-                "continuation_depth": entry.turn_count if entry else 0,
-                "last_resumed_at": entry.last_used_at if entry else None,
+                "last_resumed_at": entry.last_resumed_at if entry else None,
             }
 
-    def _record_transition(self, root_session_id: str, state: str) -> None:
+    def _record_transition(
+        self, root_session_id: str, state: str, transition: str | None = None
+    ) -> None:
+        previous = self._transitions.get(root_session_id) or {}
         self._transitions[root_session_id] = {
             "state": state,
-            "transition": f"{state}@{time.time():.6f}",
+            "transition": transition or previous.get("transition"),
         }
+
+    @staticmethod
+    def _close_entry(entry: ResidentPersonaChatRuntime) -> None:
+        close = getattr(entry.agent, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
     def _evict_expired(self, now: float) -> None:
         expired = [key for key, value in self._entries.items() if now - value.last_used_at > self.ttl_seconds]
         for key in expired:
-            self._entries.pop(key, None)
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self._close_entry(entry)
+            self._record_transition(key, "cold", "evicted")
 
 
 _REGISTRY: PersonaChatRuntimeRegistry | None = None
 
 
-def initialize_persona_chat_runtime_registry(*, max_entries: int = 8, ttl_seconds: float = 900.0) -> PersonaChatRuntimeRegistry:
+def initialize_persona_chat_runtime_registry(
+    *, enabled: bool = True, max_entries: int = 8, ttl_seconds: float = 1800.0
+) -> PersonaChatRuntimeRegistry | None:
     global _REGISTRY
-    _REGISTRY = PersonaChatRuntimeRegistry(max_entries=max_entries, ttl_seconds=ttl_seconds)
+    _REGISTRY = (
+        PersonaChatRuntimeRegistry(max_entries=max_entries, ttl_seconds=ttl_seconds)
+        if enabled
+        else None
+    )
     return _REGISTRY
 
 

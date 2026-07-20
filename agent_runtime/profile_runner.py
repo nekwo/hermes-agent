@@ -91,6 +91,11 @@ class AgentRunRequest:
     persona_chat_runtime_registry: Any | None = None
     persona_chat_runtime_signature: str | None = None
     persona_chat_native_revision: str | None = None
+    # Explicit one-turn proof/debug seam. Normal persona-chat turns leave these
+    # unset and inherit the model/profile compressor configuration.
+    compression_threshold_tokens_override: int | None = None
+    compression_protect_first_n_override: int | None = None
+    compression_protect_last_n_override: int | None = None
     platform: str = "agent_runtime"
     quiet_mode: bool = True
     skip_context_files: bool = True
@@ -215,6 +220,32 @@ def _prepare_resident_persona_chat_agent(agent: Any, candidate: Any) -> None:
             setattr(agent, name, value)
 
 
+def _finish_resident_persona_chat_agent(agent: Any) -> None:
+    """Detach every turn-local handle while preserving conversation state."""
+
+    for name in (
+        "status_callback",
+        "tool_progress_callback",
+        "tool_start_callback",
+        "tool_complete_callback",
+        "clarify_callback",
+        "_stream_callback",
+    ):
+        if hasattr(agent, name):
+            setattr(agent, name, None)
+    for name, value in (
+        ("_interrupt_requested", False),
+        ("_interrupt_reason", None),
+        ("_current_api_request_id", ""),
+        ("_current_turn_id", None),
+        ("_current_task_id", None),
+        ("_persona_chat_client_message_id", None),
+        ("_persona_chat_turn_id", None),
+    ):
+        if hasattr(agent, name):
+            setattr(agent, name, value)
+
+
 class ProfileAgentRunner:
     def __init__(self, *, agent_factory: Callable[..., Any] | None = None, credential_pool=None, session_db=None):
         self._uses_default_agent_factory = agent_factory is None
@@ -228,10 +259,29 @@ class ProfileAgentRunner:
         if binding.readiness != "ready":
             raise ProfileRunnerError(binding.summary)
         started = time.perf_counter()
-        raw_result, agent, profile_timing = self._execute_agent_run(binding, request)
+        resident = bool(
+            request.persona_chat_runtime_registry is not None
+            and request.root_chat_session_id
+        )
+        try:
+            raw_result, agent, profile_timing = self._execute_agent_run(
+                binding, request
+            )
+        except Exception:
+            if resident:
+                request.persona_chat_runtime_registry.evict(
+                    request.root_chat_session_id
+                )
+            raise
         normalize_started = time.perf_counter()
-        result = _normalize_result(raw_result, agent=agent)
-        profile_timing["result_normalize_ms"] = _emit_request_timing(request, "result_normalize", normalize_started)
+        try:
+            result = _normalize_result(raw_result, agent=agent)
+            profile_timing["result_normalize_ms"] = _emit_request_timing(
+                request, "result_normalize", normalize_started
+            )
+        finally:
+            if resident:
+                _finish_resident_persona_chat_agent(agent)
         result.latency_ms = _elapsed_ms(started)
         result.profile_timing = profile_timing
         if isinstance(result.raw, dict):
@@ -323,6 +373,30 @@ class ProfileAgentRunner:
                 agent._persona_chat_root_session_id = request.root_chat_session_id
                 agent._persona_chat_client_message_id = request.client_message_id
                 agent._persona_chat_turn_id = request.turn_id
+                # Persona-chat continuity deliberately keeps a stable logical
+                # root while native compression advances to a child SessionDB
+                # tip.  Hermes' global default is in-place compaction, which
+                # cannot express that lineage (and makes the Launcher observe
+                # depth=0 forever), so this lane must always use rotation.
+                agent.compression_in_place = False
+                compressor = getattr(agent, "context_compressor", None)
+                if compressor is not None:
+                    if request.compression_threshold_tokens_override is not None:
+                        threshold_tokens = int(request.compression_threshold_tokens_override)
+                        if threshold_tokens <= 0:
+                            raise ValueError("compression threshold tokens must be positive")
+                        compressor.threshold_tokens = threshold_tokens
+                        context_length = int(getattr(compressor, "context_length", 0) or 0)
+                        if context_length > 0:
+                            compressor.threshold_percent = threshold_tokens / context_length
+                    if request.compression_protect_first_n_override is not None:
+                        compressor.protect_first_n = max(
+                            0, int(request.compression_protect_first_n_override)
+                        )
+                    if request.compression_protect_last_n_override is not None:
+                        compressor.protect_last_n = max(
+                            0, int(request.compression_protect_last_n_override)
+                        )
             timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
             budget_guard.set_interrupt_callback(lambda reason: _interrupt_agent_for_budget(agent, reason))
             agent_ready_cleanup = _notify_agent_ready(request, agent)

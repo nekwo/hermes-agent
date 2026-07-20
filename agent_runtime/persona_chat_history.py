@@ -610,16 +610,32 @@ def _history_row(
     except Exception:
         pass
     try:
-        from .persona_chat_continuity import persona_chat_runtime_registry
+        from .persona_chat_continuity import (
+            native_lineage_summary,
+            persona_chat_runtime_registry,
+        )
 
         registry = persona_chat_runtime_registry()
+        lineage = native_lineage_summary(session_db, session_id)
         runtime = (
             registry.observation(session_id, owning_process=True)
             if registry is not None
-            else {"runtime_state": "unknown", "observer_identity": "external_cli"}
+            else {
+                "runtime_state": "unknown",
+                "runtime_observer_id": "external_cli",
+            }
         )
     except Exception:
-        runtime = {"runtime_state": "unknown", "observer_identity": "external_cli"}
+        lineage = {"active_session_id": active_session_id, "continuation_depth": 0}
+        runtime = {
+            "runtime_state": "unknown",
+            "runtime_observer_id": "external_cli",
+        }
+    lineage_aggregate = _lineage_aggregate(
+        session_db,
+        root_session_id=session_id,
+        active_session_id=lineage["active_session_id"],
+    )
     redaction_status = (
         "would_redact"
         if "would_redact" in {title_status, preview_status, messages_status}
@@ -647,25 +663,79 @@ def _history_row(
         "live_mission": bool(kind == "mission" or raw.get("live_mission")),
         "title": title,
         "last_message_preview": preview,
-        "message_count": _safe_int(raw.get("message_count")),
+        "message_count": lineage_aggregate.get(
+            "message_count", _safe_int(raw.get("message_count"))
+        ),
         "created_at": _iso_timestamp(raw.get("started_at")),
-        "updated_at": _iso_timestamp(raw.get("last_active") or raw.get("ended_at") or raw.get("started_at")),
+        "updated_at": _iso_timestamp(
+            lineage_aggregate.get("last_active")
+            or raw.get("last_active")
+            or raw.get("ended_at")
+            or raw.get("started_at")
+        ),
         "state": "archived" if bool(raw.get("archived")) else "open",
         "redaction_status": redaction_status,
         **({"would_redact": would_redact} if would_redact else {}),
-        **_token_usage_fields(raw),
+        **_token_usage_fields({**raw, **lineage_aggregate}),
         **_chat_model_fields(raw),
         **_cache_policy_fields(raw),
         "messages": messages,
         "root_chat_session_id": session_id,
-        "active_session_id": active_session_id,
+        "active_session_id": lineage["active_session_id"],
         "runtime_state": runtime.get("runtime_state", "unknown"),
         "last_runtime_transition": runtime.get("last_runtime_transition"),
-        "observer_identity": runtime.get("observer_identity"),
-        "observer_time": runtime.get("observer_time"),
-        "continuation_depth": runtime.get("continuation_depth", 0),
+        "runtime_observer_id": runtime.get("runtime_observer_id"),
+        "runtime_observed_at": runtime.get("runtime_observed_at"),
+        "continuation_depth": lineage["continuation_depth"],
         "last_resumed_at": runtime.get("last_resumed_at"),
     }
+
+
+def _lineage_aggregate(
+    session_db: Any | None,
+    *,
+    root_session_id: str,
+    active_session_id: str,
+) -> dict[str, Any]:
+    """Aggregate usage/activity exactly once across root→compression tip."""
+
+    if session_db is None:
+        return {}
+    current = active_session_id
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    while current and current not in seen:
+        seen.add(current)
+        try:
+            row = session_db.get_session(current)
+        except Exception:
+            return {}
+        if not isinstance(row, dict):
+            return {}
+        rows.append(row)
+        if current == root_session_id:
+            break
+        current = safe_assignment_text(row.get("parent_session_id"), limit=240)
+    if not rows or current != root_session_id:
+        return {}
+    result: dict[str, Any] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "message_count",
+    ):
+        result[key] = sum(_safe_int(row.get(key)) for row in rows)
+    activity = [
+        _iso_timestamp(
+            row.get("last_active") or row.get("ended_at") or row.get("started_at")
+        )
+        for row in rows
+    ]
+    result["last_active"] = max((item for item in activity if item), default=None)
+    return result
 
 
 def _cache_policy_fields(raw: dict[str, Any]) -> dict[str, Any]:
@@ -823,6 +893,7 @@ def _safe_recent_messages(
     rows: list[dict[str, Any]] = []
     redacted = False
     assistant_client_message_ids: set[str] = set()
+    seen_logical_rows: set[tuple[str, str, str]] = set()
     # Curate the agent's raw working transcript into an operator-facing one.
     # The bound session is the agent's internal session, so its raw rows are
     # verbose tick-context prompts (role=user) and serialized decision dicts
@@ -896,6 +967,11 @@ def _safe_recent_messages(
                 row["relay_sender_persona_id"] = relay_sender.persona_id
                 row["relay_sender_instance_id"] = relay_sender.instance_id
         if client_message_id:
+            logical_client_id = re.sub(r":assistant:\d+$", "", client_message_id)
+            logical_key = (role, logical_client_id, text)
+            if logical_key in seen_logical_rows:
+                continue
+            seen_logical_rows.add(logical_key)
             row["client_message_id"] = client_message_id
             # C8 ordering key: the turn anchor is the client_message_id; the
             # intra-turn position is stamped HERE (one authority) — the
@@ -1285,6 +1361,7 @@ _INTERNAL_SCAFFOLDING_MARKERS = (
     "## Task Snapshot",
     "Repo-Grounded Execution",
     "Prior persona chat context",
+    "[CONTEXT COMPACTION — REFERENCE ONLY]",
 )
 
 
@@ -1304,6 +1381,8 @@ def _curate_chat_message_text(role: str, content: Any) -> str | None:
         text = _safe_chat_body_text(content, limit=PERSONA_CHAT_MESSAGE_TEXT_LIMIT)
         if not text or text.startswith("{"):
             # Empty assistant turn or an unparseable raw dict — not presentable.
+            return None
+        if any(marker in text for marker in _INTERNAL_SCAFFOLDING_MARKERS):
             return None
         return text
     if role == "operator":

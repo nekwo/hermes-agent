@@ -85,6 +85,38 @@ def test_decision_dict_collapses_to_summary_and_rationale():
     assert "payload" not in rows[0]["text"]
 
 
+def test_compression_lineage_projection_hides_summary_and_deduplicates_turn():
+    db = FakeSessionDB(
+        [
+            {"role": "user", "content": "continue", "client_message_id": "turn-1"},
+            {"role": "user", "content": "continue", "client_message_id": "turn-1"},
+            {
+                "role": "assistant",
+                "content": "[CONTEXT COMPACTION — REFERENCE ONLY] internal summary",
+                "client_message_id": "turn-1:assistant:0",
+            },
+            {
+                "role": "assistant",
+                "content": "done",
+                "client_message_id": "turn-1:assistant:2",
+            },
+            {
+                "role": "assistant",
+                "content": "done",
+                "client_message_id": "turn-1:assistant:4",
+            },
+        ]
+    )
+
+    rows, status = _safe_recent_messages(db, session_id="s1")
+
+    assert status == "safe"
+    assert [(row["role"], row["text"]) for row in rows] == [
+        ("operator", "continue"),
+        ("agent", "done"),
+    ]
+
+
 def test_internal_scaffolding_operator_rows_are_dropped():
     db = FakeSessionDB(
         [

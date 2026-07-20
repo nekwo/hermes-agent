@@ -783,6 +783,73 @@ def _cmd_persona_chat_delete(args) -> int:
         }
         print(emit_json(data) if args.json else data["error"])
         return 2
+    owner_instance_id = _persona_chat_session_owner(session_db, session_id)
+    if not owner_instance_id:
+        owner_instance_id = _persona_chat_bound_owner(session_id)
+    try:
+        owner_instance = (
+            PersonaInstanceStore().get(owner_instance_id)
+            if owner_instance_id
+            else None
+        )
+    except Exception:
+        owner_instance = None
+    session_exists = False
+    try:
+        session_exists = session_db.get_session(session_id) is not None
+    except Exception:
+        session_exists = False
+    if owner_instance is None and not session_exists:
+        data = {
+            "ok": False,
+            "status": "not_found",
+            "session_id": session_id,
+            "deleted_session": False,
+            "cleared_bindings": [],
+            "error": f"persona chat session not found: {session_id}",
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    if (
+        owner_instance is None
+        or (requested_instance and owner_instance.id != requested_instance)
+        or (requested_persona and owner_instance.persona_id != requested_persona)
+    ):
+        data = {
+            "ok": False,
+            "capability_id": "persona.chat.delete",
+            "error_kind": "foreign_chat_session",
+            "error": "chat root is not owned by the requested persona instance",
+            "session_id": session_id,
+            "persona_instance_id": requested_instance or None,
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    if not bool(getattr(args, "_persona_chat_delete_lease_acquired", False)):
+        try:
+            with persona_chat_root_lease(
+                session_id,
+                owner_id=safe_assignment_token(
+                    getattr(args, "requested_by", None)
+                ),
+                observer_kind="delete",
+            ):
+                args._persona_chat_delete_lease_acquired = True
+                try:
+                    return _cmd_persona_chat_delete(args)
+                finally:
+                    args._persona_chat_delete_lease_acquired = False
+        except PersonaChatBusyError as exc:
+            data = {
+                "ok": False,
+                "capability_id": "persona.chat.delete",
+                "error_kind": "chat_busy",
+                "session_id": session_id,
+                "lease_owner": exc.owner,
+                "error": str(exc),
+            }
+            print(emit_json(data) if args.json else data["error"])
+            return 2
     try:
         lineage_delete = getattr(session_db, "delete_compression_lineage", None)
         if callable(lineage_delete):
@@ -1424,18 +1491,57 @@ def _cmd_mission_chat_message(args) -> int:
             print(emit_json(data) if args.json else data["error"])
         return 2
 
+    replay = _persona_chat_existing_turn(
+        session_db=session_db,
+        session_id=session_id,
+        client_message_id=client_message_id,
+    )
     journal = mission_chat_turn_record(
         session_id=session_id, client_message_id=client_message_id
     ) or {}
     journal_state = safe_assignment_token(journal.get("state"))
+    if journal_state in {"executing", "outcome_unknown"} and replay.get(
+        "assistant"
+    ):
+        recovered_reply = _redact_persona_chat_text(
+            replay["assistant"].get("content"), limit=PERSONA_CHAT_REPLY_LIMIT
+        )
+        transition_mission_chat_turn(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=journal.get("turn_id") or client_message_id,
+            state="native_committed",
+            metadata={
+                "root_chat_session_id": session_id,
+                "active_session_id": _persona_chat_native_tip(
+                    session_db, session_id
+                ),
+                "native_revision": _persona_chat_native_revision(
+                    session_db, session_id
+                ),
+                "native_committed": True,
+                "stored_reply": recovered_reply,
+            },
+            elements=journal.get("elements") or [],
+        )
+        journal = mission_chat_turn_record(
+            session_id=session_id, client_message_id=client_message_id
+        ) or {}
+        journal_state = safe_assignment_token(journal.get("state"))
     if journal_state == "native_committed":
+        stored_reply = journal.get("stored_reply")
+        if stored_reply is None and replay.get("assistant"):
+            stored_reply = _redact_persona_chat_text(
+                replay["assistant"].get("content"),
+                limit=PERSONA_CHAT_REPLY_LIMIT,
+            )
         transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=journal.get("turn_id") or client_message_id,
             state="projected",
             metadata={
-                "stored_reply": journal.get("stored_reply"),
+                "stored_reply": stored_reply,
                 "projection_committed": True,
             },
             elements=journal.get("elements") or [],
@@ -1492,11 +1598,6 @@ def _cmd_mission_chat_message(args) -> int:
         else:
             print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
         return 0
-    replay = _persona_chat_existing_turn(
-        session_db=session_db,
-        session_id=session_id,
-        client_message_id=client_message_id,
-    )
     if replay.get("assistant"):
         reply_text = _redact_persona_chat_text(
             replay["assistant"].get("content"), limit=PERSONA_CHAT_REPLY_LIMIT
@@ -1590,24 +1691,6 @@ def _cmd_mission_chat_message(args) -> int:
     )
     native_revision_before = _persona_chat_native_revision(session_db, session_id)
     runtime_registry = persona_chat_runtime_registry()
-    runtime_signature = hashlib.sha256(
-        emit_json(
-            {
-                "persona": normalized_persona,
-                "instance": instance.id,
-                "root": session_id,
-                "provider": model_selection.get("effective_provider"),
-                "model": model_selection.get("effective_model"),
-                "api_mode": getattr(persona, "api_mode", None),
-                "profile": getattr(persona, "hermes_profile", None),
-                "tools": list(getattr(persona, "toolsets", []) or []),
-                "permissions": permission_state_for_chat(persona, session_id=session_id),
-                "surface_prompt": getattr(args, "surface_prompt", "") or "",
-                "runtime_root": str(paths.store_root()),
-                "prompt_contract_revision": "mc-chat-continuity-v1",
-            }
-        ).encode("utf-8")
-    ).hexdigest()
     chat_message = message
     queued_skills = consume_skills_for_next_turn(
         persona_id=normalized_persona,
@@ -1633,6 +1716,55 @@ def _cmd_mission_chat_message(args) -> int:
     workspace_agents = load_workspace_agents_context(
         getattr(args, "agents_file", None)
     )
+    workspace_agents_receipt = (
+        dict(workspace_agents.receipt) if workspace_agents is not None else None
+    )
+    if workspace_agents_receipt is not None:
+        workspace_agents_receipt.pop("preview", None)
+    # A resident actor is reusable only while every prompt/provider/tool input
+    # remains identical.  Hash config objects before including them so the
+    # signature never becomes an observability channel for prompt/config text.
+    runtime_signature = hashlib.sha256(
+        emit_json(
+            {
+                "persona_revision": hashlib.sha256(
+                    emit_json(asdict(persona)).encode("utf-8")
+                ).hexdigest(),
+                "instance_revision": hashlib.sha256(
+                    emit_json(asdict(instance)).encode("utf-8")
+                ).hexdigest(),
+                "root": session_id,
+                "root_model_config_revision": hashlib.sha256(
+                    emit_json(_session_model_config(session_db, session_id)).encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+                "provider": model_selection.get("effective_provider"),
+                "model": model_selection.get("effective_model"),
+                "api_mode": model_selection.get("effective_api_mode")
+                or getattr(persona, "api_mode", None),
+                "reasoning_effort": model_selection.get(
+                    "effective_reasoning_effort"
+                ),
+                "profile": getattr(persona, "hermes_profile", None),
+                "tool_contract": chat_runtime_tool_contract(
+                    persona, session_id=session_id
+                ),
+                "permissions": permission_state_for_chat(
+                    persona, session_id=session_id
+                ),
+                "relevant_config_revision": hashlib.sha256(
+                    emit_json(asdict(cfg)).encode("utf-8")
+                ).hexdigest(),
+                "workspace_agents": workspace_agents_receipt,
+                "surface_prompt_sha256": hashlib.sha256(
+                    (getattr(args, "surface_prompt", "") or "").encode("utf-8")
+                ).hexdigest(),
+                "runtime_root": str(paths.store_root()),
+                "prompt_contract_revision": "mc-chat-continuity-v1",
+            }
+        ).encode("utf-8")
+    ).hexdigest()
     workspace_id = safe_assignment_token(getattr(args, "workspace_id", None))
     workspace_name = safe_assignment_text(
         getattr(args, "workspace_name", None), limit=120
@@ -1799,6 +1931,15 @@ def _cmd_mission_chat_message(args) -> int:
                 runtime_registry=runtime_registry,
                 runtime_signature=runtime_signature,
                 native_revision=native_revision_before,
+                compression_threshold_tokens_override=getattr(
+                    args, "compression_threshold_tokens", None
+                ),
+                compression_protect_first_n_override=getattr(
+                    args, "compression_protect_first_n", None
+                ),
+                compression_protect_last_n_override=getattr(
+                    args, "compression_protect_last_n", None
+                ),
                 provider_override=model_selection.get("effective_provider"),
                 model_override=model_selection.get("effective_model"),
                 # Per-instance reasoning-effort override for this turn (None =
@@ -1953,7 +2094,7 @@ def _cmd_mission_chat_message(args) -> int:
                 if runtime_registry is not None
                 else {
                     "runtime_state": "unknown",
-                    "observer_identity": "external_cli",
+                    "runtime_observer_id": "external_cli",
                 }
             ),
             "native_revision": native_revision,
@@ -2019,6 +2160,16 @@ def _cmd_mission_chat_message(args) -> int:
             # Without these, diagnosing a slow chat turn needs an in-process probe.
             "latency_ms": getattr(chat_result, "latency_ms", None),
             "profile_timing": dict(getattr(chat_result, "profile_timing", None) or {}) or None,
+            "resident_actor_reused": bool(
+                (getattr(chat_result, "profile_timing", None) or {}).get(
+                    "resident_actor_reused"
+                )
+            ),
+            "rehydrated": not bool(
+                (getattr(chat_result, "profile_timing", None) or {}).get(
+                    "resident_actor_reused"
+                )
+            ),
             "prompt_context_id": prompt_context["context_id"],
             # C3 (2026-07-17): the terminal frame carries the turn's facts ONCE,
             # small — the slim typed subset (ruling §7.3), not the full ~26 KB
@@ -2182,6 +2333,63 @@ def _cmd_mission_chat_turn_resolve(args) -> int:
         getattr(args, "client_message_id", None), limit=240
     )
     turn_id = safe_assignment_token(getattr(args, "turn_id", None))
+    action = safe_assignment_token(getattr(args, "action", None))
+    persona_instance_id = safe_assignment_token(
+        getattr(args, "persona_instance_id", None)
+    )
+    if action != "abandon" or not persona_instance_id:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.turn.resolve",
+            "error_kind": "invalid_request",
+            "error": "action=abandon and persona_instance_id are required",
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    try:
+        session_db = _default_persona_session_db()
+        owner_instance_id = _persona_chat_session_owner(session_db, session_id)
+        owner_instance = (
+            PersonaInstanceStore().get(owner_instance_id)
+            if owner_instance_id
+            else None
+        )
+    except Exception:
+        owner_instance = None
+    if owner_instance is None or owner_instance.id != persona_instance_id:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.turn.resolve",
+            "error_kind": "foreign_chat_session",
+            "error": "chat root is not owned by the requested persona instance",
+            "session_id": session_id,
+            "persona_instance_id": persona_instance_id,
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    if not bool(getattr(args, "_persona_chat_resolve_lease_acquired", False)):
+        try:
+            with persona_chat_root_lease(
+                session_id,
+                owner_id=persona_instance_id,
+                observer_kind="turn_resolve",
+            ):
+                args._persona_chat_resolve_lease_acquired = True
+                try:
+                    return _cmd_mission_chat_turn_resolve(args)
+                finally:
+                    args._persona_chat_resolve_lease_acquired = False
+        except PersonaChatBusyError as exc:
+            data = {
+                "ok": False,
+                "capability_id": "mission.chat.turn.resolve",
+                "error_kind": "chat_busy",
+                "session_id": session_id,
+                "lease_owner": exc.owner,
+                "error": str(exc),
+            }
+            print(emit_json(data) if args.json else data["error"])
+            return 2
     record = mission_chat_turn_record(
         session_id=session_id, client_message_id=client_message_id
     )
@@ -2205,6 +2413,11 @@ def _cmd_mission_chat_turn_resolve(args) -> int:
         session_id=session_id,
         client_message_id=client_message_id,
         turn_id=turn_id,
+        resolution_actor=persona_instance_id,
+        resolution_reason=safe_assignment_text(
+            getattr(args, "reason", None), limit=320
+        )
+        or "operator requested abandon and resend",
     )
     data = {
         "ok": outcome is MissionChatTurnPersistOutcome.PERSISTED,
@@ -3624,6 +3837,33 @@ def _persona_chat_session_owner(session_db, session_id: str | None) -> str | Non
     return safe_assignment_token(config.get("persona_instance_id")) or None
 
 
+def _persona_chat_bound_owner(session_id: str | None) -> str | None:
+    """Resolve a uniquely bound root when its canonical transcript is gone.
+
+    This is deliberately narrower than trusting a caller-supplied instance id:
+    the persisted instance binding itself must name the exact root, and an
+    ambiguous binding is treated as unowned.  It preserves safe cleanup of a
+    stale binding without permitting a foreign-root delete.
+    """
+
+    exact_session = safe_assignment_text(session_id, limit=240)
+    if not exact_session:
+        return None
+    matches = []
+    try:
+        instances = PersonaInstanceStore().list_all()
+    except Exception:
+        return None
+    for instance in instances:
+        bound = safe_assignment_text(
+            getattr(instance, "default_chat_session_id", None), limit=240
+        ) or safe_assignment_text(getattr(instance, "session_id", None), limit=240)
+        if bound == exact_session:
+            matches.append(safe_assignment_token(getattr(instance, "id", None)))
+    unique = {item for item in matches if item}
+    return next(iter(unique)) if len(unique) == 1 else None
+
+
 def _persist_chat_model_override(
     *,
     session_db,
@@ -4182,34 +4422,6 @@ def _display_name_for_profile(profile_id: str) -> str:
     return " ".join(part.capitalize() for part in profile_id.replace("_", "-").split("-") if part) or "Profile"
 
 
-def _persona_chat_message_with_history(*, session_db, session_id: str, message: str) -> str:
-    safe_message = _redact_persona_chat_text(message, limit=PERSONA_CHAT_OPERATOR_MESSAGE_LIMIT)
-    if session_db is None or not session_id:
-        return safe_message
-    try:
-        history = session_db.get_messages(session_id)
-    except Exception:
-        return safe_message
-    prior = []
-    for item in (history or [])[-8:]:
-        role = str(item.get("role") or "").strip().lower()
-        if role not in {"user", "assistant"}:
-            continue
-        content = _redact_persona_chat_text(item.get("content"), limit=500)
-        if not content or content == safe_message:
-            continue
-        label = "Operator" if role == "user" else "Agent"
-        prior.append(f"{label}: {content}")
-    if not prior:
-        return safe_message
-    return (
-        "Prior persona chat context (oldest to newest):\n"
-        + "\n".join(prior)
-        + "\n\nCurrent operator message:\n"
-        + safe_message
-    )
-
-
 def _maybe_auto_title_persona_chat(*, session_db, session_id: str, user_message: str, assistant_response: str) -> None:
     if session_db is None or not session_id or not assistant_response:
         return
@@ -4298,13 +4510,12 @@ def _run_free_floating_assignment_once(
             "next_expected": "configure the persona before chatting",
         }, None
 
-    # Chat-first: run a plain conversational turn (no decision contract, no task
-    # scoping). Continuity comes from the prepended session history; the agent
-    # returns free text which we persist as the assistant turn.
-    chat_message = _persona_chat_message_with_history(
-        session_db=session_db,
-        session_id=session_id,
-        message=message,
+    # Compatibility commands share the same native structured continuation
+    # authority as Mission Control.  The current operator row is already in the
+    # native history, so reuse it rather than prepending a lossy text recap.
+    active_session_id = _persona_chat_native_tip(session_db, session_id)
+    native_history = safe_native_history(
+        _persona_chat_native_history(session_db, active_session_id)
     )
     stream_emitter = _ChatProtocolV2Emitter(
         turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
@@ -4347,17 +4558,14 @@ def _run_free_floating_assignment_once(
             default_model=cfg.default_model,
             session_db=session_db,
             persist_agent_session=False,
-        ).chat_reply(
+        ).mission_chat_reply(
             persona,
-            chat_message,
+            message,
             session_id=None,
-            # T10c follow-up: the free-floating lane (operator console chats +
-            # agent_chat relays) binds a stable chat session above but runs with
-            # session_id=None (history is baked into chat_message). Feed that
-            # stable id as the header-only cache scope so the codex cache-scope
-            # headers ride and the persona's warm prefix survives across turns —
-            # without it this lane was cache-cold on every turn.
-            cache_scope_id=session_id,
+            permission_session_id=session_id,
+            root_chat_session_id=session_id,
+            conversation_history=native_history,
+            reuse_current_user_message=True,
             turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
             max_wall_seconds=max_seconds,
             stream_callback=_stream_delta if stream else None,

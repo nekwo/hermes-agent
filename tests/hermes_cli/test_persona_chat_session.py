@@ -10,10 +10,10 @@ from hermes_cli.harness import (
     _append_persona_assistant_text,
     _append_persona_operator_turn,
     _ensure_persona_chat_session,
-    _persona_chat_message_with_history,
     _redact_persona_chat_text,
     _update_persona_chat_token_counts,
 )
+from agent_runtime.persona_chat_continuity import safe_native_history
 
 
 class FakeSessionDB:
@@ -142,20 +142,20 @@ def test_persona_chat_records_a_cache_only_turn():
     assert db.token_updates[0]["cache_read_tokens"] == 20000
 
 
-def test_continuity_prepends_prior_turns():
+def test_continuity_preserves_prior_turns_as_native_structure():
     db = FakeSessionDB()
     _append_persona_operator_turn(session_db=db, session_id="s1", message="first")
     _append_persona_assistant_text(session_db=db, session_id="s1", text="ack")
-    enriched = _persona_chat_message_with_history(session_db=db, session_id="s1", message="second")
-    assert "Prior persona chat context" in enriched
-    assert "Operator: first" in enriched
-    assert "Agent: ack" in enriched
-    assert enriched.strip().endswith("second")
+    history = safe_native_history(db.get_messages("s1"))
+    assert history == [
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "ack"},
+    ]
 
 
-def test_no_history_returns_bare_message():
+def test_no_history_returns_empty_native_structure():
     db = FakeSessionDB()
-    assert _persona_chat_message_with_history(session_db=db, session_id="s1", message="hi") == "hi"
+    assert safe_native_history(db.get_messages("s1")) == []
 
 
 def test_none_session_db_is_safe_for_optional_callers():
@@ -165,7 +165,6 @@ def test_none_session_db_is_safe_for_optional_callers():
     assert not _append_persona_assistant_text(
         session_db=None, session_id="s1", text="reply"
     )
-    assert _persona_chat_message_with_history(session_db=None, session_id="s1", message="hi") == "hi"
 
 
 def test_redaction_on_write_operator_turn():
@@ -190,14 +189,14 @@ def test_redaction_on_write_assistant_turn():
     assert "[redacted]" in written
 
 
-def test_redaction_on_write_continuity_context():
+def test_redaction_on_native_continuity_history():
     db = FakeSessionDB()
     # A prior turn containing a secret must not be echoed verbatim into the
     # enriched context handed to the model.
     db.append_message("s1", "user", "password: hunter2secret")
-    enriched = _persona_chat_message_with_history(session_db=db, session_id="s1", message="next")
-    assert "hunter2secret" not in enriched
-    assert "[redacted]" in enriched
+    history = safe_native_history(db.get_messages("s1"))
+    assert "hunter2secret" not in str(history)
+    assert "***" in str(history)
 
 
 def test_redactor_passes_clean_text():

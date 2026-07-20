@@ -18,12 +18,16 @@ from agent_runtime.persona_chat_continuity import (
     PersonaChatMintReceiptStore,
     PersonaChatRuntimeRegistry,
     current_tool_execution_scope,
+    initialize_persona_chat_runtime_registry,
+    native_lineage_summary,
+    persona_chat_runtime_registry,
     persona_chat_root_lease,
     safe_native_history,
     safe_native_message,
     tool_execution_scope,
 )
 from agent_runtime.states import WorkerSessionState
+from agent_runtime.profile_runner import _finish_resident_persona_chat_agent
 from hermes_state import SessionDB
 
 
@@ -174,6 +178,36 @@ def test_19_safe_history_preserves_tool_pair_structure():
     assert [row["role"] for row in rows] == ["assistant", "tool"]
 
 
+def test_safe_history_deduplicates_compression_lineage_turn_copies():
+    rows = safe_native_history(
+        [
+            {"role": "user", "content": "continue", "client_message_id": "turn-1"},
+            {"role": "user", "content": "continue", "client_message_id": "turn-1"},
+            {
+                "role": "assistant",
+                "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary",
+                "client_message_id": "turn-1:assistant:0",
+            },
+            {
+                "role": "assistant",
+                "content": "done",
+                "client_message_id": "turn-1:assistant:2",
+            },
+            {
+                "role": "assistant",
+                "content": "done",
+                "client_message_id": "turn-1:assistant:4",
+            },
+        ]
+    )
+
+    assert [(row["role"], row["content"]) for row in rows] == [
+        ("user", "continue"),
+        ("assistant", "[CONTEXT COMPACTION — REFERENCE ONLY] summary"),
+        ("assistant", "done"),
+    ]
+
+
 def test_20_registry_reuses_same_root_and_revision():
     registry = PersonaChatRuntimeRegistry()
     one, reused, _ = registry.acquire(root_session_id="root", active_session_id="tip", signature="sig", revision="rev", factory=object)
@@ -224,3 +258,83 @@ def test_26_delete_root_removes_compression_lineage_but_preserves_branch(tmp_pat
     db.create_session("branch", "agent_runtime_persona_chat", parent_session_id="root", model_config={"_branched_from": "root"})
     assert db.delete_compression_lineage("root") == ["root", "tip"]
     assert db.get_session("branch")["parent_session_id"] is None
+
+
+def test_27_json_shaped_tool_secret_is_redacted():
+    row = safe_native_message(
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "terminal",
+                        "arguments": '{"token":"topsecret","command":"ok"}',
+                    },
+                }
+            ],
+        }
+    )
+    assert "topsecret" not in row["tool_calls"][0]["function"]["arguments"]
+
+
+def test_28_safe_history_drops_unpaired_assistant_tool_call():
+    rows = safe_native_history(
+        [
+            {
+                "role": "assistant",
+                "content": "still useful",
+                "tool_calls": [
+                    {
+                        "id": "call_missing",
+                        "function": {"name": "read", "arguments": "{}"},
+                    }
+                ],
+            }
+        ]
+    )
+    assert rows == [{"role": "assistant", "content": "still useful"}]
+
+
+def test_29_lineage_depth_is_compression_depth_not_turn_count(tmp_path):
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("root", "agent_runtime_persona_chat")
+    db.end_session("root", "compression")
+    db.create_session("tip", "agent_runtime_persona_chat", parent_session_id="root")
+    assert native_lineage_summary(db, "root") == {
+        "active_session_id": "tip",
+        "continuation_depth": 1,
+    }
+
+
+def test_30_hot_registry_can_be_dark_launched():
+    initialize_persona_chat_runtime_registry(enabled=False)
+    assert persona_chat_runtime_registry() is None
+    initialize_persona_chat_runtime_registry(enabled=True)
+    assert persona_chat_runtime_registry() is not None
+
+
+def test_31_resident_finish_detaches_turn_handles_without_erasing_history():
+    marker = object()
+    agent = type("Resident", (), {})()
+    agent.messages = [{"role": "user", "content": "durable"}]
+    agent.status_callback = marker
+    agent.tool_progress_callback = marker
+    agent.tool_start_callback = marker
+    agent.tool_complete_callback = marker
+    agent.clarify_callback = marker
+    agent._stream_callback = marker
+    agent._persona_chat_client_message_id = "client-old"
+    agent._persona_chat_turn_id = "turn-old"
+
+    _finish_resident_persona_chat_agent(agent)
+
+    assert agent.messages == [{"role": "user", "content": "durable"}]
+    assert agent.status_callback is None
+    assert agent.tool_progress_callback is None
+    assert agent.tool_start_callback is None
+    assert agent.tool_complete_callback is None
+    assert agent.clarify_callback is None
+    assert agent._stream_callback is None
+    assert agent._persona_chat_client_message_id is None
+    assert agent._persona_chat_turn_id is None

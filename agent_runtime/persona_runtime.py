@@ -308,6 +308,9 @@ class GPTPersonaRuntime:
         runtime_registry=None,
         runtime_signature: str | None = None,
         native_revision: str | None = None,
+        compression_threshold_tokens_override: int | None = None,
+        compression_protect_first_n_override: int | None = None,
+        compression_protect_last_n_override: int | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -393,6 +396,9 @@ class GPTPersonaRuntime:
                 persona_chat_runtime_registry=runtime_registry,
                 persona_chat_runtime_signature=runtime_signature,
                 persona_chat_native_revision=native_revision,
+                compression_threshold_tokens_override=compression_threshold_tokens_override,
+                compression_protect_first_n_override=compression_protect_first_n_override,
+                compression_protect_last_n_override=compression_protect_last_n_override,
                 max_wall_seconds=max_wall_seconds,
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,
@@ -657,7 +663,7 @@ def _mission_chat_user_message(
 ) -> str:
     """Compose the operator turn's user message: the operator's message (which
     already carries the redaction-safe rolling chat history baked in by
-    ``_persona_chat_message_with_history``), then the queued-skill preload (when
+    the native structured conversation history), then the queued-skill preload (when
     the operator loaded a skill this turn), then the per-turn Runtime Situation
     HUD.
 
@@ -889,6 +895,21 @@ def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None)
     return scope_chat_lane_toolsets(
         resolved, restore=chat_lane_restore_toolsets(persona.id)
     )
+
+
+def chat_runtime_tool_contract(
+    persona: AgentPersona, *, session_id: str | None
+) -> dict[str, list[str]]:
+    """Return the exact tool inputs used to construct an operator-chat actor."""
+
+    return {
+        "enabled_toolsets": _enabled_toolsets_for_chat(
+            persona, session_id=session_id
+        ),
+        "blocked_tool_names": _blocked_tool_names_for_chat(
+            persona, session_id=session_id
+        ),
+    }
 
 
 def apply_chat_lane_tool_scope(
