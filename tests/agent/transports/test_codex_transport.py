@@ -310,6 +310,55 @@ class TestCodexBuildKwargs:
         )
         assert "extra_headers" not in kw
 
+    @pytest.mark.parametrize("scope_param", ["cache_scope_id", "session_id"])
+    def test_codex_cache_scope_headers_bound_long_ids(self, transport, scope_param):
+        """Cache-routing headers must satisfy the provider's 64-character
+        limit whether their source is the persona-chat override or the normal
+        session fallback. The live Alice operator-chat id is the regression
+        case: it is 66 characters and was previously forwarded verbatim."""
+        live_alice_scope = (
+            "persona_chat_personainst_profile_alice_agent_0f044056_7b2f618f1998"
+        )
+        assert len(live_alice_scope) == 66
+
+        common = dict(
+            model="gpt-5.4",
+            messages=[{"role": "system", "content": "You are Alice."}],
+            tools=[],
+            is_codex_backend=True,
+        )
+        first = transport.build_kwargs(**common, **{scope_param: live_alice_scope})
+        repeated = transport.build_kwargs(**common, **{scope_param: live_alice_scope})
+        without_scope = transport.build_kwargs(**common)
+        different = transport.build_kwargs(
+            **common,
+            **{scope_param: f"{live_alice_scope[:-1]}0"},
+        )
+
+        first_scope = first["extra_headers"]["session_id"]
+        assert first_scope == first["extra_headers"]["x-client-request-id"]
+        assert first_scope != live_alice_scope
+        assert 0 < len(first_scope) <= 64
+        assert repeated["extra_headers"]["session_id"] == first_scope
+        assert different["extra_headers"]["session_id"] != first_scope
+        # Header normalization must not alter the content-addressed body key.
+        assert first["prompt_cache_key"] == without_scope["prompt_cache_key"]
+
+    def test_codex_cache_scope_preserves_id_at_provider_limit(self, transport):
+        """Existing cache buckets remain stable when an id already satisfies
+        the provider contract, including the exact 64-character boundary."""
+        boundary_scope = "s" * 64
+        kw = transport.build_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[],
+            cache_scope_id=boundary_scope,
+            is_codex_backend=True,
+        )
+
+        assert kw["extra_headers"]["session_id"] == boundary_scope
+        assert kw["extra_headers"]["x-client-request-id"] == boundary_scope
+
     def test_cache_scope_id_is_header_only_not_transcript_or_cache_key(self, transport):
         """cache_scope_id must ONLY change the cache-scope headers — never the
         input items (transcript), instructions, prompt_cache_key body field, or

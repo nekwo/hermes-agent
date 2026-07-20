@@ -13,6 +13,26 @@ from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
 
 
+_MAX_CACHE_SCOPE_LENGTH = 64
+
+
+def _provider_safe_cache_scope_id(value: Any) -> str:
+    """Return a stable cache-routing id accepted by the Codex backend.
+
+    Codex treats the ``session_id`` / ``x-client-request-id`` routing headers
+    as its prompt-cache scope and rejects values longer than 64 characters.
+    Preserve existing short ids verbatim; content-address only oversized ids so
+    durable runtime identifiers can grow without breaking model calls.
+    """
+    scope_id = str(value or "").strip()
+    if len(scope_id) <= _MAX_CACHE_SCOPE_LENGTH:
+        return scope_id
+    digest = hashlib.sha256(
+        scope_id.encode("utf-8", errors="replace")
+    ).hexdigest()[:48]
+    return f"scope_{digest}"
+
+
 def _content_cache_key(instructions: str, tools: Optional[List[Dict[str, Any]]]) -> Optional[str]:
     """Content-address the prompt cache key from the static request prefix.
 
@@ -349,7 +369,9 @@ class ResponsesApiTransport(ProviderTransport):
             # transcript reload — can still route a STABLE per-conversation cache
             # scope. Falls back to session_id (worker/mission-run lanes carry a
             # real one, so their headers are unchanged). Empty ⇒ no headers.
-            scope_header_value = str(cache_scope_id or session_id or "").strip()
+            scope_header_value = _provider_safe_cache_scope_id(
+                cache_scope_id or session_id
+            )
             if scope_header_value:
                 existing_extra_headers = kwargs.get("extra_headers")
                 merged_extra_headers: Dict[str, str] = {}
