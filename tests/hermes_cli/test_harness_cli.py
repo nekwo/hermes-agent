@@ -13,7 +13,14 @@ from agent_runtime.goal_runner import GoalRunResult
 from agent_runtime.models import AgentRun, Incident, Proof, Task
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import RunState, TaskState
-from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
+from agent_runtime.store import (
+    IncidentStore,
+    ProofStore,
+    RealmStore,
+    RunStore,
+    TaskStore,
+    WorkspaceStore,
+)
 
 
 def parser():
@@ -29,6 +36,21 @@ def test_harness_init_exposes_atomic_bundled_persona_opt_in():
     args = parser().parse_args(["harness", "init", "--with-bundled-personas", "--json"])
     assert args.harness_command == "init"
     assert args.with_bundled_personas is True
+
+
+def test_harness_init_materializes_an_idempotent_default_scope(capsys):
+    args = parser().parse_args(["harness", "init", "--json"])
+
+    assert args.func(args) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["default_realm_id"] == "realm_default"
+    assert first["default_workspace_id"] == "ws_default"
+
+    assert args.func(args) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second == first
+    assert len(RealmStore().list_all()) == 1
+    assert len(WorkspaceStore().list_all()) == 1
 
 
 def test_harness_mission_chat_steer_no_active_turn_returns_structured_json(tmp_path, monkeypatch, capsys):

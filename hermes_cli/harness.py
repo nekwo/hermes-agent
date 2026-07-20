@@ -29,6 +29,7 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.default_plan import ensure_default_mission_plan
+from agent_runtime.default_scope import ensure_default_scope
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
@@ -2996,8 +2997,21 @@ def _cmd_init(args) -> int:
             )
     else:
         personas = ensure_persisted_personas(cfg)
-    data = {"personas": [p.id for p in personas]}
-    print(emit_json(data) if args.json else f"Initialized harness personas: {', '.join(data['personas'])}")
+    persona_ids = [p.id for p in personas]
+    scope = ensure_default_scope(agent_ids=persona_ids)
+    data = {
+        "personas": persona_ids,
+        "default_realm_id": scope.realm.id,
+        "default_workspace_id": scope.workspace.id,
+    }
+    print(
+        emit_json(data)
+        if args.json
+        else (
+            f"Initialized harness personas: {', '.join(data['personas'])}\n"
+            f"Default scope: {scope.realm.name} / {scope.workspace.name}"
+        )
+    )
     return 0
 
 
