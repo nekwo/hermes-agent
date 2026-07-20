@@ -427,6 +427,27 @@ def _cmd_persona_instance_open_chat(args) -> int:
         data = _chat_busy_payload(exc)
         print(emit_json(data) if args.json else data["error"])
         return 2
+    try:
+        _ensure_persona_chat_session(
+            session_db=_default_persona_session_db(),
+            session_id=instance.session_id,
+            persona_id=instance.persona_id,
+            title=f"{instance.display_name} chat",
+            required=True,
+        )
+    except PersonaChatPersistenceError as exc:
+        data = {
+            "ok": False,
+            "error_kind": "chat_session_persist_failed",
+            "persistence_operation": exc.operation,
+            "error": str(exc),
+            "persona_id": instance.persona_id,
+            "persona_instance_id": instance.id,
+            "session_id": instance.session_id,
+            "next_expected": "restore canonical persona chat transcript storage and retry",
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
     data = {
         "ok": True,
         "persona_instance_id": instance.id,

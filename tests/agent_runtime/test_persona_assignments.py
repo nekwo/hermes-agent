@@ -937,7 +937,9 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     from hermes_cli import harness
 
     cfg = _assignment_config()
+    session_db = _TranscriptDB()
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
 
     code = harness._cmd_persona_instance_open_chat(
         Namespace(
@@ -956,6 +958,8 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     assert instance.active_run_id is None
     assert PersonaAssignmentStore().list_all() == []
     assert RunStore().list_all() == []
+    assert session_db.get_session(instance.session_id) is not None
+    assert session_db.get_session_title(instance.session_id) == f"{instance.display_name} chat"
 
 
 def test_persona_instance_open_chat_can_target_additional_placement(monkeypatch, isolate_agent_runtime_root):
@@ -963,7 +967,9 @@ def test_persona_instance_open_chat_can_target_additional_placement(monkeypatch,
     from hermes_cli import harness
 
     cfg = _assignment_config()
+    session_db = _TranscriptDB()
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
 
     code = harness._cmd_persona_instance_open_chat(
         Namespace(
@@ -988,6 +994,43 @@ def test_persona_instance_open_chat_can_target_additional_placement(monkeypatch,
     assert additional.persona_id == "profile:reviewer"
     assert additional.session_id == "chat_old_123"
     assert additional.mode == "chat"
+    assert session_db.get_session(additional.session_id) is not None
+    assert session_db.get_session_title(additional.session_id) == f"{additional.display_name} chat"
+
+
+def test_persona_instance_open_chat_session_persistence_failure_is_typed_and_not_silent(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(
+        harness,
+        "_default_persona_session_db",
+        lambda: _FailingTranscriptDB("session_create"),
+    )
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="launcher-dev",
+            session_id="chat_persist_failure_123",
+            kill_active=False,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "chat_session_persist_failed"
+    assert payload["persistence_operation"] == "session_create"
+    assert payload["persona_id"] == "dev"
+    assert payload["persona_instance_id"] == "personainst_dev"
+    assert payload["session_id"] == "chat_persist_failure_123"
 
 
 def test_open_chat_cli_targets_the_session_owner_not_the_canonical(monkeypatch, isolate_agent_runtime_root):
