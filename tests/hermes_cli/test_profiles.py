@@ -89,6 +89,31 @@ class TestNormalizeProfileName:
             normalize_profile_name("   ")
 
 
+def test_available_profile_template_summaries_skip_runtime_config(
+    profile_env, monkeypatch
+):
+    profile_dir = profile_env / ".hermes" / "profiles" / "alice"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "profile.yaml").write_text(
+        "description: Mission lead\n", encoding="utf-8"
+    )
+    (profile_dir / "config.yaml").write_text(
+        "model:\n  default: expensive-to-parse\n", encoding="utf-8"
+    )
+
+    def fail_config_read(_profile_dir):
+        raise AssertionError("metadata-only catalog must not parse config.yaml")
+
+    monkeypatch.setattr(profiles, "_read_config_model", fail_config_read)
+    rows = profiles.available_profile_template_summaries()
+
+    assert [(row.name, row.description) for row in rows] == [
+        ("alice", "Mission lead")
+    ]
+    assert rows[0].model is None
+    assert rows[0].provider is None
+
+
 class TestValidateProfileName:
     """Tests for validate_profile_name()."""
 

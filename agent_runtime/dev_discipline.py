@@ -57,7 +57,7 @@ _HARNESS_SUPPORT_REPO_MARKERS = (
 )
 
 
-def needs_supervisor_slicing(task: Task) -> bool:
+def needs_supervisor_slicing(task: Task, *, event_log=None) -> bool:
     """Return true when a PM-ready mission is too broad for first Dev tick.
 
     This is intentionally conservative: it only catches unsliced multi-surface
@@ -79,7 +79,7 @@ def needs_supervisor_slicing(task: Task) -> bool:
             " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
         ]
     ).lower()
-    if _has_bounded_specialist_handoff_packet(task):
+    if _has_bounded_specialist_handoff_packet(task, event_log=event_log):
         return False
     if _is_backend_first_slice(task, repos=repos, text=text):
         return False
@@ -121,9 +121,9 @@ def _is_harness_support_repo(repo: str) -> bool:
     return any(marker in normalized for marker in _HARNESS_SUPPORT_REPO_MARKERS)
 
 
-def _has_bounded_specialist_handoff_packet(task: Task) -> bool:
+def _has_bounded_specialist_handoff_packet(task: Task, *, event_log=None) -> bool:
     try:
-        packet = latest_packet(task.id, "handoff_packet")
+        packet = latest_packet(task.id, "handoff_packet", event_log=event_log)
     except Exception:
         return False
     body = packet.get("body") if isinstance(packet, dict) else None

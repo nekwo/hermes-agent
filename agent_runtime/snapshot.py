@@ -8,7 +8,10 @@ import time
 import hashlib
 from datetime import datetime, timezone
 
-from hermes_cli.profiles import available_profile_templates
+# The snapshot roster does not render per-profile model/provider settings. Use
+# the metadata-only catalog so a cold build does not parse every config.yaml.
+# Keep the local alias stable for existing monkeypatch seams/tests.
+from hermes_cli.profiles import available_profile_template_summaries as available_profile_templates
 from hermes_time import now
 from utils import atomic_json_write
 
@@ -48,6 +51,7 @@ from .persona_instance_identity import (
     identity_aliases_for_rows,
 )
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
+from .parse_cache import cached_by_mtime
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
 from .prompt_observability import snapshot_prompt_observability
@@ -433,7 +437,11 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     # also returns the dormant typed catalog for resolution and would surface mothballed
     # pipeline personas that are not meant to be shown.
     agents = agent_store.list_all() or seed_personas()
-    incidents = incident_store.list_all()
+    # Closed incidents are history-only in the steady-state frame. Avoid
+    # recursively coercing the entire closed tail (thousands of files on a
+    # mature runtime) merely to count it; the store still validates each JSON
+    # row and materializes every open incident used by routing/observability.
+    incidents, incidents_evicted_count = incident_store.list_open_with_closed_count()
     role_envelope_store = RoleEnvelopeStore(event_log=event_log)
     role_checklist_store = RoleChecklistStore(event_log=event_log)
     proof_batch_store = ProofBatchStore(event_log=event_log)
@@ -494,7 +502,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     # closed incident is history, evicted to the paged query. The full
     # ``incidents`` list still feeds summary/observability/dirty/tasks — only the
     # ``incidents`` frame key is filtered to open.
-    incident_frame_rows, incidents_evicted_count = _open_incidents_frame(incidents)
+    incident_frame_rows = incidents
     # S4: the frame carries these as id-keyed maps (``_keyed`` below). The row
     # LISTS are still needed as an ordered input to the operator-channel
     # projection (``run_summaries`` feeds the goal-turn flow), so build them once
@@ -508,6 +516,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     active_run_id_set = {r.id for r in active_runs}
     frame_run_rows = [row for row in run_rows if row.get("run_id") in active_run_id_set]
     incident_rows = [_incident_summary(i) for i in incident_frame_rows]
+    migration = migration_status()
     data = {
         "schema_version": 2,
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
@@ -540,8 +549,8 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             "model_source": getattr(cfg, "default_model_source", "unset"),
             "provider_source": getattr(cfg, "default_provider_source", "unset"),
         },
-        "runtime_config": effective_config_summary(cfg),
-        "migration": migration_status(),
+        "runtime_config": effective_config_summary(cfg, migration=migration),
+        "migration": migration,
         "prompt_observability": snapshot_prompt_observability(
             personas=agents,
             persona_instances=persona_instances,
@@ -588,6 +597,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
                     stage_verification_accountant=stage_verification_accountant,
                     flow_timeline_accountant=flow_timeline_accountant,
                     workspaces=workspaces,
+                    event_log=event_log,
                 ))
                 for t in tasks
             ],
@@ -1538,12 +1548,11 @@ def _archived_task_summaries(limit: int = 25) -> list[dict]:
 
 
 def _read_json(path):
-    try:
-        if not path.exists():
-            return {}
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = cached_by_mtime(
+        path,
+        lambda candidate: json.loads(candidate.read_text(encoding="utf-8")),
+        default={},
+    )
     return data if isinstance(data, dict) else {}
 
 
@@ -2503,7 +2512,7 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
-def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None):
+def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, event_log=None):
     gate = task_verdict_proof_satisfied(task, proofs)
     current_stage_id = _task_current_stage_id(task)
     current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
@@ -2517,7 +2526,12 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         if getattr(worker, "task_id", None) == task.id
         and str(getattr(getattr(worker, "state", ""), "value", getattr(worker, "state", ""))) not in {"completed", "blocked", "closed"}
     ]
-    next_action = _next_action_summary(task, open_incidents, run_store=run_store)
+    next_action = _next_action_summary(
+        task,
+        open_incidents,
+        run_store=run_store,
+        event_log=event_log,
+    )
     assignments = list(persona_assignments or [])
     bundles = list(repo_bundles or [])
     runtime_lane = _runtime_lane_summary(runtime_instances or [])
@@ -2812,7 +2826,7 @@ def _task_current_stage_id(task) -> str | None:
     return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
 
 
-def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None) -> dict:
+def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None, event_log=None) -> dict:
     # S4 goals/tasks merge: the goal entity is the FULL task summary (all the
     # rich lanes the old ``tasks`` section carried — self_tests, role_envelopes,
     # role_checklists, proof_batches, accounted stage_verification) UNIONED with
@@ -2838,6 +2852,7 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         persona_instances=persona_instances,
         stage_verification_accountant=stage_verification_accountant,
         flow_timeline_accountant=flow_timeline_accountant,
+        event_log=event_log,
     )
     workspace_id = getattr(task, "workspace_id", None)
     realm_id = None
@@ -2923,6 +2938,7 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
         persona_instances=persona_instances,
         stage_verification_accountant=None,
         workspaces=workspaces,
+        event_log=event_log,
     )
 
 
@@ -3953,7 +3969,7 @@ def _run_blocked_reason(task, active_runs, open_incidents, *, run_store=None) ->
     return None
 
 
-def _next_action_summary(task, open_incidents, *, run_store=None):
+def _next_action_summary(task, open_incidents, *, run_store=None, event_log=None):
     if open_incidents:
         runs = run_store or RunStore()
         cfg = load_agent_runtime_config()
@@ -3967,7 +3983,7 @@ def _next_action_summary(task, open_incidents, *, run_store=None):
     if task.state in {TaskState.DONE, TaskState.CANCELLED}:
         return {**_stopped_progress(task, [], "settled", "harness"), "action": "terminal", "reason": "mission is terminal"}
     cfg = load_agent_runtime_config()
-    action = MissionStateMachine(config=cfg).next_action(task)
+    action = MissionStateMachine(config=cfg, event_log=event_log).next_action(task)
     reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
     return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "action": action.type.value, "reason": action.reason}
 

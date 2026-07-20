@@ -408,7 +408,7 @@ def test_persisted_row_size_shrinks(isolate_agent_runtime_root):
 def _seed_store(*, legacy_shape: bool) -> None:
     """Three lanes: (a) live instance's CURRENT session (built-row overlap),
     (b) same live instance's OLDER console session (no built match — the
-    ref-preservation lane), (c) a departed instance (evicted)."""
+    historical-session eviction lane), (c) a departed instance (evicted)."""
 
     rows = [
         (
@@ -468,8 +468,8 @@ def test_frame_chat_contexts_byte_parity_old_vs_new_store(tmp_path, monkeypatch)
     assert old_bytes == new_bytes, "frame chat_contexts must be byte-identical across store shapes"
     # The catalog pointer accounting holds across shapes too.
     assert old_section["skills_catalogs_ref"]["hashes"] == new_section["skills_catalogs_ref"]["hashes"]
-    # Both modes agree on what was evicted (the departed lane).
-    assert old_section["chat_contexts_ref"]["count"] == new_section["chat_contexts_ref"]["count"] == 1
+    # Both modes evict the departed lane and the live instance's stale session.
+    assert old_section["chat_contexts_ref"]["count"] == new_section["chat_contexts_ref"]["count"] == 2
     # And the new store actually took the index lane, not the fallback.
     assert new_section["chat_contexts_ref"]["read"]["source"] == "index"
     assert old_section["chat_contexts_ref"]["read"]["source"] == "glob_fallback"
@@ -589,6 +589,41 @@ def test_frame_read_is_roster_sized(isolate_agent_runtime_root):
     assert section["chat_contexts_ref"]["count"] == 4
     live_ids = {row["persona_instance_id"] for row in section["chat_contexts"]}
     assert live_ids == {"personainst_l0", "personainst_l1"}
+
+
+def test_frame_read_excludes_old_sessions_for_live_instance(isolate_agent_runtime_root):
+    _persist_new(
+        _canonical_row(
+            "ctx_old_session",
+            instance_id="personainst_live",
+            session_id="sess_old",
+            catalog=_catalog(3),
+        ),
+        mtime=1_700_000_000.0,
+    )
+    _persist_new(
+        _canonical_row(
+            "ctx_current_session",
+            instance_id="personainst_live",
+            session_id="sess_current",
+            catalog=_catalog(3),
+        ),
+        mtime=1_700_000_100.0,
+    )
+
+    section = po.snapshot_prompt_observability(
+        personas=[_persona()],
+        persona_instances=[_instance("personainst_live", "sess_current")],
+        tasks=[],
+    )
+
+    read = section["chat_contexts_ref"]["read"]
+    assert read["source"] == "index"
+    assert read["files_read"] == 1
+    assert {row["context_id"] for row in section["chat_contexts"]} <= {
+        "ctx_current_session"
+    }
+    assert section["chat_contexts_ref"]["count"] == 1
 
 
 def test_deleted_indexed_file_typed_miss_fallback_then_heal(isolate_agent_runtime_root):

@@ -1191,10 +1191,11 @@ def load_live_prompt_observability_contexts(
         instance_id = safe_assignment_token(entry.get("instance_id")) or ""
         session_id = safe_assignment_text(entry.get("session_id"), limit=200) or ""
         persona_id = safe_assignment_token(entry.get("persona_id")) or ""
-        is_live = (
-            (instance_id, session_id, persona_id) in built_keys
-            or (instance_id and instance_id in live_instance_ids)
-            or (session_id and session_id in live_session_ids)
+        is_live = _context_identity_is_live(
+            key=(instance_id, session_id, persona_id),
+            built_keys=built_keys,
+            live_instance_ids=live_instance_ids,
+            live_session_ids=live_session_ids,
         )
         if not is_live:
             # Counted, never silently skipped: these lanes' rows stay on disk
@@ -1319,16 +1320,47 @@ def _filter_live_chat_contexts(
         key = _context_row_key(row)
         inst_id = safe_assignment_token(row.get("persona_instance_id"))
         sess_id = safe_assignment_text(row.get("session_id"), limit=200)
-        is_live = (
-            key in built_keys
-            or (inst_id and inst_id in live_instance_ids)
-            or (sess_id and sess_id in live_session_ids)
+        is_live = _context_identity_is_live(
+            key=key,
+            built_keys=built_keys,
+            live_instance_ids=live_instance_ids,
+            live_session_ids=live_session_ids,
         )
         if is_live:
             kept.append(row)
         else:
             evicted += 1
     return kept, evicted
+
+
+def _context_identity_is_live(
+    *,
+    key: tuple[str, str, str],
+    built_keys: set[tuple[str, str, str]],
+    live_instance_ids: set[str],
+    live_session_ids: set[str],
+) -> bool:
+    """Resolve a persisted context against the current-session roster.
+
+    A long-lived persona instance can accumulate many historical sessions.
+    Instance identity alone therefore cannot make a row live: freshly built
+    keys are the authority for that instance's current session. Session-only
+    legacy rows remain supported when their session is current.
+    """
+
+    if key in built_keys:
+        return True
+    instance_id, session_id, _persona_id = key
+    if instance_id:
+        current_sessions = {
+            built_session
+            for built_instance, built_session, _ in built_keys
+            if built_instance == instance_id
+        }
+        if current_sessions:
+            return session_id in current_sessions
+        return instance_id in live_instance_ids and not session_id
+    return bool(session_id and session_id in live_session_ids)
 
 
 def _merge_latest_contexts(
