@@ -106,16 +106,14 @@ def test_instance_shaped_target_canonicalizes_and_does_not_mint_a_variant(
 def test_task_bound_session_pointer_is_not_absorbed_as_a_chat_lane(
     isolate_agent_runtime_root,
 ):
-    # If the instance's pointer is a non-chat (task/worker) session id, a chat
-    # relay must NOT thread its transcript onto it — mint a fresh chat session.
+    # A legacy worker pointer cannot displace the dedicated chat pointer.
     store = PersonaInstanceStore()
     instance = store.open_chat(persona_id="qa", session_id="persona_chat_seed_000000000000")
     instance.session_id = "worker_session_task_42"  # not a persona_chat_* id
     store.update(instance)
 
     minted = default_chat_session_id_for_instance(store, persona_id="qa")
-    assert minted != "worker_session_task_42"
-    assert minted.startswith(f"persona_chat_{persona_instance_id_for('qa')}_")
+    assert minted == "persona_chat_seed_000000000000"
 
 
 def test_relay_exchange_is_visible_in_the_snapshot_projection(
@@ -288,9 +286,7 @@ def test_open_chat_refuses_binding_a_siblings_session_onto_the_canonical(
 def test_resolve_default_ignores_a_foreign_pointer_and_self_heals(
     isolate_agent_runtime_root,
 ):
-    # A pointer already poisoned with a sibling's session (pre-fix corruption)
-    # must be ignored, and the next send mints the instance's OWN session —
-    # self-healing the corrupted pointer with no manual store repair.
+    # Poisoning the retired scalar cannot corrupt the dedicated default.
     store = PersonaInstanceStore()
     sibling = store.add_instance(
         persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
@@ -302,12 +298,13 @@ def test_resolve_default_ignores_a_foreign_pointer_and_self_heals(
     store.update(primary)
     assert store.get(persona_instance_id_for("qa")).session_id == sibling.session_id
 
-    # Read side ignores the foreign session; send mints the primary's own.
-    assert resolve_default_chat_session_id_for_instance(store, persona_id="qa") is None
+    # Read side ignores the foreign legacy scalar and keeps the dedicated root.
+    own_root = primary.default_chat_session_id
+    assert resolve_default_chat_session_id_for_instance(store, persona_id="qa") == own_root
     healed = default_chat_session_id_for_instance(store, persona_id="qa")
-    assert healed.startswith(f"persona_chat_{persona_instance_id_for('qa')}_")
+    assert healed == own_root
     store.open_chat(persona_id="qa", session_id=healed)
-    assert store.get(persona_instance_id_for("qa")).session_id == healed
+    assert store.get(persona_instance_id_for("qa")).default_chat_session_id == healed
     assert store.get("personainst_qa_agent_2").session_id == sibling.session_id
 
 

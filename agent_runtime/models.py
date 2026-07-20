@@ -517,6 +517,12 @@ class PersonaInstance:
     current_task_id: str | None = None
     active_worker_session_id: str | None = None
     active_run_id: str | None = None
+    # Durable pointer to the operator-owned Mission Control chat root.  This is
+    # deliberately independent from worker/run sessions: a task bind may come
+    # and go without changing which operator conversation opens by default.
+    default_chat_session_id: str | None = None
+    # Legacy dual-purpose pointer.  Read only for v1 migration; new writers do
+    # not use it for either chat or worker ownership.
     session_id: str | None = None
     context_receipt_id: str | None = None
     compression_receipt_id: str | None = None
@@ -545,6 +551,12 @@ class PersonaInstance:
         # steering parent, so only an instance-shaped scalar seeds the set.
         if not self.steered_by and looks_like_persona_instance_id(self.spawned_by):
             self.steered_by = [self.spawned_by]
+        if (
+            not self.default_chat_session_id
+            and isinstance(self.session_id, str)
+            and self.session_id.startswith("persona_chat_")
+        ):
+            self.default_chat_session_id = self.session_id
 
 
 def apply_instance_model_overrides(

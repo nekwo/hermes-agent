@@ -133,6 +133,7 @@ def build_turn_context(
     set_session_context,
     set_current_write_origin,
     ra,
+    reuse_current_user_message: bool = False,
 ) -> TurnContext:
     """Run the once-per-turn setup and return the loop's input context.
 
@@ -313,11 +314,25 @@ def build_turn_context(
             should_review_memory = True
             agent._turns_since_memory = 0
 
-    # Add user message.
-    user_msg = {"role": "user", "content": user_message}
-    messages.append(user_msg)
-    current_turn_user_idx = len(messages) - 1
-    agent._persist_user_message_idx = current_turn_user_idx
+    # A pending journal retry may already have durably written the exact user
+    # row before the process died. Reuse it as the current prompt instead of
+    # appending a second native user message.
+    if reuse_current_user_message:
+        current_turn_user_idx = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if messages[index].get("role") == "user"
+            ),
+            -1,
+        )
+        if current_turn_user_idx < 0:
+            raise ValueError("reuse_current_user_message requires a native user row")
+    else:
+        user_msg = {"role": "user", "content": user_message}
+        messages.append(user_msg)
+        current_turn_user_idx = len(messages) - 1
+        agent._persist_user_message_idx = current_turn_user_idx
 
     if not agent.quiet_mode:
         _print_preview = summarize_user_message_for_log(user_message)

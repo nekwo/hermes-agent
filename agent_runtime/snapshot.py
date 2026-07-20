@@ -852,6 +852,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
             "proof_gate_state",
             "stage_verification",
             "operator_capabilities",
+            "server_minted_chat_sessions",
         ],
         "freshness": {
             "state": "fresh",

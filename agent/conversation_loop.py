@@ -559,6 +559,7 @@ def run_conversation(
     persist_user_message: Optional[str] = None,
     persist_user_timestamp: Optional[float] = None,
     moa_config: Optional[dict[str, Any]] = None,
+    reuse_current_user_message: bool = False,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -618,6 +619,7 @@ def run_conversation(
         set_session_context=set_session_context,
         set_current_write_origin=set_current_write_origin,
         ra=_ra,
+        reuse_current_user_message=reuse_current_user_message,
     )
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message

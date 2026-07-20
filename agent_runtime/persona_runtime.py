@@ -301,6 +301,13 @@ class GPTPersonaRuntime:
         preloaded_skill_prompt: str | None = None,
         workspace_agents_content: str | None = None,
         situational_hud_content: str | None = None,
+        conversation_history: list[dict] | None = None,
+        reuse_current_user_message: bool = False,
+        root_chat_session_id: str | None = None,
+        client_message_id: str | None = None,
+        runtime_registry=None,
+        runtime_signature: str | None = None,
+        native_revision: str | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -377,6 +384,15 @@ class GPTPersonaRuntime:
                 # turns. Header/routing value ONLY — never a transcript-load key
                 # (T10c). Worker/mission-run lanes leave this unset.
                 cache_scope_id=perm_session_id,
+                tool_execution_scope_id=root_chat_session_id or perm_session_id,
+                conversation_history=conversation_history,
+                reuse_current_user_message=reuse_current_user_message,
+                root_chat_session_id=root_chat_session_id or perm_session_id,
+                client_message_id=client_message_id,
+                turn_id=turn_id,
+                persona_chat_runtime_registry=runtime_registry,
+                persona_chat_runtime_signature=runtime_signature,
+                persona_chat_native_revision=native_revision,
                 max_wall_seconds=max_wall_seconds,
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,

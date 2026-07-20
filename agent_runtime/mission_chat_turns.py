@@ -63,7 +63,25 @@ _MAX_TEXT = 20000
 _RETENTION_MAX_TURNS_PER_SESSION = 100
 _RETENTION_MAX_SESSIONS = 50
 _SENSITIVE_FILE_MARKERS = ("private_token", "secret_token", "api_key", "apikey", "credential")
-_VALID_TURN_STATES = {"running", "completed", "failed", "interrupted"}
+JOURNAL_TURN_STATES = {
+    "pending",
+    "executing",
+    "outcome_unknown",
+    "native_committed",
+    "projected",
+    "abandoned",
+}
+_LEGACY_TURN_STATES = {"running", "completed", "failed", "interrupted"}
+_VALID_TURN_STATES = JOURNAL_TURN_STATES | _LEGACY_TURN_STATES
+_JOURNAL_TRANSITIONS = {
+    None: {"pending"},
+    "pending": {"pending", "executing", "abandoned"},
+    "executing": {"native_committed", "outcome_unknown"},
+    "outcome_unknown": {"abandoned", "native_committed"},
+    "native_committed": {"native_committed", "projected"},
+    "projected": {"projected"},
+    "abandoned": {"abandoned"},
+}
 
 _T = TypeVar("_T")
 
@@ -103,6 +121,8 @@ def next_turn_state(
       is stale and is rejected.
     """
 
+    if current in JOURNAL_TURN_STATES and requested in _LEGACY_TURN_STATES:
+        return None
     if requested is None:
         return current or "running"
     if requested not in _VALID_TURN_STATES:
@@ -122,6 +142,7 @@ def persist_mission_chat_turn(
     elements: list[dict[str, Any]] | None,
     state: str | None = None,
     write_ahead: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> MissionChatTurnPersistOutcome:
     session_key = safe_assignment_text(session_id, limit=240)
     message_key = safe_assignment_text(client_message_id, limit=240)
@@ -158,14 +179,114 @@ def persist_mission_chat_turn(
         )
         if write_ahead and not started_at:
             started_at = _utc_now_iso()
+        prior = dict(existing) if isinstance(existing, dict) else {}
         session[message_key] = {
-            "schema_version": 1,
+            **prior,
+            "schema_version": 2,
             "turn_id": safe_assignment_token(turn_id) or safe_assignment_token(message_key),
             "state": resolved_state,
             "updated_at": _utc_now_iso(),
             **({"started_at": started_at} if started_at else {}),
             "elements": safe_elements,
+            **_safe_journal_metadata(metadata),
         }
+        return True, MissionChatTurnPersistOutcome.PERSISTED
+
+    return _mutate_session(
+        session_key,
+        _mutate,
+        timeout_result=MissionChatTurnPersistOutcome.SKIPPED_LOCK_TIMEOUT,
+        protected_message=message_key,
+    )
+
+
+def transition_mission_chat_turn(
+    *,
+    session_id: str | None,
+    client_message_id: str | None,
+    turn_id: str | None,
+    state: str,
+    metadata: dict[str, Any] | None = None,
+    elements: list[dict[str, Any]] | None = None,
+) -> MissionChatTurnPersistOutcome:
+    """Durably advance the exactly-once persona-chat journal.
+
+    The record is keyed by stable root plus client id and also carries the turn
+    id.  Invalid/backwards transitions fail closed; callers may safely repeat a
+    transition to its current state after a crash.
+    """
+
+    session_key = safe_assignment_text(session_id, limit=240)
+    message_key = safe_assignment_text(client_message_id, limit=240)
+    requested = _safe_turn_state(state)
+    if not session_key or not message_key:
+        return MissionChatTurnPersistOutcome.SKIPPED_NO_KEYS
+    if requested not in JOURNAL_TURN_STATES:
+        return MissionChatTurnPersistOutcome.REJECTED_INVALID_STATE
+
+    def _mutate(session: dict[str, Any]) -> tuple[bool, MissionChatTurnPersistOutcome]:
+        existing = session.get(message_key)
+        current = _record_state(existing) if isinstance(existing, dict) else None
+        if current in _LEGACY_TURN_STATES:
+            current = {"running": "pending", "completed": "projected"}.get(current)
+        if requested not in _JOURNAL_TRANSITIONS.get(current, set()):
+            return False, MissionChatTurnPersistOutcome.REJECTED_STALE_TRANSITION
+        now_iso = _utc_now_iso()
+        record = dict(existing) if isinstance(existing, dict) else {}
+        if not record.get("started_at"):
+            record["started_at"] = now_iso
+        record.update(
+            {
+                "schema_version": 2,
+                "turn_id": safe_assignment_token(turn_id) or safe_assignment_token(message_key),
+                "state": requested,
+                "updated_at": now_iso,
+            }
+        )
+        if elements is not None:
+            record["elements"] = _safe_elements(elements)
+        else:
+            record.setdefault("elements", [])
+        record.update(_safe_journal_metadata(metadata))
+        session[message_key] = record
+        return True, MissionChatTurnPersistOutcome.PERSISTED
+
+    return _mutate_session(
+        session_key,
+        _mutate,
+        timeout_result=MissionChatTurnPersistOutcome.SKIPPED_LOCK_TIMEOUT,
+        protected_message=message_key,
+    )
+
+
+def abandon_mission_chat_turn(
+    *, session_id: str | None, client_message_id: str | None, turn_id: str | None
+) -> MissionChatTurnPersistOutcome:
+    session_key = safe_assignment_text(session_id, limit=240)
+    message_key = safe_assignment_text(client_message_id, limit=240)
+    exact_turn = safe_assignment_token(turn_id)
+    if not session_key or not message_key or not exact_turn:
+        return MissionChatTurnPersistOutcome.SKIPPED_NO_KEYS
+
+    def _mutate(session: dict[str, Any]) -> tuple[bool, MissionChatTurnPersistOutcome]:
+        existing = session.get(message_key)
+        if not isinstance(existing, dict):
+            return False, MissionChatTurnPersistOutcome.REJECTED_STALE_TRANSITION
+        if (
+            _record_state(existing) != "outcome_unknown"
+            or safe_assignment_token(existing.get("turn_id")) != exact_turn
+        ):
+            return False, MissionChatTurnPersistOutcome.REJECTED_STALE_TRANSITION
+        record = dict(existing)
+        record.update(
+            {
+                "state": "abandoned",
+                "updated_at": _utc_now_iso(),
+                "resolved_at": _utc_now_iso(),
+                "resolution": "abandon",
+            }
+        )
+        session[message_key] = record
         return True, MissionChatTurnPersistOutcome.PERSISTED
 
     return _mutate_session(
@@ -343,7 +464,7 @@ def _apply_session_turn_cap(
         for message_key, record in session.items()
         if not (
             str(message_key) == str(protected_message)
-            or _record_state(record) == "running"
+            or _record_state(record) in {"running", "pending", "executing", "outcome_unknown"}
         )
     )
     for _, message_key in evictable[:excess]:
@@ -386,7 +507,10 @@ def _gc_session_files(*, protected_session_key: str | None = None) -> None:
                     if not got:
                         continue
                     session = _read_session_map(path)
-                    if any(_record_state(record) == "running" for record in session.values()):
+                    if any(
+                        _record_state(record) in {"running", "pending", "executing", "outcome_unknown"}
+                        for record in session.values()
+                    ):
                         continue
                     if _archive_session_file(path):
                         dropped += 1
@@ -656,7 +780,7 @@ def _safe_record(
     if not turn_id:
         return None
     started_at = safe_assignment_text(record.get("started_at"), limit=80)
-    return {
+    safe = {
         "client_message_id": client_message_id,
         "turn_id": turn_id,
         "state": _record_state(record) or "completed",
@@ -666,6 +790,38 @@ def _safe_record(
         **({"started_at": started_at} if started_at else {}),
         "elements": _safe_elements(record.get("elements")),
     }
+    safe.update(_safe_journal_metadata(record))
+    return safe
+
+
+_JOURNAL_TEXT_FIELDS = {
+    "root_chat_session_id": 240,
+    "active_session_id": 240,
+    "persona_instance_id": 200,
+    "provider_request_id": 240,
+    "provider_request_fingerprint": 128,
+    "native_revision": 160,
+    "native_assistant_message_id": 240,
+    "stored_reply": _MAX_TEXT,
+    "projection_revision": 160,
+    "resolution": 80,
+    "resolved_at": 80,
+    "pending_user_message": 12000,
+}
+
+
+def _safe_journal_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key, limit in _JOURNAL_TEXT_FIELDS.items():
+        text = safe_assignment_text(value.get(key), limit=limit)
+        if text:
+            result[key] = text
+    for key in ("provider_submitted", "native_committed", "projection_committed"):
+        if key in value:
+            result[key] = bool(value.get(key))
+    return result
 
 
 def _safe_turn_state(value: Any) -> str | None:

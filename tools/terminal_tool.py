@@ -1142,6 +1142,14 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     session to spin up its own container.  Only overrides containing
     backend-specific image keys or ``env_type`` trigger isolation.
     """
+    try:
+        from agent_runtime.persona_chat_continuity import current_tool_execution_scope
+
+        chat_scope = current_tool_execution_scope()
+    except Exception:
+        chat_scope = None
+    if chat_scope:
+        return chat_scope
     _ISOLATION_KEYS = frozenset({
         "docker_image", "modal_image", "singularity_image",
         "daytona_image", "env_type",

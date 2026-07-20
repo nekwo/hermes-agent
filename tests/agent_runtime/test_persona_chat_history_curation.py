@@ -1436,6 +1436,7 @@ def _chat_persona_instance(instance_id: str, persona_id: str, session_id: str) -
         state=WorkerSessionState.IDLE,
         mode="chat",
         session_id=session_id,
+        default_chat_session_id=session_id,
     )
 
 

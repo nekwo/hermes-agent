@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -68,6 +69,7 @@ from agent_runtime.persona_assignments import (
     StaleModelOverrideWrite,
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    canonical_chat_instance_id,
     canonical_persona_instance_id,
     chat_session_owner_instance_id,
     default_chat_session_id_for_instance,
@@ -77,6 +79,7 @@ from agent_runtime.persona_assignments import (
     persona_instance_runtime_enabled,
     persona_instance_summary,
     persona_instance_id_for,
+    resolve_default_chat_session_id_for_instance,
     safe_assignment_token,
     safe_assignment_text,
     safe_optional_token,
@@ -97,7 +100,25 @@ from agent_runtime.realm_sync import (
 from agent_runtime.resolution import resolution_table, resolve_runtime
 from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
-from agent_runtime.mission_chat_turns import MissionChatTurnPersistOutcome, mark_stale_running_turns_interrupted, persist_mission_chat_turn
+from agent_runtime.mission_chat_turns import (
+    MissionChatTurnPersistOutcome,
+    abandon_mission_chat_turn,
+    mark_stale_running_turns_interrupted,
+    mission_chat_turn_record,
+    mission_chat_turn_records,
+    persist_mission_chat_turn,
+    transition_mission_chat_turn,
+)
+from agent_runtime.persona_chat_continuity import (
+    PersonaChatBusyError,
+    PersonaChatMintReceiptStore,
+    PERSONA_CHAT_SESSION_SOURCE,
+    native_history_revision,
+    initialize_persona_chat_runtime_registry,
+    persona_chat_root_lease,
+    persona_chat_runtime_registry,
+    safe_native_history,
+)
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime
@@ -1015,6 +1036,16 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_open)
     persona_instance_open.add_argument("--json", action="store_true")
     persona_instance_open.set_defaults(func=_cmd_persona_instance_open_chat)
+    persona_instance_resolve_turn = persona_instance_subs.add_parser(
+        "resolve-chat-turn", help="Strictly resolve one ambiguous persona-chat turn"
+    )
+    persona_instance_resolve_turn.add_argument("persona_instance_id")
+    persona_instance_resolve_turn.add_argument("--session-id", required=True)
+    persona_instance_resolve_turn.add_argument("--client-message-id", required=True)
+    persona_instance_resolve_turn.add_argument("--turn-id", required=True)
+    persona_instance_resolve_turn.add_argument("--action", choices=["abandon"], required=True)
+    persona_instance_resolve_turn.add_argument("--json", action="store_true")
+    persona_instance_resolve_turn.set_defaults(func=_cmd_mission_chat_turn_resolve)
     persona_instance_message = persona_instance_subs.add_parser("message", help="Queue a message to a free-floating persona instance without ticking")
     persona_instance_message.add_argument("persona_instance_id")
     persona_instance_message.add_argument("--message", required=True)
@@ -1135,6 +1166,7 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--intent-hint", default="chat")
     mission_chat_message.add_argument("--requested-by", default="cli")
     mission_chat_message.add_argument("--client-message-id", default=None)
+    mission_chat_message.add_argument("--idempotency-key", default=None)
     mission_chat_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
     mission_chat_message.add_argument("--relay-chain", default=None, help="Comma-separated canonical persona ids already on the agent-relay chain (envelope provenance for chained agent_chat_send hops)")
@@ -1156,6 +1188,16 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_steer.add_argument("--persona-instance-id", default=None)
     mission_chat_steer.add_argument("--json", action="store_true")
     mission_chat_steer.set_defaults(func=_cmd_mission_chat_steer)
+    mission_chat_resolve = mission_chat_subs.add_parser(
+        "turn-resolve", help="Resolve one outcome_unknown chat turn"
+    )
+    mission_chat_resolve.add_argument("--session-id", required=True)
+    mission_chat_resolve.add_argument("--client-message-id", required=True)
+    mission_chat_resolve.add_argument("--turn-id", required=True)
+    mission_chat_resolve.add_argument("--persona-instance-id", default=None)
+    mission_chat_resolve.add_argument("--action", choices=["abandon"], required=True)
+    mission_chat_resolve.add_argument("--json", action="store_true")
+    mission_chat_resolve.set_defaults(func=_cmd_mission_chat_turn_resolve)
 
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")

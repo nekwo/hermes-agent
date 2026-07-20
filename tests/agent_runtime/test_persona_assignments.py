@@ -1193,17 +1193,27 @@ def test_open_chat_cli_targets_the_session_owner_not_the_canonical(monkeypatch, 
         persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
     )
     code = harness._cmd_persona_instance_open_chat(
-        Namespace(persona_id="qa", session_id=sibling.session_id, kill_active=False, json=True)
+        Namespace(
+            persona_id="qa",
+            persona_instance_id=sibling.id,
+            session_id=None,
+            new_session=True,
+            idempotency_key="open-sibling-owner",
+            kill_active=False,
+            json=True,
+        )
     )
 
     assert code == 0
     fresh = PersonaInstanceStore()
     # The sibling was rebound to its own session; the canonical primary never
     # adopted it.
-    assert fresh.get("personainst_qa_agent_2").session_id == sibling.session_id
+    sibling_root = fresh.get("personainst_qa_agent_2").default_chat_session_id
+    assert sibling_root
+    assert sibling_root != sibling.session_id
     primary_adopted = False
     try:
-        primary_adopted = fresh.get("personainst_qa").session_id == sibling.session_id
+        primary_adopted = fresh.get("personainst_qa").default_chat_session_id == sibling_root
     except Exception:
         primary_adopted = False
     assert not primary_adopted
@@ -1378,7 +1388,7 @@ def test_open_chat_cli_add_instance_omitted_name_uses_persona_config_not_title_c
     assert placed.display_name != "Qa"
 
 
-def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runtime_root):
+def test_open_chat_updates_only_default_chat_pointer_during_live_run(isolate_agent_runtime_root):
     instance_store = PersonaInstanceStore()
     workers = WorkerSessionStore()
     runs = RunStore()
@@ -1387,12 +1397,11 @@ def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runti
     worker = workers.assign_run(worker.id, run)
     instance_store.update_from_worker(worker)
 
-    with pytest.raises(ChatBusyError) as exc:
-        instance_store.open_chat(persona_id="dev", session_id="persona_chat_personainst_dev_new")
+    instance = instance_store.open_chat(
+        persona_id="dev", session_id="persona_chat_personainst_dev_new"
+    )
 
-    assert exc.value.active_run_id == run.id
-    assert exc.value.active_worker_session_id == worker.id
-    instance = instance_store.get("personainst_dev")
+    assert instance.default_chat_session_id == "persona_chat_personainst_dev_new"
     assert instance.active_run_id == run.id
     assert instance.active_worker_session_id == worker.id
     assert instance.current_task_id == "task_live"
@@ -1400,7 +1409,7 @@ def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runti
     assert workers.get(worker.id).state == WorkerSessionState.RUNNING
 
 
-def test_open_chat_with_kill_active_terminates_run_and_worker_before_swap(isolate_agent_runtime_root):
+def test_open_chat_kill_active_flag_cannot_cancel_worker_lifecycle(isolate_agent_runtime_root):
     instance_store = PersonaInstanceStore()
     workers = WorkerSessionStore()
     runs = RunStore()
@@ -1415,13 +1424,13 @@ def test_open_chat_with_kill_active_terminates_run_and_worker_before_swap(isolat
         kill_active=True,
     )
 
-    assert runs.get(run.id).state == RunState.CANCELLED
-    assert workers.get(worker.id).state == WorkerSessionState.CLOSED
+    assert runs.get(run.id).state == RunState.RUNNING
+    assert workers.get(worker.id).state == WorkerSessionState.RUNNING
     assert updated.id == "personainst_dev"
     assert updated.session_id == "persona_chat_personainst_dev_replacement"
-    assert updated.current_task_id is None
-    assert updated.active_run_id is None
-    assert updated.active_worker_session_id is None
+    assert updated.current_task_id == "task_live"
+    assert updated.active_run_id == run.id
+    assert updated.active_worker_session_id == worker.id
 
 
 def test_add_instance_mints_distinct_placement_backed_instance(isolate_agent_runtime_root):
@@ -1508,6 +1517,14 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
             "cache_ttl_seconds": None,
             "cache_ttl_basis": None,
             "messages": [],
+            "root_chat_session_id": "chat_old_123",
+            "active_session_id": "chat_old_123",
+            "runtime_state": "unknown",
+            "last_runtime_transition": None,
+            "observer_identity": "external_cli",
+            "observer_time": None,
+            "continuation_depth": 0,
+            "last_resumed_at": None,
         }
     ]
 
@@ -1932,7 +1949,7 @@ def _mission_chat_test_args(client_message_id: str, *, stream: bool = False):
     )
 
 
-@pytest.mark.parametrize("operation", ["session_create", "operator_append"])
+@pytest.mark.parametrize("operation", ["session_create"])
 def test_mission_chat_required_pre_model_transcript_failure_skips_provider(
     operation,
     monkeypatch,
@@ -2005,7 +2022,7 @@ def test_mission_chat_session_db_acquisition_failure_is_typed_and_skips_provider
     assert provider_calls == []
 
 
-def test_mission_chat_assistant_db_failure_finishes_v2_failed_without_success(
+def test_mission_chat_fake_runtime_does_not_use_legacy_assistant_append(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
@@ -2038,21 +2055,19 @@ def test_mission_chat_assistant_db_failure_finishes_v2_failed_without_success(
         _mission_chat_test_args("client_assistant_db_failure", stream=True)
     )
 
-    assert code == 2
+    assert code == 0
     frames = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert provider_calls == ["constructed", "called"]
     assert frames[-1]["type"] == "chat.final"
-    assert frames[-1]["ok"] is False
-    assert frames[-1]["persistence_operation"] == "assistant_append"
+    assert frames[-1]["ok"] is True
     terminal_frames = [frame for frame in frames if frame.get("type") == "turn.end"]
     assert terminal_frames
-    assert {frame.get("state") for frame in terminal_frames} == {"failed"}
-    assert not any(frame.get("ok") is True for frame in frames)
+    assert {frame.get("state") for frame in terminal_frames} == {"completed"}
     record = mission_chat_turn_record(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_assistant_db_failure",
     )
-    assert record["state"] == "failed"
+    assert record["state"] == "projected"
 
 
 def test_free_floating_operator_db_failure_blocks_before_provider(
@@ -3012,12 +3027,12 @@ def test_mission_chat_non_stream_persists_completed_turn_and_prints_one_json(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_durable_1",
     )
-    assert record["state"] == "completed"
+    assert record["state"] == "projected"
     assert [item["kind"] for item in record["elements"]] == ["tool"]
     assert record["elements"][0]["state"] == "finished"
 
 
-def test_mission_chat_failure_marks_turn_failed(monkeypatch, capsys, isolate_agent_runtime_root):
+def test_mission_chat_post_boundary_failure_marks_outcome_unknown(monkeypatch, capsys, isolate_agent_runtime_root):
     from hermes_cli import harness
 
     cfg = _assignment_config()
@@ -3055,11 +3070,15 @@ def test_mission_chat_failure_marks_turn_failed(monkeypatch, capsys, isolate_age
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
+    assert payload["error_kind"] == "chat_turn_outcome_unknown"
+    assert payload["root_chat_session_id"] == "persona_chat_personainst_dev"
+    assert payload["client_message_id"] == "client_failed_1"
+    assert payload["turn_id"] == "client_failed_1"
     record = mission_chat_turn_record(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_failed_1",
     )
-    assert record["state"] == "failed"
+    assert record["state"] == "outcome_unknown"
 
 
 def test_mission_chat_new_turn_interrupts_prior_running_turn(
@@ -3126,10 +3145,10 @@ def test_mission_chat_new_turn_interrupts_prior_running_turn(
     assert mission_chat_turn_record(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_fresh",
-    )["state"] == "completed"
+    )["state"] == "projected"
 
 
-def test_mission_chat_post_provider_crash_settles_failed_and_prints_one_json(
+def test_mission_chat_post_native_projection_crash_stays_repairable(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
@@ -3147,7 +3166,7 @@ def test_mission_chat_post_provider_crash_settles_failed_and_prints_one_json(
     def _boom(**_kwargs):
         raise RuntimeError("transcript write exploded")
 
-    monkeypatch.setattr(harness, "_append_persona_assistant_text", _boom)
+    monkeypatch.setattr(harness, "_update_persona_chat_token_counts", _boom)
 
     class _FakeRuntime:
         def __init__(self, *args, **kwargs):
@@ -3187,14 +3206,14 @@ def test_mission_chat_post_provider_crash_settles_failed_and_prints_one_json(
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert payload["error_kind"] == "post_turn_persist_failed"
+    assert payload["error_kind"] == "chat_projection_incomplete"
     assert payload["reply"] == "The reply that must not vanish."
     assert "transcript write exploded" in payload["blocker"]
     record = mission_chat_turn_record(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_post_crash",
     )
-    assert record["state"] == "failed"
+    assert record["state"] == "native_committed"
 
 
 def test_free_floating_post_provider_crash_settles_failed(
@@ -3317,12 +3336,11 @@ def test_mission_chat_success_persist_sequence_has_single_terminal_write(
 
     assert code == 0
     json.loads(capsys.readouterr().out)
-    assert recorded == [
-        ("running", True),  # write-ahead marker
-        ("running", False),  # on_update: tool started
-        ("running", False),  # on_update: tool finished
-        ("completed", False),  # single terminal write, nothing after it
-    ]
+    assert recorded == [(None, False), (None, False)]
+    assert mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_sequence",
+    )["state"] == "projected"
 
 
 def test_mission_chat_message_replays_duplicate_client_message_id(
@@ -3385,14 +3403,7 @@ def test_mission_chat_message_replays_duplicate_client_message_id(
     replay = json.loads(capsys.readouterr().out)
 
     assert calls["count"] == 1
-    assert [item["role"] for item in db.messages["persona_chat_personainst_dev"]] == [
-        "user",
-        "assistant",
-    ]
-    assert {
-        item["platform_message_id"]
-        for item in db.messages["persona_chat_personainst_dev"]
-    } == {"client_dup_1"}
+    assert db.messages["persona_chat_personainst_dev"] == []
     assert replay["idempotent_replay"] is True
     assert replay["client_message_id"] == "client_dup_1"
     assert replay["reply"] == "Recovered canonical reply."
@@ -3457,10 +3468,10 @@ def test_mission_chat_message_generates_client_message_id_when_missing(
     assert client_message_id.startswith("agent-chat-send-")
     assert payload["turn_id"] == client_message_id
     assert captured["turn_id"] == client_message_id
-    assert {
-        item["platform_message_id"]
-        for item in db.messages["persona_chat_personainst_dev"]
-    } == {client_message_id}
+    assert mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id=client_message_id,
+    )["state"] == "projected"
     # C3: the terminal frame's `prompt_observability` is the slim subset — the
     # turn id lives at the top level (asserted above); the slim block links to
     # the persisted record-at-injection row only by `context_id`.
@@ -3650,12 +3661,10 @@ def test_mission_chat_pre_trace_ack_is_presentation_only(
     assert lines.index(ack_frames[0]) < min(
         index for index, line in enumerate(lines) if line["type"] == "segment.start"
     )
-    # The DURABLE record carries no ack: SessionDB has exactly the operator
-    # message and the real reply…
+    # Native persistence is owned by the runtime actor. This fake runtime writes
+    # no SessionDB rows, proving the CLI did not restore the retired append lane.
     messages = db.messages["persona_chat_personainst_dev"]
-    assert [item["role"] for item in messages] == ["user", "assistant"]
-    assert messages[1]["content"] == "The guidance is loaded; this is the right place."
-    assert messages[1].get("platform_message_id") == "client_pre_trace_1"
+    assert messages == []
     # …and the turn store's elements hold only real content (replay shows no ack).
     persisted = mission_chat_turn_elements(
         session_id="persona_chat_personainst_dev",
@@ -4677,7 +4686,7 @@ def test_retired_placement_cannot_be_resurrected_from_its_saved_chat(
     assert instance.id not in {row.id for row in store.list_all()}
 
 
-def test_open_chat_cli_returns_typed_refusal_for_retired_placement(
+def test_open_chat_cli_rejects_unpersisted_retired_root_at_cutoff(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
@@ -4705,9 +4714,7 @@ def test_open_chat_cli_returns_typed_refusal_for_retired_placement(
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert payload["error_kind"] == "retired_persona_instance"
-    assert payload["persona_instance_id"] == instance.id
-    assert payload["history_preserved"] is True
+    assert payload["error_kind"] == "unknown_chat_session"
     assert instance.id not in {
         row.id for row in PersonaInstanceStore().list_all()
     }

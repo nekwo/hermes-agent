@@ -197,14 +197,14 @@ def _mission_chat_message_call_names():
 
 
 def test_omitted_session_routes_through_the_default_resolver():
-    # An omitted session must CONTINUE the target's default chat session so
-    # repeated relays thread into one conversation — resolved through the single
-    # chokepoint, never minted per send.
+    # An omitted session continues the dedicated default root when present, then
+    # falls back to the same receipt-backed server mint used by open-chat.
     calls = _mission_chat_message_call_names()
-    assert "default_chat_session_id_for_instance" in calls, (
+    assert "resolve_default_chat_session_id_for_instance" in calls, (
         "the omitted-session path must resolve the target's default chat session "
-        "via default_chat_session_id_for_instance (relay threading + visibility)"
+        "before using the canonical server-mint fallback"
     )
+    assert "mint" in calls
 
 
 def test_handler_no_longer_mints_a_fresh_session_per_send():
@@ -215,6 +215,6 @@ def test_handler_no_longer_mints_a_fresh_session_per_send():
     calls = _mission_chat_message_call_names()
     assert "_persona_chat_session_id" not in calls, (
         "the handler must not mint a fresh session id per send — route omitted "
-        "sessions through default_chat_session_id_for_instance"
+        "sessions through the default resolver and receipt-backed mint service"
     )
     assert "persona_chat_session_id_for" not in calls

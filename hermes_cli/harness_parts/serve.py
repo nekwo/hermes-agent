@@ -441,6 +441,11 @@ def serve_loop(
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; a
     future remote lane feeds the same loop (design doc §Future)."""
+    from agent_runtime.persona_chat_continuity import (
+        initialize_persona_chat_runtime_registry,
+    )
+
+    initialize_persona_chat_runtime_registry()
     frames = _FrameWriter(writer)
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")

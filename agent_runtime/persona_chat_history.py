@@ -83,10 +83,9 @@ def persona_chat_history_summary(
         persona_id = _canonical_persona_id(getattr(instance, "persona_id", None))
         if persona_id:
             instances_by_persona[persona_id] = instance
-        mode = safe_assignment_token(getattr(instance, "mode", None))
-        if mode not in _CHAT_INSTANCE_MODES:
-            continue
-        session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
+        session_id = safe_assignment_text(
+            getattr(instance, "default_chat_session_id", None), limit=200
+        )
         if session_id:
             bound_by_session[session_id] = instance
 
@@ -121,6 +120,11 @@ def persona_chat_history_summary(
         if not session_id or session_id in seen:
             continue
         is_source_chat = safe_assignment_token(raw.get("source")) == PERSONA_CHAT_SESSION_SOURCE
+        root_meta = _model_config(raw.get("model_config")).get("mission_chat_root_id")
+        if root_meta and safe_assignment_text(root_meta, limit=200) != session_id:
+            # Compression descendants are projected through their stable root.
+            seen.add(session_id)
+            continue
         # Only persona-chat sessions and sessions bound to a live instance are
         # candidates for this projection. Unrelated SessionDB sources (cron,
         # telegram, cli, scratch) can never render as chat rows — counting them
@@ -600,6 +604,22 @@ def _history_row(
         limit=180,
     )
     messages, messages_status = _safe_recent_messages(session_db, session_id=session_id, limit=message_tail)
+    active_session_id = session_id
+    try:
+        active_session_id = session_db.resolve_resume_session_id(session_id)
+    except Exception:
+        pass
+    try:
+        from .persona_chat_continuity import persona_chat_runtime_registry
+
+        registry = persona_chat_runtime_registry()
+        runtime = (
+            registry.observation(session_id, owning_process=True)
+            if registry is not None
+            else {"runtime_state": "unknown", "observer_identity": "external_cli"}
+        )
+    except Exception:
+        runtime = {"runtime_state": "unknown", "observer_identity": "external_cli"}
     redaction_status = (
         "would_redact"
         if "would_redact" in {title_status, preview_status, messages_status}
@@ -637,6 +657,14 @@ def _history_row(
         **_chat_model_fields(raw),
         **_cache_policy_fields(raw),
         "messages": messages,
+        "root_chat_session_id": session_id,
+        "active_session_id": active_session_id,
+        "runtime_state": runtime.get("runtime_state", "unknown"),
+        "last_runtime_transition": runtime.get("last_runtime_transition"),
+        "observer_identity": runtime.get("observer_identity"),
+        "observer_time": runtime.get("observer_time"),
+        "continuation_depth": runtime.get("continuation_depth", 0),
+        "last_resumed_at": runtime.get("last_resumed_at"),
     }
 
 
@@ -780,7 +808,16 @@ def _safe_recent_messages(
     if session_db is None:
         return [], "safe"
     try:
-        raw_messages = session_db.get_messages(session_id)
+        lineage_loader = getattr(session_db, "get_messages_as_conversation", None)
+        try:
+            native_tip = session_db.resolve_resume_session_id(session_id)
+        except Exception:
+            native_tip = session_id
+        raw_messages = (
+            lineage_loader(native_tip, include_ancestors=True)
+            if callable(lineage_loader)
+            else session_db.get_messages(session_id)
+        )
     except Exception:
         return [], "safe"
     rows: list[dict[str, Any]] = []
@@ -798,7 +835,9 @@ def _safe_recent_messages(
         if role not in {"operator", "agent"}:
             continue
         client_message_id = safe_assignment_text(
-            raw.get("platform_message_id") or raw.get("client_message_id"),
+            raw.get("platform_message_id")
+            or raw.get("message_id")
+            or raw.get("client_message_id"),
             limit=240,
         )
         if role == "agent" and client_message_id:

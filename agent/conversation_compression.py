@@ -29,6 +29,7 @@ these paths see no behavioural change.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import tempfile
 import uuid
@@ -786,11 +787,31 @@ def compress_context(
                         pass
                     agent._session_db_created = False
                     try:
+                        child_model_config = agent._session_init_model_config
+                        root_chat_id = getattr(agent, "_persona_chat_root_session_id", None)
+                        if root_chat_id:
+                            try:
+                                root_row = agent._session_db.get_session(root_chat_id) or {}
+                                root_meta = json.loads(root_row.get("model_config") or "{}")
+                            except Exception:
+                                root_meta = {}
+                            child_model_config = {
+                                **(child_model_config or {}),
+                                **{
+                                    key: root_meta.get(key)
+                                    for key in (
+                                        "mission_chat_root_id",
+                                        "persona_instance_id",
+                                        "source",
+                                    )
+                                    if root_meta.get(key) is not None
+                                },
+                            }
                         agent._session_db.create_session(
                             session_id=agent.session_id,
                             source=agent.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
                             model=agent.model,
-                            model_config=agent._session_init_model_config,
+                            model_config=child_model_config,
                             parent_session_id=old_session_id,
                         )
                     except Exception as _cs_err:

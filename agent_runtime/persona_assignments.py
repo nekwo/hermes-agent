@@ -1350,7 +1350,9 @@ class PersonaInstanceStore:
                 updated_at=ts,
             )
         else:
-            self._guard_or_replace_chat(instance, kill_active=kill_active)
+            # Worker/run ownership is orthogonal to operator chat ownership.
+            # Opening another chat root must not cancel or rebind live work.
+            pass
 
         # An explicit ``display_name`` is AUTHORITATIVE — an operator naming this
         # chat (create_operator_chat) or a deliberate placement (add_instance,
@@ -1384,11 +1386,10 @@ class PersonaInstanceStore:
         if safe_realm_id:
             instance.realm_id = safe_realm_id
         instance.mode = "chat"
+        instance.default_chat_session_id = normalized_session
+        # Read-compatible mirror for v1 consumers. Worker writers never touch
+        # this field; default_chat_session_id is the sole new authority.
         instance.session_id = normalized_session
-        instance.current_assignment_id = None
-        instance.current_task_id = None
-        instance.active_worker_session_id = None
-        instance.active_run_id = None
         updated = self.update(instance)
         self._event("persona_instance.chat_opened", updated, {"session_id": normalized_session})
         return updated
@@ -1455,7 +1456,7 @@ class PersonaInstanceStore:
 
     def _session_owned_by_other_instance(self, session_id: str, instance_id: str) -> bool:
         for instance in self.list_all():
-            if instance.id != instance_id and instance.session_id == session_id:
+            if instance.id != instance_id and instance.default_chat_session_id == session_id:
                 return True
         return False
 
@@ -1497,7 +1498,6 @@ class PersonaInstanceStore:
         instance.goal_id = self._goal_id_for_worker(worker) or worker.task_id
         instance.active_worker_session_id = worker.id if worker.state in ACTIVE_PERSONA_WORKER_STATES else None
         instance.active_run_id = worker.active_run_id
-        instance.session_id = worker.session_id
         instance.context_receipt_id = worker.context_receipt_id
         instance.compression_receipt_id = worker.compression_receipt_id
         instance.prompt_contract_hash = worker.prompt_contract_hash
@@ -1554,7 +1554,6 @@ class PersonaInstanceStore:
                 or instance.current_task_id
                 or instance.active_worker_session_id
                 or instance.active_run_id
-                or instance.session_id
                 or instance.context_receipt_id
                 or instance.compression_receipt_id
             ):
@@ -1567,7 +1566,6 @@ class PersonaInstanceStore:
                 instance.steered_by = []
                 instance.active_worker_session_id = None
                 instance.active_run_id = None
-                instance.session_id = None
                 instance.context_receipt_id = None
                 instance.compression_receipt_id = None
                 instance.token_budget_used = 0
@@ -2095,7 +2093,9 @@ def resolve_default_chat_session_id_for_instance(
     except Exception:
         existing = None
     if existing is not None:
-        existing_session = safe_assignment_text(getattr(existing, "session_id", None), limit=200)
+        existing_session = safe_assignment_text(
+            getattr(existing, "default_chat_session_id", None), limit=200
+        )
         # Reuse only a chat-shaped session: a task/worker session on the pointer
         # (task_bound mode) is not the persona's chat lane and must never absorb
         # a chat relay's transcript.
@@ -2252,7 +2252,7 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
     if visibility_persona is not None:
         tool_options = permission_options_for_chat(
             visibility_persona,
-            session_id=instance.session_id,
+            session_id=instance.default_chat_session_id,
             task_id=instance.current_task_id,
             goal_id=instance.goal_id,
             runtime_root=instance.runtime_root,
@@ -2264,7 +2264,7 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         from .persona_runtime import apply_chat_lane_tool_scope
 
         apply_chat_lane_tool_scope(
-            visibility_persona, tool_options, session_id=instance.session_id
+            visibility_persona, tool_options, session_id=instance.default_chat_session_id
         )
     summary = {
         "agent_profile_id": instance.id,
@@ -2315,8 +2315,9 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "current_task_id": instance.current_task_id,
         "active_worker_session_id": instance.active_worker_session_id,
         "active_run_id": instance.active_run_id,
-        "chat_session_id": instance.session_id,
-        "session_id": instance.session_id,
+        "default_chat_session_id": instance.default_chat_session_id,
+        "chat_session_id": instance.default_chat_session_id,
+        "session_id": instance.default_chat_session_id,
         "context_receipt_id": instance.context_receipt_id,
         "compression_receipt_id": instance.compression_receipt_id,
         "prompt_contract_hash": instance.prompt_contract_hash,
@@ -2392,7 +2393,7 @@ def persona_instance_tool_detail(
         return None
     tool_options = permission_options_for_chat(
         visibility_persona,
-        session_id=instance.session_id,
+        session_id=instance.default_chat_session_id,
         task_id=instance.current_task_id,
         goal_id=instance.goal_id,
         runtime_root=instance.runtime_root,
@@ -2402,7 +2403,7 @@ def persona_instance_tool_detail(
     from .persona_runtime import apply_chat_lane_tool_scope
 
     apply_chat_lane_tool_scope(
-        visibility_persona, tool_options, session_id=instance.session_id
+        visibility_persona, tool_options, session_id=instance.default_chat_session_id
     )
     tool_resolution = resolve_tool_visibility(visibility_persona, tool_options)
     return {

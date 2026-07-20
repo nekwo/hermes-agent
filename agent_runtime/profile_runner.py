@@ -80,6 +80,17 @@ class AgentRunRequest:
     # transport falls back to ``session_id`` (worker/mission-run lanes carry a
     # real one, so their behavior is unchanged). See T10c / codex.py header seam.
     cache_scope_id: str | None = None
+    # Stable persona-chat root used by terminal/file tool ephemeral state.
+    # It is intentionally separate from task_id and native compression tip.
+    tool_execution_scope_id: str | None = None
+    conversation_history: list[dict[str, Any]] | None = None
+    reuse_current_user_message: bool = False
+    client_message_id: str | None = None
+    turn_id: str | None = None
+    root_chat_session_id: str | None = None
+    persona_chat_runtime_registry: Any | None = None
+    persona_chat_runtime_signature: str | None = None
+    persona_chat_native_revision: str | None = None
     platform: str = "agent_runtime"
     quiet_mode: bool = True
     skip_context_files: bool = True
@@ -177,6 +188,33 @@ class _ToolBudgetGuard:
             return
 
 
+def _prepare_resident_persona_chat_agent(agent: Any, candidate: Any) -> None:
+    """Refresh turn-scoped state without erasing native compressor memory."""
+
+    for name in (
+        "status_callback", "tool_progress_callback", "tool_start_callback",
+        "tool_complete_callback", "clarify_callback", "cache_scope_id", "max_iterations",
+    ):
+        if hasattr(candidate, name):
+            setattr(agent, name, getattr(candidate, name))
+    for name in (
+        "session_prompt_tokens", "session_completion_tokens", "session_total_tokens",
+        "session_api_calls", "session_input_tokens", "session_output_tokens",
+        "session_cache_read_tokens", "session_cache_write_tokens",
+        "session_reasoning_tokens", "session_estimated_cost_usd", "_api_call_count",
+    ):
+        if hasattr(agent, name):
+            setattr(agent, name, 0.0 if name.endswith("cost_usd") else 0)
+    agent.session_usage_ledger = []
+    for name, value in (
+        ("_stream_callback", None), ("_interrupt_requested", False),
+        ("_interrupt_reason", None), ("_current_api_request_id", ""),
+        ("_current_turn_id", None), ("_current_task_id", None),
+    ):
+        if hasattr(agent, name):
+            setattr(agent, name, value)
+
+
 class ProfileAgentRunner:
     def __init__(self, *, agent_factory: Callable[..., Any] | None = None, credential_pool=None, session_db=None):
         self._uses_default_agent_factory = agent_factory is None
@@ -208,10 +246,11 @@ class ProfileAgentRunner:
         if result.raw.get("failed") and result.raw.get("error"):
             raise ProfileRunnerError(str(result.raw.get("error")))
         return result
-
     def _execute_agent_run(self, binding: PersonaProfileBinding, request: AgentRunRequest) -> tuple[Any, Any, dict[str, int]]:
         timing: dict[str, int] = {}
-        with _WORKDIR_LOCK, persona_profile_context(binding, runtime_root=request.runtime_root), _agent_workdir(request.workdir):
+        from .persona_chat_continuity import tool_execution_scope
+
+        with _WORKDIR_LOCK, persona_profile_context(binding, runtime_root=request.runtime_root), _agent_workdir(request.workdir), tool_execution_scope(request.tool_execution_scope_id):
             try:
                 runtime_started = time.perf_counter()
                 runtime = _resolve_request_runtime(request)
@@ -265,6 +304,25 @@ class ProfileAgentRunner:
                 tool_complete_callback=_progress_adapter(request.progress_callback, "run.tool.finished", guard=budget_guard),
                 clarify_callback=request.clarify_callback,
             )
+            if request.persona_chat_runtime_registry is not None and request.root_chat_session_id:
+                active_id = request.session_id or request.root_chat_session_id
+                entry, reused, rebuild_reason = request.persona_chat_runtime_registry.acquire(
+                    root_session_id=request.root_chat_session_id,
+                    active_session_id=active_id,
+                    signature=request.persona_chat_runtime_signature or "default",
+                    revision=request.persona_chat_native_revision or "unknown",
+                    factory=lambda: agent,
+                )
+                if reused:
+                    _prepare_resident_persona_chat_agent(entry.agent, agent)
+                    agent = entry.agent
+                timing["resident_actor_reused"] = 1 if reused else 0
+                if rebuild_reason:
+                    timing[f"resident_rebuild_{rebuild_reason}"] = 1
+            if request.root_chat_session_id:
+                agent._persona_chat_root_session_id = request.root_chat_session_id
+                agent._persona_chat_client_message_id = request.client_message_id
+                agent._persona_chat_turn_id = request.turn_id
             timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
             budget_guard.set_interrupt_callback(lambda reason: _interrupt_agent_for_budget(agent, reason))
             agent_ready_cleanup = _notify_agent_ready(request, agent)
@@ -277,6 +335,10 @@ class ProfileAgentRunner:
                         "system_message": request.system_message,
                         "task_id": request.task_id,
                     }
+                    if request.conversation_history is not None:
+                        conversation_kwargs["conversation_history"] = request.conversation_history
+                    if request.reuse_current_user_message:
+                        conversation_kwargs["reuse_current_user_message"] = True
                     if request.stream_callback is not None:
                         conversation_kwargs["stream_callback"] = request.stream_callback
                     raw_result = agent.run_conversation(**conversation_kwargs)
@@ -319,6 +381,10 @@ class ProfileAgentRunner:
                     "system_message": request.system_message,
                     "task_id": request.task_id,
                 }
+                if request.conversation_history is not None:
+                    conversation_kwargs["conversation_history"] = request.conversation_history
+                if request.reuse_current_user_message:
+                    conversation_kwargs["reuse_current_user_message"] = True
                 if request.stream_callback is not None:
                     conversation_kwargs["stream_callback"] = request.stream_callback
                 raw_result = agent.run_conversation(**conversation_kwargs)
