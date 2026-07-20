@@ -63,6 +63,7 @@ from agent_runtime.persona_assignments import (
     PERSONA_INSTANCE_ID_PREFIX,
     PersonaAssignmentSpec,
     PersonaInstanceRetireError,
+    RetiredPersonaInstanceError,
     StaleModelOverrideWrite,
     PersonaAssignmentStore,
     PersonaInstanceStore,

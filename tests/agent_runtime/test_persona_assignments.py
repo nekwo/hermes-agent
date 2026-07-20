@@ -4445,6 +4445,68 @@ def test_retire_archives_placement_row_and_emits_event(isolate_agent_runtime_roo
     assert payload["persona_id"] == "dev"
 
 
+def test_retired_placement_cannot_be_resurrected_from_its_saved_chat(
+    isolate_agent_runtime_root,
+):
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+
+    store = PersonaInstanceStore()
+    instance = _placement_instance(placement_id="dev_agent_2")
+    session_id = instance.session_id
+    assert session_id
+
+    result = store.retire(instance.id, reason="placement deleted")
+
+    with pytest.raises(RetiredPersonaInstanceError) as excinfo:
+        store.open_chat(
+            persona_id=instance.persona_id,
+            persona_instance_id=instance.id,
+            session_id=session_id,
+        )
+
+    assert excinfo.value.persona_instance_id == instance.id
+    assert excinfo.value.archive_path == Path(result["archive_path"])
+    assert not paths.persona_instance_path(instance.id).exists()
+    assert instance.id not in {row.id for row in store.list_all()}
+
+
+def test_open_chat_cli_returns_typed_refusal_for_retired_placement(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    instance = _placement_instance(placement_id="dev_agent_2")
+    session_id = instance.session_id
+    assert session_id
+    PersonaInstanceStore().retire(instance.id, reason="placement deleted")
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id=instance.persona_id,
+            session_id=session_id,
+            kill_active=False,
+            add_instance=False,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "retired_persona_instance"
+    assert payload["persona_instance_id"] == instance.id
+    assert payload["history_preserved"] is True
+    assert instance.id not in {
+        row.id for row in PersonaInstanceStore().list_all()
+    }
+
+
 def test_retire_refuses_canonical_persona_channel(isolate_agent_runtime_root):
     from agent_runtime import paths
     from agent_runtime.persona_assignments import PersonaInstanceRetireError

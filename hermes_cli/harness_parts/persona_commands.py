@@ -249,6 +249,10 @@ def _cmd_persona_instance_create(args) -> int:
                 )
             if add_instance or coordinator_id:
                 instance = _maybe_stamp_spawned_by(instance, coordinator_id=coordinator_id)
+        except RetiredPersonaInstanceError as exc:
+            data = _retired_persona_instance_payload(exc)
+            print(emit_json(data) if args.json else data["error"])
+            return 2
         except ChatBusyError as exc:
             data = _chat_busy_payload(exc)
             print(emit_json(data) if args.json else data["error"])
@@ -423,6 +427,10 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 }
                 print(emit_json(data) if args.json else data["error"])
                 return 2
+    except RetiredPersonaInstanceError as exc:
+        data = _retired_persona_instance_payload(exc)
+        print(emit_json(data) if args.json else data["error"])
+        return 2
     except ChatBusyError as exc:
         data = _chat_busy_payload(exc)
         print(emit_json(data) if args.json else data["error"])
@@ -610,6 +618,27 @@ def _chat_busy_payload(exc: ChatBusyError) -> dict[str, object]:
         "active_run_id": exc.active_run_id,
         "active_worker_session_id": exc.active_worker_session_id,
         "next_expected": "choose add_instance to keep the current chat, or retry with kill_active to cancel the current run/worker and replace it",
+    }
+
+
+def _retired_persona_instance_payload(
+    exc: RetiredPersonaInstanceError,
+) -> dict[str, object]:
+    return {
+        "ok": False,
+        "execution_state": "refused",
+        "error_kind": exc.code,
+        "error": (
+            f"persona instance {exc.persona_instance_id} was retired with its "
+            "placement and cannot be reopened as a live agent"
+        ),
+        "persona_instance_id": exc.persona_instance_id,
+        "archive_path": str(exc.archive_path),
+        "history_preserved": True,
+        "next_expected": (
+            "view the preserved chat history read-only, or create a fresh "
+            "placement with a new instance id"
+        ),
     }
 
 
@@ -891,6 +920,13 @@ def _cmd_mission_chat_message(args) -> int:
             profile_id=safe_assignment_token(getattr(persona, "hermes_profile", None)),
             kill_active=False,
         )
+    except RetiredPersonaInstanceError as exc:
+        data = _retired_persona_instance_payload(exc)
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
     except ChatBusyError as exc:
         data = _chat_busy_payload(exc)
         if getattr(args, "stream", False):
@@ -2301,11 +2337,19 @@ def _queue_free_floating_assignment(
                 else:
                     print(emit_json(data) if json_output else data["error"])
                 return 2
-            instance = instance_store.add_instance(
-                persona_id=normalized_persona,
-                placement_id=placement_id,
-                display_name=safe_assignment_text(title, limit=120) or None,
-            )
+            try:
+                instance = instance_store.add_instance(
+                    persona_id=normalized_persona,
+                    placement_id=placement_id,
+                    display_name=safe_assignment_text(title, limit=120) or None,
+                )
+            except RetiredPersonaInstanceError as exc:
+                data = _retired_persona_instance_payload(exc)
+                if stream:
+                    _emit_chat_final(data)
+                else:
+                    print(emit_json(data) if json_output else data["error"])
+                return 2
             instance = _maybe_stamp_spawned_by(instance, coordinator_id=spawned_by, operator_source="operator")
             persona_instance_id = instance.id
         else:
@@ -2338,6 +2382,21 @@ def _queue_free_floating_assignment(
             kill_active=kill_active,
             transcript_required=True,
         )
+    except RetiredPersonaInstanceError as exc:
+        try:
+            assignment_store.complete(
+                assignment.id,
+                state="blocked",
+                error=exc.code,
+            )
+        except Exception:
+            pass
+        data = _retired_persona_instance_payload(exc)
+        if stream:
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if json_output else data["error"])
+        return 2
     except ChatBusyError as exc:
         data = _chat_busy_payload(exc)
         if stream:

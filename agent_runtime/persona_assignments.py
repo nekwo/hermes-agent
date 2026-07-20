@@ -6,6 +6,7 @@ import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from hermes_time import now
@@ -171,6 +172,50 @@ class PersonaInstanceRetireError(AgentRuntimeError):
         self.message = message
         self.persona_instance_id = persona_instance_id
         self.detail = detail or {}
+
+
+class RetiredPersonaInstanceError(AgentRuntimeError):
+    """A saved chat tried to recreate an instance whose placement ended.
+
+    Retirement preserves the row under ``persona_instances_archive`` so chat
+    history remains inspectable, but the archived row is also the durable
+    end-of-life marker. Reopening that old session must never mint the row back
+    into the live roster.
+    """
+
+    def __init__(self, persona_instance_id: str, *, archive_path: Path):
+        super().__init__("retired_persona_instance")
+        self.code = "retired_persona_instance"
+        self.persona_instance_id = persona_instance_id
+        self.archive_path = archive_path
+
+
+def _retired_persona_instance_archive_path(
+    persona_instance_id: str,
+) -> Path | None:
+    """Newest explicit-retire archive row for ``persona_instance_id``.
+
+    Only ``*_retire`` batches are tombstones. Reconcile/prune archives answer
+    different lifecycle questions and must not make a future legitimate mint
+    impossible. Exact child paths avoid treating the instance id as a glob.
+    """
+    archive_root = paths.persona_instances_archive_dir()
+    if not archive_root.exists():
+        return None
+    archive_dirs = sorted(
+        (
+            candidate
+            for candidate in archive_root.iterdir()
+            if candidate.is_dir() and candidate.name.endswith("_retire")
+        ),
+        key=lambda candidate: candidate.name,
+        reverse=True,
+    )
+    for archive_dir in archive_dirs:
+        candidate = archive_dir / f"{persona_instance_id}.json"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -1163,10 +1208,13 @@ class PersonaInstanceStore:
         """Bind a persona instance to a durable chat session without running a turn.
 
         Persona instances are intentionally chat-shaped: selecting an old chat can
-        re-open the same persona instance history by rebinding the instance to the
-        stored session id, while the normal send/resume path owns the actual LLM
-        execution. This helper is a state transition only; it never fabricates a
-        task, worker, run, or transcript.
+        re-open the same live persona instance history by rebinding the instance
+        to the stored session id, while the normal send/resume path owns the actual
+        LLM execution. A placement retired through :meth:`retire` is the explicit
+        exception: its archived row is an end-of-life tombstone, so the preserved
+        chat stays history-only and cannot recreate a live roster row. This helper
+        is a state transition only; it never fabricates a task, worker, run, or
+        transcript.
         """
         normalized_persona = _normalize_instance_source_persona(persona_id)
         normalized_session = safe_assignment_text(session_id, limit=200)
@@ -1206,6 +1254,12 @@ class PersonaInstanceStore:
         try:
             instance = self.get(instance_id)
         except Exception:
+            retired_archive = _retired_persona_instance_archive_path(instance_id)
+            if retired_archive is not None:
+                raise RetiredPersonaInstanceError(
+                    instance_id,
+                    archive_path=retired_archive,
+                )
             ts = now()
             role = "profile" if normalized_persona.startswith("profile:") else normalized_persona
             instance = PersonaInstance(
