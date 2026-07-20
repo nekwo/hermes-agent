@@ -1708,6 +1708,204 @@ class _TranscriptDB:
         return True
 
 
+class _FailingTranscriptDB(_TranscriptDB):
+    def __init__(self, operation: str):
+        super().__init__()
+        self.operation = operation
+
+    def create_session(self, session_id, source, **kwargs):
+        if self.operation == "session_create":
+            raise OSError("simulated canonical session create failure")
+        return super().create_session(session_id, source, **kwargs)
+
+    def append_message(self, session_id, role, content=None, **kwargs):
+        if self.operation == "operator_append" and role == "user":
+            raise OSError("simulated canonical operator append failure")
+        if self.operation == "assistant_append" and role == "assistant":
+            raise OSError("simulated canonical assistant append failure")
+        return super().append_message(session_id, role, content, **kwargs)
+
+
+def _mission_chat_test_args(client_message_id: str, *, stream: bool = False):
+    return SimpleNamespace(
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        session_id="persona_chat_personainst_dev",
+        task_id=None,
+        goal_id=None,
+        message="please answer",
+        surface_prompt="",
+        intent_hint="chat",
+        requested_by="test",
+        client_message_id=client_message_id,
+        stream=stream,
+        max_seconds=5.0,
+        json=True,
+    )
+
+
+@pytest.mark.parametrize("operation", ["session_create", "operator_append"])
+def test_mission_chat_required_pre_model_transcript_failure_skips_provider(
+    operation,
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    provider_calls = []
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+        def mission_chat_reply(self, *args, **kwargs):
+            provider_calls.append("called")
+            raise AssertionError("provider must not run after transcript persistence failure")
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(
+        harness,
+        "_default_persona_session_db",
+        lambda: _FailingTranscriptDB(operation),
+    )
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    code = harness._cmd_mission_chat_message(
+        _mission_chat_test_args(f"client_pre_model_{operation}")
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["execution_state"] == "failed"
+    assert payload["persistence_operation"] == operation
+    assert provider_calls == []
+
+
+def test_mission_chat_session_db_acquisition_failure_is_typed_and_skips_provider(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    import hermes_state
+    from hermes_cli import harness
+
+    provider_calls = []
+
+    def _fail_session_db(*args, **kwargs):
+        raise OSError("simulated canonical DB open failure")
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(hermes_state, "SessionDB", _fail_session_db)
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    code = harness._cmd_mission_chat_message(
+        _mission_chat_test_args("client_db_acquire_failure", stream=True)
+    )
+
+    assert code == 2
+    frames = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(frames) == 1
+    assert frames[0]["type"] == "chat.final"
+    assert frames[0]["ok"] is False
+    assert frames[0]["persistence_operation"] == "session_db_acquire"
+    assert provider_calls == []
+
+
+def test_mission_chat_assistant_db_failure_finishes_v2_failed_without_success(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    db = _FailingTranscriptDB("assistant_append")
+    provider_calls = []
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            provider_calls.append("called")
+            kwargs["stream_callback"]("provider reply")
+            return SimpleNamespace(
+                final_response="provider reply",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    code = harness._cmd_mission_chat_message(
+        _mission_chat_test_args("client_assistant_db_failure", stream=True)
+    )
+
+    assert code == 2
+    frames = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert provider_calls == ["constructed", "called"]
+    assert frames[-1]["type"] == "chat.final"
+    assert frames[-1]["ok"] is False
+    assert frames[-1]["persistence_operation"] == "assistant_append"
+    terminal_frames = [frame for frame in frames if frame.get("type") == "turn.end"]
+    assert terminal_frames
+    assert {frame.get("state") for frame in terminal_frames} == {"failed"}
+    assert not any(frame.get("ok") is True for frame in frames)
+    record = mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_assistant_db_failure",
+    )
+    assert record["state"] == "failed"
+
+
+def test_free_floating_operator_db_failure_blocks_before_provider(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    db = _FailingTranscriptDB("operator_append")
+    provider_calls = []
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    code = harness._queue_free_floating_assignment(
+        persona_id="launcher-dev",
+        title="Launcher Dev chat",
+        message="hey",
+        requested_by="test",
+        json_output=True,
+        auto_run=True,
+        max_seconds=5.0,
+        client_message_id="client_free_operator_failure",
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["persistence_operation"] == "operator_append"
+    assert provider_calls == []
+    assignments = PersonaAssignmentStore().list_for_persona("dev")
+    assert len(assignments) == 1
+    assert assignments[0].state == "blocked"
+
+
 def test_persona_instance_create_persists_empty_operator_chat_history(
     monkeypatch, capsys, isolate_agent_runtime_root
 ):
@@ -2819,21 +3017,18 @@ def test_free_floating_post_provider_crash_settles_failed(
     from hermes_cli import harness
 
     cfg = _assignment_config()
-    db = _TranscriptDB()
+    db = _FailingTranscriptDB("assistant_append")
+    provider_calls = []
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
     monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
 
-    def _boom(**_kwargs):
-        raise RuntimeError("token bookkeeping exploded")
-
-    monkeypatch.setattr(harness, "_update_persona_chat_token_counts", _boom)
-
     class _FakeRuntime:
         def __init__(self, *args, **kwargs):
-            pass
+            provider_calls.append("constructed")
 
         def chat_reply(self, persona, message, **kwargs):
+            provider_calls.append("called")
             return SimpleNamespace(final_response="Still here.")
 
     monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
@@ -2853,7 +3048,9 @@ def test_free_floating_post_provider_crash_settles_failed(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["error_kind"] == "post_turn_persist_failed"
+    assert payload["persistence_operation"] == "assistant_append"
     assert payload["reply"] == "Still here."
+    assert provider_calls == ["constructed", "called"]
     session_id = payload["session_id"]
     record = mission_chat_turn_record(
         session_id=session_id,

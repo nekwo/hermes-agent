@@ -253,12 +253,27 @@ def _cmd_persona_instance_create(args) -> int:
             data = _chat_busy_payload(exc)
             print(emit_json(data) if args.json else data["error"])
             return 2
-        _ensure_persona_chat_session(
-            session_db=_default_persona_session_db(),
-            session_id=instance.session_id,
-            persona_id=instance.persona_id,
-            title=f"{instance.display_name} chat",
-        )
+        try:
+            _ensure_persona_chat_session(
+                session_db=_default_persona_session_db(),
+                session_id=instance.session_id,
+                persona_id=instance.persona_id,
+                title=f"{instance.display_name} chat",
+                required=True,
+            )
+        except PersonaChatPersistenceError as exc:
+            data = {
+                "ok": False,
+                "error_kind": "chat_session_persist_failed",
+                "persistence_operation": exc.operation,
+                "error": str(exc),
+                "persona_id": instance.persona_id,
+                "persona_instance_id": instance.id,
+                "session_id": instance.session_id,
+                "next_expected": "restore canonical persona chat transcript storage and retry",
+            }
+            print(emit_json(data) if args.json else data["error"])
+            return 2
         data = {
             "ok": True,
             "agent_profile_id": instance.id,
@@ -452,20 +467,30 @@ def _cmd_persona_chat_delete(args) -> int:
     requested_instance = safe_assignment_token(getattr(args, "persona_instance_id", None))
 
     deleted_session = False
-    session_db = _default_persona_session_db()
-    if session_db is not None:
-        try:
-            deleted_session = bool(session_db.delete_session(session_id, sessions_dir=get_hermes_home() / "sessions"))
-        except TypeError:
-            deleted_session = bool(session_db.delete_session(session_id))
-        except Exception as exc:
-            data = {
-                "ok": False,
-                "session_id": session_id,
-                "error": f"failed to delete persona chat session: {exc}",
-            }
-            print(emit_json(data) if args.json else data["error"])
-            return 2
+    try:
+        session_db = _default_persona_session_db()
+    except PersonaChatPersistenceError as exc:
+        data = {
+            "ok": False,
+            "session_id": session_id,
+            "error_kind": "chat_session_db_unavailable",
+            "persistence_operation": exc.operation,
+            "error": str(exc),
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+    try:
+        deleted_session = bool(session_db.delete_session(session_id, sessions_dir=get_hermes_home() / "sessions"))
+    except TypeError:
+        deleted_session = bool(session_db.delete_session(session_id))
+    except Exception as exc:
+        data = {
+            "ok": False,
+            "session_id": session_id,
+            "error": f"failed to delete persona chat session: {exc}",
+        }
+        print(emit_json(data) if args.json else data["error"])
+        return 2
 
     instance_store = PersonaInstanceStore()
     assignment_store = PersonaAssignmentStore()
@@ -742,7 +767,24 @@ def _cmd_mission_chat_message(args) -> int:
             print(emit_json(data) if args.json else data["error"])
         return 2
 
-    session_db = _default_persona_session_db()
+    try:
+        session_db = _default_persona_session_db()
+    except PersonaChatPersistenceError as exc:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "failed",
+            "error_kind": "chat_session_db_unavailable",
+            "persistence_operation": exc.operation,
+            "error": str(exc),
+            "persona_id": normalized_persona,
+            "next_expected": "restore canonical persona chat transcript storage and retry the message",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
     instance_store = PersonaInstanceStore()
     instance_store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
     # Canonicalize a caller-supplied instance id at THIS boundary (the same
@@ -851,12 +893,32 @@ def _cmd_mission_chat_message(args) -> int:
         instance.mode = "task_bound"
         instance = instance_store.update(instance)
 
-    _ensure_persona_chat_session(
-        session_db=session_db,
-        session_id=session_id,
-        persona_id=normalized_persona,
-        title=f"{instance.display_name} chat",
-    )
+    try:
+        _ensure_persona_chat_session(
+            session_db=session_db,
+            session_id=session_id,
+            persona_id=normalized_persona,
+            title=f"{instance.display_name} chat",
+            required=True,
+        )
+    except PersonaChatPersistenceError as exc:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "failed",
+            "error_kind": "chat_session_persist_failed",
+            "persistence_operation": exc.operation,
+            "error": str(exc),
+            "persona_id": normalized_persona,
+            "session_id": session_id,
+            "persona_instance_id": instance.id,
+            "next_expected": "restore canonical persona chat transcript storage and retry the message",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
     try:
         requested_override = _requested_chat_model_override(args)
         chat_override = _resolve_chat_model_override(
@@ -970,14 +1032,35 @@ def _cmd_mission_chat_message(args) -> int:
         instance_store=instance_store,
         relay_chain_in=relay_chain_in,
     )
-    _append_persona_operator_turn(
-        session_db=session_db,
-        session_id=session_id,
-        message=message,
-        client_message_id=client_message_id,
-        skip_if_present=bool(replay.get("operator")),
-        relay_marker=relay_marker,
-    )
+    try:
+        _append_persona_operator_turn(
+            session_db=session_db,
+            session_id=session_id,
+            message=message,
+            client_message_id=client_message_id,
+            skip_if_present=bool(replay.get("operator")),
+            relay_marker=relay_marker,
+            required=True,
+        )
+    except PersonaChatPersistenceError as exc:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "failed",
+            "error_kind": "chat_operator_turn_persist_failed",
+            "persistence_operation": exc.operation,
+            "error": str(exc),
+            "persona_id": normalized_persona,
+            "session_id": session_id,
+            "persona_instance_id": instance.id,
+            "client_message_id": client_message_id,
+            "next_expected": "restore canonical persona chat transcript storage and retry the message",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
     chat_message = _persona_chat_message_with_history(
         session_db=session_db,
         session_id=session_id,
@@ -1251,6 +1334,7 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             text=reply_text,
             client_message_id=client_message_id,
+            required=True,
         )
         _update_persona_chat_token_counts(
             session_db=session_db,
@@ -1375,6 +1459,9 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "error_kind": "post_turn_persist_failed",
+            "persistence_operation": (
+                exc.operation if isinstance(exc, PersonaChatPersistenceError) else None
+            ),
             "persona_instance_id": instance.id,
             "persona_id": normalized_persona,
             "session_id": session_id,
@@ -2218,8 +2305,8 @@ def _queue_free_floating_assignment(
             client_message_id=client_message_id,
         )
     )
-    session_db = _default_persona_session_db()
     try:
+        session_db = _default_persona_session_db()
         session_id = _bind_free_floating_chat_session(
             instance_store=instance_store,
             session_db=session_db,
@@ -2228,9 +2315,37 @@ def _queue_free_floating_assignment(
             assignment_id=assignment.id,
             session_id=session_id,
             kill_active=kill_active,
+            transcript_required=True,
         )
     except ChatBusyError as exc:
         data = _chat_busy_payload(exc)
+        if stream:
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if json_output else data["error"])
+        return 2
+    except PersonaChatPersistenceError as exc:
+        try:
+            assignment_store.complete(
+                assignment.id,
+                state="blocked",
+                error=str(exc),
+            )
+        except Exception:
+            pass
+        data = {
+            "ok": False,
+            "execution_state": "blocked",
+            "error_kind": "chat_transcript_persist_failed",
+            "persistence_operation": exc.operation,
+            "error": str(exc),
+            "assignment_id": assignment.id,
+            "persona_instance_id": assignment.persona_instance_id,
+            "persona_id": normalized_persona,
+            "session_id": safe_assignment_text(session_id, limit=200) or None,
+            "client_message_id": assignment.client_message_id,
+            "next_expected": "restore canonical persona chat transcript storage and retry the message",
+        }
         if stream:
             _emit_chat_final(data)
         else:
@@ -2676,6 +2791,41 @@ def _tool_name_from_progress(payload: dict[str, object]) -> str:
     return safe_assignment_token(payload.get("tool_name") or payload.get("tool")) or "tool"
 
 
+class PersonaChatPersistenceError(RuntimeError):
+    """A required canonical persona-chat transcript operation failed.
+
+    The underlying exception remains available through exception chaining for
+    logs, while the public message intentionally exposes only the operation and
+    exception type so CLI/stream failure frames cannot leak database details.
+    """
+
+    def __init__(self, operation: str, cause: BaseException | None = None):
+        self.operation = safe_assignment_token(operation) or "unknown"
+        self.cause_type = type(cause).__name__ if cause is not None else None
+        detail = f" ({self.cause_type})" if self.cause_type else ""
+        super().__init__(
+            f"canonical persona chat transcript {self.operation.replace('_', ' ')} failed{detail}"
+        )
+
+
+def _persona_chat_persistence_failed(
+    operation: str,
+    exc: BaseException | None,
+    *,
+    required: bool,
+) -> bool:
+    error = (
+        exc
+        if isinstance(exc, PersonaChatPersistenceError)
+        else PersonaChatPersistenceError(operation, exc)
+    )
+    if required:
+        if exc is None or error is exc:
+            raise error
+        raise error from exc
+    return False
+
+
 def _default_persona_session_db():
     try:
         from hermes_state import SessionDB
@@ -2683,21 +2833,22 @@ def _default_persona_session_db():
 
         # The persona-chat SessionDB is the OPERATOR-visible transcript store —
         # the exact DB ``persona_chat_history`` (the snapshot projection) reads.
-        # An in-process ``agent_chat_send`` relay runs inside the caller/target
-        # persona's profile-home override (persona_profile_context sets it), so a
-        # bare ``SessionDB()`` here would open — and write the session row +
-        # messages into — that PROFILE's ``state.db``, invisible to Mission
-        # Control (only the runtime-root-scoped trace rows survived, so the
-        # channel showed thinking rows but never the conversation). When an
-        # override is active, bind to the HEAD/operator home instead so the relay
-        # persists exactly where an operator send does (2026-07-18 incident). At
-        # the true top level (no override) this is the ordinary default DB, so
-        # test isolation and the ``DEFAULT_DB_PATH`` pin are untouched.
-        if get_hermes_home_override() is not None:
-            return SessionDB(db_path=get_hermes_head_home() / "state.db")
+        # Under an in-process persona profile override it must bind to the
+        # recorded outermost/operator home, never the active profile DB. If no
+        # outermost home was recorded, both paths resolve to the override and we
+        # must fail closed rather than create a transcript invisible to Mission
+        # Control.
+        override = get_hermes_home_override()
+        if override is not None:
+            head_home = get_hermes_head_home()
+            if head_home == Path(override):
+                raise PersonaChatPersistenceError("session_db_acquire")
+            return SessionDB(db_path=head_home / "state.db")
         return SessionDB()
-    except Exception:
-        return None
+    except PersonaChatPersistenceError:
+        raise
+    except Exception as exc:
+        raise PersonaChatPersistenceError("session_db_acquire", exc) from exc
 
 
 _CHAT_MODEL_OVERRIDE_CONFIG_KEY = "mission_control_chat_model_override"
@@ -2870,9 +3021,12 @@ def _ensure_persona_chat_session(
     session_id: str | None,
     persona_id: str | None,
     title: str | None = None,
-) -> None:
+    required: bool = False,
+) -> bool:
     if session_db is None or not session_id:
-        return
+        return _persona_chat_persistence_failed(
+            "session_create", None, required=required
+        )
     try:
         normalized_persona = _normalize_cli_persona_or_template_id(persona_id or "persona")
     except Exception:
@@ -2884,22 +3038,25 @@ def _ensure_persona_chat_session(
             model=None,
             system_prompt=f"Mission Control persona chat for {normalized_persona}",
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        return _persona_chat_persistence_failed(
+            "session_create", exc, required=required
+        )
 
     safe_title = safe_assignment_text(title, limit=120)
     if not safe_title:
-        return
+        return True
     try:
         existing_title = session_db.get_session_title(session_id)
     except Exception:
         existing_title = None
     if existing_title:
-        return
+        return True
     try:
         session_db.set_session_title(session_id, safe_title)
     except Exception:
         pass
+    return True
 
 
 def _persona_chat_session_id(persona_instance_id: str) -> str:
@@ -2915,6 +3072,7 @@ def _bind_free_floating_chat_session(
     assignment_id: str | None = None,
     session_id: str | None = None,
     kill_active: bool = False,
+    transcript_required: bool = False,
 ) -> str:
     requested_persona = _normalize_cli_persona_or_template_id(persona_id)
     normalized_persona = requested_persona
@@ -2951,6 +3109,7 @@ def _bind_free_floating_chat_session(
             session_db=session_db,
             session_id=session_id,
             persona_id=normalized_persona,
+            required=transcript_required,
         )
     return session_id
 
@@ -3097,14 +3256,17 @@ def _append_persona_operator_turn(
     client_message_id: str | None = None,
     skip_if_present: bool = False,
     relay_marker: str | None = None,
-) -> None:
+    required: bool = False,
+) -> bool:
     if session_db is None or not session_id:
-        return
+        return _persona_chat_persistence_failed(
+            "operator_append", None, required=required
+        )
     if skip_if_present:
-        return
+        return True
     safe_message = _redact_persona_chat_text(message, limit=PERSONA_CHAT_OPERATOR_MESSAGE_LIMIT)
     if not safe_message:
-        return
+        return True
     try:
         session_db.append_message(
             session_id=session_id,
@@ -3117,8 +3279,11 @@ def _append_persona_operator_turn(
             platform_message_id=safe_assignment_text(client_message_id, limit=200)
             or None,
         )
-    except Exception:
-        return
+    except Exception as exc:
+        return _persona_chat_persistence_failed(
+            "operator_append", exc, required=required
+        )
+    return True
 
 
 def _append_persona_assistant_text(
@@ -3127,7 +3292,8 @@ def _append_persona_assistant_text(
     session_id: str,
     text: str,
     client_message_id: str | None = None,
-) -> None:
+    required: bool = False,
+) -> bool:
     # C8: the ONLY assistant rows this writes are real recorded replies. The
     # pre-trace ack lane that used to inject a canned assistant row here (with
     # a finish_reason marker the projections then had to suppress) is retired —
@@ -3136,17 +3302,19 @@ def _append_persona_assistant_text(
     # stay in SessionDB (archive-never-delete) and keep their typed kind on the
     # read side.
     if session_db is None or not session_id:
-        return
+        return _persona_chat_persistence_failed(
+            "assistant_append", None, required=required
+        )
     safe = _redact_persona_chat_text(text, limit=PERSONA_CHAT_REPLY_LIMIT)
     if not safe:
-        return
+        return True
     safe_client_message_id = safe_assignment_text(client_message_id, limit=200)
     if _persona_chat_existing_turn(
         session_db=session_db,
         session_id=session_id,
         client_message_id=safe_client_message_id,
     ).get("assistant"):
-        return
+        return True
     try:
         session_db.append_message(
             session_id=session_id,
@@ -3154,8 +3322,11 @@ def _append_persona_assistant_text(
             content=safe,
             platform_message_id=safe_client_message_id or None,
         )
-    except Exception:
-        return
+    except Exception as exc:
+        return _persona_chat_persistence_failed(
+            "assistant_append", exc, required=required
+        )
+    return True
 
 
 def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:
@@ -3341,20 +3512,43 @@ def _run_free_floating_assignment_once(
     """
 
     os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-    session_db = _default_persona_session_db()
-    session_id = _bind_free_floating_chat_session(
-        instance_store=PersonaInstanceStore(),
-        session_db=session_db,
-        persona_id=persona_id,
-        persona_instance_id=persona_instance_id,
-        assignment_id=assignment_id,
-    )
-    _append_persona_operator_turn(
-        session_db=session_db,
-        session_id=session_id,
-        message=message,
-        client_message_id=client_message_id,
-    )
+    session_id: str | None = None
+    try:
+        session_db = _default_persona_session_db()
+        session_id = _bind_free_floating_chat_session(
+            instance_store=PersonaInstanceStore(),
+            session_db=session_db,
+            persona_id=persona_id,
+            persona_instance_id=persona_instance_id,
+            assignment_id=assignment_id,
+            transcript_required=True,
+        )
+        _append_persona_operator_turn(
+            session_db=session_db,
+            session_id=session_id,
+            message=message,
+            client_message_id=client_message_id,
+            required=True,
+        )
+    except PersonaChatPersistenceError as exc:
+        try:
+            PersonaAssignmentStore().complete(
+                assignment_id,
+                state="blocked",
+                error=str(exc),
+            )
+        except Exception:
+            pass
+        return 2, {
+            "ok": False,
+            "execution_state": "blocked",
+            "error_kind": "chat_transcript_persist_failed",
+            "persistence_operation": exc.operation,
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "blocker": str(exc),
+            "next_expected": "restore canonical persona chat transcript storage and retry the message",
+        }, None
     persona = _persona_by_id(cfg, persona_id)
     if persona is None:
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error="unknown persona")
@@ -3463,6 +3657,7 @@ def _run_free_floating_assignment_once(
             session_id=session_id,
             text=reply_text,
             client_message_id=client_message_id,
+            required=True,
         )
         _update_persona_chat_token_counts(
             session_db=session_db,
@@ -3559,6 +3754,9 @@ def _run_free_floating_assignment_once(
             "ok": False,
             "execution_state": "blocked",
             "error_kind": "post_turn_persist_failed",
+            "persistence_operation": (
+                exc.operation if isinstance(exc, PersonaChatPersistenceError) else None
+            ),
             "session_id": session_id,
             "client_message_id": client_message_id,
             "reply": reply_text,

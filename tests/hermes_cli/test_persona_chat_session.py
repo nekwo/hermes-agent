@@ -9,6 +9,7 @@ exception-wrapped and never directly asserted, so a regression would fail silent
 from hermes_cli.harness import (
     _append_persona_assistant_text,
     _append_persona_operator_turn,
+    _ensure_persona_chat_session,
     _persona_chat_message_with_history,
     _redact_persona_chat_text,
     _update_persona_chat_token_counts,
@@ -19,6 +20,7 @@ class FakeSessionDB:
     def __init__(self):
         self.messages: dict[str, list[dict]] = {}
         self.sessions: dict[str, dict] = {}
+        self.titles: dict[str, str] = {}
         self.token_updates: list[dict] = []
 
     def create_session(self, session_id, source, **kwargs):
@@ -31,6 +33,12 @@ class FakeSessionDB:
 
     def get_messages(self, session_id, include_inactive=False):
         return list(self.messages.get(session_id, []))
+
+    def get_session_title(self, session_id):
+        return self.titles.get(session_id)
+
+    def set_session_title(self, session_id, title):
+        self.titles[session_id] = title
 
     def update_token_counts(
         self,
@@ -61,6 +69,20 @@ def test_operator_turn_is_persisted():
     db = FakeSessionDB()
     _append_persona_operator_turn(session_db=db, session_id="s1", message="hi neko")
     assert db.get_messages("s1") == [{"role": "user", "content": "hi neko"}]
+
+
+def test_ensure_session_returns_true_when_title_already_exists():
+    db = FakeSessionDB()
+    db.titles["s1"] = "Existing title"
+
+    assert _ensure_persona_chat_session(
+        session_db=db,
+        session_id="s1",
+        persona_id="dev",
+        title="Replacement title",
+        required=True,
+    ) is True
+    assert db.titles["s1"] == "Existing title"
 
 
 def test_assistant_turn_is_persisted():
@@ -136,9 +158,13 @@ def test_no_history_returns_bare_message():
     assert _persona_chat_message_with_history(session_db=db, session_id="s1", message="hi") == "hi"
 
 
-def test_none_session_db_is_safe():
-    # Must not raise when SessionDB is unavailable.
-    _append_persona_operator_turn(session_db=None, session_id="s1", message="hi")
+def test_none_session_db_is_safe_for_optional_callers():
+    assert not _append_persona_operator_turn(
+        session_db=None, session_id="s1", message="hi"
+    )
+    assert not _append_persona_assistant_text(
+        session_db=None, session_id="s1", text="reply"
+    )
     assert _persona_chat_message_with_history(session_db=None, session_id="s1", message="hi") == "hi"
 
 
