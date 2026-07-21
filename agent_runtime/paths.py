@@ -50,6 +50,15 @@ def persona_assignments_dir() -> Path:
     return store_root() / "persona_assignments"
 
 
+def persona_chat_mint_receipts_dir() -> Path:
+    """Durable idempotency receipts for server-minted persona chat roots."""
+    return store_root() / "persona_chat_mint_receipts"
+
+
+def persona_chat_mint_receipt_path(key_digest: str) -> Path:
+    return persona_chat_mint_receipts_dir() / f"{_safe_path_token(key_digest)}.json"
+
+
 def repo_bundles_dir() -> Path:
     return store_root() / "repo_bundles"
 

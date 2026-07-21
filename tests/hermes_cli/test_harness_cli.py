@@ -53,6 +53,31 @@ def test_harness_init_materializes_an_idempotent_default_scope(capsys):
     assert len(WorkspaceStore().list_all()) == 1
 
 
+def test_harness_parser_exposes_idempotent_exact_instance_chat_mint():
+    args = parser().parse_args(
+        [
+            "harness",
+            "persona",
+            "instance",
+            "open-chat",
+            "--persona",
+            "dev",
+            "--persona-instance-id",
+            "personainst_dev",
+            "--new-session",
+            "--idempotency-key",
+            "new-chat-dev-1",
+            "--json",
+        ]
+    )
+
+    assert args.persona_command == "instance"
+    assert args.persona_instance_command == "open-chat"
+    assert args.persona_instance_id == "personainst_dev"
+    assert args.new_session is True
+    assert args.idempotency_key == "new-chat-dev-1"
+
+
 def test_harness_mission_chat_steer_no_active_turn_returns_structured_json(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     args = parser().parse_args(

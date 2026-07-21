@@ -81,6 +81,10 @@ from agent_runtime.persona_assignments import (
     safe_assignment_text,
     safe_optional_token,
 )
+from agent_runtime.persona_chat_mints import (
+    PersonaChatMintError,
+    reserve_persona_chat_mint,
+)
 from agent_runtime.persona_diagnostics import PersonaDiagnosticController, PersonaDiagnosticOptions
 from agent_runtime.profile_context import active_profile_name
 from agent_runtime.realm_sync import (
@@ -997,7 +1001,10 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.set_defaults(func=_cmd_persona_instance_create)
     persona_instance_open = persona_instance_subs.add_parser("open-chat", help="Bind a persona instance to a durable chat session without ticking")
     persona_instance_open.add_argument("--persona", dest="persona_id", required=True)
+    persona_instance_open.add_argument("--persona-instance-id", default=None, help="Exact existing persona instance to bind when minting a new chat")
     persona_instance_open.add_argument("--session-id", default=None)
+    persona_instance_open.add_argument("--new-session", action="store_true", help="Mint and select a fresh server-owned chat session for the target instance")
+    persona_instance_open.add_argument("--idempotency-key", default=None, help="Stable retry key required with --new-session")
     persona_instance_open.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_open.add_argument("--add-instance", action="store_true", help="Open the chat on an additional placement-backed instance")
     persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")

@@ -360,6 +360,12 @@ def _cmd_persona_instance_open_chat(args) -> int:
             data = _coordinator_confirm_payload("persona.instance.close", coordinator_id, auth)
             print(emit_json(data) if args.json else data["status"])
             return 2
+    if bool(getattr(args, "new_session", False)):
+        return _cmd_persona_instance_open_new_chat(
+            args,
+            persona_id=persona_id,
+            coordinator_scope=coordinator_scope,
+        )
     try:
         if bool(getattr(args, "add_instance", False)):
             placement_id = safe_assignment_token(getattr(args, "placement_id", None))
@@ -471,6 +477,188 @@ def _cmd_persona_instance_open_chat(args) -> int:
     }
     print(emit_json(data) if args.json else f"opened {instance.id} on chat {instance.session_id}")
     return 0
+
+
+def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_scope) -> int:
+    """Mint one exact-instance chat root with durable retry semantics."""
+    if bool(getattr(args, "add_instance", False)):
+        return _emit_persona_open_chat_error(
+            args,
+            error_kind="invalid_request",
+            error="new_session and add_instance are mutually exclusive",
+            persona_id=persona_id,
+        )
+    if safe_assignment_text(getattr(args, "session_id", None), limit=200):
+        return _emit_persona_open_chat_error(
+            args,
+            error_kind="invalid_request",
+            error="session_id must be omitted when new_session is true",
+            persona_id=persona_id,
+        )
+
+    requested_instance_id = safe_assignment_token(
+        getattr(args, "persona_instance_id", None)
+    )
+    target_instance_id = (
+        canonical_persona_instance_id(requested_instance_id, persona_id=persona_id)
+        if requested_instance_id
+        else persona_instance_id_for(persona_id)
+    )
+    store = PersonaInstanceStore()
+    try:
+        current = store.get(target_instance_id)
+    except Exception:
+        return _emit_persona_open_chat_error(
+            args,
+            error_kind="persona_instance_not_found",
+            error=f"persona instance not found: {target_instance_id}",
+            persona_id=persona_id,
+            persona_instance_id=target_instance_id,
+            next_expected="refresh the Harness roster and retry against a live persona instance",
+        )
+    if current.persona_id != persona_id:
+        return _emit_persona_open_chat_error(
+            args,
+            error_kind="persona_instance_mismatch",
+            error=(
+                f"persona instance {target_instance_id!r} belongs to "
+                f"{current.persona_id!r}, not {persona_id!r}"
+            ),
+            persona_id=persona_id,
+            persona_instance_id=target_instance_id,
+        )
+
+    try:
+        with reserve_persona_chat_mint(
+            idempotency_key=getattr(args, "idempotency_key", None),
+            persona_id=persona_id,
+            persona_instance_id=target_instance_id,
+            session_id=persona_chat_session_id_for(target_instance_id),
+        ) as mint:
+            receipt = mint.receipt
+            if receipt.bound:
+                # A retry after a confirmed response loss must be observational:
+                # return the original root without moving the instance pointer
+                # back over a newer chat selected since this mint completed.
+                instance = store.get(target_instance_id)
+            else:
+                # Make the transcript root durable before publishing it as the
+                # instance's selected chat. If SessionDB is temporarily
+                # unavailable the reserved receipt survives and retry reuses the
+                # same root instead of creating a duplicate conversation.
+                try:
+                    _ensure_persona_chat_session(
+                        session_db=_default_persona_session_db(),
+                        session_id=receipt.session_id,
+                        persona_id=persona_id,
+                        title=f"{current.display_name} chat",
+                        required=True,
+                    )
+                except PersonaChatPersistenceError as exc:
+                    data = {
+                        "ok": False,
+                        "error_kind": "chat_session_persist_failed",
+                        "persistence_operation": exc.operation,
+                        "error": str(exc),
+                        "persona_id": persona_id,
+                        "persona_instance_id": target_instance_id,
+                        "session_id": receipt.session_id,
+                        "mission_chat_root_id": receipt.session_id,
+                        "idempotent_replay": receipt.idempotent_replay,
+                        "mint_receipt_state": receipt.state,
+                        "next_expected": "restore canonical persona chat transcript storage and retry with the same idempotency key",
+                    }
+                    print(emit_json(data) if args.json else data["error"])
+                    return 2
+                try:
+                    instance = store.open_chat(
+                        persona_id=persona_id,
+                        persona_instance_id=target_instance_id,
+                        session_id=receipt.session_id,
+                        kill_active=bool(getattr(args, "kill_active", False)),
+                    )
+                except RetiredPersonaInstanceError as exc:
+                    data = _retired_persona_instance_payload(exc)
+                    data.update(
+                        {
+                            "session_id": receipt.session_id,
+                            "mission_chat_root_id": receipt.session_id,
+                            "idempotent_replay": receipt.idempotent_replay,
+                            "mint_receipt_state": receipt.state,
+                        }
+                    )
+                    print(emit_json(data) if args.json else data["error"])
+                    return 2
+                except ChatBusyError as exc:
+                    data = _chat_busy_payload(exc)
+                    data.update(
+                        {
+                            "session_id": receipt.session_id,
+                            "mission_chat_root_id": receipt.session_id,
+                            "idempotent_replay": receipt.idempotent_replay,
+                            "mint_receipt_state": receipt.state,
+                        }
+                    )
+                    print(emit_json(data) if args.json else data["error"])
+                    return 2
+                receipt = mint.mark_bound()
+    except PersonaChatMintError as exc:
+        return _emit_persona_open_chat_error(
+            args,
+            error_kind=exc.code,
+            error=str(exc),
+            persona_id=persona_id,
+            persona_instance_id=target_instance_id,
+        )
+
+    selected = instance.session_id == receipt.session_id
+    data = {
+        "ok": True,
+        "persona_instance_id": instance.id,
+        "persona_id": instance.persona_id,
+        "mode": instance.mode,
+        "session_id": receipt.session_id,
+        "mission_chat_root_id": receipt.session_id,
+        "chat_busy": False,
+        "killed_previous": bool(getattr(args, "kill_active", False)),
+        "add_instance": False,
+        "new_session": True,
+        "selected": selected,
+        "superseded": not selected,
+        "idempotent_replay": receipt.idempotent_replay,
+        "mint_receipt_state": receipt.state,
+        "coordinator_permission_scope": asdict(coordinator_scope)
+        if coordinator_scope is not None
+        else None,
+        "next_expected": "resume or send on this server-minted chat root",
+    }
+    print(
+        emit_json(data)
+        if args.json
+        else f"opened {instance.id} on new chat {receipt.session_id}"
+    )
+    return 0
+
+
+def _emit_persona_open_chat_error(
+    args,
+    *,
+    error_kind: str,
+    error: str,
+    persona_id: str,
+    persona_instance_id: str | None = None,
+    next_expected: str = "correct the open-chat request and retry",
+) -> int:
+    data = {
+        "ok": False,
+        "error_kind": error_kind,
+        "error": safe_assignment_text(error, limit=400),
+        "persona_id": persona_id,
+        "persona_instance_id": persona_instance_id,
+        "next_expected": next_expected,
+    }
+    print(emit_json(data) if args.json else data["error"])
+    return 2
 
 
 def _cmd_persona_chat_delete(args) -> int:

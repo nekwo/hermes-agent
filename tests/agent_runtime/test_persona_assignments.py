@@ -962,6 +962,151 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     assert session_db.get_session_title(instance.session_id) == f"{instance.display_name} chat"
 
 
+def test_persona_instance_open_chat_new_session_mints_exact_instance_and_replays(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    session_db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
+    existing = PersonaInstanceStore().create_operator_chat(
+        persona_id="dev",
+        display_name="Launcher Dev Agent",
+    )
+    original_session = existing.session_id
+    args = Namespace(
+        persona_id="launcher-dev",
+        persona_instance_id=existing.id,
+        session_id=None,
+        new_session=True,
+        idempotency_key="new-chat-dev-1",
+        kill_active=False,
+        add_instance=False,
+        json=True,
+    )
+
+    assert harness._cmd_persona_instance_open_chat(args) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["ok"] is True
+    assert first["persona_instance_id"] == existing.id
+    assert first["session_id"] != original_session
+    assert first["mission_chat_root_id"] == first["session_id"]
+    assert first["idempotent_replay"] is False
+    assert first["mint_receipt_state"] == "bound"
+    assert PersonaInstanceStore().get(existing.id).session_id == first["session_id"]
+    assert session_db.get_session(first["session_id"]) is not None
+
+    assert harness._cmd_persona_instance_open_chat(args) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["session_id"] == first["session_id"]
+    assert replay["idempotent_replay"] is True
+    assert replay["selected"] is True
+
+    distinct_args = Namespace(
+        **{
+            **vars(args),
+            "idempotency_key": "new-chat-dev-2",
+        }
+    )
+    assert harness._cmd_persona_instance_open_chat(distinct_args) == 0
+    distinct = json.loads(capsys.readouterr().out)
+    assert distinct["session_id"] != first["session_id"]
+    assert distinct["idempotent_replay"] is False
+    assert PersonaInstanceStore().get(existing.id).session_id == distinct["session_id"]
+
+
+def test_persona_instance_open_chat_new_session_retry_recovers_reserved_root(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    existing = PersonaInstanceStore().create_operator_chat(
+        persona_id="dev",
+        display_name="Launcher Dev Agent",
+    )
+    original_session = existing.session_id
+    args = Namespace(
+        persona_id="launcher-dev",
+        persona_instance_id=existing.id,
+        session_id=None,
+        new_session=True,
+        idempotency_key="new-chat-recover-1",
+        kill_active=False,
+        add_instance=False,
+        json=True,
+    )
+    monkeypatch.setattr(
+        harness,
+        "_default_persona_session_db",
+        lambda: _FailingTranscriptDB("session_create"),
+    )
+
+    assert harness._cmd_persona_instance_open_chat(args) == 2
+    failed = json.loads(capsys.readouterr().out)
+    assert failed["error_kind"] == "chat_session_persist_failed"
+    assert failed["mint_receipt_state"] == "reserved"
+    assert PersonaInstanceStore().get(existing.id).session_id == original_session
+
+    recovered_db = _TranscriptDB()
+    monkeypatch.setattr(
+        harness,
+        "_default_persona_session_db",
+        lambda: recovered_db,
+    )
+    assert harness._cmd_persona_instance_open_chat(args) == 0
+    recovered = json.loads(capsys.readouterr().out)
+    assert recovered["session_id"] == failed["session_id"]
+    assert recovered["idempotent_replay"] is True
+    assert recovered["mint_receipt_state"] == "bound"
+    assert PersonaInstanceStore().get(existing.id).session_id == failed["session_id"]
+
+
+def test_persona_instance_open_chat_new_session_rejects_idempotency_scope_conflict(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    session_db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
+    store = PersonaInstanceStore()
+    dev = store.create_operator_chat(persona_id="dev", display_name="Dev")
+    qa = store.create_operator_chat(persona_id="qa", display_name="QA")
+
+    def args_for(persona_id, instance_id):
+        return Namespace(
+            persona_id=persona_id,
+            persona_instance_id=instance_id,
+            session_id=None,
+            new_session=True,
+            idempotency_key="shared-key-is-a-client-bug",
+            kill_active=False,
+            add_instance=False,
+            json=True,
+        )
+
+    assert harness._cmd_persona_instance_open_chat(args_for("dev", dev.id)) == 0
+    capsys.readouterr()
+    assert harness._cmd_persona_instance_open_chat(args_for("qa", qa.id)) == 2
+    conflict = json.loads(capsys.readouterr().out)
+    assert conflict["error_kind"] == "idempotency_conflict"
+    assert PersonaInstanceStore().get(qa.id).session_id == qa.session_id
+
+
 def test_persona_instance_open_chat_can_target_additional_placement(monkeypatch, isolate_agent_runtime_root):
     from argparse import Namespace
     from hermes_cli import harness
