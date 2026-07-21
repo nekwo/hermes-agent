@@ -26,6 +26,7 @@ from .dirty_state import build_dirty_state
 from .events import CachedEventLog, EventLog, event_summary_missing, operator_event_summary
 from .migrations import effective_config_summary, migration_status
 from .mission_plan import mission_plan_summary, task_stage_records
+from .models import looks_like_persona_instance_id
 from .observability import build_observability
 from .operator_channels import (
     OPERATOR_CHANNELS_SCHEMA_VERSION,
@@ -1222,6 +1223,58 @@ def _parity_warnings(data) -> list[dict]:
         for inst in instances
         if isinstance(inst, dict)
     }
+    # Shape-valid JSON can still be referentially stale. Steering fields are
+    # foreign keys into persona_instances; report every unresolved target in
+    # the parity envelope so clients never have to infer corruption from a
+    # missing card or a failed flow sync.
+    for instance in instances:
+        if not isinstance(instance, dict):
+            continue
+        source_id = str(
+            instance.get("persona_instance_id")
+            or instance.get("agent_profile_id")
+            or ""
+        )
+        spawned_by = str(instance.get("spawned_by") or "").strip()
+        if (
+            spawned_by
+            and looks_like_persona_instance_id(spawned_by)
+            and spawned_by not in instance_ids
+        ):
+            warnings.append(
+                {
+                    "code": "fk_miss",
+                    "from_entity": "persona_instance",
+                    "from_id": source_id,
+                    "fk_field": "spawned_by",
+                    "target_entity": "persona_instances",
+                    "target_id": spawned_by,
+                    "detail": (
+                        f"persona_instance '{source_id}' spawned_by -> "
+                        f"{spawned_by} does not resolve in persona_instances; "
+                        "run `harness persona-instance reconcile [--dry-run]`"
+                    ),
+                }
+            )
+        for parent_id in dict.fromkeys(instance.get("steered_by") or []):
+            parent_id = str(parent_id or "").strip()
+            if not parent_id or parent_id in instance_ids:
+                continue
+            warnings.append(
+                {
+                    "code": "fk_miss",
+                    "from_entity": "persona_instance",
+                    "from_id": source_id,
+                    "fk_field": "steered_by",
+                    "target_entity": "persona_instances",
+                    "target_id": parent_id,
+                    "detail": (
+                        f"persona_instance '{source_id}' steered_by -> "
+                        f"{parent_id} does not resolve in persona_instances; "
+                        "run `harness persona-instance reconcile [--dry-run]`"
+                    ),
+                }
+            )
     for row in data.get("persona_chat_trace") or []:
         if not isinstance(row, dict):
             continue

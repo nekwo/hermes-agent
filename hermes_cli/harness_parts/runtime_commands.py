@@ -27,6 +27,7 @@ def _cmd_persona_instance_reconcile(args) -> int:
             f"persona-instance reconcile ({mode}): merged={data['merged_count']} "
             f"renamed={data['renamed_count']} skipped={data['skipped_count']} "
             f"pruned={data.get('pruned_count', 0)} held={data.get('held_count', 0)} "
+            f"steering_repaired={data.get('steering_repaired_count', 0)} "
             f"aliases={data['alias_count']}"
         )
         for item in data["actions"]:
@@ -35,6 +36,11 @@ def _cmd_persona_instance_reconcile(args) -> int:
             print(f"  - pruned ({item['reason']}): {item['persona_instance_id']}")
         for item in data.get("held") or []:
             print(f"  - held ({item['reason']}): {item['persona_instance_id']}")
+        for item in data.get("steering_repairs") or []:
+            print(
+                f"  - steering repaired: {item['persona_instance_id']} "
+                f"removed {item['missing_parent_ids']}"
+            )
     return 0
 
 

@@ -464,6 +464,12 @@ def reconcile_persona_instances(*, apply: bool = True, event_log: EventLog | Non
             },
         )
 
+    # Phase 3 — referential integrity. Shape-valid rows can still point at an
+    # owner that was retired, reaped, or manually removed. Repair those
+    # foreign-key misses after the archive phases so the next snapshot cannot
+    # retain a random missing owner.
+    steering_repairs = store.repair_missing_steering_references(apply=apply)
+
     return {
         "applied": bool(apply),
         "actions": actions,
@@ -474,6 +480,8 @@ def reconcile_persona_instances(*, apply: bool = True, event_log: EventLog | Non
         "held": held_actions,
         "pruned_count": len(pruned_actions),
         "held_count": len(held_actions),
+        "steering_repairs": steering_repairs["repaired"],
+        "steering_repaired_count": steering_repairs["repaired_count"],
         "alias_count": len(aliases),
         "archive_dir": str(archive_dir) if apply and actions else None,
         "prune_archive_dir": str(prune_archive_dir) if apply and pruned_actions else None,

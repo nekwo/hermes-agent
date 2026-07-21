@@ -4445,6 +4445,67 @@ def test_retire_archives_placement_row_and_emits_event(isolate_agent_runtime_roo
     assert payload["persona_id"] == "dev"
 
 
+def test_retire_releases_child_backlinks_without_clearing_child_context(
+    isolate_agent_runtime_root,
+):
+    store = PersonaInstanceStore()
+    retiring = _placement_instance(
+        persona_id="neko_supervisor",
+        placement_id="lead_retiring",
+        display_name="Retiring lead",
+    )
+    remaining = _placement_instance(
+        persona_id="neko_supervisor",
+        placement_id="lead_remaining",
+        display_name="Remaining lead",
+    )
+    child = _placement_instance(
+        persona_id="dev",
+        placement_id="dev_child",
+        display_name="Dev child",
+    )
+    child = store.set_parents(
+        child.id,
+        [retiring.id, remaining.id],
+        goal_id="goal_live",
+    )
+
+    store.retire(retiring.id, reason="placement deleted")
+
+    child = store.get(child.id)
+    assert child.steered_by == [remaining.id]
+    assert child.spawned_by == remaining.id
+    assert child.goal_id == "goal_live"
+    assert child.current_task_id == "goal_live"
+    assert child.mode == "task_bound"
+
+
+def test_retire_last_parent_preserves_child_mission_context(
+    isolate_agent_runtime_root,
+):
+    store = PersonaInstanceStore()
+    retiring = _placement_instance(
+        persona_id="neko_supervisor",
+        placement_id="lead_only",
+        display_name="Only lead",
+    )
+    child = _placement_instance(
+        persona_id="dev",
+        placement_id="dev_only_child",
+        display_name="Dev child",
+    )
+    child = store.set_parents(child.id, [retiring.id], goal_id="goal_live")
+
+    store.retire(retiring.id, reason="placement deleted")
+
+    child = store.get(child.id)
+    assert child.steered_by == []
+    assert child.spawned_by is None
+    assert child.goal_id == "goal_live"
+    assert child.current_task_id == "goal_live"
+    assert child.mode == "task_bound"
+
+
 def test_retired_placement_cannot_be_resurrected_from_its_saved_chat(
     isolate_agent_runtime_root,
 ):

@@ -621,6 +621,82 @@ class PersonaInstanceStore:
             "repaired_count": len(repairs),
         }
 
+    def repair_missing_steering_references(
+        self,
+        *,
+        apply: bool = True,
+    ) -> dict[str, Any]:
+        """Remove steering parents that no longer resolve to a live instance.
+
+        JSON shape validation cannot catch a syntactically valid id whose row
+        has been retired or reaped. This is the referential-integrity repair:
+        it preserves every live parent and all child context, rewrites the
+        ``spawned_by`` mirror, and emits the ordinary steering event when
+        applied. Dry-run is side-effect free.
+        """
+        instances = self.list_all()
+        live_ids = {instance.id for instance in instances}
+        repairs: list[dict[str, Any]] = []
+        for instance in instances:
+            before = list(instance.steered_by)
+            kept = [parent for parent in before if parent in live_ids]
+            missing = [parent for parent in before if parent not in live_ids]
+            spawned_before = instance.spawned_by
+            spawned_missing = bool(
+                spawned_before
+                and looks_like_persona_instance_id(spawned_before)
+                and spawned_before not in live_ids
+            )
+            if not missing and not spawned_missing:
+                continue
+            spawned_after = kept[0] if kept else None
+            repairs.append(
+                {
+                    "persona_instance_id": instance.id,
+                    "steered_by_before": before,
+                    "steered_by_after": kept,
+                    "spawned_by_before": spawned_before,
+                    "spawned_by_after": spawned_after,
+                    "missing_parent_ids": sorted(set(missing + ([spawned_before] if spawned_missing else []))),
+                }
+            )
+            if not apply:
+                continue
+            self._commit_steer(
+                instance,
+                {"steered_by": kept, "spawned_by": spawned_after},
+                added=[],
+                removed=missing,
+                detached=not kept,
+            )
+        return {
+            "applied": bool(apply),
+            "dry_run": not apply,
+            "repaired": repairs,
+            "repaired_count": len(repairs),
+        }
+
+    def _release_parent_references(self, parent_instance_id: str) -> list[str]:
+        """Transactionally release every child backlink before owner removal."""
+        released: list[str] = []
+        for child in self.list_all():
+            if child.id == parent_instance_id or parent_instance_id not in child.steered_by:
+                continue
+            kept = [parent for parent in child.steered_by if parent != parent_instance_id]
+            if kept:
+                self._apply_steer_edges(
+                    child.id,
+                    kept,
+                    goal_id=child.goal_id,
+                    _instance=child,
+                )
+            else:
+                # Owner retirement changes graph topology, not the child's
+                # mission membership. Preserve goal/task/mode context.
+                self.clear_parents(child.id)
+            released.append(child.id)
+        return released
+
     def _apply_steer_edges(
         self,
         persona_instance_id: str,
@@ -1182,6 +1258,7 @@ class PersonaInstanceStore:
         source = paths.persona_instance_path(instance.id)
         if not source.exists():
             return None
+        self._release_parent_references(instance.id)
         archive_dir.mkdir(parents=True, exist_ok=True)
         target = archive_dir / source.name
         shutil.move(str(source), str(target))
@@ -1504,6 +1581,7 @@ class PersonaInstanceStore:
         path = paths.persona_instance_path(instance.id)
         if not path.exists():
             return False
+        self._release_parent_references(instance.id)
         path.unlink()
         return True
 
