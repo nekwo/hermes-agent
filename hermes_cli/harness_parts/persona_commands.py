@@ -337,57 +337,6 @@ def _cmd_persona_instance_open_chat(args) -> int:
         return 2
     persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
     persona = _persona_by_id(cfg, persona_id)
-    if bool(getattr(args, "new_session", False)):
-        instance_id = canonical_chat_instance_id(
-            persona_id, getattr(args, "persona_instance_id", None)
-        )
-        idempotency_key = safe_assignment_text(
-            getattr(args, "idempotency_key", None), limit=240
-        )
-        if not idempotency_key:
-            data = {"ok": False, "error_kind": "invalid_request", "error": "idempotency_key is required with new_session"}
-            print(emit_json(data) if args.json else data["error"])
-            return 2
-        try:
-            receipt = PersonaChatMintReceiptStore().mint(
-                instance_store=PersonaInstanceStore(),
-                session_db=_default_persona_session_db(),
-                persona_id=persona_id,
-                persona_instance_id=instance_id,
-                idempotency_key=idempotency_key,
-                title=f"{safe_assignment_text(getattr(persona, 'display_name', None), limit=120) or persona_id} chat",
-            )
-            instance = PersonaInstanceStore().open_chat(
-                persona_id=persona_id,
-                persona_instance_id=instance_id,
-                session_id=receipt["root_chat_session_id"],
-                display_name=safe_assignment_text(
-                    getattr(args, "display_name", None), limit=120
-                ),
-                workspace_id=safe_assignment_token(
-                    getattr(args, "workspace_id", None)
-                ) or None,
-                realm_id=safe_assignment_token(getattr(args, "realm_id", None)) or None,
-            )
-        except Exception as exc:
-            data = {"ok": False, "error_kind": "chat_session_mint_failed", "error": safe_assignment_text(str(exc), limit=320)}
-            print(emit_json(data) if args.json else data["error"])
-            return 2
-        data = {
-            "ok": True,
-            "capability_id": "persona.instance.open_chat",
-            "server_minted_chat_session": True,
-            "persona_instance_id": instance.id,
-            "persona_id": instance.persona_id,
-            "default_chat_session_id": receipt["root_chat_session_id"],
-            "root_chat_session_id": receipt["root_chat_session_id"],
-            "active_session_id": receipt["root_chat_session_id"],
-            "session_id": receipt["root_chat_session_id"],
-            "idempotency_key": idempotency_key,
-            "mint_receipt_state": receipt["state"],
-        }
-        print(emit_json(data) if args.json else f"opened {instance.id} on chat {receipt['root_chat_session_id']}")
-        return 0
     coordinator_id = _coordinator_actor_id(args)
     coordinator_scope = None
     if coordinator_id and bool(getattr(args, "add_instance", False)):
