@@ -833,7 +833,12 @@ def _safe_journal_metadata(value: Any) -> dict[str, Any]:
         text = safe_assignment_text(value.get(key), limit=limit)
         if text:
             result[key] = text
-    for key in ("provider_submitted", "native_committed", "projection_committed"):
+    for key in (
+        "provider_submitted",
+        "native_committed",
+        "projection_committed",
+        "projection_event_emitted",
+    ):
         if key in value:
             result[key] = bool(value.get(key))
     return result

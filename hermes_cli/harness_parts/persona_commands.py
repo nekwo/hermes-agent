@@ -1055,6 +1055,99 @@ def _cmd_mission_chat_steer(args) -> int:
     return 0
 
 
+def _publish_persona_chat_projection_event(
+    *,
+    session_id: str,
+    client_message_id: str,
+    turn_id: str,
+    persona_id: str,
+    persona_instance_id: str,
+    task_id: str | None,
+    active_session_id: str | None,
+    native_revision: str | None,
+) -> bool:
+    """Notify stream consumers after the durable chat projection commits.
+
+    The journal bit makes normal retries exactly-once. Event append deliberately
+    precedes the bit: a crash between the two can duplicate a harmless rebuild
+    notification, while the opposite order could permanently hide a committed
+    reply from a running Launcher stream.
+    """
+
+    record = mission_chat_turn_record(
+        session_id=session_id,
+        client_message_id=client_message_id,
+    ) or {}
+    if record.get("state") != "projected" or record.get(
+        "projection_event_emitted"
+    ):
+        return False
+    try:
+        EventLog().append(
+            Event(
+                type="persona_chat.projected",
+                task_id=task_id or None,
+                run_id=None,
+                persona_id=persona_id or None,
+                ts=now(),
+                payload={
+                    "persona_instance_id": persona_instance_id,
+                    "root_chat_session_id": session_id,
+                    "active_session_id": active_session_id or session_id,
+                    "client_message_id": client_message_id,
+                    "turn_id": turn_id,
+                    "native_revision": native_revision,
+                    "change_kind": "projection_committed",
+                },
+                session_id=session_id,
+                turn_id=turn_id,
+            )
+        )
+    except Exception:
+        # The reply is already durable. Leave the marker false so an
+        # idempotent replay repairs the missed notification.
+        return False
+    outcome = transition_mission_chat_turn(
+        session_id=session_id,
+        client_message_id=client_message_id,
+        turn_id=turn_id,
+        state="projected",
+        metadata={"projection_event_emitted": True},
+        elements=record.get("elements") or [],
+    )
+    return outcome is MissionChatTurnPersistOutcome.PERSISTED
+
+
+def _publish_persona_chat_metadata_event(
+    *,
+    session_id: str,
+    persona_id: str,
+    persona_instance_id: str,
+    task_id: str | None,
+) -> bool:
+    """Notify stream consumers that SessionDB-only chat metadata changed."""
+
+    try:
+        EventLog().append(
+            Event(
+                type="persona_chat.metadata_updated",
+                task_id=task_id or None,
+                run_id=None,
+                persona_id=persona_id or None,
+                ts=now(),
+                payload={
+                    "persona_instance_id": persona_instance_id,
+                    "root_chat_session_id": session_id,
+                    "change_kind": "auto_title_updated",
+                },
+                session_id=session_id,
+            )
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _cmd_mission_chat_message(args) -> int:
     cfg = load_agent_runtime_config()
     try:
@@ -1495,6 +1588,9 @@ def _cmd_mission_chat_message(args) -> int:
             },
             elements=journal.get("elements") or [],
         )
+        journal = mission_chat_turn_record(
+            session_id=session_id, client_message_id=client_message_id
+        ) or {}
         journal_state = "projected"
     if journal_state in {"executing", "outcome_unknown"}:
         if journal_state == "executing":
@@ -1523,6 +1619,18 @@ def _cmd_mission_chat_message(args) -> int:
             print(emit_json(data) if args.json else data["error"])
         return 2
     if journal_state == "projected" and journal.get("stored_reply") is not None:
+        _publish_persona_chat_projection_event(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=journal.get("turn_id") or client_message_id,
+            persona_id=normalized_persona,
+            persona_instance_id=instance.id,
+            task_id=task_id,
+            active_session_id=journal.get("active_session_id")
+            or _persona_chat_native_tip(session_db, session_id),
+            native_revision=journal.get("native_revision")
+            or _persona_chat_native_revision(session_db, session_id),
+        )
         reply_text = _redact_persona_chat_text(
             journal.get("stored_reply"), limit=PERSONA_CHAT_REPLY_LIMIT
         )
@@ -1578,6 +1686,16 @@ def _cmd_mission_chat_message(args) -> int:
             turn_id=client_message_id,
             state="projected",
             metadata={"projection_committed": True, "stored_reply": reply_text},
+        )
+        _publish_persona_chat_projection_event(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            turn_id=client_message_id,
+            persona_id=normalized_persona,
+            persona_instance_id=instance.id,
+            task_id=task_id,
+            active_session_id=_persona_chat_native_tip(session_db, session_id),
+            native_revision=_persona_chat_native_revision(session_db, session_id),
         )
         data = {
             "ok": True,
@@ -2152,6 +2270,17 @@ def _cmd_mission_chat_message(args) -> int:
         )
         if terminal_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_persist_outcome"] = terminal_outcome.value
+        else:
+            _publish_persona_chat_projection_event(
+                session_id=session_id,
+                client_message_id=client_message_id,
+                turn_id=stream_emitter.turn_id,
+                persona_id=normalized_persona,
+                persona_instance_id=instance.id,
+                task_id=task_id,
+                active_session_id=active_session_id,
+                native_revision=native_revision,
+            )
         if write_ahead_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_write_ahead_outcome"] = write_ahead_outcome.value
         if stream:
@@ -2173,12 +2302,20 @@ def _cmd_mission_chat_message(args) -> int:
         # internally; this wrap is defense-in-depth so a title failure can
         # never add to stdout or change the return code.
         try:
+            title_before = session_db.get_session_title(session_id)
             _maybe_auto_title_persona_chat(
                 session_db=session_db,
                 session_id=session_id,
                 user_message=message,
                 assistant_response=reply_text,
             )
+            if session_db.get_session_title(session_id) != title_before:
+                _publish_persona_chat_metadata_event(
+                    session_id=session_id,
+                    persona_id=normalized_persona,
+                    persona_instance_id=instance.id,
+                    task_id=task_id,
+                )
         except Exception:
             pass
         return 0

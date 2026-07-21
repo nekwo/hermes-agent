@@ -3191,6 +3191,14 @@ def test_mission_chat_retry_recovers_native_reply_before_outcome_unknown(
         session_id=instance.session_id,
         client_message_id="client_recover_native",
     )["state"] == "projected"
+    projected = [
+        event
+        for event in EventLog().iter_all()
+        if event.type == "persona_chat.projected"
+        and event.payload.get("client_message_id") == "client_recover_native"
+    ]
+    assert len(projected) == 1
+    assert projected[0].payload["persona_instance_id"] == instance.id
 
 
 def test_mission_chat_turn_resolve_requires_exact_owner_and_records_abandon(
@@ -3538,10 +3546,13 @@ def test_mission_chat_message_replays_duplicate_client_message_id(
     calls = {"count": 0}
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
-    monkeypatch.setattr(
-        "agent.title_generator.generate_title",
-        lambda user_message, assistant_response, **kwargs: "Mission Chat",
-    )
+
+    def _title(**kwargs):
+        kwargs["session_db"].set_session_title(
+            kwargs["session_id"], "Mission Chat"
+        )
+
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", _title)
 
     class _FakeRuntime:
         def __init__(self, *args, **kwargs):
@@ -3590,6 +3601,28 @@ def test_mission_chat_message_replays_duplicate_client_message_id(
     assert replay["idempotent_replay"] is True
     assert replay["client_message_id"] == "client_dup_1"
     assert replay["reply"] == "Recovered canonical reply."
+    record = mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_dup_1",
+    )
+    assert record["projection_event_emitted"] is True
+    projected = [
+        event
+        for event in EventLog().iter_all()
+        if event.type == "persona_chat.projected"
+        and event.payload.get("client_message_id") == "client_dup_1"
+    ]
+    assert len(projected) == 1
+    assert projected[0].payload["change_kind"] == "projection_committed"
+    metadata_events = [
+        event
+        for event in EventLog().iter_all()
+        if event.type == "persona_chat.metadata_updated"
+        and event.payload.get("root_chat_session_id")
+        == "persona_chat_personainst_dev"
+    ]
+    assert len(metadata_events) == 1
+    assert metadata_events[0].payload["change_kind"] == "auto_title_updated"
 
 
 def test_mission_chat_message_generates_client_message_id_when_missing(

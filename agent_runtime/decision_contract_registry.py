@@ -1232,6 +1232,8 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "operator.takeover.approval_required": EventContract("operator.takeover.approval_required", "Operator takeover approval required", ("worker_session_id", "actor", "approval"), ("reason",)),
     "operator.takeover.applied": EventContract("operator.takeover.applied", "Operator takeover applied", ("worker_session_id", "actor"), ("parked_lane_ids", "paused_worker_ids", "cancelled_run_id", "approval_required")),
     "persona_instance.chat_opened": EventContract("persona_instance.chat_opened", "Persona instance chat opened", ("persona_instance_id", "session_id"), ("persona_id",)),
+    "persona_chat.projected": EventContract("persona_chat.projected", "Persona chat turn projection committed", ("persona_instance_id", "root_chat_session_id", "client_message_id", "turn_id", "change_kind"), ("active_session_id", "native_revision")),
+    "persona_chat.metadata_updated": EventContract("persona_chat.metadata_updated", "Persona chat session metadata updated", ("persona_instance_id", "root_chat_session_id", "change_kind"), ()),
     "persona_instance.profile_updated": EventContract("persona_instance.profile_updated", "Persona instance runtime profile updated", ("persona_instance_id",), ("persona_id", "display_name", "current_chat_goal", "goal_id", "skill_overrides", "provider", "model", "api_mode", "requested_by")),
     "persona_assignment.created": EventContract("persona_assignment.created", "Persona assignment created", ("assignment_id", "persona_instance_id", "kind"), ("state",)),
     "persona_assignment.closed": EventContract("persona_assignment.closed", "Persona assignment closed", ("assignment_id", "state"), ("kind",)),
