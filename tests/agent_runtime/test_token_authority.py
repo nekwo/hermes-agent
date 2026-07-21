@@ -137,6 +137,50 @@ def test_safe_final_model_input_without_tool_schema_is_none_not_a_crash():
     assert safe["tool_schema"] is None
 
 
+def test_safe_final_model_input_whitelists_only_cache_routing_fingerprints():
+    safe = _safe_final_model_input(
+        {
+            "messages": [],
+            "cache_routing": {
+                "schema_version": 1,
+                "backend": "openai_codex",
+                "prompt_cache_key_present": True,
+                "prompt_cache_key_source": "static_prefix",
+                "prompt_cache_key_fingerprint": f"sha256:{'a' * 64}",
+                "cache_scope_source": "cache_scope_id",
+                "session_header_present": True,
+                "session_header_fingerprint": f"sha256:{'b' * 64}",
+                "client_request_header_present": True,
+                "client_request_header_fingerprint": f"sha256:{'b' * 64}",
+                "scope_headers_match": True,
+                "raw_values_omitted": False,
+                "raw_session_id": "must-not-survive",
+            },
+        }
+    )
+
+    routing = safe["cache_routing"]
+    assert routing["prompt_cache_key_fingerprint"] == f"sha256:{'a' * 64}"
+    assert routing["session_header_fingerprint"] == f"sha256:{'b' * 64}"
+    assert routing["raw_values_omitted"] is True
+    assert "raw_session_id" not in routing
+
+
+def test_safe_final_model_input_rejects_untyped_cache_fingerprints():
+    safe = _safe_final_model_input(
+        {
+            "messages": [],
+            "cache_routing": {
+                "prompt_cache_key_fingerprint": "raw-cache-key",
+                "session_header_fingerprint": "private-session",
+            },
+        }
+    )
+
+    assert safe["cache_routing"]["prompt_cache_key_fingerprint"] is None
+    assert safe["cache_routing"]["session_header_fingerprint"] is None
+
+
 # --------------------------------------------------------------------------
 # H5 — the basis matrix
 # --------------------------------------------------------------------------

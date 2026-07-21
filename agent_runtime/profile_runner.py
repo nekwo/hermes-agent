@@ -1485,6 +1485,7 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
     if system_prompt:
         messages.append(_message_preview("system", str(system_prompt), source="hermes_system_prompt"))
     messages.append(_message_preview("user", request.user_message, source="mission_chat_user_message"))
+    cache_routing = _agent_cache_routing_observability(agent)
     return {
         "schema_version": 1,
         "kind": "redaction_safe_final_model_input",
@@ -1505,6 +1506,7 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
             # context inspector. Same measurement as `hermes prompt-size`.
             "json_bytes": _agent_tools_json_bytes(agent),
         },
+        **({"cache_routing": cache_routing} if cache_routing is not None else {}),
         "skip_context_files": bool(request.skip_context_files),
         "skip_memory": bool(request.skip_memory),
         "system_message_supplied": request.system_message is not None,
@@ -1524,6 +1526,19 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
             else {}
         ),
     }
+
+
+def _agent_cache_routing_observability(agent) -> dict[str, Any] | None:
+    """Read the agent-owned redaction-safe final-request cache facts.
+
+    The request builder copies these from the short-lived Responses transport
+    only after request overrides and provider-specific header/body routing.
+    Other transports and test doubles simply omit the block; absence is honest
+    and never fabricated.
+    """
+
+    value = getattr(agent, "_last_cache_routing_observability", None)
+    return dict(value) if isinstance(value, dict) else None
 
 
 def _rendered_skills_prompt_chars(agent) -> int | None:

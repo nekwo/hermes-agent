@@ -752,7 +752,7 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
                     getattr(agent, "log_prefix", ""), exc,
                 )
 
-        return _ct.build_kwargs(
+        kwargs = _ct.build_kwargs(
             model=agent.model,
             messages=_msgs_for_codex,
             tools=tools_for_api,
@@ -774,6 +774,14 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
                 getattr(agent, "_codex_reasoning_replay_enabled", True)
             ),
         )
+        # Transports are intentionally short-lived registry instances. Copy the
+        # redaction-safe FINAL request routing facts onto this agent before the
+        # instance goes out of scope, so the profile runner can persist the
+        # matching turn's evidence without cross-agent/global state.
+        cache_routing = getattr(_ct, "_last_cache_routing_observability", None)
+        if isinstance(cache_routing, dict):
+            agent._last_cache_routing_observability = dict(cache_routing)
+        return kwargs
 
     # ── chat_completions (default) ─────────────────────────────────────
     _ct = agent._get_transport()

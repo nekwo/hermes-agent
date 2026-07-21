@@ -4,6 +4,7 @@ import json
 import pytest
 from types import SimpleNamespace
 
+from agent.chat_completion_helpers import build_api_kwargs
 from agent.transports import get_transport
 from agent.transports.types import NormalizedResponse
 
@@ -38,6 +39,35 @@ class TestCodexTransportBasic:
 
 
 class TestCodexBuildKwargs:
+
+    def test_build_api_kwargs_copies_final_cache_routing_to_agent(self, transport):
+        agent = SimpleNamespace(
+            tools=[],
+            api_mode="codex_responses",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex/responses",
+            _base_url_hostname="chatgpt.com",
+            _base_url_lower="https://chatgpt.com/backend-api/codex/responses",
+            model="gpt-5.4",
+            reasoning_config=None,
+            session_id=None,
+            cache_scope_id="private-conversation-alpha",
+            max_tokens=None,
+            request_overrides=None,
+            _get_transport=lambda: transport,
+            _prepare_messages_for_non_vision_model=lambda messages: messages,
+            _resolved_api_call_timeout=lambda: None,
+            _github_models_reasoning_extra_body=lambda: None,
+            _codex_reasoning_replay_enabled=True,
+        )
+
+        build_api_kwargs(agent, [{"role": "user", "content": "Hi"}])
+
+        routing = agent._last_cache_routing_observability
+        assert routing["backend"] == "openai_codex"
+        assert routing["cache_scope_source"] == "cache_scope_id"
+        assert routing["session_header_fingerprint"].startswith("sha256:")
+        assert "private-conversation-alpha" not in json.dumps(routing)
 
     def test_basic_kwargs(self, transport):
         messages = [
@@ -226,6 +256,55 @@ class TestCodexBuildKwargs:
         assert headers.get("x-test") == "1"
         assert headers.get("session_id") == "conv-codex-1"
         assert headers.get("x-client-request-id") == "conv-codex-1"
+
+    def test_cache_routing_observability_fingerprints_final_request(self, transport):
+        """Same static prefix stays comparable while conversation scope moves.
+
+        The evidence is captured from final kwargs and must never retain the raw
+        persona-chat scope/header values it is meant to diagnose.
+        """
+        messages = [
+            {"role": "system", "content": "stable"},
+            {"role": "user", "content": "Hi"},
+        ]
+
+        transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            cache_scope_id="private-conversation-alpha",
+            is_codex_backend=True,
+        )
+        first = dict(transport._last_cache_routing_observability)
+        transport.build_kwargs(
+            model="gpt-5.4",
+            messages=messages,
+            tools=[],
+            cache_scope_id="private-conversation-beta",
+            is_codex_backend=True,
+        )
+        second = dict(transport._last_cache_routing_observability)
+
+        assert first["prompt_cache_key_source"] == "static_prefix"
+        assert first["prompt_cache_key_fingerprint"].startswith("sha256:")
+        assert (
+            first["prompt_cache_key_fingerprint"]
+            == second["prompt_cache_key_fingerprint"]
+        )
+        assert first["cache_scope_source"] == "cache_scope_id"
+        assert (
+            first["session_header_fingerprint"]
+            != second["session_header_fingerprint"]
+        )
+        assert (
+            first["session_header_fingerprint"]
+            == first["client_request_header_fingerprint"]
+        )
+        assert first["scope_headers_match"] is True
+        assert first["raw_values_omitted"] is True
+        encoded = json.dumps([first, second], sort_keys=True)
+        assert "private-conversation-alpha" not in encoded
+        assert "private-conversation-beta" not in encoded
 
     def test_non_codex_responses_preserves_caller_extra_headers(self, transport):
         messages = [{"role": "user", "content": "Hi"}]

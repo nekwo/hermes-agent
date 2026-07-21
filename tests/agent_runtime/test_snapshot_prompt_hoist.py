@@ -128,6 +128,20 @@ def test_final_model_input_evicted_to_typed_stub():
             "tool_count": 31,
             "json_bytes": 46216,
         },
+        "cache_routing": {
+            "schema_version": 1,
+            "backend": "openai_codex",
+            "prompt_cache_key_present": True,
+            "prompt_cache_key_source": "static_prefix",
+            "prompt_cache_key_fingerprint": f"sha256:{'a' * 64}",
+            "cache_scope_source": "cache_scope_id",
+            "session_header_present": True,
+            "session_header_fingerprint": f"sha256:{'b' * 64}",
+            "client_request_header_present": True,
+            "client_request_header_fingerprint": f"sha256:{'b' * 64}",
+            "scope_headers_match": True,
+            "raw_values_omitted": True,
+        },
     }
     rows = [_row("ctx_a", available=[], accessible=[], fmi=fmi)]
 
@@ -145,6 +159,11 @@ def test_final_model_input_evicted_to_typed_stub():
     # system message; the stub carries the count + wire size (and ONLY those two
     # keys — never the schema bodies) so the context budget can attribute it.
     assert stub["tool_schema"] == {"tool_count": 31, "json_bytes": 46216}
+    assert (
+        stub["cache_routing"]["prompt_cache_key_fingerprint"]
+        == f"sha256:{'a' * 64}"
+    )
+    assert stub["cache_routing"]["scope_headers_match"] is True
 
 
 def test_final_model_input_stub_omits_absent_tool_schema():

@@ -189,6 +189,48 @@ def test_runner_attaches_redaction_safe_model_input(monkeypatch):
     assert model_input["messages"][1]["content"] == "hello"
 
 
+def test_runner_attaches_agent_owned_final_cache_routing_observability(monkeypatch):
+    monkeypatch.setattr(
+        "agent_runtime.profile_runner.resolve_runtime_provider",
+        lambda requested, target_model: {
+            "provider": requested,
+            "model": target_model,
+            "api_mode": "codex_responses",
+        },
+    )
+
+    class CacheRoutingAgent(FakeAgent):
+        def run_conversation(self, user_message, system_message=None, task_id=None):
+            self._last_cache_routing_observability = {
+                "schema_version": 1,
+                "backend": "openai_codex",
+                "prompt_cache_key_present": True,
+                "prompt_cache_key_source": "static_prefix",
+                "prompt_cache_key_fingerprint": f"sha256:{'a' * 64}",
+                "cache_scope_source": "cache_scope_id",
+                "session_header_present": True,
+                "session_header_fingerprint": f"sha256:{'b' * 64}",
+                "client_request_header_present": True,
+                "client_request_header_fingerprint": f"sha256:{'b' * 64}",
+                "scope_headers_match": True,
+                "raw_values_omitted": True,
+            }
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    result = ProfileAgentRunner(agent_factory=CacheRoutingAgent).run(
+        AgentRunRequest(profile=None, user_message="hello")
+    )
+
+    routing = result.raw["model_input_observability"]["cache_routing"]
+    assert routing["backend"] == "openai_codex"
+    assert routing["prompt_cache_key_fingerprint"] == f"sha256:{'a' * 64}"
+    assert routing["scope_headers_match"] is True
+
+
 def test_runner_forwards_stream_callback_to_agent():
     captured = {}
 

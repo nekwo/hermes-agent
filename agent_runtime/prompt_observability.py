@@ -584,12 +584,11 @@ def _final_model_input_stub(final_model_input: dict[str, Any], context_id: Any) 
     payload.
 
     Also carries a slim ``tool_schema`` accounting block (``tool_count`` +
-    ``json_bytes``) copied from the full row when present — the tool schemas are
-    the single largest fixed slice of the prompt after the system message, and
-    the launcher's context-budget breakdown needs their size on the eviction
-    lane too, not only on the un-evicted row. Copied verbatim from the recorded
-    ``tool_schema`` (never fabricated); omitted entirely when the source row
-    carried no ``tool_schema`` block."""
+    ``json_bytes``) and the already-small, one-way ``cache_routing`` evidence
+    when present. The tool schemas are the single largest fixed slice of the
+    prompt after the system message, and cache-routing fingerprints must remain
+    comparable between warm and cold turns on the eviction lane. Both are
+    copied through typed safety boundaries and omitted when absent."""
 
     payload = json.dumps(
         to_jsonable(final_model_input),
@@ -615,6 +614,12 @@ def _final_model_input_stub(final_model_input: dict[str, Any], context_id: Any) 
             "tool_count": _safe_int(tool_schema.get("tool_count")),
             "json_bytes": _safe_int(tool_schema.get("json_bytes")),
         }
+    cache_routing = _safe_cache_routing(final_model_input.get("cache_routing"))
+    if cache_routing is not None:
+        # Unlike messages/tool bodies, this block is already tiny and contains
+        # only one-way fingerprints. Keep it in the frame stub so operators can
+        # compare a cold turn with adjacent warm turns without a disk fetch.
+        stub["cache_routing"] = cache_routing
     return stub
 
 
@@ -2354,7 +2359,54 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
         # dropped them, which is why the context budget could not see (or
         # estimate) them at all.
         "tool_schema": _safe_tool_schema(value.get("tool_schema")),
+        "cache_routing": _safe_cache_routing(value.get("cache_routing")),
     }
+
+
+def _safe_cache_routing(value: Any) -> dict[str, Any] | None:
+    """Whitelist the one-way cache-routing diagnostics.
+
+    No raw cache key, session id, or header value is accepted by this boundary;
+    only transport-produced fingerprints, presence bits, and typed provenance
+    survive into SessionDB-reachable prompt observability.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    return {
+        "schema_version": _safe_int(value.get("schema_version")) or 1,
+        "backend": safe_assignment_token(value.get("backend")),
+        "prompt_cache_key_present": value.get("prompt_cache_key_present") is True,
+        "prompt_cache_key_source": safe_assignment_token(
+            value.get("prompt_cache_key_source")
+        ),
+        "prompt_cache_key_fingerprint": _safe_cache_fingerprint(
+            value.get("prompt_cache_key_fingerprint")
+        ),
+        "cache_scope_source": safe_assignment_token(value.get("cache_scope_source")),
+        "session_header_present": value.get("session_header_present") is True,
+        "session_header_fingerprint": _safe_cache_fingerprint(
+            value.get("session_header_fingerprint")
+        ),
+        "client_request_header_present": value.get("client_request_header_present")
+        is True,
+        "client_request_header_fingerprint": _safe_cache_fingerprint(
+            value.get("client_request_header_fingerprint")
+        ),
+        "scope_headers_match": value.get("scope_headers_match")
+        if isinstance(value.get("scope_headers_match"), bool)
+        else None,
+        "raw_values_omitted": True,
+    }
+
+
+def _safe_cache_fingerprint(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    prefix = "sha256:"
+    digest = text[len(prefix) :] if text.startswith(prefix) else ""
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        return None
+    return f"{prefix}{digest}"
 
 
 _TURN_USAGE_FIELDS = (
