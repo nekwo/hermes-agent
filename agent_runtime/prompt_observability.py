@@ -1602,13 +1602,24 @@ def _profile_persona_from_instance(instance: Any) -> Any | None:
         safe_assignment_text(getattr(instance, "display_name", None), limit=120)
         or f"{profile.replace('_', ' ').title()} Agent"
     )
-    return SimpleNamespace(
+    # Keep the synthetic profile persona on the same typed contract as every
+    # persisted/catalog persona. Instance model/skill policy is applied with
+    # ``dataclasses.replace`` by ``apply_instance_model_overrides``; returning a
+    # SimpleNamespace here made any explicit profile-instance override crash the
+    # entire Harness snapshot/stream before its first hydrate frame.
+    from .models import AgentPersona
+
+    return AgentPersona(
         id=f"profile:{profile}",
         display_name=display_name,
         role="profile",
+        model=None,
+        provider=None,
+        api_mode=None,
         hermes_profile=profile,
         skills=[],
         toolsets=["file", "search", "session_search", "todo", "skills"],
+        system_prompt_path="",
     )
 
 

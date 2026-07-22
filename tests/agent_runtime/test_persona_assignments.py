@@ -4219,6 +4219,12 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
                 state=WorkerSessionState.IDLE,
                 mode="chat",
                 session_id="persona_chat_personainst_profile_alice",
+                # Regression: a profile-backed instance is synthesized rather
+                # than loaded from AgentStore. Explicit skill policy must still
+                # overlay through the typed AgentPersona path; the old
+                # SimpleNamespace fallback crashed dataclasses.replace and took
+                # down `harness stream` before its hydrate frame.
+                skill_overrides=["harness-runtime-model"],
             )
         ],
         session_db=db,
@@ -4247,11 +4253,12 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
             toolsets=["file", "skills"],
             system_prompt_path="",
             hermes_profile="alice",
-            skills=[],
+            skills=["harness-runtime-model"],
         ),
         persona_instance_id="personainst_profile_alice",
         session_id="persona_chat_personainst_profile_alice",
         session_db=db,
+        instance_skill_overrides=["harness-runtime-model"],
     )
     expected_accessible = expected_context["accessible_skills"]
     assert "skills_catalogs" not in snapshot
