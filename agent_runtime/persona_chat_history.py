@@ -546,9 +546,14 @@ def _get_session_row(db: Any, session_id: str) -> dict[str, Any] | None:
 
 def _default_session_db() -> Any | None:
     try:
+        from hermes_constants import get_hermes_head_home
         from hermes_state import SessionDB
 
-        return SessionDB()
+        # History pointers, on-demand message tails, open/send validation and
+        # transcript writes must all resolve the same operator-visible database.
+        # A Launcher-selected profile changes HERMES_HOME, but not the shared
+        # persona-instance authority rooted at HERMES_HEAD_HOME.
+        return SessionDB(db_path=get_hermes_head_home() / "state.db")
     except Exception:
         return None
 

@@ -362,7 +362,7 @@ def test_explicit_head_home_is_stable_across_launcher_profile_selection(
     isolate_agent_runtime_root, tmp_path, monkeypatch
 ):
     from hermes_cli import harness
-    from agent_runtime import snapshot
+    from agent_runtime import persona_chat_history, snapshot
     from agent_runtime.profile_context import persona_profile_context
     from hermes_constants import get_hermes_head_home, get_hermes_home
 
@@ -378,11 +378,13 @@ def test_explicit_head_home_is_stable_across_launcher_profile_selection(
     assert get_hermes_head_home() == shared_head
     assert Path(harness._default_persona_session_db().db_path) == shared_head / "state.db"
     assert Path(snapshot._default_persona_session_db().db_path) == shared_head / "state.db"
+    assert Path(persona_chat_history._default_session_db().db_path) == shared_head / "state.db"
 
     with persona_profile_context(_qa_profile_binding(persona_home)):
         assert get_hermes_home() == persona_home
         assert get_hermes_head_home() == shared_head
         assert Path(harness._default_persona_session_db().db_path) == shared_head / "state.db"
+        assert Path(persona_chat_history._default_session_db().db_path) == shared_head / "state.db"
 
 
 def test_relay_under_profile_override_persists_transcript_to_the_projection_home(
