@@ -983,9 +983,10 @@ def build_parser(parent_subparsers) -> None:
     persona_chat_delete.add_argument("--requested-by", default="cli")
     persona_chat_delete.add_argument("--json", action="store_true")
     persona_chat_delete.set_defaults(func=_cmd_persona_chat_delete)
-    persona_chat_history = persona_chat_subs.add_parser("history", help="Fetch a persona chat session's redaction-safe message tail (the tail S2 evicts from the frame)")
+    persona_chat_history = persona_chat_subs.add_parser("history", help="Page a persona chat session's complete redaction-safe transcript")
     persona_chat_history.add_argument("--session-id", dest="session_id", required=True)
-    persona_chat_history.add_argument("--limit", type=int, default=40, help="Message tail size (clamped 1..40)")
+    persona_chat_history.add_argument("--limit", type=int, default=40, help="Page size (clamped 1..40)")
+    persona_chat_history.add_argument("--before", default=None, help="Opaque cursor returned by the previous page")
     persona_chat_history.add_argument("--json", action="store_true")
     persona_chat_history.set_defaults(func=_cmd_persona_chat_history)
 

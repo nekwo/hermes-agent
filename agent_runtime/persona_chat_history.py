@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
 from typing import Any, Iterable
@@ -253,16 +255,16 @@ def persona_chat_session_messages(
     *,
     session_id: str,
     limit: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+    before: str | None = None,
     session_db: Any | None = None,
 ) -> dict[str, Any]:
-    """Paged on-demand read of one persona chat session's message tail.
+    """Paged on-demand read of one persona chat session's complete transcript.
 
     Backs ``harness persona chat history`` — the fetch that replaces the message
-    tail S2 evicts from the steady-state frame. Reuses the exact curation the
-    in-frame projection used (``_safe_recent_messages``), so the fetched tail is
-    identical to what ``persona_chat_history[].messages`` used to carry. The log
-    IS the history: no new storage, just a per-session read of the durable
-    SessionDB the frame previously projected inline.
+    tail S2 evicts from the steady-state frame. Each page is bounded, but the
+    opaque ``before`` cursor can walk all curated rows across the root's native
+    compression lineage. The log IS the history: no new storage, just a
+    per-session read of the durable SessionDB the frame previously projected.
     """
 
     bounded = _bounded_message_tail(limit)
@@ -273,17 +275,55 @@ def persona_chat_session_messages(
             "session_id": session_id,
             "limit": bounded,
             "count": 0,
+            "total_count": 0,
+            "has_more": False,
+            "next_before": None,
+            "history_revision": _history_revision(session_id, []),
             "redaction_status": "safe",
             "messages": [],
         }
-    messages, status = _safe_recent_messages(db, session_id=session_id, limit=bounded)
+    messages, status = _safe_curated_messages(db, session_id=session_id)
+    end = len(messages)
+    if before:
+        cursor = _decode_history_cursor(before)
+        if cursor is None or cursor.get("session_id") != session_id:
+            return {
+                "ok": False,
+                "error_kind": "invalid_history_cursor",
+                "error": "history cursor is malformed or belongs to another session",
+                "session_id": session_id,
+            }
+        before_id = safe_assignment_text(cursor.get("before_id"), limit=160)
+        match = next(
+            (index for index, row in enumerate(messages) if row.get("id") == before_id),
+            None,
+        )
+        if match is None:
+            return {
+                "ok": False,
+                "error_kind": "invalid_history_cursor",
+                "error": "history cursor no longer resolves in this session",
+                "session_id": session_id,
+            }
+        end = match
+    start = max(0, end - bounded)
+    page = messages[start:end]
+    has_more = start > 0
     return {
         "ok": True,
         "session_id": session_id,
         "limit": bounded,
-        "count": len(messages),
+        "count": len(page),
+        "total_count": len(messages),
+        "has_more": has_more,
+        "next_before": (
+            _encode_history_cursor(session_id, page[0]["id"])
+            if has_more and page
+            else None
+        ),
+        "history_revision": _history_revision(session_id, messages, session_db=db),
         "redaction_status": status,
-        "messages": messages,
+        "messages": page,
     }
 
 
@@ -755,6 +795,29 @@ def _lineage_aggregate(
         )
         for row in rows
     ]
+    # Some SessionDB implementations omit computed activity fields from
+    # ``get_session``. Only in that case derive a fallback from durable message
+    # timestamps; an explicit session activity value remains authoritative.
+    if not any(row.get("last_active") or row.get("ended_at") for row in rows):
+        try:
+            lineage_loader = getattr(session_db, "get_messages_as_conversation", None)
+            native_messages = (
+                lineage_loader(active_session_id, include_ancestors=True)
+                if callable(lineage_loader)
+                else session_db.get_messages(root_session_id)
+            )
+        except Exception:
+            native_messages = []
+        activity.extend(
+            _iso_timestamp(
+                message.get("created_at")
+                or message.get("timestamp")
+                or message.get("time")
+                or message.get("updated_at")
+            )
+            for message in native_messages or []
+            if isinstance(message, dict)
+        )
     result["last_active"] = max((item for item in activity if item), default=None)
     return result
 
@@ -921,6 +984,22 @@ def _safe_recent_messages(
     session_id: str,
     limit: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
 ) -> tuple[list[dict[str, Any]], str]:
+    rows, status = _safe_curated_messages(session_db, session_id=session_id)
+    return rows[-_bounded_message_tail(limit):], status
+
+
+def _safe_curated_messages(
+    session_db: Any | None,
+    *,
+    session_id: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Return every redaction-safe operator-facing row for one logical chat.
+
+    Snapshot callers continue to take a bounded tail through
+    :func:`_safe_recent_messages`; the on-demand authority pages this complete
+    ordered list with opaque cursors.
+    """
+
     if session_db is None:
         return [], "safe"
     try:
@@ -1047,8 +1126,50 @@ def _safe_recent_messages(
         )
     )
     rows = _ordered_message_rows(rows)
-    rows = rows[-_bounded_message_tail(limit):]
     return rows, "redacted" if redacted else "safe"
+
+
+def _history_revision(
+    session_id: str,
+    messages: list[dict[str, Any]],
+    *,
+    session_db: Any | None = None,
+) -> str:
+    """Stable revision for cache invalidation without exposing transcript text."""
+
+    if session_db is not None:
+        try:
+            from .persona_chat_continuity import native_history_revision
+
+            return native_history_revision(session_db, session_id)
+        except Exception:
+            pass
+    payload = json.dumps(messages, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return f"{session_id}:{digest}"
+
+
+def _encode_history_cursor(session_id: str, before_id: str) -> str:
+    payload = json.dumps(
+        {"v": 1, "session_id": session_id, "before_id": before_id},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_history_cursor(value: str) -> dict[str, Any] | None:
+    try:
+        token = str(value or "").strip()
+        padded = token + "=" * (-len(token) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        if not isinstance(decoded, dict) or decoded.get("v") != 1:
+            return None
+        if not safe_assignment_text(decoded.get("before_id"), limit=160):
+            return None
+        return decoded
+    except Exception:
+        return None
 
 
 def _interrupted_turn_rows(

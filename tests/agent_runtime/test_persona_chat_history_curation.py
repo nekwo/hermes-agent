@@ -255,6 +255,49 @@ def test_history_row_timestamps_are_iso_utc_at_projection_boundary():
     assert rows[0]["updated_at"] == "2026-06-22T21:00:02.500000Z"
 
 
+def test_history_row_activity_uses_latest_message_when_raw_session_has_no_last_active():
+    class RawSessionDB(FakeHistorySessionDB):
+        def get_session(self, session_id):
+            row = super().get_session(session_id)
+            if row is not None:
+                row.pop("last_active", None)
+            return row
+
+    db = RawSessionDB(
+        [
+            {
+                "id": "chat_neko",
+                "title": "Neko briefing",
+                "message_count": 2,
+                "started_at": 1782162000.25,
+                # list_sessions_rich computes this, while get_session does not.
+                "last_active": 1782162002.5,
+            }
+        ],
+        messages=[
+            {"id": "m1", "role": "user", "content": "hi", "timestamp": 1782162001.0},
+            {
+                "id": "m2",
+                "role": "assistant",
+                "content": "hello",
+                "timestamp": 1782162064.0,
+            },
+        ],
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=[
+            _chat_persona_instance(
+                "personainst_neko", "neko_supervisor", "chat_neko"
+            )
+        ],
+        session_db=db,
+    )
+
+    assert rows[0]["created_at"] == "2026-06-22T21:00:00.250000Z"
+    assert rows[0]["updated_at"] == "2026-06-22T21:01:04.000000Z"
+
+
 def test_history_row_normalizes_iso_and_drops_garbage_timestamps():
     db = FakeHistorySessionDB(
         [

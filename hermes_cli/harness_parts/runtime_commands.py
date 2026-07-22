@@ -1179,7 +1179,11 @@ def _cmd_persona_chat_history(args) -> int:
     from agent_runtime.persona_chat_history import persona_chat_session_messages
 
     limit = max(1, min(40, int(getattr(args, "limit", 40) or 40)))
-    data = persona_chat_session_messages(session_id=args.session_id, limit=limit)
+    data = persona_chat_session_messages(
+        session_id=args.session_id,
+        limit=limit,
+        before=getattr(args, "before", None),
+    )
     if getattr(args, "json", False):
         print(emit_json(data))
     else:
@@ -1189,7 +1193,7 @@ def _cmd_persona_chat_history(args) -> int:
             head = text[0][:120] if text else ""
             lines.append(f"{message.get('timestamp') or '-'} {message.get('role')}: {head}")
         print("\n".join(lines) if lines else f"no messages for {args.session_id}")
-    return 0
+    return 0 if data.get("ok") is not False else 2
 
 
 def _cmd_incident_close(args) -> int:

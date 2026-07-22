@@ -329,7 +329,109 @@ def test_persona_chat_history_fetch_returns_tail():
     assert data["ok"] is True
     assert data["session_id"] == "persona_chat_x"
     assert data["count"] == 2
+    assert data["total_count"] == 2
+    assert data["has_more"] is False
+    assert data["next_before"] is None
+    assert data["history_revision"]
     assert [m["role"] for m in data["messages"]] == ["operator", "agent"]
+
+
+def test_persona_chat_history_fetch_pages_complete_transcript_without_overlap():
+    from agent_runtime.persona_chat_history import persona_chat_session_messages
+
+    class FakeSessionDB:
+        def get_messages(self, session_id, include_inactive=False):
+            return [
+                {
+                    "id": f"m{index:03d}",
+                    "role": "operator" if index % 2 == 0 else "assistant",
+                    "content": f"message {index:03d}",
+                    "timestamp": 1_780_000_000 + index,
+                }
+                for index in range(95)
+            ]
+
+    db = FakeSessionDB()
+    pages = []
+    before = None
+    revision = None
+    while True:
+        page = persona_chat_session_messages(
+            session_id="persona_chat_x",
+            limit=40,
+            before=before,
+            session_db=db,
+        )
+        assert page["ok"] is True
+        assert page["total_count"] == 95
+        revision = revision or page["history_revision"]
+        assert page["history_revision"] == revision
+        pages.insert(0, page["messages"])
+        if not page["has_more"]:
+            assert page["next_before"] is None
+            break
+        assert page["next_before"]
+        before = page["next_before"]
+
+    messages = [message for page in pages for message in page]
+    assert [len(page) for page in pages] == [15, 40, 40]
+    assert len(messages) == 95
+    assert len({message["id"] for message in messages}) == 95
+    assert messages[0]["text"] == "message 000"
+    assert messages[-1]["text"] == "message 094"
+
+
+def test_persona_chat_history_fetch_rejects_foreign_or_malformed_cursor():
+    from agent_runtime.persona_chat_history import persona_chat_session_messages
+
+    class FakeSessionDB:
+        def get_messages(self, session_id, include_inactive=False):
+            return [
+                {"id": "m1", "role": "operator", "content": "hello"},
+                {"id": "m2", "role": "assistant", "content": "hi"},
+            ]
+
+    first = persona_chat_session_messages(
+        session_id="persona_chat_a", limit=1, session_db=FakeSessionDB()
+    )
+    foreign = persona_chat_session_messages(
+        session_id="persona_chat_b",
+        limit=1,
+        before=first["next_before"],
+        session_db=FakeSessionDB(),
+    )
+    malformed = persona_chat_session_messages(
+        session_id="persona_chat_a",
+        limit=1,
+        before="not-a-history-cursor",
+        session_db=FakeSessionDB(),
+    )
+
+    assert foreign["ok"] is False
+    assert foreign["error_kind"] == "invalid_history_cursor"
+    assert malformed["ok"] is False
+    assert malformed["error_kind"] == "invalid_history_cursor"
+
+
+def test_persona_chat_history_cli_accepts_opaque_before_cursor(parser):
+    args = parser.parse_args(
+        [
+            "harness",
+            "persona",
+            "chat",
+            "history",
+            "--session-id",
+            "persona_chat_a",
+            "--limit",
+            "40",
+            "--before",
+            "opaque-cursor",
+            "--json",
+        ]
+    )
+    assert args.session_id == "persona_chat_a"
+    assert args.limit == 40
+    assert args.before == "opaque-cursor"
 
 
 def test_persona_chat_history_hides_runtime_envelope_but_keeps_turn_reference():
@@ -364,6 +466,8 @@ def test_persona_chat_history_fetch_empty_without_sessiondb():
     data = persona_chat_session_messages(session_id="persona_chat_x", limit=40, session_db=None)
     assert data["ok"] is True
     assert data["count"] == 0
+    assert data["total_count"] == 0
+    assert data["has_more"] is False
     assert data["messages"] == []
 
 
