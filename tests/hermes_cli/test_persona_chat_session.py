@@ -10,6 +10,7 @@ from hermes_cli.harness import (
     _append_persona_assistant_text,
     _append_persona_operator_turn,
     _ensure_persona_chat_session,
+    _persona_chat_session_owner,
     _redact_persona_chat_text,
     _update_persona_chat_token_counts,
 )
@@ -33,6 +34,10 @@ class FakeSessionDB:
 
     def get_messages(self, session_id, include_inactive=False):
         return list(self.messages.get(session_id, []))
+
+    def get_session(self, session_id):
+        session = self.sessions.get(session_id)
+        return {"id": session_id, **session} if session is not None else None
 
     def get_session_title(self, session_id):
         return self.titles.get(session_id)
@@ -83,6 +88,55 @@ def test_ensure_session_returns_true_when_title_already_exists():
         required=True,
     ) is True
     assert db.titles["s1"] == "Existing title"
+
+
+def test_ensure_session_persists_exact_owner_metadata_for_future_roots():
+    db = FakeSessionDB()
+    session_id = "persona_chat_personainst_neko_supervisor_agent_f6f7a51b_012345abcdef"
+
+    assert _ensure_persona_chat_session(
+        session_db=db,
+        session_id=session_id,
+        persona_id="neko_supervisor",
+        required=True,
+    ) is True
+
+    assert db.sessions[session_id]["model_config"] == {
+        "source": "agent_runtime_persona_chat",
+        "persona_id": "neko_supervisor",
+        "persona_instance_id": "personainst_neko_supervisor_agent_f6f7a51b",
+    }
+    assert _persona_chat_session_owner(db, session_id) == (
+        "personainst_neko_supervisor_agent_f6f7a51b"
+    )
+
+
+def test_legacy_persona_chat_without_duplicate_metadata_keeps_exact_owner():
+    db = FakeSessionDB()
+    session_id = "persona_chat_personainst_neko_supervisor_agent_f6f7a51b_012345abcdef"
+    db.create_session(session_id, "agent_runtime_persona_chat")
+
+    assert _persona_chat_session_owner(db, session_id) == (
+        "personainst_neko_supervisor_agent_f6f7a51b"
+    )
+
+
+def test_persona_chat_owner_rejects_non_chat_source_and_conflicting_metadata():
+    session_id = "persona_chat_personainst_dev_012345abcdef"
+    wrong_source = FakeSessionDB()
+    wrong_source.create_session(session_id, "cli")
+    assert _persona_chat_session_owner(wrong_source, session_id) is None
+
+    conflicting = FakeSessionDB()
+    conflicting.create_session(
+        session_id,
+        "agent_runtime_persona_chat",
+        model_config={
+            "source": "agent_runtime_persona_chat",
+            "persona_instance_id": "personainst_qa",
+        },
+    )
+    assert _persona_chat_session_owner(conflicting, session_id) is None
 
 
 def test_assistant_turn_is_persisted():

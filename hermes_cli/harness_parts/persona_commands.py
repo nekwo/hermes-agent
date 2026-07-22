@@ -3920,15 +3920,18 @@ def _requested_chat_model_override(args) -> dict[str, object] | None:
     }
 
 
-def _session_model_config(session_db, session_id: str | None) -> dict[str, object]:
+def _session_row(session_db, session_id: str | None) -> dict[str, object]:
     if session_db is None or not session_id:
         return {}
     try:
         raw = session_db.get_session(session_id)
     except Exception:
         return {}
-    if not isinstance(raw, dict):
-        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _session_model_config(session_db, session_id: str | None) -> dict[str, object]:
+    raw = _session_row(session_db, session_id)
     model_config = raw.get("model_config")
     if isinstance(model_config, dict):
         return dict(model_config)
@@ -3943,10 +3946,48 @@ def _session_model_config(session_db, session_id: str | None) -> dict[str, objec
 
 
 def _persona_chat_session_owner(session_db, session_id: str | None) -> str | None:
-    config = _session_model_config(session_db, session_id)
-    if safe_assignment_token(config.get("source")) != PERSONA_CHAT_SESSION_SOURCE:
+    """Resolve the immutable owner of a canonical persona-chat transcript.
+
+    SessionDB's typed ``source`` column is the authority that makes a row a
+    persona chat.  Older rows predate the duplicated ownership fields in
+    ``model_config``; their server-minted id still carries the exact instance
+    owner.  Requiring the duplicate field made those rows visible through the
+    history projection but impossible to open or message.
+
+    New rows persist both forms.  If both are present they must agree, so a
+    corrupt metadata write cannot reassign another instance's transcript.
+    """
+
+    raw = _session_row(session_db, session_id)
+    if safe_assignment_token(raw.get("source")) != PERSONA_CHAT_SESSION_SOURCE:
         return None
-    return safe_assignment_token(config.get("persona_instance_id")) or None
+    config = _session_model_config(session_db, session_id)
+    config_source = safe_assignment_token(config.get("source"))
+    if config_source and config_source != PERSONA_CHAT_SESSION_SOURCE:
+        return None
+
+    metadata_owner = safe_assignment_token(config.get("persona_instance_id")) or None
+    structural_owner = chat_session_owner_instance_id(session_id)
+    if metadata_owner and structural_owner and metadata_owner != structural_owner:
+        return None
+    owner = metadata_owner or structural_owner
+    if not owner:
+        return None
+
+    # Retired singleton/operator ids are recorded as durable aliases during
+    # persona-instance reconciliation.  Resolve those aliases here so history,
+    # open and send all name the same current instance authority.
+    try:
+        from agent_runtime.persona_instance_identity import load_persona_instance_aliases
+
+        aliases = load_persona_instance_aliases()
+    except Exception:
+        aliases = {}
+    seen: set[str] = set()
+    while owner in aliases and owner not in seen:
+        seen.add(owner)
+        owner = aliases[owner]
+    return canonical_persona_instance_id(owner) or owner
 
 
 def _persona_chat_bound_owner(session_id: str | None) -> str | None:
@@ -4116,11 +4157,19 @@ def _ensure_persona_chat_session(
         normalized_persona = _normalize_cli_persona_or_template_id(persona_id or "persona")
     except Exception:
         normalized_persona = safe_assignment_token(persona_id) or "persona"
+    owner_instance_id = chat_session_owner_instance_id(session_id)
+    ownership = {
+        "source": PERSONA_CHAT_SESSION_SOURCE,
+        "persona_id": normalized_persona,
+    }
+    if owner_instance_id:
+        ownership["persona_instance_id"] = owner_instance_id
     try:
         session_db.create_session(
             session_id=session_id,
             source=PERSONA_CHAT_SESSION_SOURCE,
             model=None,
+            model_config=ownership,
             system_prompt=f"Mission Control persona chat for {normalized_persona}",
         )
     except Exception as exc:
