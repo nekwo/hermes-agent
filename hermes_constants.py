@@ -96,13 +96,18 @@ def get_hermes_head_home() -> Path:
     """Return the operator/head Hermes home — the home the Mission Control
     projection reads — IGNORING any active persona profile-home override.
 
-    When a profile-home override is active this returns the recorded outermost
-    home; at the true top level (no override, nothing recorded) it falls back to
-    the ordinary resolved home, so behavior is unchanged off the relay path.
+    The launcher may provide ``HERMES_HEAD_HOME`` to keep the Mission Control
+    transcript store stable while ``HERMES_HOME`` selects a different runtime
+    profile. A context-local relay head still wins so nested persona execution
+    cannot escape the operator that started it. With neither authority present,
+    behavior falls back to the ordinary resolved home.
     """
     head = _HERMES_HEAD_HOME.get()
     if head is not _UNSET and head:
         return Path(head)
+    configured = os.environ.get("HERMES_HEAD_HOME", "").strip()
+    if configured:
+        return Path(configured).expanduser()
     return get_hermes_home()
 
 

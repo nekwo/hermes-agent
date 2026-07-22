@@ -1550,9 +1550,10 @@ def write_snapshot(snapshot: dict | None = None) -> dict:
 
 def _default_persona_session_db():
     try:
+        from hermes_constants import get_hermes_head_home
         from hermes_state import SessionDB
 
-        return SessionDB()
+        return SessionDB(db_path=get_hermes_head_home() / "state.db")
     except Exception:
         return None
 

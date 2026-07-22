@@ -3863,17 +3863,16 @@ def _default_persona_session_db():
         # The persona-chat SessionDB is the OPERATOR-visible transcript store —
         # the exact DB ``persona_chat_history`` (the snapshot projection) reads.
         # Under an in-process persona profile override it must bind to the
-        # recorded outermost/operator home, never the active profile DB. If no
-        # outermost home was recorded, both paths resolve to the override and we
-        # must fail closed rather than create a transcript invisible to Mission
-        # Control.
+        # recorded outermost/operator home, never the active profile DB. The
+        # launcher also supplies an explicit HERMES_HEAD_HOME so changing its
+        # selected runtime profile cannot split one shared persona-instance
+        # pointer across multiple profile-local SessionDBs.
         override = get_hermes_home_override()
+        head_home = get_hermes_head_home()
         if override is not None:
-            head_home = get_hermes_head_home()
             if head_home == Path(override):
                 raise PersonaChatPersistenceError("session_db_acquire")
-            return SessionDB(db_path=head_home / "state.db")
-        return SessionDB()
+        return SessionDB(db_path=head_home / "state.db")
     except PersonaChatPersistenceError:
         raise
     except Exception as exc:

@@ -358,6 +358,33 @@ def test_persona_session_db_binds_to_head_home_under_profile_override(
         assert Path(db.db_path) != profile_home / "state.db"
 
 
+def test_explicit_head_home_is_stable_across_launcher_profile_selection(
+    isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    from hermes_cli import harness
+    from agent_runtime import snapshot
+    from agent_runtime.profile_context import persona_profile_context
+    from hermes_constants import get_hermes_head_home, get_hermes_home
+
+    shared_head = tmp_path / "profiles" / "base"
+    selected_home = tmp_path / "profiles" / "alice"
+    persona_home = tmp_path / "profiles" / "neko"
+    for path in (shared_head, selected_home, persona_home):
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(selected_home))
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(shared_head))
+
+    assert get_hermes_home() == selected_home
+    assert get_hermes_head_home() == shared_head
+    assert Path(harness._default_persona_session_db().db_path) == shared_head / "state.db"
+    assert Path(snapshot._default_persona_session_db().db_path) == shared_head / "state.db"
+
+    with persona_profile_context(_qa_profile_binding(persona_home)):
+        assert get_hermes_home() == persona_home
+        assert get_hermes_head_home() == shared_head
+        assert Path(harness._default_persona_session_db().db_path) == shared_head / "state.db"
+
+
 def test_relay_under_profile_override_persists_transcript_to_the_projection_home(
     isolate_agent_runtime_root, tmp_path
 ):

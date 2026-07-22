@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from hermes_constants import (
+    get_hermes_head_home,
     get_hermes_home,
     record_hermes_head_home_if_unset,
     reset_hermes_head_home,
@@ -95,7 +96,7 @@ def persona_profile_context(binding: PersonaProfileBinding, *, runtime_root: Pat
     # can still persist its operator-visible transcript (persona-chat SessionDB)
     # to the home the Mission Control projection reads (2026-07-18 relay
     # SessionDB-persistence fix).
-    head_home_token = record_hermes_head_home_if_unset(get_hermes_home())
+    head_home_token = record_hermes_head_home_if_unset(get_hermes_head_home())
     token = set_hermes_home_override(binding.profile_home)
     try:
         head_auth_home = previous_env.get("HERMES_AUTH_HOME") or previous_env.get("HERMES_HOME")
