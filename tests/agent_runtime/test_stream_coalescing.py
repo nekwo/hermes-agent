@@ -11,6 +11,7 @@ reads only type/watermark/identity_map/core).
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -131,3 +132,41 @@ def test_stream_single_event_keeps_delta_batch_golden_shape(
     assert frame["entity"] == frame["events"][0]
     assert frame["seq"] == frame["watermark"]["event_offset"]
     assert isinstance(frame["core"], dict)
+
+
+def test_slow_full_core_build_emits_applied_watermark_heartbeats(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """A healthy producer blocked in snapshot construction stays live without
+    advertising the not-yet-applied event offset."""
+
+    frames = stream_frames(
+        poll_interval_seconds=0.01,
+        heartbeat_interval_seconds=0.02,
+        delta_debounce_seconds=0,
+    )
+    hydrate = next(frames)
+    applied_offset = hydrate["watermark"]["event_offset"]
+
+    real_build = stream_mod.build_snapshot
+    release = threading.Event()
+
+    def slow_build():
+        assert release.wait(10)
+        return real_build()
+
+    monkeypatch.setattr(stream_mod, "build_snapshot", slow_build)
+    _append(EventLog(), 0)
+
+    heartbeat = next(frames)
+    assert heartbeat["type"] == "heartbeat"
+    assert heartbeat["watermark"]["event_offset"] == applied_offset
+    assert heartbeat["activity"]["kind"] == "snapshot_build"
+    assert heartbeat["activity"]["state"] == "busy"
+
+    release.set()
+    delta = next(frames)
+    while delta["type"] == "heartbeat":
+        delta = next(frames)
+    assert delta["type"] == "delta"
+    assert delta["watermark"]["event_offset"] > applied_offset

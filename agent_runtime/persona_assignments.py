@@ -1328,6 +1328,7 @@ class PersonaInstanceStore:
             safe_assignment_text(default_display_name, limit=120) if default_display_name is not None else None
         )
         safe_profile_id = safe_assignment_token(profile_id) if profile_id is not None else None
+        created = False
         try:
             instance = self.get(instance_id)
         except Exception:
@@ -1349,10 +1350,21 @@ class PersonaInstanceStore:
                 state=WorkerSessionState.IDLE,
                 updated_at=ts,
             )
+            created = True
         else:
             # Worker/run ownership is orthogonal to operator chat ownership.
             # Opening another chat root must not cancel or rebind live work.
             pass
+
+        before = None if created else (
+            instance.display_name,
+            instance.profile_id,
+            instance.workspace_id,
+            instance.realm_id,
+            instance.mode,
+            instance.default_chat_session_id,
+            instance.session_id,
+        )
 
         # An explicit ``display_name`` is AUTHORITATIVE — an operator naming this
         # chat (create_operator_chat) or a deliberate placement (add_instance,
@@ -1390,6 +1402,22 @@ class PersonaInstanceStore:
         # Read-compatible mirror for v1 consumers. Worker writers never touch
         # this field; default_chat_session_id is the sole new authority.
         instance.session_id = normalized_session
+        after = (
+            instance.display_name,
+            instance.profile_id,
+            instance.workspace_id,
+            instance.realm_id,
+            instance.mode,
+            instance.default_chat_session_id,
+            instance.session_id,
+        )
+        if not created and before == after:
+            # Idempotent re-open is an observation, not a mutation. Rewriting the
+            # row would advance directory fingerprints and emitting
+            # persona_instance.chat_opened would force a full-core stream delta.
+            # One first-turn path legitimately reaches this chokepoint multiple
+            # times; no-op calls must stay invisible to the event/read model.
+            return instance
         updated = self.update(instance)
         self._event("persona_instance.chat_opened", updated, {"session_id": normalized_session})
         return updated

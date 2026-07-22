@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -13,6 +14,7 @@ from . import paths
 from .events import EventLog
 from .models import Event
 from .patch_coverage import batch_is_patch_coverable
+from .request_control import request_cancelled
 from .serde import to_jsonable
 from .snapshot import build_snapshot
 from .state_patches import STATE_PATCHED_EVENT_TYPE, delta_patches_enabled
@@ -71,7 +73,9 @@ def hydrate_frame(
     return frame
 
 
-def heartbeat_frame(*, offset: int) -> dict[str, Any]:
+def heartbeat_frame(
+    *, offset: int, activity: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Liveness frame that advances the stream watermark without a core delta.
 
     Pure liveness telemetry: consumers merge it fire-and-forget and a dropped
@@ -79,12 +83,15 @@ def heartbeat_frame(*, offset: int) -> dict[str, Any]:
     carried the Mission Daemon status block; the background daemon was retired.)
     """
 
-    return {
+    frame = {
         "type": "heartbeat",
         "schema_version": STREAM_SCHEMA_VERSION,
         "generated_at": now(),
         "watermark": {"event_offset": int(offset or 0), "captured_at": now()},
     }
+    if activity:
+        frame["activity"] = activity
+    return frame
 
 
 def _delta_entity(event: Event) -> dict[str, Any]:
@@ -231,6 +238,94 @@ def select_batch_frame(
 #: emits multiple batch frames, each with its own (single) core.
 _DELTA_BATCH_CAP = 256
 
+_SNAPSHOT_CANCEL_POLL_SECONDS = 0.1
+
+
+class _SnapshotBuildJob:
+    """Finite daemon build used by the stream's liveness envelope.
+
+    Snapshot construction is synchronous and can involve filesystem parsing.
+    Running it on a daemon worker lets the stream generator keep emitting the
+    already-applied watermark as a heartbeat and observe cooperative request
+    cancellation. A cancelled consumer does not wait for a finite build to
+    finish; the build may complete in the background and remains protected by
+    ``build_snapshot``'s existing coalescing contract.
+    """
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.snapshot: dict[str, Any] | None = None
+        self.error: BaseException | None = None
+
+    def run(self) -> None:
+        try:
+            self.snapshot = build_snapshot()
+        except BaseException as exc:  # re-raised on the stream worker
+            self.error = exc
+        finally:
+            self.done.set()
+
+
+def _full_core_batch_frames(
+    batch: list[tuple[int, Event]],
+    *,
+    base_offset: int,
+    heartbeat_interval_seconds: float,
+) -> Iterator[dict[str, Any]]:
+    """Emit liveness while one uncovered batch builds its authoritative core."""
+
+    job = _SnapshotBuildJob()
+    started = time.monotonic()
+    threading.Thread(
+        target=job.run,
+        name="harness-stream-snapshot",
+        daemon=True,
+    ).start()
+    heartbeat_interval = max(0.05, float(heartbeat_interval_seconds or 0.05))
+    next_heartbeat = started + heartbeat_interval
+    while not job.done.wait(_SNAPSHOT_CANCEL_POLL_SECONDS):
+        if request_cancelled():
+            return
+        current = time.monotonic()
+        if current >= next_heartbeat:
+            # Keep the watermark at the last APPLIED core. Advertising the
+            # drained batch's future offset here would make the launcher infer a
+            # missed delta and start a second hydrate while this build is healthy.
+            yield heartbeat_frame(
+                offset=base_offset,
+                activity={
+                    "kind": "snapshot_build",
+                    "state": "busy",
+                    "elapsed_ms": int((current - started) * 1000),
+                },
+            )
+            next_heartbeat = current + heartbeat_interval
+    if request_cancelled():
+        return
+    if job.error is not None:
+        raise job.error
+    if job.snapshot is None:
+        raise RuntimeError("snapshot build completed without a result")
+    yield delta_batch_frame(batch, snapshot=job.snapshot)
+
+
+def _batch_frames_with_liveness(
+    batch: list[tuple[int, Event]],
+    *,
+    base_offset: int,
+    delta_patches: bool,
+    resync: bool,
+    heartbeat_interval_seconds: float,
+) -> Iterator[dict[str, Any]]:
+    if delta_patches and not resync and batch_is_patch_coverable(event for _, event in batch):
+        yield patch_batch_frame(batch, base_offset=base_offset)
+        return
+    yield from _full_core_batch_frames(
+        batch,
+        base_offset=base_offset,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+    )
+
 
 def stream_frames(
     *,
@@ -280,6 +375,8 @@ def stream_frames(
 
     last_heartbeat = time.monotonic()
     while True:
+        if request_cancelled():
+            return
         # Fingerprint BEFORE reading events. A delta batch rebuilds one full
         # snapshot per BATCH (W1 coalescing — it was per event, ~9MB a time);
         # a memo taken AFTER the batch would absorb any event-less write that
@@ -298,17 +395,23 @@ def stream_frames(
             offset = int(next_offset)
             pending.append((offset, event))
             if len(pending) >= _DELTA_BATCH_CAP:
-                yield select_batch_frame(
-                    pending, base_offset=batch_base, delta_patches=delta_patches, resync=resync_pending
-                )
+                for frame in _batch_frames_with_liveness(
+                    pending,
+                    base_offset=batch_base,
+                    delta_patches=delta_patches,
+                    resync=resync_pending,
+                    heartbeat_interval_seconds=heartbeat_interval_seconds,
+                ):
+                    yield frame
+                    emitted += 1
+                    last_heartbeat = time.monotonic()
+                    if frame.get("type") != "heartbeat":
+                        emitted_delta = True
+                    if max_frames is not None and emitted >= max_frames:
+                        return
                 resync_pending = False
                 batch_base = offset
                 pending = []
-                emitted += 1
-                emitted_delta = True
-                last_heartbeat = time.monotonic()
-                if max_frames is not None and emitted >= max_frames:
-                    return
         if pending and delta_debounce_seconds > 0:
             # Settle window: an event burst usually lands over a few tens of
             # milliseconds — one bounded sleep lets the tail join the SAME
@@ -319,27 +422,39 @@ def stream_frames(
                 offset = int(next_offset)
                 pending.append((offset, event))
                 if len(pending) >= _DELTA_BATCH_CAP:
-                    yield select_batch_frame(
-                        pending, base_offset=batch_base, delta_patches=delta_patches, resync=resync_pending
-                    )
+                    for frame in _batch_frames_with_liveness(
+                        pending,
+                        base_offset=batch_base,
+                        delta_patches=delta_patches,
+                        resync=resync_pending,
+                        heartbeat_interval_seconds=heartbeat_interval_seconds,
+                    ):
+                        yield frame
+                        emitted += 1
+                        last_heartbeat = time.monotonic()
+                        if frame.get("type") != "heartbeat":
+                            emitted_delta = True
+                        if max_frames is not None and emitted >= max_frames:
+                            return
                     resync_pending = False
                     batch_base = offset
                     pending = []
-                    emitted += 1
-                    emitted_delta = True
-                    last_heartbeat = time.monotonic()
-                    if max_frames is not None and emitted >= max_frames:
-                        return
         if pending:
-            yield select_batch_frame(
-                pending, base_offset=batch_base, delta_patches=delta_patches, resync=resync_pending
-            )
+            for frame in _batch_frames_with_liveness(
+                pending,
+                base_offset=batch_base,
+                delta_patches=delta_patches,
+                resync=resync_pending,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+            ):
+                yield frame
+                emitted += 1
+                last_heartbeat = time.monotonic()
+                if frame.get("type") != "heartbeat":
+                    emitted_delta = True
+                if max_frames is not None and emitted >= max_frames:
+                    return
             resync_pending = False
-            emitted += 1
-            emitted_delta = True
-            last_heartbeat = time.monotonic()
-            if max_frames is not None and emitted >= max_frames:
-                return
         if emitted_delta:
             # Evented mutations legitimately move the fingerprint; adopt the
             # pre-batch candidate so the watchdog only fires on offset-less
@@ -360,7 +475,13 @@ def stream_frames(
             if max_frames is not None and emitted >= max_frames:
                 return
 
-        time.sleep(max(0.01, float(poll_interval_seconds)))
+        # Cancellation latency is bounded even when a caller chooses a long
+        # poll interval; the production default remains 250ms.
+        sleep_remaining = max(0.01, float(poll_interval_seconds))
+        while sleep_remaining > 0 and not request_cancelled():
+            interval = min(_SNAPSHOT_CANCEL_POLL_SECONDS, sleep_remaining)
+            time.sleep(interval)
+            sleep_remaining -= interval
 
 
 def _scope_fingerprint() -> str:

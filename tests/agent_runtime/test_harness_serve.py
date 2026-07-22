@@ -423,3 +423,49 @@ def test_cancel_of_running_or_unknown_request_is_denied():
     assert errors and errors[0]["error"] == "invalid_request"
     exits = {frame["id"]: frame for frame in frames if frame.get("event") == "exit"}
     assert exits["r1"]["code"] == 0 and "cancelled" not in exits["r1"]
+
+
+def test_cancel_of_running_runtime_stream_is_cooperative_and_frees_worker():
+    """The infinite read stream is the one running request that must cancel.
+
+    With a one-worker pool, a cancelled stream must release the worker so a
+    following status request runs; otherwise four Launcher reconnects exhaust
+    the production pool permanently.
+    """
+
+    from agent_runtime.request_control import request_cancelled
+
+    started = threading.Event()
+    status_ran = threading.Event()
+
+    def dispatch(argv):
+        if argv[:2] == ["harness", "stream"]:
+            started.set()
+            while not request_cancelled():
+                threading.Event().wait(0.01)
+            return 0
+        status_ran.set()
+        return 0
+
+    def requests():
+        yield _request("stream-1", ["harness", "stream"])
+        assert started.wait(10)
+        yield json.dumps({"op": "cancel", "id": "stream-1"}) + "\n"
+        yield _request("status-1", ["harness", "status", "--json"])
+        assert status_ran.wait(10)
+        yield SHUTDOWN
+
+    out = io.StringIO()
+    assert serve_loop(requests(), out, pool_size=1, dispatch=dispatch) == 0
+    frames = _frames(out)
+
+    accepted = [
+        frame
+        for frame in frames
+        if frame.get("id") == "stream-1"
+        and frame.get("event") == "cancel_accepted"
+    ]
+    assert accepted and accepted[0]["state"] == "running"
+    exits = {frame["id"]: frame for frame in frames if frame.get("event") == "exit"}
+    assert exits["stream-1"]["code"] == 0
+    assert exits["status-1"]["code"] == 0

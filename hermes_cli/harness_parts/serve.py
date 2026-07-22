@@ -31,6 +31,8 @@ Protocol (NDJSON, one frame per line):
              answers ``{"id":…,"event":"cancel_denied","state":
              "running"|"unknown"}`` — its side effects may still happen, so
              mutation verbs carry their own replay guard (``--issued-at``).
+             A RUNNING read-only ``harness stream`` is cooperatively cancelled
+             and releases its pool worker; it is the sole running exception.
 - errors:    ``{"id":…,"event":"error","error":"invalid_request"|…,"detail":…}``
 
 Per-request stdout: handlers ``print()`` directly and streaming turns emit
@@ -356,7 +358,7 @@ class _LineFrameProxy(io.TextIOBase):
 
 
 class _ArgvRequest:
-    __slots__ = ("rid", "argv", "is_chat_turn")
+    __slots__ = ("rid", "argv", "is_chat_turn", "is_runtime_stream", "cancel_event")
 
     def __init__(self, rid: str, argv: list[str]):
         self.rid = rid
@@ -365,6 +367,8 @@ class _ArgvRequest:
         self.is_chat_turn = any(
             tuple(tail[: len(shape)]) == shape for shape in _CHAT_TURN_COMMANDS
         )
+        self.is_runtime_stream = bool(tail and tail[0] == "stream")
+        self.cancel_event = threading.Event()
 
 
 def _build_harness_parser() -> argparse.ArgumentParser:
@@ -472,6 +476,8 @@ def serve_loop(
         return {"event": "busy", "chat_turns": chat_turns, "pending": pending}
 
     def _run(request: _ArgvRequest) -> None:
+        from agent_runtime.request_control import request_cancel_scope
+
         token = _request_id.set(request.rid)
         code = 1
         cache_key = _CACHEABLE_ARGV.get(tuple(request.argv))
@@ -499,7 +505,8 @@ def serve_loop(
                 stdout_proxy.begin_capture(request.rid)
                 capturing = True
             try:
-                code = dispatch(list(request.argv))
+                with request_cancel_scope(request.cancel_event):
+                    code = dispatch(list(request.argv))
             except SystemExit as exc:  # argparse usage errors land here
                 raw = exc.code
                 code = raw if isinstance(raw, int) else (0 if raw is None else 2)
@@ -646,7 +653,8 @@ def serve_loop(
                         continue
                     with inflight_lock:
                         future = inflight_futures.get(cancel_id)
-                        known = cancel_id in inflight
+                        running_request = inflight.get(cancel_id)
+                        known = running_request is not None
                     if future is not None and future.cancel():
                         with inflight_lock:
                             inflight.pop(cancel_id, None)
@@ -657,6 +665,20 @@ def serve_loop(
                                 "event": "exit",
                                 "code": 130,
                                 "cancelled": True,
+                            }
+                        )
+                    elif running_request is not None and running_request.is_runtime_stream:
+                        # The state stream is read-only and infinite. Unlike a
+                        # mutation, it has a cooperative cancellation seam and
+                        # MUST release its worker when the Launcher reconnects;
+                        # otherwise four watchdog cycles exhaust the entire
+                        # serve pool with abandoned streams.
+                        running_request.cancel_event.set()
+                        frames.emit(
+                            {
+                                "id": cancel_id,
+                                "event": "cancel_accepted",
+                                "state": "running",
                             }
                         )
                     else:

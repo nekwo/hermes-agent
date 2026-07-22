@@ -69,3 +69,75 @@ degrade under concurrency.**
 
 Target: warm serve-resident core < 500ms; scope-switch confirm < 1s without
 the Stage 13 fast-confirm having to hide anything.
+
+## First-message stream liveness hardening (2026-07-22)
+
+### Incident and fact check
+
+The first message in an operator chat persisted and the model reply completed,
+but Mission Control declared the runtime offline and the console appeared stuck
+on stale state. This was not a Riverpod refresh failure or a missing reply.
+
+Production evidence separated three coupled faults:
+
+1. One first-turn event burst included repeated
+   `persona_instance.chat_opened` events plus uncovered projection events, so
+   the stream correctly selected an authoritative full-core delta instead of a
+   patch.
+2. The full-core builder took 36.6 seconds. Prompt observability resolved each
+   skill inside the persona-by-skill loop: 502 exhaustive `resolve_skill`
+   operations, 20,098 recursive directory walks, and 49,759 frontmatter parses.
+   The resolver already exposed `resolve_skills()` for a single collision-safe
+   batch, but the snapshot path did not use it.
+3. Launcher steady-state liveness expires after 30 seconds. During synchronous
+   core construction the generator emitted no heartbeat, so a healthy but busy
+   producer looked dead. Cancelling the Launcher subscription did not cancel the
+   already-running infinite `harness stream` request; reconnects could therefore
+   strand workers in the four-thread serve pool.
+
+### Enterprise invariants
+
+- The EventLog offset of the last *applied* core is the only advertised
+  watermark during a rebuild. Liveness must never claim an unbuilt future core.
+- One effective skill-root set is walked once per snapshot build. Persona rows
+  reuse that build-scoped resolver and content-receipt cache.
+- Reopening an already-authoritative chat binding is a read/no-op: no file
+  rewrite, fingerprint churn, or duplicate event.
+- A finite expensive build cannot block liveness. The stream emits additive
+  `activity={kind: snapshot_build, state: busy, elapsed_ms: ...}` heartbeats
+  while construction runs away from the generator thread.
+- Cancellation is cooperative only for the read-only infinite `harness stream`
+  command. Chat turns and mutations keep the existing finish-and-record rule.
+- Every accepted stream cancellation releases its serve-pool worker. A new
+  status request must complete with a pool size of one in the regression test.
+- The consumer treats build activity as live authoritative synchronization,
+  never as an outage; true silence still trips the watchdog.
+
+### Implementation and acceptance gates
+
+The prompt-observability snapshot now owns a build-scoped batch resolver keyed
+by the effective roots. Package hashes are memoized for the same build. Exact
+`open_chat` retries return before store update/event emission. Full-core stream
+batches build on a finite daemon worker, with cancellation polling and
+last-applied-offset heartbeats. The serve protocol accepts cancellation of an
+active runtime stream and leaves every mutating or recording command
+uncancellable.
+
+Pinned gates:
+
+- production-shaped 8-persona/60-skill snapshot performs one resolver walk and
+  60 hashes, not 480;
+- exact repeated chat binding preserves `updated_at` and emits one open event;
+- a deliberately blocked full-core build emits activity heartbeats at the held
+  watermark before its delta;
+- cancellation of an active stream frees a one-worker serve pool for `status`;
+- the existing patch/full-core convergence, prompt receipt, chat, and serve
+  suites remain green.
+
+Measured against the same live store after implementation: full core
+**36.622s -> 5.949s wall** (`build_ms=5882`), an approximately **84% reduction**.
+This clears the current 30-second client budget, while the activity heartbeat
+and cancellation protocol keep correctness and liveness bounded if the store
+grows past it again. The longer-term `<500ms` target and domain/event-log caches
+above remain valid follow-up work; they are optimization, not correctness
+prerequisites for this incident.

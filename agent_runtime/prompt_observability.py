@@ -127,6 +127,7 @@ def mission_chat_prompt_observability(
     preloaded_skills_loaded: Iterable[str] | None = None,
     preloaded_skills_missing: Iterable[str] | None = None,
     instance_skill_overrides: Iterable[str] | None = None,
+    skill_resolver: "_SkillObservabilityResolver | None" = None,
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
 
@@ -184,6 +185,7 @@ def mission_chat_prompt_observability(
         )
     except Exception:
         skill_profile_context = nullcontext()
+    skill_resolver = skill_resolver or _SkillObservabilityResolver()
     with skill_profile_context:
         accessible_skills = _accessible_skills_context(
             persona,
@@ -191,10 +193,12 @@ def mission_chat_prompt_observability(
             loaded_skill_names=set(loaded_names),
             queued_skill_names=set(queued_names),
             instance_override_names=override_names,
+            skill_resolver=skill_resolver,
         )
         skill_assignment_removals = _persona_skill_assignment_removals(persona)
         available_skills = available_skills_context(
-            accessible_skills=accessible_skills
+            accessible_skills=accessible_skills,
+            skill_resolver=skill_resolver,
         )
         used_skills = used_skills_context(
             final_model_input=final_model_input,
@@ -780,6 +784,12 @@ def snapshot_prompt_observability(
             return {}
 
     contexts: list[dict[str, Any]] = []
+    # One build-scoped resolver owns filesystem skill discovery + package hashes
+    # for every projected persona.  The active profile context is part of its
+    # cache key, so profile-specific roots never bleed into another persona,
+    # while the normal shared-install case pays one registry walk for the whole
+    # snapshot instead of one recursive walk per skill, per persona.
+    skill_resolver = _SkillObservabilityResolver()
     by_persona = {
         safe_assignment_token(getattr(persona, "id", None)): persona
         for persona in personas
@@ -811,6 +821,7 @@ def snapshot_prompt_observability(
                     if getattr(instance, "skill_overrides", None) is not None
                     else None
                 ),
+                skill_resolver=skill_resolver,
             )
         )
     if not contexts:
@@ -823,6 +834,7 @@ def snapshot_prompt_observability(
                         surface_prompt="",
                         limiting_wrapper_active=False,
                         session_db=session_db,
+                        skill_resolver=skill_resolver,
                     )
                 )
                 break
@@ -1850,6 +1862,57 @@ def _profile_snapshot_skill_names(profile: str) -> list[str]:
     return names
 
 
+class _SkillObservabilityResolver:
+    """Build-scoped skill registry + content-receipt cache.
+
+    ``resolve_skill`` intentionally performs an exhaustive collision-safe walk.
+    Calling it in a nested persona×skill loop turned one snapshot into hundreds
+    of recursive walks.  This resolver preserves the exact same authoritative
+    resolver semantics through ``resolve_skills`` while batching every name
+    known for one effective root set.  A different profile/root set gets an
+    isolated registry entry; package hashes are memoized only for this build.
+    """
+
+    def __init__(self) -> None:
+        self._resolutions_by_roots: dict[tuple[str, ...], dict[str, Any]] = {}
+        self._hashes: dict[tuple[str, str], str | None] = {}
+
+    def resolve(self, identifiers: Iterable[str]) -> dict[str, Any]:
+        from agent.skill_utils import get_all_skills_dirs, resolve_skills
+
+        names = list(
+            dict.fromkeys(
+                str(item or "").strip() for item in identifiers if str(item or "").strip()
+            )
+        )
+        if not names:
+            return {}
+        roots = list(get_all_skills_dirs())
+        root_key = tuple(str(root.resolve()) for root in roots)
+        cached = self._resolutions_by_roots.get(root_key, {})
+        missing = [name for name in names if name not in cached]
+        if missing:
+            # Rebuild the root-local registry for the union.  This stays one
+            # filesystem walk and keeps collision results deterministic if a
+            # later persona introduces a name absent from the first subset.
+            requested = list(dict.fromkeys([*cached.keys(), *missing]))
+            cached = resolve_skills(requested, roots=roots)
+            self._resolutions_by_roots[root_key] = cached
+        return {name: cached[name] for name in names if name in cached}
+
+    def content_hash(self, candidate: Any | None) -> str | None:
+        if candidate is None:
+            return None
+        from agent.skill_utils import skill_package_content_hash
+
+        key = (str(candidate.skill_dir or ""), str(candidate.skill_md))
+        if key not in self._hashes:
+            self._hashes[key] = skill_package_content_hash(
+                candidate.skill_dir, candidate.skill_md
+            )
+        return self._hashes[key]
+
+
 def _accessible_skills_context(
     persona: Any,
     profile: str,
@@ -1857,6 +1920,7 @@ def _accessible_skills_context(
     loaded_skill_names: set[str] | None = None,
     queued_skill_names: set[str] | None = None,
     instance_override_names: set[str] | None = None,
+    skill_resolver: _SkillObservabilityResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Redaction-safe list of skills accessible to this persona/profile.
 
@@ -1916,8 +1980,7 @@ def _accessible_skills_context(
     except Exception:
         pass
     from agent.skill_utils import (
-        resolve_skill,
-        skill_package_content_hash,
+        resolve_skills,
         skill_runtime_compatibility,
     )
 
@@ -1925,9 +1988,17 @@ def _accessible_skills_context(
     loaded_skill_names = loaded_skill_names or set()
     queued_skill_names = queued_skill_names or set()
     instance_override_names = instance_override_names or set()
-    for name in declared[:80]:
+    bounded_declared = declared[:80]
+    resolutions = (
+        skill_resolver.resolve(bounded_declared)
+        if skill_resolver is not None
+        else resolve_skills(bounded_declared)
+    )
+    for name in bounded_declared:
         token = safe_assignment_token(name) or name
-        resolution = resolve_skill(name)
+        resolution = resolutions.get(name)
+        if resolution is None:
+            continue
         selected = resolution.candidate
         compatibility = skill_runtime_compatibility(
             selected, surface="mission_chat", root_node_mode=False
@@ -1953,9 +2024,9 @@ def _accessible_skills_context(
         else:
             status = load_state
         content_hash = (
-            skill_package_content_hash(selected.skill_dir, selected.skill_md)
-            if selected
-            else None
+            skill_resolver.content_hash(selected)
+            if skill_resolver is not None
+            else _skill_candidate_content_hash(selected)
         )
         skills.append(
             {
@@ -2058,6 +2129,7 @@ def available_skills_context(
     *,
     accessible_skills: list[dict[str, Any]] | None = None,
     limit: int = 160,
+    skill_resolver: _SkillObservabilityResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Redaction-safe installed skill catalog for Mission Control.
 
@@ -2088,7 +2160,6 @@ def available_skills_context(
     installed = _installed_skill_catalog()
     from agent.skill_utils import (
         resolve_skills,
-        skill_package_content_hash,
         skill_runtime_compatibility,
     )
 
@@ -2097,7 +2168,11 @@ def available_skills_context(
         for item in installed
         if isinstance(item, dict) and safe_assignment_token(item.get("name"))
     ]
-    resolutions = resolve_skills(installed_names)
+    resolutions = (
+        skill_resolver.resolve(installed_names)
+        if skill_resolver is not None
+        else resolve_skills(installed_names)
+    )
     if isinstance(installed, list):
         for skill in installed:
             if not isinstance(skill, dict):
@@ -2119,9 +2194,9 @@ def available_skills_context(
             shared = shared_by_name.get(name)
             realm_sync = _skill_realm_sync(name, realm_rows) if shared else []
             content_hash = (
-                skill_package_content_hash(selected.skill_dir, selected.skill_md)
-                if selected
-                else None
+                skill_resolver.content_hash(selected)
+                if skill_resolver is not None
+                else _skill_candidate_content_hash(selected)
             )
             rows.append(
                 {
@@ -2281,6 +2356,14 @@ def _resolved_skill_receipt(name: str) -> dict[str, Any]:
         "content_hash": content_hash,
         "hash_tracked": content_hash is not None,
     }
+
+
+def _skill_candidate_content_hash(candidate: Any | None) -> str | None:
+    if candidate is None:
+        return None
+    from agent.skill_utils import skill_package_content_hash
+
+    return skill_package_content_hash(candidate.skill_dir, candidate.skill_md)
 
 
 def _generated_prompt_contract_hash() -> str:

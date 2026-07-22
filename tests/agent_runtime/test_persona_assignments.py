@@ -1248,6 +1248,44 @@ def test_open_chat_default_display_name_never_renames_an_existing_named_instance
     assert store.get("personainst_qa_agent_2").display_name == "QA Agent (2)"
 
 
+def test_open_chat_same_authoritative_binding_is_a_true_no_op(
+    isolate_agent_runtime_root,
+):
+    """Repeated first-turn binding must not rewrite the row or fan out another
+    full-core stream event when every authoritative field is already equal."""
+
+    from agent_runtime.events import EventLog
+
+    events = EventLog()
+    store = PersonaInstanceStore(event_log=events)
+    session_id = "persona_chat_personainst_dev_aaaaaaaaaaaa"
+    first = store.open_chat(
+        persona_id="dev",
+        session_id=session_id,
+        default_display_name="Dev",
+    )
+    opened_before = [
+        event
+        for event in events.tail(20)
+        if event.type == "persona_instance.chat_opened"
+    ]
+
+    reopened = store.open_chat(
+        persona_id="dev",
+        session_id=session_id,
+        default_display_name="Dev",
+    )
+    opened_after = [
+        event
+        for event in events.tail(20)
+        if event.type == "persona_instance.chat_opened"
+    ]
+
+    assert reopened.updated_at == first.updated_at
+    assert len(opened_before) == 1
+    assert len(opened_after) == 1
+
+
 def test_open_chat_default_display_name_names_a_first_ever_holder(isolate_agent_runtime_root):
     # A brand-new chat holder with no name yet DOES take the persona default —
     # stamping only happens when the instance has none.
