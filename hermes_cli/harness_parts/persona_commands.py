@@ -375,6 +375,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             persona_id=persona_id,
             coordinator_scope=coordinator_scope,
         )
+    previous_instance = None
     try:
         if bool(getattr(args, "add_instance", False)):
             placement_id = safe_assignment_token(getattr(args, "placement_id", None))
@@ -382,6 +383,12 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 data = {"ok": False, "error": "placement_id is required when add_instance is true"}
                 print(emit_json(data) if args.json else data["error"])
                 return 2
+            try:
+                previous_instance = PersonaInstanceStore().get(
+                    persona_instance_id_for_placement(placement_id)
+                )
+            except Exception:
+                previous_instance = None
             # A deliberately-placed additional instance ("QA Agent (2)") carries
             # its distinct name so the operator's placement cue survives into the
             # store, the launcher conversational fold (keyed on
@@ -451,6 +458,12 @@ def _cmd_persona_instance_open_chat(args) -> int:
                     return 2
                 target_instance_id = session_owner
             try:
+                previous_instance = PersonaInstanceStore().get(
+                    target_instance_id or persona_instance_id_for(persona_id)
+                )
+            except Exception:
+                previous_instance = None
+            try:
                 instance = PersonaInstanceStore().open_chat(
                     persona_id=persona_id,
                     persona_instance_id=target_instance_id,
@@ -497,6 +510,23 @@ def _cmd_persona_instance_open_chat(args) -> int:
         }
         print(emit_json(data) if args.json else data["error"])
         return 2
+    previous_session_id = (
+        safe_assignment_text(
+            getattr(previous_instance, "default_chat_session_id", None)
+            or getattr(previous_instance, "session_id", None),
+            limit=200,
+        )
+        if previous_instance is not None
+        else None
+    )
+    instance_updated_at = _persona_instance_updated_at(instance)
+    previous_updated_at = _persona_instance_updated_at(previous_instance)
+    binding_changed = (
+        previous_instance is None
+        or previous_session_id != instance.default_chat_session_id
+        or getattr(previous_instance, "mode", None) != instance.mode
+        or previous_updated_at != instance_updated_at
+    )
     data = {
         "ok": True,
         "persona_instance_id": instance.id,
@@ -504,6 +534,15 @@ def _cmd_persona_instance_open_chat(args) -> int:
         "mode": instance.mode,
         "default_chat_session_id": instance.default_chat_session_id,
         "session_id": instance.default_chat_session_id,
+        "previous_session_id": previous_session_id,
+        "binding_receipt": {
+            "schema_version": 1,
+            "persona_instance_id": instance.id,
+            "session_id": instance.default_chat_session_id,
+            "previous_session_id": previous_session_id,
+            "changed": binding_changed,
+            "instance_updated_at": instance_updated_at,
+        },
         "chat_busy": False,
         "killed_previous": bool(getattr(args, "kill_active", False)),
         "add_instance": bool(getattr(args, "add_instance", False)),
@@ -513,6 +552,17 @@ def _cmd_persona_instance_open_chat(args) -> int:
     }
     print(emit_json(data) if args.json else f"opened {instance.id} on chat {instance.default_chat_session_id}")
     return 0
+
+
+def _persona_instance_updated_at(instance) -> str | None:
+    if instance is None:
+        return None
+    value = getattr(instance, "updated_at", None)
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return safe_assignment_text(value, limit=80) or None
 
 
 def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_scope) -> int:

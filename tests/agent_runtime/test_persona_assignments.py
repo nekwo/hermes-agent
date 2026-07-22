@@ -937,7 +937,11 @@ def test_persona_instance_steer_store_rejects_cycles(isolate_agent_runtime_root)
     assert store.get("personainst_dev").spawned_by == "personainst_neko_supervisor"
 
 
-def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, isolate_agent_runtime_root):
+def test_persona_instance_open_chat_binds_old_chat_without_ticking(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
     from argparse import Namespace
     from hermes_cli import harness
 
@@ -945,6 +949,11 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     session_db = _TranscriptDB()
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
+    previous = PersonaInstanceStore().create_operator_chat(
+        persona_id="dev",
+        display_name="dev worker",
+        session_id="chat_current_123",
+    )
 
     code = harness._cmd_persona_instance_open_chat(
         Namespace(
@@ -965,6 +974,28 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     assert RunStore().list_all() == []
     assert session_db.get_session(instance.session_id) is not None
     assert session_db.get_session_title(instance.session_id) == f"{instance.display_name} chat"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["previous_session_id"] == previous.session_id
+    assert payload["binding_receipt"] == {
+        "schema_version": 1,
+        "persona_instance_id": instance.id,
+        "session_id": "chat_old_123",
+        "previous_session_id": previous.session_id,
+        "changed": True,
+        "instance_updated_at": instance.updated_at.isoformat(),
+    }
+
+    assert harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="launcher-dev",
+            session_id="chat_old_123",
+            kill_active=False,
+            json=True,
+        )
+    ) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["binding_receipt"]["changed"] is False
+    assert replay["binding_receipt"]["previous_session_id"] == "chat_old_123"
 
 
 def test_persona_instance_open_chat_new_session_mints_exact_instance_and_replays(
