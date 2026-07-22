@@ -9,6 +9,7 @@ from hermes_constants import get_hermes_home, get_shared_skills_dir
 
 from agent_runtime import paths as runtime_paths
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+from agent_runtime.events import EventLog
 from agent_runtime.realm_sync import (
     RealmSyncError,
     _git,
@@ -18,6 +19,7 @@ from agent_runtime.realm_sync import (
     read_realm_sync_sidecar,
     realm_sync_sidecar_path,
     realm_sync_status,
+    resolve_realm_sync_artifacts,
 )
 from agent_runtime.skill_install import HARNESS_SKILLS, harness_skill_hash_mismatches, install_harness_skills
 from agent_runtime.store import RealmStore, WorkspaceStore
@@ -84,13 +86,9 @@ def test_harness_runtime_model_is_hash_tracked():
 
 
 def test_publish_dry_run_is_allowlisted_and_excludes_state(isolate_agent_runtime_root, tmp_path):
-    home = get_hermes_home()
     skill = get_shared_skills_dir() / "demo-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: demo-skill\n---\n# Demo\n", encoding="utf-8")
-    system_prompt = home / "personas" / "dev" / "system.md"
-    system_prompt.parent.mkdir(parents=True)
-    system_prompt.write_text("# Dev system\n", encoding="utf-8")
     (isolate_agent_runtime_root / "blueprints").mkdir(parents=True)
     (isolate_agent_runtime_root / "blueprints" / "already-git-tracked.yaml").write_text("id: bp\n", encoding="utf-8")
     (isolate_agent_runtime_root / "state.db").write_text("do not sync\n", encoding="utf-8")
@@ -106,7 +104,11 @@ def test_publish_dry_run_is_allowlisted_and_excludes_state(isolate_agent_runtime
     assert f"skills/demo-skill/SKILL.md" in paths
     assert any(path.startswith("store/workspaces/") for path in paths)
     assert f"store/realms/{realm.id}.json" in paths
-    assert "profiles/default/personas/dev/system_prompt/system.md" in paths
+    assert any(
+        path.startswith("profiles/")
+        and path.endswith("/personas/dev/system_prompt/dev.md")
+        for path in paths
+    )
     assert all("blueprint" not in path.lower() for path in paths)
     assert all("state.db" not in path.lower() for path in paths)
     assert all("\\" not in path for path in paths)
@@ -169,6 +171,25 @@ def test_publish_syncs_multi_file_skill_package(isolate_agent_runtime_root, tmp_
     assert "skills/multi-skill/scripts/run.py" in paths
     assert all("__pycache__" not in path for path in paths)
     assert all(".scratch_note" not in path for path in paths)
+
+
+def test_publish_refuses_duplicate_profile_skill_authority(
+    isolate_agent_runtime_root, tmp_path
+):
+    shared = get_shared_skills_dir() / "duplicate-skill" / "SKILL.md"
+    shared.parent.mkdir(parents=True)
+    shared.write_text("---\nname: duplicate-skill\n---\n# Shared\n", encoding="utf-8")
+    profile = get_hermes_home() / "skills" / "duplicate-skill" / "SKILL.md"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("---\nname: duplicate-skill\n---\n# Profile\n", encoding="utf-8")
+    realm, _repo = _realm_with_repo(tmp_path)
+
+    with pytest.raises(RealmSyncError) as exc:
+        publish_realm_sync(realm.id, dry_run=True)
+
+    assert exc.value.code == "skill_authority_conflict"
+    assert exc.value.safe_details["skill"] == "duplicate-skill"
+    assert exc.value.safe_details["resolution_status"] == "collision"
 
 
 def test_sync_destination_maps_nested_skill_and_blocks_traversal(isolate_agent_runtime_root):
@@ -536,3 +557,309 @@ def test_publish_notify_posts_counts_only(isolate_agent_runtime_root, tmp_path, 
     assert captured["artifact_counts"]["skill"] >= 1
     assert all(isinstance(count, int) for count in captured["artifact_counts"].values())
     assert set(captured) == {"realm_id", "commit", "artifact_counts"}
+
+
+# ── per-realm skill publish selection (REALM_SKILL_SELECTION_DESIGN §2–5, §9) ──
+
+
+def _make_shared_skill(slug: str, *, body: str | None = None) -> Path:
+    skill = get_shared_skills_dir() / slug / "SKILL.md"
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.write_text(body or f"---\nname: {slug}\n---\n# {slug}\n", encoding="utf-8")
+    return skill
+
+
+def _resolved_skill_packages(realm_id: str) -> set[str]:
+    packages: set[str] = set()
+    for artifact in resolve_realm_sync_artifacts(realm_id):
+        if artifact.kind == "skill":
+            packages.add(Path(artifact.relative_path).parts[1])
+    return packages
+
+
+def test_skill_selection_defaults_to_publish_all(isolate_agent_runtime_root, tmp_path):
+    # Back-compat lock: a realm with no selection publishes every shared skill.
+    for slug in ("alpha", "beta"):
+        _make_shared_skill(slug)
+    realm, _repo = _realm_with_repo(tmp_path)
+
+    assert realm.skill_publish_mode == "all"
+    assert realm.skill_selection == []
+    assert {"alpha", "beta"} <= _resolved_skill_packages(realm.id)
+
+    status = realm_sync_status(realm.id)
+    assert status["skill_publish_mode"] == "all"
+    assert status["skill_selection"] == []
+    assert status["skills_published"] >= 2
+
+
+def test_selected_mode_filters_skill_artifacts(isolate_agent_runtime_root, tmp_path):
+    for slug in ("alpha", "beta", "gamma"):
+        _make_shared_skill(slug)
+    realm, _repo = _realm_with_repo(tmp_path)
+
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["gamma", "alpha"])
+
+    assert _resolved_skill_packages(realm.id) == {"alpha", "gamma"}
+    status = realm_sync_status(realm.id)
+    assert status["skill_publish_mode"] == "selected"
+    assert status["skill_selection"] == ["alpha", "gamma"]  # sorted + deduped
+    assert status["skills_published"] == 2
+
+
+def test_republish_prunes_deselected_skills_from_subtree(isolate_agent_runtime_root, tmp_path):
+    for slug in ("alpha", "beta"):
+        _make_shared_skill(slug)
+    realm, repo = _realm_with_remote(tmp_path)
+    subtree_skills = repo / "realms" / realm.id / "skills"
+
+    publish_realm_sync(realm.id)
+    assert (subtree_skills / "alpha" / "SKILL.md").exists()
+    assert (subtree_skills / "beta" / "SKILL.md").exists()
+
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["alpha"])
+    publish_realm_sync(realm.id)
+
+    assert (subtree_skills / "alpha" / "SKILL.md").exists()
+    assert not (subtree_skills / "beta").exists()  # deselected → pruned on republish
+
+
+def test_skills_drift_only_covers_selected(isolate_agent_runtime_root, tmp_path):
+    # Drift is computed over the RESOLVED (already-filtered) artifacts, so a
+    # deselected skill can never surface as drift.
+    for slug in ("alpha", "beta"):
+        _make_shared_skill(slug)
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["alpha"])
+
+    status = realm_sync_status(realm.id)
+    assert "beta" not in status["skills_drift"]
+    assert _resolved_skill_packages(realm.id) == {"alpha"}
+
+
+def test_selection_travels_on_pull_while_authority_preserved(isolate_agent_runtime_root, tmp_path):
+    _make_shared_skill("alpha")
+    realm, repo = _realm_with_remote(tmp_path)
+    realm = RealmStore().bind_server(realm.id, "srv_selection")
+    realm.default_workspace_id = "ws_backend_default"
+    realm.default_workspace_name = "Backend Office"
+    realm.default_workspace_version = 8
+    realm = RealmStore().save(realm)
+    # Local starts in the default "all" mode with no selection.
+    assert realm.skill_publish_mode == "all"
+
+    incoming = {
+        **json.loads(runtime_paths.realm_path(realm.id).read_text(encoding="utf-8")),
+        # Realm-wide truth authored by another member (travels on pull).
+        "skill_publish_mode": "selected",
+        "skill_selection": ["alpha"],
+        # Stale authority fields must NOT roll our backend-owned pointer back.
+        "default_workspace_id": "ws_stale",
+        "default_workspace_name": "Stale Office",
+        "default_workspace_version": 2,
+    }
+    remote_realm = repo / "realms" / realm.id / "store" / "realms" / f"{realm.id}.json"
+    remote_realm.parent.mkdir(parents=True, exist_ok=True)
+    remote_realm.write_text(json.dumps(incoming), encoding="utf-8")
+
+    pull_realm_sync(realm.id)
+
+    pulled = RealmStore().get(realm.id)
+    # Selection is NOT an authority field → it adopts the incoming realm truth.
+    assert pulled.skill_publish_mode == "selected"
+    assert pulled.skill_selection == ["alpha"]
+    # Authority fields are still preserved against the stale incoming copy.
+    assert pulled.default_workspace_id == "ws_backend_default"
+    assert pulled.default_workspace_name == "Backend Office"
+    assert pulled.default_workspace_version == 8
+
+
+def test_set_skill_selection_preserves_unknown_slug(isolate_agent_runtime_root, tmp_path):
+    # Only alpha exists locally; "ghost" is owned by another member → preserved,
+    # never stripped on save (dropping it would corrupt realm truth).
+    _make_shared_skill("alpha")
+    realm, _repo = _realm_with_repo(tmp_path)
+
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["ghost", "alpha", "alpha"])
+
+    stored = RealmStore().get(realm.id)
+    assert stored.skill_selection == ["alpha", "ghost"]  # deduped + sorted, unknown kept
+
+
+def test_set_skill_selection_rejects_malformed_slug(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    for bad in ("bad/slug", "bad\\slug", ".hidden", ""):
+        with pytest.raises(ValueError):
+            RealmStore().set_skill_selection(realm.id, mode="selected", selection=[bad])
+    # A rejected write never mutates the realm.
+    assert RealmStore().get(realm.id).skill_publish_mode == "all"
+
+
+def test_set_skill_selection_names_every_malformed_slug(isolate_agent_runtime_root, tmp_path):
+    # A batch save reports ALL offenders in one typed error, not just the first
+    # — the launcher sends the whole checkbox set in one --skills batch.
+    realm, _repo = _realm_with_repo(tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        RealmStore().set_skill_selection(
+            realm.id, mode="selected", selection=["bad/slug", ".hidden", "fine"]
+        )
+    message = str(excinfo.value)
+    assert "bad/slug" in message
+    assert ".hidden" in message
+    assert "fine" not in message
+    assert RealmStore().get(realm.id).skill_publish_mode == "all"  # untouched
+
+
+def test_set_skill_selection_dry_run_does_not_mutate(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["alpha"])
+
+    would_be = RealmStore().set_skill_selection(
+        realm.id, mode="selected", selection=[], dry_run=True
+    )
+    assert would_be.skill_selection == []  # the preview reflects the request
+
+    stored = RealmStore().get(realm.id)
+    assert stored.skill_selection == ["alpha"]  # disk untouched
+    events = [
+        event
+        for event in EventLog().tail(50)
+        if event.type == "realm.updated" and event.payload.get("change") == "skill_selection"
+    ]
+    assert len(events) == 1  # only the seeding write emitted
+
+
+def test_set_skill_selection_emits_store_event(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["a", "b"])
+
+    events = [event for event in EventLog().tail(20) if event.type == "realm.updated"]
+    match = next(event for event in events if event.payload.get("change") == "skill_selection")
+    assert match.payload["mode"] == "selected"
+    assert match.payload["selection_count"] == 2
+
+
+def test_all_mode_keeps_selection_list(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["alpha", "beta"])
+    RealmStore().set_skill_selection(realm.id, mode="all", selection=[])
+
+    stored = RealmStore().get(realm.id)
+    assert stored.skill_publish_mode == "all"
+    assert stored.skill_selection == ["alpha", "beta"]  # intact — restores on switch back
+
+
+def test_status_and_sidecar_carry_selection_fields(isolate_agent_runtime_root, tmp_path):
+    _make_shared_skill("alpha")
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["alpha"])
+
+    status = realm_sync_status(realm.id)  # writes the sidecar
+    assert status["skill_publish_mode"] == "selected"
+    assert status["skill_selection"] == ["alpha"]
+    assert status["skills_published"] == 1
+
+    sidecar = read_realm_sync_sidecar(realm.id)
+    assert sidecar["skill_publish_mode"] == "selected"
+    assert sidecar["skill_selection"] == ["alpha"]
+    assert sidecar["skills_published"] == 1
+
+
+def test_sidecar_read_defaults_when_fields_absent(isolate_agent_runtime_root, tmp_path):
+    # Tolerant read: a sidecar written by an older hermes lacks the new keys.
+    realm, _repo = _realm_with_repo(tmp_path)
+    legacy = {"schema_version": 2, "realm_id": realm.id, "state": "in_sync"}
+    sidecar_path = realm_sync_sidecar_path(realm.id)
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    sidecar_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    sidecar = read_realm_sync_sidecar(realm.id)
+    assert sidecar["skill_publish_mode"] == "all"
+    assert sidecar["skill_selection"] == []
+    assert sidecar["skills_published"] == 0
+
+
+# ── CLI: `realm skills show|set` (design §5) ────────────────────────────────
+
+
+def test_realm_skills_show_cli_envelope(isolate_agent_runtime_root, tmp_path):
+    _make_shared_skill("alpha")
+    _make_shared_skill("beta")
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["alpha", "ghost"])
+
+    proc = _run_harness("realm", "skills", "show", realm.id, "--json")
+    payload = json.loads(proc.stdout)
+
+    assert proc.returncode == 0
+    assert payload["schema_version"] == 1
+    assert payload["kind"] == "realm_skill_selection"
+    assert payload["id"] == realm.id
+    assert payload["mode"] == "selected"
+    assert payload["selection"] == ["alpha", "ghost"]
+    assert "alpha" in payload["catalog"] and "beta" in payload["catalog"]
+    assert "ghost" not in payload["catalog"]
+    assert payload["missing"] == ["ghost"]  # honest accounting: selection − catalog
+
+
+def test_realm_skills_set_cli_selected_and_all(isolate_agent_runtime_root, tmp_path):
+    _make_shared_skill("alpha")
+    _make_shared_skill("beta")
+    realm, _repo = _realm_with_repo(tmp_path)
+
+    proc = _run_harness("realm", "skills", "set", realm.id, "--skills", "beta,alpha,beta", "--json")
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == 0
+    assert payload["mode"] == "selected"
+    assert payload["selection"] == ["alpha", "beta"]
+
+    proc = _run_harness("realm", "skills", "set", realm.id, "--all", "--json")
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == 0
+    assert payload["mode"] == "all"
+    assert payload["selection"] == ["alpha", "beta"]  # --all keeps the list intact
+
+
+def test_realm_skills_set_cli_none(isolate_agent_runtime_root, tmp_path):
+    _make_shared_skill("alpha")
+    realm, _repo = _realm_with_repo(tmp_path)
+    proc = _run_harness("realm", "skills", "set", realm.id, "--none", "--json")
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == 0
+    assert payload["mode"] == "selected"
+    assert payload["selection"] == []
+
+
+def test_realm_skills_set_cli_dry_run_previews_without_mutating(isolate_agent_runtime_root, tmp_path):
+    _make_shared_skill("alpha")
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_skill_selection(realm.id, mode="selected", selection=["alpha"])
+
+    proc = _run_harness("realm", "skills", "set", realm.id, "--none", "--dry-run", "--json")
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == 0
+    assert payload["dry_run"] is True
+    assert payload["mode"] == "selected"
+    assert payload["selection"] == []  # the previewed would-be state
+
+    stored = RealmStore().get(realm.id)
+    assert stored.skill_selection == ["alpha"]  # nothing was written
+
+
+def test_realm_skills_set_cli_malformed_slug_is_typed_error(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    proc = _run_harness("realm", "skills", "set", realm.id, "--skills", "bad/slug", "--json")
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == 2
+    assert payload["kind"] == "error"
+    assert payload["error"]["code"] == "invalid_request"
+
+
+def test_realm_skills_set_cli_requires_exactly_one_flag(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    both = _run_harness("realm", "skills", "set", realm.id, "--all", "--none", "--json")
+    assert both.returncode == 2
+    assert json.loads(both.stdout)["error"]["code"] == "invalid_request"
+    neither = _run_harness("realm", "skills", "set", realm.id, "--json")
+    assert neither.returncode == 2
+    assert json.loads(neither.stdout)["error"]["code"] == "invalid_request"

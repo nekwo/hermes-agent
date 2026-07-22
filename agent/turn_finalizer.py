@@ -420,6 +420,11 @@ def finalize_turn(
         "prompt_tokens": agent.session_prompt_tokens,
         "completion_tokens": agent.session_completion_tokens,
         "total_tokens": agent.session_total_tokens,
+        # Per-call canonical usage rows for this turn. The cumulative counters
+        # above cannot answer "how big was the assembled context on the first
+        # call" (tool schemas included) — Mission Control's context budget reads
+        # row 1 for exactly that. See agent.usage_pricing.record_api_call_usage.
+        "usage_ledger": list(getattr(agent, "session_usage_ledger", None) or []),
         "last_prompt_tokens": getattr(agent.context_compressor, "last_prompt_tokens", 0) or 0,
         "estimated_cost_usd": agent.session_estimated_cost_usd,
         "cost_status": agent.session_cost_status,

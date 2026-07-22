@@ -27,6 +27,8 @@ import json
 from typing import Any, Dict, List, Optional
 
 from agent.prompt_builder import (
+    BROWSER_PRECONDITION_GUIDANCE,
+    CLARIFY_CHOICES_GUIDANCE,
     DEFAULT_AGENT_IDENTITY,
     GOOGLE_MODEL_OPERATIONAL_GUIDANCE,
     HERMES_AGENT_HELP_GUIDANCE,
@@ -36,9 +38,11 @@ from agent.prompt_builder import (
     PARALLEL_TOOL_CALL_GUIDANCE,
     PLATFORM_HINTS,
     SESSION_SEARCH_GUIDANCE,
+    SHELL_TOOL_PREFERENCE_GUIDANCE,
     SKILLS_GUIDANCE,
     STEER_CHANNEL_NOTE,
     TASK_COMPLETION_GUIDANCE,
+    TOOL_DESCRIBE_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
     drain_truncation_warnings,
@@ -192,6 +196,17 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(SESSION_SEARCH_GUIDANCE)
     if "skill_manage" in agent.valid_tool_names:
         tool_guidance.append(SKILLS_GUIDANCE)
+    # T6b policy moves (Context Cost Workstream). The tool schemas ship brief
+    # descriptions; genuine cross-tool policy that used to live in those
+    # descriptions rides here instead — byte-stable, tool-gated so it only
+    # appears in a lane that actually has the relevant tools. See
+    # agent/prompt_builder.py for the source strings and the proposal mapping.
+    if "terminal" in agent.valid_tool_names:
+        tool_guidance.append(SHELL_TOOL_PREFERENCE_GUIDANCE)
+    if "clarify" in agent.valid_tool_names:
+        tool_guidance.append(CLARIFY_CHOICES_GUIDANCE)
+    if "browser_navigate" in agent.valid_tool_names:
+        tool_guidance.append(BROWSER_PRECONDITION_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
@@ -204,6 +219,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(KANBAN_GUIDANCE)
     if tool_guidance:
         stable_parts.append(" ".join(tool_guidance))
+
+    # T6b details-on-demand pointer: descriptions are brief; tool_describe loads
+    # a tool's full docs. Present whenever the agent has tools (tool_describe is
+    # injected into every resolved lane). Static text → byte-stable prompt.
+    if agent.valid_tool_names:
+        stable_parts.append(TOOL_DESCRIBE_GUIDANCE)
 
     # Steering only lands inside tool results, so it's only reachable when the
     # agent has tools. Static text → byte-stable prompt (no cache hit).

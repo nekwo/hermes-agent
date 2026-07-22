@@ -66,10 +66,13 @@ def coerce_agent_role(role: AgentRole | str | None) -> AgentRole:
     return AgentRole(text)
 
 
+# NOTE: the ``board`` toolset (advisory Mission Board card tools) is allowed for
+# every mission role — the board is nudged-never-forced, so any agent may track
+# follow-up work as a card. It never mutates goal state.
 ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
-    AgentRole.PM: frozenset({"file", "session_search", "todo", "skills", "agent_chat"}),
-    AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills", "agent_chat"}),
-    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills", "agent_chat"}),
+    AgentRole.PM: frozenset({"file", "session_search", "todo", "skills", "agent_chat", "board"}),
+    AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills", "agent_chat", "board"}),
+    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills", "agent_chat", "board"}),
     AgentRole.ALICE_SUPERVISOR: frozenset(
         {
             "file",
@@ -84,11 +87,24 @@ ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
             "skills",
             "mission_goal",
             "agent_chat",
+            "board",
         }
     ),
 }
 
 DEFAULT_SUPERVISOR_PERSONA_ID = "neko_supervisor"
+
+# The Launcher-owned install path deliberately opts back into the typed Mission
+# Control team. Every advertised agent must have a real Hermes profile behind
+# it; these bindings are the cross-stack install contract consumed by
+# ``harness init --with-bundled-personas`` and the Launcher's verifier.
+BUNDLED_PERSONA_PROFILES: dict[str, str] = {
+    DEFAULT_SUPERVISOR_PERSONA_ID: BASE_PERSONA_ID,
+    "dev": "launcher-dev",
+    "backend_dev": "backend-dev",
+    "qa": "qa",
+}
+BUNDLED_PERSONA_IDS = frozenset(BUNDLED_PERSONA_PROFILES)
 
 PROFILE_CHAT_FALLBACK_TOOLSETS = (
     "file",
@@ -99,6 +115,46 @@ PROFILE_CHAT_FALLBACK_TOOLSETS = (
     "skills",
     "mission_goal",
     "agent_chat",
+    "board",
+)
+
+
+# Fork registry hygiene (T6c, 2026-07-18). Upstream toolsets the fork's effective
+# registry must never resolve on ANY agent-runtime lane: the whole ``kanban``
+# toolset (9 tools — superseded by the fork board/mission system) and the
+# ``feishu_doc`` + ``feishu_drive`` toolsets (5 tools — an irrelevant Feishu/Lark
+# integration). The upstream tool files stay untouched (fork-sync cleanliness);
+# this fork-owned constant is the deregistration mechanism. It is enforced in TWO
+# places so no lane escapes:
+#   1. folded into ``PERSONA_BLOCKED_TOOLS`` below → the persona chat/run lanes and
+#      the ``tool_visibility`` permission-preview surface, and
+#   2. unioned at the ``profile_runner`` agent-construction chokepoint → every
+#      lane, including the worker / root-node lanes that pass
+#      ``blocked_tool_names=[]`` (node_tools.py / root_node_engine.py).
+# ``delegate_task`` and ``memory`` are deliberately NOT here — operator ruling:
+# keep them registered (both are parallel-authority surfaces; a future lane that
+# enables either owns reconciling delegation-vs-harness-dispatch / upstream-memory-
+# vs-profile-memory).
+REGISTRY_HYGIENE_BLOCKED_TOOLS = frozenset(
+    {
+        # kanban toolset (9)
+        "kanban_show",
+        "kanban_list",
+        "kanban_create",
+        "kanban_complete",
+        "kanban_block",
+        "kanban_link",
+        "kanban_comment",
+        "kanban_unblock",
+        "kanban_heartbeat",
+        # feishu_doc toolset (1)
+        "feishu_doc_read",
+        # feishu_drive toolset (4)
+        "feishu_drive_list_comments",
+        "feishu_drive_list_comment_replies",
+        "feishu_drive_reply_comment",
+        "feishu_drive_add_comment",
+    }
 )
 
 
@@ -109,17 +165,8 @@ PERSONA_BLOCKED_TOOLS = frozenset(
         "memory",
         "send_message",
         "cronjob",
-        "kanban_show",
-        "kanban_list",
-        "kanban_create",
-        "kanban_complete",
-        "kanban_block",
-        "kanban_link",
-        "kanban_comment",
-        "kanban_unblock",
-        "kanban_heartbeat",
     }
-)
+) | REGISTRY_HYGIENE_BLOCKED_TOOLS
 
 PER_ROLE_TOOL_DENIES: dict[AgentRole, frozenset[str]] = {
     AgentRole.PM: frozenset({"write_file", "patch", "terminal"}),
@@ -190,8 +237,9 @@ def default_personas() -> list[AgentPersona]:
             provider=None,
             api_mode="codex_responses",
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills", "mission_goal"],
-            system_prompt_path="personas/neko_supervisor/system.md",
+            system_prompt_path="agent_runtime/prompts/alice_supervisor.md",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
+            hermes_profile=None,
             skills=["harness-mission-lead", "harness-continuity", "harness-runtime-model"],
         ),
         AgentPersona(
@@ -202,19 +250,10 @@ def default_personas() -> list[AgentPersona]:
             provider=None,
             api_mode="codex_responses",
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
-            system_prompt_path="personas/dev/system.md",
+            system_prompt_path="agent_runtime/prompts/dev.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
+            hermes_profile=BUNDLED_PERSONA_PROFILES["dev"],
             skills=[
-                "agent-runtime-harness",
-                "staged-deep-audit-delivery",
-                "aaa-feature-delivery",
-                "test-driven-development",
-                "systematic-debugging",
-                "flutter-ui-development",
-                "eternia-launcher-workflow",
-                "frontend-backend-contract-handoff",
-                "launcher-stagec-mcp-screenshot",
-                "harness-handoff-recovery",
                 "harness-continuity",
                 "harness-dev-delivery",
                 "launcher-analyze-proof",
@@ -229,19 +268,10 @@ def default_personas() -> list[AgentPersona]:
             provider=None,
             api_mode="codex_responses",
             toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
-            system_prompt_path="personas/dev/system.md",
+            system_prompt_path="agent_runtime/prompts/dev.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
-            hermes_profile="backend-dev",
+            hermes_profile=BUNDLED_PERSONA_PROFILES["backend_dev"],
             skills=[
-                "agent-runtime-harness",
-                "staged-deep-audit-delivery",
-                "aaa-feature-delivery",
-                "test-driven-development",
-                "systematic-debugging",
-                "eternia-local-gates",
-                "eternia-backend-tests",
-                "frontend-backend-contract-handoff",
-                "harness-handoff-recovery",
                 "harness-continuity",
                 "harness-dev-delivery",
             ],
@@ -256,8 +286,9 @@ def default_personas() -> list[AgentPersona]:
             provider=None,
             api_mode="codex_responses",
             toolsets=["file", "search", "terminal", "browser", "vision", "session_search", "skills"],
-            system_prompt_path="personas/qa/system.md",
+            system_prompt_path="agent_runtime/prompts/qa.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
+            hermes_profile=BUNDLED_PERSONA_PROFILES["qa"],
             skills=["harness-qa-verdict"],
         ),
     ]

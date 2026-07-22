@@ -720,6 +720,10 @@ class AIAgent:
         self.session_cache_write_tokens = 0
         self.session_reasoning_tokens = 0
         self.session_api_calls = 0
+        # Per-call canonical usage rows (see agent.usage_pricing.record_api_call_usage).
+        # The counters above are cumulative and cannot answer "how big was the
+        # assembled context on the first call" — that is what this ledger carries.
+        self.session_usage_ledger = []
         self.session_estimated_cost_usd = 0.0
         self.session_cost_status = "unknown"
         self.session_cost_source = "none"
@@ -1862,6 +1866,34 @@ class AIAgent:
                     ]
                 elif isinstance(msg.get("tool_calls"), list):
                     tool_calls_data = msg["tool_calls"]
+                platform_message_id = None
+                if getattr(self, "_persona_chat_root_session_id", None):
+                    from agent_runtime.persona_chat_continuity import safe_native_message
+
+                    native = safe_native_message(
+                        {
+                            **msg,
+                            "content": content,
+                            "tool_calls": tool_calls_data,
+                            "root_chat_session_id": self._persona_chat_root_session_id,
+                            "client_message_id": self._persona_chat_client_message_id,
+                            "turn_id": self._persona_chat_turn_id,
+                        }
+                    )
+                    # The safe representation is retained in the live actor too;
+                    # the next provider call therefore sees exactly what cold
+                    # resume will read, never raw tool residue.
+                    msg.clear()
+                    msg.update(native)
+                    role = native.get("role", role)
+                    content = native.get("content")
+                    tool_calls_data = native.get("tool_calls")
+                    platform_message_id = self._persona_chat_client_message_id
+                    if role != "user":
+                        platform_message_id = (
+                            f"{self._persona_chat_client_message_id}:"
+                            f"{role}:{_msg_idx}"
+                        )
                 self._session_db.append_message(
                     session_id=self.session_id,
                     role=role,
@@ -1876,6 +1908,7 @@ class AIAgent:
                     codex_reasoning_items=msg.get("codex_reasoning_items") if role == "assistant" else None,
                     codex_message_items=msg.get("codex_message_items") if role == "assistant" else None,
                     timestamp=_row_timestamp,
+                    platform_message_id=platform_message_id,
                 )
                 msg[_DB_PERSISTED_MARKER] = True
             # The intrinsic markers are now the sole source of truth. Reset the
@@ -5768,6 +5801,7 @@ class AIAgent:
         persist_user_message: Optional[str] = None,
         persist_user_timestamp: Optional[float] = None,
         moa_config: Optional[dict[str, Any]] = None,
+        reuse_current_user_message: bool = False,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         from agent.conversation_loop import run_conversation
@@ -5781,6 +5815,7 @@ class AIAgent:
             persist_user_message,
             persist_user_timestamp=persist_user_timestamp,
             moa_config=moa_config,
+            reuse_current_user_message=reuse_current_user_message,
         )
 
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:

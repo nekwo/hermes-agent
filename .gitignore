@@ -118,6 +118,7 @@ docs/superpowers/*
 # bootstrap installer. It is Hermes-managed runtime state, never a code change —
 # ignore it so `hermes update`'s `git stash push --include-untracked` does not
 # treat it as a local edit and autostash it on every run (#38529).
+.install_method
 .hermes-bootstrap-complete
 
 # Interrupted-update breadcrumb + recovery lock written next to the shared venv

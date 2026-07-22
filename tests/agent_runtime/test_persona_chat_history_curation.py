@@ -85,6 +85,38 @@ def test_decision_dict_collapses_to_summary_and_rationale():
     assert "payload" not in rows[0]["text"]
 
 
+def test_compression_lineage_projection_hides_summary_and_deduplicates_turn():
+    db = FakeSessionDB(
+        [
+            {"role": "user", "content": "continue", "client_message_id": "turn-1"},
+            {"role": "user", "content": "continue", "client_message_id": "turn-1"},
+            {
+                "role": "assistant",
+                "content": "[CONTEXT COMPACTION — REFERENCE ONLY] internal summary",
+                "client_message_id": "turn-1:assistant:0",
+            },
+            {
+                "role": "assistant",
+                "content": "done",
+                "client_message_id": "turn-1:assistant:2",
+            },
+            {
+                "role": "assistant",
+                "content": "done",
+                "client_message_id": "turn-1:assistant:4",
+            },
+        ]
+    )
+
+    rows, status = _safe_recent_messages(db, session_id="s1")
+
+    assert status == "safe"
+    assert [(row["role"], row["text"]) for row in rows] == [
+        ("operator", "continue"),
+        ("agent", "done"),
+    ]
+
+
 def test_internal_scaffolding_operator_rows_are_dropped():
     db = FakeSessionDB(
         [
@@ -140,6 +172,41 @@ def test_tool_system_and_empty_rows_are_dropped():
     )
     rows, _ = _safe_recent_messages(db, session_id="s1")
     assert [r["role"] for r in rows] == ["agent"]
+
+
+def test_pre_trace_ack_marker_projects_typed_kind():
+    # The canned "I'll … then report back with …" ack is persisted with a
+    # finish_reason marker so the projection stamps a typed kind. The Launcher
+    # drops/collapses the ack by kind instead of matching its (tool-specific,
+    # drifting) prose.
+    ack = "I'll load the relevant guidance first, then report back with the useful part."
+    db = FakeSessionDB(
+        [
+            {"role": "user", "content": "what skills are loaded"},
+            {"role": "assistant", "content": ack, "finish_reason": "pre_trace_ack"},
+            {"role": "assistant", "content": "Currently one skill is loaded: hermes-agent."},
+        ]
+    )
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+    ack_rows = [r for r in rows if r.get("kind") == "pre_trace_ack"]
+    assert len(ack_rows) == 1
+    assert ack_rows[0]["role"] == "agent"
+    assert ack_rows[0]["text"] == ack
+    # The real reply carries no pre_trace_ack kind.
+    assert not any(
+        r.get("kind") == "pre_trace_ack" and "Currently one skill" in r["text"]
+        for r in rows
+    )
+
+
+def test_pre_trace_ack_without_marker_has_no_typed_kind():
+    # Legacy rows persisted before the marker carry no kind; the projection never
+    # guesses a kind from prose (the Launcher text fallback handles those).
+    ack = "I'll check that now and report back with what I find."
+    db = FakeSessionDB([{"role": "assistant", "content": ack}])
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+    assert len(rows) == 1
+    assert "kind" not in rows[0]
 
 
 def test_unparseable_raw_dict_is_not_shown():
@@ -1401,4 +1468,49 @@ def _chat_persona_instance(instance_id: str, persona_id: str, session_id: str) -
         state=WorkerSessionState.IDLE,
         mode="chat",
         session_id=session_id,
+        default_chat_session_id=session_id,
     )
+
+
+def test_safe_recent_messages_tags_relay_marker_on_operator_row():
+    # A relayed incoming row (role=user) carries the sender identity in
+    # finish_reason; the read side surfaces it as a typed kind + sender fields,
+    # while a plain operator row (finish_reason=None) is byte-identical to today.
+    from agent_runtime.persona_chat_history import PERSONA_RELAYED_MESSAGE_KIND
+
+    db = FakeSessionDB(
+        [
+            {
+                "id": "m1",
+                "role": "user",
+                "content": "From Neko: status?",
+                "finish_reason": "relay_from:neko:personainst_neko",
+                "platform_message_id": "cm-relay-1",
+                "created_at": "2026-07-18T00:00:00Z",
+            },
+            {
+                "id": "m2",
+                "role": "user",
+                "content": "Operator: ping",
+                "platform_message_id": "cm-op-1",
+                "created_at": "2026-07-18T00:01:00Z",
+            },
+        ]
+    )
+    rows, status = _safe_recent_messages(
+        db, session_id="persona_chat_personainst_qa_abc123def456"
+    )
+    assert status == "safe"
+
+    relayed = [row for row in rows if row.get("kind") == PERSONA_RELAYED_MESSAGE_KIND]
+    assert len(relayed) == 1
+    assert relayed[0]["role"] == "operator"
+    assert relayed[0]["relay_sender_persona_id"] == "neko"
+    assert relayed[0]["relay_sender_instance_id"] == "personainst_neko"
+
+    plain = [row for row in rows if row.get("client_message_id") == "cm-op-1"]
+    assert len(plain) == 1
+    assert "kind" not in plain[0]
+    assert "relay_sender_persona_id" not in plain[0]
+    # Both are turn openers on the operator lane — turn_seq stamping unchanged.
+    assert relayed[0]["turn_seq"] == plain[0]["turn_seq"]

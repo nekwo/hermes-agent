@@ -129,7 +129,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
                 )
         return {}
 
-    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+    from agent.usage_pricing import CanonicalUsage, estimate_usage_cost, record_api_call_usage
 
     input_tokens = _coerce_usage_int(usage.get("inputTokens"))
     cache_read_tokens = _coerce_usage_int(usage.get("cachedInputTokens"))
@@ -177,6 +177,7 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+    record_api_call_usage(agent, canonical_usage)
 
     cost_result = estimate_usage_cost(
         agent.model,

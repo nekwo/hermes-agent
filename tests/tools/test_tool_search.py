@@ -295,14 +295,53 @@ class TestBridgeDispatch:
         result = dispatch_tool_describe({}, current_tool_defs=[])
         assert "error" in json.loads(result)
 
-    def test_tool_describe_rejects_non_deferrable(self):
-        """If the model asks to describe a core tool, refuse — it's already
-        in the visible list."""
+    def test_tool_describe_serves_core_tool_full_docs(self):
+        """T6b: tool_describe now serves the FULL docs for a core tool whose
+        wire schema ships a brief. It reads the full text from the fork-owned
+        mirror and the live (untrimmed) parameter schema off the registry."""
+        from tools.registry import discover_builtin_tools
+        discover_builtin_tools()
         from tools.tool_search import dispatch_tool_describe
-        result = dispatch_tool_describe(
-            {"name": "terminal"}, current_tool_defs=[_td("terminal", "Run shell")],
+        result = json.loads(
+            dispatch_tool_describe({"name": "session_search"}, current_tool_defs=[])
         )
-        assert "error" in json.loads(result)
+        assert "error" not in result
+        # Full original text, not the trimmed brief.
+        assert "SOURCE-FIRST LIMIT" in result["description"]
+        assert "FOUR CALLING SHAPES" in result["description"]
+        # Parameters are never trimmed — live schema is returned.
+        assert result["parameters"].get("properties")
+
+    def test_tool_describe_unknown_tool_errors(self):
+        from tools.tool_search import dispatch_tool_describe
+        result = json.loads(
+            dispatch_tool_describe({"name": "zzz_not_a_tool"}, current_tool_defs=[])
+        )
+        assert "error" in result
+
+    def test_tool_describe_schema_is_fixed_and_tiny(self):
+        from tools.tool_search import tool_describe_schema, TOOL_DESCRIBE_NAME
+        schema = tool_describe_schema()
+        fn = schema["function"]
+        assert fn["name"] == TOOL_DESCRIBE_NAME
+        assert list(fn["parameters"]["properties"]) == ["name"]
+        assert fn["parameters"]["required"] == ["name"]
+
+    def test_ensure_tool_describe_present_is_idempotent(self):
+        from tools.tool_search import (
+            ensure_tool_describe_present, tool_describe_schema, TOOL_DESCRIBE_NAME,
+        )
+        base = [_td("terminal", "Run shell")]
+        once = ensure_tool_describe_present(base)
+        names = [(t.get("function") or {}).get("name") for t in once]
+        assert names.count(TOOL_DESCRIBE_NAME) == 1
+        twice = ensure_tool_describe_present(once)
+        names2 = [(t.get("function") or {}).get("name") for t in twice]
+        assert names2.count(TOOL_DESCRIBE_NAME) == 1
+        # Never mutates the input list.
+        assert TOOL_DESCRIBE_NAME not in [
+            (t.get("function") or {}).get("name") for t in base
+        ]
 
     def test_resolve_underlying_call_parses_object_args(self):
         from tools.tool_search import resolve_underlying_call

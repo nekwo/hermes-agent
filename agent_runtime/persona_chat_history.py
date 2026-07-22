@@ -9,8 +9,29 @@ from .mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_re
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction_mode import redaction_observe_enabled
+from .relay_policy import parse_relay_sender_marker
+from .transcript_order import (
+    TURN_SEQ_CONTENT,
+    TURN_SEQ_OPERATOR,
+    TURN_SEQ_TERMINAL,
+    order_transcript_rows,
+)
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
+# Structural marker for the canned "I'll … then report back with …" pre-trace
+# acknowledgment the persona-chat turn writes ahead of the real LLM reply. The
+# ack text is tool-specific (several variants) and changes over time, so we stamp
+# a machine flag at persist time (``finish_reason``) and re-emit it as a typed
+# message ``kind`` through every projection. Consumers (operator conversation,
+# the Launcher) key on the kind instead of matching the prose.
+PERSONA_PRE_TRACE_ACK_FINISH_REASON = "pre_trace_ack"
+PERSONA_PRE_TRACE_ACK_KIND = "pre_trace_ack"
+
+# Typed kind for an incoming role="user" row that a relay tagged with the
+# sending agent's identity (finish_reason=relay_from:<persona>:<instance>). The
+# conversation projection keys on this to attribute the message to the sending
+# AGENT instead of the operator. See agent_runtime/relay_policy.py.
+PERSONA_RELAYED_MESSAGE_KIND = "relayed_message"
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
 DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
 MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
@@ -62,10 +83,9 @@ def persona_chat_history_summary(
         persona_id = _canonical_persona_id(getattr(instance, "persona_id", None))
         if persona_id:
             instances_by_persona[persona_id] = instance
-        mode = safe_assignment_token(getattr(instance, "mode", None))
-        if mode not in _CHAT_INSTANCE_MODES:
-            continue
-        session_id = safe_assignment_text(getattr(instance, "session_id", None), limit=200)
+        session_id = safe_assignment_text(
+            getattr(instance, "default_chat_session_id", None), limit=200
+        )
         if session_id:
             bound_by_session[session_id] = instance
 
@@ -100,6 +120,11 @@ def persona_chat_history_summary(
         if not session_id or session_id in seen:
             continue
         is_source_chat = safe_assignment_token(raw.get("source")) == PERSONA_CHAT_SESSION_SOURCE
+        root_meta = _model_config(raw.get("model_config")).get("mission_chat_root_id")
+        if root_meta and safe_assignment_text(root_meta, limit=200) != session_id:
+            # Compression descendants are projected through their stable root.
+            seen.add(session_id)
+            continue
         # Only persona-chat sessions and sessions bound to a live instance are
         # candidates for this projection. Unrelated SessionDB sources (cron,
         # telegram, cli, scratch) can never render as chat rows — counting them
@@ -208,6 +233,44 @@ def persona_chat_history_summary(
             break
 
     return rows
+
+
+def persona_chat_session_messages(
+    *,
+    session_id: str,
+    limit: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+    session_db: Any | None = None,
+) -> dict[str, Any]:
+    """Paged on-demand read of one persona chat session's message tail.
+
+    Backs ``harness persona chat history`` — the fetch that replaces the message
+    tail S2 evicts from the steady-state frame. Reuses the exact curation the
+    in-frame projection used (``_safe_recent_messages``), so the fetched tail is
+    identical to what ``persona_chat_history[].messages`` used to carry. The log
+    IS the history: no new storage, just a per-session read of the durable
+    SessionDB the frame previously projected inline.
+    """
+
+    bounded = _bounded_message_tail(limit)
+    db = session_db or _default_session_db()
+    if db is None:
+        return {
+            "ok": True,
+            "session_id": session_id,
+            "limit": bounded,
+            "count": 0,
+            "redaction_status": "safe",
+            "messages": [],
+        }
+    messages, status = _safe_recent_messages(db, session_id=session_id, limit=bounded)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "limit": bounded,
+        "count": len(messages),
+        "redaction_status": status,
+        "messages": messages,
+    }
 
 
 def persona_chat_trace_summary(
@@ -541,6 +604,38 @@ def _history_row(
         limit=180,
     )
     messages, messages_status = _safe_recent_messages(session_db, session_id=session_id, limit=message_tail)
+    active_session_id = session_id
+    try:
+        active_session_id = session_db.resolve_resume_session_id(session_id)
+    except Exception:
+        pass
+    try:
+        from .persona_chat_continuity import (
+            native_lineage_summary,
+            persona_chat_runtime_registry,
+        )
+
+        registry = persona_chat_runtime_registry()
+        lineage = native_lineage_summary(session_db, session_id)
+        runtime = (
+            registry.observation(session_id, owning_process=True)
+            if registry is not None
+            else {
+                "runtime_state": "unknown",
+                "runtime_observer_id": "external_cli",
+            }
+        )
+    except Exception:
+        lineage = {"active_session_id": active_session_id, "continuation_depth": 0}
+        runtime = {
+            "runtime_state": "unknown",
+            "runtime_observer_id": "external_cli",
+        }
+    lineage_aggregate = _lineage_aggregate(
+        session_db,
+        root_session_id=session_id,
+        active_session_id=lineage["active_session_id"],
+    )
     redaction_status = (
         "would_redact"
         if "would_redact" in {title_status, preview_status, messages_status}
@@ -568,17 +663,79 @@ def _history_row(
         "live_mission": bool(kind == "mission" or raw.get("live_mission")),
         "title": title,
         "last_message_preview": preview,
-        "message_count": _safe_int(raw.get("message_count")),
+        "message_count": lineage_aggregate.get(
+            "message_count", _safe_int(raw.get("message_count"))
+        ),
         "created_at": _iso_timestamp(raw.get("started_at")),
-        "updated_at": _iso_timestamp(raw.get("last_active") or raw.get("ended_at") or raw.get("started_at")),
+        "updated_at": _iso_timestamp(
+            lineage_aggregate.get("last_active")
+            or raw.get("last_active")
+            or raw.get("ended_at")
+            or raw.get("started_at")
+        ),
         "state": "archived" if bool(raw.get("archived")) else "open",
         "redaction_status": redaction_status,
         **({"would_redact": would_redact} if would_redact else {}),
-        **_token_usage_fields(raw),
+        **_token_usage_fields({**raw, **lineage_aggregate}),
         **_chat_model_fields(raw),
         **_cache_policy_fields(raw),
         "messages": messages,
+        "root_chat_session_id": session_id,
+        "active_session_id": lineage["active_session_id"],
+        "runtime_state": runtime.get("runtime_state", "unknown"),
+        "last_runtime_transition": runtime.get("last_runtime_transition"),
+        "runtime_observer_id": runtime.get("runtime_observer_id"),
+        "runtime_observed_at": runtime.get("runtime_observed_at"),
+        "continuation_depth": lineage["continuation_depth"],
+        "last_resumed_at": runtime.get("last_resumed_at"),
     }
+
+
+def _lineage_aggregate(
+    session_db: Any | None,
+    *,
+    root_session_id: str,
+    active_session_id: str,
+) -> dict[str, Any]:
+    """Aggregate usage/activity exactly once across root→compression tip."""
+
+    if session_db is None:
+        return {}
+    current = active_session_id
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    while current and current not in seen:
+        seen.add(current)
+        try:
+            row = session_db.get_session(current)
+        except Exception:
+            return {}
+        if not isinstance(row, dict):
+            return {}
+        rows.append(row)
+        if current == root_session_id:
+            break
+        current = safe_assignment_text(row.get("parent_session_id"), limit=240)
+    if not rows or current != root_session_id:
+        return {}
+    result: dict[str, Any] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "message_count",
+    ):
+        result[key] = sum(_safe_int(row.get(key)) for row in rows)
+    activity = [
+        _iso_timestamp(
+            row.get("last_active") or row.get("ended_at") or row.get("started_at")
+        )
+        for row in rows
+    ]
+    result["last_active"] = max((item for item in activity if item), default=None)
+    return result
 
 
 def _cache_policy_fields(raw: dict[str, Any]) -> dict[str, Any]:
@@ -721,12 +878,22 @@ def _safe_recent_messages(
     if session_db is None:
         return [], "safe"
     try:
-        raw_messages = session_db.get_messages(session_id)
+        lineage_loader = getattr(session_db, "get_messages_as_conversation", None)
+        try:
+            native_tip = session_db.resolve_resume_session_id(session_id)
+        except Exception:
+            native_tip = session_id
+        raw_messages = (
+            lineage_loader(native_tip, include_ancestors=True)
+            if callable(lineage_loader)
+            else session_db.get_messages(session_id)
+        )
     except Exception:
         return [], "safe"
     rows: list[dict[str, Any]] = []
     redacted = False
     assistant_client_message_ids: set[str] = set()
+    seen_logical_rows: set[tuple[str, str, str]] = set()
     # Curate the agent's raw working transcript into an operator-facing one.
     # The bound session is the agent's internal session, so its raw rows are
     # verbose tick-context prompts (role=user) and serialized decision dicts
@@ -739,7 +906,9 @@ def _safe_recent_messages(
         if role not in {"operator", "agent"}:
             continue
         client_message_id = safe_assignment_text(
-            raw.get("platform_message_id") or raw.get("client_message_id"),
+            raw.get("platform_message_id")
+            or raw.get("message_id")
+            or raw.get("client_message_id"),
             limit=240,
         )
         if role == "agent" and client_message_id:
@@ -771,8 +940,48 @@ def _safe_recent_messages(
             ),
             "redaction_status": status,
         }
+        # PRE-C8 RESIDUE PATH: acks stopped entering SessionDB with C8 (they
+        # are a presentation-only `turn.ack` stream frame now), but rows
+        # persisted before that still carry the finish_reason marker
+        # (archive-never-delete). Keep re-emitting the typed kind so the
+        # Launcher's persisted-row render path can keep suppressing them
+        # structurally. New turns can never take this branch.
+        is_pre_trace_ack = role == "agent" and (
+            safe_assignment_token(raw.get("finish_reason"))
+            == PERSONA_PRE_TRACE_ACK_FINISH_REASON
+        )
+        if is_pre_trace_ack:
+            row["kind"] = PERSONA_PRE_TRACE_ACK_KIND
+        # RELAY SENDER ATTRIBUTION: an incoming role="user" row persisted by the
+        # agent_chat_send relay lane carries the sending agent's identity in
+        # finish_reason (relay_from:<persona>:<instance>) — the same typed-marker
+        # -in-finish_reason precedent as the pre_trace_ack rows above. Surface it
+        # as a typed kind + sender fields so the conversation projection can
+        # attribute the message to the sending AGENT rather than the operator.
+        # Operator/CLI sends (finish_reason=None) parse to None → skipped, so the
+        # operator row is byte-identical to today.
+        if role == "operator":
+            relay_sender = parse_relay_sender_marker(raw.get("finish_reason"))
+            if relay_sender is not None:
+                row["kind"] = PERSONA_RELAYED_MESSAGE_KIND
+                row["relay_sender_persona_id"] = relay_sender.persona_id
+                row["relay_sender_instance_id"] = relay_sender.instance_id
         if client_message_id:
+            logical_client_id = re.sub(r":assistant:\d+$", "", client_message_id)
+            logical_key = (role, logical_client_id, text)
+            if logical_key in seen_logical_rows:
+                continue
+            seen_logical_rows.add(logical_key)
             row["client_message_id"] = client_message_id
+            # C8 ordering key: the turn anchor is the client_message_id; the
+            # intra-turn position is stamped HERE (one authority) — the
+            # operator message opens its turn, the recorded reply closes it.
+            # Elements between them carry the emitter's 1..N seq. Pre-C8 ack
+            # rows carry no anchor and stay on the fallback order.
+            if role == "operator":
+                row["turn_seq"] = TURN_SEQ_OPERATOR
+            elif role == "agent" and not is_pre_trace_ack:
+                row["turn_seq"] = TURN_SEQ_TERMINAL
         if role == "agent" and client_message_id:
             elements = mission_chat_turn_elements(
                 session_id=session_id,
@@ -819,24 +1028,39 @@ def _interrupted_turn_rows(
                 "redaction_status": "safe",
                 "client_message_id": client_message_id,
                 "turn_id": turn_id,
+                # C8 ordering key: the interrupt marker is the turn's terminal
+                # row (a turn has a reply or an interrupt, never both).
+                "turn_seq": TURN_SEQ_TERMINAL,
             }
         )
     return rows
 
 
 def _ordered_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # Merge synthesized rows into the transcript by timestamp, keeping the
-    # original order as the tie-breaker. A row without a parseable timestamp
-    # inherits the preceding row's, so it holds its transcript position instead
-    # of front-loading (where the tail bound would evict it first).
-    keyed: list[tuple[str, int, dict[str, Any]]] = []
+    # C8: ONE ordering authority. Rows carrying the turn key (anchor =
+    # client_message_id, position = turn_seq) sort by that key inside their
+    # turn — the operator row first, elements by emitter seq, the terminal
+    # reply/interrupt last — regardless of clock skew between SessionDB stamps
+    # and turn-store settle times (the F17 reorder seam). Rows that predate the
+    # key keep the pre-C8 fallback: timestamp order with the original index as
+    # tie-breaker, a row without a parseable timestamp inheriting the preceding
+    # row's so it holds its transcript position instead of front-loading.
+    fallback: list[tuple[str, int]] = []
     last_timestamp = ""
     for index, row in enumerate(rows):
         timestamp = str(row.get("timestamp") or "") or last_timestamp
         last_timestamp = timestamp
-        keyed.append((timestamp, index, row))
-    keyed.sort(key=lambda item: (item[0], item[1]))
-    return [row for _, _, row in keyed]
+        fallback.append((timestamp, index))
+    return order_transcript_rows(
+        rows,
+        # Token-normalized so the anchor is byte-equal to the `turn_id` the
+        # emitter/turn store mint from the same client_message_id.
+        anchor=lambda row: safe_assignment_token(row.get("client_message_id")) or None,
+        turn_seq=lambda row: row.get("turn_seq")
+        if isinstance(row.get("turn_seq"), int)
+        else None,
+        fallback_key=lambda _row, index: fallback[index],
+    )
 
 
 def _iso_timestamp(value: Any) -> str | None:
@@ -917,12 +1141,20 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
     summary = _trace_summary(event_type, payload)
     status = _safe_trace_text(payload.get("status") or payload.get("to") or payload.get("exit_code"), limit=80)
     files = _safe_trace_file_labels(payload.get("changed_files") or payload.get("files_touched"))
+    turn_id = safe_assignment_text(
+        getattr(event, "turn_id", None) or payload.get("turn_id"), limit=160
+    )
     return {
         "kind": "harness_trace",
         "task_id": safe_assignment_text(getattr(event, "task_id", None), limit=160),
         "persona_id": safe_assignment_token(getattr(event, "persona_id", None)) or "unknown",
         "run_id": safe_assignment_text(getattr(event, "run_id", None), limit=160),
-        "turn_id": safe_assignment_text(getattr(event, "turn_id", None) or payload.get("turn_id"), limit=160),
+        "turn_id": turn_id,
+        # C8 ordering key: turn-anchored trace content sits in the content band
+        # (after the turn's operator row, before its terminal reply) so the
+        # launcher's history+trace merge sorts on the key, never on the skew
+        # between SessionDB stamps and this trace clock (F17).
+        **({"turn_seq": TURN_SEQ_CONTENT} if turn_id else {}),
         "stage_id": _safe_trace_text(payload.get("stage_id"), limit=120),
         "event": trace_event,
         "tool_name": tool_name,
@@ -945,6 +1177,12 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
             else _safe_trace_operator_line(payload.get("reasoning_summary"), limit=500)
         ),
         "target": _safe_trace_operator_line(payload.get("target_label"), limit=300),
+        # First-class agent-to-agent dispatch (G2): structured target persona +
+        # the FULL order, carried straight from the agent_chat_send progress
+        # payload. dispatch_order keeps its newline structure (block scrub), so
+        # the console renders the whole briefing, not the 90-char target excerpt.
+        "dispatch_target": _safe_trace_operator_line(payload.get("dispatch_target"), limit=120),
+        "dispatch_order": _safe_trace_operator_block(payload.get("dispatch_order"), limit=1500),
         "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
         "output": _safe_trace_operator_block(payload.get("output"), limit=1600),
         "paths": _safe_trace_operator_paths(payload.get("changed_paths")),
@@ -1123,6 +1361,7 @@ _INTERNAL_SCAFFOLDING_MARKERS = (
     "## Task Snapshot",
     "Repo-Grounded Execution",
     "Prior persona chat context",
+    "[CONTEXT COMPACTION — REFERENCE ONLY]",
 )
 
 
@@ -1142,6 +1381,8 @@ def _curate_chat_message_text(role: str, content: Any) -> str | None:
         text = _safe_chat_body_text(content, limit=PERSONA_CHAT_MESSAGE_TEXT_LIMIT)
         if not text or text.startswith("{"):
             # Empty assistant turn or an unparseable raw dict — not presentable.
+            return None
+        if any(marker in text for marker in _INTERNAL_SCAFFOLDING_MARKERS):
             return None
         return text
     if role == "operator":

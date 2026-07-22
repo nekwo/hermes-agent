@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from agent.skill_utils import (
     extract_skill_conditions,
     get_disabled_skill_names,
@@ -11,8 +13,98 @@ from agent.skill_utils import (
     is_skill_support_path,
     iter_skill_index_files,
     resolve_skill_config_values,
+    required_preload_skill_ids,
+    resolve_skill,
+    skill_package_content_hash,
+    skill_runtime_compatibility,
     skill_matches_platform,
 )
+
+
+def _write_skill(root, name, *, modes=None, load_policy=None):
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True)
+    metadata = ""
+    if modes or load_policy:
+        metadata = (
+            "metadata:\n  hermes:\n    surfaces: [mission_chat]\n"
+            f"    modes: [{', '.join(modes or ['standard'])}]\n"
+            f"    load_policy: {load_policy or 'recommended'}\n"
+        )
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: test\n{metadata}---\nbody\n",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
+def test_canonical_resolver_reports_collision_and_exact_hash(tmp_path):
+    local = tmp_path / "local"
+    shared = tmp_path / "shared"
+    local.mkdir()
+    shared.mkdir()
+    _write_skill(local, "same")
+    shared_skill = _write_skill(shared, "shared-only")
+
+    resolved = resolve_skill("shared-only", roots=[local, shared])
+    assert resolved.status == "resolved"
+    assert resolved.candidate is not None
+    assert skill_package_content_hash(resolved.candidate.skill_dir, resolved.candidate.skill_md)
+
+    _write_skill(shared, "same")
+    assert resolve_skill("same", roots=[local, shared]).status == "collision"
+
+
+def test_runtime_compatibility_rejects_root_only_skill_in_standard_chat(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    _write_skill(root, "lead", modes=["root_node"])
+    candidate = resolve_skill("lead", roots=[root]).candidate
+
+    assert skill_runtime_compatibility(
+        candidate, surface="mission_chat", root_node_mode=False
+    )["reason"] == "mode_not_supported"
+
+
+def test_canonical_harness_skill_refuses_non_shared_source_and_duplicates(
+    tmp_path, monkeypatch
+):
+    import agent.skill_utils as skill_utils
+
+    local = tmp_path / "local"
+    shared = tmp_path / "shared"
+    local.mkdir()
+    shared.mkdir()
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    _write_skill(local, "harness-runtime-model")
+
+    assert resolve_skill(
+        "harness-runtime-model", roots=[local, shared]
+    ).status == "invalid_source"
+
+    _write_skill(shared, "harness-runtime-model")
+    assert resolve_skill(
+        "harness-runtime-model", roots=[local, shared]
+    ).status == "collision"
+
+
+def test_required_preload_policy_uses_resolver_and_compatibility(tmp_path, monkeypatch):
+    import agent.skill_utils as skill_utils
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [shared])
+    _write_skill(
+        shared,
+        "harness-runtime-model",
+        modes=["standard"],
+        load_policy="required_preload",
+    )
+
+    assert required_preload_skill_ids(
+        ["harness-runtime-model"], surface="mission_chat"
+    ) == ["harness-runtime-model"]
 
 
 def test_metadata_as_dict_with_hermes():

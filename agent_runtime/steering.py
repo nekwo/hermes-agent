@@ -98,7 +98,7 @@ def execute_steer_action(
     requested_by: str = "operator",
     reason: str = "operator steer",
 ) -> dict[str, Any]:
-    from .snapshot import build_snapshot
+    from .snapshot import agent_topology_for_task
 
     task_store = TaskStore()
     event_log = EventLog()
@@ -116,9 +116,10 @@ def execute_steer_action(
     if ref is None:
         return _steer_failed(task, None, "invalid_request", "A steer action id or verb/source/target is required.", event_log=event_log)
 
-    snap = build_snapshot()
-    task_row = next((item for item in snap.get("tasks", []) if item.get("task_id") == task.id), None)
-    topology = ((task_row or {}).get("mission_level_state") or {}).get("agent_topology") or {}
+    # S4: agent_topology is no longer shipped in the snapshot frame (it was a
+    # derived copy of steering truth). Re-derive it on demand from the stores —
+    # one producer (``_agent_topology``), computed only when an operator steers.
+    topology = agent_topology_for_task(task)
     action = _matching_available_action(topology.get("steer_actions") or [], ref)
     if action is None:
         return _steer_failed(task, ref, "action_unavailable", "Steer action is not available in the current topology/state.", event_log=event_log)
@@ -303,7 +304,7 @@ def _spawn_target_helper(task: Task, action: dict, *, actor: str, reason: str, e
         _log_cap(task, "max_depth", source_instance_id, event_log=event_log)
         raise ValueError("spawn depth cap reached")
     store = PersonaInstanceStore(event_log=event_log)
-    children = [item for item in store.list_all() if item.spawned_by == source_instance_id and item.goal_id == task.id]
+    children = [item for item in store.list_all() if source_instance_id in _parent_ids(item) and item.goal_id == task.id]
     if len(children) >= DEFAULT_MAX_CHILDREN_PER_STEERER:
         _log_cap(task, "max_children_per_steerer", source_instance_id, event_log=event_log)
         raise ValueError("spawn fan-out cap reached")
@@ -411,21 +412,38 @@ def _stage_by_id(task: Task, stage_id: str | None):
     return next((item for item in plan.stages if item.id == stage_id), None)
 
 
+def _parent_ids(instance) -> list[str]:
+    """Steering-parent ids of an instance (multi-parent fan-in aware): the
+    authoritative ``steered_by`` set, falling back to the legacy scalar
+    ``spawned_by`` for un-migrated records."""
+    parents = list(getattr(instance, "steered_by", []) or [])
+    if not parents:
+        scalar = getattr(instance, "spawned_by", None)
+        if scalar:
+            parents = [scalar]
+    return parents
+
+
 def _steer_depth(instance_id: str) -> int:
+    # Longest parent chain from this node upward, over the multi-parent steering
+    # DAG (max across every parent), so the spawn depth cap still holds when a
+    # child fans in from several parents.
     store = PersonaInstanceStore()
-    depth = 0
-    cursor = instance_id
-    seen = set()
-    while cursor and cursor not in seen:
-        seen.add(cursor)
+
+    def depth_of(node_id: str, seen: frozenset[str]) -> int:
+        if not node_id or node_id in seen:
+            return 0
+        seen = seen | {node_id}
         try:
-            instance = store.get(cursor)
+            instance = store.get(node_id)
         except Exception:
-            return depth
-        cursor = instance.spawned_by
-        if cursor:
-            depth += 1
-    return depth
+            return 0
+        parents = _parent_ids(instance)
+        if not parents:
+            return 0
+        return 1 + max(depth_of(parent, seen) for parent in parents)
+
+    return depth_of(instance_id, frozenset())
 
 
 def _log_cap(task: Task, cap: str, source_instance_id: str, *, event_log: EventLog) -> None:

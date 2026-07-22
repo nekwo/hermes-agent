@@ -9,6 +9,28 @@ from .proof_rules import ProofType
 from .states import PossessionState, RunState, StageStatus, TaskState, WorkerSessionState
 
 
+# The structural prefix every persona-instance id carries. Defined at this low
+# layer (no import back into persona_assignments, which would be a cycle) so the
+# PersonaInstance backfill can recognize instance-shaped tokens. The id authority
+# in ``persona_assignments`` re-exports this constant + predicate; do not fork a
+# second copy.
+PERSONA_INSTANCE_ID_PREFIX = "personainst_"
+
+
+def looks_like_persona_instance_id(token: object) -> bool:
+    """True when ``token`` is structurally a persona-instance id (``personainst_*``).
+
+    A steering-parent SET (``steered_by``) and its denormalized mirror
+    (``spawned_by``) may hold ONLY these. A non-instance principal — the
+    operator, a bare persona/role token, any provenance string — is never a
+    steering parent, so it must never be mirrored into a steering field from
+    provenance. Read projections filter on this predicate so a legacy row that
+    already carries such a value renders as an accounted anomaly, never as a
+    phantom "steered by <principal>" edge.
+    """
+    return isinstance(token, str) and token.strip().startswith(PERSONA_INSTANCE_ID_PREFIX)
+
+
 @dataclass(slots=True)
 class MissionIntent:
     title: str
@@ -148,8 +170,159 @@ class Realm:
     default_workspace_name: str = "Default"
     default_workspace_version: int = 0
     workspace_ids: list[str] = field(default_factory=list)
+    # Resurrection-guard ledger (ids only, bounded): workspaces DELETED from
+    # this realm. Travels inside the realm JSON through realm sync so a member
+    # that still holds a local copy neither republishes it nor re-adopts it on
+    # pull (the Board.archived_card_ids / OfficeSurface.archived_actor_keys
+    # idiom, lifted to workspace granularity).
+    deleted_workspace_ids: list[str] = field(default_factory=list)
+    # Which shared skills publish to this realm. Mode "all" (default,
+    # back-compat) publishes every skill in the shared catalog including
+    # future ones; "selected" publishes exactly skill_selection (empty list =
+    # publish none). Travels realm-wide via realm sync (NOT an authority
+    # field) — the selection is realm truth, converged last-publisher-wins.
+    # Kept sorted + deduped at every write chokepoint
+    # (RealmStore.set_skill_selection); slugs unknown to a member's local
+    # catalog are preserved, never stripped, on an unrelated save.
+    skill_publish_mode: str = "all"  # "all" | "selected"
+    skill_selection: list[str] = field(default_factory=list)
     sync_manifest_ref: str | None = None
     archived: bool = False
+    schema_version: int = 1
+
+
+@dataclass(slots=True)
+class BoardColumn:
+    """A value object living inside ``board.json`` (never its own file).
+
+    Default columns use FIXED ids + deterministic content so two machines
+    lazily creating the same default board converge on identical semantic
+    content instead of conflicting on first realm sync. Behavior binds to
+    ``kind`` (queued/active/review/done/custom), never to ``title``.
+    """
+
+    column_id: str
+    title: str
+    kind: str = "custom"
+    wip_limit: int | None = None  # soft — surfaces a warning, never blocks
+
+
+@dataclass(slots=True)
+class BoardCard:
+    """One planning card — one file each under ``boards/<board_id>/cards/``.
+
+    A card is a PLANNING artifact only: its column is planning state and never
+    mutates a goal. ``linked_goal_id`` is a read-only reflection pointer (the
+    card stores the id, never a cached goal state). ``created_by`` attribution
+    is first-class so operator- and agent-authored cards render distinctly.
+    """
+
+    card_id: str
+    board_id: str
+    column_id: str
+    title: str
+    order_key: str
+    description: str = ""
+    priority: str = "p2"  # "p0".."p3"
+    labels: list[str] = field(default_factory=list)
+    assignee: str | None = None  # persona_id or "operator"
+    checklist: list[dict[str, Any]] = field(default_factory=list)  # [{text, done}]
+    linked_goal_id: str | None = None
+    state: str = "active"  # "active" | "archived"
+    created_by: str = "operator"  # "operator" | persona_id
+    revision: int = 1
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    updated_by: str = "operator"
+    schema_version: int = 1
+
+
+@dataclass(slots=True)
+class Board:
+    """A workspace-scoped kanban board (def + ordered columns + card ledger).
+
+    The default board id is deterministic (``board_default_<workspace_id>``) so
+    two machines converge on it. ``archived_card_ids`` is the resurrection-guard
+    ledger (ids only, bounded) that blocks a pulled remote copy from re-creating
+    a locally archived card.
+    """
+
+    board_id: str
+    workspace_id: str
+    title: str
+    columns: list[BoardColumn] = field(default_factory=list)
+    archived_card_ids: list[str] = field(default_factory=list)
+    revision: int = 1
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    updated_by: str = "operator"
+    schema_version: int = 1
+
+
+@dataclass(slots=True)
+class OfficeItem:
+    """One authored Mission Office scene item (agent character or its desk) —
+    a value object living inside its actor's file, never its own file.
+
+    Geometry is scene-space ``[x, y]``; ``scale`` is the operator-authored
+    render scale, clamped to the launcher's authorable range at the store
+    boundary. ``display_name`` is operator text and is validated against the
+    secret-assignment scanner at WRITE time (plan §4.2) so one member's name
+    can never fail another member's realm publish.
+    """
+
+    item_id: str
+    persona_id: str
+    kind: str = "agent"  # "agent" | "desk"
+    position: list[float] = field(default_factory=lambda: [0.0, 0.0])
+    folder: str = ""
+    display_name: str | None = None
+    pet_slug: str | None = None
+    scale: float = 1.0
+
+
+@dataclass(slots=True)
+class OfficeActor:
+    """One Mission Office actor placement — one file each under
+    ``office/<workspace>/actors/`` (the realm-sync merge unit).
+
+    ``actor_key`` is the canonical sync key minted ONLY by ``OfficeStore``
+    (``canonical_persona_instance_id`` for instance-bound actors, else the
+    persona id). The identity triple (persona/instance/profile) is the
+    payload truth — the filename is routing only. All scene items bound to
+    one actor (agent placements + coupled desks) live in this one file, so
+    actor granularity — not item granularity — is the merge unit.
+    """
+
+    actor_key: str
+    workspace_id: str
+    persona_id: str
+    persona_instance_id: str | None = None
+    backing_profile: str | None = None
+    items: list[OfficeItem] = field(default_factory=list)
+    state: str = "active"  # "active" | "archived"
+    revision: int = 1
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    updated_by: str = "operator"
+    schema_version: int = 1
+
+
+@dataclass(slots=True)
+class OfficeSurface:
+    """The per-workspace Mission Office surface definition — shared taxonomy
+    only (folders) + the resurrection-guard ledger. Personal view state
+    (viewport, collapsed docks, hidden ids) never enters this model — it stays
+    launcher-local by design (plan §4.4).
+    """
+
+    workspace_id: str
+    folders: list[str] = field(default_factory=list)
+    archived_actor_keys: list[str] = field(default_factory=list)
+    revision: int = 1
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    updated_by: str = "operator"
     schema_version: int = 1
 
 
@@ -306,7 +479,24 @@ class PersonaInstance:
     state: WorkerSessionState
     mode: str = "configured"
     goal_id: str | None = None
+    # Scope-provenance pointers: the Mission Control realm/workspace this
+    # instance belongs to, stamped at placement creation from the operator
+    # client's active scope (a deliberate placement is minted INSIDE one
+    # workspace's scene). None = runtime-global — canonical seeded rows and
+    # pre-pointer records. These are the instance's own "belongs to" claim;
+    # read-side consumers resolve the ids against the live realm/workspace
+    # stores and fall back to roster/goal joins, so a stale pointer degrades
+    # honestly instead of inventing scope.
+    realm_id: str | None = None
+    workspace_id: str | None = None
+    # Legacy scalar parent. Retained as a denormalized back-compat MIRROR of the
+    # primary steer parent (``steered_by[0]``); the PersonaInstanceStore is the
+    # single writer that keeps it in sync. New code reads ``steered_by``.
     spawned_by: str | None = None
+    # Authoritative living-graph parent SET (Stage 77 multi-parent fan-in): the
+    # persona-instance ids that steer this child. Empty = standalone owner.
+    # Back-filled from ``spawned_by`` for legacy v1 records in ``__post_init__``.
+    steered_by: list[str] = field(default_factory=list)
     returned_to: str | None = None
     current_chat_goal: str | None = None
     skill_overrides: list[str] | None = None
@@ -327,6 +517,12 @@ class PersonaInstance:
     current_task_id: str | None = None
     active_worker_session_id: str | None = None
     active_run_id: str | None = None
+    # Durable pointer to the operator-owned Mission Control chat root.  This is
+    # deliberately independent from worker/run sessions: a task bind may come
+    # and go without changing which operator conversation opens by default.
+    default_chat_session_id: str | None = None
+    # Legacy dual-purpose pointer.  Read only for v1 migration; new writers do
+    # not use it for either chat or worker ownership.
     session_id: str | None = None
     context_receipt_id: str | None = None
     compression_receipt_id: str | None = None
@@ -340,28 +536,64 @@ class PersonaInstance:
     updated_at: datetime | None = None
     schema_version: int = 1
 
+    def __post_init__(self) -> None:
+        # Back-compat: a legacy record (or any writer) that only set the scalar
+        # ``spawned_by`` seeds the authoritative ``steered_by`` set, so every
+        # reader sees a populated parent set. Idempotent — a writer that already
+        # set ``steered_by`` (mirroring ``spawned_by`` = steered_by[0]) is a
+        # no-op here. Kept out of ``upgrade()`` on purpose: schema_version stays
+        # 1 (serde's shared upgrade hook hard-rejects any other version).
+        #
+        # Guarded on instance-shape: ``spawned_by`` doubles as a provenance
+        # scalar and can legitimately hold a NON-instance principal (the
+        # operator). Mirroring that into ``steered_by`` is exactly the defect
+        # that made the HUD render "steered by operator" — a principal is not a
+        # steering parent, so only an instance-shaped scalar seeds the set.
+        if not self.steered_by and looks_like_persona_instance_id(self.spawned_by):
+            self.steered_by = [self.spawned_by]
+        if (
+            not self.default_chat_session_id
+            and isinstance(self.session_id, str)
+            and self.session_id.startswith("persona_chat_")
+        ):
+            self.default_chat_session_id = self.session_id
+
 
 def apply_instance_model_overrides(
     persona: AgentPersona, instance: PersonaInstance | None
 ) -> AgentPersona:
-    """Overlay a persona instance's model override tier onto its backing persona.
+    """Overlay an instance's runtime overrides onto its backing persona.
 
     Pure: returns a copy, never mutates. ``None`` on the instance means inherit
     the persona value live. Both the chat lane and the run/tick lane must
     resolve model/provider/api_mode through this single overlay so two
-    instances of one persona can run different models without drift between
-    the lanes.
+    instances of one persona can run different models or assigned skill sets
+    without drift between prompt observability and execution.
     """
 
     if instance is None:
         return persona
-    if instance.model is None and instance.provider is None and instance.api_mode is None:
+    instance_model = getattr(instance, "model", None)
+    instance_provider = getattr(instance, "provider", None)
+    instance_api_mode = getattr(instance, "api_mode", None)
+    instance_skills = getattr(instance, "skill_overrides", None)
+    if (
+        instance_model is None
+        and instance_provider is None
+        and instance_api_mode is None
+        and instance_skills is None
+    ):
         return persona
     return replace(
         persona,
-        model=instance.model if instance.model is not None else persona.model,
-        provider=instance.provider if instance.provider is not None else persona.provider,
-        api_mode=instance.api_mode if instance.api_mode is not None else persona.api_mode,
+        model=instance_model if instance_model is not None else persona.model,
+        provider=instance_provider if instance_provider is not None else persona.provider,
+        api_mode=instance_api_mode if instance_api_mode is not None else persona.api_mode,
+        skills=(
+            list(instance_skills)
+            if instance_skills is not None
+            else list(persona.skills)
+        ),
     )
 
 

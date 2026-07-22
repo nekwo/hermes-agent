@@ -71,17 +71,26 @@ def test_stage38_runtime_snapshot_matches_fixture_contract_shape(isolate_agent_r
 
     response = create_mission_goal_from_request(_load("goal_create_request.valid.json"))
     snapshot = build_snapshot()
-    row = next(item for item in snapshot["tasks"] if item["task_id"] == response["task_id"])
+    row = next(item for item in list(snapshot["goals"].values()) if item["task_id"] == response["task_id"])
 
     fixture = _load("mission_snapshot.neko_to_dev_running.json")
     fixture_goal = fixture["goals"][0]
 
     # The nested read-model objects the bridge passes straight through must have
     # the same key set the runtime produces (additive-only within the contract).
-    for model_key in ("mission_level_state", "mission_flow_timeline", "proof_gate_state", "operator_capabilities"):
+    # S8: these mission-level objects stay in the goal HEAD (office/roster/HUD
+    # render them every frame); ``operator_capabilities`` moved to the on-demand
+    # detail body (verified against the head-fetched detail below).
+    for model_key in ("mission_level_state", "mission_flow_timeline", "proof_gate_state"):
         runtime_keys = set(row[model_key].keys())
         fixture_keys = set(fixture_goal[model_key].keys())
         assert fixture_keys <= runtime_keys, (model_key, fixture_keys - runtime_keys)
+    # S8: operator_capabilities is served by `harness goal detail`, not the head.
+    from agent_runtime.snapshot import goal_detail_for_task
+
+    assert "operator_capabilities" not in row
+    detail = goal_detail_for_task(row["task_id"])
+    assert set(fixture_goal["operator_capabilities"].keys()) <= set(detail["operator_capabilities"].keys())
 
     runtime_actor_keys = set(row["mission_level_state"]["actors"][0].keys())
     fixture_actor_keys = set(fixture_goal["mission_level_state"]["actors"][0].keys())
@@ -89,7 +98,7 @@ def test_stage38_runtime_snapshot_matches_fixture_contract_shape(isolate_agent_r
 
     # Envelope: real parity carries every Stage 38 field the Launcher consumes.
     parity = snapshot["parity"]
-    assert parity["contract_version"] == 38
+    assert parity["contract_version"] == 44
     assert {"runtime_root", "profile", "capabilities", "freshness"} <= set(parity.keys())
     assert row["proof_gate_state"]["gate_state"] in {
         "not_required", "incomplete", "running", "blocked", "failed", "passed", "waived",

@@ -24,13 +24,7 @@ logger = logging.getLogger(__name__)
 MISSION_GOAL_CREATE_SCHEMA = {
     "name": "mission_goal_create",
     "description": (
-        "Create a REAL Mission Control goal: a live harness task that self-drives through the "
-        "Neko -> Dev -> QA pipeline with real models, proof gates, and budgets, and shows up in "
-        "Mission Control with a tracked task_id. Use this whenever the operator asks you to start, "
-        "trigger, kick off, or run a goal/mission/task. This is NOT the no-model smoke test — it "
-        "creates real tracked work. Starting a new foreground goal parks other open goals (standard "
-        "new-goal hygiene), so only call it when the operator actually wants a goal to start now. "
-        "Returns the created task_id and the Mission Daemon start status."
+        "Create a REAL Mission Control goal: a live self-driving Neko -> Dev -> QA task with proof gates and a tracked task_id. Use when the operator asks to start/kick off a goal. Disambiguator: NOT the no-model smoke test and NOT agent_chat_send -- this starts real tracked work and parks other open goals."
     ),
     "parameters": {
         "type": "object",

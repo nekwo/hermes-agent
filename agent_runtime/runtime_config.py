@@ -93,6 +93,51 @@ class ReadModelConfig:
     enabled: bool = False
     serve_snapshot_from_db: bool = True
     db_filename: str = "read_model.db"
+    # S6 producer kill-switch. When False (default), store chokepoints emit NO
+    # ``state.patched`` field-patch entries — the producer lane is dark until the
+    # launcher fold exists (the consumer + stream wire land after S4). Flip True
+    # to have steer/profile/task-transition/incident-close chokepoints append a
+    # ``state.patched`` EventLog entry carrying the field-level patch. Log-only:
+    # no stream/wire change rides this flag in S6.
+    #
+    # NOTE (S7-B RULING-0 COMPAT STRIP, 2026-07-16): the S2 ``history_in_frame``
+    # and S3 ``inline_prompt_payloads`` kill-switches were removed here — the
+    # evicted/hoisted read-model shape is the ONLY shape (operator ruling: "no
+    # backward-shape support; makes things stale"). Rollback = ``git revert`` of
+    # the landing, not a runtime flag flip. ``delta_patches`` stays: it gates the
+    # in-progress S6 producer lane, not a legacy-emission fallback.
+    delta_patches: bool = False
+
+
+@dataclass(slots=True)
+class PersonaChatConfig:
+    """Process-resident persona-chat cache policy.
+
+    Native SessionDB history, the root lease, and the turn journal remain
+    authoritative when this optimization is disabled.
+    """
+
+    hot_sessions_enabled: bool = False
+    max_hot_sessions: int = 8
+    idle_ttl_seconds: int = 1800
+
+
+@dataclass(slots=True)
+class EventLogConfig:
+    """Durable-log hygiene (C6a): size-gated, offset-safe rotation of the
+    append-only ``events.jsonl``.
+
+    ``rotation_cap_bytes`` is the size at/above which the live slice is sealed
+    into an archive slice (``events_archive/events.<start_offset>.jsonl``) and a
+    fresh live slice is opened. Logical (cross-slice, monotonic) offsets are
+    preserved via the slice manifest, so byte-offset tailers and the checkpoint
+    ``event_offset`` watermark keep resolving unchanged. ``0`` disables rotation
+    (the live file grows unbounded, i.e. legacy behavior). The env override
+    ``HERMES_EVENT_LOG_ROTATION_CAP_BYTES`` wins over this field when set
+    (operator/test knob); no config is required for the 16 MiB default.
+    """
+
+    rotation_cap_bytes: int = 16 * 1024 * 1024
 
 
 @dataclass(slots=True)
@@ -170,7 +215,8 @@ class RuntimeConfig:
     repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)
     read_model: ReadModelConfig = field(default_factory=ReadModelConfig)
+    persona_chat: PersonaChatConfig = field(default_factory=PersonaChatConfig)
+    event_log: EventLogConfig = field(default_factory=EventLogConfig)
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
     supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
-

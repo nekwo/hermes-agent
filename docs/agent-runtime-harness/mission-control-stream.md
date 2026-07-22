@@ -35,6 +35,10 @@ For `heartbeat` frames:
 
 - `watermark.event_offset` repeats the latest offset known to the stream.
 - Heartbeats do not advance the read model by themselves; they only prove the stream is alive at the current offset.
+- If that offset is ahead of the consumer's last applied state-bearing frame,
+  the heartbeat proves a frame was missed. The consumer must keep its applied
+  watermark unchanged and rehydrate; advancing to the heartbeat offset would
+  make the missing delta look stale when it later arrives.
 - Heartbeats additionally carry the current `daemon` status block (see the `heartbeat` frame section) so runtime HUDs stay live while an idle daemon emits no deltas. Consumers may merge it into their read model's daemon view; it never changes any other entity.
 
 ## `hydrate` frame
@@ -189,4 +193,15 @@ CLI timing flags:
 - Start by applying the `hydrate` frame's `core` as the complete Mission Control snapshot.
 - Then apply each `delta` in ascending `watermark.event_offset` / `seq` order.
 - Treat `heartbeat` frames as liveness and offset markers only.
+- Count only decoded protocol frames (`hydrate`, `delta`, `patch`, or
+  `heartbeat`) as stream liveness. Arbitrary stdout is not a heartbeat.
 - If a consumer detects a gap, cannot parse the stream, or needs a canonical re-sync, call `hermes harness snapshot --json`. The one-shot snapshot remains the canonical fallback for consumers.
+
+Persona chat commands participate in this event-driven contract. After the
+native transcript and Mission Control turn projection commit,
+`mission.chat.message` emits `persona_chat.projected`; a first-turn auto-title
+change emits `persona_chat.metadata_updated`. The exactly-once turn journal
+records `projection_event_emitted`, so normal idempotent replays do not append a
+second notification, while an older or interrupted projected turn repairs a
+missing notification on replay. `agent_chat_send` invokes the same command
+handler, so agent-to-agent and direct CLI messages share this path.

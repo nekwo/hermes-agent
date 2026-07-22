@@ -3,18 +3,35 @@ from types import SimpleNamespace
 
 from hermes_time import now
 from utils import atomic_json_write
-from agent_runtime.blueprints.runs import BlueprintRunStore
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore, PersonaInstanceStore
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
-from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, _parity_warnings, build_snapshot, write_snapshot
+from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, _archived_task_summaries, _parity_warnings, build_snapshot, goal_detail_for_task, write_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.events import EventLog
 from agent_runtime.serde import to_jsonable
+
+
+def _goal_detail_view(snap, task_id=None):
+    """S8: the pre-split full goal row for projection-logic assertions.
+
+    The steady-state frame ships only the goal HEAD; the heavy detail
+    (role_streams / stage_streams / timeline / operator_capabilities / …) is
+    served by ``harness goal detail``. These tests build snapshots over an
+    isolated disk-backed root, so ``goal_detail_for_task`` rebuilds the same
+    detail read-only from the same stores + EventLog."""
+
+    goals = list(snap["goals"].values())
+    head = (
+        next((row for row in goals if row.get("task_id") == task_id), goals[0])
+        if task_id is not None
+        else goals[0]
+    )
+    return goal_detail_for_task(head["task_id"])
 
 
 def test_agent_topology_collapses_multi_turn_instances_to_one_node_per_persona(isolate_agent_runtime_root):
@@ -53,7 +70,7 @@ def test_agent_topology_collapses_multi_turn_instances_to_one_node_per_persona(i
 def test_snapshot_contains_task_summary_and_no_raw_logs(isolate_agent_runtime_root):
     ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
     snap=build_snapshot(task_store=ts)
-    assert snap["tasks"][0]["task_id"] == "t"
+    assert list(snap["goals"].values())[0]["task_id"] == "t"
     assert "stdout" not in str(snap).lower()
     assert snap["summary"]["dirty"] is True
     assert snap["dirty_state"]["runtime"]["open_task_ids"] == ["t"]
@@ -235,50 +252,17 @@ def test_snapshot_coalesces_progress_events_by_event_id(isolate_agent_runtime_ro
         )
 
     snap = build_snapshot()
-    timeline = [item for item in snap["tasks"][0]["timeline"] if item["type"] == "run.progress"]
+    timeline = [item for item in _goal_detail_view(snap)["timeline"] if item["type"] == "run.progress"]
 
     assert len(timeline) == 1
     assert timeline[0]["display_summary"] == "proof is still_running"
 
 
-def test_snapshot_projects_blueprint_run_records(isolate_agent_runtime_root):
-    n = now()
-    task = Task(
-        id="task_blueprint_snapshot",
-        title="Blueprint snapshot",
-        description="record projection",
-        state=TaskState.DONE,
-        created_at=n,
-        updated_at=n,
-        requested_by="tony",
-        mission_plan=MissionPlan(
-            mission_intent=MissionIntent(title="Blueprint snapshot", objective="record projection"),
-            blueprint_id="one_agent_smoke",
-            blueprint_version=1,
-            bindings={"builder": "dev"},
-            binding_sources={"builder": "persona:dev"},
-            stages=[
-                MissionPlanStage(
-                    id="build",
-                    title="Build",
-                    objective="Build",
-                    owner="builder",
-                    owner_slot="builder",
-                    repo="hermes-agent",
-                    kind="implementation",
-                    status=StageStatus.PASSED,
-                )
-            ],
-        ),
-    )
-    BlueprintRunStore().record_task_terminal(task, result="passed", ended_at=n)
-
-    snap = build_snapshot()
-
-    assert snap["blueprint_runs"][0]["task_id"] == "task_blueprint_snapshot"
-    assert snap["blueprint_runs"][0]["blueprint_id"] == "one_agent_smoke"
-    assert snap["blueprint_runs"][0]["per_stage_outcomes"] == {"build": "passed"}
-    assert any(item["id"] == "one_agent_smoke" for item in snap["blueprints"])
+# ``test_snapshot_projects_blueprint_run_records`` was REMOVED in the snapshot
+# residue-slim R1 (2026-07-17): the ``blueprints`` / ``blueprint_runs`` FRAME
+# sections were deleted (zero readers in all three repos). The disk stores
+# (BlueprintRunStore / BlueprintStore) + the ``hermes harness blueprint`` CLI read
+# path are unchanged; blueprint-store behaviour is covered by the blueprint suites.
 
 
 def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_root):
@@ -364,36 +348,17 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     )
 
     snap = build_snapshot(event_log=events)
-    row = next(item for item in snap["tasks"] if item["task_id"] == "stage38")
+    row = next(item for item in list(snap["goals"].values()) if item["task_id"] == "stage38")
 
-    assert snap["parity"]["contract_version"] == 38
+    assert snap["parity"]["contract_version"] == 44
     assert "mission_level_state" in snap["parity"]["capabilities"]
     assert "agent_topology" in snap["parity"]["capabilities"]
     assert row["mission_level_state"]["blueprint_id"] == "neko_dev_qa_basic"
-    topology = row["mission_level_state"]["agent_topology"]
-    assert topology["root_node_id"] == "slot_lead"
-    assert [(node["node_id"], node["persona_id"]) for node in topology["nodes"]] == [
-        ("slot_lead", "neko_supervisor"),
-        ("slot_builder", "dev"),
-        ("slot_verifier", "qa"),
-    ]
-    assert [(edge["source_node_id"], edge["target_node_id"], edge["kind"]) for edge in topology["edges"]] == [
-        ("slot_lead", "slot_builder", "steers"),
-        ("slot_builder", "slot_verifier", "steers"),
-    ]
-    assert topology["control_node_id"] == "slot_lead"
-    route_action = next(action for action in topology["steer_actions"] if action["verb"] == "route" and action["target_node_id"] == "slot_builder")
-    assert route_action["available_now"] is True
-    assert route_action["capability_id"] == "goal.steer"
-    assert route_action["capability_args"] == {
-        "task_id": "stage38",
-        "verb": "route",
-        "source_node_id": "slot_lead",
-        "target_node_id": "slot_builder",
-    }
-    assert any(action["recommended_steer"] for action in topology["steer_actions"])
-    assert topology["completeness"]["stream_event_cap_per_node"] == 3
-    assert len(topology["nodes"][0]["progress_peek"]) <= 3
+    # S4: agent_topology (a derived copy of steering truth) no longer ships in
+    # the frame — the launcher derives it from persona_instances[].steered_by.
+    # The `_agent_topology` builder itself is still unit-tested directly (see
+    # test_multi_parent_fanin); here we prove the derived copy is gone.
+    assert "agent_topology" not in row["mission_level_state"]
     assert [(actor["persona_id"], actor["presence"]) for actor in row["mission_level_state"]["actors"]] == [
         ("neko_supervisor", "waiting"),
         ("dev", "queued"),
@@ -403,7 +368,7 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     assert row["proof_gate_state"]["gate_state"] == "incomplete"
     assert row["proof_gate_state"]["missing_stage_ids"] == ["implement", "verify"]
     assert row["proof_gate_state"]["why_not_ready"]
-    assert row["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is True
+    assert _goal_detail_view(snap, "stage38")["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is True
 
 
 def test_mission_level_actors_emit_typed_persona_instance_id(monkeypatch, isolate_agent_runtime_root):
@@ -477,7 +442,7 @@ def test_mission_level_actors_emit_typed_persona_instance_id(monkeypatch, isolat
     )
 
     snap = build_snapshot()
-    row = next(item for item in snap["tasks"] if item["task_id"] == "task_actor_contract")
+    row = next(item for item in list(snap["goals"].values()) if item["task_id"] == "task_actor_contract")
     actors = {actor["persona_id"]: actor for actor in row["mission_level_state"]["actors"]}
 
     # Indexing (not .get) so a dropped field fails the contract loudly.
@@ -710,7 +675,7 @@ def test_snapshot_projects_bounded_stage_verification_with_parity(isolate_agent_
     )
 
     snap = build_snapshot()
-    row = next(item for item in snap["tasks"] if item["task_id"] == task.id)
+    row = next(item for item in list(snap["goals"].values()) if item["task_id"] == task.id)
     verification = row["stage_verification"]
 
     assert len(verification["stages"]) == 12
@@ -798,16 +763,13 @@ def test_snapshot_agent_topology_runtime_spawned_by_overrides_blueprint(isolate_
     )
 
     snap = build_snapshot()
-    row = next(item for item in snap["tasks"] if item["task_id"] == task.id)
+    row = next(item for item in list(snap["goals"].values()) if item["task_id"] == task.id)
 
-    topology = row["mission_level_state"]["agent_topology"]
-    assert topology["source"] == "runtime_spawned_by"
-    assert [(edge["source_node_id"], edge["target_node_id"]) for edge in topology["edges"]] == [
-        ("personainst_topology_spawned_by_neko_supervisor", "personainst_topology_spawned_by_backend_dev"),
-        ("personainst_topology_spawned_by_backend_dev", "personainst_topology_spawned_by_dev"),
-    ]
-    backend_node = next(node for node in topology["nodes"] if node["persona_id"] == "backend_dev")
-    assert backend_node["spawned_by"] == "personainst_topology_spawned_by_neko_supervisor"
+    # S4: agent_topology is deleted from the frame (derived copy of steering
+    # truth). The builder's runtime_spawned_by-overrides-blueprint behavior is
+    # still covered by the direct `_agent_topology` unit tests; the frame just
+    # no longer carries the derived copy.
+    assert "agent_topology" not in row["mission_level_state"]
 
 
 def _topology_persona(persona_id: str, display_name: str, role: str) -> AgentPersona:
@@ -839,7 +801,7 @@ def test_snapshot_unscoped_task_keeps_all_canonical_role_streams_visible(isolate
     )
 
     snap = build_snapshot(task_store=ts)
-    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+    roles = {stream["persona_id"]: stream for stream in _goal_detail_view(snap)["role_streams"]}
 
     assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
     assert all(stream["events"] for stream in roles.values())
@@ -882,7 +844,7 @@ def test_snapshot_role_stream_projects_decision_summary_thinking_fields(isolate_
     )
 
     snap = build_snapshot(task_store=ts, event_log=events)
-    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+    roles = {stream["persona_id"]: stream for stream in _goal_detail_view(snap)["role_streams"]}
     event = roles["dev"]["events"][0]
 
     assert event["payload"]["display_kind"] == "thinking_summary"
@@ -901,7 +863,7 @@ def test_snapshot_exposes_terminal_and_active_run_execution_truth(isolate_agent_
     runs.open_run("dev", "active", stage_id=None)
 
     snap = build_snapshot(task_store=ts, run_store=runs)
-    by_id = {task["task_id"]: task for task in snap["tasks"]}
+    by_id = {task["task_id"]: task for task in list(snap["goals"].values())}
 
     assert by_id["done"]["execution_status"] == "complete"
     assert by_id["done"]["can_start_run"] is False
@@ -1010,7 +972,7 @@ def test_snapshot_exposes_typed_mission_role_and_stage_streams(isolate_agent_run
     events.append(Event(n, "run.tool.finished", task.id, "run_launcher", "dev", {"stage_id": "launcher_implementation", "tool_name": "terminal", "summary": "flutter test passed"}))
 
     snap = build_snapshot(task_store=ts, event_log=events)
-    item = snap["tasks"][0]
+    item = _goal_detail_view(snap)
 
     assert item["mission_plan"]["current_stage_id"] == "launcher_implementation"
     roles = {stream["persona_id"]: stream for stream in item["role_streams"]}
@@ -1061,7 +1023,7 @@ def test_snapshot_typed_plan_keeps_empty_backend_stream_selectable(isolate_agent
     ts.create(task)
 
     snap = build_snapshot(task_store=ts)
-    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+    roles = {stream["persona_id"]: stream for stream in _goal_detail_view(snap)["role_streams"]}
 
     assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
     assert roles["backend_dev"]["display_name"] == "Backend Dev Agent"
@@ -1118,7 +1080,7 @@ def test_snapshot_role_streams_use_task_window_not_global_tail(isolate_agent_run
         events.append(Event(n, "run.tool.finished", task.id, "run_slot", "dev", {"summary": f"Dev tool event {index}"}))
 
     snap = build_snapshot(task_store=ts, event_log=events)
-    roles = {stream["persona_id"]: stream for stream in snap["tasks"][0]["role_streams"]}
+    roles = {stream["persona_id"]: stream for stream in _goal_detail_view(snap)["role_streams"]}
 
     assert roles["neko_supervisor"]["events"][0]["type"] == "mission_plan.updated"
     assert roles["dev"]["events"]
@@ -1152,8 +1114,8 @@ def test_snapshot_next_action_owner_reports_backend_specialist_for_backend_stage
 
     snap = build_snapshot(task_store=ts)
 
-    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
-    assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "backend_dev"
+    assert list(snap["goals"].values())[0]["next_action"]["action"] == "run_slot"
+    assert list(snap["goals"].values())[0]["next_action"]["stopped_progress"]["owner"] == "backend_dev"
 
 
 def test_snapshot_routes_budget_approval_to_neko_before_cap(isolate_agent_runtime_root):
@@ -1170,8 +1132,8 @@ def test_snapshot_routes_budget_approval_to_neko_before_cap(isolate_agent_runtim
 
     snap = build_snapshot(task_store=ts, run_store=runs, incident_store=incidents)
 
-    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
-    assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
+    assert list(snap["goals"].values())[0]["next_action"]["action"] == "run_slot"
+    assert list(snap["goals"].values())[0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
 
 
 def test_snapshot_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_agent_runtime_root):
@@ -1195,9 +1157,9 @@ def test_snapshot_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_
 
     snap = build_snapshot(task_store=ts, run_store=runs, incident_store=incidents)
 
-    assert snap["tasks"][0]["next_action"]["action"] == "run_slot"
-    assert snap["tasks"][0]["next_action"]["reason"] == "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
-    assert snap["tasks"][0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
+    assert list(snap["goals"].values())[0]["next_action"]["action"] == "run_slot"
+    assert list(snap["goals"].values())[0]["next_action"]["reason"] == "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
+    assert list(snap["goals"].values())[0]["next_action"]["stopped_progress"]["owner"] == "neko_supervisor"
 
 
 def test_snapshot_exposes_specialist_agent_repo_scope_labels(isolate_agent_runtime_root):
@@ -1299,7 +1261,7 @@ def test_snapshot_exposes_canonical_persona_instance_ids(monkeypatch, isolate_ag
     created = PersonaInstanceStore().create_free_floating("profile:reviewer")
 
     snap = build_snapshot()
-    by_id = {item["persona_instance_id"]: item for item in snap["persona_instances"]}
+    by_id = {item["persona_instance_id"]: item for item in list(snap["persona_instances"].values())}
 
     assert created.id == "personainst_profile_reviewer"
     assert by_id[created.id]["agent_profile_id"] == "personainst_profile_reviewer"
@@ -1319,9 +1281,11 @@ def test_snapshot_links_deleted_archive_tasks(isolate_agent_runtime_root):
         {"id": "task_archived", "title": "Archived mission from disk", "state": "done"},
     )
 
-    snap = build_snapshot()
-
-    archived = snap["archived_tasks"][0]
+    # S7-B: the frame carries an archived_tasks POINTER stub; the full archived
+    # rows are read from the projection it references (the same rows
+    # `harness task history` serves).
+    assert "task_archived" in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived = _archived_task_summaries()[0]
     assert archived["task_id"] == "task_archived"
     assert archived["title"] == "Archived mission from disk"
     assert archived["state"] == "archived"
@@ -1428,9 +1392,10 @@ def test_snapshot_archived_tasks_include_run_proof_and_decision_transcript(isola
         encoding="utf-8",
     )
 
-    snap = build_snapshot()
-
-    archived = snap["archived_tasks"][0]
+    # S7-B: read the full archived row from the projection the frame pointer
+    # references (the frame ships the pointer stub, not the rows).
+    assert "task_archived" in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived = _archived_task_summaries()[0]
     assert archived["runs"][0]["run_id"] == "run_slot"
     assert archived["runs"][0]["decision_summary"] == "Implemented archived transcript mapping."
     assert archived["runs"][0]["decision_rationale"] == "Tests are required before QA handoff."
@@ -1561,24 +1526,27 @@ def test_snapshot_projects_archived_goal_as_operator_channel(monkeypatch, isolat
 
     channel = next(
         item
-        for item in snap["operator_channels"]
+        for item in list(snap["operator_channels"].values())
         if item["task_id"] == "task_archived"
     )
     conversation = channel["conversation"]
+    # S8: an archived channel is a POINTER STUB — identity + recency +
+    # message_count are kept so the console renders an honest archived row + a
+    # fetch affordance; the transcript (~20-25 KB) is evicted (fetched on demand
+    # via `harness task history`), never a fake-empty conversation.
     assert channel["archived"] is True
     assert channel["persona_id"] == "neko_supervisor"
-    assert conversation["status"] == "complete"
+    assert channel["messages_evicted"] is True
+    assert channel["fetch"] == "harness task history task_archived --json"
+    assert conversation["status"] == "archived"
     assert conversation["goal_id"] == "goal_archived"
-    assert [message["kind"] for message in conversation["messages"]] == [
-        "goal_input",
-        "handoff",
-        "final",
-    ]
-    transcript = "\n".join(message["display_text"] for message in conversation["messages"])
-    assert "Goal: Archived Neko default graph token flow" in transcript
-    assert "Prompted dev." in transcript
-    assert "Implement the scoped work and attach proof." in transcript
-    assert "archived operator channel should remain recallable" in transcript
+    assert conversation["messages"] == []
+    assert conversation["messages_evicted"] is True
+    # The count is preserved (goal_input + handoff + final = 3), so the launcher
+    # can label the archived row without shipping the bodies.
+    assert conversation["message_count"] == 3
+    assert channel["message_count"] == 3
+    assert conversation["fetch"] == "harness task history task_archived --json"
 
 
 def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(isolate_agent_runtime_root):
@@ -1625,7 +1593,10 @@ def test_snapshot_archived_typed_task_keeps_all_canonical_role_streams_visible(i
         },
     )
 
-    archived = build_snapshot()["archived_tasks"][0]
+    # S7-B: the full archived row comes from the projection the frame pointer
+    # references, not the in-frame section (which is a pointer stub now).
+    assert "task_archived" in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived = _archived_task_summaries()[0]
     roles = {stream["persona_id"]: stream for stream in archived["role_streams"]}
 
     assert {"neko_supervisor", "backend_dev", "dev", "qa"}.issubset(roles)
@@ -1665,7 +1636,10 @@ def test_snapshot_masks_secret_assignments_but_keeps_pathful_decision_text(isola
         },
     )
 
-    archived = build_snapshot()["archived_tasks"][0]
+    # S7-B: the frame ships a pointer stub; read the full archived row from the
+    # projection it references.
+    assert "task_archived" in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived = _archived_task_summaries()[0]
     run = archived["runs"][0]
 
     # Paths are content on the operator surface — they must survive.

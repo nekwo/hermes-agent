@@ -17,7 +17,7 @@ STEER_ACTIONS = frozenset(
     }
 )
 CREATE_ACTIONS = frozenset({"persona.instance.create", "persona.instance.open_chat"})
-KILL_ACTIONS = frozenset({"persona.instance.close", "run.cancel"})
+KILL_ACTIONS = frozenset({"persona.instance.close", "persona.instance.retire", "run.cancel"})
 OPERATOR_ACTORS = frozenset({"operator", "tony", "cli"})
 
 

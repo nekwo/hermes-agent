@@ -160,6 +160,9 @@ def test_enterprise_worker_session_tracks_tick_context_and_proof(isolate_agent_r
     assert worker.decision_count == 1
     assert worker.proof_count == 1
     assert worker.prompt_contract_hash
+    from agent_runtime.decision_contract_registry import contract_hash
+
+    assert worker.prompt_contract_hash == contract_hash()
     manifest = worker_context_manifest(task.id, "dev")
     assert "static_prompt_receipt.json" in manifest["files"]
 
@@ -324,7 +327,7 @@ def test_snapshot_status_and_observability_surface_worker_sessions():
 
     assert status["active_worker_sessions"] == 1
     assert snapshot["summary"]["active_worker_sessions"] == 1
-    assert snapshot["tasks"][0]["active_worker_session_ids"] == [worker.id]
+    assert list(snapshot["goals"].values())[0]["active_worker_session_ids"] == [worker.id]
     assert obs["signals"]["stale_worker_sessions"] == 1
     assert obs["interventions"][0]["kind"] == "worker_stale_heartbeat"
 

@@ -23,11 +23,16 @@ def test_searching_for_sudo_does_not_trigger_rewrite(monkeypatch):
 
 
 def test_terminal_schema_advertises_persistent_env_state():
+    """T6b: the wire brief states cwd + env persist between calls; the detailed
+    virtualenv / re-source guidance moved to the full docs (tool_describe)."""
     description = terminal_tool.TERMINAL_TOOL_DESCRIPTION
+    assert "persist between calls" in description
 
-    assert "exported environment variables persist between calls" in description
-    assert "activate a virtualenv" in description
-    assert "do not re-source the same environment before every command" in description
+    from tools.tool_full_descriptions import full_tool_description
+    full = full_tool_description("terminal")
+    assert "exported environment variables persist between calls" in full
+    assert "activate a virtualenv" in full
+    assert "do not re-source the same environment before every command" in full
 
 
 def test_printf_literal_sudo_does_not_trigger_rewrite(monkeypatch):

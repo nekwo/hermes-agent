@@ -583,7 +583,7 @@ def test_snapshot_surfaces_stage52_state_for_mission_control():
     ).tick_once(task_id=task.id)
 
     snap = build_snapshot(task_store=tasks, proof_store=proofs)
-    item = snap["tasks"][0]
+    item = list(snap["goals"].values())[0]
 
     assert snap["role_envelopes"]
     assert snap["role_checklists"]
@@ -609,6 +609,10 @@ def test_context_hud_injects_task_list_after_checklist_exists():
 
 
 def test_archive_preserves_role_state_evidence(isolate_agent_runtime_root):
+    # S7-B: the frame carries an archived_tasks POINTER stub, not the rows. The
+    # preserved role-state evidence is verified two ways: the on-disk archive
+    # artifacts (below) + the archived-task projection the pointer references (the
+    # same rows `harness task history` serves) — not the in-frame projection.
     tasks = TaskStore()
     task = _task("task_archive", state=TaskState.DONE)
     tasks.create(task)
@@ -632,8 +636,10 @@ def test_archive_preserves_role_state_evidence(isolate_agent_runtime_root):
     assert (archive_dir / "role_checklists" / task.id).exists()
     assert (archive_dir / "proof_batches" / task.id).exists()
 
-    snap = build_snapshot(task_store=tasks)
-    archived_task = next(item for item in snap["archived_tasks"] if item["task_id"] == task.id)
+    from agent_runtime.snapshot import _archived_task_summaries
+
+    assert task.id in build_snapshot(task_store=tasks)["archived_tasks"]["recent_ids"]
+    archived_task = next(item for item in _archived_task_summaries() if item["task_id"] == task.id)
     assert archived_task["role_envelopes"][0]["role_id"] == "dev"
     assert archived_task["role_checklists"][0]["items"][0]["item_id"] == "inspect"
     assert archived_task["proof_batches"][0]["proof_ids"] == ["proof_1"]

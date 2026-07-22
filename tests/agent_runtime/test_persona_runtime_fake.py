@@ -14,7 +14,12 @@ from agent_runtime.models import AgentRun, Event, Task
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.persona_runtime import _apply_llm_metadata
 from agent_runtime.profile_runner import AgentRunResult
-from agent_runtime.personas import all_registered_toolsets, default_personas, effective_toolsets
+from agent_runtime.personas import (
+    REGISTRY_HYGIENE_BLOCKED_TOOLS,
+    all_registered_toolsets,
+    default_personas,
+    effective_toolsets,
+)
 from agent_runtime.tool_permissions import ChatToolPermissionStore
 from agent_runtime.states import RunState, TaskState
 
@@ -159,7 +164,10 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
 
     fake = FakeAIAgent.instances[0]
     assert fake.kwargs["enabled_toolsets"] == all_registered_toolsets()
-    assert fake.kwargs["blocked_tool_names"] == []
+    # T6c registry hygiene rides every construction, unbounded included:
+    # kanban/feishu are registry junk, not a permission tier, so the escape
+    # hatch does not resurrect them.
+    assert set(fake.kwargs["blocked_tool_names"]) == set(REGISTRY_HYGIENE_BLOCKED_TOOLS)
 
 
 def test_chat_permission_unbounded_one_turn_expires_after_success(tmp_path, monkeypatch):
@@ -181,7 +189,8 @@ def test_chat_permission_unbounded_one_turn_expires_after_success(tmp_path, monk
 
     fake = FakeAIAgent.instances[0]
     assert fake.kwargs["enabled_toolsets"] == all_registered_toolsets()
-    assert fake.kwargs["blocked_tool_names"] == []
+    # Registry hygiene applies even on the unbounded turn (see the QA test above).
+    assert set(fake.kwargs["blocked_tool_names"]) == set(REGISTRY_HYGIENE_BLOCKED_TOOLS)
     record = store.get(persona_id=neko.id, session_id=session_id)
     assert record is not None
     assert record.mode == "profile_default"
@@ -378,6 +387,120 @@ def test_mission_chat_surface_message_always_carries_operative_rules():
     assert workspace_composed.endswith("Use its conventions.")
 
 
+def test_mission_chat_ack_is_the_first_hard_rule():
+    # §7 acknowledge-before-acting promotion: the ack requirement is the FIRST
+    # bullet of the operative rules and phrased as a hard requirement, so a
+    # model that skims the rules still meets it before its first tool call.
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    bullets = [line for line in rules.splitlines() if line.startswith("- ")]
+    assert bullets, "operative rules must be a bulleted list"
+    first = bullets[0]
+    assert "HARD RULE" in first
+    assert "before your first tool call" in first
+    assert "never open a turn with a silent tool call" in first
+
+
+def test_mission_chat_operative_rules_teach_the_chat_session_verbs():
+    # The chat-session verb set is taught in the busy operative-rules prompt (not
+    # only the tool schemas): teammates are addressable by @personainst_* handles,
+    # and the three thread lanes of agent_chat_send (omit / session_id /
+    # new_session) plus the read verbs are spelled out. Rule #1 must STILL be the
+    # ack rule — the new bullet may not displace it.
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    bullets = [line for line in rules.splitlines() if line.startswith("- ")]
+    assert "HARD RULE" in bullets[0], "the acknowledge-before-acting rule must remain first"
+
+    verbs_bullet = next(
+        (line for line in bullets if "agent_chat_threads" in line and "agent_chat_open" in line),
+        None,
+    )
+    assert verbs_bullet is not None, "operative rules must teach the chat-session verb set"
+    assert "@personainst_" in verbs_bullet
+    assert "new_session" in verbs_bullet
+    assert "session_id" in verbs_bullet
+
+
+def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkeypatch):
+    # A profile-backed persona configured with `soul_overlay_path` reads its
+    # soul from ITS OWN profile home (single source — realm sync already models
+    # soul_overlay as profile-home-relative) and layers it into BOTH chat lanes
+    # — after the identity hat, before the operative rules on the mission-chat
+    # surface. Personas without one keep the exact legacy composition.
+    from dataclasses import replace
+
+    import agent_runtime.persona_runtime as pr
+
+    profile_home = tmp_path / "profiles" / "neko"
+    profile_home.mkdir(parents=True)
+    (profile_home / "SOUL.md").write_text(
+        "You are Neko, the Mission Lead — test soul.\n"
+        "- Before your first tool call in any turn, tell Tony what you're about to do.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        pr, "_persona_profile_home", lambda name: profile_home if name == "neko" else None
+    )
+
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    souled = replace(neko, soul_overlay_path="SOUL.md", hermes_profile="neko")
+
+    composed = pr._mission_chat_surface_message(souled, "")
+    identity = pr._mission_chat_identity_prompt(souled)
+    rules = pr._mission_chat_operative_rules()
+    soul_marker = "You are Neko, the Mission Lead — test soul."
+    ack_habit = "Before your first tool call in any turn"
+    assert soul_marker in composed
+    assert ack_habit in composed
+    assert composed.index(identity[:60]) < composed.index(soul_marker) < composed.index(
+        "Mission Control operator-chat rules"
+    )
+    # The rules still ride after the soul — soul shapes voice, never displaces
+    # the surface invariants.
+    assert rules in composed
+
+    # Persona-chat lane carries the same soul.
+    chat_prompt = pr._persona_chat_system_prompt(souled)
+    assert soul_marker in chat_prompt
+    assert chat_prompt.index("operator-channel agent") < chat_prompt.index(soul_marker)
+
+    # No soul configured -> byte-identical legacy composition.
+    assert (
+        pr._mission_chat_surface_message(neko, "")
+        == pr._mission_chat_identity_prompt(neko) + "\n\n" + rules
+    )
+    # A bogus path degrades to no soul, never an error.
+    bogus = replace(neko, soul_overlay_path="does_not_exist.md", hermes_profile="neko")
+    assert pr._mission_chat_surface_message(bogus, "") == pr._mission_chat_surface_message(neko, "")
+
+
+def test_profile_backed_soul_never_falls_through_to_operator_home(tmp_path, monkeypatch):
+    # Identity-leak guard: when a profile-backed persona's soul misses, a bare
+    # `SOUL.md` path must NOT resolve to the OPERATOR profile's SOUL.md via the
+    # operator-home fallback (that would put Alice's soul on Neko).
+    from dataclasses import replace
+
+    import agent_runtime.persona_runtime as pr
+
+    operator_home = tmp_path / "profiles" / "alice"
+    operator_home.mkdir(parents=True)
+    (operator_home / "SOUL.md").write_text("OPERATOR SOUL — must not leak", encoding="utf-8")
+    monkeypatch.setattr(pr, "get_hermes_home", lambda: operator_home)
+    monkeypatch.setattr(pr, "_persona_profile_home", lambda name: None)
+
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    souled = replace(neko, soul_overlay_path="SOUL.md", hermes_profile="neko")
+    composed = pr._mission_chat_surface_message(souled, "")
+    assert "OPERATOR SOUL" not in composed
+
+    # A persona WITHOUT a bound profile keeps the legacy operator-home lane.
+    legacy = replace(neko, soul_overlay_path="SOUL.md", hermes_profile=None)
+    assert "OPERATOR SOUL" in pr._mission_chat_surface_message(legacy, "")
+
+
 def test_mission_chat_identity_prompt_names_persona_and_forbids_self_relay():
     # Root-cause guard for the "Neko messages itself" incident: the isolated
     # chat lane does not load the profile SOUL, so this block is the ONLY place
@@ -442,6 +565,137 @@ def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path
     # And the chat-trace callback is wired on the canonical operator path too.
     assert captured["request"].progress_callback is not None
     assert captured["request"].agent_ready_callback is agent_ready
+
+
+def test_mission_chat_reply_rides_hud_on_user_turn_not_system_prompt(tmp_path, monkeypatch):
+    # T5 wiring guard: the caller passes the resolved situational HUD block; it
+    # must land on the operator's USER turn (after the message), never in the
+    # system prompt (the codex instructions), so the byte-stable cross-turn
+    # cache prefix survives. Pins the mission_chat_reply -> _mission_chat_user_message
+    # / _mission_chat_surface_message wiring against a silent regression.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="session_mission_chat",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    hud_block = (
+        "## Runtime Situation\nThis mirrors the operator's Mission Control "
+        "runtime HUD.\n- Scope: realm default · workspace alpha\n"
+        "- On level (1): QA Agent (@personainst_qa)"
+    )
+    runtime.mission_chat_reply(
+        neko,
+        "what's the state?",
+        permission_session_id="session_mission_chat",
+        situational_hud_content=hud_block,
+    )
+
+    request = captured["request"]
+    # HUD is on the user turn, after the operator's message.
+    assert hud_block in request.user_message
+    assert request.user_message.index(hud_block) > request.user_message.index(
+        "what's the state?"
+    )
+    # HUD is NOT in the system prompt — the instructions stay byte-stable.
+    assert "## Runtime Situation" not in request.system_message
+    assert hud_block not in request.system_message
+
+
+def test_mission_chat_user_message_orders_skill_then_hud_after_message():
+    # T9a placement unit: the operator message leads, then the queued-skill
+    # preload, then the live Runtime HUD (HUD stays last). Backward-compatible
+    # shapes (no skill / no HUD / HUD-only) match the T5 behaviour exactly.
+    from agent_runtime.persona_runtime import _mission_chat_user_message
+
+    body = "operator message with baked history"
+    skill = "Loaded skill: deep-audit\nFollow this procedure."
+    hud = "## Runtime Situation\n- Scope: realm default"
+
+    composed = _mission_chat_user_message(body, hud, preloaded_skill_prompt=skill)
+    assert composed.index(body) < composed.index(skill) < composed.index(hud)
+
+    assert _mission_chat_user_message(body) == body
+    assert _mission_chat_user_message(body, hud) == f"{body}\n\n{hud}"
+    assert (
+        _mission_chat_user_message(body, preloaded_skill_prompt=skill)
+        == f"{body}\n\n{skill}"
+    )
+
+
+def test_mission_chat_reply_skill_preload_rides_user_turn_byte_stable(tmp_path, monkeypatch):
+    # T9a byte-stability: the queued-skill preload — T5's flagged secondary
+    # cache-invalidation vector — now rides the operator USER turn with the HUD,
+    # never the codex ``instructions``. Two turns of one conversation that differ
+    # ONLY in preloaded-skill state must produce BYTE-IDENTICAL instructions so
+    # the cross-turn prompt cache prefix survives a mid-conversation skill load;
+    # the skill content lands on the user turn instead.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+
+    captured: list = []
+
+    class CapturingRunner:
+        def run(self, request):
+            captured.append(request)
+            return AgentRunResult(
+                final_response="ok",
+                session_id="session_mission_chat",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    skill_block = (
+        "Loaded skill: deep-audit\nFollow this procedure when auditing the harness."
+    )
+    # Turn 1: operator loads a skill this turn.
+    runtime.mission_chat_reply(
+        neko,
+        "run the audit",
+        permission_session_id="session_mission_chat",
+        preloaded_skill_prompt=skill_block,
+    )
+    # Turn 2: same conversation, no skill loaded.
+    runtime.mission_chat_reply(
+        neko,
+        "and the next step?",
+        permission_session_id="session_mission_chat",
+        preloaded_skill_prompt=None,
+    )
+
+    with_skill, without_skill = captured
+    # Instructions (system message) are byte-identical regardless of skill state.
+    assert with_skill.system_message == without_skill.system_message
+    # The skill preload is NOT in the byte-stable system prompt...
+    assert "deep-audit" not in with_skill.system_message
+    assert "Loaded skill" not in with_skill.system_message
+    # ...it rides the operator USER turn instead, trailing the operator message.
+    assert skill_block in with_skill.user_message
+    assert with_skill.user_message.index(skill_block) > with_skill.user_message.index(
+        "run the audit"
+    )
+    # No skill this turn -> nothing leaks onto the user turn.
+    assert "deep-audit" not in without_skill.user_message
 
 
 def test_mission_chat_reply_honors_include_profile_memory(tmp_path, monkeypatch):
@@ -569,9 +823,13 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
     # Toolsets resolved through the supervisor ceiling; mission_goal augmentation
     # (the operator-channel goal capability) is available to the profile chat.
     assert "mission_goal" in request.enabled_toolsets
-    assert set(["file", "search", "session_search", "todo", "skills"]).issubset(
+    # The chat lane keeps the supervision toolsets; the T6a cost policy drops the
+    # `file` dev toolkit (patch/read/write/search_files) from the conversational
+    # lane, so it is no longer present even though the persona configured it.
+    assert set(["search", "session_search", "todo", "skills"]).issubset(
         set(request.enabled_toolsets)
     )
+    assert "file" not in request.enabled_toolsets
 
 
 def test_mission_chat_reply_has_no_api_call_cap_and_keeps_iteration_failsafe(
@@ -1086,3 +1344,142 @@ def test_dev_grounding_overrides_default_blueprint_placeholder_repo(isolate_agen
     ctx = type("Ctx", (), {"task": task, "current_stage": None})()
 
     assert _stage_repo_scope_for_persona(persona, ctx) == "hermes-agent"
+
+
+def test_mission_chat_reply_sets_cache_scope_id_but_keeps_session_none(tmp_path, monkeypatch):
+    # T10c: the persona-chat lane must feed the STABLE chat session id as the
+    # header-only cache_scope_id (so the codex cache-scope headers stay stable
+    # across turns) WHILE keeping session_id=None (so the runtime never re-loads
+    # the transcript it already baked into the message). The two ids must not be
+    # conflated — cache_scope_id is a routing value, session_id is the
+    # transcript/session-load key.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="chat-neko-stable-1",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.mission_chat_reply(
+        neko,
+        "status?",
+        session_id=None,
+        permission_session_id="chat-neko-stable-1",
+    )
+
+    request = captured["request"]
+    # The header-only cache scope is the stable chat session identity…
+    assert request.cache_scope_id == "chat-neko-stable-1"
+    # …and the transcript/session-load key is left None (no re-bake).
+    assert request.session_id is None
+
+
+def test_chat_reply_threads_cache_scope_id_to_run_request(tmp_path, monkeypatch):
+    # T10c follow-up: the FREE-FLOATING lane (operator console chats +
+    # agent_chat relays) calls chat_reply with session_id=None while holding a
+    # bound stable chat session id. chat_reply must thread that id through as
+    # the header-only cache_scope_id — this lane was cache-cold on every turn
+    # without it (live-observed: fmi.session_id='' and cache_read=0 post-T10c).
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="persona_chat_personainst_neko_free_1",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.chat_reply(
+        neko,
+        "hi",
+        session_id=None,
+        cache_scope_id="persona_chat_personainst_neko_free_1",
+    )
+
+    request = captured["request"]
+    assert request.cache_scope_id == "persona_chat_personainst_neko_free_1"
+    assert request.session_id is None
+
+
+def test_chat_reply_cache_scope_defaults_to_none(tmp_path, monkeypatch):
+    # Callers that pass a REAL session_id (transcript-loading chat lanes) get
+    # header routing via session_id at the transport seam; chat_reply must not
+    # invent a scope for them — absent stays absent.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="s2",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.chat_reply(neko, "hi", session_id="real-session-7")
+
+    request = captured["request"]
+    assert request.cache_scope_id is None
+    assert request.session_id == "real-session-7"
+
+
+def test_mission_chat_reply_cache_scope_falls_back_to_session_when_no_perm(tmp_path, monkeypatch):
+    # perm_session_id = permission_session_id or session_id. When only session_id
+    # is supplied (no separate permission id), the cache scope still resolves to
+    # that same stable chat id — never left empty on the chat lane.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    captured = {}
+
+    class CapturingRunner:
+        def run(self, request):
+            captured["request"] = request
+            return AgentRunResult(
+                final_response="ok",
+                session_id="s",
+                provider="openai-codex",
+                model="gpt-5.5",
+                base_url=None,
+                messages=[],
+            )
+
+    runtime = GPTPersonaRuntime(
+        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
+    )
+
+    runtime.mission_chat_reply(neko, "status?", session_id="chat-only-2")
+
+    assert captured["request"].cache_scope_id == "chat-only-2"

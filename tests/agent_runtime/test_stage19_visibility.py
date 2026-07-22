@@ -58,11 +58,21 @@ def test_snapshot_exposes_goal_timeline_proof_summaries_and_why_not_done():
     )
 
     snap = build_snapshot(task_store=tasks, proof_store=proofs, incident_store=incidents, event_log=events)
-    summary = next(item for item in snap["tasks"] if item["task_id"] == task.id)
+    summary = next(item for item in list(snap["goals"].values()) if item["task_id"] == task.id)
 
     assert summary["why_not_done"][0]["kind"] == "open_incident"
     assert summary["next_action"]["action"] == "blocked_by_incident"
-    assert summary["proof_summaries"] == [
+    # S8: proof_summaries / timeline are GOAL_DETAIL_ONLY_FIELDS — evicted from
+    # the frame HEAD behind ``detail_ref`` and served by ``harness goal detail``.
+    # The head must not carry them; the on-demand detail rebuild must.
+    assert "proof_summaries" not in summary
+    assert "timeline" not in summary
+    assert summary["detail_ref"]["evicted"] is True
+    from agent_runtime.snapshot import goal_detail_for_task
+
+    detail = goal_detail_for_task(task.id, event_log=events)
+    assert detail is not None
+    assert detail["proof_summaries"] == [
         {
             "proof_id": "proof_cmd",
             "type": "test_run",
@@ -73,6 +83,6 @@ def test_snapshot_exposes_goal_timeline_proof_summaries_and_why_not_done():
             "has_artifact": True,
         }
     ]
-    assert [item["type"] for item in summary["timeline"]][-3:] == ["run.opened", "proof.attached", "incident.opened"]
+    assert [item["type"] for item in detail["timeline"]][-3:] == ["run.opened", "proof.attached", "incident.opened"]
     assert "needs QA verdict" not in str(summary)
     assert "proofs/task_visibility" not in str(summary)

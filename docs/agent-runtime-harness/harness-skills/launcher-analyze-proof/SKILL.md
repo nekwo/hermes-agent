@@ -1,6 +1,11 @@
 ---
 name: launcher-analyze-proof
 description: Choose fast, correct Flutter analyze and Launcher proof commands for Harness tasks. Use when Launcher Dev sees flutter analyze, launcher_contract_smoke, Mission Control bridge proof, Stage 47 burn-in, no-edit Launcher smoke, Stage C/Marionette QA, or contract-consumption proof.
+metadata:
+  hermes:
+    surfaces: [mission_chat, mission_worker]
+    modes: [standard]
+    load_policy: recommended
 ---
 
 # Launcher Analyze Proof

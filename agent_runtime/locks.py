@@ -80,6 +80,40 @@ def worker_session_lock(worker_session_id: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def board_lock(board_id: str) -> Iterator[None]:
+    with _file_lock(paths.lock_dir() / "boards" / f"{paths._safe_path_token(board_id)}.lock"):
+        yield
+
+
+@contextlib.contextmanager
+def office_lock(workspace_id: str) -> Iterator[None]:
+    with _file_lock(paths.lock_dir() / "office" / f"{paths._safe_path_token(workspace_id)}.lock"):
+        yield
+
+
+@contextlib.contextmanager
+def persona_chat_mint_lock(key_digest: str) -> Iterator[None]:
+    """Serialize one chat-root mint idempotency key across CLI/serve processes."""
+    with _file_lock(
+        paths.lock_dir()
+        / "persona_chat_mints"
+        / f"{paths._safe_path_token(key_digest)}.lock"
+    ):
+        yield
+
+
+@contextlib.contextmanager
+def persona_chat_instance_lock(persona_instance_id: str) -> Iterator[None]:
+    """Serialize chat-root selection changes for one persona instance."""
+    with _file_lock(
+        paths.lock_dir()
+        / "persona_chat_instances"
+        / f"{paths._safe_path_token(persona_instance_id)}.lock"
+    ):
+        yield
+
+
+@contextlib.contextmanager
 def archive_lock() -> Iterator[None]:
     with _file_lock(paths.lock_dir() / "archive.lock"):
         yield

@@ -76,19 +76,6 @@ def test_new_goal_hygiene_cancels_stage47_temp_state_and_orphan_runs():
     assert runs.find_active(task_id=keep.id)
 
 
-def test_new_goal_hygiene_marks_dead_daemon_status_offline(monkeypatch):
-    from agent_runtime import daemon as daemon_mod
-
-    daemon_mod._write_daemon_status({"state": "idle", "pid": 999999})
-    monkeypatch.setattr("agent_runtime.goal_hygiene._pid_is_alive", lambda pid: False)
-
-    report = prepare_new_goal_runtime(task_store=TaskStore(), run_store=RunStore(), cleanup_stage47_temp=False)
-
-    assert report["daemon_status_cleanup"]["changed"] is True
-    assert daemon_mod.read_daemon_status()["state"] == "offline"
-    assert daemon_mod.read_daemon_status()["cleared_by"] == "new_goal_hygiene"
-
-
 def test_new_goal_hygiene_can_cleanup_launcher_visual_processes(monkeypatch):
     receipt = {
         "enabled": True,

@@ -6,8 +6,13 @@ from typing import Any, Iterable
 
 from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
-from .persona_chat_history import _canonical_persona_id
+from .persona_chat_history import (
+    _canonical_persona_id,
+    PERSONA_PRE_TRACE_ACK_KIND,
+    PERSONA_RELAYED_MESSAGE_KIND,
+)
 from .simplified_contract import public_decision_type_value
+from .transcript_order import TURN_SEQ_CONTENT, order_transcript_rows
 
 OPERATOR_CHANNELS_SCHEMA_VERSION = 1
 # v2: goal-run turn flow — thinking_summary / turn / tool_call / turns_collapsed
@@ -66,6 +71,11 @@ def operator_channel_summary(
     channels: dict[str, _OperatorChannelBuilder] = {}
     by_session: dict[str, _OperatorChannelBuilder] = {}
     by_instance: dict[str, _OperatorChannelBuilder] = {}
+    # instance id → display name, built once from the FULL roster so a relayed
+    # message can name the sending agent (the sender may be any instance, not
+    # just this channel's owner). Threaded down to the history projection as an
+    # additive lookup; never re-derived per row.
+    display_names: dict[str, str] = {}
 
     for instance in persona_instances:
         key = _channel_key_for_instance(instance)
@@ -80,6 +90,9 @@ def operator_channel_summary(
             by_session[session_id] = builder
         if instance_id:
             by_instance[instance_id] = builder
+            name = safe_assignment_text(getattr(instance, "display_name", None), limit=120)
+            if name:
+                display_names[instance_id] = name
 
     for row in persona_chat_history:
         session_id = _safe_session(row.get("session_id"))
@@ -118,7 +131,12 @@ def operator_channel_summary(
     return [
         channel
         for channel in (
-            builder.build(task_lookup=task_lookup, run_lookup=run_lookup, accountant=accountant)
+            builder.build(
+                task_lookup=task_lookup,
+                run_lookup=run_lookup,
+                accountant=accountant,
+                display_names=display_names,
+            )
             for builder in channels.values()
         )
         if channel is not None
@@ -182,6 +200,7 @@ class _OperatorChannelBuilder:
         task_lookup: "_TaskLookup",
         run_lookup: "_RunLookup | None" = None,
         accountant: Any = None,
+        display_names: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         history = self._bound_history() or _latest_history(self.history_rows)
         trace = _merged_trace(self.trace_rows)
@@ -238,14 +257,6 @@ class _OperatorChannelBuilder:
                     "entity_ids": source_instance_ids,
                 }
             )
-        if history is None and session_id:
-            warnings.append(
-                {
-                    "code": "session_without_history",
-                    "detail": "operator channel has a session id but no curated chat history row",
-                    "entity_id": session_id,
-                }
-            )
         task_id = _first_text(
             getattr(canonical, "current_task_id", None) if canonical is not None else None,
             history.get("task_id") if history else None,
@@ -286,6 +297,7 @@ class _OperatorChannelBuilder:
             trace=trace,
             runs=channel_runs,
             accountant=accountant,
+            display_names=display_names,
         )
         if _turn_identity_dropped(entries, conversation.get("messages") or []):
             warnings.append(
@@ -295,13 +307,40 @@ class _OperatorChannelBuilder:
                     "entity_id": channel_id,
                 }
             )
-        # trace_empty is evaluated AFTER the conversation: a channel whose goal
-        # turns already flow as canonical messages is not an empty channel, even
-        # when the legacy trace lane happens to be null.
+        # session_without_history and trace_empty are both evaluated AFTER the
+        # conversation is built: a channel whose goal turns already flow as
+        # canonical messages is not an empty channel, even when the legacy trace
+        # lane happens to be null.
+        conversation_messages = conversation.get("messages") or []
         has_flow_messages = any(
             message.get("kind") in {"thinking_summary", "turn", "tool_call"}
-            for message in conversation.get("messages") or []
+            for message in conversation_messages
         )
+        # ONE shared predicate for the NEWBORN channel state: a freshly-created
+        # chat that has a session id but into which nothing has flowed yet — no
+        # curated history row, no trace, no task binding, and zero projected
+        # conversation messages (operator rows included). A newborn is neither a
+        # projection loss nor an empty-trace anomaly; both warnings stay silent
+        # until real content arrives (live 2026-07-18: creating a fresh
+        # neko_supervisor chat surfaced two false-positive contract warnings).
+        is_newborn_channel = (
+            bool(session_id)
+            and history is None
+            and trace is None
+            and task_id is None
+            and not conversation_messages
+        )
+        # session_without_history is the genuine projection-loss signal: real
+        # content flowed (conversation messages or a trace) but no curated
+        # history row backs it. A newborn — nothing has flowed yet — stays silent.
+        if history is None and session_id and not is_newborn_channel:
+            warnings.append(
+                {
+                    "code": "session_without_history",
+                    "detail": "operator channel has a session id but no curated chat history row",
+                    "entity_id": session_id,
+                }
+            )
         # A dormant instance channel — no session, no history, no task binding,
         # and an empty conversation — has never had anything to trace; flagging
         # it would emit a permanent false-positive parity warning for every
@@ -310,13 +349,14 @@ class _OperatorChannelBuilder:
             history is None
             and session_id is None
             and task_id is None
-            and not (conversation.get("messages") or [])
+            and not conversation_messages
         )
         if (
             trace is None
             and not has_flow_messages
             and (history is None or task_id)
             and not dormant_channel
+            and not is_newborn_channel
         ):
             warnings.append(
                 {
@@ -525,6 +565,7 @@ def _conversation_contract(
     trace: dict[str, Any] | None,
     runs: list[dict[str, Any]] | None = None,
     accountant: Any = None,
+    display_names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     if task is not None:
@@ -544,6 +585,7 @@ def _conversation_contract(
                 index=index,
                 persona_id=persona_id,
                 persona_instance_id=persona_instance_id,
+                display_names=display_names,
             )
             if message is not None:
                 messages.append(message)
@@ -579,7 +621,7 @@ def _conversation_contract(
 
     _settle_interrupted_tool_calls(messages, history=history)
 
-    messages.sort(key=_conversation_message_sort_key)
+    messages = _order_conversation_messages(messages)
     messages = _dedupe_conversation_messages(messages)
     messages = _apply_conversation_cap(messages, channel_id=channel_id, accountant=accountant)
     for seq, message in enumerate(messages, start=1):
@@ -710,6 +752,7 @@ def _conversation_history_message(
     index: int,
     persona_id: str,
     persona_instance_id: str | None,
+    display_names: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     text = _safe_conversation_text(row.get("text"), limit=20000)
     if not text:
@@ -749,27 +792,79 @@ def _conversation_history_message(
             message["client_message_id"] = client_message_id
         if turn_id:
             message["turn_id"] = turn_id
+        _carry_turn_seq(message, row)
         return message
+    # A canned pre-trace ack keeps its typed kind end-to-end so the Launcher
+    # collapses/drops it structurally (never as a settled reply bubble ahead of
+    # the real tool run), instead of matching the tool-specific ack prose.
+    is_pre_trace_ack = (
+        role == "agent"
+        and safe_assignment_token(row.get("kind")) == PERSONA_PRE_TRACE_ACK_KIND
+    )
+    # A relayed incoming message is a role="operator" row that persona_chat_history
+    # tagged with the SENDING agent's identity (finish_reason marker). Attribute
+    # it to that agent, but keep role="operator" so the lane semantics — and any
+    # consumer that ignores the typed kind — degrade to today's operator render.
+    is_relayed_message = (
+        role == "operator"
+        and safe_assignment_token(row.get("kind")) == PERSONA_RELAYED_MESSAGE_KIND
+    )
+    relay_sender_instance_id = (
+        safe_assignment_text(row.get("relay_sender_instance_id"), limit=160)
+        if is_relayed_message
+        else None
+    )
+    if is_relayed_message:
+        default_kind = PERSONA_RELAYED_MESSAGE_KIND
+        actor_persona_id = (
+            safe_assignment_text(row.get("relay_sender_persona_id"), limit=160) or "agent"
+        )
+        actor_instance_id = relay_sender_instance_id or None
+    else:
+        if role == "agent":
+            default_kind = PERSONA_PRE_TRACE_ACK_KIND if is_pre_trace_ack else "reply"
+        elif role == "operator":
+            default_kind = "operator_message"
+        else:
+            default_kind = "system_message"
+        actor_persona_id = "operator" if role == "operator" else persona_id
+        actor_instance_id = None if role == "operator" else persona_instance_id
     message = {
         "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
         "seq": 0,
         "timestamp": row.get("timestamp"),
-        "actor_persona_id": "operator" if role == "operator" else persona_id,
-        "actor_instance_id": None if role == "operator" else persona_instance_id,
+        "actor_persona_id": actor_persona_id,
+        "actor_instance_id": actor_instance_id,
         "role": role,
-        "kind": "reply" if role == "agent" else "operator_message" if role == "operator" else "system_message",
+        "kind": default_kind,
         "status": "delivered",
         "display_title": "",
         "display_text": text,
         "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
         "refs": {"source": "persona_chat_history"},
     }
+    # Name the sending agent ONLY when its instance id resolves in the roster —
+    # never fabricate a name for an instance we cannot see.
+    if is_relayed_message and relay_sender_instance_id:
+        resolved_name = (display_names or {}).get(relay_sender_instance_id)
+        if resolved_name:
+            message["actor_display_name"] = resolved_name
     if role == "operator" and client_message_id:
         message["client_message_id"] = client_message_id
     if role == "agent" and client_message_id:
         message["turn_id"] = safe_assignment_token(client_message_id) or client_message_id
         message["client_message_id"] = client_message_id
+    # C8 ordering key: the history projection stamps the intra-turn position
+    # (operator opens, terminal reply/interrupt closes); carry it through this
+    # contract unchanged so every representation sorts on the same key.
+    _carry_turn_seq(message, row)
     return message
+
+
+def _carry_turn_seq(message: dict[str, Any], row: dict[str, Any]) -> None:
+    turn_seq = row.get("turn_seq")
+    if isinstance(turn_seq, int) and not isinstance(turn_seq, bool):
+        message["turn_seq"] = turn_seq
 
 
 def _conversation_trace_message(
@@ -819,6 +914,7 @@ def _conversation_trace_message(
         }
         if turn_id:
             message["turn_id"] = turn_id
+            message["turn_seq"] = TURN_SEQ_CONTENT
         return message
     summary = _safe_conversation_text(
         entry.get("summary") or entry.get("rationale"),
@@ -851,6 +947,7 @@ def _conversation_trace_message(
     }
     if turn_id:
         message["turn_id"] = turn_id
+        message["turn_seq"] = TURN_SEQ_CONTENT
     return message
 
 
@@ -1165,13 +1262,23 @@ def _tool_call_message(
     }
     if turn_id:
         message["turn_id"] = turn_id
+        # C8 ordering key: turn-anchored content without an emitter seq sits in
+        # the content band — after the turn's operator row, before its terminal
+        # reply — keeping its relative order among band peers from the fallback.
+        message["turn_seq"] = TURN_SEQ_CONTENT
     return message
 
 
 # Operator-detail fields carried from a trace entry onto the tool_call payload.
 # The values were already operator-sanitized (secret-scrubbed, bounded) when the
 # trace entry was rendered; this is a straight, newest-wins merge.
-_TOOL_DETAIL_STR_FIELDS = ("command", "target", "detail", "output")
+_TOOL_DETAIL_STR_FIELDS = (
+    "command", "target", "detail", "output",
+    # First-class agent-to-agent dispatch (G2): the target persona chip + the
+    # full order, carried onto the tool{} payload under the same names the
+    # launcher reads. Already operator-sanitized upstream; straight newest-wins.
+    "dispatch_target", "dispatch_order",
+)
 _TOOL_DETAIL_INT_FIELDS = ("duration_ms", "exit_code")
 
 
@@ -1240,9 +1347,7 @@ def _apply_conversation_cap(
     if accountant is not None:
         accountant.drop("turn_cap_trimmed", count=len(dropped), entity_id=channel_id)
         accountant.mark_truncated()
-    result = [*protected, marker, *kept]
-    result.sort(key=_conversation_message_sort_key)
-    return result
+    return _order_conversation_messages([*protected, marker, *kept])
 
 
 def _conversation_kind_from_status(status: str) -> str:
@@ -1304,6 +1409,33 @@ def _conversation_message_sort_key(message: dict[str, Any]) -> tuple[int, str, s
     if parsed is not None:
         return (1, parsed.isoformat(), str(message.get("id") or ""))
     return (2, str(message.get("timestamp") or ""), str(message.get("id") or ""))
+
+
+def _order_conversation_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """C8: order the conversation by the ONE turn-scoped key.
+
+    Turn-anchored rows (anchor = token(client_message_id | turn_id), position =
+    ``turn_seq``) sort inside their turn by the stamped position — operator row
+    first, content band between, terminal reply/interrupt last — immune to the
+    two-clock skew between SessionDB stamps and trace ``ts`` values (F17). Rows
+    without the key (pre-C8 history, goal_input, warnings) keep the pre-C8
+    timestamp fallback, which also anchors where each turn sits among them.
+    """
+
+    return order_transcript_rows(
+        messages,
+        anchor=lambda message: safe_assignment_token(
+            message.get("client_message_id") or message.get("turn_id")
+        )
+        or None,
+        turn_seq=lambda message: message.get("turn_seq")
+        if isinstance(message.get("turn_seq"), int)
+        and not isinstance(message.get("turn_seq"), bool)
+        else None,
+        fallback_key=lambda message, _index: _conversation_message_sort_key(message),
+    )
 
 
 def _dedupe_conversation_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -175,6 +175,9 @@ def _active_runs(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(runs, list):
         return [run for run in runs if isinstance(run, dict)]
     runs = snapshot.get("runs")
+    # S4: the snapshot ships ``runs`` as an id-keyed map; read its rows.
+    if isinstance(runs, dict):
+        runs = list(runs.values())
     if not isinstance(runs, list):
         return []
     return [run for run in runs if isinstance(run, dict) and str(run.get("state") or "") in {"running", "queued", "waiting_on_tool", "waiting_on_approval"}]
@@ -215,6 +218,9 @@ def _repeated_history_value(history: list[dict[str, Any]], key: str) -> dict[str
 
 def _incident_kind_count(snapshot: dict[str, Any], kind: str) -> int:
     incidents = snapshot.get("incidents")
+    # S4: the snapshot ships ``incidents`` as an id-keyed map; read its rows.
+    if isinstance(incidents, dict):
+        incidents = list(incidents.values())
     if not isinstance(incidents, list):
         return 0
     return sum(

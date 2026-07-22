@@ -1,9 +1,28 @@
 # Turn durability — design (2026-07-08)
 
-Status: **settled with Tony, not yet implemented.** Implementation and
-review prompts are delivered operator-side (not committed). Sibling design:
+Status: **shipped and superseded by MC-CHAT-CONTINUITY (2026-07-20).** This
+document retains the original incremental durability design and its hardening
+history. The production state machine is now `pending | executing |
+outcome_unknown | native_committed | projected | abandoned`; native structured
+SessionDB history is the sole continuation authority. Sibling design:
 `harness-serve-design.md` (§Follow-up slices item 2 is this document,
 expanded).
+
+The current recovery contract is stricter than the original
+`running/completed/failed/interrupted` design below:
+
+- the journal is keyed by stable root, `client_message_id`, and turn ID;
+- the provider boundary is recorded immediately before submission;
+- an unprovable in-flight result becomes `outcome_unknown` and is never
+  automatically resubmitted;
+- `native_committed` retries repair projections without calling the provider;
+- explicit abandon requires an exact tuple match, after which resend uses a
+  fresh client message ID;
+- a cross-process root lease covers recovery, rehydrate, provider execution,
+  native commit, and projection.
+
+Use the persona-chat commands in
+`harness-skills/harness-runtime-model/SKILL.md` for the current operator path.
 
 ## Problem
 

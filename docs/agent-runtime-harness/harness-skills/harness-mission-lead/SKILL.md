@@ -1,6 +1,11 @@
 ---
 name: harness-mission-lead
 description: Root-node Neko Mission Lead skill for authoring stages, running self-looped child nodes, judging harness-captured evidence, steering child sessions, and declaring goal completion.
+metadata:
+  hermes:
+    surfaces: [mission_worker]
+    modes: [root_node]
+    load_policy: required_preload
 ---
 
 # Harness Mission Lead

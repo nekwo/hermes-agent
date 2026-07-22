@@ -89,7 +89,7 @@ def test_root_authored_single_repo_stage_persists_for_snapshot(monkeypatch, isol
 
     stored = TaskStore().get(task.id)
     snapshot = build_snapshot(task_store=TaskStore())
-    snap_task = next(item for item in snapshot["tasks"] if item["task_id"] == task.id)
+    snap_task = next(item for item in list(snapshot["goals"].values()) if item["task_id"] == task.id)
     assert result.ok is True
     assert [stage.repo for stage in stored.mission_plan.stages] == ["hermes-agent"]
     assert snap_task["mission_plan"]["stages"][0]["repo"] == "hermes-agent"

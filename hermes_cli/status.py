@@ -102,6 +102,46 @@ def _effective_provider_label() -> str:
 from hermes_constants import is_termux as _is_termux
 
 
+# The API-key registry the status box renders. Module-level so the typed
+# provider-visibility contract (fork-owned `harness providers --json`, schema
+# v2) reports the SAME registry instead of a drifting copy — one source of
+# truth for "which key names exist".
+# Values may be a single env var name (str) or a tuple of alternates (first
+# found wins).
+STATUS_API_KEYS: dict[str, str | tuple[str, ...]] = {
+    "OpenRouter": "OPENROUTER_API_KEY",
+    "OpenAI": "OPENAI_API_KEY",
+    "Anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"),
+    "Google / Gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    "DeepSeek": "DEEPSEEK_API_KEY",
+    "xAI / Grok": "XAI_API_KEY",
+    "NVIDIA NIM": "NVIDIA_API_KEY",
+    "Z.AI / GLM": "GLM_API_KEY",
+    "Kimi": "KIMI_API_KEY",
+    "StepFun Step Plan": "STEPFUN_API_KEY",
+    "MiniMax": "MINIMAX_API_KEY",
+    "MiniMax-CN": "MINIMAX_CN_API_KEY",
+    "Firecrawl": "FIRECRAWL_API_KEY",
+    "Tavily": "TAVILY_API_KEY",
+    "Browser Use": "BROWSER_USE_API_KEY",  # Optional — local browser works without this
+    "Browserbase": "BROWSERBASE_API_KEY",  # Optional — direct credentials only
+    "FAL": "FAL_KEY",
+    "ElevenLabs": "ELEVENLABS_API_KEY",
+    "GitHub": "GITHUB_TOKEN",
+}
+
+
+def resolve_status_env(env_ref) -> str:
+    """Return first non-empty env var value from a str or tuple of names."""
+    if isinstance(env_ref, tuple):
+        for candidate in env_ref:
+            v = get_env_value(candidate) or ""
+            if v:
+                return v
+        return ""
+    return get_env_value(env_ref) or ""
+
+
 def show_status(args):
     """Show status of all Hermes Agent components."""
     deep = getattr(args, 'deep', False)
@@ -136,46 +176,13 @@ def show_status(args):
     print()
     print(color("◆ API Keys", Colors.CYAN, Colors.BOLD))
 
-    # Values may be a single env var name (str) or a tuple of alternates (first found wins).
-    keys: dict[str, str | tuple[str, ...]] = {
-        "OpenRouter": "OPENROUTER_API_KEY",
-        "OpenAI": "OPENAI_API_KEY",
-        "Anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN"),
-        "Google / Gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
-        "DeepSeek": "DEEPSEEK_API_KEY",
-        "xAI / Grok": "XAI_API_KEY",
-        "NVIDIA NIM": "NVIDIA_API_KEY",
-        "Z.AI / GLM": "GLM_API_KEY",
-        "Kimi": "KIMI_API_KEY",
-        "StepFun Step Plan": "STEPFUN_API_KEY",
-        "MiniMax": "MINIMAX_API_KEY",
-        "MiniMax-CN": "MINIMAX_CN_API_KEY",
-        "Firecrawl": "FIRECRAWL_API_KEY",
-        "Tavily": "TAVILY_API_KEY",
-        "Browser Use": "BROWSER_USE_API_KEY",  # Optional — local browser works without this
-        "Browserbase": "BROWSERBASE_API_KEY",  # Optional — direct credentials only
-        "FAL": "FAL_KEY",
-        "ElevenLabs": "ELEVENLABS_API_KEY",
-        "GitHub": "GITHUB_TOKEN",
-    }
-
-    def _resolve_env(env_ref) -> str:
-        """Return first non-empty env var value from a str or tuple of names."""
-        if isinstance(env_ref, tuple):
-            for candidate in env_ref:
-                v = get_env_value(candidate) or ""
-                if v:
-                    return v
-            return ""
-        return get_env_value(env_ref) or ""
-
-    for name, env_ref in keys.items():
+    for name, env_ref in STATUS_API_KEYS.items():
         # Anthropic already has a dedicated lookup below; keep that as the
         # single source of truth (it also resolves OAuth tokens), skip here
         # so we don't print two "Anthropic" rows.
         if name == "Anthropic":
             continue
-        value = _resolve_env(env_ref)
+        value = resolve_status_env(env_ref)
         has_key = bool(value)
         display = redact_key(value)
         print(f"  {name:<12}  {check_mark(has_key)} {display}")

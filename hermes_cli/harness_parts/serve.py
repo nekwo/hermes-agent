@@ -113,6 +113,59 @@ _FINGERPRINT_STORE_DIRS = (
 )
 
 
+_FINGERPRINT_BOARD_CARD_CAP = 600  # bounded per-board card stat; remainder is rare + also evented
+
+
+def _stat_board_tree(root: Any, _stat) -> None:
+    """Bounded stat of the boards/ subtree: the root, each board's def + card
+    files + conflict dir. Card files are stat'd individually so in-place edits
+    (move/edit rewrite a file without touching the dir mtime) still flip the
+    fingerprint. Capped per board to stay cheap on the hot poll path."""
+
+    boards_root = root / "boards"
+    _stat(boards_root)
+    try:
+        board_dirs = sorted(p for p in boards_root.iterdir() if p.is_dir())
+    except OSError:
+        return
+    for board_dir in board_dirs:
+        _stat(board_dir / "board.json")
+        cards_dir = board_dir / "cards"
+        _stat(cards_dir)
+        _stat(board_dir / "conflicts")
+        try:
+            card_files = sorted(cards_dir.glob("*.json"))
+        except OSError:
+            continue
+        for card_path in card_files[:_FINGERPRINT_BOARD_CARD_CAP]:
+            _stat(card_path)
+
+
+_FINGERPRINT_TURN_FILE_CAP = 200  # session cap is 50; defensive bound only
+
+
+def _stat_turn_store_tree(root: Any, _stat) -> None:
+    """Bounded stat of the per-session turn store (mission_chat_turns/<key>.json).
+
+    The turn-store split (one file per chat session) made the legacy
+    `mission_chat_turns.json` root-file stat a dead signal: after migration the
+    monolith is renamed aside and every streamed-turn flush rewrites ONE
+    session file in place — which does not reliably move the directory mtime.
+    Stat each session file individually (the board-tree pattern) so a cached
+    snapshot can never serve stale turn elements. The legacy root file stays in
+    _FINGERPRINT_ROOT_FILES so the one-time migration rename also flips the
+    fingerprint."""
+
+    turns_root = root / "mission_chat_turns"
+    _stat(turns_root)
+    try:
+        session_files = sorted(turns_root.glob("*.json"))
+    except OSError:
+        return
+    for session_path in session_files[:_FINGERPRINT_TURN_FILE_CAP]:
+        _stat(session_path)
+
+
 def _runtime_state_fingerprint() -> tuple | None:
     """Cheap stat-based sequence check over the harness read-model inputs.
 
@@ -138,6 +191,29 @@ def _runtime_state_fingerprint() -> tuple | None:
         _stat(root / name)
     for name in _FINGERPRINT_STORE_DIRS:
         _stat(root / name)
+    # Event-log rotation (C6a) moves appends off the static "events.jsonl" onto a
+    # rotating live slice, so the _FINGERPRINT_ROOT_FILES entry above freezes once
+    # the log rotates. Stat the manifest (flips on each rotation) AND the resolved
+    # live slice (flips on every append) so a cached snapshot never serves stale
+    # frames after rotation. Pre-rotation the live slice IS events.jsonl (a
+    # harmless duplicate stat); the manifest is absent (a stable -1/-1 signal).
+    try:
+        from agent_runtime import event_rotation as _event_rotation
+
+        _stat(_event_rotation.manifest_path())
+        _stat(_event_rotation.live_path())
+    except Exception:
+        parts.append(("event_log_rotation", -1, -1))
+    # Mission Board tree is nested two levels deep (boards/<id>/cards/<card>.json),
+    # so a top-level dir stat alone misses card adds/moves/in-place edits and
+    # pull-materialized cards. Every board mutation also advances events.jsonl
+    # (already fingerprinted), but a bounded subtree walk here keeps cached
+    # snapshots honest even for event-less file materialization (realm pull).
+    _stat_board_tree(root, _stat)
+    # Per-session turn store: streamed-turn flushes rewrite one session file in
+    # place and emit NO EventLog event, so without these stats a cached snapshot
+    # would serve stale turn elements.
+    _stat_turn_store_tree(root, _stat)
     try:
         from hermes_state import SessionDB
 
@@ -365,6 +441,17 @@ def serve_loop(
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; a
     future remote lane feeds the same loop (design doc §Future)."""
+    from agent_runtime.persona_chat_continuity import (
+        initialize_persona_chat_runtime_registry,
+    )
+    from agent_runtime.config import load_agent_runtime_config
+
+    persona_chat_cfg = load_agent_runtime_config().persona_chat
+    initialize_persona_chat_runtime_registry(
+        enabled=persona_chat_cfg.hot_sessions_enabled,
+        max_entries=persona_chat_cfg.max_hot_sessions,
+        ttl_seconds=persona_chat_cfg.idle_ttl_seconds,
+    )
     frames = _FrameWriter(writer)
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")

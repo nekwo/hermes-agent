@@ -80,9 +80,10 @@ class MissionStateMachine:
     orchestration code should treat each record as a mission/goal.
     """
 
-    def __init__(self, *, proof_store=None, config=None):
+    def __init__(self, *, proof_store=None, config=None, event_log=None):
         self.proof_store = proof_store
         self.config = config
+        self.event_log = event_log
 
     def next_action(self, mission: Task) -> HarnessAction:
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
@@ -95,7 +96,12 @@ class MissionStateMachine:
         typed = self._blueprint_next_action(mission, state=state)
         if typed is not None:
             return typed
-        return _legacy_next_action(mission, state=state, proof_store=self.proof_store)
+        return _legacy_next_action(
+            mission,
+            state=state,
+            proof_store=self.proof_store,
+            event_log=self.event_log,
+        )
 
     def next_actions(self, mission: Task) -> list[HarnessAction]:
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
@@ -118,7 +124,7 @@ class MissionStateMachine:
             return []
         if getattr(mission, "open_incident_ids", None):
             return []
-        if needs_pm_triage_before_dev(mission) or has_unresolved_context_request(mission) or needs_supervisor_slicing(mission):
+        if needs_pm_triage_before_dev(mission) or has_unresolved_context_request(mission) or needs_supervisor_slicing(mission, event_log=self.event_log):
             return []
         stages = list(getattr(plan, "stages", None) or [])
         by_id = {stage.id: stage for stage in stages}
@@ -188,7 +194,7 @@ class MissionStateMachine:
             return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead issue discovery triage")
         if has_unresolved_context_request(mission):
             return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to resolve context request")
-        if needs_supervisor_slicing(mission):
+        if needs_supervisor_slicing(mission, event_log=self.event_log):
             return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to slice broad specialist mission before delivery")
         if current.status in {StageStatus.READY_FOR_QA, StageStatus.PASSED}:
             apply_stage_outcome(mission, current.id, StageOutcome.PASSED, reason=f"blueprint stage {current.id} already ready")
@@ -319,7 +325,7 @@ def _mission_plan_routing_enabled(mission: Task, config) -> bool:
     return bool(getattr(mission_plan_config, "enabled", False))
 
 
-def _legacy_next_action(mission: Task, *, state: TaskState, proof_store=None) -> HarnessAction:
+def _legacy_next_action(mission: Task, *, state: TaskState, proof_store=None, event_log=None) -> HarnessAction:
     if state in {TaskState.DONE, TaskState.CANCELLED}:
         return HarnessAction(HarnessActionType.NOOP, mission.id, reason="legacy task is terminal")
     if getattr(mission, "open_incident_ids", None):
@@ -346,7 +352,7 @@ def _legacy_next_action(mission: Task, *, state: TaskState, proof_store=None) ->
         return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead issue discovery triage")
     if has_unresolved_context_request(mission) or _has_unsupported_context_requests(mission):
         return _run_slot(mission, "neko_supervisor", "legacy task needs Neko Mission Lead to resolve context request")
-    if needs_supervisor_slicing(mission):
+    if needs_supervisor_slicing(mission, event_log=event_log):
         return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead to slice broad specialist mission before delivery")
 
     current = _current_stage(mission)

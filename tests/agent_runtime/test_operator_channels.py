@@ -1,6 +1,10 @@
 from agent_runtime.models import PersonaInstance
 from agent_runtime.models import Task
-from agent_runtime.operator_channels import operator_channel_summary
+from agent_runtime.operator_channels import (
+    _conversation_history_message,
+    operator_channel_summary,
+)
+from agent_runtime.persona_chat_history import PERSONA_PRE_TRACE_ACK_KIND
 from agent_runtime.states import TaskState, WorkerSessionState
 from hermes_time import now
 
@@ -272,6 +276,11 @@ def test_operator_conversation_projects_interrupted_turn_marker_and_settles_runn
 
 
 def test_operator_channel_reports_missing_history_loudly():
+    """Genuine projection loss: real content flowed — a live trace with tool
+    activity, which also projects a tool_call conversation message — but no
+    curated chat history row backs it. session_without_history must still fire
+    loudly. (A bare newborn chat with no content is covered separately and
+    stays silent.)"""
     session_id = "persona_chat_personainst_profile_alice_missing"
     channels = operator_channel_summary(
         persona_instances=[
@@ -282,7 +291,23 @@ def test_operator_channel_reports_missing_history_loudly():
             )
         ],
         persona_chat_history=[],
-        persona_chat_trace=[],
+        persona_chat_trace=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_profile_alice",
+                "task_id": None,
+                "entries": [
+                    {
+                        "event": "tool_started",
+                        "tool_name": "terminal",
+                        "summary": "Started tool terminal: date",
+                        "status": "started",
+                        "ts": "2026-06-25T21:54:00Z",
+                    }
+                ],
+            }
+        ],
     )
 
     assert len(channels) == 1
@@ -290,7 +315,84 @@ def test_operator_channel_reports_missing_history_loudly():
         warning["code"] == "session_without_history"
         for warning in channels[0]["warnings"]
     )
-    assert any(warning["code"] == "trace_empty" for warning in channels[0]["warnings"])
+    # The trace lane carries real activity, so this is not an empty channel.
+    assert not any(
+        warning["code"] == "trace_empty" for warning in channels[0]["warnings"]
+    )
+
+
+def test_operator_channel_newborn_chat_emits_no_warnings():
+    """A brand-new Mission Control chat has a session id and nothing else yet —
+    no curated history row, no trace, no task binding, zero conversation
+    messages. That NEWBORN state is not a contract breach: neither
+    session_without_history nor trace_empty may fire (live 2026-07-18: creating
+    a fresh neko_supervisor chat surfaced two false-positive 'Channel contract
+    warning' bubbles)."""
+    session_id = "persona_chat_personainst_profile_alice_newborn"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _instance(
+                "personainst_profile_alice",
+                session_id=session_id,
+                updated_at="2026-07-18T09:00:00Z",
+            )
+        ],
+        persona_chat_history=[],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 1
+    codes = {warning["code"] for warning in channels[0]["warnings"]}
+    assert "session_without_history" not in codes
+    assert "trace_empty" not in codes
+
+
+def test_operator_channel_session_without_history_fires_when_turns_flow():
+    """Content flowed as canonical turn messages (a run summary) but no curated
+    history row backs it — session_without_history is genuine projection loss
+    and must fire even when trace_empty is (correctly) suppressed by the flow."""
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[],
+        tasks=[_goal_task(ts)],
+        run_summaries=[
+            _dev_run_summary(
+                "run_flow", started="2026-07-05T05:50:00Z", finished="2026-07-05T05:51:00Z"
+            )
+        ],
+    )
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert any(m["kind"] == "turn" for m in channel["conversation"]["messages"])
+    assert any(
+        warning["code"] == "session_without_history"
+        for warning in channel["warnings"]
+    )
+    # A channel whose turns flow is not an empty-trace anomaly.
+    assert not any(
+        warning["code"] == "trace_empty" for warning in channel["warnings"]
+    )
+
+
+def test_operator_channel_trace_empty_fires_for_task_bound_channel_without_trace():
+    """A task-bound channel with a goal but no trace and no flow messages is a
+    genuine empty-trace anomaly — trace_empty must still fire. The newborn
+    exemption is scoped to session-only channels with no task binding."""
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[],
+        tasks=[_goal_task(ts)],
+    )
+
+    assert len(channels) == 1
+    assert any(
+        warning["code"] == "trace_empty" for warning in channels[0]["warnings"]
+    )
 
 
 def test_operator_channel_dormant_instance_has_no_trace_empty_warning():
@@ -953,6 +1055,143 @@ def test_tool_call_messages_carry_operator_detail():
     ]
 
 
+def test_tool_call_message_carries_dispatch_target_and_order():
+    ts = now()
+    channels = operator_channel_summary(
+        persona_instances=[_dev_task_instance(ts)],
+        persona_chat_history=[],
+        persona_chat_trace=[
+            {
+                "session_id": "20260705_dev_session",
+                "persona_id": "dev",
+                "persona_instance_id": "personainst_dev",
+                "task_id": "task_goal",
+                "entries": [
+                    {
+                        "event": "tool_started",
+                        "tool_name": "agent_chat_send",
+                        "summary": "Started tool agent_chat_send: → backend_dev: run a bounded check",
+                        "status": "started",
+                        "run_id": "run_a",
+                        "target": "→ backend_dev: run a bounded check",
+                        "dispatch_target": "backend_dev",
+                        "dispatch_order": (
+                            "From Neko: run a bounded backend health check.\n"
+                            "Keep it lightweight; no repo commits."
+                        ),
+                        "ts": "2026-07-05T05:48:03Z",
+                    },
+                    {
+                        # The finished row carries NO dispatch fields — the merge
+                        # must preserve the started row's values, not erase them.
+                        "event": "tool_finished",
+                        "tool_name": "agent_chat_send",
+                        "summary": "Finished tool agent_chat_send: passed",
+                        "status": "passed",
+                        "run_id": "run_a",
+                        "ts": "2026-07-05T05:48:09Z",
+                    },
+                ],
+            }
+        ],
+        tasks=[_goal_task(ts)],
+        run_summaries=[],
+    )
+
+    tool_calls = [
+        message
+        for message in channels[0]["conversation"]["messages"]
+        if message["kind"] == "tool_call"
+    ]
+    dispatch = next(m for m in tool_calls if m["tool"]["tool_name"] == "agent_chat_send")
+    assert dispatch["tool"]["dispatch_target"] == "backend_dev"
+    assert dispatch["tool"]["dispatch_order"] == (
+        "From Neko: run a bounded backend health check.\n"
+        "Keep it lightweight; no repo commits."
+    )
+    # The pair collapsed to one ok row with the fields intact after finish.
+    assert dispatch["status"] == "ok"
+
+
+def test_native_reasoning_mints_thinking_row_and_reply_echo_is_deduped():
+    session_id = "persona_chat_personainst_neko_fanout"
+    reply_text = "Dispatched to backend_dev, dev, and qa; each got a one-line bounded check."
+    channels = operator_channel_summary(
+        persona_instances=[
+            _instance(
+                "personainst_neko",
+                session_id=session_id,
+                updated_at="2026-07-17T14:00:08Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_neko",
+                "title": "Neko chat",
+                "message_count": 2,
+                "messages": [
+                    {
+                        "id": "operator_1",
+                        "role": "operator",
+                        "text": "fan out a bounded check to backend_dev, dev, qa",
+                        "client_message_id": "op-1",
+                        "timestamp": "2026-07-17T14:00:00Z",
+                    },
+                    {
+                        "id": "agent_1",
+                        "role": "agent",
+                        "text": reply_text,
+                        "client_message_id": "op-1",
+                        "timestamp": "2026-07-17T14:00:08Z",
+                    },
+                ],
+                "updated_at": "2026-07-17T14:00:08Z",
+            }
+        ],
+        persona_chat_trace=[
+            {
+                "session_id": session_id,
+                "persona_id": "profile:alice",
+                "persona_instance_id": "personainst_neko",
+                "entries": [
+                    {
+                        # Native model reasoning (distinct from the reply) — this
+                        # is the G3 emit; it must mint a first-class thinking row.
+                        "event": "progress",
+                        "summary": "Agent thinking process updated",
+                        "reasoning_summary": "I'll fan out one bounded order to each teammate, then summarize who I told what.",
+                        "status": "running",
+                        "turn_id": "op-1",
+                        "ts": "2026-07-17T14:00:01Z",
+                    },
+                    {
+                        # A trailing reasoning step whose text IS the reply (the
+                        # content echo) — dedup must drop it against reply_texts.
+                        "event": "progress",
+                        "summary": "Agent thinking process updated",
+                        "reasoning_summary": reply_text,
+                        "status": "running",
+                        "turn_id": "op-1",
+                        "ts": "2026-07-17T14:00:07Z",
+                    },
+                ],
+            }
+        ],
+    )
+
+    messages = channels[0]["conversation"]["messages"]
+    thinking_texts = [m["display_text"] for m in messages if m["kind"] == "thinking_summary"]
+    # The native reasoning surfaced as a thinking row.
+    assert any(t.startswith("I'll fan out one bounded order") for t in thinking_texts)
+    # The reply-echo thinking row was deduped against the real reply.
+    assert reply_text not in thinking_texts
+    # And the real reply survives exactly once.
+    replies = [m for m in messages if m["kind"] == "reply" and m["display_text"] == reply_text]
+    assert len(replies) == 1
+
+
 def test_trace_empty_warning_suppressed_when_flow_messages_exist_without_trace():
     ts = now()
     channels = operator_channel_summary(
@@ -1122,3 +1361,311 @@ def test_operator_channel_reports_incomplete_when_sources_exist_but_nothing_proj
 
     assert orphan["conversation_status"] == "incomplete"
     assert orphan["conversation"]["incomplete_reason"]
+
+
+def test_conversation_history_message_carries_pre_trace_ack_kind():
+    # A history row marked with the pre_trace_ack kind keeps that typed kind in
+    # the projected conversation message (role stays agent) so the Launcher
+    # collapses/drops it structurally.
+    message = _conversation_history_message(
+        {
+            "id": "m_ack",
+            "role": "agent",
+            "text": "I'll load the relevant guidance first, then report back with the useful part.",
+            "kind": PERSONA_PRE_TRACE_ACK_KIND,
+            "timestamp": "2026-07-13T20:51:00Z",
+        },
+        channel_id="chan_neko",
+        index=1,
+        persona_id="neko_supervisor",
+        persona_instance_id="personainst_neko_supervisor",
+    )
+    assert message is not None
+    assert message["role"] == "agent"
+    assert message["kind"] == PERSONA_PRE_TRACE_ACK_KIND
+
+
+def test_conversation_history_message_normal_reply_kind_is_reply():
+    message = _conversation_history_message(
+        {
+            "id": "m_reply",
+            "role": "agent",
+            "text": "Currently one skill is loaded: hermes-agent.",
+            "timestamp": "2026-07-13T20:51:02Z",
+        },
+        channel_id="chan_neko",
+        index=2,
+        persona_id="neko_supervisor",
+        persona_instance_id="personainst_neko_supervisor",
+    )
+    assert message is not None
+    assert message["kind"] == "reply"
+
+
+def _qa_instance(instance_id: str, *, session_id: str, display_name: str, updated_at: str) -> PersonaInstance:
+    return PersonaInstance(
+        id=instance_id,
+        persona_id="qa",
+        role="qa",
+        display_name=display_name,
+        profile_id=None,
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="chat",
+        session_id=session_id,
+        updated_at=updated_at,
+    )
+
+
+def test_operator_channels_are_instance_scoped_for_same_persona_siblings():
+    # 2026-07-18 channel-fold regression: two live instances of ONE persona, each
+    # threading its OWN session, must project TWO channels, each carrying only its
+    # own turns — no cross-bleed, no duplicate_instances_same_channel warning.
+    primary_session = "persona_chat_personainst_qa_84406cdb480e"
+    sibling_session = "persona_chat_personainst_qa_agent_2_32063a99b165"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _qa_instance(
+                "personainst_qa",
+                session_id=primary_session,
+                display_name="QA Agent",
+                updated_at="2026-07-18T06:50:26Z",
+            ),
+            _qa_instance(
+                "personainst_qa_agent_2",
+                session_id=sibling_session,
+                display_name="QA Agent (2)",
+                updated_at="2026-07-18T06:48:15Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": primary_session,
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa",
+                "title": "QA Agent chat",
+                "message_count": 2,
+                "messages": [
+                    {"role": "operator", "text": "Hi test test"},
+                    {"role": "agent", "text": "Hi! QA Agent online and ready."},
+                ],
+                "updated_at": "2026-07-18T06:50:26Z",
+            },
+            {
+                "session_id": sibling_session,
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa_agent_2",
+                "title": "QA Agent (2) chat",
+                "message_count": 2,
+                "messages": [
+                    {"role": "operator", "text": "Hi test test"},
+                    {"role": "agent", "text": "QA Agent (2) here."},
+                ],
+                "updated_at": "2026-07-18T06:48:15Z",
+            },
+        ],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 2
+    by_instance = {channel["persona_instance_id"]: channel for channel in channels}
+    assert set(by_instance) == {"personainst_qa", "personainst_qa_agent_2"}
+
+    primary = by_instance["personainst_qa"]
+    sibling = by_instance["personainst_qa_agent_2"]
+    # Distinct channel identities keyed on the instance's own session.
+    assert primary["channel_id"] != sibling["channel_id"]
+    assert primary["session_id"] == primary_session
+    assert sibling["session_id"] == sibling_session
+
+    # Each channel carries ONLY its own instance's turns — the canonical reply
+    # must not leak into the sibling's channel.
+    primary_texts = [m.get("display_text") for m in primary["conversation"]["messages"]]
+    sibling_texts = [m.get("display_text") for m in sibling["conversation"]["messages"]]
+    assert "Hi! QA Agent online and ready." in primary_texts
+    assert "Hi! QA Agent online and ready." not in sibling_texts
+    assert "QA Agent (2) here." in sibling_texts
+    assert "QA Agent (2) here." not in primary_texts
+
+    for channel in channels:
+        assert channel["source_instance_ids"] == [channel["persona_instance_id"]]
+        assert not any(
+            warning["code"] == "duplicate_instances_same_channel"
+            for warning in channel["warnings"]
+        )
+
+
+def test_duplicate_instances_warning_fires_only_on_true_canonical_collision():
+    # Two DIFFERENT canonical instance ids resolving onto ONE session is a genuine
+    # identity collision (they should never share a chat lane) — the guard fires.
+    # This is distinct from the legitimate-sibling case above, where distinct
+    # sessions keep the instances in distinct channels.
+    session_id = "persona_chat_personainst_qa_84406cdb480e"
+    channels = operator_channel_summary(
+        persona_instances=[
+            _qa_instance(
+                "personainst_qa",
+                session_id=session_id,
+                display_name="QA Agent",
+                updated_at="2026-07-18T06:50:26Z",
+            ),
+            _qa_instance(
+                "personainst_qa_agent_2",
+                session_id=session_id,
+                display_name="QA Agent (2)",
+                updated_at="2026-07-18T06:48:15Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa",
+                "title": "QA Agent chat",
+                "message_count": 1,
+                "messages": [{"role": "operator", "text": "collision"}],
+                "updated_at": "2026-07-18T06:50:26Z",
+            }
+        ],
+        persona_chat_trace=[],
+    )
+
+    assert len(channels) == 1
+    channel = channels[0]
+    assert set(channel["source_instance_ids"]) == {
+        "personainst_qa",
+        "personainst_qa_agent_2",
+    }
+    assert any(
+        warning["code"] == "duplicate_instances_same_channel"
+        for warning in channel["warnings"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Relayed-message conversation projection (sender attribution)                  #
+# --------------------------------------------------------------------------- #
+
+
+def _relayed_row(*, sender_persona_id, sender_instance_id, text="From Neko: hi"):
+    return {
+        "id": "row-relay",
+        "role": "operator",
+        "kind": "relayed_message",
+        "relay_sender_persona_id": sender_persona_id,
+        "relay_sender_instance_id": sender_instance_id,
+        "text": text,
+        "timestamp": "2026-07-18T00:00:00Z",
+        "client_message_id": "cm-relay-1",
+    }
+
+
+def test_conversation_history_message_relayed_attributes_sender_and_names_it():
+    message = _conversation_history_message(
+        _relayed_row(sender_persona_id="neko", sender_instance_id="personainst_neko"),
+        channel_id="qa::sess",
+        index=0,
+        persona_id="qa",
+        persona_instance_id="personainst_qa",
+        display_names={"personainst_neko": "Neko Mission Lead"},
+    )
+    assert message["kind"] == "relayed_message"
+    assert message["actor_persona_id"] == "neko"
+    assert message["actor_instance_id"] == "personainst_neko"
+    assert message["actor_display_name"] == "Neko Mission Lead"
+    # Lane semantics unchanged: an old consumer ignoring the typed kind still
+    # renders it on the operator lane.
+    assert message["role"] == "operator"
+
+
+def test_conversation_history_message_relayed_omits_name_when_instance_absent():
+    # The sender instance is not in the roster map → no fabricated name; and an
+    # unresolvable sender persona degrades to the honest "agent".
+    message = _conversation_history_message(
+        _relayed_row(sender_persona_id=None, sender_instance_id=None),
+        channel_id="qa::sess",
+        index=0,
+        persona_id="qa",
+        persona_instance_id="personainst_qa",
+        display_names={"personainst_neko": "Neko Mission Lead"},
+    )
+    assert message["kind"] == "relayed_message"
+    assert message["actor_persona_id"] == "agent"
+    assert message["actor_instance_id"] is None
+    assert "actor_display_name" not in message
+
+
+def test_conversation_history_message_true_operator_row_is_unchanged():
+    message = _conversation_history_message(
+        {"id": "row-op", "role": "operator", "text": "ping", "client_message_id": "cm-op"},
+        channel_id="qa::sess",
+        index=0,
+        persona_id="qa",
+        persona_instance_id="personainst_qa",
+        display_names={"personainst_neko": "Neko Mission Lead"},
+    )
+    assert message["kind"] == "operator_message"
+    assert message["actor_persona_id"] == "operator"
+    assert message["actor_instance_id"] is None
+    assert "actor_display_name" not in message
+
+
+def test_operator_channel_summary_names_relayed_sender_from_full_roster():
+    # display_names is built from the FULL roster, so a relay INTO qa's channel
+    # can name neko even though neko is a different channel's owner.
+    session_id = "persona_chat_personainst_qa_relaya1b2c3d4"
+    channels = operator_channel_summary(
+        persona_instances=[
+            PersonaInstance(
+                id="personainst_qa",
+                persona_id="qa",
+                role="seed",
+                display_name="QA Agent",
+                profile_id=None,
+                runtime_root="test-runtime",
+                state=WorkerSessionState.IDLE,
+                mode="chat",
+                session_id=session_id,
+                updated_at="2026-07-18T00:00:00Z",
+            ),
+            PersonaInstance(
+                id="personainst_neko",
+                persona_id="neko",
+                role="seed",
+                display_name="Neko Mission Lead",
+                profile_id=None,
+                runtime_root="test-runtime",
+                state=WorkerSessionState.IDLE,
+                mode="chat",
+                session_id="persona_chat_personainst_neko_ffff0000ffff",
+                updated_at="2026-07-18T00:00:00Z",
+            ),
+        ],
+        persona_chat_history=[
+            {
+                "session_id": session_id,
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa",
+                "title": "QA Agent chat",
+                "message_count": 1,
+                "messages": [
+                    _relayed_row(
+                        sender_persona_id="neko",
+                        sender_instance_id="personainst_neko",
+                        text="From Neko: status?",
+                    )
+                ],
+                "updated_at": "2026-07-18T00:00:00Z",
+            }
+        ],
+        persona_chat_trace=[],
+    )
+    qa_channel = [c for c in channels if c["session_id"] == session_id]
+    assert len(qa_channel) == 1
+    relayed = [
+        m for m in qa_channel[0]["conversation"]["messages"] if m.get("kind") == "relayed_message"
+    ]
+    assert len(relayed) == 1
+    assert relayed[0]["actor_persona_id"] == "neko"
+    assert relayed[0]["actor_instance_id"] == "personainst_neko"
+    assert relayed[0]["actor_display_name"] == "Neko Mission Lead"

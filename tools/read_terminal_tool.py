@@ -57,12 +57,7 @@ def check_read_terminal_requirements() -> bool:
 READ_TERMINAL_SCHEMA = {
     "name": "read_terminal",
     "description": (
-        "Read what's currently shown in the in-app terminal pane of the Hermes "
-        "desktop GUI (the embedded shell beside this chat). Call with no arguments "
-        "to get the visible screen plus the total line count (`total_lines`). To "
-        "page through scrollback, pass `start_line` (0 = oldest line) and `count`; "
-        "valid lines are [0, total_lines). Returns JSON: "
-        "{total_lines, start, end, viewport_rows, cursor_row, text}."
+        "Read what is currently shown in the Hermes desktop GUI's embedded terminal pane (desktop only). No args = visible screen + total_lines; pass start_line/count to page scrollback. Returns a JSON viewport."
     ),
     "parameters": {
         "type": "object",

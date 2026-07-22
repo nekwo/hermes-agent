@@ -1,6 +1,11 @@
 ---
 name: harness-qa-verdict
 description: QA proof review verdict contract for Harness missions, including cross-stack coverage, missing proof, visual/MCP blockers, and flat verdict metadata.
+metadata:
+  hermes:
+    surfaces: [mission_chat, mission_worker]
+    modes: [standard]
+    load_policy: recommended
 ---
 
 # Harness QA Verdict

@@ -254,15 +254,24 @@ def test_concurrent_processes_do_not_lose_writes(isolate_agent_runtime_root):
         assert process.returncode == 0, stderr
         assert "done" in stdout
 
-    store_path = isolate_agent_runtime_root / "mission_chat_turns.json"
-    store = json.loads(store_path.read_text(encoding="utf-8"))
-    assert len(store.get("sess_a") or {}) == 25
-    assert len(store.get("sess_b") or {}) == 25
+    # Per-session isolation: the two concurrent writers land in DIFFERENT files
+    # behind DIFFERENT locks, and neither loses a record.
+    path_a = mission_chat_turns._session_file_path("sess_a")
+    path_b = mission_chat_turns._session_file_path("sess_b")
+    assert path_a != path_b
+    assert path_a.exists() and path_b.exists()
+    assert len(json.loads(path_a.read_text(encoding="utf-8"))) == 25
+    assert len(json.loads(path_b.read_text(encoding="utf-8"))) == 25
+    # Directory-enumeration reader parity: exactly the two session files exist.
+    assert {p.name for p in mission_chat_turns._iter_session_files()} == {
+        path_a.name,
+        path_b.name,
+    }
 
 
 def test_persist_skips_with_typed_outcome_when_lock_is_held(monkeypatch):
     monkeypatch.setattr(mission_chat_turns, "_LOCK_TIMEOUT_SECONDS", 0.05)
-    lock_path = mission_chat_turns.paths.store_root() / mission_chat_turns._LOCK_NAME
+    lock_path = mission_chat_turns._session_lock_path("s1")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
     mission_chat_turns._lock_fd_exclusive_nonblocking(fd)
@@ -299,3 +308,154 @@ def test_persist_skips_with_typed_outcome_when_lock_is_held(monkeypatch):
         write_ahead=True,
     )
     assert outcome is MissionChatTurnPersistOutcome.PERSISTED
+
+
+def test_lock_on_one_session_never_blocks_another_session(monkeypatch):
+    # The whole point of one-file-per-chat: a stuck/held turn in session A must
+    # not stall (or corrupt) a concurrent turn in session B. They take DIFFERENT
+    # locks, so B proceeds while A's lock is held.
+    monkeypatch.setattr(mission_chat_turns, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    assert mission_chat_turns._session_lock_path("sess_a") != mission_chat_turns._session_lock_path(
+        "sess_b"
+    )
+    lock_path = mission_chat_turns._session_lock_path("sess_a")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    mission_chat_turns._lock_fd_exclusive_nonblocking(fd)
+    try:
+        # Session A cannot be written — its lock is held.
+        assert (
+            persist_mission_chat_turn(
+                session_id="sess_a",
+                client_message_id="m1",
+                turn_id="t1",
+                elements=[],
+                state="running",
+                write_ahead=True,
+            )
+            is MissionChatTurnPersistOutcome.SKIPPED_LOCK_TIMEOUT
+        )
+        # Session B goes straight through despite A's lock being held.
+        assert (
+            persist_mission_chat_turn(
+                session_id="sess_b",
+                client_message_id="m1",
+                turn_id="t1",
+                elements=[],
+                state="running",
+                write_ahead=True,
+            )
+            is MissionChatTurnPersistOutcome.PERSISTED
+        )
+        assert mission_chat_turn_record(session_id="sess_b", client_message_id="m1")["state"] == "running"
+    finally:
+        mission_chat_turns._unlock_fd(fd)
+        os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# T7 — todo checklist state survives the turn-store safety pass
+# ---------------------------------------------------------------------------
+
+
+def test_safe_todo_state_bounds_and_validates():
+    long_content = "x" * (mission_chat_turns._TODO_STATE_MAX_CONTENT + 40)
+    raw = [
+        {"id": "1", "content": "verify lane", "status": "completed"},
+        {"id": "", "content": "", "status": "weird"},
+        {"id": "3", "content": long_content, "status": "in_progress"},
+        "not-a-dict",
+    ]
+    result = mission_chat_turns._safe_todo_state(raw)
+    assert result is not None
+    assert [item["id"] for item in result] == ["1", "?", "3"]  # non-dict dropped, empty→"?"
+    assert result[1]["content"] == "(no description)"
+    assert result[1]["status"] == "pending"  # unknown status normalised
+    assert len(result[2]["content"]) <= mission_chat_turns._TODO_STATE_MAX_CONTENT
+
+
+def test_safe_todo_state_caps_item_count():
+    raw = [{"id": str(i), "content": f"c{i}", "status": "pending"} for i in range(mission_chat_turns._TODO_STATE_MAX_ITEMS + 10)]
+    result = mission_chat_turns._safe_todo_state(raw)
+    assert len(result) == mission_chat_turns._TODO_STATE_MAX_ITEMS
+
+
+def test_safe_todo_state_returns_none_only_when_absent_or_non_list():
+    # Absence / non-list values stay None so a non-todo element never gains the
+    # key. An explicit empty list is a DIFFERENT case (T9d cleared-checklist).
+    assert mission_chat_turns._safe_todo_state(None) is None
+    assert mission_chat_turns._safe_todo_state("nope") is None
+
+
+def test_safe_todo_state_preserves_explicit_empty_for_cleared_checklist():
+    # T9d: a list value — including an explicit empty one — persists as a list so
+    # a reloaded turn carries the cleared-checklist signal (`[]`) exactly like the
+    # live lane, instead of collapsing back to absence.
+    assert mission_chat_turns._safe_todo_state([]) == []
+    # A list of only-non-dict junk reduces to empty (also a cleared signal),
+    # never None — the value WAS a list (present), just carried nothing valid.
+    assert mission_chat_turns._safe_todo_state(["only-non-dicts"]) == []
+
+
+def test_safe_elements_preserves_todo_state_only_on_todo_tools():
+    todo_items = [{"id": "1", "content": "do it", "status": "in_progress"}]
+    elements = mission_chat_turns._safe_elements(
+        [
+            {
+                "kind": "tool",
+                "id": "t1_tool_1",
+                "turn_id": "t1",
+                "seq": 1,
+                "state": "settled",
+                "name": "todo",
+                "todo_state": todo_items,
+            },
+            {
+                "kind": "tool",
+                "id": "t1_tool_2",
+                "turn_id": "t1",
+                "seq": 2,
+                "state": "settled",
+                "name": "skill_view",
+            },
+        ]
+    )
+    assert elements[0]["todo_state"] == todo_items
+    assert "todo_state" not in elements[1]  # non-todo tool gains no key
+
+
+def test_chat_emitter_carries_explicit_empty_todo_state_on_both_lanes():
+    # T9d end-to-end on the emit path: a cleared todo checklist arrives as an
+    # explicit empty list, and it must ride BOTH the turn-store element and the
+    # live tool.finished frame so the launcher can clear its panel. A non-todo
+    # tool still gains no key on either lane.
+    # The emitter is exec'd into the `harness` namespace (harness_parts pattern),
+    # so it resolves as `harness._ChatProtocolV2Emitter`, not a standalone import.
+    from hermes_cli import harness
+
+    def _drive(payload):
+        frames: list[dict] = []
+        emitter = harness._ChatProtocolV2Emitter(
+            turn_id="turn_todo", client_message_id="m1", emit_frames=False
+        )
+        emitter._emit_chat_frame = lambda frame: frames.append(frame)  # capture frames
+        emitter._tool_finished(payload)
+        tool_elements = [e for e in emitter.elements if e.get("kind") == "tool"]
+        finished = [f for f in frames if f.get("type") == "tool.finished"]
+        return tool_elements[-1], finished[-1]
+
+    # Cleared checklist -> explicit [] on the element AND the frame.
+    element, frame = _drive({"tool_name": "todo", "status": "ok", "todo_state": []})
+    assert element["todo_state"] == []
+    assert frame["todo_state"] == []
+
+    # Populated checklist still rides both lanes verbatim.
+    todos = [{"id": "1", "content": "do it", "status": "in_progress"}]
+    element, frame = _drive({"tool_name": "todo", "status": "ok", "todo_state": todos})
+    assert element["todo_state"] == todos
+    assert frame["todo_state"] == todos
+
+    # A non-todo tool never carries the key on either lane.
+    element, frame = _drive({"tool_name": "terminal", "status": "ok"})
+    assert "todo_state" not in element
+    assert "todo_state" not in frame

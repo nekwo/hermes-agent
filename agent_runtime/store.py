@@ -13,7 +13,7 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
-from .errors import AlreadyExists, NotFound
+from .errors import AlreadyExists, NotFound, WorkspaceDeleteBlocked
 from .events import EventLog, archive_task_events
 from .locks import archive_lock, task_lock, run_lock
 from .models import AgentPersona, AgentRun, Event, Goal, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
@@ -21,6 +21,7 @@ from .persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
 from .proof_rules import ProofType
 from .recovery_flags import mark_incident_closed_for_recovery
 from .serde import from_jsonable, to_jsonable
+from .state_patches import emit_incident_remove, emit_task_refresh
 from .simplified_contract import public_decision_type_value
 from .states import RunState, TaskState
 
@@ -34,6 +35,11 @@ RELEASE_ASSIGNMENT_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED,
 TERMINAL_RUN_STATES = frozenset({RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED})
 ACTIVE_RUN_STATES = frozenset({RunState.QUEUED, RunState.STARTING, RunState.RUNNING, RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL})
 ARCHIVABLE_TASK_STATES = frozenset({TaskState.DONE, TaskState.CANCELLED})
+# Bound on Realm.deleted_workspace_ids — the workspace-delete resurrection
+# guard. Oldest entries fall off first; by then every member has long since
+# pulled the tombstone (the bounded-ledger idiom shared with the board/office
+# archived ledgers).
+DELETED_WORKSPACE_LEDGER_CAP = 500
 _ANY_STAGE = object()
 
 
@@ -244,6 +250,18 @@ class TaskStore:
                             "reason": reason,
                         },
                     )
+                )
+                # S7-A producer: a task/goal wire row (~80 KB: role_streams,
+                # role_envelopes, mission_level_state, derived actor/stage labels)
+                # cannot fold as a sub-4 KB op, so a transition emits an accounted
+                # ``refresh`` — its coalesced batch falls back to a full core
+                # (patch_coverage), which also carries the terminal-transition
+                # fan-out (persona-instance removes, assignment closes). Dark by
+                # default (read_model.delta_patches off).
+                emit_task_refresh(
+                    self.event_log,
+                    task.id,
+                    persona_id=actor if actor != "harness" else None,
                 )
         if reached_terminal:
             # Terminal-transition chokepoint: every writer that lands a task in a
@@ -714,6 +732,132 @@ class WorkspaceStore:
         _append_store_event(self.event_log, "workspace.archived", workspace_id=item.id, name=item.name)
         return item
 
+    def delete(self, workspace_id: str, *, reason: str = "operator_delete") -> dict:
+        """Hard-delete a workspace and cascade its scoped content stores.
+
+        The single write chokepoint for workspace deletion (archive stays the
+        reversible path). Guards, in order:
+
+        - ``workspace_has_goals`` — the workspace still owns live-store goals.
+          Evidence is never destroyed implicitly; the operator archives goals
+          first (``harness task archive-ready``), then deletes.
+        - ``realm_default_workspace`` — a SERVER-bound realm's default pointer
+          is backend-adoption authority; promote another default first. A
+          local realm's default pointer is local truth and is cleared here.
+
+        Cascade: the workspace JSON, its Mission Office subtree, and every
+        board owned by the workspace. A realm-bound delete also rewrites realm
+        membership and records the id in the realm's ``deleted_workspace_ids``
+        resurrection-guard ledger, so realm sync propagates the removal
+        instead of letting another member's surviving copy republish it.
+        Emits ``workspace.deleted`` (Stage 12: the mutation must ride its own
+        event or stay invisible to the watermark-gated consumers).
+        """
+        item = self.get(workspace_id)
+        tasks = TaskStore(event_log=self.event_log).list_for_workspace(item.id)
+        if tasks:
+            live = [task for task in tasks if task.state not in RELEASE_ASSIGNMENT_TASK_STATES]
+            raise WorkspaceDeleteBlocked(
+                "workspace_has_goals",
+                "Workspace still owns goals; archive them first (harness task archive-ready), then delete.",
+                safe_details={"goal_count": len(tasks), "live_goal_count": len(live)},
+            )
+        realm: Realm | None = None
+        if item.realm_id:
+            try:
+                realm = RealmStore(event_log=self.event_log).get(item.realm_id)
+            except NotFound:
+                realm = None
+        if realm is not None and realm.server_id and realm.default_workspace_id == item.id:
+            raise WorkspaceDeleteBlocked(
+                "realm_default_workspace",
+                "This workspace is the realm's default; promote another default workspace first.",
+                safe_details={"realm_id": realm.id},
+            )
+
+        # Cascade content stores under their own write locks so a concurrent
+        # office/board write cannot interleave with the removal.
+        from .board_store import BoardStore
+        from .locks import board_lock, office_lock
+
+        with office_lock(item.id):
+            shutil.rmtree(paths.office_dir(item.id), ignore_errors=True)
+        for board in BoardStore(event_log=self.event_log).list_all():
+            if board.workspace_id != item.id:
+                continue
+            with board_lock(board.board_id):
+                shutil.rmtree(paths.board_dir(board.board_id), ignore_errors=True)
+
+        if realm is not None:
+            realm.workspace_ids = [wid for wid in (realm.workspace_ids or []) if wid != item.id]
+            ledger = [wid for wid in (realm.deleted_workspace_ids or []) if wid != item.id]
+            ledger.append(item.id)
+            realm.deleted_workspace_ids = ledger[-DELETED_WORKSPACE_LEDGER_CAP:]
+            if realm.default_workspace_id == item.id:
+                # Only reachable for local realms — the server-bound case is
+                # guarded above.
+                realm.default_workspace_id = None
+            RealmStore(event_log=self.event_log).save(realm, emit_event=False)
+            _append_store_event(
+                self.event_log, "realm.updated", realm_id=realm.id, change="workspace_deleted"
+            )
+
+        paths.workspace_path(item.id).unlink(missing_ok=True)
+        if self.active_id() == item.id:
+            # Clear the dangling pointer; verb-layer callers may re-reconcile
+            # to the realm's default afterwards.
+            self.set_active(None)
+        _append_store_event(
+            self.event_log,
+            "workspace.deleted",
+            workspace_id=item.id,
+            name=item.name,
+            realm_id=item.realm_id,
+            reason=reason,
+        )
+        return {
+            "id": item.id,
+            "name": item.name,
+            "realm_id": item.realm_id,
+            "deleted": True,
+        }
+
+
+def _normalize_skill_selection(selection: list[str] | None) -> list[str]:
+    """Validate (shape only), dedupe, and sort skill selection slugs.
+
+    Shape rules (per REALM_SKILL_SELECTION_DESIGN §2): non-empty, no leading
+    dot, no path separator, and identical to their ``_safe_token`` form — the
+    same tokenizer the realm publisher uses for skill directory names, so a
+    valid slug round-trips to its published path. Every malformed slug is
+    collected and reported in ONE ``ValueError`` (mapped to a typed
+    ``invalid_request`` at the CLI seam) so a batch save names all offenders
+    instead of failing on the first. Slugs unknown to the local catalog are
+    NOT filtered here — that is realm truth another member may own.
+    """
+    # Function-local import breaks the module cycle (realm_sync imports store).
+    from agent_runtime.realm_sync import _safe_token
+
+    cleaned: set[str] = set()
+    rejected: list[str] = []
+    for raw in selection or []:
+        slug = str(raw).strip()
+        if (
+            not slug
+            or slug.startswith(".")
+            or "/" in slug
+            or "\\" in slug
+            or slug != _safe_token(slug)
+        ):
+            rejected.append(slug or repr(raw))
+            continue
+        cleaned.add(slug)
+    if rejected:
+        raise ValueError(
+            "malformed skill selection slug(s): " + ", ".join(repr(slug) for slug in sorted(set(rejected)))
+        )
+    return sorted(cleaned)
+
 
 class RealmStore:
     def __init__(self, event_log: EventLog | None = None):
@@ -778,6 +922,47 @@ class RealmStore:
         item = self.save(item, emit_event=False)
         _append_store_event(
             self.event_log, "realm.updated", realm_id=item.id, change="server_bound", server_id=item.server_id
+        )
+        return item
+
+    def set_skill_selection(
+        self, realm_id: str, *, mode: str, selection: list[str], dry_run: bool = False
+    ) -> Realm:
+        """Single write chokepoint for a realm's shared-skill publish selection.
+
+        ``mode == "all"`` publishes every shared skill and PRESERVES the stored
+        ``skill_selection`` intact (switching back to "selected" restores it, so
+        the passed ``selection`` is ignored in this mode). ``mode == "selected"``
+        replaces the selection with the validated/deduped/sorted slugs (an empty
+        list means "publish none").
+
+        Slugs are validated for shape only (non-empty, no leading dot, no path
+        separators, must equal their ``_safe_token`` form). Slugs unknown to
+        this machine's catalog are NOT filtered here — another member may hold
+        the skill locally, and dropping it on an unrelated save would corrupt
+        realm truth; unknown slugs are reported (``missing``) by the CLI, never
+        stripped. Emits ``realm.updated``/``skill_selection`` so the read-model
+        pipeline sees the mutation (Stage 12 watermark discipline).
+
+        ``dry_run`` runs the full validation and returns the WOULD-BE realm
+        (in-memory only) without saving and without emitting the store event.
+        """
+        if mode not in {"all", "selected"}:
+            raise ValueError(f"invalid skill_publish_mode: {mode!r}")
+        item = self.get(realm_id)
+        if mode == "selected":
+            item.skill_selection = _normalize_skill_selection(selection)
+        item.skill_publish_mode = mode
+        if dry_run:
+            return item
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log,
+            "realm.updated",
+            realm_id=item.id,
+            change="skill_selection",
+            mode=mode,
+            selection_count=len(item.skill_selection),
         )
         return item
 
@@ -1522,10 +1707,49 @@ class IncidentStore:
                     payload=payload,
                 )
             )
+            # S7-A producer: incidents ship open-only in the frame (settled), so a
+            # close is a ``remove`` op — the launcher deletes the keyed row. Dark
+            # by default (read_model.delta_patches off).
+            emit_incident_remove(
+                self.event_log,
+                incident,
+            )
             return incident
 
     def list_open(self) -> list[Incident]:
-        return [incident for incident in self.list_all() if incident.closed_at is None]
+        incidents, _ = self.list_open_with_closed_count()
+        return incidents
+
+    def list_open_with_closed_count(self) -> tuple[list[Incident], int]:
+        """Return live incidents without deserializing the closed-history tail.
+
+        Mission Control keeps only open incidents in its steady-state frame;
+        closed rows are represented by a count and fetched on demand.  Large
+        long-lived runtimes can have thousands of closed incident files, and
+        coercing every one into the recursive ``Incident`` dataclass graph on
+        every snapshot made history cost as much as live state.
+
+        We still JSON-decode every file so corrupt store rows fail exactly as
+        ``list_all`` does.  Only closed rows skip the substantially more
+        expensive ``from_jsonable`` pass.
+        """
+
+        directory = paths.incidents_dir()
+        if not directory.exists():
+            return [], 0
+        open_incidents: list[Incident] = []
+        closed_count = 0
+        for path in directory.glob("*.json"):
+            try:
+                raw = _read_json(path)
+            except NotFound:
+                # Preserve the archive-race tolerance of ``_list_models``.
+                continue
+            if raw.get("closed_at") is not None:
+                closed_count += 1
+                continue
+            open_incidents.append(from_jsonable(Incident, raw))
+        return sorted(open_incidents, key=lambda item: item.id), closed_count
 
     def list_all(self) -> list[Incident]:
         return _list_models(Incident, paths.incidents_dir())

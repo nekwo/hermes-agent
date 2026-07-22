@@ -4,12 +4,16 @@ import json
 from pathlib import Path
 import time
 from urllib.parse import urlparse
-from typing import Callable, Protocol
+from typing import Callable, Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .tool_visibility import ToolVisibilityOptions
 
 from hermes_constants import get_hermes_home
 
 from . import paths
-from .config import load_agent_runtime_config
+from .chat_lane_toolsets import chat_lane_blocked_tools, scope_chat_lane_toolsets
+from .config import chat_lane_restore_toolsets, load_agent_runtime_config
 from .context_builder import AgentContext, build_context, render_context
 from .decision_contract_registry import prompt_contract_markdown
 from .decision_schema import (
@@ -27,7 +31,13 @@ from .mission_plan import current_plan_stage
 from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
-from .profile_runner import AgentRunRequest, AgentRunResult, ProfileAgentRunner, RunBudgetExceeded
+from .profile_runner import (
+    AgentRunRequest,
+    AgentRunResult,
+    ProfileAgentRunner,
+    RunBudgetExceeded,
+    _blocked_tool_names_with_registry_hygiene,
+)
 from .progress import ChatProgressSink, RunProgressSink
 from .repo_context import RepoExecutionContext, capture_repo_baseline, isolated_repo_context_for_run, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
@@ -117,7 +127,14 @@ class GPTPersonaRuntime:
             progress_sink.emit("run.progress", _repo_context_progress_payload(repo_ctx))
         render_started = time.perf_counter()
         user_message = render_context(ctx)
-        system_message = build_system_prompt(persona, task_id=run.id)
+        system_message = build_system_prompt(
+            persona,
+            task_id=run.id,
+            root_node_mode=bool(
+                isinstance(getattr(ctx.task, "harness_self_heal", None), dict)
+                and ctx.task.harness_self_heal.get("root_node_mode")
+            ),
+        )
         timing: dict[str, int] = {}
         timing["prompt_render_ms"] = _emit_timing(progress_sink, "prompt_render", render_started, status="completed")
         provider_started = time.perf_counter()
@@ -192,6 +209,12 @@ class GPTPersonaRuntime:
         stream_callback: Callable[[str | None], None] | None = None,
         pre_trace_callback: Callable[[dict], None] | None = None,
         trace_callback: Callable[[dict], None] | None = None,
+        # T10c follow-up: header-only cache-scope routing identity (codex
+        # cache-scope headers), NEVER a transcript/session-load key. The
+        # free-floating lane binds its chat session but calls with
+        # session_id=None (history is baked into the message) — without this,
+        # that lane ships no cache-scope headers and every turn is cache-cold.
+        cache_scope_id: str | None = None,
     ) -> AgentRunResult:
         """Run one plain conversational turn for an operator persona chat.
 
@@ -233,6 +256,7 @@ class GPTPersonaRuntime:
                 skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
                 session_id=session_id,
+                cache_scope_id=cache_scope_id,
                 max_wall_seconds=max_wall_seconds,
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,
@@ -284,6 +308,16 @@ class GPTPersonaRuntime:
         preloaded_skill_prompt: str | None = None,
         workspace_agents_content: str | None = None,
         situational_hud_content: str | None = None,
+        conversation_history: list[dict] | None = None,
+        reuse_current_user_message: bool = False,
+        root_chat_session_id: str | None = None,
+        client_message_id: str | None = None,
+        runtime_registry=None,
+        runtime_signature: str | None = None,
+        native_revision: str | None = None,
+        compression_threshold_tokens_override: int | None = None,
+        compression_protect_first_n_override: int | None = None,
+        compression_protect_last_n_override: int | None = None,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -351,16 +385,45 @@ class GPTPersonaRuntime:
                 skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
                 session_id=session_id,
+                # session_id stays None on this lane (the transcript is already
+                # baked into the message), but the ChatGPT-Codex prompt cache is
+                # scoped by the session_id / x-client-request-id HTTP headers.
+                # Feed the STABLE chat session identity (perm_session_id — the id
+                # that names the turn store / observability session) as the
+                # header-only cache_scope_id so the warm prefix survives across
+                # turns. Header/routing value ONLY — never a transcript-load key
+                # (T10c). Worker/mission-run lanes leave this unset.
+                cache_scope_id=perm_session_id,
+                tool_execution_scope_id=root_chat_session_id or perm_session_id,
+                conversation_history=conversation_history,
+                reuse_current_user_message=reuse_current_user_message,
+                root_chat_session_id=root_chat_session_id or perm_session_id,
+                client_message_id=client_message_id,
+                turn_id=turn_id,
+                persona_chat_runtime_registry=runtime_registry,
+                persona_chat_runtime_signature=runtime_signature,
+                persona_chat_native_revision=native_revision,
+                compression_threshold_tokens_override=compression_threshold_tokens_override,
+                compression_protect_first_n_override=compression_protect_first_n_override,
+                compression_protect_last_n_override=compression_protect_last_n_override,
                 max_wall_seconds=max_wall_seconds,
                 max_api_calls=max_api_calls,
                 max_total_tokens=max_total_tokens,
-                user_message=message,
+                # Byte-stable system prompt (T5 + T9a): the volatile Runtime
+                # Situation HUD *and* the queued-skill preload ride the operator's
+                # user turn, not the codex ``instructions``, so the cross-turn
+                # prompt cache prefix survives every follow-up turn — including a
+                # turn on which the operator loads a skill mid-conversation. See
+                # ``_mission_chat_user_message`` / ``_mission_chat_surface_message``.
+                user_message=_mission_chat_user_message(
+                    message,
+                    situational_hud_content,
+                    preloaded_skill_prompt=preloaded_skill_prompt,
+                ),
                 system_message=_mission_chat_surface_message(
                     persona,
                     surface_prompt,
-                    preloaded_skill_prompt=preloaded_skill_prompt,
                     workspace_agents_content=workspace_agents_content,
-                    situational_hud_content=situational_hud_content,
                 ),
                 stream_callback=stream_callback,
                 agent_ready_callback=agent_ready_callback,
@@ -396,11 +459,13 @@ PERSONA_CHAT_SCRATCH_SOURCE = "agent_runtime_persona_chat_scratch"
 def _persona_chat_system_prompt(persona: AgentPersona) -> str:
     display = getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")
     role = role_from_persona(persona).value
-    return (
+    base = (
         f"You are {display}, a Mission Control operator-channel agent (role: {role}). "
         "You are in a direct, real-time chat with a single human operator — your teammate, not an end user. "
         "You are embodied in the Mission Control office — a 2D/3D space shared with the other agents — and the "
         "operator's HUD shows live state: the current realm, workspace, and each agent's name and steer handle. "
+        "A workspace board also exists; when you notice follow-up work worth tracking, you may add a card with the "
+        "board tools (advisory — a card is planning state only and never starts or changes a goal). "
         f"{_persona_chat_voice(role, display)} "
         "Voice: warm, plain text, teammate-tight. Lead with the answer; skip preamble, filler, and restating the question. "
         "A sentence or two is usually enough — only go longer when the operator clearly wants depth. "
@@ -421,6 +486,13 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         "something specific from a past session you can't already see, and consult your durable memory only when it actually "
         "bears on the reply — don't fish."
     )
+    # Same soul lane as the mission-chat surface: the persona's own configured
+    # soul overlay rides along; absent for personas that don't set one.
+    soul = _safe_read_soul_overlay(
+        getattr(persona, "soul_overlay_path", None),
+        hermes_profile=getattr(persona, "hermes_profile", None),
+    )
+    return f"{base}\n\n{soul}" if soul else base
 
 
 def _persona_chat_voice(role: str, display: str) -> str:
@@ -456,8 +528,10 @@ def _mission_chat_operative_rules() -> str:
 
     return (
         "Mission Control operator-chat rules (these govern this live operator channel):\n"
+        "- HARD RULE, FIRST IN EVERY TURN THAT USES TOOLS: before your first tool call, send one short sentence saying "
+        "what you are about to do. The operator watches the console live — never open a turn with a silent tool call. "
+        "Acknowledge, then act, then report the result.\n"
         "- You are talking directly to your operator — a trusted teammate, not an end user.\n"
-        "- If you need tools, acknowledge the action first in one short sentence, then use the tools, then report the result.\n"
         "- You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
         "change state — actually use your tools and report the real result. The operator's current permission grant is the "
         "only gate on what you can do; there is no separate 'hand it off first' step.\n"
@@ -478,6 +552,12 @@ def _mission_chat_operative_rules() -> str:
         "- When an agent you briefed replies with a clarifying question of their own, answer it by sending the choice back to "
         "them (agent_chat_send into that same session) so the exchange continues as one conversation — don't drop their "
         "question or answer it by guessing.\n"
+        "- Teammates on your level are addressable by the `@personainst_*` handles in your Runtime Situation HUD. With "
+        "`agent_chat_send`: omit the session to continue your durable pair thread (the norm — one thread per teammate); pass "
+        "`session_id` to continue a specific thread; pass `new_session: true` only to start a clean thread (sparingly). Use "
+        "`agent_chat_open` to review a teammate's recent thread before continuing it, and `agent_chat_threads` to list your threads.\n"
+        "- When a persona runs more than one instance on your level, a BARE persona id is ambiguous and the send is refused "
+        "(`ambiguous_target`) with the candidate @personainst_* handles — address the exact instance you mean by its @handle.\n"
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
         "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane."
     )
@@ -519,41 +599,116 @@ def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
     )
 
 
+#: Fixed preamble prepended to the operator-selected workspace ``AGENTS.md``
+#: body inside the surface message. Kept as one constant so the per-file
+#: in-prompt attribution in ``prompt_observability`` can measure the workspace
+#: part's contributed chars (preamble + body) WITHOUT drifting from the text
+#: actually pasted here (T8, 2026-07-18).
+MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE = (
+    "Workspace instructions from the operator-selected AGENTS.md "
+    "(apply these instructions to this turn):\n\n"
+)
+
+
 def _mission_chat_surface_message(
     persona: AgentPersona,
     surface_prompt: str | None,
     *,
-    preloaded_skill_prompt: str | None = None,
     workspace_agents_content: str | None = None,
-    situational_hud_content: str | None = None,
 ) -> str:
-    """Compose the operator-chat system message: the persona's first-person
-    identity block first, then the non-negotiable operative rules, then the
-    runtime situational HUD (the same picture the operator's Mission Control
-    runtime HUD strip shows, so the two are on the same page), then the
-    operator's optional per-session surface prompt. The identity block gives the
-    isolated chat lane a "you ARE <persona>" hat (the profile SOUL is not loaded
-    here); the rules always apply so the anti-fabrication invariant holds even
-    when the operator supplies their own surface prompt."""
+    """Compose the operator-chat system message (the codex ``instructions``):
+    the persona's first-person identity block first, then the non-negotiable
+    operative rules, then the operator's optional per-session surface prompt.
+    The identity block gives the isolated chat lane a "you ARE <persona>" hat
+    (the profile SOUL is not loaded here); the rules always apply so the
+    anti-fabrication invariant holds even when the operator supplies their own
+    surface prompt.
+
+    BYTE-STABILITY INVARIANT (T5, 2026-07-18): every part of this string must be
+    byte-identical across every turn of a conversation, so the codex transport's
+    ``prompt_cache_key = sha256(instructions + tools)`` stops rotating and the
+    ~13K-token stable prefix (system prompt + tool schema) hits the cross-turn
+    prompt cache. The identity/rules are static; the persona SOUL, workspace
+    AGENTS.md, and operator surface prompt change only when their source
+    actually changes (legitimate content-driven invalidation, like MEMORY.md).
+    The Runtime Situation HUD — whose roster/scope/mission state rotated every
+    turn — is deliberately NOT here anymore: it rides the operator's user turn
+    instead (see ``_mission_chat_user_message``). Do NOT reintroduce per-turn
+    volatile text into this builder; it re-bills the whole prefix every turn.
+    (T9a, 2026-07-18: the queued-skill preload — the secondary content-driven
+    invalidation vector T5 flagged — was likewise moved OUT of this builder onto
+    the operator user turn via ``_mission_chat_user_message``. It must NOT come
+    back here: loading a skill mid-conversation would otherwise rotate the whole
+    stable prefix for that turn.)"""
 
     identity = _mission_chat_identity_prompt(persona)
     operator_surface = (surface_prompt or "").strip()
-    skill_prompt = (preloaded_skill_prompt or "").strip()
     workspace_agents = (workspace_agents_content or "").strip()
-    situational_hud = (situational_hud_content or "").strip()
     rules = _mission_chat_operative_rules()
-    parts = [identity, rules]
-    if situational_hud:
-        parts.append(situational_hud)
-    if skill_prompt:
-        parts.append(skill_prompt)
+    # The persona's OWN soul overlay (config `soul_overlay_path`) is the one
+    # identity document this isolated lane does load — who-you-are sits between
+    # the identity hat and the surface rules. For a profile-backed persona it
+    # resolves inside that persona's own profile home (single source), so this
+    # IS the persona's SOUL.md — the OPERATOR profile's SOUL stays not-loaded.
+    soul = _safe_read_soul_overlay(
+        getattr(persona, "soul_overlay_path", None),
+        hermes_profile=getattr(persona, "hermes_profile", None),
+    )
+    parts = [identity, soul or "", rules]
     if workspace_agents:
-        parts.append(
-            "Workspace instructions from the operator-selected AGENTS.md "
-            "(apply these instructions to this turn):\n\n" + workspace_agents
-        )
+        parts.append(MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE + workspace_agents)
     if operator_surface:
         parts.append(operator_surface)
+    return "\n\n".join(part for part in parts if part)
+
+
+def _mission_chat_user_message(
+    message: str,
+    situational_hud_content: str | None = None,
+    *,
+    preloaded_skill_prompt: str | None = None,
+) -> str:
+    """Compose the operator turn's user message: the operator's message (which
+    already carries the redaction-safe rolling chat history baked in by
+    the native structured conversation history), then the queued-skill preload (when
+    the operator loaded a skill this turn), then the per-turn Runtime Situation
+    HUD.
+
+    Why the HUD *and* the skill preload ride here and not in the system prompt:
+    the codex transport keys its cross-turn prompt cache on
+    ``sha256(instructions + tools)``. A HUD whose roster / scope / mission state
+    rotates every turn — e.g. ``QA Agent`` vs ``QA Agent (2)`` — would evict the
+    ~13K-token stable prefix on every follow-up turn's first call; likewise a
+    skill preload layered into ``instructions`` (T5's flagged secondary
+    invalidation vector) would rotate the whole prefix on any turn the operator
+    loads a skill. Riding both in the operator's user turn keeps the system
+    prompt byte-stable for the life of the conversation while still giving the
+    model the loaded skill and the same live picture the operator sees.
+
+    Placement is load-bearing: the skill preload and HUD TRAIL the history +
+    current operator message rather than leading it, and the HUD stays last. The
+    user turn is already per-turn volatile (history grows, the message changes),
+    so appending these at its tail keeps the append-only, cache-friendly ordering
+    the spec requires — a volatile block ahead of the history would push it
+    earlier in the (already uncached) input. This mirrors Hermes's own per-turn
+    ephemeral-context injection, which appends recall / plugin context onto the
+    current user turn rather than mutating the cached system prompt
+    (agent/conversation_loop.py), and the skill-command pattern that injects the
+    loaded skill as a user message to preserve caching (agent/skill_commands.py).
+
+    Transport note: on the codex Responses path a mid-conversation ``system``
+    message is dropped by the input converter and two consecutive ``user`` items
+    violate the role-alternation invariant, so neither the HUD nor the skill
+    preload can be a distinct non-user message without either vanishing or
+    breaking alternation. Folding them onto the operator user turn is the
+    transport-safe realization of "a per-turn message adjacent to the current
+    operator message."
+    """
+
+    skill_prompt = (preloaded_skill_prompt or "").strip()
+    hud = (situational_hud_content or "").strip()
+    body = message if isinstance(message, str) else ("" if message is None else str(message))
+    parts = [body, skill_prompt, hud]
     return "\n\n".join(part for part in parts if part)
 
 
@@ -676,6 +831,16 @@ def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | Non
         return []
     names = set(blocked_tool_names(persona))
     names.update(extra_blocked_tools_for_permission_mode(options.permission_mode))
+    # T6a chat-lane cost policy: drop single heavy tools whose whole toolset must
+    # stay enabled. ``skill_manage`` (skill authoring) rides here so the ``skills``
+    # toolset keeps skill_search / skill_view / skills_list for read-only recall.
+    # Shares the per-persona ``chat_lane_restore_toolsets`` knob with the toolset
+    # exclusion, so an operator can restore it the same way. This applies only on
+    # the bounded lane — the unbounded escape hatch returns [] above, though the
+    # T6c registry-hygiene names are still unioned in at agent construction
+    # (profile_runner) on every lane: hygiene is registry junk removal, not a
+    # permission tier, so unbounded does not resurrect kanban/feishu.
+    names.update(chat_lane_blocked_tools(restore=chat_lane_restore_toolsets(persona.id)))
     # clarify is globally blocked (PERSONA_BLOCKED_TOOLS) because autonomous
     # runs have no interactive callback to answer it — but the operator/relay
     # chat lane provides a non-blocking clarify bridge (MissionChatClarifyCapture),
@@ -717,10 +882,73 @@ def _chat_trace_callback(
 
 
 def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
+    """The single chat-lane toolset chokepoint (both the free-chat and operator/
+    mission chat call sites funnel through here).
+
+    Resolution order: permission mode → role/persona toolset resolution → chat
+    capability augmentation → the chat-lane cost policy
+    (``scope_chat_lane_toolsets``) that drops browser / vision / heavy-dev from a
+    conversational lane. ``unbounded`` permission mode is the operator's explicit
+    "full capability" escape hatch and is returned unfiltered; a persona that
+    wants a specific excluded toolset back on its *bounded* chat lane restores it
+    via ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` (see
+    ``config.chat_lane_restore_toolsets``). Worker/dev task lanes never call this
+    — they resolve toolsets via ``effective_toolsets`` directly."""
+
     options = permission_options_for_chat(persona, session_id=session_id)
     if permission_mode_is_unbounded(options.permission_mode):
         return all_registered_toolsets()
-    return _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+    resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+    return scope_chat_lane_toolsets(
+        resolved, restore=chat_lane_restore_toolsets(persona.id)
+    )
+
+
+def chat_runtime_tool_contract(
+    persona: AgentPersona, *, session_id: str | None
+) -> dict[str, list[str]]:
+    """Return the exact tool inputs used to construct an operator-chat actor."""
+
+    return {
+        "enabled_toolsets": _enabled_toolsets_for_chat(
+            persona, session_id=session_id
+        ),
+        "blocked_tool_names": _blocked_tool_names_for_chat(
+            persona, session_id=session_id
+        ),
+    }
+
+
+def apply_chat_lane_tool_scope(
+    persona: AgentPersona,
+    options: "ToolVisibilityOptions",
+    *,
+    session_id: str | None,
+) -> "ToolVisibilityOptions":
+    """Thread the REAL chat-lane resolution onto a tool-visibility PREVIEW (T9b).
+
+    The operator-facing permission preview (``persona_instance_summary`` /
+    ``persona_instance_tool_detail``) resolved ``effective_toolsets(persona)`` —
+    the persona's raw configured set — so it omitted BOTH the operator-chat
+    capability augmentation (mission_goal / agent_chat / board / clarify) and the
+    T3/T6a chat-lane cost scoping (browser / vision / file / terminal /
+    skill_manage cut). The preview therefore lied about the actual chat lane.
+
+    This mutates ``options`` so the preview reuses the ONE chat-lane authority:
+    ``enabled_toolsets`` becomes the chat-lane-scoped toolset list
+    (``_enabled_toolsets_for_chat``) and ``chat_lane_blocked_tool_names`` becomes
+    the chat lane's authoritative block (``_blocked_tool_names_for_chat`` unioned
+    with the fork registry hygiene the runner enforces on every lane, minus the
+    ``clarify`` unblock the chat bridge grants). ``resolve_tool_visibility`` then
+    emits ``final_model_tools`` byte-identical to the schema the chat lane ships.
+    Display-parity only — no policy change, no parallel resolver.
+    """
+
+    options.enabled_toolsets = _enabled_toolsets_for_chat(persona, session_id=session_id)
+    options.chat_lane_blocked_tool_names = _blocked_tool_names_with_registry_hygiene(
+        _blocked_tool_names_for_chat(persona, session_id=session_id)
+    )
+    return options
 
 
 # Operator-chat-only first-class capabilities that a persona's role is allowed to
@@ -728,7 +956,7 @@ def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None)
 # existed) may not yet enumerate. Without this, a deployment whose supervisor
 # toolsets were persisted before ``mission_goal`` shipped could never trigger a
 # real Mission Control goal from chat — the very thing the tool exists for.
-_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat")
+_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat", "board")
 
 
 def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> list[str]:
@@ -975,7 +1203,12 @@ def _finish_reason_from_result(result: dict | object) -> str | None:
     return None
 
 
-def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) -> str:
+def build_system_prompt(
+    persona: AgentPersona,
+    *,
+    task_id: str | None = None,
+    root_node_mode: bool = False,
+) -> str:
     role = role_from_persona(persona)
     compact_schema = json.dumps(DECISION_SCHEMA, separators=(",", ":"))
     try:
@@ -984,13 +1217,37 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
         cfg = None
     simplified_prompt = _simplified_contract_prompt_enabled(cfg)
     payload_contracts = prompt_contract_markdown(_simplified_contract_decisions_for_role(role) if simplified_prompt else None)
-    parts = [load_bundled_prompt(role)]
+    parts = [_load_persona_system_prompt(persona, role)]
     overlay = Path(__file__).with_name("prompts") / "shared_harness_overlay.md"
     if overlay.exists():
         parts.append(overlay.read_text(encoding="utf-8").strip())
-    soul_overlay = _safe_read_soul_overlay(persona.soul_overlay_path)
+    soul_overlay = _safe_read_soul_overlay(
+        persona.soul_overlay_path,
+        hermes_profile=getattr(persona, "hermes_profile", None),
+    )
     if soul_overlay:
         parts.append(soul_overlay)
+    from agent.skill_commands import build_preloaded_skills_prompt
+    from agent.skill_utils import required_preload_skill_ids
+
+    required_skills = required_preload_skill_ids(
+        list(persona.skills),
+        surface="mission_worker",
+        root_node_mode=root_node_mode,
+    )
+    if required_skills:
+        required_prompt, loaded_required, missing_required = build_preloaded_skills_prompt(
+            required_skills,
+            task_id=task_id,
+            required_skill_names=set(required_skills),
+        )
+        if missing_required:
+            raise ValueError(
+                "Required skill preload failed: " + ", ".join(missing_required)
+            )
+        if set(loaded_required) != set(required_skills):
+            raise ValueError("Required skill preload receipt did not match policy")
+        parts.append(required_prompt)
     skill_guidance = _recommended_skill_guidance(list(persona.skills))
     if skill_guidance:
         parts.append(skill_guidance)
@@ -1028,6 +1285,20 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
         ]
     )
     return "\n\n".join(part for part in parts if part)
+
+
+def _load_persona_system_prompt(persona: AgentPersona, role) -> str:
+    """Load the configured prompt when it is real, otherwise the bundled role prompt."""
+
+    from .prompt_sources import resolve_persona_system_prompt_path
+
+    configured = resolve_persona_system_prompt_path(persona)
+    if configured is not None:
+        try:
+            return configured.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return load_bundled_prompt(role)
 
 
 def _simplified_contract_prompt_enabled(cfg) -> bool:
@@ -1242,22 +1513,61 @@ def _recommended_skill_guidance(skill_names: list[str]) -> str:
     return "\n".join(lines)
 
 
-def _safe_read_soul_overlay(path_value: str | None) -> str | None:
+def _safe_read_soul_overlay(
+    path_value: str | None, *, hermes_profile: str | None = None
+) -> str | None:
     if not path_value:
         return None
     raw = Path(path_value)
     if raw.is_absolute() or not _is_safe_soul_overlay_path(raw):
         return None
-    candidates = [
-        Path(__file__).with_name("prompts") / raw.name,
-        get_hermes_home() / raw,
-    ]
+    if hermes_profile:
+        # A profile-backed persona owns its soul in ITS OWN profile home —
+        # `profiles/<hermes_profile>/SOUL.md` is the single source (realm sync
+        # already models soul_overlay as profile-home-relative). Repo prompts
+        # stay as the shipped-default fallback. Deliberately NO operator-home
+        # fallthrough here: on a miss, a bare `SOUL.md` must never resolve to
+        # the OPERATOR profile's SOUL (the persona-identity-leak class).
+        home = _persona_profile_home(hermes_profile)
+        candidates = [
+            *( [home / raw] if home is not None else [] ),
+            Path(__file__).with_name("prompts") / raw.name,
+        ]
+    else:
+        candidates = [
+            Path(__file__).with_name("prompts") / raw.name,
+            get_hermes_home() / raw,
+        ]
     for candidate in candidates:
         try:
             if candidate.exists() and candidate.is_file():
                 return candidate.read_text(encoding="utf-8").strip()
         except OSError:
             continue
+    return None
+
+
+def _persona_profile_home(name: str) -> Path | None:
+    """Home directory of the named hermes profile, or None when unresolvable.
+
+    Prefers the canonical CLI resolver; falls back to the standard
+    ``<profiles root>/<name>`` layout beside the operator home. Kept as its own
+    seam so tests can pin the home without touching global profile state."""
+
+    try:
+        from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
+
+        normalized = normalize_profile_name(name)
+        if profile_exists(normalized):
+            return Path(get_profile_dir(normalized))
+    except Exception:
+        pass
+    try:
+        candidate = get_hermes_home().parent / name
+        if candidate.exists():
+            return candidate
+    except OSError:
+        pass
     return None
 
 

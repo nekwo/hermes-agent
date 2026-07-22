@@ -1,0 +1,1 @@
+{"type":"patch","schema_version":2,"generated_at":"2026-07-17T04:22:55.149761Z","watermark":{"event_offset":420,"last_event_ts":"2026-07-16T12:10:00.000000Z","captured_at":"2026-07-17T04:22:55.149761Z"},"base_offset":419,"patches":[{"seq":420,"ts":"2026-07-16T12:10:00.000000Z","entity":"incident","id":"inc_resolved","op":"remove"}],"coalesced_count":1}

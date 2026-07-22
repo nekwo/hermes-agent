@@ -1218,10 +1218,11 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "proof_batch.superseded": EventContract("proof_batch.superseded", "Proof batch superseded", ("proof_batch_id", "status"), ("mission_stage_id", "recipe_id")),
     "persona_instance.created": EventContract("persona_instance.created", "Persona instance created", ("persona_instance_id",), ("persona_id",)),
     "persona_instance.attributed": EventContract("persona_instance.attributed", "Persona instance attributed to a goal", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by")),
-    "persona_instance.steered": EventContract("persona_instance.steered", "Persona instance steering edge changed", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by", "detached")),
+    "persona_instance.steered": EventContract("persona_instance.steered", "Persona instance steering edge changed", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by", "steered_by", "added", "removed", "detached")),
     "persona_instance.reaped": EventContract("persona_instance.reaped", "Stale persona instance reaped from the live graph", ("persona_instance_id", "reason"), ("task_id", "goal_id", "owner_state")),
     "persona_instance.reconciled": EventContract("persona_instance.reconciled", "Legacy-id persona instance row folded onto its canonical channel", ("persona_instance_id", "from_id", "to_id", "action"), ("persona_id",)),
     "persona_instance.pruned": EventContract("persona_instance.pruned", "Orphaned/legacy-role persona instance archived from the live graph", ("persona_instance_id", "reason"), ("persona_id", "role", "profile_id", "updated_at")),
+    "persona_instance.retired": EventContract("persona_instance.retired", "Placement-backed persona instance retired (end-of-life) to the archive on placement removal", ("persona_instance_id", "reason"), ("persona_id", "mode", "requested_by", "archive_dir")),
     "steer.requested": EventContract("steer.requested", "Steer requested", ("action_id", "verb", "source_node_id", "target_node_id"), ("requested_by", "reason")),
     "steer.started": EventContract("steer.started", "Steer started", ("action_id", "verb", "source_node_id", "target_node_id"), ("requested_by", "reason")),
     "steer.returned": EventContract("steer.returned", "Steer returned", ("action_id", "verb", "source_node_id", "target_node_id"), ("result", "stage_id", "persona_instance_id")),
@@ -1231,6 +1232,8 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "operator.takeover.approval_required": EventContract("operator.takeover.approval_required", "Operator takeover approval required", ("worker_session_id", "actor", "approval"), ("reason",)),
     "operator.takeover.applied": EventContract("operator.takeover.applied", "Operator takeover applied", ("worker_session_id", "actor"), ("parked_lane_ids", "paused_worker_ids", "cancelled_run_id", "approval_required")),
     "persona_instance.chat_opened": EventContract("persona_instance.chat_opened", "Persona instance chat opened", ("persona_instance_id", "session_id"), ("persona_id",)),
+    "persona_chat.projected": EventContract("persona_chat.projected", "Persona chat turn projection committed", ("persona_instance_id", "root_chat_session_id", "client_message_id", "turn_id", "change_kind"), ("active_session_id", "native_revision")),
+    "persona_chat.metadata_updated": EventContract("persona_chat.metadata_updated", "Persona chat session metadata updated", ("persona_instance_id", "root_chat_session_id", "change_kind"), ()),
     "persona_instance.profile_updated": EventContract("persona_instance.profile_updated", "Persona instance runtime profile updated", ("persona_instance_id",), ("persona_id", "display_name", "current_chat_goal", "goal_id", "skill_overrides", "provider", "model", "api_mode", "requested_by")),
     "persona_assignment.created": EventContract("persona_assignment.created", "Persona assignment created", ("assignment_id", "persona_instance_id", "kind"), ("state",)),
     "persona_assignment.closed": EventContract("persona_assignment.closed", "Persona assignment closed", ("assignment_id", "state"), ("kind",)),
@@ -1288,9 +1291,37 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "workspace.created": EventContract("workspace.created", "Workspace created", ("workspace_id", "name"), ("realm_id",)),
     "workspace.updated": EventContract("workspace.updated", "Workspace updated", ("workspace_id", "change"), ("name", "persona_id")),
     "workspace.archived": EventContract("workspace.archived", "Workspace archived", ("workspace_id",), ("name",)),
+    # Hard delete (archive stays the reversible path). ``reason`` is
+    # "operator_delete" or "realm_sync_tombstone" — the resurrection-guard
+    # ledger application on pull rides the same store chokepoint.
+    "workspace.deleted": EventContract("workspace.deleted", "Workspace deleted", ("workspace_id",), ("name", "realm_id", "reason")),
     "workspace.activated": EventContract("workspace.activated", "Active workspace changed", (), ("workspace_id", "name", "cleared")),
     "realm.sync.pulled": EventContract("realm.sync.pulled", "Realm pulled", ("realm_id", "changed"), ("artifacts",)),
     "realm.sync.published": EventContract("realm.sync.published", "Realm published", ("realm_id", "changed"), ("artifacts", "commit")),
+    # Mission Board store mutations. Every BoardStore write MUST ride one of
+    # these (standing store rule): the stream/read-model pipeline is
+    # watermark-gated on the EventLog, so an event-less board write is invisible
+    # to every consumer until an unrelated event advances the offset. Cards
+    # NEVER mutate goal state — these are planning-domain events only.
+    "board.created": EventContract("board.created", "Board created", ("board_id", "workspace_id"), ("title",)),
+    "board.updated": EventContract("board.updated", "Board updated", ("board_id", "change"), ("title", "revision")),
+    "board.card.created": EventContract("board.card.created", "Board card created", ("board_id", "card_id"), ("title", "column_id", "created_by")),
+    "board.card.moved": EventContract("board.card.moved", "Board card moved", ("board_id", "card_id", "column_id"), ("from_column_id", "order_key")),
+    "board.card.edited": EventContract("board.card.edited", "Board card edited", ("board_id", "card_id"), ("fields", "revision")),
+    "board.card.escalated": EventContract("board.card.escalated", "Board card escalated to a goal", ("board_id", "card_id", "goal_id"), ("idempotency_key",)),
+    "board.card.archived": EventContract("board.card.archived", "Board card archived", ("board_id", "card_id", "reason"), ("column_id",)),
+    "board.card.restored": EventContract("board.card.restored", "Board card restored", ("board_id", "card_id"), ("column_id",)),
+    "board.card.conflict_resolved": EventContract("board.card.conflict_resolved", "Board card sync conflict resolved", ("board_id", "card_id", "take"), ("revision",)),
+    "board.rebalanced": EventContract("board.rebalanced", "Board column order keys rebalanced", ("board_id", "column_id"), ("card_count",)),
+    # Mission Office events — the OfficeStore chokepoint emits one on EVERY
+    # mutation (same standing store rule as boards; realm-synced the same way).
+    # See EterniaLauncher docs/mission_control/OFFICE_LAYOUT_REALM_SYNC_PLAN_2026-07-17.md.
+    "office.surface.created": EventContract("office.surface.created", "Office surface created", ("workspace_id",), ()),
+    "office.surface.updated": EventContract("office.surface.updated", "Office surface updated", ("workspace_id", "change"), ("revision",)),
+    "office.actor.upserted": EventContract("office.actor.upserted", "Office actor placement upserted", ("workspace_id", "actor_key"), ("persona_id", "items", "revision")),
+    "office.actor.removed": EventContract("office.actor.removed", "Office actor placement archived", ("workspace_id", "actor_key", "reason"), ()),
+    "office.actor.restored": EventContract("office.actor.restored", "Office actor placement restored", ("workspace_id", "actor_key"), ()),
+    "office.actor.conflict_resolved": EventContract("office.actor.conflict_resolved", "Office actor sync conflict resolved", ("workspace_id", "actor_key", "take"), ("revision",)),
     "blueprint.saved": EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title")),
     "persona.updated": EventContract("persona.updated", "Persona updated", ("persona_id",), ("display_name",)),
     # Synthetic watchdog event: appended by stream_frames when the scope/catalog
@@ -1298,4 +1329,15 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # slipped the Stage 12 rule. Advances the watermark so gated consumers
     # converge; every occurrence names a producer bug to fix at the source.
     "state.reconciled": EventContract("state.reconciled", "Read model reconciled after event-less write", ("fingerprint",), ("source",)),
+    # S7-A read-model producer: an op-based, WIRE-LEVEL state-patch entry.
+    # Payload is ``{entity, id, op, changed?}`` where op ∈ {upsert, remove,
+    # refresh}. ``upsert`` carries ``changed`` — the projected wire fields the
+    # mutation affected (derived dependents recomputed), sized to the 4KB cap
+    # (oversize values become accounted {oversize,bytes} markers; an unavoidable
+    # overflow degrades the op to ``refresh``). ``remove``/``refresh`` carry no
+    # ``changed``. ``entity``/``id``/``op`` are the summary fields every emission
+    # carries; ``changed`` is optional (detail). ``seq``/``ts`` ride the EventLog
+    # envelope, not the payload. Emitted only when ``read_model.delta_patches``
+    # is on (default off → this type never appears).
+    "state.patched": EventContract("state.patched", "State patched", ("entity", "id", "op"), ("changed",)),
 }

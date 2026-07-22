@@ -1031,6 +1031,44 @@ def available_profile_templates() -> List[ProfileTemplateInfo]:
     return profiles
 
 
+def available_profile_template_summaries() -> List[ProfileTemplateInfo]:
+    """Return profile metadata without parsing every runtime config.
+
+    Mission Control's available-persona roster uses only the profile name,
+    path, and description. Reading every large ``config.yaml`` merely to
+    discard model/provider adds substantial latency to a cold snapshot. The
+    full :func:`available_profile_templates` contract remains available to CLI
+    callers that render those runtime details.
+    """
+
+    profiles: list[ProfileTemplateInfo] = []
+    try:
+        profiles_root = _get_profiles_root()
+        entries = sorted(profiles_root.iterdir()) if profiles_root.is_dir() else []
+    except Exception:
+        return []
+
+    for entry in entries:
+        try:
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name == "default" or not _PROFILE_ID_RE.match(name):
+                continue
+            meta = read_profile_meta(entry)
+            profiles.append(
+                ProfileTemplateInfo(
+                    name=name,
+                    path=entry,
+                    description=meta.get("description", ""),
+                )
+            )
+        except Exception:
+            continue
+
+    return profiles
+
+
 def create_profile(
     name: str,
     clone_from: Optional[str] = None,

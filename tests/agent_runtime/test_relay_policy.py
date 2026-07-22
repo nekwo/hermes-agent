@@ -7,10 +7,14 @@ from agent_runtime import relay_policy
 from agent_runtime.relay_policy import (
     DEFAULT_MAX_RELAY_DEPTH,
     MIN_RELAY_BUDGET_SECONDS,
+    RELAY_SENDER_FINISH_REASON_PREFIX,
+    RelaySender,
+    build_relay_sender_marker,
     evaluate_relay,
     max_relay_depth,
     normalize_chain,
     parse_deadline_epoch,
+    parse_relay_sender_marker,
     remaining_budget_seconds,
 )
 
@@ -141,3 +145,66 @@ def test_sufficient_deadline_is_allowed():
 def test_context_carriers_default_empty():
     assert relay_policy.RELAY_CHAIN.get() == ()
     assert relay_policy.RELAY_DEADLINE.get() is None
+
+
+# ── relayed-message sender marker (single build/parse authority) ─────
+
+
+def test_build_marker_full_identity_round_trips():
+    marker = build_relay_sender_marker("neko_supervisor", "personainst_neko")
+    assert marker == f"{RELAY_SENDER_FINISH_REASON_PREFIX}neko_supervisor:personainst_neko"
+    assert parse_relay_sender_marker(marker) == RelaySender(
+        persona_id="neko_supervisor", instance_id="personainst_neko"
+    )
+
+
+def test_build_marker_persona_only_and_instance_only():
+    persona_only = build_relay_sender_marker("dev", None)
+    assert persona_only == f"{RELAY_SENDER_FINISH_REASON_PREFIX}dev:"
+    assert parse_relay_sender_marker(persona_only) == RelaySender(persona_id="dev", instance_id=None)
+
+    instance_only = build_relay_sender_marker(None, "personainst_qa_agent_2")
+    assert instance_only == f"{RELAY_SENDER_FINISH_REASON_PREFIX}:personainst_qa_agent_2"
+    assert parse_relay_sender_marker(instance_only) == RelaySender(
+        persona_id=None, instance_id="personainst_qa_agent_2"
+    )
+
+
+def test_build_bare_marker_is_the_honest_unknown():
+    bare = build_relay_sender_marker(None, None)
+    assert bare == f"{RELAY_SENDER_FINISH_REASON_PREFIX}:"
+    assert parse_relay_sender_marker(bare) == RelaySender(persona_id=None, instance_id=None)
+
+
+def test_build_marker_strips_whitespace_segments():
+    # Blank/whitespace inputs collapse to the empty segment (parsed back as None),
+    # never a whitespace-only fabricated id.
+    assert build_relay_sender_marker("  ", "\t") == f"{RELAY_SENDER_FINISH_REASON_PREFIX}:"
+    assert parse_relay_sender_marker(build_relay_sender_marker("  neko ", " personainst_x ")) == (
+        RelaySender(persona_id="neko", instance_id="personainst_x")
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "stop",
+        "pre_trace_ack",
+        "length",
+        "relay_fromX",  # prefix must match exactly, colon included
+        "prefixed relay_from:neko:inst",  # marker must be at the START
+        42,
+        object(),
+    ],
+)
+def test_non_marker_values_parse_to_none(value):
+    assert parse_relay_sender_marker(value) is None
+
+
+def test_parse_is_defensive_against_extra_colons():
+    # A stray third colon in the tail must never raise; the parse takes the first
+    # two segments and drops the remainder (the frozen split(":", 2) contract).
+    parsed = parse_relay_sender_marker(f"{RELAY_SENDER_FINISH_REASON_PREFIX}neko:personainst_x:extra")
+    assert parsed == RelaySender(persona_id="neko", instance_id="personainst_x")

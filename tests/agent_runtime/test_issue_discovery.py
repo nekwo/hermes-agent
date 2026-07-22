@@ -228,8 +228,8 @@ def test_context_snapshot_and_observability_show_safe_discovery_handles():
 
     assert "Issue Discoveries" in rendered
     assert task.issue_discoveries[0]["id"] in rendered
-    assert snap["tasks"][0]["issue_discovery_counts"]["untriaged"] == 1
-    assert snap["tasks"][0]["untriaged_issue_severities"] == ["high"]
+    assert list(snap["goals"].values())[0]["issue_discovery_counts"]["untriaged"] == 1
+    assert list(snap["goals"].values())[0]["untriaged_issue_severities"] == ["high"]
     assert obs["signals"]["untriaged_issue_discoveries"] == 1
     assert any(item["kind"] == "issue_discovery_triage_needed" for item in obs["interventions"])
     assert "pytest tests/other_test.py failed" not in encoded
@@ -243,7 +243,7 @@ def test_child_proof_does_not_satisfy_parent_gate():
     proof_store.attach(Proof(id="proof_child_test", task_id=child.id, stage_id=None, type=ProofType.TEST_RUN, title="child test", path_or_value="ok", created_by="qa", created_at=ts, redaction_status="safe"))
 
     snap = build_snapshot(task_store=parent_store, proof_store=proof_store)
-    parent_summary = next(item for item in snap["tasks"] if item["task_id"] == parent.id)
+    parent_summary = next(item for item in list(snap["goals"].values()) if item["task_id"] == parent.id)
 
     assert parent_summary["missing_proof"]
 

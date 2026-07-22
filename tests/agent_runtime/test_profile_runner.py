@@ -4,7 +4,21 @@ from pathlib import Path
 
 import pytest
 
-from agent_runtime.profile_runner import AgentRunRequest, ProfileAgentRunner, ProfileRunnerError, RunBudgetExceeded, _progress_adapter
+import json
+
+from agent_runtime.profile_runner import (
+    AgentRunRequest,
+    ProfileAgentRunner,
+    ProfileRunnerError,
+    RunBudgetExceeded,
+    _agent_chat_target_label,
+    _progress_adapter,
+    _tool_finished_payload,
+    _todo_items_from,
+    _todo_state_payload,
+    _TODO_STATE_MAX_CONTENT,
+    _TODO_STATE_MAX_ITEMS,
+)
 
 
 class FakeAgent:
@@ -103,7 +117,17 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
     assert result.final_response == "ok"
     assert result.session_id == "session_1"
     assert FakeAgent.last_kwargs["enabled_toolsets"] == ["terminal"]
-    assert FakeAgent.last_kwargs["blocked_tool_names"] == ["send_message"]
+    # T6c: the requested blocks are preserved AND the fork registry-hygiene set
+    # (kanban + feishu) is unioned in at agent construction, so no lane can resolve
+    # those toolsets. delegate_task / memory are deliberately NOT force-blocked
+    # here (operator ruling: keep them registered).
+    from agent_runtime.personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
+
+    passed_blocked = FakeAgent.last_kwargs["blocked_tool_names"]
+    assert "send_message" in passed_blocked
+    assert REGISTRY_HYGIENE_BLOCKED_TOOLS.issubset(set(passed_blocked))
+    assert "delegate_task" not in passed_blocked
+    assert "memory" not in passed_blocked
     assert FakeAgent.last_kwargs["api_mode"] == "codex_responses"
     assert result.profile_timing["runtime_resolve_ms"] >= 0
     assert result.profile_timing["agent_construct_ms"] >= 0
@@ -128,6 +152,73 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
         "profile_result_normalize_ms",
         "profile_budget_checks_ms",
     ]
+
+
+def test_persona_chat_runner_forces_native_compression_tip_rotation():
+    class CompressionAgent(FakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.compression_in_place = True
+
+        def run_conversation(self, user_message, system_message=None, task_id=None):
+            assert self.compression_in_place is False
+            assert self._persona_chat_root_session_id == "chat_root"
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    result = ProfileAgentRunner(agent_factory=CompressionAgent).run(
+        AgentRunRequest(
+            profile=None,
+            user_message="compress safely",
+            session_id="chat_tip",
+            root_chat_session_id="chat_root",
+        )
+    )
+
+    assert result.final_response == "ok"
+
+
+def test_persona_chat_runner_applies_one_turn_compression_proof_overrides():
+    class Compressor:
+        context_length = 400_000
+        threshold_percent = 0.5
+        threshold_tokens = 200_000
+        protect_first_n = 3
+        protect_last_n = 12
+
+    class CompressionAgent(FakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.compression_in_place = True
+            self.context_compressor = Compressor()
+
+        def run_conversation(self, user_message, system_message=None, task_id=None):
+            assert self.context_compressor.threshold_tokens == 500
+            assert self.context_compressor.threshold_percent == 0.00125
+            assert self.context_compressor.protect_first_n == 0
+            assert self.context_compressor.protect_last_n == 1
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    result = ProfileAgentRunner(agent_factory=CompressionAgent).run(
+        AgentRunRequest(
+            profile=None,
+            user_message="compress safely",
+            session_id="chat_tip",
+            root_chat_session_id="chat_root",
+            compression_threshold_tokens_override=500,
+            compression_protect_first_n_override=0,
+            compression_protect_last_n_override=1,
+        )
+    )
+
+    assert result.final_response == "ok"
 
 
 def test_runner_attaches_redaction_safe_model_input(monkeypatch):
@@ -163,6 +254,48 @@ def test_runner_attaches_redaction_safe_model_input(monkeypatch):
     assert "should-not-leak" not in model_input["messages"][0]["content"]
     assert model_input["messages"][1]["role"] == "user"
     assert model_input["messages"][1]["content"] == "hello"
+
+
+def test_runner_attaches_agent_owned_final_cache_routing_observability(monkeypatch):
+    monkeypatch.setattr(
+        "agent_runtime.profile_runner.resolve_runtime_provider",
+        lambda requested, target_model: {
+            "provider": requested,
+            "model": target_model,
+            "api_mode": "codex_responses",
+        },
+    )
+
+    class CacheRoutingAgent(FakeAgent):
+        def run_conversation(self, user_message, system_message=None, task_id=None):
+            self._last_cache_routing_observability = {
+                "schema_version": 1,
+                "backend": "openai_codex",
+                "prompt_cache_key_present": True,
+                "prompt_cache_key_source": "static_prefix",
+                "prompt_cache_key_fingerprint": f"sha256:{'a' * 64}",
+                "cache_scope_source": "cache_scope_id",
+                "session_header_present": True,
+                "session_header_fingerprint": f"sha256:{'b' * 64}",
+                "client_request_header_present": True,
+                "client_request_header_fingerprint": f"sha256:{'b' * 64}",
+                "scope_headers_match": True,
+                "raw_values_omitted": True,
+            }
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    result = ProfileAgentRunner(agent_factory=CacheRoutingAgent).run(
+        AgentRunRequest(profile=None, user_message="hello")
+    )
+
+    routing = result.raw["model_input_observability"]["cache_routing"]
+    assert routing["backend"] == "openai_codex"
+    assert routing["prompt_cache_key_fingerprint"] == f"sha256:{'a' * 64}"
+    assert routing["scope_headers_match"] is True
 
 
 def test_runner_forwards_stream_callback_to_agent():
@@ -449,6 +582,71 @@ def test_progress_adapter_records_target_for_read_and_search_tools():
     assert read_payload["summary"] == "Started tool read_file: lib/features/library/petdex_menu.dart"
     assert search_payload["target_label"] == "PetdexTile in lib/features/library"
     assert search_payload["summary"] == "Started tool search_files: PetdexTile in lib/features/library"
+
+
+def test_progress_adapter_agent_chat_send_carries_structured_dispatch_fields():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.started")
+
+    order = (
+        "From Neko Mission Lead: run a bounded backend health check.\n"
+        "Keep it lightweight; no repo commits.\n"
+        "Report the one-line result back."
+    )
+    invocation = {"persona_id": "backend_dev", "message": order}
+    cb("call_1", "agent_chat_send", invocation)
+
+    payload = events[0]
+    # G2 structured fields: the target chip + the FULL order, newlines preserved
+    # (NOT whitespace-collapsed like the prose target_label).
+    assert payload["dispatch_target"] == "backend_dev"
+    assert payload["dispatch_order"] == order
+    assert "\n" in payload["dispatch_order"]
+    # Backward-compat: the prose target_label + summary are byte-identical to
+    # what the (unchanged) label helper produces — the new keys are additive.
+    expected_label = _agent_chat_target_label("agent_chat_send", invocation)
+    assert payload["target_label"] == expected_label
+    assert payload["summary"] == f"Started tool agent_chat_send: {expected_label}"
+    # The prose label is still a single, 90-char-excerpted line.
+    assert "\n" not in payload["target_label"]
+    assert len(payload["target_label"]) <= len("→ backend_dev: ") + 90
+
+
+def test_agent_chat_dispatch_order_drops_secret_lines_and_target_is_capped():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.started")
+
+    order = "Line one is fine.\napi_key=SUPERSECRET must be dropped\nLine three is fine."
+    cb("call_1", "agent_chat_send", {"persona_id": "q" * 200, "message": order})
+
+    payload = events[0]
+    # Secret-bearing line dropped whole; the surrounding lines survive in order.
+    assert payload["dispatch_order"] == "Line one is fine.\nLine three is fine."
+    assert "SUPERSECRET" not in payload["dispatch_order"]
+    # Target persona capped at 120.
+    assert len(payload["dispatch_target"]) == 120
+
+
+def test_agent_chat_dispatch_order_caps_at_1500_with_ellipsis():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.started")
+
+    cb("call_1", "agent_chat_send", {"persona_id": "dev", "message": "x" * 4000})
+
+    order = events[0]["dispatch_order"]
+    assert len(order) == 1500
+    assert order.endswith("…")
+    assert order[:1499] == "x" * 1499
+
+
+def test_non_dispatch_tool_has_no_dispatch_fields():
+    events = []
+    cb = _progress_adapter(events.append, "run.tool.started")
+
+    cb("call_1", "read_file", {"path": "lib/features/library/petdex_menu.dart"})
+
+    assert "dispatch_target" not in events[0]
+    assert "dispatch_order" not in events[0]
 
 
 def test_progress_adapter_recovers_patch_files_from_diff_headers():
@@ -992,3 +1190,283 @@ def test_normalize_result_carries_canonical_cache_and_reasoning():
     assert result.cache_read_tokens == 1432576
     assert result.cache_write_tokens == 300
     assert result.reasoning_tokens == 128
+
+
+# ── T7: todo checklist state on the finished event ───────────────────────────
+
+
+def _todo_result(items):
+    """The JSON-string result shape `todo_tool` returns."""
+    return json.dumps({"todos": items, "summary": {"total": len(items)}})
+
+
+def test_todo_state_payload_from_json_string_result():
+    items = [
+        {"id": "1", "content": "Verify the data lane", "status": "completed"},
+        {"id": "2", "content": "Ship the checklist panel", "status": "in_progress"},
+        {"id": "3", "content": "Land it", "status": "pending"},
+    ]
+    payload = _todo_state_payload("todo", _todo_result(items), invocation={"todos": items})
+    assert payload == items
+
+
+def test_todo_state_payload_from_dict_result():
+    items = [{"id": "a", "content": "one", "status": "pending"}]
+    payload = _todo_state_payload("todo", {"todos": items}, invocation=None)
+    assert payload == items
+
+
+def test_todo_state_payload_falls_back_to_invocation_when_result_unparseable():
+    items = [{"id": "x", "content": "draft", "status": "pending"}]
+    payload = _todo_state_payload("todo", "not-json{", invocation={"todos": items})
+    assert payload == items
+
+
+def test_todo_state_payload_returns_none_for_non_todo_tool():
+    assert _todo_state_payload("terminal", _todo_result([{"id": "1", "content": "c", "status": "pending"}]), None) is None
+
+
+def test_todo_state_payload_returns_none_when_unrecoverable():
+    # Absence (None) is reserved for a non-todo tool or an unrecoverable payload:
+    # neither the result nor the invocation yields a list. A cleared list is a
+    # DIFFERENT case (see test_todo_state_payload_emits_explicit_empty_on_clear).
+    assert _todo_state_payload("todo", "just a string", invocation=None) is None
+    assert _todo_state_payload("todo", {"summary": {}}, invocation=None) is None
+    assert _todo_state_payload("todo", "not-json{", invocation="also bad") is None
+
+
+def test_todo_state_payload_emits_explicit_empty_on_clear():
+    # T9d: a todo WRITE whose resulting list is empty emits an explicit `[]` — the
+    # cleared-checklist signal the launcher resolver uses to hide the panel —
+    # distinct from absence (None). Both the JSON-string and bare-list shapes of
+    # a cleared result recover an empty list.
+    assert _todo_state_payload("todo", _todo_result([]), invocation=None) == []
+    assert _todo_state_payload("todo", {"todos": []}, invocation=None) == []
+    assert _todo_state_payload("todo", "[]", invocation=None) == []
+    # A cleared result is NOT masked by a stale invocation fallback: the result's
+    # empty list wins (the fallback only triggers on an unparseable result).
+    assert _todo_state_payload(
+        "todo", _todo_result([]), invocation={"todos": [{"id": "1", "content": "stale", "status": "pending"}]}
+    ) == []
+    # But a non-todo tool with an empty result is still absent, never `[]`.
+    assert _todo_state_payload("terminal", _todo_result([]), invocation=None) is None
+
+
+def test_todo_state_payload_normalizes_status_and_caps_content():
+    long_content = "x" * (_TODO_STATE_MAX_CONTENT + 50)
+    items = [
+        {"id": "1", "content": long_content, "status": "bogus"},
+        {"id": "", "content": "", "status": "completed"},
+    ]
+    payload = _todo_state_payload("todo", _todo_result(items), None)
+    assert payload is not None
+    assert payload[0]["status"] == "pending"  # unknown → pending
+    assert len(payload[0]["content"]) == _TODO_STATE_MAX_CONTENT
+    assert payload[0]["content"].endswith("…")
+    assert payload[1]["id"] == "?"  # empty id → placeholder
+    assert payload[1]["content"] == "(no description)"
+
+
+def test_todo_state_payload_caps_item_count():
+    items = [{"id": str(i), "content": f"item {i}", "status": "pending"} for i in range(_TODO_STATE_MAX_ITEMS + 20)]
+    payload = _todo_state_payload("todo", _todo_result(items), None)
+    assert len(payload) == _TODO_STATE_MAX_ITEMS
+
+
+def test_todo_state_payload_collapses_whitespace_matching_persist_lane():
+    # T9c: multi-line / multi-space todo content must be byte-identical on the
+    # live `tool.finished` lane (the producer output) and the reloaded turn-store
+    # lane (which re-bounds via `mission_chat_turns._safe_todo_state`). The
+    # producer now collapses whitespace to the persisted `safe_assignment_text`
+    # shape, so the persist re-run is a no-op and the two lanes match.
+    from agent_runtime.mission_chat_turns import _safe_todo_state
+
+    items = [
+        {"id": "1", "content": "line one\nline two\n\n  trailing", "status": "in_progress"},
+        {"id": "2", "content": "\ttabbed   and   spaced   ", "status": "pending"},
+    ]
+    live = _todo_state_payload("todo", _todo_result(items), None)
+    assert live is not None
+    # Whitespace collapsed (no raw newlines/tabs/double-spaces survive).
+    assert live[0]["content"] == "line one line two trailing"
+    assert live[1]["content"] == "tabbed and spaced"
+    # The reloaded/persisted lane is byte-identical to the live lane.
+    reloaded = _safe_todo_state(live)
+    assert reloaded == live
+
+
+def test_todo_state_payload_ellipsis_survives_persist_rerun():
+    # The over-cap `…` marker must also be lane-stable: the persist re-bound
+    # runs safe_assignment_text over the producer's already-collapsed,
+    # ellipsis-terminated content and leaves it byte-identical.
+    from agent_runtime.mission_chat_turns import _safe_todo_state
+
+    items = [{"id": "1", "content": "word " * 100, "status": "pending"}]
+    live = _todo_state_payload("todo", _todo_result(items), None)
+    assert live[0]["content"].endswith("…")
+    assert len(live[0]["content"]) == _TODO_STATE_MAX_CONTENT
+    assert _safe_todo_state(live) == live
+
+
+def test_todo_items_from_accepts_bare_list():
+    items = [{"id": "1", "content": "c", "status": "pending"}]
+    assert _todo_items_from(items) == items
+    assert _todo_items_from(None) is None
+    assert _todo_items_from(42) is None
+
+
+def test_tool_finished_payload_carries_todo_state():
+    items = [{"id": "1", "content": "do it", "status": "in_progress"}]
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "todo",
+        duration=None,
+        is_error=False,
+        result=_todo_result(items),
+        invocation={"todos": items},
+    )
+    assert payload["todo_state"] == items
+
+
+def test_tool_finished_payload_omits_todo_state_for_other_tools():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "skill_view",
+        duration=None,
+        is_error=False,
+        result={"ok": True},
+        invocation={"skill": "x"},
+    )
+    assert "todo_state" not in payload
+
+
+# T8 (2026-07-18): the rendered skills-index chars captured on final_model_input.
+
+
+def test_rendered_skills_prompt_chars_guards_and_measures(monkeypatch):
+    from types import SimpleNamespace
+    from agent_runtime.profile_runner import _rendered_skills_prompt_chars
+    import run_agent
+
+    # No tool set at all -> None (never fabricated).
+    assert _rendered_skills_prompt_chars(SimpleNamespace(valid_tool_names=None)) is None
+    # A lane with no skills tools -> None (the index does not render).
+    assert (
+        _rendered_skills_prompt_chars(
+            SimpleNamespace(valid_tool_names={"web_search", "terminal"}, platform="cli")
+        )
+        is None
+    )
+
+    # A lane that ships skill_view renders -> the length of the rendered index,
+    # measured against the agent's OWN resolved tool set (mirrors
+    # agent/system_prompt.py; a guaranteed in-process cache hit at runtime).
+    rendered_text = "## Skills (mandatory)\n" + "x" * 9000
+    monkeypatch.setattr(run_agent, "get_toolset_for_tool", lambda name: "skills")
+    monkeypatch.setattr(
+        run_agent, "build_skills_system_prompt", lambda **kwargs: rendered_text
+    )
+    agent = SimpleNamespace(
+        valid_tool_names={"skill_view", "skills_list", "web_search"}, platform="cli"
+    )
+    assert _rendered_skills_prompt_chars(agent) == len(rendered_text)
+
+
+def test_rendered_skills_prompt_chars_swallows_render_failure(monkeypatch):
+    from types import SimpleNamespace
+    from agent_runtime.profile_runner import _rendered_skills_prompt_chars
+    import run_agent
+
+    monkeypatch.setattr(run_agent, "get_toolset_for_tool", lambda name: "skills")
+
+    def _boom(**kwargs):
+        raise RuntimeError("render exploded")
+
+    monkeypatch.setattr(run_agent, "build_skills_system_prompt", _boom)
+    agent = SimpleNamespace(valid_tool_names={"skill_view"}, platform="cli")
+    assert _rendered_skills_prompt_chars(agent) is None
+
+
+# ── T10c: cache_scope_id threading (request → factory → agent) ───────────────
+
+def test_runner_threads_cache_scope_id_to_agent_factory(monkeypatch):
+    """AgentRunRequest.cache_scope_id reaches the agent factory as a distinct
+    kwarg while session_id is left None (persona-chat shape). It must not be
+    conflated with session_id — the transcript-load key stays untouched."""
+    monkeypatch.setattr(
+        "agent_runtime.profile_runner.resolve_runtime_provider",
+        lambda requested, target_model: {"provider": requested, "model": target_model, "api_mode": "codex_responses"},
+    )
+    runner = ProfileAgentRunner(agent_factory=FakeAgent)
+
+    runner.run(
+        AgentRunRequest(
+            profile=None,
+            provider="openai-codex",
+            model="gpt-5.6-luna",
+            api_mode="codex_responses",
+            session_id=None,               # persona-chat: no transcript reload
+            cache_scope_id="chat-persona-abc",
+            user_message="hello",
+            system_message="system",
+            task_id="run_scope",
+        )
+    )
+
+    assert FakeAgent.last_kwargs["cache_scope_id"] == "chat-persona-abc"
+    # session_id (the transcript/session-load key) is independent and stays None.
+    assert FakeAgent.last_kwargs["session_id"] is None
+
+
+def test_runner_defaults_cache_scope_id_none_for_worker_lanes(monkeypatch):
+    """Lanes that don't set cache_scope_id thread None — the codex transport
+    then falls back to session_id, so worker/mission-run behavior is unchanged."""
+    monkeypatch.setattr(
+        "agent_runtime.profile_runner.resolve_runtime_provider",
+        lambda requested, target_model: {"provider": requested, "model": target_model, "api_mode": "codex_responses"},
+    )
+    runner = ProfileAgentRunner(agent_factory=FakeAgent)
+
+    runner.run(
+        AgentRunRequest(
+            profile=None,
+            provider="openai-codex",
+            model="gpt-5.6-luna",
+            session_id="worker-session-1",
+            user_message="hello",
+            task_id="run_worker",
+        )
+    )
+
+    assert FakeAgent.last_kwargs["cache_scope_id"] is None
+    assert FakeAgent.last_kwargs["session_id"] == "worker-session-1"
+
+
+def test_default_agent_factory_applies_cache_scope_without_ctor_kwarg(monkeypatch):
+    """_default_agent_factory pops cache_scope_id and sets it on the constructed
+    agent — it is NEVER forwarded to the (upstream) AIAgent constructor, and it
+    never touches the session_id the agent loads its transcript from."""
+    from agent_runtime import profile_runner as pr
+
+    seen_kwargs = {}
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs):
+            seen_kwargs.update(kwargs)
+            self.session_id = kwargs.get("session_id")
+
+    monkeypatch.setattr("run_agent.AIAgent", _RecordingAgent, raising=False)
+
+    agent = pr._default_agent_factory(session_id=None, cache_scope_id="chat-persona-xyz")
+
+    # Applied as an attribute the codex seam reads…
+    assert agent.cache_scope_id == "chat-persona-xyz"
+    # …but NOT passed into the upstream constructor, and session_id untouched.
+    assert "cache_scope_id" not in seen_kwargs
+    assert seen_kwargs.get("session_id") is None
+
+    # Unset scope leaves no attribute (getattr default None at the seam).
+    seen_kwargs.clear()
+    agent2 = pr._default_agent_factory(session_id="worker-1", cache_scope_id=None)
+    assert getattr(agent2, "cache_scope_id", None) is None
+    assert "cache_scope_id" not in seen_kwargs

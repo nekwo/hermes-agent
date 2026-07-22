@@ -65,7 +65,7 @@ from agent.retry_utils import (
     zai_coding_overload_retry_ceiling,
 )
 from agent.trajectory import has_incomplete_scratchpad
-from agent.usage_pricing import estimate_usage_cost, normalize_usage
+from agent.usage_pricing import estimate_usage_cost, normalize_usage, record_api_call_usage
 from hermes_constants import PARTIAL_STREAM_STUB_ID
 from hermes_logging import set_session_context
 from tools.skill_provenance import set_current_write_origin
@@ -559,6 +559,7 @@ def run_conversation(
     persist_user_message: Optional[str] = None,
     persist_user_timestamp: Optional[float] = None,
     moa_config: Optional[dict[str, Any]] = None,
+    reuse_current_user_message: bool = False,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -618,6 +619,7 @@ def run_conversation(
         set_session_context=set_session_context,
         set_current_write_origin=set_current_write_origin,
         ra=_ra,
+        reuse_current_user_message=reuse_current_user_message,
     )
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message
@@ -2230,6 +2232,7 @@ def run_conversation(
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
                     agent.session_cache_write_tokens += canonical_usage.cache_write_tokens
                     agent.session_reasoning_tokens += canonical_usage.reasoning_tokens
+                    record_api_call_usage(agent, canonical_usage)
 
                     # Log API call details for debugging/observability
                     _cache_pct = ""
@@ -4407,6 +4410,19 @@ def run_conversation(
                 else:
                     agent._vprint(f"{agent.log_prefix}🤖 Assistant: {assistant_message.content[:100]}{'...' if len(assistant_message.content) > 100 else ''}")
 
+            # Fork addition (trace-visibility G3): parse the model's NATIVE
+            # reasoning first — when present it OWNS the turn's thinking row and
+            # the legacy reply-echo emit below is suppressed (once thinking rows
+            # became visible, the echo rendered as a near-duplicate of the reply
+            # bubble: whitespace-collapse + the 500-char cap defeat the
+            # projection's byte-equal dedup).
+            _native_reasoning = ""
+            if agent.tool_progress_callback and getattr(agent, '_delegate_depth', 0) == 0:
+                try:
+                    _native_reasoning = (agent._extract_reasoning(assistant_message) or "").strip()
+                except Exception:
+                    _native_reasoning = ""
+
             # Notify progress callback of model's thinking (used by subagent
             # delegation to relay the child's reasoning to the parent display).
             if (assistant_message.content and agent.tool_progress_callback):
@@ -4423,12 +4439,25 @@ def run_conversation(
                         agent.tool_progress_callback("_thinking", first_line)
                     except Exception:
                         pass
-                elif _think_text:
+                elif _think_text and not _native_reasoning:
+                    # Legacy stand-in: only a provider that surfaced no native
+                    # reasoning gets the reply text as its thinking row.
                     try:
                         agent.tool_progress_callback("reasoning.available", "_thinking", _think_text[:500], None)
                     except Exception:
                         pass
-            
+
+            # Fork addition (trace-visibility G3): emit the NATIVE reasoning once
+            # per turn on the harness/top-level path — OUTSIDE the content gate so
+            # a reasoning-only (empty-content) codex turn still surfaces a
+            # thinking row. Subagent relay (depth > 0) keeps its first-line-only
+            # behavior above, untouched.
+            if _native_reasoning:
+                try:
+                    agent.tool_progress_callback("reasoning.available", "_thinking", _native_reasoning[:500], None)
+                except Exception:
+                    pass
+
             # Check for incomplete <REASONING_SCRATCHPAD> (opened but never closed)
             # This means the model ran out of output tokens mid-reasoning — retry up to 2 times
             if has_incomplete_scratchpad(assistant_message.content or ""):

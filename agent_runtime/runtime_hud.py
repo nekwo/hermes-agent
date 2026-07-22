@@ -25,22 +25,11 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from .models import looks_like_persona_instance_id
+
 # Bound the roster so a large level cannot bloat every chat turn. The operator's
 # widget wraps chips; the fed block lists names and notes the overflow count.
 SITUATIONAL_HUD_ROSTER_CAP = 16
-
-# Daemon status keys mirrored into the fed `runtime` block — the same fields the
-# launcher pulse line renders (see daemon.daemon_status_schema).
-_RUNTIME_KEYS = (
-    "state",
-    "loops",
-    "heartbeat_at",
-    "next_wake_at",
-    "last_tick_finished_at",
-    "actions_last_tick",
-    "wait_seconds",
-)
-
 
 def _clean(value: Any) -> bool:
     """True when a value carries information worth emitting."""
@@ -53,16 +42,6 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
-
-
-def _runtime_block(daemon: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(daemon, dict):
-        return {}
-    block: dict[str, Any] = {}
-    for key in _RUNTIME_KEYS:
-        if key in daemon and _clean(daemon.get(key)):
-            block[key] = daemon.get(key)
-    return block
 
 
 def _lane_block(instance: Any) -> dict[str, Any]:
@@ -129,6 +108,87 @@ def _roster_block(roster: Iterable[Any], *, self_id: str | None) -> list[dict[st
     return entries
 
 
+def _parent_refs(instance: Any) -> list[str]:
+    """The steering-parent ref set of an instance (fan-in aware): the
+    authoritative ``steered_by`` list, falling back to ``[spawned_by]`` for
+    un-migrated records. Mirrors the launcher's
+    ``missionAgentInstanceParentIds`` so both ends agree who steers whom.
+
+    Raw refs — a ref may name an instance id, a persona id, or a role, resolved
+    downstream in :func:`_steering_block`. Principals that resolve to nobody AND
+    are not instance-shaped (the operator) are dropped there, not here, so the
+    intentional persona/role resolution is preserved."""
+
+    refs = [ref for ref in (_text(item) for item in (getattr(instance, "steered_by", None) or ())) if ref]
+    if refs:
+        return refs
+    spawned_by = _text(getattr(instance, "spawned_by", None))
+    return [spawned_by] if spawned_by else []
+
+
+def _resolve_parent_ref(ref: str, roster: Iterable[Any]) -> Any | None:
+    """Resolve a parent ref to a roster instance. A ref may name an instance id,
+    a persona id, or a role — in that precedence order (mirrors the launcher's
+    ``missionAgentOwnerForSpawnedBy``)."""
+
+    by_persona = None
+    by_role = None
+    for inst in roster or ():
+        if _text(getattr(inst, "id", None)) == ref:
+            return inst
+        if by_persona is None and _text(getattr(inst, "persona_id", None)) == ref:
+            by_persona = inst
+        if by_role is None and _text(getattr(inst, "role", None)) == ref:
+            by_role = inst
+    return by_persona or by_role
+
+
+def _steering_block(instance: Any, roster: Iterable[Any], *, self_id: str | None) -> dict[str, Any]:
+    """Who steers this lane, and whom it steers — harness truth, fan-in aware.
+
+    Hermes states steering only child→parent (``steered_by``/``spawned_by``), so
+    the downstream set is derived by inverting the roster through the same ref
+    resolution, keeping both directions consistent. Both keys are ALWAYS present:
+    explicit empty lists mean genuinely standalone (the common case), which a
+    consumer must be able to tell apart from "this hermes predates steering"."""
+
+    roster = list(roster or ())
+    steered_by: list[dict[str, Any]] = []
+    for ref in _parent_refs(instance):
+        parent = _resolve_parent_ref(ref, roster)
+        # Drop a phantom steerer: a ref that resolves to nobody AND is not even
+        # instance-shaped is a non-agent principal (the operator, leaked into a
+        # steering field by a legacy mint), never a real steer parent — so the
+        # HUD must not narrate "steered by operator". A resolved persona/role ref,
+        # or an instance-shaped-but-departed ref ("off level"), is a genuine fact
+        # and is kept.
+        if parent is None and not looks_like_persona_instance_id(ref):
+            continue
+        entry: dict[str, Any] = {"ref": ref}
+        if parent is not None:
+            entry["persona_instance_id"] = _text(getattr(parent, "id", None))
+            entry["display_name"] = _text(getattr(parent, "display_name", None)) or ref
+        steered_by.append(entry)
+
+    steers: list[dict[str, Any]] = []
+    for inst in roster:
+        instance_id = _text(getattr(inst, "id", None))
+        if instance_id is None or instance_id == self_id:
+            continue
+        for ref in _parent_refs(inst):
+            parent = _resolve_parent_ref(ref, roster)
+            if parent is not None and _text(getattr(parent, "id", None)) == self_id:
+                steers.append(
+                    {
+                        "persona_instance_id": instance_id,
+                        "display_name": _text(getattr(inst, "display_name", None)) or instance_id,
+                    }
+                )
+                break
+
+    return {"steered_by": steered_by, "steers": steers}
+
+
 def resolve_situational_hud(
     instance: Any,
     *,
@@ -139,6 +199,7 @@ def resolve_situational_hud(
     task: Any = None,
     goal_task: Any = None,
     proof_store: Any = None,
+    board: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the typed situational snapshot for one lane.
 
@@ -154,9 +215,6 @@ def resolve_situational_hud(
     self_id = _text(getattr(instance, "id", None))
 
     hud: dict[str, Any] = {"preview": True}
-    runtime = _runtime_block(daemon)
-    if runtime:
-        hud["runtime"] = runtime
 
     scope = {
         key: value
@@ -177,6 +235,17 @@ def resolve_situational_hud(
     roster_block = _roster_block(roster, self_id=self_id)
     if roster_block:
         hud["roster"] = roster_block
+
+    # Steering is always emitted (unlike the other blocks, which drop when
+    # empty): an explicit empty block is the honest "standalone" answer, and
+    # its absence is reserved for HUDs that predate steering entirely.
+    hud["steering"] = _steering_block(instance, roster, self_id=self_id)
+
+    # Advisory Mission Board digest (nudge, not instruction): a one-line
+    # awareness cue. Absent when there is no board or it has no open cards, so a
+    # workspace with no board contributes NO line (nudged-never-forced).
+    if isinstance(board, dict) and board:
+        hud["board"] = board
 
     if task is not None:
         # Deferred import: context_builder pulls a large dependency graph and is
@@ -213,16 +282,6 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
         "not an instruction to act.",
     ]
 
-    runtime = hud.get("runtime") if isinstance(hud.get("runtime"), dict) else {}
-    if runtime:
-        parts = [f"state {runtime['state']}"] if _clean(runtime.get("state")) else []
-        if _clean(runtime.get("loops")):
-            parts.append(f"loop {runtime['loops']}")
-        if _clean(runtime.get("next_wake_at")):
-            parts.append(f"next wake {runtime['next_wake_at']}")
-        if parts:
-            lines.append(f"- Runtime: {' · '.join(parts)}")
-
     scope = hud.get("scope") if isinstance(hud.get("scope"), dict) else {}
     if scope:
         realm = scope.get("realm") or "no realm"
@@ -241,6 +300,20 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
     else:
         lines.append("- Mission: no mission bound to this lane")
 
+    board = hud.get("board") if isinstance(hud.get("board"), dict) else {}
+    if board:
+        segments = [
+            (board.get("queued"), "queued"),
+            (board.get("active"), "in progress"),
+            (board.get("review"), "in review"),
+        ]
+        parts = [f"{count} {label}" for count, label in segments if isinstance(count, int) and count > 0]
+        if parts:
+            lines.append(
+                f"- Board: {' · '.join(parts)} (a workspace board exists; you MAY add a "
+                "card for follow-up work worth tracking — advisory, never required)"
+            )
+
     lane = hud.get("lane") if isinstance(hud.get("lane"), dict) else {}
     if lane:
         who = lane.get("display_name") or lane.get("persona_instance_id") or "this agent"
@@ -251,9 +324,34 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
             who_bits.append(f"role {lane['role']}")
         lines.append(f"- You: {' · '.join(who_bits)}")
 
+    # Shared "Name (@personainst_...)" formatter: the handle IS the address the
+    # chat/steer verbs accept, so every line naming a teammate must carry it —
+    # a name without its handle is visible but not actionable.
+    def _handle(entry: dict[str, Any]) -> str:
+        name = entry.get("display_name")
+        ref = entry.get("persona_instance_id") or entry.get("ref")
+        if _clean(name) and _clean(ref) and name != ref:
+            return f"{name} (@{ref})"
+        return f"@{ref}" if _clean(ref) else str(name or "unknown")
+
+    steering = hud.get("steering") if isinstance(hud.get("steering"), dict) else None
+    if steering is not None:
+        steered_by = steering.get("steered_by") if isinstance(steering.get("steered_by"), list) else []
+        steers = steering.get("steers") if isinstance(steering.get("steers"), list) else []
+        if steered_by:
+            lines.append(
+                "- Steered by: " + ", ".join(_handle(e) for e in steered_by if isinstance(e, dict))
+            )
+        if steers:
+            lines.append(
+                "- Steers: " + ", ".join(_handle(e) for e in steers if isinstance(e, dict))
+            )
+        if not steered_by and not steers:
+            lines.append("- Steering: standalone — no steerer, steers nobody")
+
     roster = hud.get("roster") if isinstance(hud.get("roster"), list) else []
     if roster:
-        names = ", ".join(str(entry.get("display_name") or entry.get("persona_instance_id")) for entry in roster)
+        names = ", ".join(_handle(entry) for entry in roster if isinstance(entry, dict))
         lines.append(f"- On level ({len(roster)}): {names}")
 
     mission_hud = hud.get("mission_hud") if isinstance(hud.get("mission_hud"), dict) else {}
@@ -276,26 +374,55 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = None) -> str:
+def _board_digest_for_workspace(workspace_id: str | None) -> dict[str, Any] | None:
+    """Count open (non-done) cards on the active workspace's default board, by
+    typed column kind. Returns ``None`` when there is no board or no open cards,
+    so a workspace with no board contributes no HUD line. One store read per chat
+    turn (chat-side wrapper only — never on the snapshot's per-lane hot path)."""
+
+    if not workspace_id:
+        return None
+    try:
+        from . import board_models
+        from .board_store import BoardStore
+
+        store = BoardStore()
+        board_id = board_models.default_board_id(workspace_id)
+        if not store.exists(board_id):
+            return None
+        board = store.get(board_id)
+        kind_by_column = {column.column_id: column.kind for column in board.columns}
+        counts: dict[str, int] = {}
+        for card in store.list_cards(board_id):
+            kind = kind_by_column.get(card.column_id, "custom")
+            counts[kind] = counts.get(kind, 0) + 1
+        digest = {key: counts.get(key, 0) for key in ("queued", "active", "review")}
+        return digest if any(digest.values()) else None
+    except Exception:
+        return None
+
+
+def situational_hud_for_instance(instance: Any, *, proof_store: Any = None) -> dict[str, Any]:
     """Chat-side convenience: load the ambient runtime facts for one lane and
-    render the fed ``## Runtime Situation`` block.
+    resolve the situational HUD dict.
 
     The snapshot path resolves the same projection from data it already has
     loaded; this wrapper does the store I/O for a single mission-chat turn, then
-    calls the same pure `resolve_situational_hud` + `render_situational_hud_block`
-    (one authority). Best-effort: returns '' on any failure so a chat turn is
+    calls the same pure `resolve_situational_hud` (one authority). The chat
+    caller renders THIS dict into the fed block AND records it verbatim on the
+    turn's observability row, so the Mission Control CONTEXT peek shows exactly
+    the object that was injected — parity by construction, not by later
+    re-derivation. Best-effort: returns {} on any failure so a chat turn is
     never blocked by situational-HUD assembly."""
 
     if instance is None:
-        return ""
+        return {}
     try:
         # Deferred imports keep module load order robust (context_builder, the
         # stores, and daemon all pull sizeable graphs).
-        from .daemon import daemon_status_schema
         from .persona_assignments import PersonaInstanceStore
         from .store import RealmStore, TaskStore, WorkspaceStore
 
-        daemon = daemon_status_schema()
         roster = PersonaInstanceStore().list_all()
 
         workspace_store = WorkspaceStore()
@@ -327,16 +454,25 @@ def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = No
             except Exception:
                 return None
 
-        hud = resolve_situational_hud(
+        return resolve_situational_hud(
             instance,
-            daemon=daemon,
+            daemon=None,
             realm=realm,
             workspace=workspace,
             roster=roster,
             task=_safe_get(getattr(instance, "current_task_id", None)),
             goal_task=_safe_get(getattr(instance, "goal_id", None)),
             proof_store=proof_store,
+            board=_board_digest_for_workspace(workspace_store.active_id()),
         )
-        return render_situational_hud_block(hud)
     except Exception:
-        return ""
+        return {}
+
+
+def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = None) -> str:
+    """Rendered-block form of `situational_hud_for_instance` (same authority);
+    kept for callers that only need the fed text."""
+
+    return render_situational_hud_block(
+        situational_hud_for_instance(instance, proof_store=proof_store)
+    )

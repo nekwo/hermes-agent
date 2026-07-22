@@ -10,10 +10,10 @@ import yaml
 from hermes_constants import get_config_path
 from hermes_cli.profiles import profile_exists
 
-from .personas import DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
+from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, MissionPlanConfig, NormalWorkerFlowConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
 
 @dataclass(slots=True)
 class AgentRuntimeConfig(RuntimeConfig):
@@ -98,6 +98,8 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     repo_bundle_routing = _repo_bundle_routing_config(raw.get("repo_bundle_routing") or {})
     simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
     read_model = _read_model_config(raw.get("read_model") or {})
+    persona_chat = _persona_chat_config(raw.get("persona_chat") or {})
+    event_log = _event_log_config(raw.get("event_log") or {})
     swarm = _swarm_config(raw.get("swarm") or {})
     supervision = _supervision_config(raw.get("supervision") or {})
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
@@ -153,6 +155,8 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         repo_bundle_routing=repo_bundle_routing,
         simplified_agent_contract=simplified_agent_contract,
         read_model=read_model,
+        persona_chat=persona_chat,
+        event_log=event_log,
         swarm=swarm,
         supervision=supervision,
         coordinator_permissions=coordinator_permissions,
@@ -242,6 +246,38 @@ def describe_runtime_default_authority(config_path: Path | None = None) -> dict[
     }
 
 
+def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> list[str]:
+    """Per-persona operator override for the chat-lane toolset cost policy.
+
+    Read from ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` in
+    ``config.yaml``: a list of toolsets to RESTORE onto that persona's operator /
+    mission chat lane after the default policy
+    (``chat_lane_toolsets.DEFAULT_CHAT_LANE_EXCLUDED_TOOLSETS``) would exclude
+    them (browser / vision / heavy-dev). Restore is un-exclusion, not a grant —
+    a restored toolset is only kept if the persona's role/permission layer
+    already resolved it into the lane.
+
+    Honors the legacy ``alice_supervisor`` ⇄ ``neko_supervisor`` alias so an
+    older config keyed on either name is respected. Absent / malformed → ``[]``
+    (the default policy applies unchanged)."""
+
+    persona_id = str(persona_id or "").strip()
+    if not persona_id:
+        return []
+    cfg = cfg or load_agent_runtime_config()
+    personas = cfg.personas if isinstance(getattr(cfg, "personas", None), dict) else {}
+    keys = [persona_id]
+    if persona_id == "neko_supervisor":
+        keys.append("alice_supervisor")
+    elif persona_id == "alice_supervisor":
+        keys.append("neko_supervisor")
+    for key in keys:
+        raw = personas.get(key)
+        if isinstance(raw, dict) and "chat_lane_restore_toolsets" in raw:
+            return _string_list(raw.get("chat_lane_restore_toolsets"))
+    return []
+
+
 def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
     # Full resolvable catalog: the typed pipeline personas remain here (dormant, so the
@@ -281,8 +317,14 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         p.max_wall_seconds = _optional_float(overrides.get("max_wall_seconds", p.max_wall_seconds))
         p.max_api_calls = _optional_int(overrides.get("max_api_calls", p.max_api_calls))
         p.max_total_tokens = _optional_int(overrides.get("max_total_tokens", p.max_total_tokens))
-        if "skills" in overrides:
-            p.skills = _string_list(overrides["skills"])
+        if "skills" in overrides or "skills_remove" in overrides:
+            additions = _string_list(overrides.get("skills", []))
+            removals = set(_string_list(overrides.get("skills_remove", [])))
+            # Persona defaults are required/recommended assignments. Config
+            # extends that baseline by id; subtraction is explicit so adding
+            # one skill never accidentally erases every default.
+            merged = list(dict.fromkeys([*p.skills, *additions]))
+            p.skills = [skill_id for skill_id in merged if skill_id not in removals]
         if "required_mcp_servers" in overrides:
             p.required_mcp_servers = _string_list(overrides["required_mcp_servers"])
         if "toolsets" in overrides:
@@ -311,10 +353,12 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
     store = AgentStore()
     stored = {persona.id: persona for persona in store.list_all()}
-    # Base-profile foundation: seed ONLY the base profile into the store. AgentStore is
-    # what Mission Control surfaces (snapshot reads store.list_all()), so the store stays
-    # base-only. The typed pipeline personas are NOT persisted/shown.
-    seed = {persona.id: persona for persona in seed_personas()}
+    # Base-profile foundation: seed ONLY the base profile for a generic Hermes
+    # installation. Launcher installations explicitly provision the bundled typed
+    # team; once that team exists, later bootstrap calls must not add a fifth `base`
+    # persona on top of it.
+    has_bundled_team = bool(BUNDLED_PERSONA_IDS.intersection(stored))
+    seed = {} if has_bundled_team else {persona.id: persona for persona in seed_personas()}
     changed = False
     for persona_id, persona in seed.items():
         if persona_id not in stored:
@@ -339,6 +383,61 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
     catalog = {persona.id: persona for persona in persona_records_from_config(cfg)}
     merged = {**catalog, **stored}
     return list(merged.values())
+
+
+def provision_bundled_personas(cfg: AgentRuntimeConfig | None = None):
+    """Persist the Launcher's typed default team after a profile preflight.
+
+    The generic Hermes bootstrap remains base-only. The Launcher explicitly
+    opts into this team during installation, after creating every required
+    profile. Preflighting all bindings before the first store write prevents
+    Mission Control from advertising a half-runnable backend/frontend team.
+    Existing custom bindings are preserved when they still point at a real
+    profile; missing/unbacked legacy rows are repaired to the bundled binding.
+    """
+    from .store import AgentStore
+
+    cfg = cfg or load_agent_runtime_config()
+    resolved = {persona.id: persona for persona in persona_records_from_config(cfg)}
+    missing_definitions = sorted(BUNDLED_PERSONA_IDS.difference(resolved))
+    if missing_definitions:
+        raise ValueError(
+            "bundled persona definitions are missing: "
+            + ", ".join(missing_definitions)
+        )
+
+    # This is the Launcher's explicit bundled-team contract. In particular,
+    # generic Hermes may resolve Neko to a configured head profile, while the
+    # Launcher installer always creates and binds the bundled Neko to `base`.
+    for persona_id, profile in BUNDLED_PERSONA_PROFILES.items():
+        resolved[persona_id].hermes_profile = profile
+
+    missing_profiles = sorted(
+        persona_id
+        for persona_id in BUNDLED_PERSONA_IDS
+        if not str(resolved[persona_id].hermes_profile or "").strip()
+        or not profile_exists(str(resolved[persona_id].hermes_profile))
+    )
+    if missing_profiles:
+        raise ValueError(
+            "bundled persona profiles are missing: " + ", ".join(missing_profiles)
+        )
+
+    store = AgentStore()
+    stored = {persona.id: persona for persona in store.list_all()}
+    provisioned = []
+    for persona_id in sorted(BUNDLED_PERSONA_IDS):
+        desired = resolved[persona_id]
+        current = stored.get(persona_id)
+        if current is None:
+            current = store.save(desired)
+        else:
+            current_profile = str(current.hermes_profile or "").strip()
+            if not current_profile or not profile_exists(current_profile):
+                current.hermes_profile = desired.hermes_profile
+                current = store.save(current)
+        provisioned.append(current)
+    return provisioned
 
 
 def get_persisted_persona(persona_id: str, cfg: AgentRuntimeConfig | None = None):
@@ -389,7 +488,7 @@ def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any
         provider=overrides.get("provider") or cfg.default_provider,
         api_mode=overrides.get("api_mode") or cfg.default_api_mode,
         toolsets=validate_toolsets(coerce_agent_role(role), list(overrides.get("toolsets") or [])),
-        system_prompt_path=str(overrides.get("system_prompt_path") or f"personas/{role}/system.md"),
+        system_prompt_path=str(overrides.get("system_prompt_path") or f"agent_runtime/prompts/{role}.md"),
         include_core_context_files=bool(overrides.get("include_core_context_files", False)),
     )
 
@@ -526,7 +625,45 @@ def _read_model_config(raw: dict[str, Any]) -> ReadModelConfig:
         enabled=bool(raw.get("enabled", defaults.enabled)),
         serve_snapshot_from_db=bool(raw.get("serve_snapshot_from_db", defaults.serve_snapshot_from_db)),
         db_filename=filename,
+        delta_patches=bool(raw.get("delta_patches", defaults.delta_patches)),
     )
+
+
+def _persona_chat_config(raw: dict[str, Any]) -> PersonaChatConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = PersonaChatConfig()
+    return PersonaChatConfig(
+        hot_sessions_enabled=bool(
+            raw.get("hot_sessions_enabled", defaults.hot_sessions_enabled)
+        ),
+        max_hot_sessions=_clamped_positive_int(
+            raw.get("max_hot_sessions"),
+            defaults.max_hot_sessions,
+            minimum=1,
+            maximum=64,
+        ),
+        idle_ttl_seconds=_clamped_positive_int(
+            raw.get("idle_ttl_seconds"),
+            defaults.idle_ttl_seconds,
+            minimum=30,
+            maximum=86_400,
+        ),
+    )
+
+
+def _event_log_config(raw: dict[str, Any]) -> EventLogConfig:
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = EventLogConfig()
+    cap = raw.get("rotation_cap_bytes", defaults.rotation_cap_bytes)
+    try:
+        cap_int = int(cap)
+    except (TypeError, ValueError):
+        cap_int = defaults.rotation_cap_bytes
+    # Negative is meaningless; clamp to 0 (rotation disabled). 0 is a valid
+    # explicit "never rotate" (legacy unbounded live file).
+    if cap_int < 0:
+        cap_int = 0
+    return EventLogConfig(rotation_cap_bytes=cap_int)
 
 
 def _swarm_config(raw: dict[str, Any]) -> SwarmConfig:

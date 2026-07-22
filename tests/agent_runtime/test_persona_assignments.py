@@ -14,14 +14,21 @@ from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, PersonaInstance, Proof, Task
-from agent_runtime.mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_record, persist_mission_chat_turn
+from agent_runtime.mission_chat_turns import (
+    mission_chat_turn_elements,
+    mission_chat_turn_record,
+    persist_mission_chat_turn,
+    transition_mission_chat_turn,
+)
 from agent_runtime.persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
     ChatBusyError,
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    default_chat_session_id_for_instance,
     persona_instance_summary,
+    persona_instance_tool_detail,
     persona_instance_id_for,
     persona_instance_id_for_placement,
 )
@@ -442,6 +449,50 @@ def test_additional_placement_does_not_reuse_another_instance_session(isolate_ag
     assert placed.session_id.startswith(f"persona_chat_{placed.id}_")
 
 
+def test_additional_placement_stamps_scope_pointers(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    placed = store.add_instance(
+        persona_id="qa",
+        placement_id="agent_a1b2c3d4",
+        display_name="QA Agent (2)",
+        workspace_id="ws_testv4",
+        realm_id="realm_test",
+    )
+    assert placed.workspace_id == "ws_testv4"
+    assert placed.realm_id == "realm_test"
+
+    # The pointers survive the store round-trip and ship in the snapshot row.
+    reloaded = store.get(placed.id)
+    assert reloaded.workspace_id == "ws_testv4"
+    assert reloaded.realm_id == "realm_test"
+    summary = persona_instance_summary(reloaded)
+    assert summary["workspace_id"] == "ws_testv4"
+    assert summary["realm_id"] == "realm_test"
+
+    # A plain re-open that carries no scope must NOT clear the pointers —
+    # ordinary chat opens don't know scope and never erase provenance.
+    reopened = store.open_chat(
+        persona_id="qa",
+        persona_instance_id=placed.id,
+        session_id=placed.session_id,
+    )
+    assert reopened.workspace_id == "ws_testv4"
+    assert reopened.realm_id == "realm_test"
+
+
+def test_scope_pointers_default_none_for_unscoped_lanes(isolate_agent_runtime_root):
+    store = PersonaInstanceStore()
+    chat = store.create_operator_chat(
+        persona_id="profile:alice",
+        display_name="Alice Agent",
+    )
+    assert chat.workspace_id is None
+    assert chat.realm_id is None
+    summary = persona_instance_summary(chat)
+    assert summary["workspace_id"] is None
+    assert summary["realm_id"] is None
+
+
 def test_assignment_store_create_or_resume_uses_signal_hash(isolate_agent_runtime_root):
     store = PersonaAssignmentStore()
     spec = PersonaAssignmentSpec(
@@ -599,15 +650,27 @@ def test_status_and_snapshot_expose_persona_instances_when_enabled(monkeypatch, 
     status_lane_agents = {item["persona_id"]: item for item in status["agents"]}
     assert "personainst_dev" in status_lane_agents
     assert status_lane_agents["personainst_dev"]["source_persona_id"] == "dev"
-    assert isinstance(status_lane_agents["personainst_dev"]["agent_hud_state"], dict)
-    assert isinstance(status_lane_agents["personainst_dev"]["tool_resolution"], dict)
+    # Residue-slim R2: the fat tool payloads (tool_resolution) + the retired
+    # agent_hud_state leave the row; the head keeps a typed visibility_ref pointer
+    # + the always-visible scalars, fetched in full via `harness persona-instance
+    # detail`.
+    assert "agent_hud_state" not in status_lane_agents["personainst_dev"]
+    assert "tool_resolution" not in status_lane_agents["personainst_dev"]
+    assert isinstance(status_lane_agents["personainst_dev"]["visibility_ref"], dict)
+    assert status_lane_agents["personainst_dev"]["visibility_ref"]["evicted"] is True
+    assert isinstance(status_lane_agents["personainst_dev"]["mutation_boundary"], dict)
     assert snapshot["persona_instance_runtime"]["enabled"] is True
-    assert {item["persona_id"] for item in snapshot["persona_instances"]} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
+    assert {item["persona_id"] for item in list(snapshot["persona_instances"].values())} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
     snapshot_lane_agents = {item["persona_id"]: item for item in snapshot["agents"]}
     assert "personainst_dev" in snapshot_lane_agents
     assert snapshot_lane_agents["personainst_dev"]["source_persona_id"] == "dev"
-    assert isinstance(snapshot_lane_agents["personainst_dev"]["agent_hud_state"], dict)
-    assert isinstance(snapshot_lane_agents["personainst_dev"]["tool_resolution"], dict)
+    # The eviction guarantee holds unconditionally (the fat payloads + retired
+    # agent_hud_state never ride the row). visibility_ref + head scalars are added
+    # whenever a backing visibility persona resolves (always true on the live
+    # runtime; the status lane above exercises the resolved path — this synthetic
+    # snapshot config may not persist the backing persona).
+    assert "agent_hud_state" not in snapshot_lane_agents["personainst_dev"]
+    assert "tool_resolution" not in snapshot_lane_agents["personainst_dev"]
 
 
 def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, isolate_agent_runtime_root):
@@ -616,7 +679,7 @@ def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, is
     created = PersonaInstanceStore().create_free_floating("profile:reviewer")
 
     snapshot = build_snapshot()
-    by_id = {item["persona_instance_id"]: item for item in snapshot["persona_instances"]}
+    by_id = {item["persona_instance_id"]: item for item in list(snapshot["persona_instances"].values())}
 
     assert created.id in by_id
     assert by_id[created.id]["agent_profile_id"] == created.id
@@ -879,7 +942,9 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     from hermes_cli import harness
 
     cfg = _assignment_config()
+    session_db = _TranscriptDB()
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
 
     code = harness._cmd_persona_instance_open_chat(
         Namespace(
@@ -898,6 +963,153 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     assert instance.active_run_id is None
     assert PersonaAssignmentStore().list_all() == []
     assert RunStore().list_all() == []
+    assert session_db.get_session(instance.session_id) is not None
+    assert session_db.get_session_title(instance.session_id) == f"{instance.display_name} chat"
+
+
+def test_persona_instance_open_chat_new_session_mints_exact_instance_and_replays(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    session_db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
+    existing = PersonaInstanceStore().create_operator_chat(
+        persona_id="dev",
+        display_name="Launcher Dev Agent",
+    )
+    original_session = existing.session_id
+    args = Namespace(
+        persona_id="launcher-dev",
+        persona_instance_id=existing.id,
+        session_id=None,
+        new_session=True,
+        idempotency_key="new-chat-dev-1",
+        kill_active=False,
+        add_instance=False,
+        json=True,
+    )
+
+    assert harness._cmd_persona_instance_open_chat(args) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["ok"] is True
+    assert first["persona_instance_id"] == existing.id
+    assert first["session_id"] != original_session
+    assert first["mission_chat_root_id"] == first["session_id"]
+    assert first["idempotent_replay"] is False
+    assert first["mint_receipt_state"] == "bound"
+    assert PersonaInstanceStore().get(existing.id).session_id == first["session_id"]
+    assert session_db.get_session(first["session_id"]) is not None
+
+    assert harness._cmd_persona_instance_open_chat(args) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["session_id"] == first["session_id"]
+    assert replay["idempotent_replay"] is True
+    assert replay["selected"] is True
+
+    distinct_args = Namespace(
+        **{
+            **vars(args),
+            "idempotency_key": "new-chat-dev-2",
+        }
+    )
+    assert harness._cmd_persona_instance_open_chat(distinct_args) == 0
+    distinct = json.loads(capsys.readouterr().out)
+    assert distinct["session_id"] != first["session_id"]
+    assert distinct["idempotent_replay"] is False
+    assert PersonaInstanceStore().get(existing.id).session_id == distinct["session_id"]
+
+
+def test_persona_instance_open_chat_new_session_retry_recovers_reserved_root(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    existing = PersonaInstanceStore().create_operator_chat(
+        persona_id="dev",
+        display_name="Launcher Dev Agent",
+    )
+    original_session = existing.session_id
+    args = Namespace(
+        persona_id="launcher-dev",
+        persona_instance_id=existing.id,
+        session_id=None,
+        new_session=True,
+        idempotency_key="new-chat-recover-1",
+        kill_active=False,
+        add_instance=False,
+        json=True,
+    )
+    monkeypatch.setattr(
+        harness,
+        "_default_persona_session_db",
+        lambda: _FailingTranscriptDB("session_create"),
+    )
+
+    assert harness._cmd_persona_instance_open_chat(args) == 2
+    failed = json.loads(capsys.readouterr().out)
+    assert failed["error_kind"] == "chat_session_persist_failed"
+    assert failed["mint_receipt_state"] == "reserved"
+    assert PersonaInstanceStore().get(existing.id).session_id == original_session
+
+    recovered_db = _TranscriptDB()
+    monkeypatch.setattr(
+        harness,
+        "_default_persona_session_db",
+        lambda: recovered_db,
+    )
+    assert harness._cmd_persona_instance_open_chat(args) == 0
+    recovered = json.loads(capsys.readouterr().out)
+    assert recovered["session_id"] == failed["session_id"]
+    assert recovered["idempotent_replay"] is True
+    assert recovered["mint_receipt_state"] == "bound"
+    assert PersonaInstanceStore().get(existing.id).session_id == failed["session_id"]
+
+
+def test_persona_instance_open_chat_new_session_rejects_idempotency_scope_conflict(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    session_db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
+    store = PersonaInstanceStore()
+    dev = store.create_operator_chat(persona_id="dev", display_name="Dev")
+    qa = store.create_operator_chat(persona_id="qa", display_name="QA")
+
+    def args_for(persona_id, instance_id):
+        return Namespace(
+            persona_id=persona_id,
+            persona_instance_id=instance_id,
+            session_id=None,
+            new_session=True,
+            idempotency_key="shared-key-is-a-client-bug",
+            kill_active=False,
+            add_instance=False,
+            json=True,
+        )
+
+    assert harness._cmd_persona_instance_open_chat(args_for("dev", dev.id)) == 0
+    capsys.readouterr()
+    assert harness._cmd_persona_instance_open_chat(args_for("qa", qa.id)) == 2
+    conflict = json.loads(capsys.readouterr().out)
+    assert conflict["error_kind"] == "idempotency_conflict"
+    assert PersonaInstanceStore().get(qa.id).session_id == qa.session_id
 
 
 def test_persona_instance_open_chat_can_target_additional_placement(monkeypatch, isolate_agent_runtime_root):
@@ -905,7 +1117,9 @@ def test_persona_instance_open_chat_can_target_additional_placement(monkeypatch,
     from hermes_cli import harness
 
     cfg = _assignment_config()
+    session_db = _TranscriptDB()
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
 
     code = harness._cmd_persona_instance_open_chat(
         Namespace(
@@ -930,9 +1144,256 @@ def test_persona_instance_open_chat_can_target_additional_placement(monkeypatch,
     assert additional.persona_id == "profile:reviewer"
     assert additional.session_id == "chat_old_123"
     assert additional.mode == "chat"
+    assert session_db.get_session(additional.session_id) is not None
+    assert session_db.get_session_title(additional.session_id) == f"{additional.display_name} chat"
 
 
-def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runtime_root):
+def test_persona_instance_open_chat_session_persistence_failure_is_typed_and_not_silent(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(
+        harness,
+        "_default_persona_session_db",
+        lambda: _FailingTranscriptDB("session_create"),
+    )
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="launcher-dev",
+            session_id="chat_persist_failure_123",
+            kill_active=False,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "chat_session_persist_failed"
+    assert payload["persistence_operation"] == "session_create"
+    assert payload["persona_id"] == "dev"
+    assert payload["persona_instance_id"] == "personainst_dev"
+    assert payload["session_id"] == "chat_persist_failure_123"
+
+
+def test_open_chat_cli_targets_the_session_owner_not_the_canonical(monkeypatch, isolate_agent_runtime_root):
+    # Poison origin fix: the console's open-chat of a sibling passes the sibling's
+    # session with a bare persona id. The CLI must rebind the instance the session
+    # was minted FOR (personainst_qa_agent_2), never overwrite the canonical
+    # primary's (personainst_qa) pointer with it.
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    sibling = PersonaInstanceStore().add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
+    )
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="qa",
+            persona_instance_id=sibling.id,
+            session_id=None,
+            new_session=True,
+            idempotency_key="open-sibling-owner",
+            kill_active=False,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    fresh = PersonaInstanceStore()
+    # The sibling was rebound to its own session; the canonical primary never
+    # adopted it.
+    sibling_root = fresh.get("personainst_qa_agent_2").default_chat_session_id
+    assert sibling_root
+    assert sibling_root != sibling.session_id
+    primary_adopted = False
+    try:
+        primary_adopted = fresh.get("personainst_qa").default_chat_session_id == sibling_root
+    except Exception:
+        primary_adopted = False
+    assert not primary_adopted
+
+
+def test_open_chat_default_display_name_never_renames_an_existing_named_instance(
+    isolate_agent_runtime_root,
+):
+    # DEFECT B: the send path stamps the persona DEFAULT display_name. It must
+    # NEVER rename an existing instance — the placement sibling reads "QA Agent
+    # (2)" and the "(2)" is load-bearing (launcher conversational fold keys on
+    # persona+displayName). Two "sends" (open_chat with default_display_name)
+    # must both preserve the deliberate name.
+    store = PersonaInstanceStore()
+    sibling = store.add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
+    )
+    assert sibling.display_name == "QA Agent (2)"
+
+    for _ in range(2):  # repeated sends thread onto the same instance
+        store.open_chat(
+            persona_id="qa",
+            persona_instance_id="personainst_qa_agent_2",
+            session_id=sibling.session_id,
+            default_display_name="QA Agent",  # the persona default the send path passes
+        )
+    assert store.get("personainst_qa_agent_2").display_name == "QA Agent (2)"
+
+
+def test_open_chat_default_display_name_names_a_first_ever_holder(isolate_agent_runtime_root):
+    # A brand-new chat holder with no name yet DOES take the persona default —
+    # stamping only happens when the instance has none.
+    store = PersonaInstanceStore()
+    minted = default_chat_session_id_for_instance(store, persona_id="qa")
+    instance = store.open_chat(
+        persona_id="qa", session_id=minted, default_display_name="QA Agent"
+    )
+    assert instance.display_name == "QA Agent"
+
+
+def test_open_chat_authoritative_display_name_still_renames(isolate_agent_runtime_root):
+    # An AUTHORITATIVE display_name (create_operator_chat / add_instance / an
+    # explicit name) is unchanged by the fix — it always applies, so deliberate
+    # (re)naming through those paths keeps working.
+    store = PersonaInstanceStore()
+    first = store.create_operator_chat(persona_id="qa", display_name="QA One")
+    assert first.display_name == "QA One"
+    second = store.create_operator_chat(persona_id="qa", display_name="QA Two")
+    assert second.id == first.id
+    assert second.display_name == "QA Two"  # authoritative rename honored
+
+
+def test_add_instance_stores_explicit_placement_name_verbatim(isolate_agent_runtime_root):
+    # PRIMARY FIX: a deliberate placement's distinct name ("QA Agent (2)") is
+    # AUTHORITATIVE and stored verbatim, so the launcher conversational fold
+    # (keyed on persona+display_name) keeps the sibling distinct end to end.
+    store = PersonaInstanceStore()
+    placed = store.add_instance(
+        persona_id="qa",
+        placement_id="qa_agent_2",
+        display_name="QA Agent (2)",
+    )
+    assert placed.id == persona_instance_id_for_placement("qa_agent_2")
+    assert placed.display_name == "QA Agent (2)"
+
+
+def test_add_instance_omitted_name_uses_honest_default_not_title_cased_id(
+    isolate_agent_runtime_root,
+):
+    # DOCUMENTED FALLBACK: when the client omits the placement name the store
+    # takes the persona's honest default ("QA Agent"), NEVER the title-cased
+    # persona id ("Qa") the template fallback would otherwise mint — that was
+    # the live 2026-07-19 personainst_qa_agent_2 == "Qa" defect.
+    store = PersonaInstanceStore()
+    placed = store.add_instance(
+        persona_id="qa",
+        placement_id="qa_agent_2",
+        default_display_name="QA Agent",
+    )
+    assert placed.display_name == "QA Agent"
+    assert placed.display_name != "Qa"
+
+
+def test_add_instance_default_never_overwrites_a_deliberate_name(
+    isolate_agent_runtime_root,
+):
+    # INGEST SAFETY: a later add_instance re-open that carries only the persona
+    # default must NOT rewrite an existing deliberate placement name — the "(2)"
+    # is load-bearing for the fold.
+    store = PersonaInstanceStore()
+    first = store.add_instance(
+        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent (2)"
+    )
+    assert first.display_name == "QA Agent (2)"
+    reopened = store.add_instance(
+        persona_id="qa",
+        placement_id="qa_agent_2",
+        default_display_name="QA Agent",  # the persona default a later open passes
+    )
+    assert reopened.display_name == "QA Agent (2)"
+
+
+def test_open_chat_cli_add_instance_threads_explicit_display_name(
+    monkeypatch, isolate_agent_runtime_root
+):
+    # END-TO-END SEAM: the occupied-chat placement path sends the distinct name
+    # through --display-name; the open-chat CLI must forward it to the new
+    # placement instead of dropping it (the exact seam that minted the live
+    # "Qa" — add_instance was called with no display_name).
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="qa",
+            session_id=None,
+            kill_active=False,
+            add_instance=True,
+            placement_id="qa_agent_2",
+            display_name="QA Agent (2)",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    placed = PersonaInstanceStore().get("personainst_qa_agent_2")
+    assert placed.display_name == "QA Agent (2)"
+
+
+def test_open_chat_cli_add_instance_omitted_name_uses_persona_config_not_title_case(
+    monkeypatch, isolate_agent_runtime_root
+):
+    # HONEST FALLBACK at the CLI seam: with --display-name omitted, the new
+    # placement takes the persona's CONFIGURED display name ("QA Agent"), never
+    # the store template's title-cased persona id ("Qa").
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    qa_persona = AgentPersona(
+        id="qa",
+        display_name="QA Agent",
+        role="qa",
+        model="gpt-test",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        toolsets=["file"],
+        system_prompt_path="agent_runtime/prompts/qa.md",
+        hermes_profile="profile-qa",
+    )
+    monkeypatch.setattr(harness, "_persona_by_id", lambda _cfg, _pid: qa_persona)
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="qa",
+            session_id=None,
+            kill_active=False,
+            add_instance=True,
+            placement_id="qa_agent_2",
+            display_name=None,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    placed = PersonaInstanceStore().get("personainst_qa_agent_2")
+    assert placed.display_name == "QA Agent"
+    assert placed.display_name != "Qa"
+
+
+def test_open_chat_updates_only_default_chat_pointer_during_live_run(isolate_agent_runtime_root):
     instance_store = PersonaInstanceStore()
     workers = WorkerSessionStore()
     runs = RunStore()
@@ -941,12 +1402,11 @@ def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runti
     worker = workers.assign_run(worker.id, run)
     instance_store.update_from_worker(worker)
 
-    with pytest.raises(ChatBusyError) as exc:
-        instance_store.open_chat(persona_id="dev", session_id="persona_chat_personainst_dev_new")
+    instance = instance_store.open_chat(
+        persona_id="dev", session_id="persona_chat_personainst_dev_new"
+    )
 
-    assert exc.value.active_run_id == run.id
-    assert exc.value.active_worker_session_id == worker.id
-    instance = instance_store.get("personainst_dev")
+    assert instance.default_chat_session_id == "persona_chat_personainst_dev_new"
     assert instance.active_run_id == run.id
     assert instance.active_worker_session_id == worker.id
     assert instance.current_task_id == "task_live"
@@ -954,7 +1414,7 @@ def test_open_chat_refuses_live_run_without_orphaning_fields(isolate_agent_runti
     assert workers.get(worker.id).state == WorkerSessionState.RUNNING
 
 
-def test_open_chat_with_kill_active_terminates_run_and_worker_before_swap(isolate_agent_runtime_root):
+def test_open_chat_kill_active_flag_cannot_cancel_worker_lifecycle(isolate_agent_runtime_root):
     instance_store = PersonaInstanceStore()
     workers = WorkerSessionStore()
     runs = RunStore()
@@ -969,13 +1429,13 @@ def test_open_chat_with_kill_active_terminates_run_and_worker_before_swap(isolat
         kill_active=True,
     )
 
-    assert runs.get(run.id).state == RunState.CANCELLED
-    assert workers.get(worker.id).state == WorkerSessionState.CLOSED
+    assert runs.get(run.id).state == RunState.RUNNING
+    assert workers.get(worker.id).state == WorkerSessionState.RUNNING
     assert updated.id == "personainst_dev"
     assert updated.session_id == "persona_chat_personainst_dev_replacement"
-    assert updated.current_task_id is None
-    assert updated.active_run_id is None
-    assert updated.active_worker_session_id is None
+    assert updated.current_task_id == "task_live"
+    assert updated.active_run_id == run.id
+    assert updated.active_worker_session_id == worker.id
 
 
 def test_add_instance_mints_distinct_placement_backed_instance(isolate_agent_runtime_root):
@@ -1062,6 +1522,14 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
             "cache_ttl_seconds": None,
             "cache_ttl_basis": None,
             "messages": [],
+            "root_chat_session_id": "chat_old_123",
+            "active_session_id": "chat_old_123",
+            "runtime_state": "unknown",
+            "last_runtime_transition": None,
+            "runtime_observer_id": "external_cli",
+            "runtime_observed_at": None,
+            "continuation_depth": 0,
+            "last_resumed_at": None,
         }
     ]
 
@@ -1332,50 +1800,34 @@ def test_snapshot_preserves_open_chat_and_emits_history(monkeypatch, isolate_age
     PersonaInstanceStore().open_chat(persona_id="dev", session_id="chat_old_123")
 
     snapshot = build_snapshot()
-    by_instance = {item["persona_instance_id"]: item for item in snapshot["persona_instances"]}
+    by_instance = {item["persona_instance_id"]: item for item in list(snapshot["persona_instances"].values())}
 
     assert by_instance["personainst_dev"]["mode"] == "chat"
     assert by_instance["personainst_dev"]["session_id"] == "chat_old_123"
-    assert snapshot["persona_chat_history"] == [
-        {
-            "session_id": "chat_old_123",
-            "persona_id": "dev",
-            "persona_instance_id": "personainst_dev",
-            "kind": "chat",
-            "live_mission": False,
-            "title": "Launcher Dev operator channel",
-            "last_message_preview": "Continue the old chat safely.",
-            "message_count": 3,
-            "created_at": "1970-01-01T00:01:40.000000Z",
-            "updated_at": "1970-01-01T00:03:20.000000Z",
-            "state": "open",
-            "redaction_status": "safe",
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_write_tokens": 0,
-            "cache_mode": "none",
-            "cache_ttl_seconds": None,
-            "cache_ttl_basis": None,
-            "messages": [
-                {
-                    "id": "msg_1",
-                    "role": "operator",
-                    "text": "Can you keep working from the old chat?",
-                    "timestamp": "2026-06-19T10:00:00.000000Z",
-                    "redaction_status": "safe",
-                },
-                {
-                    "id": "msg_2",
-                    "role": "agent",
-                    "text": "Yes. I will continue from this persona session.",
-                    "timestamp": "2026-06-19T10:01:00.000000Z",
-                    "redaction_status": "safe",
-                },
-            ],
-        }
-    ]
+    # S2/S7-B: the frame emits the open chat's history as a recency POINTER — the
+    # anchors (session/persona/instance ids, title, preview, count, timestamps,
+    # state) survive; the heavy message tail is evicted and fetched on demand via
+    # `harness persona chat history --session-id <id> --json` (the fetch path is
+    # covered by test_snapshot_history_eviction). The open chat is still emitted —
+    # as a pointer, never a silent absence.
+    history = snapshot["persona_chat_history"]
+    assert len(history) == 1
+    pointer = history[0]
+    assert pointer["session_id"] == "chat_old_123"
+    assert pointer["persona_id"] == "dev"
+    assert pointer["persona_instance_id"] == "personainst_dev"
+    assert pointer["kind"] == "chat"
+    assert pointer["live_mission"] is False
+    assert pointer["title"] == "Launcher Dev operator channel"
+    assert pointer["last_message_preview"] == "Continue the old chat safely."
+    assert pointer["message_count"] == 3
+    assert pointer["created_at"] == "1970-01-01T00:01:40.000000Z"
+    assert pointer["updated_at"] == "1970-01-01T00:03:20.000000Z"
+    assert pointer["state"] == "open"
+    assert pointer["redaction_status"] == "safe"
+    # The tail is gone from the frame; the eviction is flagged, never silent.
+    assert pointer["messages"] == []
+    assert pointer["messages_evicted"] is True
     assert PersonaAssignmentStore().list_all() == []
     assert RunStore().list_all() == []
 
@@ -1464,6 +1916,202 @@ class _TranscriptDB:
         self.messages.pop(session_id, None)
         self.titles.pop(session_id, None)
         return True
+
+
+class _FailingTranscriptDB(_TranscriptDB):
+    def __init__(self, operation: str):
+        super().__init__()
+        self.operation = operation
+
+    def create_session(self, session_id, source, **kwargs):
+        if self.operation == "session_create":
+            raise OSError("simulated canonical session create failure")
+        return super().create_session(session_id, source, **kwargs)
+
+    def append_message(self, session_id, role, content=None, **kwargs):
+        if self.operation == "operator_append" and role == "user":
+            raise OSError("simulated canonical operator append failure")
+        if self.operation == "assistant_append" and role == "assistant":
+            raise OSError("simulated canonical assistant append failure")
+        return super().append_message(session_id, role, content, **kwargs)
+
+
+def _mission_chat_test_args(client_message_id: str, *, stream: bool = False):
+    return SimpleNamespace(
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        session_id="persona_chat_personainst_dev",
+        task_id=None,
+        goal_id=None,
+        message="please answer",
+        surface_prompt="",
+        intent_hint="chat",
+        requested_by="test",
+        client_message_id=client_message_id,
+        stream=stream,
+        max_seconds=5.0,
+        json=True,
+    )
+
+
+@pytest.mark.parametrize("operation", ["session_create"])
+def test_mission_chat_required_pre_model_transcript_failure_skips_provider(
+    operation,
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    provider_calls = []
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+        def mission_chat_reply(self, *args, **kwargs):
+            provider_calls.append("called")
+            raise AssertionError("provider must not run after transcript persistence failure")
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(
+        harness,
+        "_default_persona_session_db",
+        lambda: _FailingTranscriptDB(operation),
+    )
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    code = harness._cmd_mission_chat_message(
+        _mission_chat_test_args(f"client_pre_model_{operation}")
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["execution_state"] == "failed"
+    assert payload["persistence_operation"] == operation
+    assert provider_calls == []
+
+
+def test_mission_chat_session_db_acquisition_failure_is_typed_and_skips_provider(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    import hermes_state
+    from hermes_cli import harness
+
+    provider_calls = []
+
+    def _fail_session_db(*args, **kwargs):
+        raise OSError("simulated canonical DB open failure")
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(hermes_state, "SessionDB", _fail_session_db)
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    code = harness._cmd_mission_chat_message(
+        _mission_chat_test_args("client_db_acquire_failure", stream=True)
+    )
+
+    assert code == 2
+    frames = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert len(frames) == 1
+    assert frames[0]["type"] == "chat.final"
+    assert frames[0]["ok"] is False
+    assert frames[0]["persistence_operation"] == "session_db_acquire"
+    assert provider_calls == []
+
+
+def test_mission_chat_fake_runtime_does_not_use_legacy_assistant_append(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    db = _FailingTranscriptDB("assistant_append")
+    provider_calls = []
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            provider_calls.append("called")
+            kwargs["stream_callback"]("provider reply")
+            return SimpleNamespace(
+                final_response="provider reply",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    code = harness._cmd_mission_chat_message(
+        _mission_chat_test_args("client_assistant_db_failure", stream=True)
+    )
+
+    assert code == 0
+    frames = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert provider_calls == ["constructed", "called"]
+    assert frames[-1]["type"] == "chat.final"
+    assert frames[-1]["ok"] is True
+    terminal_frames = [frame for frame in frames if frame.get("type") == "turn.end"]
+    assert terminal_frames
+    assert {frame.get("state") for frame in terminal_frames} == {"completed"}
+    record = mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_assistant_db_failure",
+    )
+    assert record["state"] == "projected"
+
+
+def test_free_floating_operator_db_failure_blocks_before_provider(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    db = _FailingTranscriptDB("operator_append")
+    provider_calls = []
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            provider_calls.append("constructed")
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    code = harness._queue_free_floating_assignment(
+        persona_id="launcher-dev",
+        title="Launcher Dev chat",
+        message="hey",
+        requested_by="test",
+        json_output=True,
+        auto_run=True,
+        max_seconds=5.0,
+        client_message_id="client_free_operator_failure",
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["persistence_operation"] == "operator_append"
+    assert provider_calls == []
+    assignments = PersonaAssignmentStore().list_for_persona("dev")
+    assert len(assignments) == 1
+    assert assignments[0].state == "blocked"
 
 
 def test_persona_instance_create_persists_empty_operator_chat_history(
@@ -1619,6 +2267,41 @@ def test_persona_chat_delete_reports_missing_without_silent_success(
     assert payload["ok"] is False
     assert payload["status"] == "not_found"
     assert payload["error"] == "persona chat session not found: missing_chat_123"
+
+
+def test_persona_chat_delete_rejects_foreign_instance_before_mutation(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    store = PersonaInstanceStore()
+    owner = store.create_operator_chat(persona_id="dev", display_name="Owner")
+    foreign = store.add_instance(
+        persona_id="qa", placement_id="foreign-delete", display_name="Foreign"
+    )
+    db.create_session(owner.session_id, "agent_runtime_persona_chat")
+    db.append_message(owner.session_id, "user", "must survive")
+
+    code = harness._cmd_persona_chat_delete(
+        SimpleNamespace(
+            session_id=owner.session_id,
+            persona_id=foreign.persona_id,
+            persona_instance_id=foreign.id,
+            requested_by="test",
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_kind"] == "foreign_chat_session"
+    assert db.get_session(owner.session_id) is not None
+    assert PersonaInstanceStore().get(owner.id).session_id == owner.session_id
 
 
 def test_free_floating_chat_session_binding_reuses_resume_and_opens_fresh_chat(monkeypatch, isolate_agent_runtime_root):
@@ -1870,13 +2553,13 @@ def test_mission_chat_queues_skill_for_next_turn_once(
     db = _TranscriptDB()
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
 
-    import tools.skills_tool as skills_tool
+    import agent.skill_utils as skill_utils
 
-    monkeypatch.setattr(
-        skills_tool,
-        "_find_all_skills",
-        lambda: [{"name": "deep-audit", "identifier": "deep-audit"}],
-    )
+    skill_root = isolate_agent_runtime_root / "skills"
+    manifest = skill_root / "deep-audit" / "SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("---\nname: deep-audit\n---\nbody\n", encoding="utf-8")
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [skill_root])
 
     code = harness._cmd_mission_chat_queue_skill(
         SimpleNamespace(
@@ -1952,15 +2635,12 @@ def test_mission_chat_queues_skill_for_next_turn_once(
     payload = json.loads(capsys.readouterr().out)
     assert captured_prompts == ["PRELOADED SKILL PROMPT"]
     assert payload["queued_skills_loaded"] == ["deep-audit"]
-    assert payload["prompt_observability"]["used_skills"] == [
-        {
-            "name": "deep-audit",
-            "kind": "skill",
-            "status": "used",
-            "hash_tracked": False,
-            "source": "queued_next_turn_skill",
-        }
-    ]
+    used = payload["prompt_observability"]["used_skills"]
+    assert used[0]["name"] == "deep-audit"
+    assert used[0]["source"] == "queued_next_turn_skill"
+    assert used[0]["resolution_status"] == "resolved"
+    assert used[0]["hash_tracked"] is True
+    assert used[0]["content_hash"]
     assert pending_skills_for_next_turn(
         persona_id="dev",
         session_id="persona_chat_personainst_dev",
@@ -2024,24 +2704,25 @@ def test_prompt_observability_reports_redaction_safe_available_skill_catalog(
         session_id="persona_chat_personainst_dev",
     )
 
-    assert context["available_skills"] == [
-        {
-            "name": "deep-audit",
-            "kind": "skill",
-            "status": "available",
-            "hash_tracked": False,
-            "source": "installed_skill_catalog",
-            "category": "harness",
-            "description": "Inspect the runtime deeply.",
-            "loadable": True,
-        }
-    ]
-    assert "content" not in context["available_skills"][0]
-    assert context["skills_catalog"] == context["available_skills"]
+    skill = context["available_skills"][0]
+    assert skill["name"] == "deep-audit"
+    assert skill["status"] == "available"
+    assert skill["load_state"] == "catalog_only"
+    assert skill["resolution_status"] == "missing"
+    assert skill["loadable"] is False
+    assert skill["hash_tracked"] is False
+    assert skill["content_hash"] is None
+    assert skill["category"] == "harness"
+    assert skill["description"] == "Inspect the runtime deeply."
+    assert "content" not in skill
+    # C1 record-once (2026-07-17): the `skills_catalog` alias key is retired —
+    # the row carries ONE canonical copy (`available_skills`), no compat
+    # emission (ruling 0).
+    assert "skills_catalog" not in context
 
 
 def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, capsys, isolate_agent_runtime_root):
-    """Chat-first wiring: auto-run uses chat_reply (no decision/task), persists the
+    """Chat-first wiring: auto-run uses native mission chat (no decision/task), persists the
     redacted operator + agent turns, wires SessionDB for recall, and completes
     the assignment with run_ids=[]/task_id=None."""
     from types import SimpleNamespace
@@ -2064,7 +2745,7 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
         def __init__(self, *args, **kwargs):
             captured["runtime_kwargs"] = kwargs
 
-        def chat_reply(self, persona, message, **kwargs):
+        def mission_chat_reply(self, persona, message, **kwargs):
             captured["chat_message"] = message
             return SimpleNamespace(final_response="Hey — doing great, what's up?")
 
@@ -2131,7 +2812,7 @@ def test_profile_backed_operator_chat_auto_run_resolves_profile_persona(monkeypa
         def __init__(self, *args, **kwargs):
             captured["runtime_kwargs"] = kwargs
 
-        def chat_reply(self, persona, message, **kwargs):
+        def mission_chat_reply(self, persona, message, **kwargs):
             captured["persona"] = persona
             captured["chat_message"] = message
             return SimpleNamespace(final_response="Alice is online.")
@@ -2203,7 +2884,7 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
         def __init__(self, *args, **kwargs):
             captured["runtime_kwargs"] = kwargs
 
-        def chat_reply(self, persona, message, **kwargs):
+        def mission_chat_reply(self, persona, message, **kwargs):
             captured["stream_callback"] = kwargs.get("stream_callback")
             kwargs["stream_callback"]("He")
             kwargs["stream_callback"]("llo")
@@ -2230,24 +2911,28 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
         for line in capsys.readouterr().out.splitlines()
         if line.strip()
     ]
+    # C8: the legacy chat.delta lane is RETIRED — one wire shape per token
+    # (protocol-v2 segment.delta only).
     assert [line["type"] for line in lines] == [
         "turn.start",
-        "chat.delta",
         "segment.start",
         "segment.delta",
-        "chat.delta",
         "segment.delta",
         "segment.end",
         "turn.end",
         "chat.final",
     ]
-    assert [line.get("text") for line in lines if line["type"] == "chat.delta"] == ["He", "llo"]
+    assert all(line["type"] != "chat.delta" for line in lines)
     assert [line.get("text") for line in lines if line["type"] == "segment.delta"] == ["He", "llo"]
     assert lines[0]["protocol_version"] == 2
     assert lines[2]["seq"] == 1
     assert lines[-1]["ok"] is True
     assert lines[-1]["protocol_version"] == 2
-    assert lines[-1]["turn_elements"][0]["text"] == "Hello"
+    # C3: `turn_elements` no longer ride the terminal frame — the turn store is
+    # the element/replay authority (asserted below) and the incremental v2
+    # frames already carried the turn structure. Dropping the wire copy retires
+    # the double carriage.
+    assert "turn_elements" not in lines[-1]
     assert lines[-1]["execution_state"] == "completed"
     assert lines[-1]["reply"] == "Hello"
     assert lines[-1]["run_ids"] == []
@@ -2259,7 +2944,7 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
         session_id=lines[-1]["session_id"],
         client_message_id="client_1",
     )
-    assert [item["id"] for item in persisted] == [lines[-1]["turn_elements"][0]["id"]]
+    assert [item["text"] for item in persisted] == ["Hello"]
     assert persisted[0]["text"] == "Hello"
 
 
@@ -2377,12 +3062,12 @@ def test_mission_chat_non_stream_persists_completed_turn_and_prints_one_json(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_durable_1",
     )
-    assert record["state"] == "completed"
+    assert record["state"] == "projected"
     assert [item["kind"] for item in record["elements"]] == ["tool"]
     assert record["elements"][0]["state"] == "finished"
 
 
-def test_mission_chat_failure_marks_turn_failed(monkeypatch, capsys, isolate_agent_runtime_root):
+def test_mission_chat_post_boundary_failure_marks_outcome_unknown(monkeypatch, capsys, isolate_agent_runtime_root):
     from hermes_cli import harness
 
     cfg = _assignment_config()
@@ -2420,11 +3105,166 @@ def test_mission_chat_failure_marks_turn_failed(monkeypatch, capsys, isolate_age
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
+    assert payload["error_kind"] == "chat_turn_outcome_unknown"
+    assert payload["root_chat_session_id"] == "persona_chat_personainst_dev"
+    assert payload["client_message_id"] == "client_failed_1"
+    assert payload["turn_id"] == "client_failed_1"
     record = mission_chat_turn_record(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_failed_1",
     )
-    assert record["state"] == "failed"
+    assert record["state"] == "outcome_unknown"
+
+
+def test_mission_chat_retry_recovers_native_reply_before_outcome_unknown(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    instance = PersonaInstanceStore().open_chat(
+        persona_id="dev", session_id="persona_chat_personainst_dev"
+    )
+    db.create_session(instance.session_id, "agent_runtime_persona_chat")
+    db.append_message(
+        instance.session_id,
+        "user",
+        "recover me",
+        platform_message_id="client_recover_native",
+    )
+    db.append_message(
+        instance.session_id,
+        "assistant",
+        "Native reply already committed.",
+        platform_message_id="client_recover_native",
+    )
+    transition_mission_chat_turn(
+        session_id=instance.session_id,
+        client_message_id="client_recover_native",
+        turn_id="client_recover_native",
+        state="pending",
+    )
+    transition_mission_chat_turn(
+        session_id=instance.session_id,
+        client_message_id="client_recover_native",
+        turn_id="client_recover_native",
+        state="executing",
+        metadata={"provider_submitted": True},
+    )
+
+    class _MustNotRun:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("provider must not be called during native recovery")
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _MustNotRun)
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id=instance.id,
+            session_id=instance.session_id,
+            task_id=None,
+            goal_id=None,
+            message="recover me",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_recover_native",
+            stream=False,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["reply"] == "Native reply already committed."
+    assert payload["idempotent_replay"] is True
+    assert mission_chat_turn_record(
+        session_id=instance.session_id,
+        client_message_id="client_recover_native",
+    )["state"] == "projected"
+    projected = [
+        event
+        for event in EventLog().iter_all()
+        if event.type == "persona_chat.projected"
+        and event.payload.get("client_message_id") == "client_recover_native"
+    ]
+    assert len(projected) == 1
+    assert projected[0].payload["persona_instance_id"] == instance.id
+
+
+def test_mission_chat_turn_resolve_requires_exact_owner_and_records_abandon(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    from hermes_cli import harness
+
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    owner = PersonaInstanceStore().open_chat(
+        persona_id="dev", session_id="persona_chat_personainst_dev"
+    )
+    foreign = PersonaInstanceStore().add_instance(
+        persona_id="qa", placement_id="foreign-placement"
+    )
+    db.create_session(
+        owner.session_id,
+        "agent_runtime_persona_chat",
+        model_config=json.dumps(
+            {
+                "source": "agent_runtime_persona_chat",
+                "persona_instance_id": owner.id,
+            }
+        ),
+    )
+    for state in ("pending", "executing", "outcome_unknown"):
+        transition_mission_chat_turn(
+            session_id=owner.session_id,
+            client_message_id="client_ambiguous",
+            turn_id="client_ambiguous",
+            state=state,
+        )
+
+    bad_code = harness._cmd_mission_chat_turn_resolve(
+        SimpleNamespace(
+            session_id=owner.session_id,
+            client_message_id="client_ambiguous",
+            turn_id="client_ambiguous",
+            action="abandon",
+            persona_instance_id=foreign.id,
+            reason="wrong owner",
+            json=True,
+        )
+    )
+    bad = json.loads(capsys.readouterr().out)
+    assert bad_code == 2
+    assert bad["error_kind"] == "foreign_chat_session"
+    assert mission_chat_turn_record(
+        session_id=owner.session_id, client_message_id="client_ambiguous"
+    )["state"] == "outcome_unknown"
+
+    code = harness._cmd_mission_chat_turn_resolve(
+        SimpleNamespace(
+            session_id=owner.session_id,
+            client_message_id="client_ambiguous",
+            turn_id="client_ambiguous",
+            action="abandon",
+            persona_instance_id=owner.id,
+            reason="operator confirmed unknown outcome",
+            json=True,
+        )
+    )
+    payload = json.loads(capsys.readouterr().out)
+    record = mission_chat_turn_record(
+        session_id=owner.session_id, client_message_id="client_ambiguous"
+    )
+    assert code == 0
+    assert payload["journal_state"] == "abandoned"
+    assert record["state"] == "abandoned"
+    assert record["resolution_actor"] == owner.id
+    assert record["resolution_reason"] == "operator confirmed unknown outcome"
 
 
 def test_mission_chat_new_turn_interrupts_prior_running_turn(
@@ -2491,10 +3331,10 @@ def test_mission_chat_new_turn_interrupts_prior_running_turn(
     assert mission_chat_turn_record(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_fresh",
-    )["state"] == "completed"
+    )["state"] == "projected"
 
 
-def test_mission_chat_post_provider_crash_settles_failed_and_prints_one_json(
+def test_mission_chat_post_native_projection_crash_stays_repairable(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
@@ -2512,7 +3352,7 @@ def test_mission_chat_post_provider_crash_settles_failed_and_prints_one_json(
     def _boom(**_kwargs):
         raise RuntimeError("transcript write exploded")
 
-    monkeypatch.setattr(harness, "_append_persona_assistant_text", _boom)
+    monkeypatch.setattr(harness, "_update_persona_chat_token_counts", _boom)
 
     class _FakeRuntime:
         def __init__(self, *args, **kwargs):
@@ -2552,14 +3392,14 @@ def test_mission_chat_post_provider_crash_settles_failed_and_prints_one_json(
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert payload["error_kind"] == "post_turn_persist_failed"
+    assert payload["error_kind"] == "chat_projection_incomplete"
     assert payload["reply"] == "The reply that must not vanish."
     assert "transcript write exploded" in payload["blocker"]
     record = mission_chat_turn_record(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_post_crash",
     )
-    assert record["state"] == "failed"
+    assert record["state"] == "native_committed"
 
 
 def test_free_floating_post_provider_crash_settles_failed(
@@ -2570,21 +3410,18 @@ def test_free_floating_post_provider_crash_settles_failed(
     from hermes_cli import harness
 
     cfg = _assignment_config()
-    db = _TranscriptDB()
+    db = _FailingTranscriptDB("assistant_append")
+    provider_calls = []
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
     monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
 
-    def _boom(**_kwargs):
-        raise RuntimeError("token bookkeeping exploded")
-
-    monkeypatch.setattr(harness, "_update_persona_chat_token_counts", _boom)
-
     class _FakeRuntime:
         def __init__(self, *args, **kwargs):
-            pass
+            provider_calls.append("constructed")
 
-        def chat_reply(self, persona, message, **kwargs):
+        def mission_chat_reply(self, persona, message, **kwargs):
+            provider_calls.append("called")
             return SimpleNamespace(final_response="Still here.")
 
     monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
@@ -2604,7 +3441,9 @@ def test_free_floating_post_provider_crash_settles_failed(
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
     assert payload["error_kind"] == "post_turn_persist_failed"
+    assert payload["persistence_operation"] == "assistant_append"
     assert payload["reply"] == "Still here."
+    assert provider_calls == ["constructed", "called"]
     session_id = payload["session_id"]
     record = mission_chat_turn_record(
         session_id=session_id,
@@ -2683,12 +3522,11 @@ def test_mission_chat_success_persist_sequence_has_single_terminal_write(
 
     assert code == 0
     json.loads(capsys.readouterr().out)
-    assert recorded == [
-        ("running", True),  # write-ahead marker
-        ("running", False),  # on_update: tool started
-        ("running", False),  # on_update: tool finished
-        ("completed", False),  # single terminal write, nothing after it
-    ]
+    assert recorded == [(None, False), (None, False)]
+    assert mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_sequence",
+    )["state"] == "projected"
 
 
 def test_mission_chat_message_replays_duplicate_client_message_id(
@@ -2703,10 +3541,13 @@ def test_mission_chat_message_replays_duplicate_client_message_id(
     calls = {"count": 0}
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
-    monkeypatch.setattr(
-        "agent.title_generator.generate_title",
-        lambda user_message, assistant_response, **kwargs: "Mission Chat",
-    )
+
+    def _title(**kwargs):
+        kwargs["session_db"].set_session_title(
+            kwargs["session_id"], "Mission Chat"
+        )
+
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", _title)
 
     class _FakeRuntime:
         def __init__(self, *args, **kwargs):
@@ -2751,17 +3592,32 @@ def test_mission_chat_message_replays_duplicate_client_message_id(
     replay = json.loads(capsys.readouterr().out)
 
     assert calls["count"] == 1
-    assert [item["role"] for item in db.messages["persona_chat_personainst_dev"]] == [
-        "user",
-        "assistant",
-    ]
-    assert {
-        item["platform_message_id"]
-        for item in db.messages["persona_chat_personainst_dev"]
-    } == {"client_dup_1"}
+    assert db.messages["persona_chat_personainst_dev"] == []
     assert replay["idempotent_replay"] is True
     assert replay["client_message_id"] == "client_dup_1"
     assert replay["reply"] == "Recovered canonical reply."
+    record = mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_dup_1",
+    )
+    assert record["projection_event_emitted"] is True
+    projected = [
+        event
+        for event in EventLog().iter_all()
+        if event.type == "persona_chat.projected"
+        and event.payload.get("client_message_id") == "client_dup_1"
+    ]
+    assert len(projected) == 1
+    assert projected[0].payload["change_kind"] == "projection_committed"
+    metadata_events = [
+        event
+        for event in EventLog().iter_all()
+        if event.type == "persona_chat.metadata_updated"
+        and event.payload.get("root_chat_session_id")
+        == "persona_chat_personainst_dev"
+    ]
+    assert len(metadata_events) == 1
+    assert metadata_events[0].payload["change_kind"] == "auto_title_updated"
 
 
 def test_mission_chat_message_generates_client_message_id_when_missing(
@@ -2823,19 +3679,130 @@ def test_mission_chat_message_generates_client_message_id_when_missing(
     assert client_message_id.startswith("agent-chat-send-")
     assert payload["turn_id"] == client_message_id
     assert captured["turn_id"] == client_message_id
-    assert {
-        item["platform_message_id"]
-        for item in db.messages["persona_chat_personainst_dev"]
-    } == {client_message_id}
-    assert payload["prompt_observability"]["turn_id"] == client_message_id
+    assert mission_chat_turn_record(
+        session_id="persona_chat_personainst_dev",
+        client_message_id=client_message_id,
+    )["state"] == "projected"
+    # C3: the terminal frame's `prompt_observability` is the slim subset — the
+    # turn id lives at the top level (asserted above); the slim block links to
+    # the persisted record-at-injection row only by `context_id`.
+    assert payload["prompt_observability"]["context_id"] == payload["prompt_context_id"]
+    assert "turn_id" not in payload["prompt_observability"]
 
 
-def test_mission_chat_message_persists_pre_trace_ack_before_final_reply(
+def test_mission_chat_message_stream_terminal_frame_is_slim(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
 ):
+    """C3 emission-shape sabotage anchor (main handler, streaming lane).
+
+    The terminal ``chat.final`` frame carries the slim typed observability subset
+    and NO ``turn_elements``. Re-adding ``turn_elements`` to the emit path, or
+    restoring the full row, turns this red."""
+    from agent_runtime.prompt_observability import CHAT_FINAL_OBSERVABILITY_FIELDS
     from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            callback = kwargs.get("stream_callback")
+            if callback is not None:
+                callback("He")
+                callback("llo")
+            return SimpleNamespace(
+                final_response="Hello",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                api_calls=1,
+                model="gpt-test",
+                raw={
+                    "model_input_observability": {
+                        "kind": "redaction_safe_final_model_input",
+                        "message_count": 1,
+                        "messages": [],
+                    }
+                },
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+
+    code = harness._cmd_mission_chat_message(
+        SimpleNamespace(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id="persona_chat_personainst_dev",
+            task_id=None,
+            goal_id=None,
+            message="hi",
+            surface_prompt="",
+            intent_hint="chat",
+            requested_by="test",
+            client_message_id="client_slim_1",
+            stream=True,
+            max_seconds=5.0,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    lines = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    final = lines[-1]
+    assert final["type"] == "chat.final"
+    assert final["ok"] is True
+    # The double carriage is gone: no full turn-element echo on the wire.
+    assert "turn_elements" not in final
+    obs = final["prompt_observability"]
+    # ONE shape: exactly the slim field set — no more, no less.
+    assert set(obs) == set(CHAT_FINAL_OBSERVABILITY_FIELDS)
+    # The heavy record-at-injection payloads never ride the terminal frame.
+    for dropped in (
+        "final_model_input",
+        "prompt_layers",
+        "context_files",
+        "chat_history_context",
+        "accessible_skills",
+        "available_skills",
+        "accessible_skills_ref",
+        "available_skills_ref",
+    ):
+        assert dropped not in obs, dropped
+    # The kept fields carry real content for the launcher's peek fallback +
+    # usage overlay.
+    assert obs["context_id"] == final["prompt_context_id"]
+    assert isinstance(obs["situational_hud"], dict)
+    assert isinstance(obs["used_skills"], list)
+    assert isinstance(obs["model_selection"], dict)
+
+
+def test_mission_chat_pre_trace_ack_is_presentation_only(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    """C8: the pre-trace ack NEVER enters the durable record.
+
+    It rides the stream as a presentation-only protocol-v2 ``turn.ack`` frame:
+    no SessionDB assistant row, no turn-store element — replay after the fact
+    shows no ack. (Pre-C8 the ack was injected into SessionDB and then
+    marker-suppressed launcher-side; that inject-then-hide seam is retired.)
+    """
+
+    from hermes_cli import harness
+    from agent_runtime.mission_chat_turns import mission_chat_turn_elements
 
     cfg = _assignment_config()
     db = _TranscriptDB()
@@ -2857,6 +3824,7 @@ def test_mission_chat_message_persists_pre_trace_ack_before_final_reply(
                     "tool_name": "skill_view",
                 }
             )
+            kwargs["stream_callback"]("The guidance is loaded.")
             return SimpleNamespace(
                 final_response="The guidance is loaded; this is the right place.",
                 input_tokens=1,
@@ -2881,27 +3849,41 @@ def test_mission_chat_message_persists_pre_trace_ack_before_final_reply(
             intent_hint="chat",
             requested_by="test",
             client_message_id="client_pre_trace_1",
-            stream=False,
+            stream=True,
             max_seconds=5.0,
             json=True,
         )
     )
 
     assert code == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    messages = db.messages["persona_chat_personainst_dev"]
-    assert [item["role"] for item in messages] == [
-        "user",
-        "assistant",
-        "assistant",
+    lines = [
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
     ]
-    assert messages[1]["content"] == (
+    # The ack IS on the live stream (typed, presentation-only), before content.
+    ack_frames = [line for line in lines if line["type"] == "turn.ack"]
+    assert len(ack_frames) == 1
+    assert ack_frames[0]["protocol_version"] == 2
+    assert ack_frames[0]["turn_id"] == "client_pre_trace_1"
+    assert ack_frames[0]["text"] == (
         "I'll load the relevant guidance first, then report back with the useful part."
     )
-    assert messages[2]["content"] == "The guidance is loaded; this is the right place."
-    assert messages[1].get("platform_message_id") is None
-    assert messages[2].get("platform_message_id") == "client_pre_trace_1"
+    assert lines.index(ack_frames[0]) < min(
+        index for index, line in enumerate(lines) if line["type"] == "segment.start"
+    )
+    # Native persistence is owned by the runtime actor. This fake runtime writes
+    # no SessionDB rows, proving the CLI did not restore the retired append lane.
+    messages = db.messages["persona_chat_personainst_dev"]
+    assert messages == []
+    # …and the turn store's elements hold only real content (replay shows no ack).
+    persisted = mission_chat_turn_elements(
+        session_id="persona_chat_personainst_dev",
+        client_message_id="client_pre_trace_1",
+    )
+    assert persisted, "turn store must hold the streamed segment"
+    assert all(item["kind"] in {"segment", "tool"} for item in persisted)
+    assert all("report back" not in str(item.get("text") or "") for item in persisted)
 
 
 def test_persona_chat_auto_title_waits_for_session_title_write(monkeypatch, isolate_agent_runtime_root):
@@ -2935,7 +3917,7 @@ def test_persona_chat_auto_title_waits_for_session_title_write(monkeypatch, isol
     assert db.get_session_title(session_id) == "Shipping Strategy Discussion"
 
 
-def test_persona_chat_context_includes_prior_turns(isolate_agent_runtime_root):
+def test_persona_chat_context_uses_native_structured_prior_turns(isolate_agent_runtime_root):
     from hermes_cli import harness
 
     db = _TranscriptDB()
@@ -2944,16 +3926,14 @@ def test_persona_chat_context_includes_prior_turns(isolate_agent_runtime_root):
     db.append_message(session_id, "user", "remember the blue button")
     db.append_message(session_id, "assistant", "I will remember the blue button.")
 
-    enriched = harness._persona_chat_message_with_history(
-        session_db=db,
-        session_id=session_id,
-        message="what did I mention?",
+    history = harness.safe_native_history(
+        harness._persona_chat_native_history(db, session_id)
     )
 
-    assert "Prior persona chat context" in enriched
-    assert "Operator: remember the blue button" in enriched
-    assert "Agent: I will remember the blue button." in enriched
-    assert enriched.endswith("what did I mention?")
+    assert history == [
+        {"role": "user", "content": "remember the blue button"},
+        {"role": "assistant", "content": "I will remember the blue button."},
+    ]
 
 
 def test_profile_persona_resolution_does_not_borrow_role_skills(monkeypatch, isolate_agent_runtime_root):
@@ -3038,13 +4018,17 @@ def test_profile_prompt_observability_uses_profile_skills_and_chat_title(
         "agent-runtime-harness",
         "creative-ideation",
     ]
-    assert context["skills"] == context["accessible_skills"]
+    # C1 record-once (2026-07-17): the `skills` alias key is retired — one
+    # canonical copy (`accessible_skills`), no compat emission (ruling 0).
+    assert "skills" not in context
     assert {item["source"] for item in context["accessible_skills"]} == {
         "profile_skills_snapshot"
     }
-    assert {item["status"] for item in context["accessible_skills"]} == {
-        "accessible"
+    assert {item["status"] for item in context["accessible_skills"]} == {"missing"}
+    assert {item["load_state"] for item in context["accessible_skills"]} == {
+        "assigned_not_loaded"
     }
+    assert all(not item["hash_tracked"] for item in context["accessible_skills"])
 
 
 def test_prompt_observability_reports_used_skill_from_skill_view_trace(
@@ -3178,7 +4162,10 @@ def test_prompt_observability_refreshes_stale_derived_fields(
     assert refreshed["chat_title"] == "Alice Agent chat"
     assert refreshed["used_skills"] == []
     assert [item["name"] for item in refreshed["accessible_skills"]] == ["fresh-profile-skill"]
-    assert refreshed["skills"] == refreshed["accessible_skills"]
+    # C1 record-once (2026-07-17): the `skills` alias key is retired — the row
+    # carries ONE canonical copy (`accessible_skills`); the legacy alias on the
+    # persisted input is normalized in, never re-emitted.
+    assert "skills" not in refreshed
     assert refreshed["accessible_skills"][0]["source"] == "profile_skills_snapshot"
     assert refreshed["context_budget"]["used_tokens"] == 25
 
@@ -3232,6 +4219,12 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
                 state=WorkerSessionState.IDLE,
                 mode="chat",
                 session_id="persona_chat_personainst_profile_alice",
+                # Regression: a profile-backed instance is synthesized rather
+                # than loaded from AgentStore. Explicit skill policy must still
+                # overlay through the typed AgentPersona path; the old
+                # SimpleNamespace fallback crashed dataclasses.replace and took
+                # down `harness stream` before its hydrate frame.
+                skill_overrides=["harness-runtime-model"],
             )
         ],
         session_db=db,
@@ -3242,9 +4235,36 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
     assert context["chat_id"] == "persona_chat_personainst_profile_alice"
     assert context["chat_title"] == "Alice Agent chat"
     assert context["used_skills"] == []
-    assert [item["name"] for item in context["accessible_skills"]] == ["alice-profile-skill"]
-    assert context["skills"] == context["accessible_skills"]
-    assert context["accessible_skills"][0]["source"] == "profile_skills_snapshot"
+    # S8: the ``skills_catalogs`` table is evicted from the frame; rows keep only
+    # the content hash. The accessible set here is the profile-snapshot fallback
+    # (backfilled at merge time — distinct from the persisted persona_definition
+    # skills), so this pins the RESOLUTION content by proving the ref equals the
+    # content hash of the expected backfilled list (`skills` aliases it → same
+    # ref). The on-disk resolver covers persisted lists; this in-memory backfill
+    # is pinned by hash equality instead.
+    expected_context = prompt_observability.mission_chat_prompt_observability(
+        persona=AgentPersona(
+            id="profile:alice",
+            display_name="Alice Agent",
+            role="profile",
+            model="gpt-test",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            toolsets=["file", "skills"],
+            system_prompt_path="",
+            hermes_profile="alice",
+            skills=["harness-runtime-model"],
+        ),
+        persona_instance_id="personainst_profile_alice",
+        session_id="persona_chat_personainst_profile_alice",
+        session_db=db,
+        instance_skill_overrides=["harness-runtime-model"],
+    )
+    expected_accessible = expected_context["accessible_skills"]
+    assert "skills_catalogs" not in snapshot
+    assert context["accessible_skills_ref"] == prompt_observability._skills_list_content_hash(
+        expected_accessible
+    )
 
 
 def test_persona_instance_close_cli_closes_only_free_floating_assignment(monkeypatch, isolate_agent_runtime_root):
@@ -3453,14 +4473,45 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
 
     summary = persona_instance_summary(instance)
 
-    assert summary["tool_resolution"]["persona_id"] == "profile:alice"
-    assert summary["turn_tool_context"]["persona_id"] == "profile:alice"
-    assert "read_file" in summary["tool_resolution"]["final_model_tools"]
-    assert "terminal" in summary["tool_resolution"]["final_model_tools"]
-    assert "execute_code" in summary["tool_resolution"]["final_model_tools"]
-    assert "send_message" in summary["tool_resolution"]["blocked_tool_names"]
-    assert summary["permission_state"]["mode"] == "profile_default"
-    assert summary["agent_hud_state"]["tool_count"] == len(summary["tool_resolution"]["final_model_tools"])
+    # Residue-slim R2: the summary keeps only the head SCALARS + a typed
+    # visibility_ref pointer; the heavy payloads (and the retired agent_hud_state)
+    # leave the wire row.
+    assert "tool_resolution" not in summary
+    assert "turn_tool_context" not in summary
+    assert "permission_state" not in summary
+    assert "agent_hud_state" not in summary
+    assert "blocked_tools" not in summary
+    assert summary["permission_mode"] == "profile_default"
+    assert isinstance(summary["mutation_boundary"], dict)
+    assert isinstance(summary["tool_count"], int)
+    assert summary["blocked_tools_count"] >= 0
+    assert summary["visibility_ref"]["evicted"] is True
+    assert summary["visibility_ref"]["id"] == "personainst_profile_alice"
+    assert "agent_hud_state" not in summary["visibility_ref"]["fields"]
+
+    # The full payloads are rebuilt on demand by persona_instance_tool_detail (the
+    # `harness persona-instance detail` body) — the same bytes the frame used to
+    # carry, minus the retired agent_hud_state.
+    detail = persona_instance_tool_detail(instance)
+    assert detail["tool_resolution"]["persona_id"] == "profile:alice"
+    assert detail["turn_tool_context"]["persona_id"] == "profile:alice"
+    # T9b: this preview is the persona instance's operator CHAT lane, so it now
+    # reflects the chat-lane scoping (augmentation + T3/T6a cost cuts) instead of
+    # the raw effective_toolsets. The dev-toolkit toolsets (file / terminal /
+    # code_execution) are cut from the conversational lane...
+    final_tools = detail["tool_resolution"]["final_model_tools"]
+    assert "read_file" not in final_tools
+    assert "terminal" not in final_tools
+    assert "execute_code" not in final_tools
+    # ...while the operator-chat capability augmentation (mission_goal / agent_chat
+    # / clarify) is present, matching what the chat lane actually ships.
+    assert "mission_goal_create" in final_tools
+    assert "agent_chat_send" in final_tools
+    assert "clarify" in final_tools
+    assert "send_message" in detail["tool_resolution"]["blocked_tool_names"]
+    assert detail["permission_state"]["mode"] == "profile_default"
+    assert "agent_hud_state" not in detail
+    assert summary["tool_count"] == len(detail["tool_resolution"]["final_model_tools"])
 
 
 def test_tick_observe_only_links_assignment_to_run_and_worker(monkeypatch, isolate_agent_runtime_root):
@@ -3537,7 +4588,9 @@ def test_tick_reuses_task_flagged_diagnostic_assignment(isolate_agent_runtime_ro
     assert worker.current_assignment_id == assignment.id
 
 
-def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(isolate_agent_runtime_root):
+def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(
+    isolate_agent_runtime_root,
+):
     cfg = _assignment_config()
     tasks = TaskStore()
     proofs = ProofStore()
@@ -3569,8 +4622,16 @@ def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(isolate_a
     batch = Path(archived["archive_dir"])
     assert archived["archived_tasks"][0]["persona_assignment_ids"] == [assignment_id]
     assert (batch / "persona_assignments" / f"{assignment_id}.json").exists()
-    snapshot = build_snapshot()
-    archived_task = snapshot["archived_tasks"][0]
+    # S7-B: the frame carries an archived_tasks POINTER stub, not the rows. The
+    # preserved assignment/command-proof evidence is read from the projection the
+    # pointer references (the same rows `harness task history` serves) + the
+    # on-disk artifact asserted above — not the in-frame projection.
+    from agent_runtime.snapshot import _archived_task_summaries
+
+    assert task.id in build_snapshot()["archived_tasks"]["recent_ids"]
+    archived_task = next(
+        row for row in _archived_task_summaries() if row["task_id"] == task.id
+    )
     assert archived_task["persona_assignment_ids"] == [assignment_id]
     assert archived_task["persona_streams"]["dev"]["assignment_ids"] == [assignment_id]
 
@@ -3715,3 +4776,344 @@ def test_contention_warning_self_heals_assignment_for_archived_goal():
 
     assert warnings == []
     assert assignment_store.get(stale.id).state == "completed"
+
+
+# ---------------------------------------------------------------------------
+# Instance end-of-life: `harness persona instance retire` (placement removal).
+# The operator ruling — deleting a deliberate placement IS the instance's
+# end-of-life — needs a sanctioned verb that archives the ROW (not an
+# assignment), emits an evented mutation, guards a working agent, and drops the
+# row from every instance-fed projection while leaving chat history on disk.
+# ---------------------------------------------------------------------------
+
+
+def _placement_instance(persona_id: str = "dev", placement_id: str = "scene_child_2", display_name: str = "Dev (2)") -> PersonaInstance:
+    return PersonaInstanceStore().add_instance(
+        persona_id=persona_id,
+        placement_id=placement_id,
+        display_name=display_name,
+    )
+
+
+def test_retire_archives_placement_row_and_emits_event(isolate_agent_runtime_root):
+    from agent_runtime import paths
+
+    store = PersonaInstanceStore()
+    instance = _placement_instance()
+    assert instance.id == "personainst_scene_child_2"
+    session_id = instance.session_id
+    assert session_id  # a real chat session pointer we must NOT destroy
+
+    result = store.retire(instance.id, reason="placement deleted", requested_by="operator")
+
+    # Row left the live dir ...
+    assert not paths.persona_instance_path(instance.id).exists()
+    assert instance.id not in {row.id for row in store.list_all()}
+    # ... and landed in the archive (never deleted); its session pointer survives.
+    archived = list(paths.persona_instances_archive_dir().rglob(f"{instance.id}.json"))
+    assert len(archived) == 1
+    archived_payload = json.loads(archived[0].read_text(encoding="utf-8"))
+    assert archived_payload["session_id"] == session_id
+    assert Path(result["archive_path"]) == archived[0]
+    assert result["persona_id"] == "dev"
+
+    events = [event for event in EventLog().tail(50) if event.type == "persona_instance.retired"]
+    assert len(events) == 1
+    payload = events[0].payload
+    assert payload["persona_instance_id"] == instance.id
+    assert payload["reason"] == "placement deleted"
+    assert payload["requested_by"] == "operator"
+    assert payload["persona_id"] == "dev"
+
+
+def test_retire_releases_child_backlinks_without_clearing_child_context(
+    isolate_agent_runtime_root,
+):
+    store = PersonaInstanceStore()
+    retiring = _placement_instance(
+        persona_id="neko_supervisor",
+        placement_id="lead_retiring",
+        display_name="Retiring lead",
+    )
+    remaining = _placement_instance(
+        persona_id="neko_supervisor",
+        placement_id="lead_remaining",
+        display_name="Remaining lead",
+    )
+    child = _placement_instance(
+        persona_id="dev",
+        placement_id="dev_child",
+        display_name="Dev child",
+    )
+    child = store.set_parents(
+        child.id,
+        [retiring.id, remaining.id],
+        goal_id="goal_live",
+    )
+
+    store.retire(retiring.id, reason="placement deleted")
+
+    child = store.get(child.id)
+    assert child.steered_by == [remaining.id]
+    assert child.spawned_by == remaining.id
+    assert child.goal_id == "goal_live"
+    assert child.current_task_id == "goal_live"
+    assert child.mode == "task_bound"
+
+
+def test_retire_last_parent_preserves_child_mission_context(
+    isolate_agent_runtime_root,
+):
+    store = PersonaInstanceStore()
+    retiring = _placement_instance(
+        persona_id="neko_supervisor",
+        placement_id="lead_only",
+        display_name="Only lead",
+    )
+    child = _placement_instance(
+        persona_id="dev",
+        placement_id="dev_only_child",
+        display_name="Dev child",
+    )
+    child = store.set_parents(child.id, [retiring.id], goal_id="goal_live")
+
+    store.retire(retiring.id, reason="placement deleted")
+
+    child = store.get(child.id)
+    assert child.steered_by == []
+    assert child.spawned_by is None
+    assert child.goal_id == "goal_live"
+    assert child.current_task_id == "goal_live"
+    assert child.mode == "task_bound"
+
+
+def test_retired_placement_cannot_be_resurrected_from_its_saved_chat(
+    isolate_agent_runtime_root,
+):
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+
+    store = PersonaInstanceStore()
+    instance = _placement_instance(placement_id="dev_agent_2")
+    session_id = instance.session_id
+    assert session_id
+
+    result = store.retire(instance.id, reason="placement deleted")
+
+    with pytest.raises(RetiredPersonaInstanceError) as excinfo:
+        store.open_chat(
+            persona_id=instance.persona_id,
+            persona_instance_id=instance.id,
+            session_id=session_id,
+        )
+
+    assert excinfo.value.persona_instance_id == instance.id
+    assert excinfo.value.archive_path == Path(result["archive_path"])
+    assert not paths.persona_instance_path(instance.id).exists()
+    assert instance.id not in {row.id for row in store.list_all()}
+
+
+def test_open_chat_cli_rejects_unpersisted_retired_root_at_cutoff(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    instance = _placement_instance(placement_id="dev_agent_2")
+    session_id = instance.session_id
+    assert session_id
+    PersonaInstanceStore().retire(instance.id, reason="placement deleted")
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id=instance.persona_id,
+            session_id=session_id,
+            kill_active=False,
+            add_instance=False,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "unknown_chat_session"
+    assert instance.id not in {
+        row.id for row in PersonaInstanceStore().list_all()
+    }
+
+
+def test_retire_refuses_canonical_persona_channel(isolate_agent_runtime_root):
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import PersonaInstanceRetireError
+
+    store = PersonaInstanceStore()
+    canonical = store.ensure_for_persona(_persona("dev"))
+    assert canonical.id == "personainst_dev"
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        store.retire(canonical.id)
+    assert excinfo.value.code == "canonical_persona_channel"
+    # Refusal is a no-op: the canonical channel stays live on disk.
+    assert paths.persona_instance_path(canonical.id).exists()
+    assert canonical.id in {row.id for row in store.list_all()}
+
+
+def test_retire_refuses_active_run_binding(isolate_agent_runtime_root):
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import PersonaInstanceRetireError
+
+    store = PersonaInstanceStore()
+    instance = _placement_instance()
+    run = RunStore().open_run("dev", "task_live", "stage_1", session_id="session_live")
+    instance.active_run_id = run.id
+    store.update(instance)
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        store.retire(instance.id)
+    assert excinfo.value.code == "instance_active"
+    assert excinfo.value.detail["active_run_id"] == run.id
+    assert paths.persona_instance_path(instance.id).exists()
+
+
+def test_retire_refuses_active_assignment(isolate_agent_runtime_root):
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import PersonaInstanceRetireError
+
+    store = PersonaInstanceStore()
+    instance = _placement_instance()
+    assignment = PersonaAssignmentStore().create_or_resume(
+        PersonaAssignmentSpec(
+            persona_id="dev",
+            persona_instance_id=instance.id,
+            kind="free_floating_message",
+            title="Live work",
+            message="Working.",
+            task_id=None,
+        )
+    )
+    assert assignment.state in ACTIVE_ASSIGNMENT_STATES
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        store.retire(instance.id)
+    assert excinfo.value.code == "assignment_active"
+    assert assignment.id in excinfo.value.detail["active_assignment_ids"]
+    assert paths.persona_instance_path(instance.id).exists()
+
+
+def test_retire_refuses_missing_instance(isolate_agent_runtime_root):
+    from agent_runtime.persona_assignments import PersonaInstanceRetireError
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        PersonaInstanceStore().retire("personainst_does_not_exist")
+    assert excinfo.value.code == "not_found"
+
+
+def test_retire_excludes_instance_from_snapshot_projection(monkeypatch, isolate_agent_runtime_root):
+    cfg = _assignment_config()
+    monkeypatch.setattr("agent_runtime.snapshot.load_agent_runtime_config", lambda: cfg)
+    store = PersonaInstanceStore()
+    instance = _placement_instance()
+
+    before = build_snapshot()
+    assert instance.id in before["persona_instances"]
+
+    store.retire(instance.id, reason="placement deleted")
+
+    after = build_snapshot()
+    assert instance.id not in after["persona_instances"]
+    # The chat-history projection reads the live instances, so it drops too.
+    history = persona_chat_history_summary(persona_instances=store.list_all())
+    assert instance.id not in {row.get("persona_instance_id") for row in history}
+
+
+def test_retire_cli_happy_path_archives_row(monkeypatch, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from agent_runtime import paths
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    instance = _placement_instance()
+
+    code = harness._cmd_persona_instance_retire(
+        Namespace(
+            persona_instance_id=instance.id,
+            reason="placement deleted",
+            requested_by="operator",
+            coordinator_id=None,
+            coordinator_max_spawns=None,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=None,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            json=True,
+        )
+    )
+
+    assert code == 0
+    assert not paths.persona_instance_path(instance.id).exists()
+    assert instance.id not in {row.id for row in PersonaInstanceStore().list_all()}
+
+
+def test_retire_cli_canonical_refusal_returns_typed_error(monkeypatch, capsys, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    canonical = PersonaInstanceStore().ensure_for_persona(_persona("dev"))
+
+    code = harness._cmd_persona_instance_retire(
+        Namespace(
+            persona_instance_id=canonical.id,
+            reason="placement deleted",
+            requested_by="operator",
+            coordinator_id=None,
+            coordinator_max_spawns=None,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=None,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=None,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "canonical_persona_channel"
+    assert payload["persona_instance_id"] == canonical.id
+
+
+def test_retire_cli_coordinator_operator_placed_needs_confirm(monkeypatch, capsys, isolate_agent_runtime_root):
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    # A placement dropped by the operator is not owned by a coordinator, so a
+    # coordinator cannot end-of-life it (KILL_ACTIONS gate -> operator confirm).
+    instance = _placement_instance()
+
+    code = harness._cmd_persona_instance_retire(
+        Namespace(
+            persona_instance_id=instance.id,
+            reason="coordinator tried retiring operator placement",
+            requested_by="coordinator:neko_supervisor",
+            coordinator_id="neko_supervisor",
+            coordinator_max_spawns=0,
+            coordinator_spawns_used=0,
+            coordinator_may_kill_own=True,
+            coordinator_no_kill_own=None,
+            coordinator_may_kill_others=True,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "needs_operator_confirm"

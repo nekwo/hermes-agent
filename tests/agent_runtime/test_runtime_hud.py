@@ -27,13 +27,11 @@ def test_resolve_situational_hud_standing_by_lane_has_runtime_scope_lane_no_miss
     roster = [instance, _instance(id="personainst_qa", display_name="QA Agent")]
     hud = resolve_situational_hud(
         instance,
-        daemon={"state": "starting", "loops": 0, "next_wake_at": "2026-07-13T15:12:00Z"},
         realm="default",
         workspace="default",
         roster=roster,
     )
     assert hud["preview"] is True
-    assert hud["runtime"]["state"] == "starting"
     assert hud["scope"] == {"realm": "default", "workspace": "default"}
     assert hud["lane"]["persona_instance_id"] == "personainst_neko"
     assert hud["lane"]["display_name"] == "Neko Mission Lead"
@@ -104,7 +102,6 @@ def test_render_situational_hud_block_is_readonly_and_mirrors_widget_lines():
     goal_task = SimpleNamespace(id="goal_1", title="Live token burn", state="queued")
     hud = resolve_situational_hud(
         instance,
-        daemon={"state": "starting", "loops": 0},
         realm="default",
         workspace="default",
         roster=[instance],
@@ -114,11 +111,21 @@ def test_render_situational_hud_block_is_readonly_and_mirrors_widget_lines():
     block = render_situational_hud_block(hud)
     assert block.startswith("## Runtime Situation")
     assert "read-only" in block
-    assert "- Runtime: state starting" in block
     assert "- Scope: realm default · workspace default" in block
     assert "Live token burn" in block
     assert "@personainst_neko" in block
     assert "- On level (1):" in block
+
+
+def test_roster_line_carries_addressable_handles():
+    # The handle IS the address the agent-chat/steer verbs accept: every roster
+    # teammate renders as "Name (@personainst_...)" so a name is never visible
+    # but unaddressable. (Steering lines already did this; the roster lagged.)
+    me = _instance()
+    teammate = _instance(id="personainst_qa", display_name="QA Agent")
+    hud = resolve_situational_hud(me, roster=[me, teammate])
+    block = render_situational_hud_block(hud)
+    assert "QA Agent (@personainst_qa)" in block
 
 
 def test_render_situational_hud_block_says_no_mission_when_unbound():
@@ -137,6 +144,88 @@ def test_render_situational_hud_block_empty_for_empty_hud():
     assert render_situational_hud_block({}) == ""
 
 
+def test_resolve_steering_fan_in_resolves_parents_in_edge_order():
+    lead = _instance(id="personainst_neko", display_name="Neko Mission Lead")
+    reviewer = _instance(id="personainst_rev", display_name="Reviewer")
+    child = _instance(
+        id="personainst_dev",
+        display_name="Dev",
+        steered_by=["personainst_neko", "personainst_rev"],
+    )
+    hud = resolve_situational_hud(child, roster=[lead, reviewer, child])
+    steering = hud["steering"]
+    assert [entry["persona_instance_id"] for entry in steering["steered_by"]] == [
+        "personainst_neko",
+        "personainst_rev",
+    ]
+    assert steering["steered_by"][0]["display_name"] == "Neko Mission Lead"
+    assert steering["steers"] == []
+
+
+def test_resolve_steering_falls_back_to_spawned_by_for_unmigrated_records():
+    lead = _instance(id="personainst_neko", display_name="Neko Mission Lead")
+    child = _instance(
+        id="personainst_dev", display_name="Dev", steered_by=[], spawned_by="personainst_neko"
+    )
+    hud = resolve_situational_hud(child, roster=[lead, child])
+    assert [entry["persona_instance_id"] for entry in hud["steering"]["steered_by"]] == [
+        "personainst_neko"
+    ]
+
+
+def test_resolve_steering_ref_may_name_persona_id_and_unresolved_ref_keeps_raw():
+    lead = _instance(id="personainst_neko", persona_id="neko_supervisor")
+    child = _instance(
+        id="personainst_dev",
+        display_name="Dev",
+        # One ref by persona id (resolvable), one naming a departed lane.
+        steered_by=["neko_supervisor", "personainst_gone"],
+    )
+    hud = resolve_situational_hud(child, roster=[lead, child])
+    steered_by = hud["steering"]["steered_by"]
+    assert steered_by[0]["persona_instance_id"] == "personainst_neko"
+    # A departed steerer is a fact, not "no steerer": the raw ref survives.
+    assert steered_by[1] == {"ref": "personainst_gone"}
+
+
+def test_resolve_steering_derives_steers_by_roster_inversion_once_per_child():
+    lead = _instance(id="personainst_neko", persona_id="neko_supervisor", display_name="Neko Mission Lead")
+    # Child names the lead twice (instance id + persona id): must appear once.
+    child = _instance(
+        id="personainst_dev",
+        display_name="Dev",
+        steered_by=["personainst_neko", "neko_supervisor"],
+    )
+    bystander = _instance(id="personainst_x", display_name="X")
+    hud = resolve_situational_hud(lead, roster=[lead, child, bystander])
+    steers = hud["steering"]["steers"]
+    assert steers == [{"persona_instance_id": "personainst_dev", "display_name": "Dev"}]
+
+
+def test_resolve_steering_standalone_is_explicit_empty_not_absent():
+    hud = resolve_situational_hud(_instance(), roster=[_instance()])
+    assert hud["steering"] == {"steered_by": [], "steers": []}
+
+
+def test_render_steering_lines_for_links_and_standalone():
+    lead = _instance(id="personainst_neko", display_name="Neko Mission Lead")
+    child = _instance(id="personainst_dev", display_name="Dev", steered_by=["personainst_neko"])
+    linked = render_situational_hud_block(
+        resolve_situational_hud(child, roster=[lead, child])
+    )
+    assert "- Steered by: Neko Mission Lead (@personainst_neko)" in linked
+
+    lead_block = render_situational_hud_block(
+        resolve_situational_hud(lead, roster=[lead, child])
+    )
+    assert "- Steers: Dev (@personainst_dev)" in lead_block
+
+    standalone = render_situational_hud_block(
+        resolve_situational_hud(_instance(), roster=[_instance()])
+    )
+    assert "- Steering: standalone — no steerer, steers nobody" in standalone
+
+
 def _chat_persona():
     from agent_runtime.models import AgentPersona
 
@@ -153,26 +242,100 @@ def _chat_persona():
     )
 
 
-def test_mission_chat_surface_message_injects_runtime_situation_block():
+def test_mission_chat_surface_message_never_carries_runtime_situation_block():
+    # T5: the volatile Runtime Situation HUD is NO LONGER injected into the
+    # system prompt (the codex ``instructions``). It rides the operator's user
+    # turn instead so the cross-turn prompt-cache prefix stays byte-stable. The
+    # surface message therefore never contains the HUD, and the builder no
+    # longer even accepts a situational_hud argument.
+    import inspect
+
     from agent_runtime.persona_runtime import _mission_chat_surface_message
 
-    block = (
-        "## Runtime Situation\nThis mirrors the operator's Mission Control "
-        "runtime HUD.\n- Runtime: state starting · loop 0"
-    )
-    message = _mission_chat_surface_message(
-        _chat_persona(), "", situational_hud_content=block
-    )
-    assert "## Runtime Situation" in message
-    # The block sits after the "you ARE Neko" identity hat so the agent has its
-    # situational context, and the anti-fabrication rules still lead.
-    assert message.index("## Runtime Situation") > message.index("Neko Mission Lead")
-
-
-def test_mission_chat_surface_message_omits_block_when_empty():
-    from agent_runtime.persona_runtime import _mission_chat_surface_message
-
-    message = _mission_chat_surface_message(
-        _chat_persona(), "", situational_hud_content=""
-    )
+    message = _mission_chat_surface_message(_chat_persona(), "")
     assert "## Runtime Situation" not in message
+    # The situational_hud_content parameter is gone from the system-prompt builder.
+    assert "situational_hud_content" not in inspect.signature(
+        _mission_chat_surface_message
+    ).parameters
+
+
+def test_mission_chat_system_prompt_is_byte_stable_across_hud_and_roster_state():
+    # THE T5 byte-stability proof: two simulated turns whose HUD/roster/scope
+    # differ (e.g. `QA Agent` ↔ `QA Agent (2)`, a new mission, a changed realm)
+    # must produce a BYTE-IDENTICAL system prompt, so the codex
+    # prompt_cache_key = sha256(instructions + tools) does not rotate turn to
+    # turn. The HUD content that used to poison the prefix is exercised through
+    # the real renderer to make the guard honest.
+    from agent_runtime.persona_runtime import (
+        _mission_chat_surface_message,
+        _mission_chat_user_message,
+    )
+
+    persona = _chat_persona()
+
+    hud_turn_1 = render_situational_hud_block(
+        {
+            "preview": True,
+            "scope": {"realm": "default", "workspace": "alpha"},
+            "roster": [{"display_name": "QA Agent", "persona_instance_id": "personainst_qa"}],
+        }
+    )
+    hud_turn_2 = render_situational_hud_block(
+        {
+            "preview": True,
+            "scope": {"realm": "staging", "workspace": "beta"},
+            "mission": {"goal_id": "goal_x", "title": "Ship it", "state": "running"},
+            "roster": [
+                {"display_name": "QA Agent (2)", "persona_instance_id": "personainst_qa2"},
+                {"display_name": "Dev", "persona_instance_id": "personainst_dev"},
+            ],
+        }
+    )
+    assert hud_turn_1 != hud_turn_2  # the two turns really do differ
+
+    system_1 = _mission_chat_surface_message(persona, "")
+    system_2 = _mission_chat_surface_message(persona, "")
+    assert system_1 == system_2  # byte-identical instructions across turns
+
+    # And the diverging state lives entirely in the (per-turn, uncached) user
+    # turn, never the system prompt.
+    assert hud_turn_1 not in system_1
+    assert hud_turn_2 not in system_2
+    user_1 = _mission_chat_user_message("hi", hud_turn_1)
+    user_2 = _mission_chat_user_message("hi", hud_turn_2)
+    assert user_1 != user_2
+    assert hud_turn_1 in user_1
+    assert hud_turn_2 in user_2
+
+
+def test_mission_chat_user_message_rides_hud_after_the_operator_message():
+    # Placement is load-bearing: the HUD trails the operator's message (which
+    # already carries the rolling chat history), so it sits AFTER chat history,
+    # adjacent to the current operator message — the append-only ordering the
+    # caching design requires.
+    from agent_runtime.persona_runtime import _mission_chat_user_message
+
+    baked = (
+        "Prior persona chat context (oldest to newest):\n"
+        "Operator: earlier\nAgent: ok\n\nCurrent operator message:\nwhat now?"
+    )
+    hud = render_situational_hud_block(
+        {"preview": True, "scope": {"realm": "default", "workspace": "alpha"}}
+    )
+    user = _mission_chat_user_message(baked, hud)
+    assert baked in user
+    assert hud in user
+    # HUD strictly after the whole operator/history block.
+    assert user.index(hud) > user.index("Current operator message:")
+    assert user.index(hud) > user.index("what now?")
+
+
+def test_mission_chat_user_message_is_bare_message_without_hud():
+    # No HUD resolved (best-effort {}/'' from situational_hud_for_instance) -> the
+    # operator turn is exactly the message, no dangling separators.
+    from agent_runtime.persona_runtime import _mission_chat_user_message
+
+    assert _mission_chat_user_message("just this", "") == "just this"
+    assert _mission_chat_user_message("just this", None) == "just this"
+    assert _mission_chat_user_message("just this", "   ") == "just this"

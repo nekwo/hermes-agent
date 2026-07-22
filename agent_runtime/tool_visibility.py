@@ -49,6 +49,16 @@ class ToolVisibilityOptions:
     runtime_root: str | Path | None = None
     blocked_tool_names: list[str] | None = None
     enabled_toolsets: list[str] | None = None
+    #: Authoritative final block set for a CHAT-lane preview (T9b). When set, it
+    #: is used verbatim as ``final_blocked`` instead of the generic
+    #: ``persona_blocked | requested_blocked`` union — because the chat-lane
+    #: chokepoint has ALREADY resolved the true block (persona blocks + permission
+    #: mode + chat-lane cost cuts + registry hygiene, minus the ``clarify``
+    #: unblock the chat bridge grants). Threading it (with ``enabled_toolsets``)
+    #: makes the operator-facing preview's ``final_model_tools`` byte-match the
+    #: schema the chat lane actually ships. Callers that don't model a chat lane
+    #: leave it ``None`` (unchanged behaviour).
+    chat_lane_blocked_tool_names: list[str] | None = None
     expires_at: str | None = None
     turns_remaining: int | None = None
 
@@ -62,7 +72,15 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
     persona_toolsets = list(getattr(persona, "toolsets", []) or [])
     persona_blocked = frozenset() if unbounded else blocked_tool_names(persona)
     requested_blocked = frozenset(_clean_names(opts.blocked_tool_names or []))
-    final_blocked = persona_blocked | requested_blocked
+    if opts.chat_lane_blocked_tool_names is not None:
+        # T9b chat-lane preview parity: use the chat-lane chokepoint's already
+        # resolved block verbatim (see ToolVisibilityOptions). The generic
+        # ``persona_blocked | requested_blocked`` union would re-add ``clarify``
+        # (a PERSONA_BLOCKED_TOOLS member the chat lane deliberately unblocks) and
+        # would miss the chat-lane cost cuts, so the preview would lie.
+        final_blocked = frozenset(_clean_names(opts.chat_lane_blocked_tool_names))
+    else:
+        final_blocked = persona_blocked | requested_blocked
     candidate_tools = _tool_names_for_toolsets(resolved_toolsets, blocked_tool_names=[])
     final_tools = _tool_names_for_toolsets(resolved_toolsets, blocked_tool_names=sorted(final_blocked))
     blocked_entries = _blocked_tool_entries(
@@ -146,40 +164,12 @@ def permission_state_for_persona(persona: AgentPersona, options: ToolVisibilityO
     }
 
 
-def agent_hud_state_for_persona(persona: AgentPersona, options: ToolVisibilityOptions | None = None) -> dict[str, Any]:
-    """DEPRECATED — legacy per-persona tools/permissions HUD.
-
-    This is the "Agent HUD" surface the launcher's `showAgentHudStateDialog`
-    reads off `instance.agentHudState`. It predates the runtime situational HUD
-    and is **due for migration to the injected situational-HUD fed path** — the
-    single projection (`agent_runtime/runtime_hud.py`) that the operator's
-    Mission Control runtime HUD strip and the agent's chat turn now both render
-    ("parity so the AI and I are on the same page").
-
-    Retained (emission unchanged) only until the launcher Agent-HUD dialog is
-    migrated/removed; do not build new consumers on it — extend the situational
-    HUD instead so operator and agent stay on one authority.
-    """
-
-    visibility = resolve_tool_visibility(persona, options)
-    return {
-        "schema_version": TOOL_VISIBILITY_SCHEMA_VERSION,
-        "kind": "agent_hud_state",
-        "persona_id": visibility["persona_id"],
-        "display_name": visibility["display_name"],
-        "role": visibility["role"],
-        "permission_mode": visibility["permission_mode"],
-        "repo_scope": visibility.get("repo_scope"),
-        "workdir": visibility.get("workdir"),
-        "session_id": visibility.get("session_id"),
-        "task_id": visibility.get("task_id"),
-        "goal_id": visibility.get("goal_id"),
-        "tool_count": visibility["final_tool_count"],
-        "model_tool_tokens": visibility["model_tool_tokens"],
-        "toolsets": visibility["effective_toolsets"],
-        "blocked_tools": visibility["blocked_tools"],
-        "mutation_boundary": visibility["mutation_boundary"],
-    }
+# ``agent_hud_state_for_persona`` was RETIRED in the snapshot residue-slim R2
+# (2026-07-17). The legacy per-persona "Agent HUD" readout is superseded by the
+# runtime situational-HUD lane (``runtime_hud.py``) — the single HUD authority
+# the operator's Mission Control HUD strip and the agent's chat turn both render.
+# The wire summary no longer carries ``agent_hud_state``; the launcher's HUD
+# dialog kind is removed. Do not reintroduce this — extend the situational HUD.
 
 
 def _tool_names_for_toolsets(toolsets: list[str], *, blocked_tool_names: list[str]) -> list[str]:

@@ -27,6 +27,7 @@ def _cmd_persona_instance_reconcile(args) -> int:
             f"persona-instance reconcile ({mode}): merged={data['merged_count']} "
             f"renamed={data['renamed_count']} skipped={data['skipped_count']} "
             f"pruned={data.get('pruned_count', 0)} held={data.get('held_count', 0)} "
+            f"steering_repaired={data.get('steering_repaired_count', 0)} "
             f"aliases={data['alias_count']}"
         )
         for item in data["actions"]:
@@ -35,6 +36,11 @@ def _cmd_persona_instance_reconcile(args) -> int:
             print(f"  - pruned ({item['reason']}): {item['persona_instance_id']}")
         for item in data.get("held") or []:
             print(f"  - held ({item['reason']}): {item['persona_instance_id']}")
+        for item in data.get("steering_repairs") or []:
+            print(
+                f"  - steering repaired: {item['persona_instance_id']} "
+                f"removed {item['missing_parent_ids']}"
+            )
     return 0
 
 
@@ -874,7 +880,6 @@ def _cmd_verify(args) -> int:
                 "addopts=",
                 "-q",
                 "tests/agent_runtime/test_proof_runner.py",
-                "tests/agent_runtime/test_daemon.py",
                 "tests/agent_runtime/test_store.py",
                 "tests/agent_runtime/test_snapshot.py",
                 "tests/agent_runtime/test_status.py",
@@ -906,13 +911,13 @@ def _cmd_observe(args) -> int:
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
     cfg = load_agent_runtime_config()
-    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
+    execution_mode = "manual"
     data = build_observability(
         tasks=tasks,
         runs=runs,
         incidents=incidents,
         proofs=proofs,
-        daemon_status=read_daemon_status(),
+        daemon_status=None,
         events=EventLog().tail(20),
         execution_mode=execution_mode,
         worker_sessions=workers,
@@ -1003,46 +1008,6 @@ def _git_summary(root: Path) -> dict:
     return {"path": str(root), "git_head": run(["rev-parse", "HEAD"]), "dirty": bool(status)}
 
 
-def _cmd_daemon(args) -> int:
-    cfg = load_agent_runtime_config()
-    command = getattr(args, "daemon_command", None)
-    if command == "start":
-        data = start_daemon(task_id=getattr(args, "task", None), interval_seconds=args.interval, idle_interval_seconds=args.idle_interval)
-        print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')} pid={data.get('pid', '')}")
-        return 0
-    if command == "stop":
-        data = stop_daemon()
-        print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')}")
-        return 0
-    if command == "status" or (not command and not args.foreground):
-        data = daemon_status_schema()
-        print(emit_json(data) if args.json else f"daemon={data.get('state', 'unknown')}")
-        return 0
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
-
-    def engine_factory():
-        if bool(getattr(cfg, "root_node_mode", False)):
-            from agent_runtime.root_node_engine import RootNodeEngine
-
-            return RootNodeEngine(config=cfg)
-        return TickEngine(
-            config=cfg,
-            persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-        )
-
-    daemon = MissionDaemon(
-        engine_factory=engine_factory,
-        target_task_id=getattr(args, "task", None),
-        interval_seconds=args.interval if args.interval is not None else cfg.daemon_interval_seconds,
-        idle_interval_seconds=args.idle_interval if args.idle_interval is not None else cfg.daemon_idle_interval_seconds,
-        heartbeat_seconds=cfg.daemon_heartbeat_seconds,
-    )
-    max_loops = 1 if command == "run-once" else getattr(args, "max_loops", None)
-    result = daemon.run_foreground(max_loops=max_loops)
-    print(emit_json(result) if args.json else f"daemon stopped after {result['loops']} loops")
-    return 0
-
-
 def _cmd_agents(args) -> int:
     personas = ensure_persisted_personas(load_agent_runtime_config())
     print(emit_json(personas) if args.json else "\n".join(f"{p.id} ({p.role})" for p in personas))
@@ -1128,9 +1093,102 @@ def _cmd_issue_triage(args) -> int:
     return 0
 
 
+def _incident_cursor_ts(incident):
+    """The timestamp an incident is ordered/paged by: when it closed (history)
+    or when it opened (still live)."""
+
+    return getattr(incident, "closed_at", None) or getattr(incident, "opened_at", None)
+
+
+def _incident_history_row(incident) -> dict:
+    cursor = _incident_cursor_ts(incident)
+    return {
+        "incident_id": incident.id,
+        "task_id": incident.task_id,
+        "run_id": incident.run_id,
+        "kind": incident.kind,
+        "summary": incident.summary,
+        "is_open": incident.closed_at is None,
+        "opened_at": incident.opened_at,
+        "closed_at": incident.closed_at,
+        "cursor": cursor,
+    }
+
+
 def _cmd_incident_list(args) -> int:
-    store=IncidentStore(); incidents=store.list_all() if getattr(args, "all", False) else store.list_open()
-    print(emit_json(incidents) if args.json else "\n".join(f"{i.id} {i.kind} {i.summary}" for i in incidents))
+    """List incidents, or page the closed/ancient HISTORY tail S2 evicts from the
+    frame. ``--state {open,closed,all}`` selects the lane; ``--before <iso>`` +
+    ``--limit`` page newest-first over the incident store (the store IS the
+    history — no new storage). Back-compat: ``--all`` == ``--state all``,
+    default == open-only."""
+
+    store = IncidentStore()
+    incidents = store.list_all()
+    state = getattr(args, "state", None)
+    if not state:
+        state = "all" if getattr(args, "all", False) else "open"
+    if state == "open":
+        incidents = [i for i in incidents if i.closed_at is None]
+    elif state == "closed":
+        incidents = [i for i in incidents if i.closed_at is not None]
+    # Newest-first by cursor (closed_at for closed, opened_at for open) so
+    # `--before` walks backwards through history one page at a time.
+    incidents = sorted(
+        incidents,
+        key=lambda i: (_incident_cursor_ts(i) is not None, _incident_cursor_ts(i)),
+        reverse=True,
+    )
+    before_text = getattr(args, "before", None)
+    if before_text:
+        try:
+            before = datetime.fromisoformat(str(before_text).replace("Z", "+00:00"))
+        except ValueError:
+            data = {"ok": False, "error": "invalid_before", "message": "--before must be an ISO-8601 timestamp"}
+            print(emit_json(data) if getattr(args, "json", False) else data["message"])
+            return 1
+        incidents = [i for i in incidents if (_incident_cursor_ts(i) is not None and _incident_cursor_ts(i) < before)]
+    truncated = False
+    limit = getattr(args, "limit", None)
+    if limit is not None:
+        limit = max(1, min(500, int(limit)))
+        if len(incidents) > limit:
+            incidents = incidents[:limit]
+            truncated = True
+    rows = [_incident_history_row(i) for i in incidents]
+    if getattr(args, "json", False):
+        next_before = rows[-1]["cursor"] if (truncated and rows) else None
+        data = {
+            "ok": True,
+            "state": state,
+            "count": len(rows),
+            "truncated": truncated,
+            "next_before": next_before,
+            "incidents": rows,
+        }
+        print(emit_json(data))
+    else:
+        print("\n".join(f"{r['incident_id']} {r['kind']} {'open' if r['is_open'] else 'closed'} {r['summary']}" for r in rows))
+    return 0
+
+
+def _cmd_persona_chat_history(args) -> int:
+    """Paged on-demand read of one persona chat session's message tail — the
+    fetch that replaces the tail S2 evicts from the frame. The frame carries the
+    recency pointer (session id + anchors); this returns the messages."""
+
+    from agent_runtime.persona_chat_history import persona_chat_session_messages
+
+    limit = max(1, min(40, int(getattr(args, "limit", 40) or 40)))
+    data = persona_chat_session_messages(session_id=args.session_id, limit=limit)
+    if getattr(args, "json", False):
+        print(emit_json(data))
+    else:
+        lines = []
+        for message in data["messages"]:
+            text = str(message.get("text") or "").splitlines()
+            head = text[0][:120] if text else ""
+            lines.append(f"{message.get('timestamp') or '-'} {message.get('role')}: {head}")
+        print("\n".join(lines) if lines else f"no messages for {args.session_id}")
     return 0
 
 
@@ -1161,7 +1219,16 @@ def _cmd_stream(args) -> int:
         for frame in stream_frames(
             poll_interval_seconds=float(getattr(args, "poll_interval", 0.25) or 0.25),
             heartbeat_interval_seconds=float(getattr(args, "heartbeat_interval", 5.0) or 5.0),
+            # 0 disables the settle window; None/absent (old Namespace shapes)
+            # keeps the coalescing default.
+            delta_debounce_seconds=max(
+                0.0, float(getattr(args, "delta_debounce_ms", 200) or 0) / 1000.0
+            ),
             max_frames=getattr(args, "max_frames", None),
+            # S6: a reconnecting client that lost its fold base asks for a fresh
+            # full-core baseline before it folds any patch (else it would fold
+            # onto stale/absent state). Off by default → normal patch/delta lane.
+            resync=bool(getattr(args, "resync", False)),
         ):
             sys.stdout.write(json.dumps(to_jsonable(frame), ensure_ascii=False, separators=(",", ":")) + "\n")
             sys.stdout.flush()

@@ -50,6 +50,15 @@ def persona_assignments_dir() -> Path:
     return store_root() / "persona_assignments"
 
 
+def persona_chat_mint_receipts_dir() -> Path:
+    """Durable idempotency receipts for server-minted persona chat roots."""
+    return store_root() / "persona_chat_mint_receipts"
+
+
+def persona_chat_mint_receipt_path(key_digest: str) -> Path:
+    return persona_chat_mint_receipts_dir() / f"{_safe_path_token(key_digest)}.json"
+
+
 def repo_bundles_dir() -> Path:
     return store_root() / "repo_bundles"
 
@@ -64,6 +73,106 @@ def workspaces_dir() -> Path:
 
 def realms_dir() -> Path:
     return store_root() / "realms"
+
+
+def boards_root() -> Path:
+    return store_root() / "boards"
+
+
+def board_dir(board_id: str) -> Path:
+    return boards_root() / _safe_path_token(board_id)
+
+
+def board_def_path(board_id: str) -> Path:
+    return board_dir(board_id) / "board.json"
+
+
+def board_cards_dir(board_id: str) -> Path:
+    return board_dir(board_id) / "cards"
+
+
+def board_card_path(board_id: str, card_id: str) -> Path:
+    return board_cards_dir(board_id) / f"{_safe_path_token(card_id)}.json"
+
+
+def board_archive_dir(board_id: str) -> Path:
+    # archive-never-delete; NOT published to realms
+    return board_dir(board_id) / "archive"
+
+
+def board_archived_card_path(board_id: str, card_id: str) -> Path:
+    return board_archive_dir(board_id) / f"{_safe_path_token(card_id)}.json"
+
+
+def board_conflicts_dir(board_id: str) -> Path:
+    # per-card sync conflict sidecars; NOT published to realms
+    return board_dir(board_id) / "conflicts"
+
+
+def board_conflict_path(board_id: str, card_id: str) -> Path:
+    return board_conflicts_dir(board_id) / f"{_safe_path_token(card_id)}.json"
+
+
+def board_idempotency_dir(board_id: str) -> Path:
+    return board_dir(board_id) / "idempotency"
+
+
+def board_idempotency_path(board_id: str, key: str) -> Path:
+    return board_idempotency_dir(board_id) / f"{_safe_path_token(key)}.json"
+
+
+def board_baseline_path(realm_id: str) -> Path:
+    # realm-sync baseline sidecar; NEVER synced, NEVER published
+    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "board_baseline.json"
+
+
+def office_root() -> Path:
+    return store_root() / "office"
+
+
+def office_dir(workspace_id: str) -> Path:
+    return office_root() / _safe_path_token(workspace_id)
+
+
+def office_surface_path(workspace_id: str) -> Path:
+    return office_dir(workspace_id) / "office.json"
+
+
+def office_actors_dir(workspace_id: str) -> Path:
+    return office_dir(workspace_id) / "actors"
+
+
+def office_actor_path(workspace_id: str, actor_key: str) -> Path:
+    from .office_models import actor_file_token  # filename authority (plan §4.3)
+
+    return office_actors_dir(workspace_id) / f"{actor_file_token(actor_key)}.json"
+
+
+def office_archive_dir(workspace_id: str) -> Path:
+    # archive-never-delete; NOT published to realms
+    return office_dir(workspace_id) / "archive"
+
+
+def office_archived_actor_path(workspace_id: str, actor_key: str) -> Path:
+    from .office_models import actor_file_token
+
+    return office_archive_dir(workspace_id) / f"{actor_file_token(actor_key)}.json"
+
+
+def office_conflicts_dir(workspace_id: str) -> Path:
+    # per-actor sync conflict sidecars; NOT published to realms
+    return office_dir(workspace_id) / "conflicts"
+
+
+def office_conflict_path(workspace_id: str, actor_key: str) -> Path:
+    from .office_models import actor_file_token
+
+    return office_conflicts_dir(workspace_id) / f"{actor_file_token(actor_key)}.json"
+
+
+def office_baseline_path(realm_id: str) -> Path:
+    # realm-sync baseline sidecar; NEVER synced, NEVER published
+    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "office_baseline.json"
 
 
 def repo_bundles_task_dir(task_id: str) -> Path:
@@ -83,7 +192,34 @@ def incidents_dir() -> Path:
 
 
 def events_path() -> Path:
+    """The pristine/base live event-log file.
+
+    Semantics (C6a event-log rotation): before any rotation this IS the live
+    file the log appends to; after the first rotation it becomes the sealed
+    base-offset (``[0, …)``) slice while appends move to a fresh live file under
+    :func:`events_archive_dir`. The current live file and the ordered slice set
+    are resolved through ``agent_runtime.event_rotation`` (manifest-backed), so
+    prefer those helpers over reading this path directly when you need the whole
+    log. This path stays the manifest's canonical base-0 slice name.
+    """
     return store_root() / "events.jsonl"
+
+
+def events_manifest_path() -> Path:
+    """Slice manifest for the rotated event log (C6a).
+
+    Absent until the first rotation — its absence is the "pristine, single live
+    file" state, in which ``events_path()`` is the whole log at logical offset 0.
+    """
+    return store_root() / "events_manifest.json"
+
+
+def events_archive_dir() -> Path:
+    """Rotated event-log slices (C6a): archive-never-delete, offset-load-bearing.
+
+    Distinct from :func:`deleted_archive_dir` (per-task compaction batches).
+    """
+    return store_root() / "events_archive"
 
 
 def lock_dir() -> Path:
@@ -112,6 +248,27 @@ def context_dir() -> Path:
 
 def prompt_observability_dir() -> Path:
     return store_root() / "prompt_observability"
+
+
+def prompt_observability_catalogs_dir() -> Path:
+    """C1 content-addressed skills-catalog store: one ``<hash>.json`` per
+    distinct skill list, written iff absent at persist time (a content hash is
+    immutable). Persisted ctx rows carry ``*_ref`` hashes into this store."""
+    return store_root() / "prompt_observability_catalogs"
+
+
+def prompt_observability_archive_dir() -> Path:
+    """C2 retention target: rows evicted from the live observability dir MOVE
+    here (archive-never-delete); ``harness prompt-context show`` still resolves
+    them."""
+    return store_root() / "prompt_observability_archive"
+
+
+def prompt_observability_index_path() -> Path:
+    """C2 latest-pointer index: (instance, session) -> newest context ids.
+    A CACHE, never authority — the persist chokepoint is its only writer; a
+    missing/corrupt index falls back to the directory scan."""
+    return store_root() / "prompt_observability_index.json"
 
 
 def queued_skills_dir() -> Path:

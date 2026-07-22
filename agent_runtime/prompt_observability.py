@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -91,6 +94,9 @@ def load_workspace_agents_context(value: str | None) -> WorkspaceAgentsContext |
         bytes=len(raw),
         preview=_safe_preview(content),
     )
+    estimate = _token_estimate_from_bytes(len(raw))
+    if estimate is not None:
+        receipt["token_estimate"] = estimate
     return WorkspaceAgentsContext(content=content, receipt=receipt)
 
 
@@ -108,6 +114,7 @@ def mission_chat_prompt_observability(
     current_message: str | None = None,
     final_model_input: dict[str, Any] | None = None,
     model_selection: dict[str, Any] | None = None,
+    turn_usage: dict[str, Any] | None = None,
     trace_events: Iterable[dict[str, Any]] | None = None,
     prompt_mode: str = "normal_hermes_profile_chat",
     workspace_id: str | None = None,
@@ -115,6 +122,11 @@ def mission_chat_prompt_observability(
     workspace_agents: WorkspaceAgentsContext | None = None,
     mission_hud: dict[str, Any] | None = None,
     situational_hud: dict[str, Any] | None = None,
+    queued_skills: Iterable[str] | None = None,
+    required_preload_skills: Iterable[str] | None = None,
+    preloaded_skills_loaded: Iterable[str] | None = None,
+    preloaded_skills_missing: Iterable[str] | None = None,
+    instance_skill_overrides: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
 
@@ -149,11 +161,78 @@ def mission_chat_prompt_observability(
     surface = safe_assignment_text(surface_prompt, limit=4000) or ""
     history = _chat_history_context(session_db=session_db, session_id=session_id)
     chat = _chat_metadata(session_db=session_db, session_id=session_id, task_id=task_id)
-    accessible_skills = _accessible_skills_context(persona, profile)
-    available_skills = available_skills_context(accessible_skills=accessible_skills)
-    used_skills = used_skills_context(
-        final_model_input=final_model_input,
-        trace_events=trace_events,
+    queued_names = [safe_assignment_token(item) for item in queued_skills or ()]
+    queued_names = [item for item in queued_names if item]
+    required_names = [
+        safe_assignment_token(item) for item in required_preload_skills or ()
+    ]
+    required_names = [item for item in required_names if item]
+    loaded_names = [safe_assignment_token(item) for item in preloaded_skills_loaded or ()]
+    loaded_names = [item for item in loaded_names if item]
+    missing_names = [safe_assignment_token(item) for item in preloaded_skills_missing or ()]
+    missing_names = [item for item in missing_names if item]
+    override_names = {
+        token
+        for item in instance_skill_overrides or ()
+        if (token := safe_assignment_token(item))
+    }
+    try:
+        from .profile_context import persona_profile_context, resolve_persona_profile
+
+        skill_profile_context = persona_profile_context(
+            resolve_persona_profile(persona)
+        )
+    except Exception:
+        skill_profile_context = nullcontext()
+    with skill_profile_context:
+        accessible_skills = _accessible_skills_context(
+            persona,
+            profile,
+            loaded_skill_names=set(loaded_names),
+            queued_skill_names=set(queued_names),
+            instance_override_names=override_names,
+        )
+        skill_assignment_removals = _persona_skill_assignment_removals(persona)
+        available_skills = available_skills_context(
+            accessible_skills=accessible_skills
+        )
+        used_skills = used_skills_context(
+            final_model_input=final_model_input,
+            trace_events=trace_events,
+            queued_skills=preloaded_skills_loaded,
+            required_preload_skills=required_names,
+        )
+    skill_manifest_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "assigned": accessible_skills,
+                "available": available_skills,
+                "queued": queued_names,
+                "required_preload": required_names,
+                "loaded": loaded_names,
+                "missing": missing_names,
+                "removed": skill_assignment_removals,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    # T8 per-item in-prompt attribution — the parts reachable at THIS pre-turn
+    # seam (T5 made the surface-message parts explicit). The persona-identity
+    # layer counts the identity+rules TEMPLATE only (soul/memory ride file rows);
+    # SOUL.md / workspace-AGENTS.md rows get their pasted-part chars; config.yaml
+    # gets a deliberate 0. .skills_prompt_snapshot.json is attached post-turn.
+    persona_template_chars = _mission_chat_template_prompt_chars(persona)
+    soul_prompt_chars = _soul_overlay_prompt_chars(persona)
+    workspace_prompt_chars = _workspace_agents_prompt_chars(workspace_agents)
+    context_files: list[dict[str, Any]] = [
+        *_profile_context_files(profile),
+        *([workspace_agents.receipt] if workspace_agents is not None else []),
+    ]
+    _attach_context_file_prompt_contributions(
+        context_files,
+        soul_chars=soul_prompt_chars,
+        workspace_chars=workspace_prompt_chars,
     )
     return {
         "context_id": context_id,
@@ -194,8 +273,28 @@ def mission_chat_prompt_observability(
                 "summary": (
                     "First-person 'you are "
                     + (safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id)
-                    + "' identity block; the isolated chat lane does not load the profile SOUL, so this "
-                    "names the persona and forbids self-relay."
+                    + "' identity block. The persona's OWN configured soul overlay "
+                    "(config soul_overlay_path, resolved in its profile home) IS "
+                    "loaded since hermes deafb825e; the OPERATOR profile's SOUL is "
+                    "not. Names the persona and forbids self-relay. The per-layer "
+                    "estimate counts the identity + operative-rules TEMPLATE only; "
+                    "the soul overlay and any profile memory are attributed to "
+                    "their own SOUL.md / MEMORY.md / USER.md rows so nothing is "
+                    "double-counted (T8, 2026-07-18)."
+                ),
+                # T8: the identity + operative-rules TEMPLATE is measurable at the
+                # T5 surface-message seam, so this layer now carries its own
+                # per-layer estimate (template only). system_core text is still
+                # assembled later in the turn and folds into the residual; the
+                # soul overlay / memory ride their file rows (never double-counted
+                # — the launcher sums this non-mirror layer AND those file rows).
+                **(
+                    {
+                        "chars": persona_template_chars,
+                        "token_estimate": persona_template_chars // 4,
+                    }
+                    if persona_template_chars is not None
+                    else {}
                 ),
             },
             {
@@ -210,6 +309,7 @@ def mission_chat_prompt_observability(
                 "status": "blank" if surface == "" else "configured",
                 "summary": "Blank by default; no limiting wrapper is applied.",
                 "preview": surface[:SAFE_PREVIEW_LIMIT],
+                **_layer_text_size(surface),
             },
             {
                 "name": "Profile memory",
@@ -220,6 +320,8 @@ def mission_chat_prompt_observability(
                     if _mission_chat_memory_loaded(persona)
                     else "Profile memory skipped; this persona does not opt into its bound profile's memory."
                 ),
+                # Its bytes are attributed via the MEMORY.md / USER.md context-file
+                # rows; no per-layer estimate here so the launcher never double-counts.
             },
             *(
                 [
@@ -232,6 +334,9 @@ def mission_chat_prompt_observability(
                             if workspace_agents.content is not None
                             else "Workspace instructions were not injected; see the file receipt."
                         ),
+                        # Its bytes are attributed via the AGENTS.md context-file
+                        # row (which carries the token_estimate), so this layer
+                        # deliberately carries no per-layer estimate — no double count.
                     }
                 ]
                 if workspace_agents is not None
@@ -243,21 +348,54 @@ def mission_chat_prompt_observability(
                 "status": "loaded" if history else "empty",
                 "summary": f"{len(history)} prior redaction-safe chat message(s) supplied before this turn.",
             },
+            {
+                "name": "Runtime Situation HUD",
+                "kind": "situational_hud",
+                "status": "loaded" if (isinstance(situational_hud, dict) and situational_hud) else "empty",
+                "summary": (
+                    "Runtime situational HUD (runtime · scope · mission · lane · "
+                    "roster) injected as per-turn context on the operator's user "
+                    "turn — NOT the system prompt. Its roster/scope/mission state "
+                    "rotates every turn, so keeping it out of the codex "
+                    "instructions preserves the byte-stable cross-turn "
+                    "prompt-cache prefix (T5, 2026-07-18)."
+                    if (isinstance(situational_hud, dict) and situational_hud)
+                    else "No runtime situational HUD resolved for this lane this "
+                    "turn; nothing injected."
+                ),
+                # Its bytes ride in the operator user-turn message
+                # (``final_model_input`` messages), so this layer carries no
+                # per-layer token estimate — the launcher already counts them via
+                # that message and would otherwise double-count the HUD.
+            },
         ],
-        "context_files": [
-            *_profile_context_files(profile),
-            *([workspace_agents.receipt] if workspace_agents is not None else []),
-        ],
+        "context_files": context_files,
         "used_skills": used_skills,
+        "queued_skills": queued_names,
+        "required_preload_skills": required_names,
+        "preloaded_skills_loaded": loaded_names,
+        "preloaded_skills_missing": missing_names,
+        "skill_manifest_hash": skill_manifest_hash,
+        "prompt_contract_hash": _generated_prompt_contract_hash(),
+        "skill_assignment_removals": skill_assignment_removals,
+        # C1 RECORD-ONCE (2026-07-17): the built row carries ONE copy of each
+        # fact — the pre-C1 alias keys (``skills_catalog`` ≡ available_skills,
+        # ``skills`` ≡ accessible_skills) are DELETED, no compat emission
+        # (ruling 0). Readers were audited and retargeted to the canonical two;
+        # legacy persisted rows that still carry the aliases are normalized at
+        # the read/persist boundaries.
         "accessible_skills": accessible_skills,
         "available_skills": available_skills,
-        "skills_catalog": available_skills,
-        "skills": accessible_skills,
         "chat_history_context": history,
         "retrieval_context": [],
         "final_model_input": _safe_final_model_input(final_model_input),
         "model_selection": _safe_model_selection(model_selection),
-        "context_budget": _context_budget(model_selection, final_model_input),
+        # What this ONE operator message actually burned, metered per API call
+        # and summed over the turn's tool loop. Distinct from context_budget,
+        # which is the size of the assembled context for a single call — the
+        # two were conflated, which is how a 6K inspector sat next to a 13K bill.
+        "turn_usage": _safe_turn_usage(turn_usage),
+        "context_budget": _context_budget(model_selection, final_model_input, turn_usage),
         "prompt_flags": {
             "skip_context_files": not bool(getattr(persona, "include_core_context_files", False)),
             "skip_memory": not _mission_chat_memory_loaded(persona),
@@ -279,6 +417,111 @@ def mission_chat_prompt_observability(
             ],
         },
     }
+
+
+def attach_prompt_observability_turn_results(
+    context: dict[str, Any],
+    *,
+    final_model_input: dict[str, Any] | None = None,
+    model_selection: dict[str, Any] | None = None,
+    turn_usage: dict[str, Any] | None = None,
+    trace_events: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """C1 build-once seam: PATCH the pre-turn row with the turn's results.
+
+    The mission-chat turn used to build the observability row TWICE per turn —
+    a pre-turn build (record-at-injection: history, skills, context files,
+    HUD) and a post-turn FULL rebuild that re-read SessionDB history and
+    re-scanned the skill catalog just to attach what the turn produced. This
+    attaches exactly the turn-result fields (``final_model_input``,
+    ``turn_usage``, trace-derived ``used_skills``, ``model_selection``, and the
+    recomputed ``context_budget``) onto the pre-turn object instead. The
+    record-at-injection fields are deliberately NOT touched: the peek shows
+    exactly what was fed, never a post-hoc re-derivation.
+
+    Lives here (not in the CLI part) because ``persona_commands.py`` is exec'd
+    into harness globals — nothing defined there is importable or unit-testable.
+    Mutates ``context`` in place and returns it.
+    """
+
+    # T8: the rendered skills-index chars are only knowable once the agent is
+    # constructed (they depend on its resolved tool set) — attach them to the
+    # .skills_prompt_snapshot.json row here, from the raw turn result, before
+    # final_model_input is sanitized/evicted.
+    _attach_skills_prompt_contribution(context, final_model_input)
+    context["final_model_input"] = _safe_final_model_input(final_model_input)
+    if model_selection is not None:
+        context["model_selection"] = _safe_model_selection(model_selection)
+    context["turn_usage"] = _safe_turn_usage(turn_usage)
+    context["used_skills"] = used_skills_context(
+        final_model_input=final_model_input,
+        trace_events=trace_events,
+        queued_skills=context.get("preloaded_skills_loaded") or [],
+        required_preload_skills=context.get("required_preload_skills") or [],
+    )
+    context["context_budget"] = _context_budget(
+        model_selection if model_selection is not None else context.get("model_selection"),
+        final_model_input,
+        turn_usage,
+    )
+    return context
+
+
+#: C3 (2026-07-17): the slim typed subset of the per-turn observability row that
+#: the terminal ``chat.final`` frame — and the mission-chat failure frames that
+#: carry observability — embed on the wire. The FULL row used to ride every
+#: terminal frame (~26 KB post-C1, still mostly ``final_model_input`` + prompt
+#: layers + context files + chat history), yet the launcher decodes only these
+#: fields off the LIVE frame: the Context peek's primary source is the snapshot
+#: frame's ``chat_contexts``, and this block is its zero-fetch live fallback
+#: (situational HUD + turn usage), while the Skills HUD prefers the frame
+#: context and degrades honestly to ``instance.skills`` when the fallback lacks
+#: skill lists. Ruling §7.3 (settled by the operator): keep EXACTLY these keys.
+#: ``chat_id`` / ``chat_title`` are included because the launcher
+#: ``MissionPromptChatContext`` parser consumes them (chat identity in the
+#: fallback window). Deliberately NOT shipped: the skill LISTS
+#: (``accessible_skills`` / ``available_skills`` + their refs),
+#: ``final_model_input``, ``prompt_layers``, ``context_files``,
+#: ``chat_history_context`` — the complete record-at-injection truth stays on
+#: disk in the persisted ctx row (archive-never-delete) and the turn store keeps
+#: the element/replay authority.
+CHAT_FINAL_OBSERVABILITY_FIELDS: tuple[str, ...] = (
+    "context_id",
+    "chat_id",
+    "chat_title",
+    "turn_usage",
+    "model_selection",
+    "context_budget",
+    "situational_hud",
+    "used_skills",
+)
+
+
+def slim_chat_final_observability(
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Project a built observability row down to the ``chat.final`` wire subset.
+
+    Pure and side-effect-free (``persona_commands.py`` is exec'd into harness
+    globals, so this lives here where it is importable/unit-testable and is
+    called at the emit site). ONE shape (ruling 0): always returns the same key
+    set, and the collection-typed fields keep their empty shape (``{}`` / ``[]``)
+    even if the row lacked them, so the launcher never decodes a ``null`` where
+    it expects a map or list. Never mutates ``context`` and never re-derives
+    anything — the record-at-injection fields it reads were resolved once,
+    upstream, on the row this projects from.
+    """
+
+    if not isinstance(context, dict):
+        return {}
+    slim: dict[str, Any] = {key: context.get(key) for key in CHAT_FINAL_OBSERVABILITY_FIELDS}
+    if slim.get("situational_hud") is None:
+        slim["situational_hud"] = {}
+    if slim.get("used_skills") is None:
+        slim["used_skills"] = []
+    if slim.get("model_selection") is None:
+        slim["model_selection"] = {}
+    return slim
 
 
 def _safe_model_selection(value: dict[str, Any] | None) -> dict[str, Any]:
@@ -312,6 +555,173 @@ def _safe_persona_id(value: Any) -> str:
         profile = safe_assignment_token(raw.split(":", 1)[1])
         return f"profile:{profile}" if profile else "profile:unknown"
     return safe_assignment_token(raw) or "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# S3 read-model — hoist duplicated globals + evict on-demand debug payloads.
+#
+# The skills catalog is a GLOBAL (one installed catalog per config; one
+# accessible set per persona), yet the pre-S3 frame stored ``available_skills``
+# / ``skills_catalog`` (installed catalog, ~19KB) AND ``accessible_skills`` /
+# ``skills`` (per-persona set, ~8KB) INLINE on EVERY ``chat_contexts`` row —
+# byte-identical across rows (S1 audit: 1.91 MiB wasted of a 6.05 MiB frame).
+# S3 stores each distinct skill list ONCE, content-addressed, under
+# ``prompt_observability.skills_catalogs`` and replaces the four inline fields
+# with two hash refs (``available_skills_ref`` / ``accessible_skills_ref``); the
+# two byte-identical alias pairs collapse to their canonical ref.
+#
+# ``final_model_input`` (~30KB/row) is a per-turn DEBUG artifact read only when
+# an operator opens the Context peek — it has no steady-state reader yet rode
+# every frame. S3 evicts it to a typed stub carrying the recorded byte count +
+# message count + fetch verb; the full payload stays on disk in the persisted
+# observability row (archive-never-delete) and is fetched on demand.
+#
+# S7-B RULING-0 COMPAT STRIP (2026-07-16): the ``read_model.inline_prompt_payloads``
+# kill-switch and its inline legacy branch were removed — the hoisted/evicted
+# shape is the ONLY shape. Rollback = ``git revert``, not a flag flip.
+# --------------------------------------------------------------------------- #
+
+#: Length of the content-hash refs (sha256 prefix). Short enough to be cheap on
+#: every row, wide enough that a collision across a frame's skill lists is
+#: astronomically unlikely.
+SKILLS_REF_HASH_LEN = 16
+
+#: The inline per-row skill-list fields hoisted out of each ``chat_contexts``
+#: row in the default (hoisted) shape. ``skills_catalog`` aliases
+#: ``available_skills`` and ``skills`` aliases ``accessible_skills`` — all four
+#: leave the row; the two canonical lists are recoverable by resolving the two
+#: refs against ``skills_catalogs``.
+HOISTED_SKILL_LIST_FIELDS = (
+    "available_skills",
+    "skills_catalog",
+    "accessible_skills",
+    "skills",
+)
+
+
+def _skills_list_content_hash(rows: Any) -> str:
+    """Stable content hash of a skill list (compact, sorted, non-ASCII-safe).
+
+    Byte-identical lists hash to the same ref, so the global installed catalog
+    (identical on every row) and any two personas sharing an accessible set map
+    to one stored blob."""
+
+    payload = json.dumps(
+        to_jsonable(rows),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:SKILLS_REF_HASH_LEN]
+
+
+def _hoist_skills_catalogs(
+    chat_contexts: list[dict[str, Any]], catalogs: dict[str, Any]
+) -> None:
+    """Replace each row's inline skill lists with content-hash refs into
+    ``catalogs`` (stored once). Mutates ``chat_contexts`` and ``catalogs`` in
+    place. A row missing a list simply carries no ref for it — never a fake
+    empty catalog (an absent ref resolves to nothing, honestly)."""
+
+    for row in chat_contexts:
+        if not isinstance(row, dict):
+            continue
+        available = row.get("available_skills")
+        if isinstance(available, list):
+            ref = _skills_list_content_hash(available)
+            catalogs.setdefault(ref, available)
+            row["available_skills_ref"] = ref
+        accessible = row.get("accessible_skills")
+        if isinstance(accessible, list):
+            ref = _skills_list_content_hash(accessible)
+            catalogs.setdefault(ref, accessible)
+            row["accessible_skills_ref"] = ref
+        for field in HOISTED_SKILL_LIST_FIELDS:
+            row.pop(field, None)
+
+
+def _final_model_input_stub(final_model_input: dict[str, Any], context_id: Any) -> dict[str, Any]:
+    """The evicted ``final_model_input`` frame value: a typed accounting stub.
+
+    Carries the recorded byte size (so the operator knows the payload exists and
+    how large it is), the message count (so the peek can still say "N messages"),
+    and the addressable fetch verb. Never a silent absence, never a fake-empty
+    payload.
+
+    Also carries a slim ``tool_schema`` accounting block (``tool_count`` +
+    ``json_bytes``) and the already-small, one-way ``cache_routing`` evidence
+    when present. The tool schemas are the single largest fixed slice of the
+    prompt after the system message, and cache-routing fingerprints must remain
+    comparable between warm and cold turns on the eviction lane. Both are
+    copied through typed safety boundaries and omitted when absent."""
+
+    payload = json.dumps(
+        to_jsonable(final_model_input),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    message_count = final_model_input.get("message_count")
+    if not isinstance(message_count, int):
+        messages = final_model_input.get("messages")
+        message_count = len(messages) if isinstance(messages, list) else 0
+    token = safe_assignment_token(context_id)
+    stub: dict[str, Any] = {
+        "evicted": True,
+        "bytes": len(payload.encode("utf-8")),
+        "message_count": message_count,
+        "context_id": token or None,
+        "fetch": "harness prompt-context final-model-input --context-id <id> --json",
+    }
+    tool_schema = final_model_input.get("tool_schema")
+    if isinstance(tool_schema, dict):
+        stub["tool_schema"] = {
+            "tool_count": _safe_int(tool_schema.get("tool_count")),
+            "json_bytes": _safe_int(tool_schema.get("json_bytes")),
+        }
+    cache_routing = _safe_cache_routing(final_model_input.get("cache_routing"))
+    if cache_routing is not None:
+        # Unlike messages/tool bodies, this block is already tiny and contains
+        # only one-way fingerprints. Keep it in the frame stub so operators can
+        # compare a cold turn with adjacent warm turns without a disk fetch.
+        stub["cache_routing"] = cache_routing
+    return stub
+
+
+def _evict_final_model_input(chat_contexts: list[dict[str, Any]]) -> None:
+    """Replace each row's heavy ``final_model_input`` with the accounting stub.
+
+    Mutates ``chat_contexts`` in place. The persisted row on disk is untouched —
+    only the FRAME copy is stubbed."""
+
+    for row in chat_contexts:
+        if not isinstance(row, dict):
+            continue
+        final_model_input = row.get("final_model_input")
+        if isinstance(final_model_input, dict) and not final_model_input.get("evicted"):
+            row["final_model_input"] = _final_model_input_stub(
+                final_model_input, row.get("context_id")
+            )
+
+
+def load_final_model_input_for_context(context_id: str) -> dict[str, Any] | None:
+    """On-demand read of a persisted context's ``final_model_input``.
+
+    The S3 frame ships an eviction stub; the FULL payload stays on disk in the
+    persisted observability row (``persist_prompt_observability_context``). This
+    is the read the Context peek's on-demand fetch resolves — the launcher fetch
+    lane and a future ``harness prompt-context final-model-input`` CLI verb both
+    call through here (verb handoff filed; harness_cli is not this stage's to
+    edit). Returns the redaction-safe payload, or None when the row/field is
+    absent."""
+
+    data = load_persisted_context_row(context_id)
+    if not isinstance(data, dict):
+        return None
+    final_model_input = data.get("final_model_input")
+    if isinstance(final_model_input, dict) and not final_model_input.get("evicted"):
+        return final_model_input
+    return None
 
 
 def snapshot_prompt_observability(
@@ -380,10 +790,13 @@ def snapshot_prompt_observability(
         persona = by_persona.get(persona_id) or _profile_persona_from_instance(instance)
         if persona is None:
             continue
+        from .models import apply_instance_model_overrides
+
+        effective_persona = apply_instance_model_overrides(persona, instance)
         task_id = getattr(instance, "current_task_id", None)
         contexts.append(
             mission_chat_prompt_observability(
-                persona=persona,
+                persona=effective_persona,
                 persona_instance_id=_persona_instance_id(instance),
                 session_id=getattr(instance, "session_id", None),
                 task_id=task_id,
@@ -393,6 +806,11 @@ def snapshot_prompt_observability(
                 session_db=session_db,
                 mission_hud=_preview_for(task_id),
                 situational_hud=_situational_for(instance, task_id),
+                instance_skill_overrides=(
+                    list(getattr(instance, "skill_overrides", None) or [])
+                    if getattr(instance, "skill_overrides", None) is not None
+                    else None
+                ),
             )
         )
     if not contexts:
@@ -408,6 +826,70 @@ def snapshot_prompt_observability(
                     )
                 )
                 break
+    # S8: the frame keeps only LIVE persona instances' current-session context
+    # rows; historical/stale rows (departed instances, closed sessions) leave the
+    # frame (operator ruling 2026-07-17: "old residue and runs need to be
+    # purged"). The persisted files stay on disk (archive-never-delete); the
+    # Context peek only selects a live roster agent, so a dropped row is never
+    # requested. ``built_keys`` are the freshly-built roster contexts = the live
+    # rows; live instance/session ids catch a live agent whose row came only from
+    # disk.
+    built_keys = {_context_row_key(item) for item in contexts}
+    live_instance_ids = {
+        token
+        for token in (safe_assignment_token(_persona_instance_id(inst)) for inst in roster)
+        if token
+    }
+    live_session_ids = {
+        session
+        for session in (
+            safe_assignment_text(getattr(inst, "session_id", None), limit=200) for inst in roster
+        )
+        if session
+    }
+    # C2: roster-keyed read — the latest-pointer index resolves the live lanes
+    # and the build reads exactly those rows (typed glob fallback on index
+    # miss/corruption; the read never writes).
+    disk_rows, ctx_read = load_live_prompt_observability_contexts(
+        built_keys=built_keys,
+        live_instance_ids=live_instance_ids,
+        live_session_ids=live_session_ids,
+    )
+    chat_contexts = _merge_latest_contexts(contexts, session_db=session_db, disk_rows=disk_rows)
+    chat_contexts, chat_contexts_evicted = _filter_live_chat_contexts(
+        chat_contexts,
+        built_keys=built_keys,
+        live_instance_ids=live_instance_ids,
+        live_session_ids=live_session_ids,
+    )
+    # Index-mode reads never load the stale lanes at all — fold them into the
+    # same eviction count the post-merge filter feeds (one accounting, both
+    # read modes).
+    chat_contexts_evicted += int(ctx_read.get("stale_lanes") or 0)
+    # S3: hoist the duplicated skills catalogs to one content-addressed table and
+    # evict the heavy per-turn debug payload. This is the only shape (S7-B
+    # RULING-0: no inline legacy fallback).
+    skills_catalogs: dict[str, Any] = {}
+    _hoist_skills_catalogs(chat_contexts, skills_catalogs)
+    _evict_final_model_input(chat_contexts)
+    # C1: ref-shaped persisted rows reach the frame already carrying their
+    # ``*_ref`` hashes (no inline lists for the hoist to fold) — the frame's
+    # catalog accounting must include those refs too, or the pointer stub would
+    # under-report the resolvable hashes.
+    frame_catalog_hashes = set(skills_catalogs)
+    for row in chat_contexts:
+        if not isinstance(row, dict):
+            continue
+        for ref_key in ("available_skills_ref", "accessible_skills_ref"):
+            token = safe_assignment_token(row.get(ref_key))
+            if token:
+                frame_catalog_hashes.add(token)
+    # S8: the ``skills_catalogs`` table LEAVES the frame entirely (operator ruling
+    # 2026-07-17: "skills catalog should just be pointers to the skills"). Rows
+    # keep their ``*_ref`` content hashes; the catalog bodies are served on demand
+    # by ``harness skills catalog --hash <h> --json`` and cached FOREVER launcher
+    # side (a content hash is immutable). The frame carries only a typed pointer
+    # stub (count + fetch verb) — never a silent absence.
     return {
         "schema_version": 1,
         "default_flow": {
@@ -417,17 +899,444 @@ def snapshot_prompt_observability(
             "qa_default": False,
         },
         "surface_prompt_default": "",
-        "chat_contexts": _merge_latest_contexts(contexts, session_db=session_db),
+        "chat_contexts": chat_contexts,
+        # S8: honest accounting for the historical/stale context rows evicted
+        # from the frame — their persisted files remain on disk and are fetched
+        # on demand (never a silent absence). C2 adds the retention accounting
+        # (``archived_count``: rows MOVED to the archive dir, still fetchable)
+        # and the typed read receipt (index hit vs glob fallback — a degraded
+        # read is visible, never silent).
+        "chat_contexts_ref": {
+            "evicted": True,
+            "count": chat_contexts_evicted,
+            "live_count": len(chat_contexts),
+            "archived_count": int(ctx_read.get("archived_count") or 0),
+            "fetch": "harness prompt-context show --context-id <id> --json",
+            "read": {
+                "source": ctx_read.get("source"),
+                "index_status": ctx_read.get("index_status"),
+                "files_read": int(ctx_read.get("files_read") or 0),
+                "index_misses": int(ctx_read.get("index_misses") or 0),
+            },
+        },
+        # One fact, one owner, one COPY: the deduplicated skill lists are no
+        # longer shipped in-frame. Rows carry ``available_skills_ref`` /
+        # ``accessible_skills_ref``; the bodies are content-addressed and fetched
+        # once by hash. This pointer accounts the eviction (hoist-folded catalogs
+        # plus the refs already carried by C1 ref-shaped persisted rows).
+        "skills_catalogs_ref": {
+            "evicted": True,
+            "count": len(frame_catalog_hashes),
+            "hashes": sorted(frame_catalog_hashes),
+            "fetch": "harness skills catalog --hash <hash> --json",
+        },
     }
 
 
+def skills_catalog_by_hash(content_hash: str) -> list[dict[str, Any]] | None:
+    """On-demand resolve of one content-addressed skills catalog by its hash.
+
+    S8 evicted the ``skills_catalogs`` table from the frame; rows keep only
+    ``*_ref`` hashes. C1 (2026-07-17) made the resolve O(1): the catalog bodies
+    are stored ONCE, content-addressed, in the persist-time catalog store
+    (``prompt_observability_catalogs/<hash>.json``) and read back directly. The
+    pre-C1 walk over the newest persisted rows remains as the LEGACY-ROW
+    fallback — rows persisted before the store existed still carry inline lists
+    (archive-never-delete means they exist) and still resolve. Read-only: the
+    store is written only by the persist chokepoint. Returns ``None`` on an
+    honest miss (the launcher renders a pending state and retries next frame),
+    never a fake empty catalog."""
+
+    token = str(content_hash or "").strip()
+    if not token:
+        return None
+    stored = load_skills_catalog_from_store(token)
+    if stored is not None:
+        return stored
+    for row in load_latest_prompt_observability_contexts():
+        if not isinstance(row, dict):
+            continue
+        for field in HOISTED_SKILL_LIST_FIELDS:
+            value = row.get(field)
+            if isinstance(value, list) and _skills_list_content_hash(value) == token:
+                return value
+    return None
+
+
+def load_skills_catalog_from_store(content_hash: str) -> list[dict[str, Any]] | None:
+    """O(1) read of one catalog from the content-addressed store.
+
+    Integrity-checked: the loaded list must hash back to its own address — a
+    corrupt or tampered store file is a typed miss (never fake content), and
+    the caller's legacy fallback walk still gets its chance."""
+
+    token = safe_assignment_token(content_hash)
+    if not token:
+        return None
+    path = paths.prompt_observability_catalogs_dir() / f"{token}.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    if _skills_list_content_hash(data) != token:
+        return None
+    return data
+
+
+def _store_skills_catalog(ref: str, rows: list) -> None:
+    """Write one content-addressed catalog iff absent (a content hash is
+    immutable, so an existing file is already the right bytes). Compact."""
+
+    path = paths.prompt_observability_catalogs_dir() / f"{ref}.json"
+    if path.exists():
+        return
+    atomic_json_write(
+        path,
+        to_jsonable(rows),
+        indent=None,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# C1/C2 record-once store (2026-07-17, console-chat plan stages C1+C2).
+#
+# C1 — the persisted per-turn RECORD carries one copy of each fact: the two
+# byte-identical alias key-pairs (57.8% of every pre-C1 file) are gone from the
+# built row, and the two canonical skill lists leave the row as content-hash
+# refs into a persist-time catalog store. ``final_model_input`` STAYS in the
+# row, compact (operator ruling 2026-07-17 §7.2). Writes are compact JSON.
+#
+# C2 — the live dir is bounded and reads are roster-keyed: the persist
+# chokepoint (ONE owner) maintains a latest-pointer index mapping
+# (persona_instance_id, session_id) -> newest context ids and enforces per-lane
+# retention (newest K live; older rows MOVE to the archive dir —
+# archive-never-delete, accounted via ``archived_count``). The frame build
+# resolves the live roster's lanes through the index and reads exactly those
+# rows; an absent/corrupt index or a dangling pointer falls back to the legacy
+# glob path with typed accounting. The READ path never writes — the heal
+# happens at the next persist (emit-path projections are READ-ONLY).
+# --------------------------------------------------------------------------- #
+
+#: C2 retention: newest K rows per (persona_instance_id, session_id) lane stay
+#: live; older rows move to ``prompt_observability_archive/``.
+PROMPT_OBSERVABILITY_RETAIN_PER_LANE = 2
+
+#: C1 persisted-row shape: (canonical inline field, legacy alias field,
+#: persisted ref field). The alias is normalized into the canonical value when
+#: a legacy-shaped input carries only the alias — data is never dropped.
+_PERSIST_REF_FIELDS = (
+    ("available_skills", "skills_catalog", "available_skills_ref"),
+    ("accessible_skills", "skills", "accessible_skills_ref"),
+)
+
+
 def persist_prompt_observability_context(context: dict[str, Any]) -> None:
+    """THE persist chokepoint (one owner): ref-transform, compact write,
+    latest-pointer index, and retention happen here and nowhere else.
+
+    The caller's dict is NEVER mutated — the live ``chat.final`` wire echo
+    still carries the built row with its inline canonical lists (slimming that
+    echo is stage C3's lane, not this one)."""
+
     context_id = safe_assignment_token(context.get("context_id"))
     if not context_id:
         return
+    # Deep JSON copy (to_jsonable rebuilds every dict/list) — mutations below
+    # cannot touch the caller's object.
+    row = to_jsonable(context)
+    for canonical_field, alias_field, ref_field in _PERSIST_REF_FIELDS:
+        value = row.pop(canonical_field, None)
+        alias = row.pop(alias_field, None)
+        if not isinstance(value, list):
+            value = alias if isinstance(alias, list) else None
+        if value is None:
+            # No list, no ref — an absent catalog is honest absence, never a
+            # fake empty one. A re-persisted ref-shaped row keeps its refs.
+            continue
+        ref = _skills_list_content_hash(value)
+        _store_skills_catalog(ref, value)
+        row[ref_field] = ref
     root = paths.prompt_observability_dir()
     root.mkdir(parents=True, exist_ok=True)
-    atomic_json_write(root / f"{context_id}.json", to_jsonable(context), indent=2, sort_keys=True)
+    atomic_json_write(
+        root / f"{context_id}.json",
+        row,
+        indent=None,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    _index_and_retain_after_persist(row, context_id=context_id)
+
+
+def _lane_key_for_row(row: dict[str, Any]) -> tuple[str, str]:
+    """The (instance, session) retention/index lane a persisted row belongs to."""
+
+    return (
+        safe_assignment_token(row.get("persona_instance_id")) or "",
+        safe_assignment_text(row.get("session_id"), limit=200) or "",
+    )
+
+
+def _load_prompt_observability_index() -> dict[str, Any] | None:
+    """The latest-pointer index, or ``None`` when absent/corrupt.
+
+    ``None`` is the typed fallback signal: readers glob instead, and the next
+    persist rebuilds the index (its one owner). Never raises."""
+
+    path = paths.prompt_observability_index_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+        return None
+    return data
+
+
+def _archived_context_count() -> int:
+    archive = paths.prompt_observability_archive_dir()
+    if not archive.exists():
+        return 0
+    return sum(1 for _ in archive.glob("*.json"))
+
+
+def _rebuild_prompt_observability_index() -> dict[str, Any]:
+    """Full index rebuild from the live dir (the heal path; persist-time only).
+
+    Parses every live row once — the one-time O(dir) cost that makes every
+    subsequent frame read roster-sized — orders each lane newest-first by file
+    mtime, and recounts the archive. Unreadable/mis-named files are counted
+    (typed, never silent) and left alone: nothing here deletes."""
+
+    root = paths.prompt_observability_dir()
+    unreadable = 0
+    files: list[tuple[float, str, dict[str, Any]]] = []
+    if root.exists():
+        for path in root.glob("*.json"):
+            try:
+                mtime = path.stat().st_mtime
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                unreadable += 1
+                continue
+            context_id = safe_assignment_token(data.get("context_id")) if isinstance(data, dict) else None
+            if not context_id or path.name != f"{context_id}.json":
+                unreadable += 1
+                continue
+            files.append((mtime, context_id, data))
+    lanes: dict[tuple[str, str], dict[str, Any]] = {}
+    for _mtime, context_id, data in sorted(files, key=lambda item: item[0], reverse=True):
+        key = _lane_key_for_row(data)
+        entry = lanes.setdefault(
+            key,
+            {
+                "instance_id": key[0],
+                "session_id": key[1],
+                "persona_id": safe_assignment_token(data.get("persona_id")) or "",
+                "context_ids": [],
+            },
+        )
+        entry["context_ids"].append(context_id)
+    return {
+        "schema_version": 1,
+        "archived_count": _archived_context_count(),
+        "unreadable_count": unreadable,
+        "entries": list(lanes.values()),
+    }
+
+
+def _index_and_retain_after_persist(row: dict[str, Any], *, context_id: str) -> None:
+    """Update the latest-pointer index for this persist and enforce retention.
+
+    One owner: only this persist-time hook moves rows out of the live dir or
+    writes the index. An absent/corrupt index is healed here by a full rebuild
+    (which also folds in any pre-index legacy rows, so the first persist after
+    landing performs the one-time bounded-store sweep)."""
+
+    index = _load_prompt_observability_index()
+    if index is None:
+        index = _rebuild_prompt_observability_index()
+    entries = [entry for entry in index.get("entries", []) if isinstance(entry, dict)]
+    key = _lane_key_for_row(row)
+    entry = next(
+        (
+            candidate
+            for candidate in entries
+            if (
+                str(candidate.get("instance_id") or ""),
+                str(candidate.get("session_id") or ""),
+            )
+            == key
+        ),
+        None,
+    )
+    if entry is None:
+        entry = {
+            "instance_id": key[0],
+            "session_id": key[1],
+            "persona_id": "",
+            "context_ids": [],
+        }
+        entries.append(entry)
+    known = [str(item) for item in entry.get("context_ids", []) if str(item or "").strip()]
+    entry["context_ids"] = [context_id] + [item for item in known if item != context_id]
+    entry["persona_id"] = (
+        safe_assignment_token(row.get("persona_id")) or str(entry.get("persona_id") or "")
+    )
+    archived = int(index.get("archived_count") or 0)
+    root = paths.prompt_observability_dir()
+    archive_dir = paths.prompt_observability_archive_dir()
+    for candidate in entries:
+        ids = [str(item) for item in candidate.get("context_ids", []) if str(item or "").strip()]
+        keep = ids[:PROMPT_OBSERVABILITY_RETAIN_PER_LANE]
+        for stale_id in ids[PROMPT_OBSERVABILITY_RETAIN_PER_LANE:]:
+            source = root / f"{stale_id}.json"
+            try:
+                if source.exists():
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    os.replace(source, archive_dir / f"{stale_id}.json")
+                    archived += 1
+            except OSError:
+                # The move failed — keep the row indexed AND live rather than
+                # losing track of it. Retention retries on the next persist.
+                keep.append(stale_id)
+        # Dangling-pointer heal: a kept id whose live file vanished outside the
+        # chokepoint (sabotage/manual deletion) is dropped here — the READ path
+        # reported the typed miss and fell back; THIS is where the index heals
+        # (its one owner). An id that was legitimately archived is not "kept".
+        candidate["context_ids"] = [
+            item for item in keep if (root / f"{item}.json").exists()
+        ]
+    # A lane with no live rows left has nothing to point at — prune the entry
+    # (its archived rows remain fetchable by id; the index only maps LIVE rows).
+    index["entries"] = [entry for entry in entries if entry.get("context_ids")]
+    index["archived_count"] = archived
+    atomic_json_write(
+        paths.prompt_observability_index_path(),
+        index,
+        indent=None,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def load_live_prompt_observability_contexts(
+    *,
+    built_keys: set[tuple[str, str, str]],
+    live_instance_ids: set[str],
+    live_session_ids: set[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Roster-keyed frame read (C2): read EXACTLY the live lanes' newest rows.
+
+    Resolves the live roster's (instance, session) lanes through the
+    latest-pointer index and reads one file per live lane, instead of the
+    legacy glob+stat+parse of the newest 50 files (4.51 MB measured) on every
+    full core. The index is a cache, never authority: an absent/corrupt index
+    or a pointer at a missing/corrupt file degrades to the legacy glob path
+    with typed accounting in the returned receipt — and this READ path never
+    writes (the heal happens at the next persist, the index's one owner).
+
+    Returns ``(rows, receipt)`` — rows newest-first (the legacy ordering
+    contract), receipt = {source, index_status, files_read, index_misses,
+    stale_lanes, archived_count}."""
+
+    receipt: dict[str, Any] = {
+        "source": "index",
+        "index_status": "hit",
+        "files_read": 0,
+        "index_misses": 0,
+        "stale_lanes": 0,
+        "archived_count": 0,
+    }
+    index = _load_prompt_observability_index()
+    if index is None:
+        receipt["source"] = "glob_fallback"
+        receipt["index_status"] = "absent_or_corrupt"
+        rows = load_latest_prompt_observability_contexts()
+        receipt["files_read"] = len(rows)
+        receipt["archived_count"] = _archived_context_count()
+        return rows, receipt
+    receipt["archived_count"] = int(index.get("archived_count") or 0)
+    root = paths.prompt_observability_dir()
+    targets: list[Path] = []
+    for entry in index.get("entries", []):
+        if not isinstance(entry, dict):
+            continue
+        instance_id = safe_assignment_token(entry.get("instance_id")) or ""
+        session_id = safe_assignment_text(entry.get("session_id"), limit=200) or ""
+        persona_id = safe_assignment_token(entry.get("persona_id")) or ""
+        is_live = _context_identity_is_live(
+            key=(instance_id, session_id, persona_id),
+            built_keys=built_keys,
+            live_instance_ids=live_instance_ids,
+            live_session_ids=live_session_ids,
+        )
+        if not is_live:
+            # Counted, never silently skipped: these lanes' rows stay on disk
+            # and feed the frame's ``chat_contexts_ref`` eviction accounting.
+            receipt["stale_lanes"] += 1
+            continue
+        newest = next(
+            (
+                token
+                for token in (
+                    safe_assignment_token(item) for item in entry.get("context_ids", [])
+                )
+                if token
+            ),
+            None,
+        )
+        if newest:
+            targets.append(root / f"{newest}.json")
+    loaded: list[tuple[float, str, dict[str, Any]]] = []
+    for path in targets:
+        try:
+            mtime = path.stat().st_mtime
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            receipt["index_misses"] += 1
+            continue
+        receipt["files_read"] += 1
+        if isinstance(data, dict) and safe_assignment_token(data.get("context_id")):
+            loaded.append((mtime, path.name, data))
+    if receipt["index_misses"]:
+        # A pointer aimed at a deleted/corrupt file: typed miss, and the frame
+        # still gets CORRECT output via the legacy glob. Heal at next persist.
+        receipt["source"] = "glob_fallback"
+        receipt["index_status"] = "miss"
+        receipt["stale_lanes"] = 0
+        rows = load_latest_prompt_observability_contexts()
+        receipt["files_read"] += len(rows)
+        return rows, receipt
+    # Newest-first with the file name as a stable tiebreak — the same recency
+    # order the legacy glob path produced, so the frame section stays
+    # deterministic across both read modes.
+    loaded.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in loaded], receipt
+
+
+def load_persisted_context_row(context_id: str) -> dict[str, Any] | None:
+    """One persisted observability row by id — live dir first, then the C2
+    archive. Archive-never-delete means retention MOVES rows; the fetch lane
+    (``harness prompt-context show``) must keep resolving them. Honest ``None``
+    on absence/corruption, never a fabricated row."""
+
+    token = safe_assignment_token(context_id)
+    if not token:
+        return None
+    for root in (paths.prompt_observability_dir(), paths.prompt_observability_archive_dir()):
+        path = root / f"{token}.json"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
 
 
 def load_latest_prompt_observability_contexts() -> list[dict[str, Any]]:
@@ -453,26 +1362,109 @@ def load_latest_prompt_observability_contexts() -> list[dict[str, Any]]:
     return rows
 
 
+def _context_row_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    """The (instance, session, persona) identity a chat-context row folds on."""
+
+    return (
+        safe_assignment_token(item.get("persona_instance_id")) or "",
+        safe_assignment_text(item.get("session_id"), limit=200) or "",
+        safe_assignment_token(item.get("persona_id")) or "",
+    )
+
+
+def _filter_live_chat_contexts(
+    chat_contexts: list[dict[str, Any]],
+    *,
+    built_keys: set[tuple[str, str, str]],
+    live_instance_ids: set[str],
+    live_session_ids: set[str],
+) -> tuple[list[dict[str, Any]], int]:
+    """Keep only chat-context rows tied to a LIVE persona instance's current
+    session (S8); return ``(kept, evicted_count)``.
+
+    A row is live when it was freshly BUILT this frame for a roster instance
+    (``built_keys``) OR its persona_instance_id / session_id resolves to a live
+    instance. Purely-historical/stale rows (a departed instance, a closed
+    session) are evicted from the frame — their persisted files stay on disk and
+    the Context peek, which only ever selects a LIVE roster agent, never requests
+    them (so the eviction is honest, never a fake-empty)."""
+
+    kept: list[dict[str, Any]] = []
+    evicted = 0
+    for row in chat_contexts:
+        if not isinstance(row, dict):
+            kept.append(row)
+            continue
+        key = _context_row_key(row)
+        inst_id = safe_assignment_token(row.get("persona_instance_id"))
+        sess_id = safe_assignment_text(row.get("session_id"), limit=200)
+        is_live = _context_identity_is_live(
+            key=key,
+            built_keys=built_keys,
+            live_instance_ids=live_instance_ids,
+            live_session_ids=live_session_ids,
+        )
+        if is_live:
+            kept.append(row)
+        else:
+            evicted += 1
+    return kept, evicted
+
+
+def _context_identity_is_live(
+    *,
+    key: tuple[str, str, str],
+    built_keys: set[tuple[str, str, str]],
+    live_instance_ids: set[str],
+    live_session_ids: set[str],
+) -> bool:
+    """Resolve a persisted context against the current-session roster.
+
+    A long-lived persona instance can accumulate many historical sessions.
+    Instance identity alone therefore cannot make a row live: freshly built
+    keys are the authority for that instance's current session. Session-only
+    legacy rows remain supported when their session is current.
+    """
+
+    if key in built_keys:
+        return True
+    instance_id, session_id, _persona_id = key
+    if instance_id:
+        current_sessions = {
+            built_session
+            for built_instance, built_session, _ in built_keys
+            if built_instance == instance_id
+        }
+        if current_sessions:
+            return session_id in current_sessions
+        return instance_id in live_instance_ids and not session_id
+    return bool(session_id and session_id in live_session_ids)
+
+
 def _merge_latest_contexts(
     contexts: list[dict[str, Any]],
     *,
     session_db: Any | None = None,
+    disk_rows: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Merge persisted rows (newest-first) over the freshly built contexts.
+
+    ``disk_rows`` lets the C2 roster-keyed loader supply exactly the live
+    lanes' rows; when omitted (legacy callers/tests) the newest-50 glob load
+    is used."""
+
     merged: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
 
-    def key_for(item: dict[str, Any]) -> tuple[str, str, str]:
-        return (
-            safe_assignment_token(item.get("persona_instance_id")) or "",
-            safe_assignment_text(item.get("session_id"), limit=200) or "",
-            safe_assignment_token(item.get("persona_id")) or "",
-        )
+    key_for = _context_row_key
 
     built_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in contexts:
         built_by_key.setdefault(key_for(item), item)
 
-    for item in load_latest_prompt_observability_contexts():
+    if disk_rows is None:
+        disk_rows = load_latest_prompt_observability_contexts()
+    for item in disk_rows:
         key = key_for(item)
         if key in seen:
             continue
@@ -494,12 +1486,19 @@ def _backfill_derived_fields(
     *,
     session_db: Any | None = None,
 ) -> None:
-    """Add `skills` / `context_budget` to persisted contexts that predate them.
+    """Repair persisted contexts that predate the current row shape.
 
     Persisted observability rows are written at chat time, so rows captured
-    before these fields existed lack them. Backfill skills from the freshly
+    before newer fields existed lack them. Backfill skills from the freshly
     built context (correct per-persona set) or the profile snapshot, and
     recompute the budget from the row's own model selection + final input.
+
+    C1 shape rules: the alias keys (``skills`` ≡ accessible, ``skills_catalog``
+    ≡ available) are READ from legacy rows for normalization but never written
+    back — one copy of each fact. A row carrying ``accessible_skills_ref`` /
+    ``available_skills_ref`` was persisted by the C1 chokepoint and is correct
+    by construction: its skills are present BY REF, so the legacy re-inflation
+    paths must not fabricate inline lists over them.
     """
     if built:
         # Persisted rows are written at chat time and never carry the typed
@@ -517,8 +1516,6 @@ def _backfill_derived_fields(
             "used_skills",
             "accessible_skills",
             "available_skills",
-            "skills_catalog",
-            "skills",
             "chat_id",
             "chat_title",
             "chat_name",
@@ -538,13 +1535,27 @@ def _backfill_derived_fields(
             item["chat_title"] = chat.get("title")
             item["chat_name"] = chat.get("name")
             item["chat"] = chat
+    # Legacy alias normalization (READ then retire): rows persisted before C1
+    # may carry only the alias keys. Fold them into the canonical fields and
+    # drop them — the frame carries one copy of each fact.
     if not item.get("accessible_skills") and item.get("skills"):
         item["accessible_skills"] = item.get("skills")
+    if not item.get("available_skills") and item.get("skills_catalog"):
+        item["available_skills"] = item.get("skills_catalog")
+    item.pop("skills", None)
+    item.pop("skills_catalog", None)
     if item.get("used_skills") is None:
         item["used_skills"] = used_skills_context(
             final_model_input=item.get("final_model_input")
         )
-    if not item.get("accessible_skills") or _profile_prompt_skills_need_snapshot(item):
+    # C1 ref-shaped rows carry their skills by content-hash ref — present, not
+    # missing. Re-inflating them from the profile snapshot / installed catalog
+    # would overwrite the recorded truth with a re-derivation.
+    has_accessible_ref = bool(safe_assignment_token(item.get("accessible_skills_ref")))
+    has_available_ref = bool(safe_assignment_token(item.get("available_skills_ref")))
+    if not has_accessible_ref and (
+        not item.get("accessible_skills") or _profile_prompt_skills_need_snapshot(item)
+    ):
         profile = safe_assignment_token(item.get("profile"))
         names = _profile_snapshot_skill_names(profile) if profile else []
         if names:
@@ -558,18 +1569,13 @@ def _backfill_derived_fields(
                 }
                 for name in names[:80]
             ]
-            item["skills"] = item["accessible_skills"]
             item["available_skills"] = available_skills_context(
                 accessible_skills=item["accessible_skills"]
             )
-            item["skills_catalog"] = item["available_skills"]
-    elif item.get("skills") is None:
-        item["skills"] = item["accessible_skills"]
-    if item.get("available_skills") is None:
+    if item.get("available_skills") is None and not has_available_ref:
         item["available_skills"] = available_skills_context(
-            accessible_skills=item.get("accessible_skills") or item.get("skills") or []
+            accessible_skills=item.get("accessible_skills") or []
         )
-        item["skills_catalog"] = item["available_skills"]
     if _context_budget_needs_refresh(item):
         budget = _context_budget(item.get("model_selection"), item.get("final_model_input"))
         if budget is not None:
@@ -596,13 +1602,24 @@ def _profile_persona_from_instance(instance: Any) -> Any | None:
         safe_assignment_text(getattr(instance, "display_name", None), limit=120)
         or f"{profile.replace('_', ' ').title()} Agent"
     )
-    return SimpleNamespace(
+    # Keep the synthetic profile persona on the same typed contract as every
+    # persisted/catalog persona. Instance model/skill policy is applied with
+    # ``dataclasses.replace`` by ``apply_instance_model_overrides``; returning a
+    # SimpleNamespace here made any explicit profile-instance override crash the
+    # entire Harness snapshot/stream before its first hydrate frame.
+    from .models import AgentPersona
+
+    return AgentPersona(
         id=f"profile:{profile}",
         display_name=display_name,
         role="profile",
+        model=None,
+        provider=None,
+        api_mode=None,
         hermes_profile=profile,
         skills=[],
         toolsets=["file", "search", "session_search", "todo", "skills"],
+        system_prompt_path="",
     )
 
 
@@ -679,7 +1696,33 @@ def _compaction_ratio(model: str, provider: str | None) -> float:
     return _DEFAULT_COMPACTION_RATIO
 
 
+# How ``context_budget.used_tokens`` was derived. The provider's meter is the
+# only authority; the estimates exist for the window BEFORE a call has returned
+# (or when a turn failed before any call) and must be labeled as such — an
+# unlabeled estimate reads as truth and silently under-reports (it cannot see
+# tool schemas, which are ~12K tokens on a typical mission-chat turn).
+BUDGET_BASIS_METERED_FIRST_CALL = "metered_first_call"
+BUDGET_BASIS_ESTIMATE_WITH_TOOLS = "estimate_messages_plus_tools"
+BUDGET_BASIS_ESTIMATE_MESSAGES_ONLY = "estimate_messages_only"
+
+
+def _tool_schema_json_bytes(final_model_input: dict[str, Any] | None) -> int | None:
+    if not isinstance(final_model_input, dict):
+        return None
+    schema = final_model_input.get("tool_schema")
+    if not isinstance(schema, dict):
+        return None
+    raw = schema.get("json_bytes")
+    return raw if isinstance(raw, int) and raw > 0 else None
+
+
 def _estimate_used_tokens(final_model_input: dict[str, Any] | None) -> int | None:
+    """Heuristic bytes//4 estimate of the assembled prompt.
+
+    Counts the recorded messages PLUS the tool-schema wire size when it is
+    known: the schemas ship on every API call, so an estimate without them is
+    not "roughly right", it is missing the second-largest block.
+    """
     if not isinstance(final_model_input, dict):
         return None
     messages = final_model_input.get("messages")
@@ -694,18 +1737,44 @@ def _estimate_used_tokens(final_model_input: dict[str, Any] | None) -> int | Non
             total_bytes += raw
         else:
             total_bytes += len(str(message.get("content") or "").encode("utf-8"))
+    total_bytes += _tool_schema_json_bytes(final_model_input) or 0
     if total_bytes <= 0:
         return None
     return max(1, total_bytes // 4)
 
 
+def _metered_assembled_tokens(turn_usage: dict[str, Any] | None) -> int | None:
+    """The assembled-context size as the provider metered it, or None.
+
+    Row 1 of the usage ledger is the only honest answer: that call carried the
+    system prompt + user message + tool schemas and nothing else. Later calls
+    also carry tool results (loop growth), which is turn burn, not context size.
+    A single-call turn's total is by definition its first call.
+    """
+    if not isinstance(turn_usage, dict):
+        return None
+    first = turn_usage.get("first_call_prompt_tokens")
+    if isinstance(first, int) and first > 0:
+        return first
+    api_calls = turn_usage.get("api_calls")
+    prompt_tokens = turn_usage.get("prompt_tokens")
+    if api_calls == 1 and isinstance(prompt_tokens, int) and prompt_tokens > 0:
+        return prompt_tokens
+    return None
+
+
 def _context_budget(
     model_selection: dict[str, Any] | None,
     final_model_input: dict[str, Any] | None,
+    turn_usage: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Per-model context budget for the Sent-to-model bar: window + compaction line.
 
-    Returns None (UI omits the bar) when the model/window can't be resolved.
+    ``used_tokens`` prefers the provider-metered first-call prompt (the exact
+    assembled context, tool schemas included) and falls back to a labeled
+    estimate only when no call has completed. ``used_basis`` says which, so the
+    UI never renders a guess as a measurement. Returns None (UI omits the bar)
+    when the model/window can't be resolved.
     """
     sel = model_selection if isinstance(model_selection, dict) else {}
     model = sel.get("effective_model") or sel.get("chat_model") or sel.get("default_model")
@@ -716,15 +1785,37 @@ def _context_budget(
     if not window:
         return None
     ratio = _compaction_ratio(str(model), provider)
-    return {
+    estimate = _estimate_used_tokens(final_model_input)
+    metered = _metered_assembled_tokens(turn_usage)
+    if metered is not None:
+        used = metered
+        basis = BUDGET_BASIS_METERED_FIRST_CALL
+    else:
+        used = estimate
+        basis = (
+            BUDGET_BASIS_ESTIMATE_WITH_TOOLS
+            if _tool_schema_json_bytes(final_model_input) is not None
+            else BUDGET_BASIS_ESTIMATE_MESSAGES_ONLY
+        )
+    budget = {
         "model": safe_assignment_text(str(model), limit=120),
         "provider": safe_assignment_token(provider) if provider else None,
         "window_tokens": int(window),
         "compaction_ratio": round(float(ratio), 4),
         "compaction_tokens": int(window * ratio),
-        "used_tokens": _estimate_used_tokens(final_model_input),
-        "used_estimated": True,
+        "used_tokens": used,
+        "used_basis": basis,
+        # Back-compat for launcher builds that predate `used_basis`; they render
+        # a tilde off this bool. Derived, never independently decided.
+        "used_estimated": basis != BUDGET_BASIS_METERED_FIRST_CALL,
+        "estimate_tokens": estimate,
     }
+    # Drift is the tripwire the old design lacked: when the estimate and the
+    # meter both exist and disagree badly, the estimator has lost an input class
+    # (as it did with tool schemas) and says so instead of failing silently.
+    if metered is not None and estimate is not None and estimate > 0:
+        budget["estimate_drift_ratio"] = round(metered / estimate, 2)
+    return budget
 
 
 def _profile_snapshot_skill_names(profile: str) -> list[str]:
@@ -759,7 +1850,14 @@ def _profile_snapshot_skill_names(profile: str) -> list[str]:
     return names
 
 
-def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any]]:
+def _accessible_skills_context(
+    persona: Any,
+    profile: str,
+    *,
+    loaded_skill_names: set[str] | None = None,
+    queued_skill_names: set[str] | None = None,
+    instance_override_names: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Redaction-safe list of skills accessible to this persona/profile.
 
     Reports skill *identity* and install/hash status (names only — never SKILL.md
@@ -775,9 +1873,27 @@ def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any
         source_label = "profile_skills_snapshot"
     if not declared:
         return []
+    explicit_additions: set[str] = set()
+    try:
+        from .config import load_agent_runtime_config
+
+        cfg = load_agent_runtime_config()
+        overrides = (getattr(cfg, "personas", {}) or {}).get(
+            str(getattr(persona, "id", "")), {}
+        )
+        if isinstance(overrides, dict):
+            raw_additions = overrides.get("skills") or []
+            if isinstance(raw_additions, str):
+                try:
+                    decoded = json.loads(raw_additions)
+                    raw_additions = decoded if isinstance(decoded, list) else [raw_additions]
+                except Exception:
+                    raw_additions = [raw_additions]
+            explicit_additions = {str(item).strip() for item in raw_additions}
+    except Exception:
+        pass
     tracked: set[str] = set()
     mismatched: set[str] = set()
-    missing: set[str] = set()
     # Resolve the persona's OWN profile home so skill hash/missing checks run against
     # the profile the persona actually runs on — mirroring profile_readiness (the
     # authoritative surface). Without hermes_home these checks fall back to the active
@@ -799,32 +1915,96 @@ def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any
         mismatched = set(harness_skill_hash_mismatches(sorted(tracked), hermes_home=profile_home))
     except Exception:
         pass
-    try:
-        from .profile_readiness import _missing_skill_names
+    from agent.skill_utils import (
+        resolve_skill,
+        skill_package_content_hash,
+        skill_runtime_compatibility,
+    )
 
-        skill_root = (profile_home / "skills") if profile_home is not None else None
-        missing = set(_missing_skill_names(sorted(tracked), skill_root=skill_root))
-    except Exception:
-        pass
     skills: list[dict[str, Any]] = []
+    loaded_skill_names = loaded_skill_names or set()
+    queued_skill_names = queued_skill_names or set()
+    instance_override_names = instance_override_names or set()
     for name in declared[:80]:
         token = safe_assignment_token(name) or name
-        if name in missing:
-            status = "missing"
+        resolution = resolve_skill(name)
+        selected = resolution.candidate
+        compatibility = skill_runtime_compatibility(
+            selected, surface="mission_chat", root_node_mode=False
+        )
+        assignment_policy = (
+            "instance_override"
+            if token in instance_override_names
+            else "explicit_addition"
+            if name in explicit_additions
+            else str(compatibility.get("load_policy") or "recommended")
+        )
+        load_state = (
+            "loaded_this_turn"
+            if token in loaded_skill_names
+            else "queued_next_turn"
+            if token in queued_skill_names
+            else "assigned_not_loaded"
+        )
+        if resolution.status != "resolved":
+            status = resolution.status
         elif name in mismatched:
             status = "hash_mismatch"
         else:
-            status = "accessible"
+            status = load_state
+        content_hash = (
+            skill_package_content_hash(selected.skill_dir, selected.skill_md)
+            if selected
+            else None
+        )
         skills.append(
             {
                 "name": token,
                 "kind": "skill",
                 "status": status,
-                "hash_tracked": name in tracked,
-                "source": source_label,
+                "hash_tracked": content_hash is not None,
+                "source": (
+                    "persona_instance" if token in instance_override_names else source_label
+                ),
+                "assignment_source": (
+                    "persona_instance" if token in instance_override_names else source_label
+                ),
+                "assignment_policy": assignment_policy,
+                "load_state": load_state,
+                "resolution_status": resolution.status,
+                "source_kind": selected.source_kind if selected else None,
+                "content_hash": content_hash,
+                "candidate_count": len(resolution.candidates),
+                "compatibility": compatibility,
             }
         )
     return skills
+
+
+def _persona_skill_assignment_removals(persona: Any) -> list[str]:
+    try:
+        from .config import load_agent_runtime_config
+
+        cfg = load_agent_runtime_config()
+        overrides = (getattr(cfg, "personas", {}) or {}).get(
+            str(getattr(persona, "id", "")), {}
+        )
+        raw = overrides.get("skills_remove") if isinstance(overrides, dict) else []
+        if isinstance(raw, str):
+            try:
+                decoded = json.loads(raw)
+                raw = decoded if isinstance(decoded, list) else [raw]
+            except Exception:
+                raw = [raw]
+        return sorted(
+            {
+                safe_assignment_token(item)
+                for item in raw or []
+                if safe_assignment_token(item)
+            }
+        )
+    except Exception:
+        return []
 
 
 # The installed-skill catalog walk parses every SKILL.md frontmatter (~1k
@@ -891,7 +2071,33 @@ def available_skills_context(
         if isinstance(item, dict) and safe_assignment_token(item.get("name"))
     }
     rows: list[dict[str, Any]] = []
+    shared_by_name: dict[str, dict[str, Any]] = {}
+    realm_rows: list[dict[str, Any]] = []
+    try:
+        from .skills_inventory import build_realm_publish_states, build_shared_catalog
+
+        _, _, catalog = build_shared_catalog()
+        shared_by_name = {
+            str(item.get("slug") or ""): item
+            for item in catalog
+            if isinstance(item, dict)
+        }
+        realm_rows = build_realm_publish_states()
+    except Exception:
+        pass
     installed = _installed_skill_catalog()
+    from agent.skill_utils import (
+        resolve_skills,
+        skill_package_content_hash,
+        skill_runtime_compatibility,
+    )
+
+    installed_names = [
+        safe_assignment_token(item.get("name"))
+        for item in installed
+        if isinstance(item, dict) and safe_assignment_token(item.get("name"))
+    ]
+    resolutions = resolve_skills(installed_names)
     if isinstance(installed, list):
         for skill in installed:
             if not isinstance(skill, dict):
@@ -903,16 +2109,48 @@ def available_skills_context(
             status = "accessible" if accessible else "available"
             if accessible and isinstance(accessible.get("status"), str):
                 status = safe_assignment_token(accessible.get("status")) or status
+            resolution = resolutions.get(name)
+            if resolution is None:
+                continue
+            selected = resolution.candidate
+            compatibility = skill_runtime_compatibility(
+                selected, surface="mission_chat", root_node_mode=False
+            )
+            shared = shared_by_name.get(name)
+            realm_sync = _skill_realm_sync(name, realm_rows) if shared else []
+            content_hash = (
+                skill_package_content_hash(selected.skill_dir, selected.skill_md)
+                if selected
+                else None
+            )
             rows.append(
                 {
                     "name": name,
                     "kind": "skill",
                     "status": status,
-                    "hash_tracked": bool(accessible.get("hash_tracked")) if accessible else False,
+                    "load_state": (
+                        safe_assignment_token(accessible.get("load_state"))
+                        if accessible
+                        else "catalog_only"
+                    )
+                    or ("assigned_not_loaded" if accessible else "catalog_only"),
+                    "hash_tracked": content_hash is not None,
                     "source": "installed_skill_catalog",
                     "category": safe_assignment_token(skill.get("category")) or "skills",
                     "description": safe_assignment_text(skill.get("description"), limit=220) or "",
-                    "loadable": True,
+                    "loadable": bool(
+                        resolution.status == "resolved"
+                        and compatibility.get("compatible")
+                    ),
+                    "resolution_status": resolution.status,
+                    "source_kind": selected.source_kind if selected else None,
+                    "content_hash": content_hash,
+                    "core_install_state": (
+                        "current" if resolution.status == "resolved" else resolution.status
+                    ),
+                    "realm_sync": realm_sync,
+                    "shared_catalog": shared is not None,
+                    "compatibility": compatibility,
                 }
             )
     if not rows:
@@ -942,11 +2180,42 @@ def available_skills_context(
     return deduped
 
 
+def _skill_realm_sync(
+    skill_name: str, realms: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for realm in realms:
+        mode = str(realm.get("skill_publish_mode") or "all")
+        selection = {str(item) for item in realm.get("skill_selection") or []}
+        published = mode == "all" or skill_name in selection
+        state = str(realm.get("sync_state") or "")
+        drift = {str(item) for item in realm.get("skills_drift") or []}
+        if not published:
+            status = "not_published"
+        elif not state:
+            status = "unknown"
+        elif skill_name in drift:
+            status = "drifted"
+        elif state == "in_sync":
+            status = "in_sync"
+        else:
+            status = "unknown"
+        rows.append(
+            {
+                "realm_id": safe_assignment_token(realm.get("realm_id")),
+                "name": safe_assignment_text(realm.get("name"), limit=120),
+                "status": status,
+            }
+        )
+    return rows
+
+
 def used_skills_context(
     *,
     final_model_input: dict[str, Any] | None = None,
     trace_events: Iterable[dict[str, Any]] | None = None,
     queued_skills: Iterable[str] | None = None,
+    required_preload_skills: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Redaction-safe list of skills actually loaded/read during this turn."""
     names: list[str] = []
@@ -961,13 +2230,18 @@ def used_skills_context(
         if not _skill_trace_event_counts_as_used(entry):
             continue
         _append_used_skill_name(names, _extract_skill_name(entry))
+    required = {
+        token
+        for item in required_preload_skills or ()
+        if (token := safe_assignment_token(item))
+    }
     rows = [
         {
             "name": name,
             "kind": "skill",
             "status": "used",
-            "hash_tracked": False,
             "source": "skill_view_trace",
+            **_resolved_skill_receipt(name),
         }
         for name in names
     ]
@@ -980,11 +2254,39 @@ def used_skills_context(
                 "name": token,
                 "kind": "skill",
                 "status": "used",
-                "hash_tracked": False,
-                "source": "queued_next_turn_skill",
+                "source": (
+                    "required_preload"
+                    if token in required
+                    else "queued_next_turn_skill"
+                ),
+                **_resolved_skill_receipt(token),
             }
         )
     return rows
+
+
+def _resolved_skill_receipt(name: str) -> dict[str, Any]:
+    from agent.skill_utils import resolve_skill, skill_package_content_hash
+
+    resolution = resolve_skill(name)
+    selected = resolution.candidate
+    content_hash = (
+        skill_package_content_hash(selected.skill_dir, selected.skill_md)
+        if selected
+        else None
+    )
+    return {
+        "resolution_status": resolution.status,
+        "source_kind": selected.source_kind if selected else None,
+        "content_hash": content_hash,
+        "hash_tracked": content_hash is not None,
+    }
+
+
+def _generated_prompt_contract_hash() -> str:
+    from .decision_contract_registry import contract_hash
+
+    return contract_hash()
 
 
 def _list_used_skill_entries(final_model_input: dict[str, Any] | None) -> list[Any]:
@@ -1096,6 +2398,178 @@ def _profile_context_files(profile: str) -> list[dict[str, Any]]:
     return files
 
 
+# --------------------------------------------------------------------------- #
+# Per-item token attribution (2026-07-18): the operator asked to "see how many
+# tokens each thing takes". Provider meters only whole API calls, so per-item
+# numbers are necessarily ``bytes // 4`` (context files) / ``chars // 4``
+# (prompt-layer text) ESTIMATES — labeled as such by the launcher, which
+# reconciles them against the metered ``turn_usage.first_call_prompt_tokens``
+# with one clamped residual row. Hermes emits the raw sizes because the launcher
+# only receives redaction-safe previews, not the underlying files/layer text.
+# --------------------------------------------------------------------------- #
+
+def _token_estimate_from_bytes(byte_count: int | None) -> int | None:
+    """Rough token estimate for a stored file: ``bytes // 4``.
+
+    ``None`` (no estimate) when the byte count is unknown — an absent estimate
+    is honest; a fabricated one would masquerade as a measurement.
+    """
+    if not isinstance(byte_count, int) or byte_count <= 0:
+        return None
+    return byte_count // 4
+
+
+def _layer_text_size(text: str | None) -> dict[str, int]:
+    """``{chars, token_estimate}`` for a prompt-layer's actual text.
+
+    Returns an EMPTY dict when the layer's text is not available at this seam
+    (e.g. the persona-identity / Hermes-core blocks are assembled later in the
+    turn) — the launcher then attributes those layers to the residual instead of
+    inventing a number. A present-but-empty layer (a blank surface prompt) is a
+    real ``0``, distinct from absent.
+    """
+    if not isinstance(text, str):
+        return {}
+    chars = len(text)
+    return {"chars": chars, "token_estimate": chars // 4}
+
+
+# --------------------------------------------------------------------------- #
+# T8 (2026-07-18): per-file IN-PROMPT contribution. The loaded-file
+# ``token_estimate`` (``bytes // 4``) answers "how big is the file"; these
+# additive ``prompt_chars`` / ``prompt_token_estimate`` fields answer "how much
+# of that file actually landed in the assembled prompt this turn" — wildly
+# different for the 41 KB skills snapshot (renders to ~9 KB of index text) and
+# ``config.yaml`` (never pasted → a deliberate 0). Only files whose contributed
+# text is REACHABLE at the T5 assembly seam get the fields; everything else is
+# left untouched so the launcher keeps the honest loaded-file chip rather than a
+# guess. Both numbers ride the row.
+# --------------------------------------------------------------------------- #
+
+def _set_row_prompt_contribution(row: dict[str, Any], chars: int | None) -> None:
+    """Attach ``prompt_chars`` + ``prompt_token_estimate`` (``chars // 4``) to a
+    context-file row. A ``None``/negative char count leaves the row untouched
+    (the field stays ABSENT → the launcher omits the in-prompt chip); a real 0
+    (config.yaml) is a deliberate zero, distinct from absent."""
+
+    if not isinstance(row, dict) or chars is None or chars < 0:
+        return
+    row["prompt_chars"] = chars
+    row["prompt_token_estimate"] = chars // 4
+
+
+def _soul_overlay_prompt_chars(persona: Any) -> int | None:
+    """Chars of the persona's own soul overlay as PASTED into the surface
+    message, or ``None`` when no overlay resolves. Uses the SAME function the
+    assembly pastes with (``persona_runtime._safe_read_soul_overlay``), so the
+    SOUL.md row's in-prompt number is exact, not a re-derivation."""
+
+    try:
+        from .persona_runtime import _safe_read_soul_overlay
+
+        soul = _safe_read_soul_overlay(
+            getattr(persona, "soul_overlay_path", None),
+            hermes_profile=getattr(persona, "hermes_profile", None),
+        )
+        return len(soul) if isinstance(soul, str) and soul else None
+    except Exception:
+        return None
+
+
+def _workspace_agents_prompt_chars(
+    workspace_agents: "WorkspaceAgentsContext | None",
+) -> int | None:
+    """Chars of the workspace-AGENTS.md PART pasted into the surface message
+    (fixed preamble + stripped body), or ``None`` when nothing was injected.
+    Reuses ``persona_runtime.MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE`` so the
+    measured part can never drift from the text actually pasted."""
+
+    if workspace_agents is None or workspace_agents.content is None:
+        return None
+    try:
+        from .persona_runtime import MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE
+
+        body = str(workspace_agents.content or "").strip()
+        return len(MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE) + len(body)
+    except Exception:
+        return None
+
+
+def _mission_chat_template_prompt_chars(persona: Any) -> int | None:
+    """Chars of the persona-identity + operative-rules TEMPLATE fed into the
+    surface message (the codex ``instructions``), EXCLUDING the soul overlay and
+    any profile memory — those ride their own file rows. This is the
+    ``persona_identity`` prompt layer's own contribution: the launcher resolver
+    sums it as a non-mirror layer, so it MUST be template-only or it would
+    double-count the SOUL.md / MEMORY.md / USER.md rows. Reachable because T5
+    made the surface-message parts explicit. ``None`` on any failure (the layer
+    then folds into the residual, as before)."""
+
+    try:
+        from .persona_runtime import (
+            _mission_chat_identity_prompt,
+            _mission_chat_operative_rules,
+        )
+
+        identity = _mission_chat_identity_prompt(persona)
+        rules = _mission_chat_operative_rules()
+        return len(identity) + len(rules)
+    except Exception:
+        return None
+
+
+def _attach_context_file_prompt_contributions(
+    context_files: list[dict[str, Any]],
+    *,
+    soul_chars: int | None,
+    workspace_chars: int | None,
+) -> None:
+    """Attach the per-file in-prompt contribution to the rows reachable at this
+    PRE-turn seam: SOUL.md (soul overlay), the workspace AGENTS.md row (workspace
+    part), and config.yaml (a deliberate 0 — consumed as configuration, never
+    pasted). MEMORY.md / USER.md are left untouched: their in-prompt text is
+    rendered later through the memory tool's dedup/sanitize pipeline and is not
+    reproducible here, so the launcher keeps their loaded-file chip rather than a
+    guess. ``.skills_prompt_snapshot.json`` is attached POST-turn (it needs the
+    constructed agent's resolved tool set — see
+    ``attach_prompt_observability_turn_results``)."""
+
+    for row in context_files:
+        if not isinstance(row, dict):
+            continue
+        if row.get("kind") == "workspace_context":
+            _set_row_prompt_contribution(row, workspace_chars)
+            continue
+        name = row.get("name")
+        if name == "SOUL.md":
+            _set_row_prompt_contribution(row, soul_chars)
+        elif name == "config.yaml":
+            _set_row_prompt_contribution(row, 0)
+
+
+def _attach_skills_prompt_contribution(
+    context: dict[str, Any], final_model_input: dict[str, Any] | None
+) -> None:
+    """Attach the rendered skills-index chars (recorded on ``final_model_input``
+    by the profile runner, measured against the agent's real tool set) to the
+    ``.skills_prompt_snapshot.json`` row. POST-turn only: the render needs the
+    constructed agent, which does not exist at the pre-turn build. Absent field →
+    the row keeps its loaded-file chip (never fabricated)."""
+
+    if not isinstance(final_model_input, dict):
+        return
+    chars = _safe_int(final_model_input.get("skills_prompt_chars"))
+    if chars is None:
+        return
+    files = context.get("context_files")
+    if not isinstance(files, list):
+        return
+    for row in files:
+        if isinstance(row, dict) and row.get("name") == ".skills_prompt_snapshot.json":
+            _set_row_prompt_contribution(row, chars)
+            break
+
+
 def _context_file_summary(path: Path, *, included: bool) -> dict[str, Any]:
     data: dict[str, Any] = {
         "path": str(path),
@@ -1114,6 +2588,9 @@ def _context_file_summary(path: Path, *, included: bool) -> dict[str, Any]:
         return data
     data["sha256"] = hashlib.sha256(raw).hexdigest().upper()
     data["bytes"] = len(raw)
+    estimate = _token_estimate_from_bytes(len(raw))
+    if estimate is not None:
+        data["token_estimate"] = estimate
     if path.name in {"SOUL.md", "MEMORY.md", "USER.md", "AGENTS.md"}:
         text = raw.decode("utf-8", errors="replace")
         data["preview"] = _safe_preview(text)
@@ -1172,6 +2649,153 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
         "system_message_supplied": bool(value.get("system_message_supplied")),
         "message_count": _safe_int(value.get("message_count")) or len(safe_messages),
         "messages": safe_messages,
+        # Tool schemas ship in full on every API call and are the largest fixed
+        # slice of the prompt after the system prompt. This whitelist previously
+        # dropped them, which is why the context budget could not see (or
+        # estimate) them at all.
+        "tool_schema": _safe_tool_schema(value.get("tool_schema")),
+        "cache_routing": _safe_cache_routing(value.get("cache_routing")),
+    }
+
+
+def _safe_cache_routing(value: Any) -> dict[str, Any] | None:
+    """Whitelist the one-way cache-routing diagnostics.
+
+    No raw cache key, session id, or header value is accepted by this boundary;
+    only transport-produced fingerprints, presence bits, and typed provenance
+    survive into SessionDB-reachable prompt observability.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    return {
+        "schema_version": _safe_int(value.get("schema_version")) or 1,
+        "backend": safe_assignment_token(value.get("backend")),
+        "prompt_cache_key_present": value.get("prompt_cache_key_present") is True,
+        "prompt_cache_key_source": safe_assignment_token(
+            value.get("prompt_cache_key_source")
+        ),
+        "prompt_cache_key_fingerprint": _safe_cache_fingerprint(
+            value.get("prompt_cache_key_fingerprint")
+        ),
+        "cache_scope_source": safe_assignment_token(value.get("cache_scope_source")),
+        "session_header_present": value.get("session_header_present") is True,
+        "session_header_fingerprint": _safe_cache_fingerprint(
+            value.get("session_header_fingerprint")
+        ),
+        "client_request_header_present": value.get("client_request_header_present")
+        is True,
+        "client_request_header_fingerprint": _safe_cache_fingerprint(
+            value.get("client_request_header_fingerprint")
+        ),
+        "scope_headers_match": value.get("scope_headers_match")
+        if isinstance(value.get("scope_headers_match"), bool)
+        else None,
+        "raw_values_omitted": True,
+    }
+
+
+def _safe_cache_fingerprint(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    prefix = "sha256:"
+    digest = text[len(prefix) :] if text.startswith(prefix) else ""
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        return None
+    return f"{prefix}{digest}"
+
+
+_TURN_USAGE_FIELDS = (
+    "api_calls",
+    "prompt_tokens",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "first_call_prompt_tokens",
+)
+
+
+def _safe_turn_usage(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Key-whitelisted, int-coerced turn usage. All ints — nothing to redact."""
+    if not isinstance(value, dict):
+        return None
+    safe = {field: _safe_int(value.get(field)) for field in _TURN_USAGE_FIELDS}
+    if all(number is None for number in safe.values()):
+        return None
+    return safe
+
+
+def turn_usage_from_result(result: Any) -> dict[str, int] | None:
+    """Shape an ``AgentRunResult`` into the envelope's ``turn_usage`` block.
+
+    Mission Control builds a fresh runtime per turn, so the result's totals ARE
+    this turn's totals, and ``usage_ledger[0]`` is the turn's FIRST API call —
+    the one whose prompt is exactly the assembled context (system + user + tool
+    schemas) with no tool-result loop growth yet. That single number is what the
+    context budget must show; the sums are what the message cost.
+
+    Lives here, beside the envelope contract it feeds, rather than in the CLI
+    command part — `hermes_cli/harness_parts/persona_commands.py` is exec'd into
+    harness globals, so nothing defined there is importable or unit-testable.
+    """
+    if result is None:
+        return None
+    ledger = getattr(result, "usage_ledger", None)
+    first_call_prompt: int | None = None
+    if isinstance(ledger, list) and ledger and isinstance(ledger[0], dict):
+        candidate = ledger[0].get("prompt_tokens")
+        if isinstance(candidate, int) and candidate > 0:
+            first_call_prompt = candidate
+
+    def _count(name: str) -> int:
+        value = getattr(result, name, None)
+        return value if isinstance(value, int) and value > 0 else 0
+
+    input_tokens = _count("input_tokens")
+    cache_read_tokens = _count("cache_read_tokens")
+    cache_write_tokens = _count("cache_write_tokens")
+    usage = {
+        "api_calls": _count("api_calls"),
+        # prompt = input + cache_read + cache_write (CanonicalUsage's own
+        # definition — input_tokens is already the uncached remainder).
+        "prompt_tokens": input_tokens + cache_read_tokens + cache_write_tokens,
+        "input_tokens": input_tokens,
+        "output_tokens": _count("output_tokens"),
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "reasoning_tokens": _count("reasoning_tokens"),
+        "first_call_prompt_tokens": first_call_prompt,
+    }
+    if not any(value for value in usage.values()):
+        return None
+    return usage
+
+
+_SAFE_TOOL_NAME_LIMIT = 120
+
+
+def _safe_tool_schema(value: Any) -> dict[str, Any] | None:
+    """Redaction-safe tool-schema summary: names + count + wire size.
+
+    Never carries the schema bodies (they can embed paths/enums); the byte size
+    is what the context budget needs.
+    """
+    if not isinstance(value, dict):
+        return None
+    names: list[str] = []
+    raw_names = value.get("final_model_tools")
+    if isinstance(raw_names, list):
+        for entry in raw_names[:_SAFE_TOOL_NAME_LIMIT]:
+            token = safe_assignment_token(entry)
+            if token:
+                names.append(token)
+    return {
+        "schema_version": _safe_int(value.get("schema_version")) or 1,
+        "kind": safe_assignment_token(value.get("kind")) or "actual_model_tools",
+        "final_model_tools": names,
+        "tool_count": _safe_int(value.get("tool_count")),
+        "json_bytes": _safe_int(value.get("json_bytes")),
     }
 
 

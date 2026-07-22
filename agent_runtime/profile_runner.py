@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 import hashlib
+import json
 import os
 from pathlib import Path
 from threading import Event, RLock, Timer
@@ -13,7 +14,28 @@ import re
 from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
+from .personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
 from .profile_context import PersonaProfileBinding, persona_profile_context
+
+
+def _blocked_tool_names_with_registry_hygiene(requested: list[str] | None) -> list[str]:
+    """Union the fork registry-hygiene block into a request's ``blocked_tool_names``.
+
+    This is the single fork-owned chokepoint that makes the deregistered upstream
+    toolsets (``kanban`` + ``feishu_doc`` / ``feishu_drive``) unresolvable on EVERY
+    agent-runtime lane — the persona chat/run lanes already carry them via
+    ``PERSONA_BLOCKED_TOOLS``, but the worker / root-node lanes construct their
+    request with ``blocked_tool_names=[]`` and would otherwise resolve them. Applied
+    here (agent construction) so no call site can opt out. Order-preserving; the
+    downstream tool-def cache keys on the set, so duplicates/order are harmless."""
+
+    names = list(requested or [])
+    seen = set(names)
+    for name in sorted(REGISTRY_HYGIENE_BLOCKED_TOOLS):
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
 
 
 class ProfileRunnerError(RuntimeError):
@@ -48,6 +70,32 @@ class AgentRunRequest:
     blocked_tool_names: list[str] | None = None
     skills: list[str] | None = None
     session_id: str | None = None
+    # Codex cache-scope routing hint (header-only), DISTINCT from ``session_id``.
+    # The persona-chat lane passes ``session_id=None`` so the runtime does not
+    # re-load a transcript it already baked into the message, but the
+    # ChatGPT-Codex backend routes its prompt cache on the ``session_id`` /
+    # ``x-client-request-id`` HTTP headers. ``cache_scope_id`` supplies a STABLE
+    # per-conversation value for those headers without ever touching transcript
+    # or session loading (which stay keyed on ``session_id``). None ⇒ the codex
+    # transport falls back to ``session_id`` (worker/mission-run lanes carry a
+    # real one, so their behavior is unchanged). See T10c / codex.py header seam.
+    cache_scope_id: str | None = None
+    # Stable persona-chat root used by terminal/file tool ephemeral state.
+    # It is intentionally separate from task_id and native compression tip.
+    tool_execution_scope_id: str | None = None
+    conversation_history: list[dict[str, Any]] | None = None
+    reuse_current_user_message: bool = False
+    client_message_id: str | None = None
+    turn_id: str | None = None
+    root_chat_session_id: str | None = None
+    persona_chat_runtime_registry: Any | None = None
+    persona_chat_runtime_signature: str | None = None
+    persona_chat_native_revision: str | None = None
+    # Explicit one-turn proof/debug seam. Normal persona-chat turns leave these
+    # unset and inherit the model/profile compressor configuration.
+    compression_threshold_tokens_override: int | None = None
+    compression_protect_first_n_override: int | None = None
+    compression_protect_last_n_override: int | None = None
     platform: str = "agent_runtime"
     quiet_mode: bool = True
     skip_context_files: bool = True
@@ -94,6 +142,12 @@ class AgentRunResult:
     cache_read_tokens: int | None = None
     cache_write_tokens: int | None = None
     reasoning_tokens: int | None = None
+    # Per-call canonical usage rows for this turn (call_index/prompt_tokens/…),
+    # in call order. The token fields above are turn-cumulative and answer "what
+    # did this turn burn"; row 1 answers "how big was the assembled context",
+    # which is the only honest source for Mission Control's context budget.
+    # Written at the accrual sites (agent.usage_pricing.record_api_call_usage).
+    usage_ledger: list[dict[str, Any]] = field(default_factory=list)
     latency_ms: int | None = None
     profile_timing: dict[str, int] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -139,6 +193,59 @@ class _ToolBudgetGuard:
             return
 
 
+def _prepare_resident_persona_chat_agent(agent: Any, candidate: Any) -> None:
+    """Refresh turn-scoped state without erasing native compressor memory."""
+
+    for name in (
+        "status_callback", "tool_progress_callback", "tool_start_callback",
+        "tool_complete_callback", "clarify_callback", "cache_scope_id", "max_iterations",
+    ):
+        if hasattr(candidate, name):
+            setattr(agent, name, getattr(candidate, name))
+    for name in (
+        "session_prompt_tokens", "session_completion_tokens", "session_total_tokens",
+        "session_api_calls", "session_input_tokens", "session_output_tokens",
+        "session_cache_read_tokens", "session_cache_write_tokens",
+        "session_reasoning_tokens", "session_estimated_cost_usd", "_api_call_count",
+    ):
+        if hasattr(agent, name):
+            setattr(agent, name, 0.0 if name.endswith("cost_usd") else 0)
+    agent.session_usage_ledger = []
+    for name, value in (
+        ("_stream_callback", None), ("_interrupt_requested", False),
+        ("_interrupt_reason", None), ("_current_api_request_id", ""),
+        ("_current_turn_id", None), ("_current_task_id", None),
+    ):
+        if hasattr(agent, name):
+            setattr(agent, name, value)
+
+
+def _finish_resident_persona_chat_agent(agent: Any) -> None:
+    """Detach every turn-local handle while preserving conversation state."""
+
+    for name in (
+        "status_callback",
+        "tool_progress_callback",
+        "tool_start_callback",
+        "tool_complete_callback",
+        "clarify_callback",
+        "_stream_callback",
+    ):
+        if hasattr(agent, name):
+            setattr(agent, name, None)
+    for name, value in (
+        ("_interrupt_requested", False),
+        ("_interrupt_reason", None),
+        ("_current_api_request_id", ""),
+        ("_current_turn_id", None),
+        ("_current_task_id", None),
+        ("_persona_chat_client_message_id", None),
+        ("_persona_chat_turn_id", None),
+    ):
+        if hasattr(agent, name):
+            setattr(agent, name, value)
+
+
 class ProfileAgentRunner:
     def __init__(self, *, agent_factory: Callable[..., Any] | None = None, credential_pool=None, session_db=None):
         self._uses_default_agent_factory = agent_factory is None
@@ -152,10 +259,29 @@ class ProfileAgentRunner:
         if binding.readiness != "ready":
             raise ProfileRunnerError(binding.summary)
         started = time.perf_counter()
-        raw_result, agent, profile_timing = self._execute_agent_run(binding, request)
+        resident = bool(
+            request.persona_chat_runtime_registry is not None
+            and request.root_chat_session_id
+        )
+        try:
+            raw_result, agent, profile_timing = self._execute_agent_run(
+                binding, request
+            )
+        except Exception:
+            if resident:
+                request.persona_chat_runtime_registry.evict(
+                    request.root_chat_session_id
+                )
+            raise
         normalize_started = time.perf_counter()
-        result = _normalize_result(raw_result, agent=agent)
-        profile_timing["result_normalize_ms"] = _emit_request_timing(request, "result_normalize", normalize_started)
+        try:
+            result = _normalize_result(raw_result, agent=agent)
+            profile_timing["result_normalize_ms"] = _emit_request_timing(
+                request, "result_normalize", normalize_started
+            )
+        finally:
+            if resident:
+                _finish_resident_persona_chat_agent(agent)
         result.latency_ms = _elapsed_ms(started)
         result.profile_timing = profile_timing
         if isinstance(result.raw, dict):
@@ -170,10 +296,11 @@ class ProfileAgentRunner:
         if result.raw.get("failed") and result.raw.get("error"):
             raise ProfileRunnerError(str(result.raw.get("error")))
         return result
-
     def _execute_agent_run(self, binding: PersonaProfileBinding, request: AgentRunRequest) -> tuple[Any, Any, dict[str, int]]:
         timing: dict[str, int] = {}
-        with _WORKDIR_LOCK, persona_profile_context(binding, runtime_root=request.runtime_root), _agent_workdir(request.workdir):
+        from .persona_chat_continuity import tool_execution_scope
+
+        with _WORKDIR_LOCK, persona_profile_context(binding, runtime_root=request.runtime_root), _agent_workdir(request.workdir), tool_execution_scope(request.tool_execution_scope_id):
             try:
                 runtime_started = time.perf_counter()
                 runtime = _resolve_request_runtime(request)
@@ -209,12 +336,15 @@ class ProfileAgentRunner:
                 **reasoning_kwargs,
                 enabled_toolsets=request.enabled_toolsets,
                 disabled_toolsets=request.disabled_toolsets,
-                blocked_tool_names=request.blocked_tool_names,
+                blocked_tool_names=_blocked_tool_names_with_registry_hygiene(request.blocked_tool_names),
                 quiet_mode=request.quiet_mode,
                 skip_context_files=request.skip_context_files,
                 skip_memory=request.skip_memory,
                 platform=request.platform,
                 session_id=request.session_id,
+                # Header-only codex cache-scope hint; the default factory applies
+                # it to the constructed agent (never to session/transcript load).
+                cache_scope_id=request.cache_scope_id,
                 credential_pool=self._credential_pool,
                 session_db=self._session_db,
                 status_callback=status_callback,
@@ -224,6 +354,49 @@ class ProfileAgentRunner:
                 tool_complete_callback=_progress_adapter(request.progress_callback, "run.tool.finished", guard=budget_guard),
                 clarify_callback=request.clarify_callback,
             )
+            if request.persona_chat_runtime_registry is not None and request.root_chat_session_id:
+                active_id = request.session_id or request.root_chat_session_id
+                entry, reused, rebuild_reason = request.persona_chat_runtime_registry.acquire(
+                    root_session_id=request.root_chat_session_id,
+                    active_session_id=active_id,
+                    signature=request.persona_chat_runtime_signature or "default",
+                    revision=request.persona_chat_native_revision or "unknown",
+                    factory=lambda: agent,
+                )
+                if reused:
+                    _prepare_resident_persona_chat_agent(entry.agent, agent)
+                    agent = entry.agent
+                timing["resident_actor_reused"] = 1 if reused else 0
+                if rebuild_reason:
+                    timing[f"resident_rebuild_{rebuild_reason}"] = 1
+            if request.root_chat_session_id:
+                agent._persona_chat_root_session_id = request.root_chat_session_id
+                agent._persona_chat_client_message_id = request.client_message_id
+                agent._persona_chat_turn_id = request.turn_id
+                # Persona-chat continuity deliberately keeps a stable logical
+                # root while native compression advances to a child SessionDB
+                # tip.  Hermes' global default is in-place compaction, which
+                # cannot express that lineage (and makes the Launcher observe
+                # depth=0 forever), so this lane must always use rotation.
+                agent.compression_in_place = False
+                compressor = getattr(agent, "context_compressor", None)
+                if compressor is not None:
+                    if request.compression_threshold_tokens_override is not None:
+                        threshold_tokens = int(request.compression_threshold_tokens_override)
+                        if threshold_tokens <= 0:
+                            raise ValueError("compression threshold tokens must be positive")
+                        compressor.threshold_tokens = threshold_tokens
+                        context_length = int(getattr(compressor, "context_length", 0) or 0)
+                        if context_length > 0:
+                            compressor.threshold_percent = threshold_tokens / context_length
+                    if request.compression_protect_first_n_override is not None:
+                        compressor.protect_first_n = max(
+                            0, int(request.compression_protect_first_n_override)
+                        )
+                    if request.compression_protect_last_n_override is not None:
+                        compressor.protect_last_n = max(
+                            0, int(request.compression_protect_last_n_override)
+                        )
             timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
             budget_guard.set_interrupt_callback(lambda reason: _interrupt_agent_for_budget(agent, reason))
             agent_ready_cleanup = _notify_agent_ready(request, agent)
@@ -236,6 +409,10 @@ class ProfileAgentRunner:
                         "system_message": request.system_message,
                         "task_id": request.task_id,
                     }
+                    if request.conversation_history is not None:
+                        conversation_kwargs["conversation_history"] = request.conversation_history
+                    if request.reuse_current_user_message:
+                        conversation_kwargs["reuse_current_user_message"] = True
                     if request.stream_callback is not None:
                         conversation_kwargs["stream_callback"] = request.stream_callback
                     raw_result = agent.run_conversation(**conversation_kwargs)
@@ -278,6 +455,10 @@ class ProfileAgentRunner:
                     "system_message": request.system_message,
                     "task_id": request.task_id,
                 }
+                if request.conversation_history is not None:
+                    conversation_kwargs["conversation_history"] = request.conversation_history
+                if request.reuse_current_user_message:
+                    conversation_kwargs["reuse_current_user_message"] = True
                 if request.stream_callback is not None:
                     conversation_kwargs["stream_callback"] = request.stream_callback
                 raw_result = agent.run_conversation(**conversation_kwargs)
@@ -743,6 +924,46 @@ def _agent_chat_target_label(tool_name: str | None, invocation: Any) -> str | No
     return f"→ {persona}: {excerpt}" if excerpt else f"→ {persona}"
 
 
+_DISPATCH_TARGET_MAX = 120
+_DISPATCH_ORDER_MAX = 1500
+
+
+def _scrub_dispatch_order(message: Any) -> str | None:
+    """The FULL relay order for the operator console's dispatch tile: per-line
+    secret drop (any line matching :func:`_line_has_secret` is removed, the rest
+    kept), newlines PRESERVED (never whitespace-collapsed like ``target_label``),
+    capped at :data:`_DISPATCH_ORDER_MAX` chars with a trailing ellipsis."""
+
+    text = str(message or "").replace("\r\n", "\n").replace("\r", "\n")
+    kept = [line for line in text.split("\n") if not _line_has_secret(line)]
+    order = "\n".join(kept).strip()
+    if not order:
+        return None
+    if len(order) > _DISPATCH_ORDER_MAX:
+        order = f"{order[: _DISPATCH_ORDER_MAX - 1]}…"
+    return order
+
+
+def _agent_chat_dispatch_fields(tool_name: str | None, invocation: Any) -> dict[str, str]:
+    """Structured dispatch fields for an ``agent_chat_send`` relay so the
+    operator console renders a first-class ``→ target`` chip and the FULL order
+    without re-parsing the prose ``target_label`` (which excerpts to 90 chars).
+    ``target_label``/``summary`` prose stay byte-identical — these are additive
+    keys alongside them. Consistent with :func:`_agent_chat_target_label`: when
+    the persona carries a secret, both the label and these fields drop it."""
+
+    if tool_name != "agent_chat_send" or not isinstance(invocation, dict):
+        return {}
+    fields: dict[str, str] = {}
+    persona = str(invocation.get("persona_id") or "").strip()
+    if persona and not _line_has_secret(persona):
+        fields["dispatch_target"] = persona[:_DISPATCH_TARGET_MAX]
+    order = _scrub_dispatch_order(invocation.get("message"))
+    if order:
+        fields["dispatch_order"] = order
+    return fields
+
+
 def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation: Any = None) -> dict[str, Any]:
     payload = {"type": event_type, "phase": "tool", "step": "tool_started", "status": "started"}
     if tool_name:
@@ -754,6 +975,10 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
     if agent_chat_label:
         payload["target_label"] = agent_chat_label
         payload["summary"] = f"Started tool {tool_name}: {agent_chat_label}"
+        # Additive G2 dispatch fields (structured target + full order). The
+        # started event is the authoritative carrier; the launcher merges the
+        # started/finished pair so finished-only is not needed here.
+        payload.update(_agent_chat_dispatch_fields(tool_name, invocation))
         return payload
     command_label = _safe_command_label(invocation)
     if command_label:
@@ -816,6 +1041,9 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
     output = _safe_operator_output(tool_name, result)
     if output:
         payload["output"] = output
+    todo_state = _todo_state_payload(tool_name, result, invocation)
+    if todo_state is not None:
+        payload["todo_state"] = todo_state
     return payload
 
 
@@ -1202,6 +1430,113 @@ def _is_error_result(result: Any) -> bool:
     return False
 
 
+# Bounds for the todo checklist mirrored onto the trace/turn-store lane. The
+# store itself caps content at MAX_TODO_CONTENT_CHARS (4000) / MAX_TODO_ITEMS
+# (256); the operator-console projection is a COMPACT checklist, so the wire
+# copy is tighter — a checklist row is a short line, and the frame must stay
+# minimal (T7: smallest honest emit, no snapshot-frame growth beyond a bounded
+# payload).
+#
+# Over-cap content is marked with an ellipsis, never dropped silently.
+#
+# T9c: id/content are whitespace-collapsed to the SAME shape the persist
+# re-bound (`mission_chat_turns._safe_todo_state`, via `safe_assignment_text`)
+# produces — whitespace runs collapsed to single spaces. The persist lane
+# re-runs `safe_assignment_text` over THIS output, and that function is
+# idempotent on an already-collapsed string (including the over-cap
+# `…`-terminated form), so the live `tool.finished` frame and the reloaded
+# turn-store element carry byte-identical text. (Before T9c the producer only
+# `.strip()`ped, so multi-line/multi-space content diverged: the live lane kept
+# the internal whitespace the persist lane collapsed.)
+_TODO_STATE_MAX_ITEMS = 64
+_TODO_STATE_MAX_CONTENT = 240
+_TODO_STATE_MAX_ID = 120
+_TODO_STATE_VALID_STATUS = {"pending", "in_progress", "completed", "cancelled"}
+
+
+def _todo_state_payload(tool_name: str | None, result: Any, invocation: Any) -> list[dict[str, str]] | None:
+    """Minimal structured todo-checklist state for the operator console (T7).
+
+    The ``todo`` tool keeps its list in-memory per session and re-injects it into
+    the prompt; nothing on the trace/turn-store lane carried the list itself (the
+    element ``args`` is a human summary and ``output`` is gated to terminal
+    tools). This copies the tool RESULT — the authoritative post-write list (all
+    statuses) returned by :func:`tools.todo_tool.todo_tool` — onto the finished
+    event, bounded and validated. Falls back to the invocation's ``todos`` when
+    the result is unparseable. Returns ``None`` for any non-todo tool or when no
+    list is recoverable (unparseable result AND invocation) — absence means "no
+    todo involvement", never fabricate. A recovered but EMPTY list returns an
+    explicit ``[]`` (T9d): a todo write that clears the checklist must tell the
+    operator console to clear it, a state distinct from absence."""
+
+    if (tool_name or "").lower() != "todo":
+        return None
+    todos = _todo_items_from(result)
+    if todos is None:
+        todos = _todo_items_from(invocation)
+    if todos is None:
+        # Neither the result nor the invocation yielded a list — unrecoverable,
+        # so stay silent (absent). This is NOT an empty checklist: a cleared list
+        # comes back as ``[]`` from _todo_items_from and falls through to the
+        # explicit-empty return below (T9d cleared-todo contract).
+        return None
+    items: list[dict[str, str]] = []
+    for raw in todos[:_TODO_STATE_MAX_ITEMS]:
+        if not isinstance(raw, dict):
+            continue
+        # T9c: collapse whitespace to the persisted `safe_assignment_text` shape
+        # (id is a straight cap; content keeps the over-cap ellipsis, which the
+        # persist re-run preserves because it operates on this already-collapsed
+        # output). See the note on the bound constants above.
+        item_id = _collapse_todo_ws(raw.get("id"))[:_TODO_STATE_MAX_ID] or "?"
+        content = _collapse_todo_ws(raw.get("content"))
+        status = str(raw.get("status", "")).strip().lower()
+        if status not in _TODO_STATE_VALID_STATUS:
+            status = "pending"
+        if not content:
+            content = "(no description)"
+        elif len(content) > _TODO_STATE_MAX_CONTENT:
+            content = content[: _TODO_STATE_MAX_CONTENT - 1] + "…"
+        items.append({"id": item_id, "content": content, "status": status})
+    # T9d: return ``items`` directly (NOT ``items or None``) so a recovered but
+    # empty list stays an explicit ``[]`` — the cleared-checklist signal. ``None``
+    # is reserved for non-todo tools / unrecoverable payloads (handled above).
+    return items
+
+
+def _collapse_todo_ws(value: Any) -> str:
+    """Collapse whitespace runs to single spaces, mirroring the normalization in
+    ``persona_assignments.safe_assignment_text`` (minus its length cap).
+
+    The persist re-bound (``mission_chat_turns._safe_todo_state``) runs
+    ``safe_assignment_text`` over THIS output; that function is idempotent on an
+    already-collapsed string, so the live ``tool.finished`` frame and the
+    reloaded turn-store element carry byte-identical todo text (T9c)."""
+
+    return " ".join(str(value or "").replace("\x00", " ").split())
+
+
+def _todo_items_from(source: Any) -> list[Any] | None:
+    """Recover the ``todos`` list from a todo tool result/invocation.
+
+    Accepts the JSON-string result (``{"todos": [...], "summary": {...}}``), a
+    dict result/invocation carrying ``todos``, or a bare list. Returns ``None``
+    when no list is recoverable."""
+
+    value: Any = source
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+    if isinstance(value, dict):
+        todos = value.get("todos")
+        return todos if isinstance(todos, list) else None
+    if isinstance(value, list):
+        return value
+    return None
+
+
 def _duration_ms(value: Any) -> int | None:
     try:
         number = float(value)
@@ -1290,6 +1625,7 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
     if system_prompt:
         messages.append(_message_preview("system", str(system_prompt), source="hermes_system_prompt"))
     messages.append(_message_preview("user", request.user_message, source="mission_chat_user_message"))
+    cache_routing = _agent_cache_routing_observability(agent)
     return {
         "schema_version": 1,
         "kind": "redaction_safe_final_model_input",
@@ -1304,13 +1640,109 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
             "kind": "actual_model_tools",
             "final_model_tools": _agent_tool_names(agent),
             "tool_count": len(_agent_tool_names(agent)),
+            # Wire size of the tool schemas, which ship in FULL on every API call
+            # (agent/conversation_loop.py passes tools=agent.tools each time).
+            # Names alone hid the largest fixed slice of the prompt from the
+            # context inspector. Same measurement as `hermes prompt-size`.
+            "json_bytes": _agent_tools_json_bytes(agent),
         },
+        **({"cache_routing": cache_routing} if cache_routing is not None else {}),
         "skip_context_files": bool(request.skip_context_files),
         "skip_memory": bool(request.skip_memory),
         "system_message_supplied": request.system_message is not None,
         "message_count": len(messages),
         "messages": messages,
+        # T8 (2026-07-18): the rendered compact skills-index text's char count —
+        # what ``.skills_prompt_snapshot.json`` ACTUALLY contributed to the
+        # prompt this turn, distinct from the loaded-file byte estimate the
+        # context-file row carries (the 41 KB snapshot renders to ~9 KB of index
+        # text in the prompt). Measured against the AGENT's own resolved tool
+        # set so the launcher attributes the real in-prompt cost, not the file
+        # size. Omitted (never fabricated) when unmeasurable. See
+        # ``_rendered_skills_prompt_chars``.
+        **(
+            {"skills_prompt_chars": _skills_chars}
+            if (_skills_chars := _rendered_skills_prompt_chars(agent)) is not None
+            else {}
+        ),
     }
+
+
+def _agent_cache_routing_observability(agent) -> dict[str, Any] | None:
+    """Read the agent-owned redaction-safe final-request cache facts.
+
+    The request builder copies these from the short-lived Responses transport
+    only after request overrides and provider-specific header/body routing.
+    Other transports and test doubles simply omit the block; absence is honest
+    and never fabricated.
+    """
+
+    value = getattr(agent, "_last_cache_routing_observability", None)
+    return dict(value) if isinstance(value, dict) else None
+
+
+def _rendered_skills_prompt_chars(agent) -> int | None:
+    """Char count of the compact skills index this turn actually rendered.
+
+    Recomputes ``build_skills_system_prompt`` with the AGENT's own resolved tool
+    set — byte-for-byte the same call ``agent/system_prompt.py`` made while
+    assembling this turn's system prompt, so it is a guaranteed in-process LRU
+    cache HIT: zero re-scan, zero disk I/O, zero snapshot write (this runs inside
+    the persona profile-home override, so the cache key matches the turn's). The
+    result is the EXACT rendered text, not a size heuristic.
+
+    Returns ``None`` (the launcher then omits the in-prompt chip and keeps the
+    loaded-file estimate) when the lane ships no skills tools, the render is
+    empty, or anything is unmeasurable — never a fabricated number."""
+
+    try:
+        valid = getattr(agent, "valid_tool_names", None)
+        if not valid:
+            return None
+        # Mirror the gate in agent/system_prompt.py: the skills index only
+        # renders when the lane ships one of the skills tools.
+        if not any(name in valid for name in ("skills_list", "skill_view", "skill_manage")):
+            return None
+        import run_agent
+
+        avail_toolsets = {
+            toolset
+            for toolset in (run_agent.get_toolset_for_tool(name) for name in valid)
+            if toolset
+        }
+        try:
+            from agent.coding_context import coding_compact_skill_categories
+            from agent.runtime_cwd import resolve_context_cwd
+
+            compact = (
+                coding_compact_skill_categories(
+                    platform=getattr(agent, "platform", None), cwd=resolve_context_cwd()
+                )
+                or None
+            )
+        except Exception:
+            compact = None
+        rendered = run_agent.build_skills_system_prompt(
+            available_tools=valid,
+            available_toolsets=avail_toolsets,
+            compact_categories=compact,
+        )
+        if not isinstance(rendered, str):
+            return None
+        return len(rendered)
+    except Exception:
+        return None
+
+
+def _agent_tools_json_bytes(agent) -> int | None:
+    """UTF-8 byte size of the serialized tool schemas, or None if unmeasurable."""
+    try:
+        tools = list(getattr(agent, "tools", None) or [])
+        if not tools:
+            return 0
+        return len(json.dumps(tools, ensure_ascii=False, default=str).encode("utf-8"))
+    except Exception:
+        return None
 
 
 def _agent_tool_names(agent) -> list[str]:
@@ -1378,6 +1810,11 @@ def _normalize_result(result: Any, *, agent) -> AgentRunResult:
             cache_read_tokens=result.get("cache_read_tokens"),
             cache_write_tokens=result.get("cache_write_tokens"),
             reasoning_tokens=result.get("reasoning_tokens"),
+            usage_ledger=[
+                row for row in (result.get("usage_ledger") or []) if isinstance(row, dict)
+            ]
+            if isinstance(result.get("usage_ledger"), list)
+            else [],
             raw=dict(result),
         )
     return AgentRunResult(
@@ -1394,4 +1831,13 @@ def _normalize_result(result: Any, *, agent) -> AgentRunResult:
 def _default_agent_factory(**kwargs):
     from run_agent import AIAgent
 
-    return AIAgent(**kwargs)
+    # ``cache_scope_id`` is a fork-runtime, header-only codex cache-scope hint —
+    # NOT part of the upstream AIAgent constructor. Pop it before construction so
+    # the upstream signature is untouched, then apply it as an attribute the
+    # codex build seam reads via ``getattr(agent, "cache_scope_id", None)``. It
+    # never participates in session/transcript loading.
+    cache_scope_id = kwargs.pop("cache_scope_id", None)
+    agent = AIAgent(**kwargs)
+    if cache_scope_id:
+        agent.cache_scope_id = cache_scope_id
+    return agent

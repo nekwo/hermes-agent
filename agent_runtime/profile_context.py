@@ -6,7 +6,13 @@ import os
 from pathlib import Path
 from typing import Any, Iterator
 
-from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+from hermes_constants import (
+    get_hermes_home,
+    record_hermes_head_home_if_unset,
+    reset_hermes_head_home,
+    reset_hermes_home_override,
+    set_hermes_home_override,
+)
 from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
 
 
@@ -83,6 +89,13 @@ def persona_profile_context(binding: PersonaProfileBinding, *, runtime_root: Pat
         "HERMES_AGENT_RUNTIME_ROOT": os.environ.get("HERMES_AGENT_RUNTIME_ROOT"),
         "HERMES_AUTH_HOME": os.environ.get("HERMES_AUTH_HOME"),
     }
+    # Record the operator/head home BEFORE this override diverts
+    # ``get_hermes_home()``. Set-once (nested relay hops keep the outermost home)
+    # so a relay-target chat turn running under a persona profile-home override
+    # can still persist its operator-visible transcript (persona-chat SessionDB)
+    # to the home the Mission Control projection reads (2026-07-18 relay
+    # SessionDB-persistence fix).
+    head_home_token = record_hermes_head_home_if_unset(get_hermes_home())
     token = set_hermes_home_override(binding.profile_home)
     try:
         head_auth_home = previous_env.get("HERMES_AUTH_HOME") or previous_env.get("HERMES_HOME")
@@ -97,6 +110,7 @@ def persona_profile_context(binding: PersonaProfileBinding, *, runtime_root: Pat
         yield
     finally:
         reset_hermes_home_override(token)
+        reset_hermes_head_home(head_home_token)
         for key, value in previous_env.items():
             if value is None:
                 os.environ.pop(key, None)

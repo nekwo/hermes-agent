@@ -45,7 +45,9 @@ def test_stream_emits_delta_after_hydrate_offset(isolate_agent_runtime_root):
     assert second["entity"]["event"]["task_id"] == "task_streamed"
 
 
-def test_heartbeat_frame_carries_daemon_status_block(isolate_agent_runtime_root):
+def test_heartbeat_frame_carries_no_daemon_block(isolate_agent_runtime_root):
+    # The Mission Daemon was retired; heartbeats are pure watermark liveness
+    # (no daemon status rider, no core).
     frames = stream_frames(
         poll_interval_seconds=0.01, heartbeat_interval_seconds=0.01, max_frames=2
     )
@@ -54,10 +56,8 @@ def test_heartbeat_frame_carries_daemon_status_block(isolate_agent_runtime_root)
 
     second = next(frames)
     assert second["type"] == "heartbeat"
-    daemon = second["daemon"]
-    assert daemon["schema_version"] == 1
-    assert daemon["state"] == "offline"
-    assert "loops" in daemon
+    assert "daemon" not in second
+    assert "core" not in second
 
 
 def test_delta_frame_masks_secret_assignments():

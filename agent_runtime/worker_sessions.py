@@ -106,6 +106,9 @@ class WorkerSessionStore:
             provider=persona.provider,
             api_mode=persona.api_mode,
             prompt_contract_hash=_prompt_contract_hash(persona),
+            skill_manifest_hash=_skill_manifest(
+                persona, root_node_mode=_task_root_node_mode(task_id)
+            )[0],
         )
         self._write(worker)
         _write_static_prompt_receipt(worker, persona)
@@ -468,6 +471,9 @@ def worker_context_manifest(task_id: str, persona_id: str) -> dict[str, Any]:
 def _write_static_prompt_receipt(worker: WorkerSession, persona: AgentPersona) -> None:
     root = paths.worker_context_dir(worker.task_id, worker.persona_id)
     root.mkdir(parents=True, exist_ok=True)
+    skill_manifest_hash, skill_receipts = _skill_manifest(
+        persona, root_node_mode=_task_root_node_mode(worker.task_id)
+    )
     receipt = {
         "schema_version": 1,
         "worker_session_id": worker.id,
@@ -477,7 +483,8 @@ def _write_static_prompt_receipt(worker: WorkerSession, persona: AgentPersona) -
         "created_at": to_jsonable(worker.opened_at),
         "prompt_contract_hash": worker.prompt_contract_hash,
         "system_prompt_ref": _safe_text(getattr(persona, "system_prompt_path", None)),
-        "skill_manifest_hash": worker.skill_manifest_hash,
+        "skill_manifest_hash": skill_manifest_hash,
+        "skills": skill_receipts,
         "strategy": "static_prompt_once_hud_every_tick",
         "raw_prompts_not_stored": True,
     }
@@ -489,13 +496,72 @@ def _worker_is_active(worker: WorkerSession) -> bool:
 
 
 def _prompt_contract_hash(persona: AgentPersona) -> str | None:
-    payload = {
-        "persona_id": persona.id,
-        "role": persona.role,
-        "skills": list(getattr(persona, "skills", []) or []),
-        "toolsets": list(getattr(persona, "toolsets", []) or []),
-    }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    del persona
+    from .decision_contract_registry import contract_hash
+
+    return contract_hash()
+
+
+def _skill_manifest(
+    persona: AgentPersona, *, root_node_mode: bool = False
+) -> tuple[str, list[dict[str, Any]]]:
+    from agent.skill_utils import (
+        resolve_skill,
+        skill_package_content_hash,
+        skill_runtime_compatibility,
+    )
+
+    rows: list[dict[str, Any]] = []
+    for raw_name in list(getattr(persona, "skills", []) or []):
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        resolution = resolve_skill(name)
+        selected = resolution.candidate
+        compatibility = skill_runtime_compatibility(
+            selected,
+            surface="mission_worker",
+            root_node_mode=root_node_mode,
+        )
+        content_hash = (
+            skill_package_content_hash(selected.skill_dir, selected.skill_md)
+            if selected
+            else None
+        )
+        rows.append(
+            {
+                "name": name,
+                "assignment_policy": str(
+                    compatibility.get("load_policy") or "recommended"
+                ),
+                "load_state": (
+                    "loaded_this_turn"
+                    if compatibility.get("compatible")
+                    and compatibility.get("load_policy") == "required_preload"
+                    else "assigned_not_loaded"
+                ),
+                "resolution_status": resolution.status,
+                "source_kind": selected.source_kind if selected else None,
+                "content_hash": content_hash,
+                "hash_tracked": content_hash is not None,
+                "compatibility": compatibility,
+            }
+        )
+    manifest_hash = hashlib.sha256(
+        json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return manifest_hash, rows
+
+
+def _task_root_node_mode(task_id: str) -> bool:
+    try:
+        from .store import TaskStore
+
+        task = TaskStore().get(task_id)
+        policy = getattr(task, "harness_self_heal", None)
+        return bool(isinstance(policy, dict) and policy.get("root_node_mode"))
+    except Exception:
+        return False
 
 
 def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:

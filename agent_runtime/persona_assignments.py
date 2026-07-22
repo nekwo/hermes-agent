@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from hermes_time import now
@@ -13,12 +15,20 @@ from utils import atomic_json_write
 from . import paths
 from .errors import AgentRuntimeError
 from .events import EventLog
-from .models import AgentPersona, Event, PersonaAssignment, PersonaInstance, WorkerSession
+from .models import (
+    PERSONA_INSTANCE_ID_PREFIX,
+    AgentPersona,
+    Event,
+    PersonaAssignment,
+    PersonaInstance,
+    WorkerSession,
+    looks_like_persona_instance_id,
+)
 from .personas import profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
+from .state_patches import emit_persona_instance_patch, emit_persona_instance_remove
 from .states import RunState, WorkerSessionState
 from .tool_visibility import (
-    agent_hud_state_for_persona,
     permission_state_for_persona,
     resolve_tool_visibility,
     turn_tool_context_for_persona,
@@ -131,6 +141,81 @@ class StaleModelOverrideWrite(AgentRuntimeError):
         self.instance = instance
         self.issued_at = issued_at
         self.applied_issued_at = applied_issued_at
+
+
+class PersonaInstanceRetireError(AgentRuntimeError):
+    """A persona-instance retire (end-of-life) was refused by a state guard.
+
+    ``code`` is the machine-readable typed reason every surface (CLI JSON,
+    launcher bridge) keys on — never a bare string:
+
+    - ``not_found`` — no such live row.
+    - ``canonical_persona_channel`` — the row IS the persona/profile's canonical
+      operator channel (the global singleton ``persona_instance_id_for(persona)``).
+      Its retirement is the queued workspace-scoping redesign, not this verb.
+    - ``instance_active`` — a live run/worker still resolves for the instance;
+      never archive a working agent.
+    - ``assignment_active`` — an active persona assignment is bound to the
+      instance; complete/close it first.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        persona_instance_id: str,
+        detail: dict[str, Any] | None = None,
+    ):
+        super().__init__(code)
+        self.code = code
+        self.message = message
+        self.persona_instance_id = persona_instance_id
+        self.detail = detail or {}
+
+
+class RetiredPersonaInstanceError(AgentRuntimeError):
+    """A saved chat tried to recreate an instance whose placement ended.
+
+    Retirement preserves the row under ``persona_instances_archive`` so chat
+    history remains inspectable, but the archived row is also the durable
+    end-of-life marker. Reopening that old session must never mint the row back
+    into the live roster.
+    """
+
+    def __init__(self, persona_instance_id: str, *, archive_path: Path):
+        super().__init__("retired_persona_instance")
+        self.code = "retired_persona_instance"
+        self.persona_instance_id = persona_instance_id
+        self.archive_path = archive_path
+
+
+def _retired_persona_instance_archive_path(
+    persona_instance_id: str,
+) -> Path | None:
+    """Newest explicit-retire archive row for ``persona_instance_id``.
+
+    Only ``*_retire`` batches are tombstones. Reconcile/prune archives answer
+    different lifecycle questions and must not make a future legitimate mint
+    impossible. Exact child paths avoid treating the instance id as a glob.
+    """
+    archive_root = paths.persona_instances_archive_dir()
+    if not archive_root.exists():
+        return None
+    archive_dirs = sorted(
+        (
+            candidate
+            for candidate in archive_root.iterdir()
+            if candidate.is_dir() and candidate.name.endswith("_retire")
+        ),
+        key=lambda candidate: candidate.name,
+        reverse=True,
+    )
+    for archive_dir in archive_dirs:
+        candidate = archive_dir / f"{persona_instance_id}.json"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -306,11 +391,28 @@ class PersonaInstanceStore:
             self._write(instance)
             self._event("persona_instance.created", instance, {"mode": "task_bound", "placement_id": placement})
         changed = False
+        normalized_spawned_by = safe_optional_token(spawned_by)
+        # ``spawned_by`` is retained as the provenance/primary-parent scalar and
+        # can legitimately be a non-instance principal (the operator adds an
+        # instance ⇒ spawned_by="operator"). The authoritative parent SET is
+        # STEERING, so it is seeded from the spawn parent ONLY when that parent is
+        # instance-shaped; a principal is never a steering parent. Seeding a
+        # principal here was the writer that made the HUD render "steered by
+        # operator" for the add-instance/occupied-chat mint.
+        seed_parents = (
+            [normalized_spawned_by]
+            if looks_like_persona_instance_id(normalized_spawned_by)
+            else []
+        )
         updates = {
             "mode": "task_bound",
             "current_task_id": normalized_goal,
             "goal_id": normalized_goal,
-            "spawned_by": safe_optional_token(spawned_by),
+            "spawned_by": normalized_spawned_by,
+            # Kept in sync with the (instance-shaped) spawn parent at creation, so
+            # the on-disk record is self-consistent — not only healed by the
+            # read-time __post_init__ backfill (which now applies the same guard).
+            "steered_by": seed_parents,
         }
         for attr, value in updates.items():
             if getattr(instance, attr) != value:
@@ -319,7 +421,17 @@ class PersonaInstanceStore:
         if changed:
             instance.updated_at = now()
             self._write(instance)
-            self._event("persona_instance.attributed", instance, {"goal_id": instance.goal_id, "spawned_by": instance.spawned_by})
+            self._event(
+                "persona_instance.attributed",
+                instance,
+                {
+                    "goal_id": instance.goal_id,
+                    "spawned_by": instance.spawned_by,
+                    # Preserve the raw provenance in the durable log even when it
+                    # is a principal that does not enter the steering set.
+                    "steered_by": list(instance.steered_by),
+                },
+            )
         return self.get(instance.id)
 
     def steer(
@@ -330,53 +442,365 @@ class PersonaInstanceStore:
         goal_id: str | None = None,
         detach: bool = False,
     ) -> PersonaInstance:
-        """Re-route an existing instance's living-graph wiring (Stage 77).
+        """Back-compat single-parent re-route (Stage 77).
 
-        Persists the steering edge the operator draws in the agent graph: it
-        sets the child's ``spawned_by`` parent and the ``goal_id`` it inherits
-        from that container, so the wiring round-trips back into the graph and
-        drives the runtime's membership resolution. ``detach`` clears both,
-        returning the instance to a standalone owner. This is a re-route (a
+        Preserves the original ``--parent`` semantics EXACTLY: replace the whole
+        steering set with the one given parent, or clear it on ``detach``. New
+        multi-parent callers use :meth:`set_parents` / :meth:`add_parent` /
+        :meth:`remove_parent` / :meth:`detach_parents`. This is a re-route (a
         STEER verb, ungated per 76D.3), never a create/kill.
         """
-        instance = self.get(persona_instance_id)
         if detach:
-            updates: dict[str, Any] = {"spawned_by": None, "goal_id": None, "current_task_id": None}
-            if instance.mode == "task_bound":
-                updates["mode"] = "configured"
-        else:
-            normalized_parent = safe_optional_token(parent_instance_id)
-            if not normalized_parent:
-                raise ValueError("parent_instance_id is required unless detach is set")
-            if normalized_parent == persona_instance_id:
-                raise ValueError("a persona instance cannot steer itself")
-            try:
-                self.get(normalized_parent)
-            except Exception as exc:
-                raise ValueError(f"parent persona instance not found: {normalized_parent}") from exc
-            self._validate_no_steering_cycle(persona_instance_id, normalized_parent)
-            resolved_goal = safe_optional_token(goal_id) if goal_id is not None else instance.goal_id
-            updates = {
-                "spawned_by": normalized_parent,
-                "goal_id": resolved_goal,
+            return self.detach_parents(persona_instance_id)
+        normalized_parent = safe_optional_token(parent_instance_id)
+        if not normalized_parent:
+            raise ValueError("parent_instance_id is required unless detach is set")
+        return self.set_parents(persona_instance_id, [normalized_parent], goal_id=goal_id)
+
+    def set_parents(
+        self,
+        persona_instance_id: str,
+        parent_instance_ids: list[str],
+        *,
+        goal_id: str | None = None,
+    ) -> PersonaInstance:
+        """Declaratively REPLACE a child's steering-parent set (fan-in).
+
+        The Launcher graph-save reconciler asserts the desired set per child
+        with this; it is idempotent (re-asserting the same set is a no-op) and
+        the single write path for the persisted living-graph wiring. An empty
+        set detaches the child (standalone owner).
+        """
+        normalized = _dedupe_tokens(parent_instance_ids)
+        if not normalized:
+            return self.detach_parents(persona_instance_id)
+        return self._apply_steer_edges(persona_instance_id, normalized, goal_id=goal_id)
+
+    def add_parent(
+        self,
+        persona_instance_id: str,
+        parent_instance_id: str,
+        *,
+        goal_id: str | None = None,
+    ) -> PersonaInstance:
+        """Idempotently ADD one parent to a child's steering set (set-union)."""
+        normalized_parent = safe_optional_token(parent_instance_id)
+        if not normalized_parent:
+            raise ValueError("parent_instance_id is required")
+        instance = self.get(persona_instance_id)
+        desired = list(instance.steered_by)
+        if normalized_parent not in desired:
+            desired.append(normalized_parent)
+        return self._apply_steer_edges(persona_instance_id, desired, goal_id=goal_id, _instance=instance)
+
+    def remove_parent(self, persona_instance_id: str, parent_instance_id: str) -> PersonaInstance:
+        """Remove ONE parent from a child's steering set (detach-one).
+
+        Removing the last parent detaches the child (standalone owner).
+        """
+        normalized_parent = safe_optional_token(parent_instance_id)
+        instance = self.get(persona_instance_id)
+        desired = [pid for pid in instance.steered_by if pid != normalized_parent]
+        if not desired:
+            return self.detach_parents(persona_instance_id)
+        return self._apply_steer_edges(persona_instance_id, desired, goal_id=instance.goal_id, _instance=instance)
+
+    def detach_parents(self, persona_instance_id: str) -> PersonaInstance:
+        """Clear a child's entire steering set (detach-all) → standalone owner."""
+        instance = self.get(persona_instance_id)
+        removed = list(instance.steered_by)
+        updates: dict[str, Any] = {
+            "steered_by": [],
+            "spawned_by": None,
+            "goal_id": None,
+            "current_task_id": None,
+        }
+        if instance.mode == "task_bound":
+            updates["mode"] = "configured"
+        self._commit_steer(instance, updates, added=[], removed=removed, detached=True)
+        return self.get(instance.id)
+
+    def clear_parents(self, persona_instance_id: str) -> PersonaInstance:
+        """Clear a child's steering set WITHOUT leaving its mission.
+
+        The flow-doc reconcile's "drawn standalone" verb: an operator's chart
+        states who steers whom — never goal membership. [detach_parents] above
+        is a different statement ("leave the mission": it also strips goal_id /
+        current_task_id and task-bound mode), and using it for a chart ingest
+        would unbind a root agent from its live goal. Same single write path
+        ([_commit_steer]) and event as every other steer mutation."""
+
+        instance = self.get(persona_instance_id)
+        removed = list(instance.steered_by)
+        self._commit_steer(
+            instance,
+            {"steered_by": [], "spawned_by": None},
+            added=[],
+            removed=removed,
+            detached=True,
+        )
+        return self.get(instance.id)
+
+    def repair_non_instance_steering(
+        self,
+        persona_instance_id: str | None = None,
+        *,
+        apply: bool = True,
+    ) -> dict[str, Any]:
+        """Strip non-instance principals out of steering fields (evented, dry-run aware).
+
+        A steering-parent SET (``steered_by``) and its mirror (``spawned_by``)
+        may hold ONLY persona-instance ids. A legacy mint seeded the operator
+        principal into them (``steered_by=["operator"]`` / ``spawned_by=
+        "operator"``), which the HUD then rendered as a phantom "steered by
+        operator" edge. This removes the non-instance entries surgically:
+
+        - ``steered_by`` keeps only its instance-shaped parents;
+        - a NON-instance ``spawned_by`` is re-pointed at the surviving primary
+          parent (``steered_by[0]``) when one remains, else cleared — restoring
+          the mirror invariant. An already instance-shaped ``spawned_by`` is left
+          untouched (the ``__post_init__`` backfill self-heals it into a bare
+          ``steered_by``), so a valid parent is never destroyed.
+
+        Everything else on the row (mode, goal, session) is untouched — this is a
+        steering repair, not a detach. Honors dry-run: with ``apply=False``
+        nothing is written and no event is emitted (the on-disk row stays
+        byte-identical); with ``apply=True`` each repaired row goes through the
+        single steer write path (``_commit_steer`` → one
+        ``persona_instance.steered`` event + state patch).
+        ``persona_instance_id`` targets one row; ``None`` scans every row.
+        """
+        targets = (
+            [self.get(persona_instance_id)]
+            if persona_instance_id
+            else self.list_all()
+        )
+        repairs: list[dict[str, Any]] = []
+        for instance in targets:
+            steered_before = list(instance.steered_by)
+            kept = [p for p in steered_before if looks_like_persona_instance_id(p)]
+            bogus_steered = [p for p in steered_before if not looks_like_persona_instance_id(p)]
+            spawned = instance.spawned_by
+            bogus_spawn = (
+                spawned
+                if (spawned and not looks_like_persona_instance_id(spawned))
+                else None
+            )
+            if not bogus_steered and bogus_spawn is None:
+                continue
+            updates: dict[str, Any] = {"steered_by": kept}
+            # Only rewrite the mirror when it is itself bogus; re-point it at the
+            # surviving primary, or clear it when no instance parent remains.
+            desired_spawn = spawned
+            if bogus_spawn is not None:
+                desired_spawn = kept[0] if kept else None
+                updates["spawned_by"] = desired_spawn
+            record = {
+                "persona_instance_id": instance.id,
+                "steered_by_before": steered_before,
+                "steered_by_after": kept,
+                "spawned_by_before": spawned,
+                "spawned_by_after": desired_spawn,
+                "removed_steered_by": bogus_steered,
+                "removed_spawned_by": bogus_spawn,
             }
-            if resolved_goal:
-                updates["mode"] = "task_bound"
-                updates["current_task_id"] = resolved_goal
-        changed = False
+            repairs.append(record)
+            if not apply:
+                continue
+            self._commit_steer(
+                instance,
+                updates,
+                added=[],
+                removed=bogus_steered,
+                detached=not kept,
+            )
+        return {
+            "applied": bool(apply),
+            "dry_run": not apply,
+            "repaired": repairs,
+            "repaired_count": len(repairs),
+        }
+
+    def repair_missing_steering_references(
+        self,
+        *,
+        apply: bool = True,
+    ) -> dict[str, Any]:
+        """Remove steering parents that no longer resolve to a live instance.
+
+        JSON shape validation cannot catch a syntactically valid id whose row
+        has been retired or reaped. This is the referential-integrity repair:
+        it preserves every live parent and all child context, rewrites the
+        ``spawned_by`` mirror, and emits the ordinary steering event when
+        applied. Dry-run is side-effect free.
+        """
+        instances = self.list_all()
+        live_ids = {instance.id for instance in instances}
+        repairs: list[dict[str, Any]] = []
+        for instance in instances:
+            before = list(instance.steered_by)
+            kept = [parent for parent in before if parent in live_ids]
+            missing = [parent for parent in before if parent not in live_ids]
+            spawned_before = instance.spawned_by
+            spawned_missing = bool(
+                spawned_before
+                and looks_like_persona_instance_id(spawned_before)
+                and spawned_before not in live_ids
+            )
+            if not missing and not spawned_missing:
+                continue
+            spawned_after = kept[0] if kept else None
+            repairs.append(
+                {
+                    "persona_instance_id": instance.id,
+                    "steered_by_before": before,
+                    "steered_by_after": kept,
+                    "spawned_by_before": spawned_before,
+                    "spawned_by_after": spawned_after,
+                    "missing_parent_ids": sorted(set(missing + ([spawned_before] if spawned_missing else []))),
+                }
+            )
+            if not apply:
+                continue
+            self._commit_steer(
+                instance,
+                {"steered_by": kept, "spawned_by": spawned_after},
+                added=[],
+                removed=missing,
+                detached=not kept,
+            )
+        return {
+            "applied": bool(apply),
+            "dry_run": not apply,
+            "repaired": repairs,
+            "repaired_count": len(repairs),
+        }
+
+    def _release_parent_references(self, parent_instance_id: str) -> list[str]:
+        """Transactionally release every child backlink before owner removal."""
+        released: list[str] = []
+        for child in self.list_all():
+            if child.id == parent_instance_id or parent_instance_id not in child.steered_by:
+                continue
+            kept = [parent for parent in child.steered_by if parent != parent_instance_id]
+            if kept:
+                self._apply_steer_edges(
+                    child.id,
+                    kept,
+                    goal_id=child.goal_id,
+                    _instance=child,
+                )
+            else:
+                # Owner retirement changes graph topology, not the child's
+                # mission membership. Preserve goal/task/mode context.
+                self.clear_parents(child.id)
+            released.append(child.id)
+        return released
+
+    def _apply_steer_edges(
+        self,
+        persona_instance_id: str,
+        parent_instance_ids: list[str],
+        *,
+        goal_id: str | None,
+        _instance: PersonaInstance | None = None,
+    ) -> PersonaInstance:
+        instance = _instance or self.get(persona_instance_id)
+        # Resolve every parent to the id of the row actually on disk BEFORE
+        # persisting, so id-scheme drift (e.g. persona_personainst_x) can never
+        # enter the stored steering set. Storing a drifted parent id would make
+        # the next snapshot re-emit the drift, and the Launcher graph edge (which
+        # matches parents by canonical instance id) would silently fail to
+        # resolve. Dedupe on the CANONICAL id so a drifted and a canonical
+        # spelling of one parent collapse to a single edge. The child id is
+        # already canonical here — `instance.id` is the resolved row.
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for parent in parent_instance_ids or []:
+            token = safe_optional_token(parent)
+            if not token:
+                continue
+            # Defense in depth for the steering invariant: a steering parent is a
+            # persona-INSTANCE id, never a principal. Reject a non-instance-shaped
+            # token loudly with the reason, BEFORE the store lookup, so no future
+            # caller (a replayed spec, a mangled graph edge) can reintroduce the
+            # "steered by operator" class of bug — and so the failure names the
+            # category error ("not an instance id") rather than a misleading
+            # "not found". Actor-token drift (persona_personainst_x) is first
+            # collapsed to its canonical instance shape, which the store lookup
+            # below then resolves to the real row.
+            shaped = canonical_persona_instance_id(token) or token
+            if not looks_like_persona_instance_id(shaped):
+                raise ValueError(
+                    "steering parent must be a persona-instance id "
+                    f"({PERSONA_INSTANCE_ID_PREFIX}*), not a non-instance principal: {token!r}"
+                )
+            try:
+                parent_instance = self.get(token)
+            except Exception as exc:
+                raise ValueError(f"parent persona instance not found: {token}") from exc
+            canonical_parent = parent_instance.id
+            if canonical_parent == instance.id:
+                raise ValueError("a persona instance cannot steer itself")
+            if canonical_parent in seen:
+                continue
+            seen.add(canonical_parent)
+            self._validate_no_steering_cycle(instance.id, canonical_parent)
+            normalized.append(canonical_parent)
+        if not normalized:
+            return self.detach_parents(instance.id)
+        before = list(instance.steered_by)
+        resolved_goal = safe_optional_token(goal_id) if goal_id is not None else instance.goal_id
+        updates: dict[str, Any] = {
+            "steered_by": normalized,
+            # Denormalized legacy mirror: the primary (first) parent, for old
+            # readers still keyed on the scalar. Single writer, single source.
+            "spawned_by": normalized[0],
+            "goal_id": resolved_goal,
+        }
+        if resolved_goal:
+            updates["mode"] = "task_bound"
+            updates["current_task_id"] = resolved_goal
+        added = [pid for pid in normalized if pid not in before]
+        removed = [pid for pid in before if pid not in normalized]
+        self._commit_steer(instance, updates, added=added, removed=removed, detached=False)
+        return self.get(instance.id)
+
+    def _commit_steer(
+        self,
+        instance: PersonaInstance,
+        updates: dict[str, Any],
+        *,
+        added: list[str],
+        removed: list[str],
+        detached: bool,
+    ) -> None:
+        changed_fields: dict[str, Any] = {}
         for attr, value in updates.items():
             if getattr(instance, attr) != value:
                 setattr(instance, attr, value)
-                changed = True
-        if changed:
-            instance.updated_at = now()
-            self._write(instance)
-            self._event(
-                "persona_instance.steered",
-                instance,
-                {"goal_id": instance.goal_id, "spawned_by": instance.spawned_by, "detached": bool(detach)},
-            )
-        return self.get(instance.id)
+                changed_fields[attr] = value
+        if not changed_fields:
+            return
+        instance.updated_at = now()
+        self._write(instance)
+        self._event(
+            "persona_instance.steered",
+            instance,
+            {
+                "goal_id": instance.goal_id,
+                "spawned_by": instance.spawned_by,
+                "steered_by": list(instance.steered_by),
+                "added": added,
+                "removed": removed,
+                "detached": bool(detached),
+            },
+        )
+        # S6 producer: the flagship field-patch case. ``changed_fields`` is the
+        # exact set this steer mutation wrote (steered_by/spawned_by, plus
+        # goal_id/mode/current_task_id when the re-route changed them). Dark by
+        # default (read_model.delta_patches off).
+        self._emit_state_patch(instance, changed_fields)
 
     def update_profile(
         self,
@@ -410,6 +834,7 @@ class PersonaInstanceStore:
         clobbering the newer value.
         """
         instance = self.get(persona_instance_id)
+        before_patch_fields = self._profile_patch_snapshot(instance)
         changed = False
         model_lane_touched = clear_model_override or any(
             value is not None for value in (provider, model, api_mode, reasoning_effort)
@@ -492,24 +917,92 @@ class PersonaInstanceStore:
             if requested_by:
                 payload["requested_by"] = str(requested_by)[:80]
             self._event("persona_instance.profile_updated", instance, payload)
+            # S6 producer: the persona-instance profile/model write funnel. Emit
+            # only the operator-editable fields this call actually changed. Dark
+            # by default (read_model.delta_patches off).
+            after_patch_fields = self._profile_patch_snapshot(instance)
+            self._emit_state_patch(
+                instance,
+                {
+                    field_name: after_patch_fields[field_name]
+                    for field_name in after_patch_fields
+                    if after_patch_fields[field_name] != before_patch_fields.get(field_name)
+                },
+            )
         return self.get(instance.id)
 
     def _validate_no_steering_cycle(self, persona_instance_id: str, parent_instance_id: str) -> None:
-        seen = {persona_instance_id}
-        cursor = parent_instance_id
-        while cursor:
-            if cursor in seen:
+        # Multi-parent DAG walk: adding parent → child must not let the child
+        # reach itself through the steering graph. We only reject when the child
+        # is reachable from the new parent (a real cycle); a diamond (two parents
+        # sharing an ancestor) is fine, so we track a visited set separately from
+        # the cycle test rather than raising on any re-visit.
+        visited: set[str] = set()
+        frontier = _dedupe_tokens([parent_instance_id])
+        while frontier:
+            cursor = frontier.pop()
+            if cursor == persona_instance_id:
                 raise ValueError("steering edge would create a cycle")
-            seen.add(cursor)
+            if cursor in visited:
+                continue
+            visited.add(cursor)
             try:
                 parent = self.get(cursor)
             except Exception:
-                return
-            cursor = safe_optional_token(parent.spawned_by)
+                continue
+            frontier.extend(_dedupe_tokens(list(parent.steered_by)))
 
     def get(self, persona_instance_id: str) -> PersonaInstance:
-        raw = json.loads(paths.persona_instance_path(persona_instance_id).read_text(encoding="utf-8"))
+        path = paths.persona_instance_path(persona_instance_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # The literal file wins (canonical ids are read verbatim — zero
+            # behaviour change). Only when it is missing do we resolve the same
+            # id-scheme drift the identity module already defines, so a caller
+            # that hands us a legacy/actor-token id (the Launcher graph save, a
+            # replayed spec, a CLI verb) reaches the real row instead of a hard
+            # "not found". Re-raise the original error for a genuinely absent id.
+            resolved = self._resolve_stored_instance_id(persona_instance_id)
+            if resolved is None:
+                raise
+            raw = json.loads(paths.persona_instance_path(resolved).read_text(encoding="utf-8"))
         return from_jsonable(PersonaInstance, raw)
+
+    def _resolve_stored_instance_id(self, raw_id: str) -> str | None:
+        """Resolve a caller-supplied id to the id of the row actually on disk.
+
+        Tolerates exactly the drift :mod:`persona_instance_identity` already
+        knows how to collapse: structural actor-token drift
+        (``persona_personainst_x`` -> ``personainst_x`` /
+        ``persona:<persona>`` -> canonical channel, via
+        :func:`canonical_persona_instance_id`) and the durable
+        legacy->canonical alias registry (the operator-hash schemes the store
+        reconciler records). Returns a stored id whose file exists, or ``None``
+        so the caller raises on a genuinely missing row. Read-only: it never
+        mints or rewrites a row — the reconciler remains the durable cleanup.
+        """
+        candidates: list[str] = []
+
+        def _add(candidate: str | None) -> None:
+            if candidate and candidate != raw_id and candidate not in candidates:
+                candidates.append(candidate)
+
+        structural = canonical_persona_instance_id(raw_id)
+        _add(structural)
+        try:
+            from .persona_instance_identity import load_persona_instance_aliases
+
+            aliases = load_persona_instance_aliases()
+        except Exception:
+            aliases = {}
+        _add(aliases.get(raw_id))
+        if structural:
+            _add(aliases.get(structural))
+        for candidate in candidates:
+            if paths.persona_instance_path(candidate).exists():
+                return candidate
+        return None
 
     def list_for_task(self, task_id: str, *, goal_id: str | None = None) -> list[PersonaInstance]:
         normalized = safe_optional_token(task_id)
@@ -559,6 +1052,11 @@ class PersonaInstanceStore:
                         "reason": safe_assignment_text(reason, limit=240),
                     },
                 )
+                # S7-A producer: the instance left the active frame, so its keyed
+                # row is a REMOVE the launcher deletes (never a stale live agent).
+                # Dark by default (read_model.delta_patches off).
+                emit_persona_instance_remove(self.event_log, instance, reason=reason)
+                self._archive_office_placements(instance)
         remaining = self.list_for_task(task_id, goal_id=goal_id)
         return {
             "task_id": safe_optional_token(task_id),
@@ -570,6 +1068,19 @@ class PersonaInstanceStore:
             "skipped_active_count": len(skipped_active),
             "remaining_count": len(remaining),
         }
+
+    def _archive_office_placements(self, instance) -> None:
+        """Mission Office prune-lane hook (office plan §4.3): a reaped instance
+        must not leave a phantom desk file that re-materializes the agent —
+        and the fix lives HERE, never in a launcher-side filter (the
+        orphan-tombstone precedent). Best-effort: office archival never fails
+        the reap."""
+        try:
+            from .office_store import OfficeStore
+
+            OfficeStore(event_log=self.event_log).archive_actors_for_instance(instance.id, reason="instance_reaped")
+        except Exception:
+            pass
 
     def sweep_orphaned_task_bound_instances(self, *, reason: str = "persona instance janitor") -> dict[str, Any]:
         """Reap stale task-bound instances whose owner is terminal or gone.
@@ -601,6 +1112,9 @@ class PersonaInstanceStore:
                         "owner_state": owner_state,
                     },
                 )
+                # S7-A producer: janitor reap also removes the keyed row.
+                emit_persona_instance_remove(self.event_log, instance, reason=reason)
+                self._archive_office_placements(instance)
         after = [instance for instance in self.list_all() if instance.mode == "task_bound"]
         return {
             "before_task_bound_count": len(before),
@@ -615,6 +1129,141 @@ class PersonaInstanceStore:
             "remaining_count": len(after),
         }
 
+    def retire(
+        self,
+        persona_instance_id: str,
+        *,
+        reason: str = "placement removed",
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Instance end-of-life: archive a placement-backed (or otherwise
+        deliberate) persona-instance ROW and emit an EventLog event.
+
+        The operator ruling is that a deliberate placement IS the instance:
+        deleting the placement ends the instance's life. This is the sanctioned
+        verb for that transition — the row file MOVES to
+        ``persona_instances_archive/<ts>_retire/`` (archive-never-delete), an
+        evented mutation (no silent row move). Chat sessions and turn stores
+        stay untouched on disk (history is never destroyed); the projection
+        simply stops listing the row because ``list_all`` only globs the live
+        dir, so every instance-fed surface (snapshot, roster, chat history,
+        flow node dropdown) drops it on the next frame.
+
+        Refuses with a typed :class:`PersonaInstanceRetireError` (never a silent
+        no-op) when the row is the canonical persona/profile channel
+        (``canonical_persona_channel`` — the global-singleton retirement is the
+        queued workspace-scoping redesign), when a live run/worker still
+        resolves (``instance_active`` — never archive a working agent), or when
+        an active persona assignment is bound (``assignment_active``)."""
+        try:
+            instance = self.get(persona_instance_id)
+        except Exception as exc:
+            raise PersonaInstanceRetireError(
+                "not_found",
+                f"persona instance not found: {persona_instance_id}",
+                persona_instance_id=safe_assignment_token(persona_instance_id) or str(persona_instance_id),
+            ) from exc
+
+        if is_canonical_persona_channel(instance):
+            raise PersonaInstanceRetireError(
+                "canonical_persona_channel",
+                (
+                    f"{instance.id} is the canonical persona channel for "
+                    f"{instance.persona_id!r}; the global-singleton channel cannot be "
+                    "retired here (that is the queued workspace-scoping redesign) — "
+                    "retire a placement-backed instance instead"
+                ),
+                persona_instance_id=instance.id,
+                detail={"persona_id": instance.persona_id},
+            )
+
+        if self._has_live_binding(instance):
+            raise PersonaInstanceRetireError(
+                "instance_active",
+                f"{instance.id} has a live run/worker binding; never retire a working agent",
+                persona_instance_id=instance.id,
+                detail={
+                    "active_run_id": safe_optional_token(instance.active_run_id),
+                    "active_worker_session_id": safe_optional_token(instance.active_worker_session_id),
+                },
+            )
+
+        active_assignment_ids = self._active_assignment_ids_for_instance(instance.id)
+        if active_assignment_ids:
+            raise PersonaInstanceRetireError(
+                "assignment_active",
+                (
+                    f"{instance.id} has {len(active_assignment_ids)} active assignment(s); "
+                    "complete or close them before retiring"
+                ),
+                persona_instance_id=instance.id,
+                detail={"active_assignment_ids": active_assignment_ids},
+            )
+
+        archive_dir = paths.persona_instances_archive_dir() / f"{now().strftime('%Y%m%dT%H%M%SZ')}_retire"
+        archived_path = self._archive_instance_row(instance, archive_dir)
+        if archived_path is None:
+            raise PersonaInstanceRetireError(
+                "not_found",
+                f"persona instance row is not on disk: {instance.id}",
+                persona_instance_id=instance.id,
+            )
+        safe_reason = safe_assignment_text(reason, limit=240) or "placement removed"
+        normalized_requested_by = str(requested_by)[:80] if requested_by else None
+        payload: dict[str, Any] = {
+            "reason": safe_reason,
+            "persona_id": instance.persona_id,
+            "mode": instance.mode,
+            "archive_dir": str(archive_dir),
+        }
+        if normalized_requested_by:
+            payload["requested_by"] = normalized_requested_by
+        self._event("persona_instance.retired", instance, payload)
+        # S7-A producer: the retired row leaves the active frame, so the launcher
+        # deletes the keyed row (never renders it as a live idle agent). Dark by
+        # default (read_model.delta_patches off).
+        emit_persona_instance_remove(self.event_log, instance, reason=safe_reason)
+        # Prune-lane hook (mirrors close_for_task / the janitor): a retired
+        # instance must not leave a phantom office desk. Best-effort; office
+        # archival never fails the retire.
+        self._archive_office_placements(instance)
+        return {
+            "persona_instance_id": instance.id,
+            "persona_id": instance.persona_id,
+            "display_name": instance.display_name,
+            "mode": instance.mode,
+            "reason": safe_reason,
+            "requested_by": normalized_requested_by,
+            "archive_path": str(archived_path),
+            "archive_dir": str(archive_dir),
+        }
+
+    def _active_assignment_ids_for_instance(self, instance_id: str) -> list[str]:
+        """Ids of active persona assignments bound to this instance (guard input
+        for :meth:`retire`). A retire must never orphan a live assignment."""
+        try:
+            assignments = PersonaAssignmentStore(event_log=self.event_log).list_all()
+        except Exception:
+            return []
+        return [
+            assignment.id
+            for assignment in assignments
+            if assignment.persona_instance_id == instance_id
+            and assignment.state in ACTIVE_ASSIGNMENT_STATES
+        ]
+
+    def _archive_instance_row(self, instance: PersonaInstance, archive_dir) -> Any:
+        """Move the instance's row file into ``archive_dir`` (archive-never-delete).
+        Returns the archived path, or ``None`` when the live row is already gone."""
+        source = paths.persona_instance_path(instance.id)
+        if not source.exists():
+            return None
+        self._release_parent_references(instance.id)
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / source.name
+        shutil.move(str(source), str(target))
+        return target
+
     def update(self, instance: PersonaInstance) -> PersonaInstance:
         instance.updated_at = now()
         self._write(instance)
@@ -627,16 +1276,22 @@ class PersonaInstanceStore:
         session_id: str,
         persona_instance_id: str | None = None,
         display_name: str | None = None,
+        default_display_name: str | None = None,
         profile_id: str | None = None,
         kill_active: bool = False,
+        workspace_id: str | None = None,
+        realm_id: str | None = None,
     ) -> PersonaInstance:
         """Bind a persona instance to a durable chat session without running a turn.
 
         Persona instances are intentionally chat-shaped: selecting an old chat can
-        re-open the same persona instance history by rebinding the instance to the
-        stored session id, while the normal send/resume path owns the actual LLM
-        execution. This helper is a state transition only; it never fabricates a
-        task, worker, run, or transcript.
+        re-open the same live persona instance history by rebinding the instance
+        to the stored session id, while the normal send/resume path owns the actual
+        LLM execution. A placement retired through :meth:`retire` is the explicit
+        exception: its archived row is an end-of-life tombstone, so the preserved
+        chat stays history-only and cannot recreate a live roster row. This helper
+        is a state transition only; it never fabricates a task, worker, run, or
+        transcript.
         """
         normalized_persona = _normalize_instance_source_persona(persona_id)
         normalized_session = safe_assignment_text(session_id, limit=200)
@@ -651,38 +1306,90 @@ class PersonaInstanceStore:
             else None
         )
         instance_id = normalized_instance or persona_instance_id_for(normalized_persona)
+        # A chat session encodes the instance it was minted for; binding one
+        # instance's session onto ANOTHER instance's pointer is the sibling steal
+        # that overwrote ``personainst_qa``'s default-chat pointer with a
+        # placement sibling's session (live 2026-07-18: the console's open-chat of
+        # a sibling bound its session onto the canonical primary, then a
+        # bare-persona relay adopted the poisoned pointer — both instances folded
+        # onto ONE operator channel). Refuse loudly at the write chokepoint every
+        # send/open flows through — the existing ``_session_owned_by_other_instance``
+        # guard only covered ``add_instance``. Legacy/opaque ``persona_chat_*``
+        # sessions (no encoded owner) and the instance's own sessions bind freely.
+        if chat_session_is_foreign_to_instance(normalized_session, instance_id):
+            owner = chat_session_owner_instance_id(normalized_session)
+            raise ValueError(
+                f"chat session {normalized_session!r} belongs to instance {owner!r}; "
+                f"it cannot be bound onto {instance_id!r} — open that instance's own "
+                "chat lane instead of adopting a sibling's session"
+            )
         safe_display_name = safe_assignment_text(display_name, limit=120) if display_name is not None else None
+        safe_default_display_name = (
+            safe_assignment_text(default_display_name, limit=120) if default_display_name is not None else None
+        )
         safe_profile_id = safe_assignment_token(profile_id) if profile_id is not None else None
         try:
             instance = self.get(instance_id)
         except Exception:
+            retired_archive = _retired_persona_instance_archive_path(instance_id)
+            if retired_archive is not None:
+                raise RetiredPersonaInstanceError(
+                    instance_id,
+                    archive_path=retired_archive,
+                )
             ts = now()
             role = "profile" if normalized_persona.startswith("profile:") else normalized_persona
             instance = PersonaInstance(
                 id=instance_id,
                 persona_id=normalized_persona,
                 role=role,
-                display_name=safe_display_name or _display_name_for_template(normalized_persona.split(":", 1)[1] if normalized_persona.startswith("profile:") else normalized_persona),
+                display_name=safe_display_name or safe_default_display_name or _display_name_for_template(normalized_persona.split(":", 1)[1] if normalized_persona.startswith("profile:") else normalized_persona),
                 profile_id=safe_profile_id or (normalized_persona.split(":", 1)[1] if normalized_persona.startswith("profile:") else None),
                 runtime_root=str(paths.store_root()),
                 state=WorkerSessionState.IDLE,
                 updated_at=ts,
             )
         else:
-            self._guard_or_replace_chat(instance, kill_active=kill_active)
+            # Worker/run ownership is orthogonal to operator chat ownership.
+            # Opening another chat root must not cancel or rebind live work.
+            pass
 
+        # An explicit ``display_name`` is AUTHORITATIVE — an operator naming this
+        # chat (create_operator_chat) or a deliberate placement (add_instance,
+        # "QA Agent (2)"); it always applies. A ``default_display_name`` is the
+        # persona DEFAULT the SEND PATH stamps and must NEVER rename an existing
+        # instance: applying it unconditionally clobbered a placement name —
+        # ``personainst_qa_agent_2`` read "QA Agent" instead of "QA Agent (2)"
+        # (the "(2)" is LOAD-BEARING: the launcher conversational fold keys on
+        # persona+displayName, so the clobber folds a sibling onto the primary's
+        # channel). Stamp the default only when the instance has NO name yet.
+        # The one rename path stays ``persona.instance.update_profile``.
         if safe_display_name:
             instance.display_name = safe_display_name
+        elif safe_default_display_name and not safe_assignment_text(
+            getattr(instance, "display_name", None), limit=120
+        ):
+            instance.display_name = safe_default_display_name
         if safe_profile_id:
             instance.profile_id = safe_profile_id
         elif normalized_persona.startswith("profile:") and not instance.profile_id:
             instance.profile_id = normalized_persona.split(":", 1)[1]
+        # Scope-provenance pointers: a provided workspace/realm is the caller's
+        # authoritative placement-scope claim (the launcher stamps its active
+        # scope when minting a placement) and applies on create AND re-open; an
+        # omitted one never clears an existing pointer (plain chat re-opens
+        # don't know scope and must not erase it).
+        safe_workspace_id = safe_assignment_token(workspace_id) if workspace_id is not None else None
+        safe_realm_id = safe_assignment_token(realm_id) if realm_id is not None else None
+        if safe_workspace_id:
+            instance.workspace_id = safe_workspace_id
+        if safe_realm_id:
+            instance.realm_id = safe_realm_id
         instance.mode = "chat"
+        instance.default_chat_session_id = normalized_session
+        # Read-compatible mirror for v1 consumers. Worker writers never touch
+        # this field; default_chat_session_id is the sole new authority.
         instance.session_id = normalized_session
-        instance.current_assignment_id = None
-        instance.current_task_id = None
-        instance.active_worker_session_id = None
-        instance.active_run_id = None
         updated = self.update(instance)
         self._event("persona_instance.chat_opened", updated, {"session_id": normalized_session})
         return updated
@@ -712,7 +1419,10 @@ class PersonaInstanceStore:
         persona_id: str,
         placement_id: str,
         display_name: str | None = None,
+        default_display_name: str | None = None,
         session_id: str | None = None,
+        workspace_id: str | None = None,
+        realm_id: str | None = None,
     ) -> PersonaInstance:
         normalized_persona = _normalize_instance_source_persona(persona_id)
         normalized_placement = safe_assignment_token(placement_id)
@@ -728,18 +1438,25 @@ class PersonaInstanceStore:
         normalized_session = safe_assignment_text(session_id, limit=200) if session_id is not None else None
         if normalized_session and self._session_owned_by_other_instance(normalized_session, instance_id):
             normalized_session = None
+        # ``display_name`` is the operator's AUTHORITATIVE placement name and
+        # always wins; ``default_display_name`` is the persona's honest default,
+        # stamped only when the instance has no name yet — never enough to clobber
+        # an existing distinct placement name on a re-open (open_chat enforces).
         return self.open_chat(
             persona_id=normalized_persona,
             persona_instance_id=instance_id,
             session_id=normalized_session or persona_chat_session_id_for(instance_id),
             display_name=display_name,
+            default_display_name=default_display_name,
             profile_id=_profile_id_for_persona_or_template(normalized_persona),
             kill_active=False,
+            workspace_id=workspace_id,
+            realm_id=realm_id,
         )
 
     def _session_owned_by_other_instance(self, session_id: str, instance_id: str) -> bool:
         for instance in self.list_all():
-            if instance.id != instance_id and instance.session_id == session_id:
+            if instance.id != instance_id and instance.default_chat_session_id == session_id:
                 return True
         return False
 
@@ -781,7 +1498,6 @@ class PersonaInstanceStore:
         instance.goal_id = self._goal_id_for_worker(worker) or worker.task_id
         instance.active_worker_session_id = worker.id if worker.state in ACTIVE_PERSONA_WORKER_STATES else None
         instance.active_run_id = worker.active_run_id
-        instance.session_id = worker.session_id
         instance.context_receipt_id = worker.context_receipt_id
         instance.compression_receipt_id = worker.compression_receipt_id
         instance.prompt_contract_hash = worker.prompt_contract_hash
@@ -838,7 +1554,6 @@ class PersonaInstanceStore:
                 or instance.current_task_id
                 or instance.active_worker_session_id
                 or instance.active_run_id
-                or instance.session_id
                 or instance.context_receipt_id
                 or instance.compression_receipt_id
             ):
@@ -848,9 +1563,9 @@ class PersonaInstanceStore:
                 instance.current_task_id = None
                 instance.goal_id = None
                 instance.spawned_by = None
+                instance.steered_by = []
                 instance.active_worker_session_id = None
                 instance.active_run_id = None
-                instance.session_id = None
                 instance.context_receipt_id = None
                 instance.compression_receipt_id = None
                 instance.token_budget_used = 0
@@ -864,6 +1579,7 @@ class PersonaInstanceStore:
         path = paths.persona_instance_path(instance.id)
         if not path.exists():
             return False
+        self._release_parent_references(instance.id)
         path.unlink()
         return True
 
@@ -897,6 +1613,35 @@ class PersonaInstanceStore:
 
     def _event(self, event_type: str, instance: PersonaInstance, payload: dict[str, Any]) -> None:
         self.event_log.append(Event(ts=now(), type=event_type, task_id=instance.current_task_id, run_id=instance.active_run_id, persona_id=instance.persona_id, payload={**payload, "persona_instance_id": instance.id}))
+
+    @staticmethod
+    def _profile_patch_snapshot(instance: PersonaInstance) -> dict[str, Any]:
+        """Operator-editable runtime fields watched for S6 field-patch diffs.
+
+        Lists are copied so a before/after comparison is not fooled by in-place
+        mutation of the same underlying object."""
+
+        return {
+            "display_name": instance.display_name,
+            "current_chat_goal": instance.current_chat_goal,
+            "goal_id": instance.goal_id,
+            "current_task_id": instance.current_task_id,
+            "skill_overrides": list(instance.skill_overrides or []),
+            "provider": instance.provider,
+            "model": instance.model,
+            "api_mode": instance.api_mode,
+            "reasoning_effort": instance.reasoning_effort,
+        }
+
+    def _emit_state_patch(self, instance: PersonaInstance, changed: dict[str, Any]) -> None:
+        """Emit an ``upsert`` ``state.patched`` entry for a persona-instance
+        field change (S7-A producer; dark unless ``read_model.delta_patches`` is
+        on). The store field NAMES that changed drive a WIRE-LEVEL projection
+        (see :func:`emit_persona_instance_patch`) so the derived wire fields the
+        launcher reads (``effective_model`` / ``skills`` / the display-name
+        mirror / …) ship recomputed, not stale."""
+
+        emit_persona_instance_patch(self.event_log, instance, list(changed.keys()))
 
 
 class PersonaAssignmentStore:
@@ -1184,7 +1929,11 @@ class PersonaAssignmentStore:
         )
 
 
-PERSONA_INSTANCE_ID_PREFIX = "personainst_"
+# ``PERSONA_INSTANCE_ID_PREFIX`` / ``looks_like_persona_instance_id`` are the
+# single id-shape authority, defined in ``models`` (the low layer the store row
+# lives in) and imported at the top of this module. Re-exported here verbatim so
+# existing ``from .persona_assignments import PERSONA_INSTANCE_ID_PREFIX``
+# callers (harness.py, persona_commands.py) keep resolving through one home.
 
 # An operator-channel actor token ('persona_' + instance id) that leaked into
 # a store row id. Live evidence 2026-07-10: persona_personainst_neko_supervisor
@@ -1198,6 +1947,22 @@ def persona_instance_id_for(persona_id: str) -> str:
 
 def persona_instance_id_for_placement(placement_id: str) -> str:
     return f"{PERSONA_INSTANCE_ID_PREFIX}{safe_assignment_token(placement_id) or 'persona'}"
+
+
+def is_canonical_persona_channel(instance: PersonaInstance) -> bool:
+    """True when a row IS the persona/profile's canonical operator channel.
+
+    The canonical channel is the global-singleton id
+    ``persona_instance_id_for(persona_id)`` (e.g. ``personainst_qa`` for persona
+    ``qa``, ``personainst_profile_alice`` for ``profile:alice``). A
+    placement-backed or otherwise deliberate instance carries a distinct
+    placement-derived id (``personainst_qa_agent_2``) whose tail is the scene
+    itemId, so it never collapses onto the canonical id — that is exactly the
+    discriminator the retire verb uses to protect the queued global-singleton
+    redesign while ending placement-backed rows."""
+    if not safe_assignment_token(instance.persona_id):
+        return False
+    return instance.id == persona_instance_id_for(instance.persona_id)
 
 
 def canonical_persona_instance_id(raw_id: Any, *, persona_id: str | None = None) -> str | None:
@@ -1234,6 +1999,159 @@ def canonical_persona_instance_id(raw_id: Any, *, persona_id: str | None = None)
 def persona_chat_session_id_for(persona_instance_id: str) -> str:
     normalized = safe_assignment_token(persona_instance_id) or "persona"
     return f"persona_chat_{normalized}_{uuid.uuid4().hex[:12]}"
+
+
+# A chat session id is, by construction, ``persona_chat_<instance>_<hex>`` (see
+# ``persona_chat_session_id_for``) or a legacy ``persona_chat_*`` id. Reusing a
+# chat lane must never thread onto a task/worker session id, so the reuse guard
+# keys on this prefix.
+_PERSONA_CHAT_SESSION_PREFIX = "persona_chat_"
+
+# A minted chat session ends in a bare 12-hex suffix (``uuid4().hex[:12]``); the
+# body between the prefix and that suffix is the OWNING instance id. This is the
+# same exact-mint discrimination ``agent_chat_open`` uses to keep a sibling's
+# session (``persona_chat_<inst>_agent_2_<hex>``) from being swallowed by the
+# primary's ``persona_chat_<inst>_`` prefix.
+_CHAT_SESSION_HEX_SUFFIX_LEN = 12
+
+
+def chat_session_owner_instance_id(session_id: str | None) -> str | None:
+    """The persona-instance id a minted chat session belongs to, or ``None``.
+
+    ``persona_chat_<instance>_<12 hex>`` → ``<instance>``. A legacy/opaque
+    ``persona_chat_*`` id whose tail is not a bare 12-hex block has no derivable
+    owner and returns ``None`` (treated as un-owned, never foreign)."""
+    token = safe_assignment_text(session_id, limit=200)
+    if not token or not token.startswith(_PERSONA_CHAT_SESSION_PREFIX):
+        return None
+    body = token[len(_PERSONA_CHAT_SESSION_PREFIX) :]
+    owner, sep, tail = body.rpartition("_")
+    if (
+        sep
+        and owner
+        and len(tail) == _CHAT_SESSION_HEX_SUFFIX_LEN
+        and all(ch in "0123456789abcdef" for ch in tail.lower())
+    ):
+        return owner
+    return None
+
+
+def chat_session_is_foreign_to_instance(session_id: str | None, instance_id: str | None) -> bool:
+    """True when ``session_id`` is a chat session MINTED FOR a DIFFERENT instance.
+
+    Chat sessions encode their owning instance, so a session whose exact-mint
+    owner resolves to some OTHER real ``personainst_*`` instance must never be
+    adopted as ``instance_id``'s default chat lane nor bound onto its pointer —
+    that sibling-session steal is what folded two live QA instances onto one
+    operator channel and overwrote the canonical instance's default-chat pointer
+    with a placement sibling's session (live 2026-07-18).
+
+    Deliberately narrow to avoid false positives: only an owner that is itself a
+    canonical ``personainst_*`` handle counts. Legacy/seed/opaque sessions whose
+    middle token is a bare persona id (``persona_chat_qa_<hex>``) or a synthetic
+    seed (``persona_chat_seed_<hex>``) have no real sibling to steal from and bind
+    freely, as does a session this instance already owns."""
+    owner = chat_session_owner_instance_id(session_id)
+    if owner is None or not owner.startswith(PERSONA_INSTANCE_ID_PREFIX):
+        return False
+    target = safe_assignment_token(instance_id)
+    return bool(target) and owner != target
+
+
+def canonical_chat_instance_id(persona_id: str, persona_instance_id: str | None = None) -> str:
+    """Canonical persona-instance id a chat lane threads onto.
+
+    One derivation shared by every chat-session resolver here (default resolve,
+    non-minting resolve, mint) so an instance-shaped target and a bare persona id
+    always land on the SAME instance row — no variant rows, no parallel scheme.
+    """
+    return (
+        canonical_persona_instance_id(persona_instance_id, persona_id=persona_id)
+        if persona_instance_id
+        else None
+    ) or persona_instance_id_for(persona_id)
+
+
+def resolve_default_chat_session_id_for_instance(
+    store: "PersonaInstanceStore",
+    *,
+    persona_id: str,
+    persona_instance_id: str | None = None,
+) -> str | None:
+    """Return the target's EXISTING default chat session id WITHOUT minting.
+
+    The read-only counterpart to :func:`default_chat_session_id_for_instance`:
+    read the canonical instance pointer and return its bound session ONLY when it
+    is a chat-shaped ``persona_chat_*`` session. Returns ``None`` when the target
+    has never chatted (or its pointer is a task/worker session) — the honest
+    "no thread yet" answer the read verbs (``agent_chat_threads`` /
+    ``agent_chat_open``) surface instead of fabricating a session. Never writes.
+    """
+    instance_id = canonical_chat_instance_id(persona_id, persona_instance_id)
+    try:
+        existing = store.get(instance_id)
+    except Exception:
+        existing = None
+    if existing is not None:
+        existing_session = safe_assignment_text(
+            getattr(existing, "default_chat_session_id", None), limit=200
+        )
+        # Reuse only a chat-shaped session: a task/worker session on the pointer
+        # (task_bound mode) is not the persona's chat lane and must never absorb
+        # a chat relay's transcript.
+        #
+        # AND only when it is THIS instance's own session. A pointer poisoned with
+        # a SIBLING's session (``persona_chat_<other-instance>_<hex>``) must not be
+        # adopted as this instance's default — that adoption is the sibling steal
+        # that folded ``personainst_qa`` onto ``personainst_qa_agent_2``'s chat
+        # lane (2026-07-18). A foreign pointer falls through to a fresh own mint,
+        # self-healing the corrupted pointer on the next send.
+        if (
+            existing_session
+            and existing_session.startswith(_PERSONA_CHAT_SESSION_PREFIX)
+            and not chat_session_is_foreign_to_instance(existing_session, instance_id)
+        ):
+            return existing_session
+    return None
+
+
+def default_chat_session_id_for_instance(
+    store: "PersonaInstanceStore",
+    *,
+    persona_id: str,
+    persona_instance_id: str | None = None,
+    mint: bool = False,
+) -> str:
+    """Resolve the target's DEFAULT chat session id for an omitted-session send.
+
+    ``agent_chat_send`` (and any first-turn open) omits ``session_id``; the tool
+    contract promises repeated sends "thread into one conversation". That means:
+    CONTINUE the target instance's current chat session when it already has one,
+    and mint a fresh session ONLY when the target has never chatted — never a
+    new random session per send.
+
+    The instance pointer is the single source of truth for "the default chat
+    session"; this reads it (through the canonical instance id) instead of
+    minting a parallel ``persona_chat_*`` id every call, which is exactly the
+    defect that left agent-to-agent relays orphaned (a fresh unpointed session
+    per send, invisible to the snapshot projection). This is the same
+    resolve-or-mint rule ``_bind_free_floating_chat_session`` applies for
+    free-floating assignments — one id scheme, not a parallel pipeline.
+
+    ``mint=True`` is the ``agent_chat_send new_session`` lane: FORCE a fresh
+    canonical session even when a default already exists, using the same mint the
+    never-chatted branch uses (``persona_chat_session_id_for`` on the canonical
+    instance id) — no parallel pipeline, just skip the reuse read. The handler's
+    ``open_chat`` then repoints the instance at this session, so the pair's new
+    thread becomes the default going forward.
+    """
+    if not mint:
+        existing = resolve_default_chat_session_id_for_instance(
+            store, persona_id=persona_id, persona_instance_id=persona_instance_id
+        )
+        if existing:
+            return existing
+    return persona_chat_session_id_for(canonical_chat_instance_id(persona_id, persona_instance_id))
 
 
 def _live_chat_bindings(instance: PersonaInstance) -> tuple[str | None, str | None]:
@@ -1334,10 +2252,19 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
     if visibility_persona is not None:
         tool_options = permission_options_for_chat(
             visibility_persona,
-            session_id=instance.session_id,
+            session_id=instance.default_chat_session_id,
             task_id=instance.current_task_id,
             goal_id=instance.goal_id,
             runtime_root=instance.runtime_root,
+        )
+        # T9b: this preview is the persona instance's operator CHAT lane, so it
+        # must reflect the chat-lane scoping (augmentation + cost cuts + restore
+        # knob + registry hygiene) — not the raw effective_toolsets. Lazy import
+        # avoids a module-load cycle; the chat-lane authority stays single.
+        from .persona_runtime import apply_chat_lane_tool_scope
+
+        apply_chat_lane_tool_scope(
+            visibility_persona, tool_options, session_id=instance.default_chat_session_id
         )
     summary = {
         "agent_profile_id": instance.id,
@@ -1376,7 +2303,10 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "lifecycle_mode": instance.mode,
         "mode": instance.mode,
         "goal_id": instance.goal_id,
+        "workspace_id": instance.workspace_id,
+        "realm_id": instance.realm_id,
         "spawned_by": instance.spawned_by,
+        "steered_by": list(instance.steered_by),
         "returned_to": instance.returned_to,
         "current_chat_goal": instance.current_chat_goal,
         "current_work_assignment_id": instance.current_assignment_id,
@@ -1385,8 +2315,9 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "current_task_id": instance.current_task_id,
         "active_worker_session_id": instance.active_worker_session_id,
         "active_run_id": instance.active_run_id,
-        "chat_session_id": instance.session_id,
-        "session_id": instance.session_id,
+        "default_chat_session_id": instance.default_chat_session_id,
+        "chat_session_id": instance.default_chat_session_id,
+        "session_id": instance.default_chat_session_id,
         "context_receipt_id": instance.context_receipt_id,
         "compression_receipt_id": instance.compression_receipt_id,
         "prompt_contract_hash": instance.prompt_contract_hash,
@@ -1398,14 +2329,92 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         "updated_at": instance.updated_at,
     }
     if visibility_persona is not None:
-        summary["tool_resolution"] = resolve_tool_visibility(visibility_persona, tool_options)
-        summary["turn_tool_context"] = turn_tool_context_for_persona(visibility_persona, tool_options)
-        summary["permission_state"] = permission_state_for_persona(visibility_persona, tool_options)
-        summary["agent_hud_state"] = agent_hud_state_for_persona(visibility_persona, tool_options)
-        summary["blocked_tools"] = summary["tool_resolution"]["blocked_tools"]
-        summary["blocked_tools_count"] = len(summary["blocked_tools"])
-        summary["effective_toolsets"] = summary["tool_resolution"]["effective_toolsets"]
+        # Residue-slim R2: the heavy tool-detail payloads
+        # (``turn_tool_context`` / ``tool_resolution`` / ``permission_state`` /
+        # ``blocked_tools`` — ~97% of this row's bytes) leave the wire row behind
+        # a typed ``visibility_ref`` pointer and are rebuilt on demand by
+        # ``harness persona-instance detail <id> --json``. ``agent_hud_state`` is
+        # RETIRED outright (the situational-HUD lane in ``runtime_hud.py`` is the
+        # single HUD authority now). The always-visible agents drawer renders only
+        # the head SCALARS below, derived at emit from the same tool-visibility
+        # resolution (never from the retired hud state).
+        tool_resolution = resolve_tool_visibility(visibility_persona, tool_options)
+        summary["permission_mode"] = tool_resolution.get("permission_mode") or "profile_default"
+        summary["mutation_boundary"] = tool_resolution["mutation_boundary"]
+        summary["tool_count"] = tool_resolution["final_tool_count"]
+        summary["blocked_tools_count"] = len(tool_resolution["blocked_tools"])
+        summary["effective_toolsets"] = tool_resolution["effective_toolsets"]
+        summary["visibility_ref"] = persona_instance_visibility_ref(instance.id)
     return summary
+
+
+#: The tool-detail fields R2 evicts from ``persona_instance_summary`` /
+#: ``_agent_summary`` and serves on demand. ``agent_hud_state`` is deliberately
+#: absent — retired, not evicted.
+PERSONA_INSTANCE_VISIBILITY_FIELDS = (
+    "tool_resolution",
+    "turn_tool_context",
+    "permission_state",
+    "blocked_tools",
+)
+
+
+def persona_instance_visibility_ref(entity_id: str) -> dict[str, Any]:
+    """Typed pointer replacing the evicted tool-detail payloads on a wire row.
+
+    Mirrors the S8 ``detail_ref`` grammar (``evicted`` / id / evicted ``fields`` /
+    ``fetch`` verb). The launcher renders an honest fetch affordance and pulls the
+    full payloads via the fetch verb when the visibility dialog opens. Shared by
+    ``persona_instance_summary`` and ``_agent_summary`` — both evict the same four
+    fields and both fetch through ``harness persona-instance detail`` (which
+    resolves a persona-instance id OR a persona id)."""
+
+    return {
+        "evicted": True,
+        "id": entity_id,
+        "fields": list(PERSONA_INSTANCE_VISIBILITY_FIELDS),
+        "fetch": "harness persona-instance detail <id> --json",
+    }
+
+
+def persona_instance_tool_detail(
+    instance: PersonaInstance, persona: AgentPersona | None = None
+) -> dict[str, Any] | None:
+    """The evicted tool-detail payloads for one persona instance, rebuilt from the
+    same tool-visibility resolution ``persona_instance_summary`` used before R2.
+
+    Served by ``harness persona-instance detail`` — the on-demand fetch behind the
+    ``visibility_ref`` pointer. Returns ``None`` when no backing persona resolves
+    (an honest "unavailable" the launcher surfaces, never a fake-empty payload).
+    ``agent_hud_state`` is intentionally NOT rebuilt here (retired)."""
+
+    visibility_persona = persona or _profile_visibility_persona(instance)
+    if visibility_persona is None:
+        return None
+    tool_options = permission_options_for_chat(
+        visibility_persona,
+        session_id=instance.default_chat_session_id,
+        task_id=instance.current_task_id,
+        goal_id=instance.goal_id,
+        runtime_root=instance.runtime_root,
+    )
+    # T9b: this on-demand tool detail is the persona instance's operator CHAT
+    # lane — scope the preview to it (see apply_chat_lane_tool_scope).
+    from .persona_runtime import apply_chat_lane_tool_scope
+
+    apply_chat_lane_tool_scope(
+        visibility_persona, tool_options, session_id=instance.default_chat_session_id
+    )
+    tool_resolution = resolve_tool_visibility(visibility_persona, tool_options)
+    return {
+        "persona_instance_id": instance.id,
+        "persona_id": instance.persona_id,
+        "display_name": instance.display_name,
+        "tool_resolution": tool_resolution,
+        "turn_tool_context": turn_tool_context_for_persona(visibility_persona, tool_options),
+        "permission_state": permission_state_for_persona(visibility_persona, tool_options),
+        "blocked_tools": tool_resolution["blocked_tools"],
+    }
 
 
 def active_persona_instance_agent_summaries(
@@ -1430,8 +2439,6 @@ def active_persona_instance_agent_summaries(
         row["persona_instance_id"] = instance_id
         row["base_persona_id"] = persona_id
         row["display_name"] = row.get("display_name") or instance_id
-        row["agent_hud_state"] = row.get("agent_hud_state") or {}
-        row["tool_resolution"] = row.get("tool_resolution") or {}
         seen.add(instance_id)
         rows.append(row)
     return rows
@@ -1573,6 +2580,22 @@ def safe_assignment_token(value: Any) -> str:
 def safe_optional_token(value: Any) -> str | None:
     token = safe_assignment_token(value)
     return token or None
+
+
+def _dedupe_tokens(values: list[str] | None) -> list[str]:
+    """Normalize + de-duplicate a parent-id list, preserving first-seen order.
+
+    The first surviving token is treated as the PRIMARY parent everywhere
+    (the ``spawned_by`` mirror, the projection's home owner), so order matters.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values or []:
+        token = safe_optional_token(value)
+        if token and token not in seen:
+            seen.add(token)
+            result.append(token)
+    return result
 
 
 def safe_assignment_state(value: str) -> str:

@@ -2122,11 +2122,7 @@ from tools.registry import registry, tool_error
 PROCESS_SCHEMA = {
     "name": "process",
     "description": (
-        "Manage background processes started with terminal(background=true). "
-        "Actions: 'list' (show all), 'poll' (check status + new output), "
-        "'log' (full output with pagination), 'wait' (block until done or timeout), "
-        "'kill' (terminate), 'write' (send raw stdin data without newline), "
-        "'submit' (send data + Enter, for answering prompts), 'close' (close stdin/send EOF)."
+        "Manage background processes from terminal(background=true). Actions: list, poll (status + new output), log, wait, kill, write (raw stdin), submit (stdin + Enter), close (EOF)."
     ),
     "parameters": {
         "type": "object",

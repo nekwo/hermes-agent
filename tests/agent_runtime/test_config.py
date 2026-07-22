@@ -34,7 +34,8 @@ def test_config_merges_profile_skills_and_readiness_fields(tmp_path):
     assert qa.display_name == "Visual QA Agent"
     assert qa.autonomy == "autonomous"
     assert qa.hermes_profile == "launcher-qa"
-    assert qa.skills == ["agent-runtime-harness", "launcher-stagec-mcp-screenshot"]
+    assert "agent-runtime-harness" in qa.skills
+    assert "launcher-stagec-mcp-screenshot" in qa.skills
     assert qa.soul_overlay_path == "prompts/qa_harness.md"
     assert qa.required_mcp_servers == ["launcher_qa"]
 
@@ -124,6 +125,27 @@ def test_config_loads_live_run_budget_fields(tmp_path):
     assert cfg.live_run_max_api_calls == 7
     assert cfg.live_run_max_total_tokens == 12345
     assert cfg.live_run_iteration_budget == 9
+
+
+def test_persona_chat_hot_runtime_defaults_dark_and_is_bounded(tmp_path):
+    default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
+    assert default_config.persona_chat.hot_sessions_enabled is False
+    assert default_config.persona_chat.max_hot_sessions == 8
+    assert default_config.persona_chat.idle_ttl_seconds == 1800
+
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "agent_runtime:\n"
+        "  persona_chat:\n"
+        "    hot_sessions_enabled: true\n"
+        "    max_hot_sessions: 3\n"
+        "    idle_ttl_seconds: 45\n",
+        encoding="utf-8",
+    )
+    configured = load_agent_runtime_config(p)
+    assert configured.persona_chat.hot_sessions_enabled is True
+    assert configured.persona_chat.max_hot_sessions == 3
+    assert configured.persona_chat.idle_ttl_seconds == 45
 
 
 def test_config_loads_read_model_flag_defaults_and_filename_guard(tmp_path):
@@ -225,7 +247,7 @@ def test_role_envelope_config_defaults_off_and_can_be_enabled(tmp_path):
     assert cfg.role_envelope.max_no_progress_repeats == 2
 
 
-def test_config_persona_skill_overrides_are_authoritative(tmp_path):
+def test_config_persona_skills_merge_defaults_with_explicit_removals(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(
         "agent_runtime:\n"
@@ -244,10 +266,30 @@ def test_config_persona_skill_overrides_are_authoritative(tmp_path):
 
     personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
-    assert personas["neko_supervisor"].skills == ["agent-runtime-harness"]
-    assert personas["dev"].skills == ["launcher-stagec-mcp-screenshot"]
-    assert personas["backend_dev"].skills == ["backend-docker"]
-    assert personas["qa"].skills == ["visual-qa"]
+    assert "agent-runtime-harness" in personas["neko_supervisor"].skills
+    assert "launcher-stagec-mcp-screenshot" in personas["dev"].skills
+    assert "backend-docker" in personas["backend_dev"].skills
+    assert "visual-qa" in personas["qa"].skills
+
+    defaults = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config())}
+    assert set(defaults["neko_supervisor"].skills).issubset(personas["neko_supervisor"].skills)
+    assert set(defaults["dev"].skills).issubset(personas["dev"].skills)
+
+
+def test_config_persona_skills_remove_is_explicit(tmp_path):
+    defaults = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config())}
+    removed = defaults["qa"].skills[0]
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "agent_runtime:\n"
+        "  personas:\n"
+        "    qa:\n"
+        f"      skills_remove: [{removed}]\n",
+        encoding="utf-8",
+    )
+
+    personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
+    assert removed not in personas["qa"].skills
 
 
 def test_neko_supervisor_uses_configured_head_agent_profile_when_not_explicit(tmp_path):
@@ -264,7 +306,7 @@ def test_neko_supervisor_uses_configured_head_agent_profile_when_not_explicit(tm
     personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
     assert personas["neko_supervisor"].hermes_profile == "captain"
-    assert personas["neko_supervisor"].skills == ["agent-runtime-harness"]
+    assert "agent-runtime-harness" in personas["neko_supervisor"].skills
 
 
 def test_neko_supervisor_legacy_alice_profile_falls_back_to_head_agent_when_missing(tmp_path, monkeypatch):
@@ -314,7 +356,8 @@ def test_config_accepts_json_encoded_skill_list_from_cli_config_set(tmp_path):
 
     personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
-    assert personas["neko_supervisor"].skills == ["agent-runtime-harness", "harness-mission-lead"]
+    assert "agent-runtime-harness" in personas["neko_supervisor"].skills
+    assert "harness-mission-lead" in personas["neko_supervisor"].skills
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,8 @@ def _seed_row(
     mode: str = "chat",
     session_id: str | None = None,
     profile_id: str | None = None,
+    spawned_by: str | None = None,
+    steered_by: list[str] | None = None,
     updated_at=None,
 ) -> PersonaInstance:
     """Write a store row verbatim — the lane legacy drifted rows arrived by,
@@ -64,6 +66,8 @@ def _seed_row(
         role="profile" if persona_id.startswith("profile:") else persona_id,
         display_name=display_name,
         profile_id=profile_id,
+        spawned_by=spawned_by,
+        steered_by=list(steered_by or []),
         runtime_root=str(paths.store_root()),
         state=WorkerSessionState.IDLE,
         mode=mode,
@@ -295,6 +299,57 @@ def test_snapshot_emits_identity_map_and_duplicate_warning(monkeypatch):
         healed["identity_map"]["persona_personainst_neko_supervisor"]
         == "personainst_neko_supervisor"
     )
+
+
+def test_snapshot_reports_shape_valid_missing_steering_foreign_keys(monkeypatch):
+    monkeypatch.setattr(
+        "agent_runtime.snapshot.load_agent_runtime_config",
+        lambda: _runtime_config(),
+    )
+    missing = "personainst_neko_supervisor_agent_gone"
+    _seed_row(
+        "personainst_dev_agent_live",
+        persona_id="dev",
+        display_name="Dev",
+        spawned_by=missing,
+        steered_by=[missing],
+    )
+
+    warnings = [
+        warning
+        for warning in build_snapshot()["parity"]["warnings"]
+        if warning.get("code") == "fk_miss"
+        and warning.get("from_entity") == "persona_instance"
+    ]
+
+    assert {(warning["fk_field"], warning["target_id"]) for warning in warnings} == {
+        ("spawned_by", missing),
+        ("steered_by", missing),
+    }
+
+
+def test_reconcile_repairs_missing_steering_foreign_keys_and_is_idempotent():
+    missing = "personainst_neko_supervisor_agent_gone"
+    child = _seed_row(
+        "personainst_dev_agent_live",
+        persona_id="dev",
+        display_name="Dev",
+        mode="free_floating",
+        spawned_by=missing,
+        steered_by=[missing],
+    )
+
+    report = reconcile_persona_instances(event_log=EventLog())
+    repaired = PersonaInstanceStore().get(child.id)
+
+    assert report["steering_repaired_count"] == 1
+    assert report["steering_repairs"][0]["missing_parent_ids"] == [missing]
+    assert repaired.steered_by == []
+    assert repaired.spawned_by is None
+    assert repaired.mode == "free_floating"
+
+    again = reconcile_persona_instances(event_log=EventLog())
+    assert again["steering_repaired_count"] == 0
 
 
 def test_identity_alias_helpers_are_pure_over_rows():

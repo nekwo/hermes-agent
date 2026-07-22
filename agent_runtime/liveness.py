@@ -8,7 +8,7 @@ import uuid
 
 from hermes_time import now
 
-from . import paths
+from . import event_rotation
 from .events import EventLog
 from .models import Event
 from .no_freeze_monitor import NoFreezeThresholds, record_freeze_findings
@@ -240,9 +240,11 @@ class LivenessProbe:
 
 
 def _current_event_offset() -> int:
-    path = paths.events_path()
+    # Logical tail offset (spans rotated slices, C6a). Equals the live file size
+    # in the pristine state; after rotation it is base_offset + live size, so a
+    # liveness cursor seeded here resolves through iter_from_offset unchanged.
     try:
-        return path.stat().st_size if path.exists() else 0
+        return event_rotation.log_end_offset()
     except OSError:
         return 0
 

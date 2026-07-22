@@ -1,1 +1,1 @@
-{"schema_version":1,"error":{"code":"blueprint_not_found","message":"Requested Neko Supervisor blueprint is unavailable.","retryable":false,"safe_details":{"requested_blueprint_id":"missing_blueprint"}}}
+{"schema_version":1,"error":{"code":"blueprint_not_found","message":"Requested Neko Mission Lead blueprint is unavailable.","retryable":false,"safe_details":{"requested_blueprint_id":"missing_blueprint"}}}

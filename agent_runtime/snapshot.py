@@ -8,23 +8,25 @@ import time
 import hashlib
 from datetime import datetime, timezone
 
-from hermes_cli.profiles import available_profile_templates
+# The snapshot roster does not render per-profile model/provider settings. Use
+# the metadata-only catalog so a cold build does not parse every config.yaml.
+# Keep the local alias stable for existing monkeypatch seams/tests.
+from hermes_cli.profiles import available_profile_template_summaries as available_profile_templates
 from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
-from .blueprints.runs import BlueprintRunStore, blueprint_run_summary
-from .blueprints.store import BlueprintStore, blueprint_summary
+from .board_store import BoardStore
+from .office_store import OfficeStore
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
-from .capabilities import capability_descriptors
 from .config import ensure_persisted_personas, load_agent_runtime_config
-from .daemon import daemon_status_schema
-from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash, event_catalog
+from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
 from .events import CachedEventLog, EventLog, event_summary_missing, operator_event_summary
 from .migrations import effective_config_summary, migration_status
 from .mission_plan import mission_plan_summary, task_stage_records
+from .models import looks_like_persona_instance_id
 from .observability import build_observability
 from .operator_channels import (
     OPERATOR_CHANNELS_SCHEMA_VERSION,
@@ -40,6 +42,7 @@ from .persona_assignments import (
     persona_assignment_summary,
     persona_instance_runtime_enabled,
     persona_instance_summary,
+    persona_instance_visibility_ref,
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _SECRET_RE, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
 from .persona_instance_identity import (
@@ -49,6 +52,7 @@ from .persona_instance_identity import (
     identity_aliases_for_rows,
 )
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
+from .parse_cache import cached_by_mtime
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
 from .prompt_observability import snapshot_prompt_observability
@@ -69,18 +73,222 @@ from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
 from .steering import build_steer_actions
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RealmStore, RunStore, TaskStore, WorkspaceStore
-from .tool_visibility import (
-    agent_hud_state_for_persona,
-    permission_state_for_persona,
-    resolve_tool_visibility,
-    turn_tool_context_for_persona,
-)
+from .tool_visibility import resolve_tool_visibility
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
 AGENT_TOPOLOGY_NODE_ID_CAP = 20
 STAGE_VERIFICATION_STAGE_CAP = 12
 STAGE_VERIFICATION_PROOF_ID_CAP = 8
 STAGE_VERIFICATION_PATH_CAP = 6
+# Residue-slim R5(a): cap the in-head ``mission_flow_timeline.items`` at the FRONT
+# window (the office renders ``items.take(5)``; keeping the front 8 preserves that
+# render byte-for-byte with margin). The evicted tail — the newest coalesced
+# progress events, the bulk of this projection's bytes — is accounted (count +
+# ``harness goal history`` pointer) and fetched on demand, never silently dropped.
+MISSION_FLOW_TIMELINE_ITEM_CAP = 8
+
+# S2 read-model — history out of the live frame (operator move 6).
+# ``archived_tasks`` (all dead), the closed/ancient tail of ``incidents``, and
+# the persona-chat message tails are append-only HISTORY: read on demand at
+# most, never advancing. They are evicted from the steady-state frame and served
+# via paged on-demand queries over the EventLog / stores (``harness task
+# history`` / ``goal history`` / ``incident list`` / ``persona chat history``).
+# Archive-never-delete: eviction removes rows from the FRAME, never from disk —
+# archived tasks stay in ``deleted_archive/``, closed incidents stay in
+# ``incidents/``.
+# Incident retention is OPEN-ONLY (operator decision 2026-07-16, supersedes the
+# plan's closed-within-TTL recommendation): a closed incident is history the
+# moment it closes and is served exclusively by the paged history query. Only
+# OPEN incidents (live state) ship in the frame.
+# Newest-N archived-task ids carried on the ``archived_tasks`` pointer stub so a
+# consumer can name the most recent dead missions without shipping their rows.
+#
+# S7-B RULING-0 COMPAT STRIP (2026-07-16): the ``read_model.history_in_frame``
+# kill-switch and its full-in-frame legacy branches were removed here — the
+# evicted (pointer-stub) shape is the ONLY shape. Rollback = ``git revert``, not
+# a flag flip. The helpers below always evict.
+ARCHIVED_TASKS_REF_RECENT_CAP = 25
+
+
+# S8 read-model — DEEP SLIM inside live rows (operator ruling 2026-07-17: "one
+# file per goal + log; the UI parses it when relevant"). The goal row is a
+# fusion of a compact HEAD (identity/state/current-stage/counts/delivery
+# pointers + the mission-level fields the ALWAYS-VISIBLE surfaces render) and a
+# heavy DETAIL body (per-role streams, envelopes, checklists, per-event
+# timelines, the mission plan, the per-run persona streams). The detail body has
+# no steady-state launcher reader: it was verified 2026-07-17 that
+# ``MissionGoalSummary`` (the launcher's goal fold) never renders any of these
+# fields off a goal — ``role_streams`` / ``stage_streams`` / ``timeline`` /
+# ``mission_plan`` / ``persona_streams`` are not even parsed, and
+# ``role_envelopes`` / ``role_checklists`` / ``proof_batches`` parse to unread
+# fields (the top-level ``role_envelopes`` / ``role_checklists`` sections feed
+# the roster; the goal-row copies are dead). They leave the head and are served
+# on demand by ``harness goal detail <task_id> --json``. The KEPT mission-level
+# fields (``mission_level_state`` → office/roster/page; ``mission_flow_timeline``
+# / ``proof_gate_state`` / ``stage_verification`` → office scene) stay in the
+# head because they render on every frame. Archive-never-delete: nothing leaves
+# disk — the detail is rebuilt from the same stores + EventLog on demand.
+GOAL_DETAIL_ONLY_FIELDS = frozenset(
+    {
+        "role_streams",
+        "role_envelopes",
+        "role_checklists",
+        "stage_streams",
+        "timeline",
+        "mission_plan",
+        "persona_streams",
+        "proof_summaries",
+        "self_test_summaries",
+        "proof_batches",
+        "verification_status",
+        "operator_capabilities",
+        "repo_bundles",
+    }
+)
+
+
+def _goal_head(row: dict) -> dict:
+    """Split a full goal projection into its compact frame HEAD.
+
+    The heavy detail-only fields (``GOAL_DETAIL_ONLY_FIELDS``) leave the row and
+    are replaced by a single typed ``detail_ref`` pointer carrying the fetch verb
+    + which fields were evicted (never a silent absence — a consumer that opens a
+    goal detail drawer/blueprint/replay view fetches them, an unfetched detail
+    renders a loading/fetch affordance). The head still carries every field the
+    always-visible surfaces read, including the mission-level state the office /
+    roster / HUD render each frame."""
+
+    head = {key: value for key, value in row.items() if key not in GOAL_DETAIL_ONLY_FIELDS}
+    evicted = sorted(key for key in GOAL_DETAIL_ONLY_FIELDS if key in row)
+    head["detail_ref"] = {
+        "evicted": True,
+        "task_id": row.get("task_id"),
+        "fields": evicted,
+        "fetch": "harness goal detail <task_id> --json",
+    }
+    return head
+
+
+def _archived_tasks_frame(archived_tasks: list):
+    """The ``archived_tasks`` frame value: a typed pointer stub.
+
+    Replaces the 25-dead-row array (≈1.27 MB live) with a small honest marker
+    carrying the count + newest-N ids + the fetch verb — never a silent absence.
+    Full rows are fetched via ``harness task history <task_id> --json`` (which
+    already reads archived batches).
+    """
+
+    recent_ids = [
+        str(row.get("task_id"))
+        for row in archived_tasks[:ARCHIVED_TASKS_REF_RECENT_CAP]
+        if isinstance(row, dict) and row.get("task_id")
+    ]
+    return {
+        "evicted": True,
+        "count": len(archived_tasks),
+        "recent_ids": recent_ids,
+        "fetch": "harness task history <task_id> --json",
+    }
+
+
+def _open_incidents_frame(incidents: list) -> tuple[list, int]:
+    """Split incidents into (in-frame open rows, closed-evicted count).
+
+    Open incidents are live state and always in-frame. Closed incidents are
+    history the moment they close (operator decision 2026-07-16: open-only, no
+    TTL window) — evicted from the frame and served by the paged history query.
+    """
+
+    kept = [incident for incident in incidents if getattr(incident, "closed_at", None) is None]
+    return kept, len(incidents) - len(kept)
+
+
+def _persona_chat_history_frame(rows: list) -> list:
+    """The ``persona_chat_history`` frame rows: recency pointers only.
+
+    Keeps every recency pointer (session id + last-message anchors + counts +
+    timestamps) but drops the heavy ``messages`` tail, flagging each row so a
+    consumer distinguishes an evicted tail from a genuinely empty chat. The tail
+    is fetched per session via
+    ``harness persona chat history --session-id <id> --json``."""
+
+    pointers: list = []
+    for row in rows:
+        if not isinstance(row, dict):
+            pointers.append(row)
+            continue
+        pointer = {key: value for key, value in row.items() if key != "messages"}
+        pointer["messages"] = []
+        pointer["messages_evicted"] = True
+        pointers.append(pointer)
+    return pointers
+
+
+# S4 read-model — normalize (operator moves 4 + 5). The on-disk stores are
+# already file-per-entity keyed by id; the fuser used to de-key them into lists
+# every consumer re-keyed. S4 exposes the keyed shape directly: list sections
+# whose rows carry a canonical id become ``{id -> row}`` maps. GOAL is the wire
+# entity name (operator decision 2026-07-16): the goals/tasks dual projection
+# collapses to ONE keyed ``goals`` map and the ``tasks`` wire section retires.
+# This is a NAMING/projection change only — the internal ``TaskStore`` machinery
+# keeps its Task names (the 45E store rename stays deferred). Emitted
+# unconditionally (no kill-switch): the rollback story is ``git revert`` of the
+# landing, not a runtime legacy-shape flag.
+def _keyed(rows, id_key: str) -> dict:
+    """A list of id-carrying rows -> an id-keyed ``{id -> row}`` map.
+
+    One owner per fact: the frame exposes the store's existing keyed shape
+    instead of a list every consumer re-keys. First occurrence wins on a
+    duplicate id (a duplicate is a parity concern surfaced elsewhere, never a
+    silent overwrite); a row missing the id is dropped rather than silently
+    keyed under ``""`` (no silent-drop-without-accounting — a missing canonical
+    id is itself a bug the parity envelope's warnings catch).
+    """
+
+    keyed: dict = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = row.get(id_key)
+        key = str(raw) if raw is not None else ""
+        if not key or key in keyed:
+            continue
+        keyed[key] = row
+    return keyed
+
+
+def _rows(value) -> list:
+    """Read a frame section that S4 emits as an id-keyed map as an ordered list
+    of rows (map values), for the snapshot's OWN parity/self-check readers.
+
+    The wire ships keyed maps; this is an internal convenience for the builder's
+    downstream self-checks, not a legacy-shape tolerance path — it also accepts
+    a plain list (sections not keyed by S4) and ``None`` (absent section)."""
+
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, list):
+        return list(value)
+    return []
+
+
+def snapshot_section_bytes(data: dict, key: str) -> int:
+    """Compact-JSON byte size of one top-level snapshot section (S2 byte-budget
+    goldens; deliberately independent of the parallel snapshot-audit module)."""
+
+    if key not in data:
+        return 0
+    try:
+        return len(
+            json.dumps(
+                to_jsonable(data.get(key)),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+    except Exception:
+        return 0
 _ARCHIVED_CONVERSATION_SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
 )
@@ -219,19 +427,27 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     cfg = load_agent_runtime_config()
-    execution_mode = "daemon" if bool(getattr(cfg, "daemon_enabled", False)) else "manual"
+    # S2 read-model: history is always evicted from the steady-state frame and
+    # served via paged on-demand queries (S7-B RULING-0: no legacy full-in-frame
+    # shape; the pointer-stub shape is the only shape).
+    # The background Mission Daemon was retired; execution is always operator/
+    # goal-runner driven ("manual").
+    execution_mode = "manual"
     # Base-profile foundation: Mission Control shows the seeded store (base only). On a
     # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
     # also returns the dormant typed catalog for resolution and would surface mothballed
     # pipeline personas that are not meant to be shown.
     agents = agent_store.list_all() or seed_personas()
-    incidents = incident_store.list_all()
+    # Closed incidents are history-only in the steady-state frame. Avoid
+    # recursively coercing the entire closed tail (thousands of files on a
+    # mature runtime) merely to count it; the store still validates each JSON
+    # row and materializes every open incident used by routing/observability.
+    incidents, incidents_evicted_count = incident_store.list_open_with_closed_count()
     role_envelope_store = RoleEnvelopeStore(event_log=event_log)
     role_checklist_store = RoleChecklistStore(event_log=event_log)
     proof_batch_store = ProofBatchStore(event_log=event_log)
     repo_bundle_store = RepoBundleStore(event_log=event_log)
     runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
-    blueprint_run_store = BlueprintRunStore()
     role_envelopes = role_envelope_store.list_all()
     role_checklists = role_checklist_store.list_all()
     proof_batches = proof_batch_store.list_all()
@@ -252,7 +468,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         (getattr(r, "name", None) for r in realms if getattr(r, "id", None) == realm_store.active_id()),
         None,
     )
-    blueprint_runs = blueprint_run_store.list_all()
     agent_summaries = [_agent_summary(a, include_tool_details=True) for a in agents]
     available_personas = _available_persona_summary(agents)
     proofs = []
@@ -260,7 +475,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
         self_tests.extend(SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id))
-    daemon_status = daemon_status_schema()
     recent_events = event_log.tail(20)
     active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
     active_workers = worker_session_store.find_active()
@@ -273,6 +487,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     topology_persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
     stage_verification_accountant = ProjectionAccountant("stage_verification")
+    flow_timeline_accountant = ProjectionAccountant("mission_flow_timeline")
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         persona_instances = instance_store.derive_from_workers(agents, workers)
@@ -284,6 +499,25 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     session_db = _default_persona_session_db()
+    # S2 read-model: keep only OPEN incidents (live state) in-frame; every
+    # closed incident is history, evicted to the paged query. The full
+    # ``incidents`` list still feeds summary/observability/dirty/tasks — only the
+    # ``incidents`` frame key is filtered to open.
+    incident_frame_rows = incidents
+    # S4: the frame carries these as id-keyed maps (``_keyed`` below). The row
+    # LISTS are still needed as an ordered input to the operator-channel
+    # projection (``run_summaries`` feeds the goal-turn flow), so build them once
+    # here and key them into the frame.
+    # ``run_rows`` (ALL runs) still feeds the operator-channel goal-turn flow
+    # below; the FRAME ``runs`` map (S8) keeps only ACTIVE runs (attached to a
+    # live lane/goal). Historical/terminal runs are old residue — evicted to a
+    # count + pointer, fetched on demand via ``harness run list``. No disk
+    # change: the run store keeps every row.
+    run_rows = [_run_summary(r) for r in runs]
+    active_run_id_set = {r.id for r in active_runs}
+    frame_run_rows = [row for row in run_rows if row.get("run_id") in active_run_id_set]
+    incident_rows = [_incident_summary(i) for i in incident_frame_rows]
+    migration = migration_status()
     data = {
         "schema_version": 2,
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
@@ -303,7 +537,6 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             "dirty_summary": dirty_state["summary"],
         },
         "dirty_state": dirty_state,
-        "daemon": daemon_status,
         "foreground_runtime": runtime_instances_summary(runtime_instances),
         "execution_mode": execution_mode,
         # Single runtime-default authority, resolved + provenance-stamped, as a
@@ -317,61 +550,60 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             "model_source": getattr(cfg, "default_model_source", "unset"),
             "provider_source": getattr(cfg, "default_provider_source", "unset"),
         },
-        "runtime_config": effective_config_summary(cfg),
-        "migration": migration_status(),
-        "capabilities": capability_descriptors(),
+        "runtime_config": effective_config_summary(cfg, migration=migration),
+        "migration": migration,
         "prompt_observability": snapshot_prompt_observability(
             personas=agents,
             persona_instances=persona_instances,
             session_db=session_db,
             tasks=tasks,
             proof_store=proof_store,
-            daemon=daemon_status,
+            daemon=None,
             realm=active_realm_name,
             workspace=active_workspace_name,
         ),
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=daemon_status, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
+        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
-        "tasks": [
-            _task_summary(
-                t,
-                proof_store.list_for_task(t.id),
-                tasks,
-                incidents,
-                runs,
-                event_log.for_task(t.id, limit=200),
-                workers=workers,
-                run_store=run_store,
-                self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(t.id),
-                role_envelopes=[item for item in role_envelopes if item.task_id == t.id],
-                role_checklists=[item for item in role_checklists if item.task_id == t.id],
-                proof_batches=[item for item in proof_batches if item.task_id == t.id],
-                persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
-                repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
-                runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
-                persona_instances=topology_persona_instances,
-                stage_verification_accountant=stage_verification_accountant,
-            )
-            for t in tasks
-        ],
-        "goals": [
-            _goal_projection_from_task(
-                t,
-                proof_store.list_for_task(t.id),
-                tasks,
-                incidents,
-                runs,
-                event_log.for_task(t.id, limit=200),
-                workers=workers,
-                run_store=run_store,
-                persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
-                repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
-                runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
-                persona_instances=topology_persona_instances,
-                workspaces=workspaces,
-            )
-            for t in tasks
-        ],
+        # S4: ONE keyed ``goals`` map is the wire entity (operator decision:
+        # GOAL is the wire name). The old ``tasks`` wire section retires; every
+        # field BOTH projections carried lives once here — the merged goal row
+        # is the full ``_task_summary`` (self_tests / role_envelopes /
+        # role_checklists / proof_batches / stage_verification all threaded, as
+        # the old ``tasks`` section had them) PLUS the goal-only fields (``id``,
+        # ``kind``, resolved ``realm_id``). Keyed by ``task_id`` — the unique
+        # per-row id, matching the on-disk ``task_*.json`` store keying. NOT
+        # ``goal_id``/``id``: several tasks can share one goal_id (parent/child
+        # under one mission), which would collapse rows. Each row still carries
+        # ``id`` (goal identity) + ``goal_id`` for goal-addressed consumers; the
+        # launcher folds the map's values, so the map key is never a lookup key.
+        "goals": _keyed(
+            [
+                _goal_head(_goal_projection_from_task(
+                    t,
+                    proof_store.list_for_task(t.id),
+                    tasks,
+                    incidents,
+                    runs,
+                    event_log.for_task(t.id, limit=200),
+                    workers=workers,
+                    run_store=run_store,
+                    self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(t.id),
+                    role_envelopes=[item for item in role_envelopes if item.task_id == t.id],
+                    role_checklists=[item for item in role_checklists if item.task_id == t.id],
+                    proof_batches=[item for item in proof_batches if item.task_id == t.id],
+                    persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
+                    repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
+                    runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
+                    persona_instances=topology_persona_instances,
+                    stage_verification_accountant=stage_verification_accountant,
+                    flow_timeline_accountant=flow_timeline_accountant,
+                    workspaces=workspaces,
+                    event_log=event_log,
+                ))
+                for t in tasks
+            ],
+            "task_id",
+        ),
         # Rows carry a resolved ``active`` flag alongside the top-level
         # ``active_*_id`` keys — consumers (launcher scope switcher) key
         # selection off the row flag and must not re-derive it.
@@ -383,14 +615,29 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             _realm_summary(item, workspaces=workspaces, active_id=realm_store.active_id())
             for item in realms
         ],
+        # Mission Board projection: board defs + bounded, redaction-safe card
+        # rows, scoped by workspace. Local reads only — NO git/sync calls in the
+        # snapshot path (conflict state comes from local sidecar files, never a
+        # git call). Cards never carry goal state; a linked_goal_id is resolved
+        # against the snapshot's goals at render time on the client.
+        "boards": _keyed(
+            _boards_summary(BoardStore(event_log=event_log), {getattr(w, "id", None) for w in workspaces}),
+            "board_id",
+        ),
+        # Mission Office projection: surface defs + bounded actor rows, keyed by
+        # workspace. Local reads only — conflict state comes from local sidecar
+        # files and the `unpublished` honesty flag from the local baseline
+        # sidecar; NEVER a git call in the snapshot path.
+        "offices": _keyed(
+            _offices_summary(OfficeStore(event_log=event_log), workspaces),
+            "workspace_id",
+        ),
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
-        "archived_tasks": archived_tasks,
+        "archived_tasks": _archived_tasks_frame(archived_tasks),
         "agents": agent_summaries,
         "available_personas": available_personas,
-        "blueprints": [blueprint_summary(bp) for bp in BlueprintStore().list()],
-        "blueprint_runs": [blueprint_run_summary(record) for record in blueprint_runs[-50:]],
         "runtime_paths_diagnostic": _runtime_paths_diagnostic(available_personas),
         "worker_sessions": [worker_session_summary(worker) for worker in workers],
         "role_envelopes": [role_envelope_summary(item, checklist_store=role_checklist_store) for item in role_envelopes],
@@ -399,34 +646,63 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         "repo_bundles": [repo_bundle_summary(item) for item in repo_bundles],
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "runtime_instances": [runtime_instance_summary(item) for item in runtime_instances],
-        "event_contracts": event_catalog(),
-        "runs": [_run_summary(r) for r in runs],
-        "incidents": [_incident_summary(i) for i in incidents],
+        "runs": _keyed(frame_run_rows, "run_id"),
+        "incidents": _keyed(incident_rows, "incident_id"),
         "proofs": [_proof_summary(p) for p in proofs],
         "self_tests": [self_test_summary(item) for item in self_tests],
+    }
+    # Honest accounting for the closed incidents evicted from the ``incidents``
+    # section — a typed pointer, never a silent absence. Only OPEN incidents
+    # remain in ``incidents`` as live state; every closed one is history-only
+    # (open-only retention, operator decision 2026-07-16).
+    data["incidents_history_ref"] = {
+        "evicted": True,
+        "closed_evicted": True,
+        "count": incidents_evicted_count,
+        "fetch": "harness incident list --state closed --json",
+    }
+    # S8: historical (non-active) runs are evicted from the ``runs`` frame map —
+    # a typed pointer accounts them, never a silent absence. Served on demand by
+    # the paged ``harness run list`` query.
+    data["runs_history_ref"] = {
+        "evicted": True,
+        "count": len(run_rows) - len(frame_run_rows),
+        "active_count": len(frame_run_rows),
+        "total_count": len(run_rows),
+        "fetch": "harness run list --json",
     }
     if persona_instance_runtime_enabled(cfg):
         data["persona_instance_runtime"] = {
             "enabled": True,
             "assignment_store_enabled": persona_assignment_store_enabled(cfg),
         }
-        data["persona_instances"] = [
+        # S4: persona_instances ships as an id-keyed map (the identity substrate
+        # the whole roster keys on — the store is already keyed on disk). The
+        # ROW LIST is built first because the identity_map alias resolver derives
+        # from the ordered rows; the frame then keys it by ``persona_instance_id``.
+        persona_instance_rows = [
             persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
             for instance in persona_instances
         ]
         # Legacy persona-instance id -> canonical id aliases (durable
         # reconciler registry + structurally derivable drift still live in
         # this snapshot). Consumers key dedup on this instead of heuristics.
-        data["identity_map"] = identity_aliases_for_rows(data["persona_instances"])
+        data["identity_map"] = identity_aliases_for_rows(persona_instance_rows)
+        data["persona_instances"] = _keyed(persona_instance_rows, "persona_instance_id")
         history_accountant = ProjectionAccountant("persona_chat_history")
         trace_accountant = ProjectionAccountant("persona_chat_trace")
-        data["persona_chat_history"] = persona_chat_history_summary(
+        # Full history (with message tails) is computed once and used to build the
+        # operator_channels conversations (their tail slimming is S4's concern).
+        # The FRAME carries recency pointers only (S2) — the tail bytes leave, the
+        # anchors stay.
+        persona_chat_history_full = persona_chat_history_summary(
             persona_instances=persona_instances,
             session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=history_accountant,
             persona_assignments=persona_assignments,
         )
+        data["persona_chat_history"] = _persona_chat_history_frame(persona_chat_history_full)
         data["persona_chat_trace"] = persona_chat_trace_summary(
             persona_instances=persona_instances,
             event_log=event_log,
@@ -436,10 +712,10 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         conversation_accountant = ProjectionAccountant("operator_conversation")
         live_operator_channels = operator_channel_summary(
             persona_instances=persona_instances,
-            persona_chat_history=data["persona_chat_history"],
+            persona_chat_history=persona_chat_history_full,
             persona_chat_trace=data["persona_chat_trace"],
             tasks=tasks,
-            run_summaries=data["runs"],
+            run_summaries=run_rows,
             accountant=conversation_accountant,
         )
         live_channel_task_ids = {
@@ -447,16 +723,41 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             for channel in live_operator_channels
             if channel.get("task_id")
         }
-        data["operator_channels"] = [
-            *live_operator_channels,
-            *_archived_operator_channels(
-                archived_tasks,
-                live_task_ids=live_channel_task_ids,
-            ),
+        # S4: operator_channels ships as an id-keyed map (channel_id). Live
+        # channels first, then the archived-task channels that don't collide —
+        # ``_keyed`` keeps the first occurrence, so a live channel is never
+        # shadowed by an archived one sharing an id.
+        data["operator_channels"] = _keyed(
+            [
+                *live_operator_channels,
+                *_archived_operator_channels(
+                    archived_tasks,
+                    live_task_ids=live_channel_task_ids,
+                ),
+            ],
+            "channel_id",
+        )
+        # S8: the ``recent`` lane (last 50 assignments, ~86 KB of old residue)
+        # leaves the frame — the launcher roster only needs the ACTIVE
+        # assignments (a live instance's current assignment is always active).
+        # ``recent`` stays an (empty) list so the launcher fold that concatenates
+        # ``active`` + ``recent`` never trips; the eviction is accounted by
+        # ``recent_ref`` and served on demand by ``harness persona assignments``.
+        active_assignments = [
+            persona_assignment_summary(item)
+            for item in persona_assignments
+            if item.state in ACTIVE_ASSIGNMENT_STATES
         ]
+        recent_count = len(persona_assignments[-50:])
         data["persona_assignments"] = {
-            "active": [persona_assignment_summary(item) for item in persona_assignments if item.state in ACTIVE_ASSIGNMENT_STATES],
-            "recent": [persona_assignment_summary(item) for item in persona_assignments[-50:]],
+            "active": active_assignments,
+            "recent": [],
+            "recent_ref": {
+                "evicted": True,
+                "count": recent_count,
+                "active_count": len(active_assignments),
+                "fetch": "harness persona assignments --json",
+            },
         }
         completeness = {
             "persona_chat_history": history_accountant.summary(),
@@ -474,6 +775,8 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         drop_samples = []
     completeness["stage_verification"] = stage_verification_accountant.summary()
     drop_samples.extend(stage_verification_accountant.drop_samples())
+    completeness["mission_flow_timeline"] = flow_timeline_accountant.summary()
+    drop_samples.extend(flow_timeline_accountant.drop_samples())
     data["parity"] = _parity_envelope(
         data,
         build_started=_build_started,
@@ -508,7 +811,28 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         )
     return {
         "envelope_version": PARITY_ENVELOPE_VERSION,
-        "contract_version": 38,
+        # S8 (DEEP SLIM inside live rows): the same history-eviction knife one
+        # level deeper. Goal rows become compact HEADS (heavy detail →
+        # ``harness goal detail``); the ``skills_catalogs`` table leaves the frame
+        # (rows keep ``*_ref`` hashes → ``harness skills catalog --hash``); the
+        # ``runs`` map keeps only ACTIVE runs (history → ``harness run list``);
+        # ``persona_assignments.recent`` and stale ``chat_contexts`` rows are
+        # evicted to pointers; archived operator channels become pointer stubs
+        # (transcript → ``harness task history``). Every eviction is accounted
+        # (typed ``*_ref`` / ``detail_ref`` / ``evicted`` markers), never a silent
+        # absence. S2/S3/S4 shape unchanged. Launcher pin
+        # (kSupportedMissionContractVersion) moves in lockstep.
+        #
+        # 44 (snapshot residue-slim R1/R2/R5a, 2026-07-17; 43 was taken by the
+        # office-realm-sync landing): the dead ``capabilities`` /
+        # ``observability.capabilities`` / ``event_contracts`` / ``blueprints`` /
+        # ``blueprint_runs`` frame sections (zero readers in all three repos) are
+        # DELETED; ``persona_instances`` / ``agents`` rows evict the heavy
+        # tool-detail payloads behind a typed ``visibility_ref`` (fetched via
+        # ``harness persona-instance detail``) and ``agent_hud_state`` is RETIRED;
+        # ``goals[].mission_flow_timeline.items`` is capped to the front window
+        # (accounted, ``harness goal history`` pointer).
+        "contract_version": 44,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
@@ -528,6 +852,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
             "proof_gate_state",
             "stage_verification",
             "operator_capabilities",
+            "server_minted_chat_sessions",
         ],
         "freshness": {
             "state": "fresh",
@@ -584,10 +909,243 @@ def _runtime_profile_identity() -> dict:
     return {"name": safe or "default"}
 
 
+# Mission Board projection bounds — honest accounting, never a silent cap
+# (the 8.6MB-snapshot lesson): oversized boards report the remainder count and
+# card bodies truncate with a flag rather than growing the snapshot unbounded.
+MAX_BOARD_CARDS_PROJECTED = 500
+BOARD_CARD_DESC_LIMIT = 2048
+
+
+def _mask_board_secrets(text) -> str:
+    """Hard-on secret mask for card prose in the projection (observe mode never
+    disables it). Card text rides the same projection boundary as goal text; the
+    HARD gate is the realm-publish fail-closed scan in ``realm_sync``."""
+
+    if not text:
+        return "" if text is None else text
+    return _ARCHIVED_CONVERSATION_SECRET_RE.sub(lambda m: f"{m.group(1)}: [redacted]", str(text))
+
+
+def _board_card_row(card) -> dict:
+    description = card.description or ""
+    truncated = len(description) > BOARD_CARD_DESC_LIMIT
+    if truncated:
+        description = description[:BOARD_CARD_DESC_LIMIT]
+    return {
+        "card_id": card.card_id,
+        "board_id": card.board_id,
+        "column_id": card.column_id,
+        "title": _mask_board_secrets(card.title),
+        "description": _mask_board_secrets(description),
+        "description_truncated": truncated,
+        "priority": card.priority,
+        "labels": list(card.labels),
+        "assignee": card.assignee,
+        "checklist": [
+            {"text": _mask_board_secrets(str(item.get("text", ""))), "done": bool(item.get("done"))}
+            for item in card.checklist
+            if isinstance(item, dict)
+        ],
+        "linked_goal_id": card.linked_goal_id,
+        "order_key": card.order_key,
+        "state": card.state,
+        "created_by": card.created_by,
+        "updated_at": to_jsonable(card.updated_at),
+        "updated_by": card.updated_by,
+        "revision": card.revision,
+    }
+
+
+def _board_conflict_card_ids(board_id: str) -> list[str]:
+    """Card ids with an OPEN conflict sidecar. Local file reads only — no git."""
+
+    conflicts_dir = paths.board_conflicts_dir(board_id)
+    if not conflicts_dir.exists():
+        return []
+    ids = [path.stem for path in conflicts_dir.glob("*.json") if not path.name.endswith(".resolved.json")]
+    return sorted(ids)
+
+
+def _boards_summary(board_store, workspace_ids: set) -> list[dict]:
+    boards: list[dict] = []
+    for board in board_store.list_all():
+        cards = board_store.list_cards(board.board_id)  # active, (order_key, card_id) sorted
+        projected = cards[:MAX_BOARD_CARDS_PROJECTED]
+        boards.append(
+            {
+                "board_id": board.board_id,
+                "workspace_id": board.workspace_id,
+                "title": board.title,
+                "revision": board.revision,
+                "updated_at": to_jsonable(board.updated_at),
+                "columns": [
+                    {"column_id": c.column_id, "title": c.title, "kind": c.kind, "wip_limit": c.wip_limit}
+                    for c in board.columns
+                ],
+                "cards": [_board_card_row(c) for c in projected],
+                "active_card_count": len(cards),
+                "cards_truncated": max(0, len(cards) - len(projected)),
+                "conflict_card_ids": _board_conflict_card_ids(board.board_id),
+                "archived_card_ids": list(board.archived_card_ids),
+                # A board whose workspace no longer resolves is accounted, never
+                # silently hidden (repair via archive) — parity warning below.
+                "orphaned": board.workspace_id not in workspace_ids,
+            }
+        )
+    return boards
+
+
+def _board_parity_warnings(data) -> list[dict]:
+    warnings: list[dict] = []
+    for board in _rows(data.get("boards")):
+        if board.get("orphaned"):
+            warnings.append(
+                {
+                    "code": "orphaned_board",
+                    "entity_id": board.get("board_id"),
+                    "detail": (
+                        f"board '{board.get('board_id')}' points at workspace "
+                        f"'{board.get('workspace_id')}' which no longer resolves; archive to repair"
+                    ),
+                }
+            )
+        for card_id in board.get("conflict_card_ids") or []:
+            warnings.append(
+                {
+                    "code": "board_card_conflict",
+                    "entity_id": card_id,
+                    "board_id": board.get("board_id"),
+                    "detail": (
+                        f"board card '{card_id}' has an unresolved realm-sync conflict; "
+                        "resolve with `harness board resolve-conflict <card_id> --take local|remote`"
+                    ),
+                }
+            )
+    return warnings
+
+
+MAX_OFFICE_ACTORS_PROJECTED = 200
+
+
+def _office_actor_summary_row(actor, *, unpublished: bool | None) -> dict:
+    row = {
+        "actor_key": actor.actor_key,
+        "persona_id": actor.persona_id,
+        "persona_instance_id": actor.persona_instance_id,
+        "backing_profile": actor.backing_profile,
+        "items": [
+            {
+                "item_id": item.item_id,
+                "persona_id": item.persona_id,
+                "kind": item.kind,
+                "position": list(item.position),
+                "folder": item.folder,
+                "display_name": item.display_name,
+                "pet_slug": item.pet_slug,
+                "scale": item.scale,
+            }
+            for item in actor.items
+        ],
+        "revision": actor.revision,
+        "updated_at": to_jsonable(actor.updated_at),
+        "updated_by": actor.updated_by,
+    }
+    if unpublished is not None:
+        row["unpublished"] = unpublished
+    return row
+
+
+def _offices_summary(office_store, workspaces) -> list[dict]:
+    """Mission Office projection rows, keyed by workspace_id. Local reads only:
+    conflict state from local sidecar files, ``unpublished`` from the local
+    realm-sync baseline sidecar (a pure file read — Decision 7 posture)."""
+
+    from .office_sync import read_office_baseline
+
+    workspace_ids = {getattr(w, "id", None) for w in workspaces}
+    realm_by_workspace = {getattr(w, "id", None): getattr(w, "realm_id", None) for w in workspaces}
+    baselines: dict[str, dict[str, str]] = {}
+    offices: list[dict] = []
+    for workspace_token in office_store.list_workspaces():
+        try:
+            surface = office_store.get_surface(workspace_token)
+        except Exception:
+            continue
+        actors = office_store.list_actors(workspace_token)
+        projected = actors[:MAX_OFFICE_ACTORS_PROJECTED]
+        realm_id = realm_by_workspace.get(surface.workspace_id)
+        baseline: dict[str, str] | None = None
+        if realm_id:
+            if realm_id not in baselines:
+                try:
+                    baselines[realm_id] = read_office_baseline(realm_id)
+                except Exception:
+                    baselines[realm_id] = {}
+            baseline = baselines[realm_id]
+
+        def _actor_unpublished(actor) -> bool | None:
+            # Publication honesty is only meaningful for realm-bound workspaces.
+            if baseline is None:
+                return None
+            from .office_models import office_content_hash
+
+            return baseline.get(f"{surface.workspace_id}:actor:{actor.actor_key}") != office_content_hash(actor)
+
+        offices.append(
+            {
+                "workspace_id": surface.workspace_id,
+                "folders": list(surface.folders),
+                "actors": [_actor_summary for _actor_summary in (_office_actor_summary_row(a, unpublished=_actor_unpublished(a)) for a in projected)],
+                "actor_count": len(actors),
+                "actors_truncated": max(0, len(actors) - len(projected)),
+                "conflict_actor_keys": office_store.conflict_actor_keys(workspace_token),
+                "archived_actor_keys": list(surface.archived_actor_keys),
+                "revision": surface.revision,
+                "updated_at": to_jsonable(surface.updated_at),
+                # A surface whose workspace no longer resolves is accounted,
+                # never silently hidden — parity warning below.
+                "orphaned": surface.workspace_id not in workspace_ids,
+            }
+        )
+    return offices
+
+
+def _office_parity_warnings(data) -> list[dict]:
+    warnings: list[dict] = []
+    for office in _rows(data.get("offices")):
+        if office.get("orphaned"):
+            warnings.append(
+                {
+                    "code": "orphaned_office",
+                    "entity_id": office.get("workspace_id"),
+                    "detail": (
+                        f"office surface points at workspace '{office.get('workspace_id')}' "
+                        "which no longer resolves"
+                    ),
+                }
+            )
+        for actor_key in office.get("conflict_actor_keys") or []:
+            warnings.append(
+                {
+                    "code": "office_actor_conflict",
+                    "entity_id": actor_key,
+                    "workspace_id": office.get("workspace_id"),
+                    "detail": (
+                        f"office actor '{actor_key}' has an unresolved realm-sync conflict; "
+                        "resolve with `harness office resolve-conflict --actor <key> --take local|remote`"
+                    ),
+                }
+            )
+    return warnings
+
+
 def _parity_warnings(data) -> list[dict]:
     """Snapshot-level self-checks that flag likely UI/harness divergence."""
 
-    warnings: list[dict] = []
+    # Board/office warnings do not depend on the persona-instance runtime, so
+    # they are computed before the runtime-disabled early return below.
+    warnings: list[dict] = _board_parity_warnings(data)
+    warnings.extend(_office_parity_warnings(data))
     runtime = data.get("persona_instance_runtime") or {}
     if not runtime.get("enabled"):
         warnings.append(
@@ -598,7 +1156,7 @@ def _parity_warnings(data) -> list[dict]:
         )
         return warnings
 
-    instances = data.get("persona_instances") or []
+    instances = _rows(data.get("persona_instances"))
     for group in duplicate_persona_instance_groups(instances):
         warnings.append(
             {
@@ -666,6 +1224,58 @@ def _parity_warnings(data) -> list[dict]:
         for inst in instances
         if isinstance(inst, dict)
     }
+    # Shape-valid JSON can still be referentially stale. Steering fields are
+    # foreign keys into persona_instances; report every unresolved target in
+    # the parity envelope so clients never have to infer corruption from a
+    # missing card or a failed flow sync.
+    for instance in instances:
+        if not isinstance(instance, dict):
+            continue
+        source_id = str(
+            instance.get("persona_instance_id")
+            or instance.get("agent_profile_id")
+            or ""
+        )
+        spawned_by = str(instance.get("spawned_by") or "").strip()
+        if (
+            spawned_by
+            and looks_like_persona_instance_id(spawned_by)
+            and spawned_by not in instance_ids
+        ):
+            warnings.append(
+                {
+                    "code": "fk_miss",
+                    "from_entity": "persona_instance",
+                    "from_id": source_id,
+                    "fk_field": "spawned_by",
+                    "target_entity": "persona_instances",
+                    "target_id": spawned_by,
+                    "detail": (
+                        f"persona_instance '{source_id}' spawned_by -> "
+                        f"{spawned_by} does not resolve in persona_instances; "
+                        "run `harness persona-instance reconcile [--dry-run]`"
+                    ),
+                }
+            )
+        for parent_id in dict.fromkeys(instance.get("steered_by") or []):
+            parent_id = str(parent_id or "").strip()
+            if not parent_id or parent_id in instance_ids:
+                continue
+            warnings.append(
+                {
+                    "code": "fk_miss",
+                    "from_entity": "persona_instance",
+                    "from_id": source_id,
+                    "fk_field": "steered_by",
+                    "target_entity": "persona_instances",
+                    "target_id": parent_id,
+                    "detail": (
+                        f"persona_instance '{source_id}' steered_by -> "
+                        f"{parent_id} does not resolve in persona_instances; "
+                        "run `harness persona-instance reconcile [--dry-run]`"
+                    ),
+                }
+            )
     for row in data.get("persona_chat_trace") or []:
         if not isinstance(row, dict):
             continue
@@ -742,17 +1352,51 @@ def _parity_warnings(data) -> list[dict]:
                 "detail": "persona runtime is enabled but the Agent Console channel projection is absent",
             }
         )
-    elif not isinstance(channels, list):
+    elif not isinstance(channels, dict):
+        # S4: operator_channels is now an id-keyed map (channel_id -> row).
         warnings.append(
             {
                 "code": "operator_channels_invalid",
-                "detail": "operator_channels must be a list; Launcher Agent Console cannot render this snapshot",
+                "detail": "operator_channels must be an id-keyed map; Launcher Agent Console cannot render this snapshot",
             }
         )
     else:
-        for channel in channels:
+        # S4 (delete derived copies -> FK-miss reports): each operator channel
+        # carries FK ids into the owner entities (persona_instances) rather than
+        # restating them. A ``persona_instance_id`` that does not resolve in the
+        # keyed persona_instances map is a typed, resolvable pointer miss — not a
+        # cross-projection "contract error" reconciling two copies of a fact.
+        # Archived channels reference archived (frame-evicted) instances by
+        # design, so they are exempt from the live-roster FK check.
+        live_instance_ids = {
+            str(row.get("persona_instance_id") or "")
+            for row in instances
+            if isinstance(row, dict) and row.get("persona_instance_id")
+        }
+        for channel in _rows(channels):
             if not isinstance(channel, dict):
                 continue
+            fk_target = str(channel.get("persona_instance_id") or "").strip()
+            if (
+                fk_target
+                and str(channel.get("state") or "") != "archived"
+                and fk_target not in live_instance_ids
+            ):
+                warnings.append(
+                    {
+                        "code": "fk_miss",
+                        "from_entity": "operator_channel",
+                        "from_id": channel.get("channel_id"),
+                        "fk_field": "persona_instance_id",
+                        "target_entity": "persona_instances",
+                        "target_id": fk_target,
+                        "detail": (
+                            f"operator_channel '{channel.get('channel_id')}' "
+                            f"persona_instance_id -> {fk_target} does not resolve in "
+                            "persona_instances"
+                        ),
+                    }
+                )
             for warning in channel.get("warnings") or []:
                 if not isinstance(warning, dict):
                     continue
@@ -766,11 +1410,11 @@ def _parity_warnings(data) -> list[dict]:
                 )
 
     summary = data.get("summary") or {}
-    if (summary.get("open_tasks") or 0) > 0 and not (data.get("tasks")):
+    if (summary.get("open_tasks") or 0) > 0 and not (data.get("goals")):
         warnings.append(
             {
                 "code": "open_tasks_without_task_rows",
-                "detail": "summary reports open tasks but no task rows were mapped",
+                "detail": "summary reports open tasks but no goal rows were mapped",
             }
         )
     try:
@@ -855,9 +1499,45 @@ def _event_summary_warnings(events) -> list[dict]:
     return warnings
 
 
+_STALE_SNAPSHOT_TMP_AGE_SECONDS = 3600.0
+
+
+def _sweep_stale_snapshot_tmp_files() -> None:
+    """Remove orphaned ``.snapshot_*.tmp`` files beside the boot cache.
+
+    ``atomic_json_write`` stages via ``tempfile.mkstemp(prefix=".snapshot_",
+    suffix=".tmp")`` in the store root; a crash between staging and
+    ``os.replace`` strands the temp file forever (live root had two, one 3MB).
+    Swept only at the next boot-cache write, age-gated so an in-flight writer's
+    fresh temp file is never touched. Best-effort: a locked/vanished file is
+    skipped, never raised.
+    """
+
+    try:
+        cutoff = time.time() - _STALE_SNAPSHOT_TMP_AGE_SECONDS
+        for tmp in paths.snapshot_path().parent.glob(".snapshot_*.tmp"):
+            try:
+                if tmp.stat().st_mtime < cutoff:
+                    tmp.unlink()
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
 def write_snapshot(snapshot: dict | None = None) -> dict:
     snapshot = snapshot or build_snapshot()
-    atomic_json_write(paths.snapshot_path(), to_jsonable(snapshot), indent=2, sort_keys=True)
+    # Compact JSON: the boot cache is machine-read only (launcher boot decode +
+    # audits), and indent=2 inflated the 9MB-era cache by ~30%. sort_keys stays
+    # (stable diffs / byte-reproducible caches).
+    atomic_json_write(
+        paths.snapshot_path(),
+        to_jsonable(snapshot),
+        indent=None,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    _sweep_stale_snapshot_tmp_files()
     cfg = load_agent_runtime_config()
     read_model_cfg = getattr(cfg, "read_model", None)
     if bool(getattr(read_model_cfg, "enabled", False)):
@@ -922,12 +1602,11 @@ def _archived_task_summaries(limit: int = 25) -> list[dict]:
 
 
 def _read_json(path):
-    try:
-        if not path.exists():
-            return {}
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = cached_by_mtime(
+        path,
+        lambda candidate: json.loads(candidate.read_text(encoding="utf-8")),
+        default={},
+    )
     return data if isinstance(data, dict) else {}
 
 
@@ -1039,8 +1718,18 @@ def _archived_operator_channel(archived: dict) -> dict | None:
     for seq, message in enumerate(messages, start=1):
         message["seq"] = seq
     updated_at = _latest_archived_message_timestamp(messages) or archived.get("updated_at") or archived.get("archived_at")
-    conversation_status = "complete" if messages else "incomplete"
-    incomplete_reason = None if messages else "Archived task did not contain projectable conversation messages."
+    # S8: an archived channel is a POINTER STUB — the embedded transcript
+    # (~20-25 KB/row of dead-mission messages) leaves the frame (operator ruling
+    # 2026-07-17: "old residue and runs need to be purged — it should just be
+    # pointers to chat history"). The full transcript stays on disk in the
+    # deleted-archive batch and is fetched on demand via ``harness task history``
+    # (or the persona chat-history query). The stub keeps identity + recency +
+    # message_count so the console renders an honest archived row + a fetch
+    # affordance, never a fake-empty conversation. ``messages`` is an explicit
+    # empty list flagged ``messages_evicted`` so the launcher conversation parser
+    # distinguishes an evicted transcript from a genuinely empty one.
+    message_count = len(messages)
+    fetch = f"harness task history {task_id} --json"
     conversation = {
         "schema_version": OPERATOR_CONVERSATION_SCHEMA_VERSION,
         "thread_id": channel_id,
@@ -1054,9 +1743,12 @@ def _archived_operator_channel(archived: dict) -> dict | None:
         "title": _archived_conversation_text(archived.get("title"), limit=240) or "Archived mission",
         "state": "archived",
         "updated_at": updated_at,
-        "status": conversation_status,
-        "incomplete_reason": incomplete_reason,
-        "messages": messages,
+        "status": "archived",
+        "incomplete_reason": None,
+        "messages": [],
+        "messages_evicted": True,
+        "message_count": message_count,
+        "fetch": fetch,
     }
     return {
         "schema_version": OPERATOR_CHANNELS_SCHEMA_VERSION,
@@ -1066,15 +1758,17 @@ def _archived_operator_channel(archived: dict) -> dict | None:
         "session_id": None,
         "task_id": task_id,
         "goal_id": goal_id,
-        "display_name": "Neko Supervisor",
+        "display_name": _display_name_for_persona("neko_supervisor"),
         "state": "archived",
         "mode": "archived_goal",
         "source_instance_ids": [],
         "history": None,
         "trace": None,
         "conversation": conversation,
-        "conversation_status": conversation_status,
-        "message_count": len(messages),
+        "conversation_status": "archived",
+        "message_count": message_count,
+        "messages_evicted": True,
+        "fetch": fetch,
         "trace_count": 0,
         "tool_trace_count": 0,
         "warnings": [],
@@ -1872,7 +2566,7 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
-def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None):
+def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, event_log=None):
     gate = task_verdict_proof_satisfied(task, proofs)
     current_stage_id = _task_current_stage_id(task)
     current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
@@ -1886,7 +2580,12 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         if getattr(worker, "task_id", None) == task.id
         and str(getattr(getattr(worker, "state", ""), "value", getattr(worker, "state", ""))) not in {"completed", "blocked", "closed"}
     ]
-    next_action = _next_action_summary(task, open_incidents, run_store=run_store)
+    next_action = _next_action_summary(
+        task,
+        open_incidents,
+        run_store=run_store,
+        event_log=event_log,
+    )
     assignments = list(persona_assignments or [])
     bundles = list(repo_bundles or [])
     runtime_lane = _runtime_lane_summary(runtime_instances or [])
@@ -1968,7 +2667,7 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
                 proof_batches=proof_batches or [],
             ),
         ),
-        "mission_flow_timeline": _mission_flow_timeline(task, events or []),
+        "mission_flow_timeline": _mission_flow_timeline(task, events or [], accountant=flow_timeline_accountant),
         "proof_gate_state": _proof_gate_state(task, proofs),
         "operator_capabilities": _operator_capabilities(task, next_action, gate),
     }
@@ -2181,7 +2880,13 @@ def _task_current_stage_id(task) -> str | None:
     return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
 
 
-def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, workspaces=None) -> dict:
+def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None, event_log=None) -> dict:
+    # S4 goals/tasks merge: the goal entity is the FULL task summary (all the
+    # rich lanes the old ``tasks`` section carried — self_tests, role_envelopes,
+    # role_checklists, proof_batches, accounted stage_verification) UNIONED with
+    # the goal-only fields below. The old ``goals`` projection omitted these
+    # lanes; the merged single owner must carry them so no field the retired
+    # ``tasks`` section held is lost.
     row = _task_summary(
         task,
         proofs,
@@ -2191,10 +2896,17 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         events,
         workers=workers,
         run_store=run_store,
+        self_tests=self_tests,
+        role_envelopes=role_envelopes,
+        role_checklists=role_checklists,
+        proof_batches=proof_batches,
         persona_assignments=persona_assignments,
         repo_bundles=repo_bundles,
         runtime_instances=runtime_instances,
         persona_instances=persona_instances,
+        stage_verification_accountant=stage_verification_accountant,
+        flow_timeline_accountant=flow_timeline_accountant,
+        event_log=event_log,
     )
     workspace_id = getattr(task, "workspace_id", None)
     realm_id = None
@@ -2212,6 +2924,128 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         }
     )
     return row
+
+
+def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
+    """The FULL goal projection for ONE task, rebuilt read-only from the stores.
+
+    S8: the steady-state frame ships only the goal HEAD (``_goal_head``); the
+    heavy detail (``GOAL_DETAIL_ONLY_FIELDS``) is served on demand here — the
+    exact bytes ``_goal_projection_from_task`` produced before the split, so the
+    launcher's goal-detail drawer / blueprint / replay views fetch identical data
+    to what the pre-S8 in-frame row carried. Read-only: lists stores + the
+    EventLog, mutates nothing. Returns ``None`` when the task id does not resolve
+    (an honest miss, never a fabricated empty goal)."""
+
+    token = str(task_id or "").strip()
+    if not token:
+        return None
+    event_log = event_log or CachedEventLog()
+    task_store = TaskStore()
+    # ``get_goal`` resolves BOTH a task id and a goal id (parent/child tasks can
+    # share one goal_id), raising NotFound on a genuine miss.
+    from .errors import NotFound
+
+    try:
+        task = task_store.get_goal(token)
+    except NotFound:
+        return None
+    tasks = task_store.list_all()
+    run_store = RunStore()
+    runs = run_store.list_all()
+    proof_store = ProofStore()
+    incident_store = IncidentStore()
+    incidents = incident_store.list_all()
+    worker_session_store = WorkerSessionStore(event_log=event_log)
+    workers = worker_session_store.list_all()
+    role_envelope_store = RoleEnvelopeStore(event_log=event_log)
+    role_checklist_store = RoleChecklistStore(event_log=event_log)
+    proof_batch_store = ProofBatchStore(event_log=event_log)
+    repo_bundle_store = RepoBundleStore(event_log=event_log)
+    runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
+    workspace_store = WorkspaceStore()
+    workspaces = workspace_store.list_all(include_archived=True)
+    cfg = load_agent_runtime_config()
+    persona_instances: list = []
+    persona_assignments: list = []
+    if persona_instance_runtime_enabled(cfg):
+        agents = AgentStore().list_all() or seed_personas()
+        persona_instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, workers)
+        if persona_assignment_store_enabled(cfg):
+            persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
+    return _goal_projection_from_task(
+        task,
+        proof_store.list_for_task(task.id),
+        tasks,
+        incidents,
+        runs,
+        event_log.for_task(task.id, limit=200),
+        workers=workers,
+        run_store=run_store,
+        self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id),
+        role_envelopes=[item for item in role_envelope_store.list_all() if item.task_id == task.id],
+        role_checklists=[item for item in role_checklist_store.list_all() if item.task_id == task.id],
+        proof_batches=[item for item in proof_batch_store.list_all() if item.task_id == task.id],
+        persona_assignments=[item for item in persona_assignments if item.task_id == task.id],
+        repo_bundles=[item for item in repo_bundle_store.list_all() if item.task_id == task.id],
+        runtime_instances=[item for item in runtime_instance_store.list_all() if item.task_id == task.id],
+        persona_instances=persona_instances,
+        stage_verification_accountant=None,
+        workspaces=workspaces,
+        event_log=event_log,
+    )
+
+
+def _agent_tool_detail(agent) -> dict:
+    """The evicted tool-detail payloads for one persona (``agents`` section row),
+    rebuilt read-only — the same fields ``_agent_summary`` carried before R2 evicted
+    them (minus the retired ``agent_hud_state``)."""
+
+    from .tool_visibility import permission_state_for_persona, turn_tool_context_for_persona
+
+    tool_resolution = resolve_tool_visibility(agent)
+    return {
+        "persona_id": agent.id,
+        "display_name": agent.display_name,
+        "tool_resolution": tool_resolution,
+        "turn_tool_context": turn_tool_context_for_persona(agent),
+        "permission_state": permission_state_for_persona(agent),
+        "blocked_tools": tool_resolution["blocked_tools"],
+    }
+
+
+def persona_instance_detail_for_id(entity_id: str, *, event_log=None) -> dict | None:
+    """The tool-detail payloads R2 evicted from ``persona_instances`` / ``agents``
+    rows, rebuilt read-only and served on demand by ``harness persona-instance
+    detail``.
+
+    Resolves ``entity_id`` as a live persona-instance id first (the same derived
+    set the frame keys), then falls back to a persona (agent) id — both wire rows
+    carry a ``visibility_ref`` pointing here. Read-only (lists stores, mutates
+    nothing). Returns ``None`` on a genuine miss (an honest ``not_found`` the
+    launcher surfaces as 'unavailable', never a fabricated empty payload)."""
+
+    token = str(entity_id or "").strip()
+    if not token:
+        return None
+    from .persona_assignments import persona_instance_tool_detail
+
+    event_log = event_log or CachedEventLog()
+    cfg = load_agent_runtime_config()
+    agents = AgentStore().list_all() or seed_personas()
+    personas_by_id = {str(getattr(a, "id", "") or ""): a for a in agents}
+    if persona_instance_runtime_enabled(cfg):
+        worker_session_store = WorkerSessionStore(event_log=event_log)
+        workers = worker_session_store.list_all()
+        instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, workers)
+        for instance in instances:
+            if str(getattr(instance, "id", "") or "") == token:
+                persona = personas_by_id.get(str(getattr(instance, "persona_id", "") or ""))
+                return persona_instance_tool_detail(instance, persona)
+    persona = personas_by_id.get(token)
+    if persona is not None:
+        return _agent_tool_detail(persona)
+    return None
 
 
 def _workspace_summary(workspace, *, tasks, active_id: str | None = None) -> dict:
@@ -2362,16 +3196,91 @@ def _mission_level_state(task, *, active_runs, active_workers, events, runtime_i
         "blueprint_version": getattr(plan, "blueprint_version", None),
         "active_stage_id": active_stage_id,
         "actors": actors,
-        "agent_topology": _agent_topology(
-            task,
-            active_runs=active_runs,
-            active_workers=active_workers,
-            runtime_instances=runtime_instances,
-            persona_instances=persona_instances,
-            role_streams=role_streams,
-        ),
+        # S4 (delete derived copies): ``agent_topology`` was a DERIVED copy of
+        # steering truth (``persona_instances[].steered_by``). It leaves the
+        # frame entirely — the launcher already derives both directions from
+        # ``steered_by`` (missionAgentInstanceParentIds /
+        # missionAgentSteeredInstances) and its runtime-graph projection falls
+        # back to that steered_by path when no topology is present. Zero
+        # ``agent_topology`` bytes ship; the ``_agent_topology`` builder is now
+        # unreferenced (its removal is S7 cleanup, kept out of this shrink stage
+        # to bound the diff).
         "updated_at": getattr(task, "updated_at", None),
     }
+
+
+def agent_topology_for_task(task) -> dict:
+    """Re-derive the steering topology (incl. ``steer_actions``) for one task.
+
+    S4 deleted the derived ``agent_topology`` copy from the snapshot frame. The
+    steering executor (``steering.execute_steer_action``) was the one live
+    reader of its ``steer_actions`` — it validated an operator's requested steer
+    against the frame's copy. Rather than ship that derived copy on EVERY frame
+    for a reader that fires only on an operator action, the executor re-derives
+    it on demand here from the stores, so there is still exactly ONE producer
+    (``_agent_topology``) and no per-frame duplicate. Not a hot path (one steer
+    action), so a per-call store read is acceptable.
+    """
+
+    event_log = CachedEventLog()
+    cfg = load_agent_runtime_config()
+    all_runs = RunStore().list_all()
+    runs = [run for run in all_runs if run.task_id == task.id]
+    active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
+    all_workers = WorkerSessionStore(event_log=event_log).list_all()
+    workers = [w for w in all_workers if getattr(w, "task_id", None) == task.id]
+    active_workers = [
+        w
+        for w in workers
+        if str(getattr(getattr(w, "state", ""), "value", getattr(w, "state", "")))
+        not in {"completed", "blocked", "closed"}
+    ]
+    runtime_instances = [
+        item
+        for item in GoalRuntimeInstanceStore(event_log=event_log).list_all()
+        if item.task_id == task.id
+    ]
+    agents = AgentStore().list_all() or seed_personas()
+    if persona_instance_runtime_enabled(cfg):
+        persona_instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, all_workers)
+    else:
+        persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
+    persona_assignments = (
+        [
+            item
+            for item in PersonaAssignmentStore(event_log=event_log).list_all()
+            if item.task_id == task.id
+        ]
+        if persona_assignment_store_enabled(cfg)
+        else []
+    )
+    role_envelopes = [
+        item for item in RoleEnvelopeStore(event_log=event_log).list_all() if item.task_id == task.id
+    ]
+    role_checklists = [
+        item for item in RoleChecklistStore(event_log=event_log).list_all() if item.task_id == task.id
+    ]
+    proof_batches = [
+        item for item in ProofBatchStore(event_log=event_log).list_all() if item.task_id == task.id
+    ]
+    role_streams = _role_streams(
+        task,
+        event_log.for_task(task.id, limit=200),
+        runs,
+        workers,
+        persona_assignments=persona_assignments,
+        role_envelopes=role_envelopes,
+        role_checklists=role_checklists,
+        proof_batches=proof_batches,
+    )
+    return _agent_topology(
+        task,
+        active_runs=active_runs,
+        active_workers=active_workers,
+        runtime_instances=runtime_instances,
+        persona_instances=persona_instances,
+        role_streams=role_streams,
+    )
 
 
 def _agent_topology(task, *, active_runs, active_workers, runtime_instances, persona_instances, role_streams) -> dict:
@@ -2400,6 +3309,47 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
         for instance in [*runtime_instances, *persona_instances]
         if _instance_matches_task(instance, task, task_goal_id)
     ]
+    # --- Steering closure -------------------------------------------------
+    # The runtime graph the operator edits lives in persona-instance steering
+    # (``steered_by``, keyed by instance id). Seeding topology nodes only from
+    # goal-matched instances + plan slots drops any node the operator steered IN
+    # whose goal does not match the task — e.g. a fan-in convergence agent on a
+    # goal-less default flow. Its node (and every edge into it) is omitted, so
+    # the Launcher reprojects the operator's wiring away ("connected + saved,
+    # gone on refresh"). Pull the steered graph in: anchor on the goal-matched
+    # set plus the lead instance bound to the plan root, then transitively add
+    # any instance steered by a member. This mirrors the Launcher's own
+    # related-instance expansion and stays BOUNDED to the mission — only steered
+    # descendants of the seed, never the global persona pool.
+    _all_instances = [*runtime_instances, *persona_instances]
+    _seed_ids = {
+        sid
+        for sid in (str(getattr(i, "id", "") or "").strip() for i in related_instances)
+        if sid
+    }
+    if root_slot:
+        _root_persona = _topology_slot_persona_id(root_slot, bindings)
+        _by_persona_all: dict[str, list] = {}
+        for _inst in _all_instances:
+            _pid = str(getattr(_inst, "persona_id", "") or "").strip()
+            if _pid:
+                _by_persona_all.setdefault(_pid, []).append(_inst)
+        _root_inst = _instance_for_persona(_root_persona, _by_persona_all)
+        _root_id = str(getattr(_root_inst, "id", "") or "").strip() if _root_inst else ""
+        if _root_id and _root_id not in _seed_ids:
+            related_instances.append(_root_inst)
+            _seed_ids.add(_root_id)
+    _closure_changed = True
+    while _closure_changed:
+        _closure_changed = False
+        for _inst in _all_instances:
+            _iid = str(getattr(_inst, "id", "") or "").strip()
+            if not _iid or _iid in _seed_ids:
+                continue
+            if any(ref in _seed_ids for ref in _instance_parent_refs(_inst)):
+                related_instances.append(_inst)
+                _seed_ids.add(_iid)
+                _closure_changed = True
     instances_by_id = {str(getattr(instance, "id", "") or ""): instance for instance in related_instances}
     instances_by_persona: dict[str, list] = {}
     for instance in related_instances:
@@ -2500,34 +3450,43 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
 
     edges: list[dict] = []
     targets_with_runtime_parent: set[str] = set()
+    fan_in_targets: set[str] = set()
     seen_spawn_edges: set[tuple[str, str]] = set()
     for instance in related_instances:
-        parent_ref = str(getattr(instance, "spawned_by", "") or "").strip()
-        parent = _topology_parent_instance(parent_ref, related_instances)
-        if parent is None:
-            continue
-        # Map lineage onto canonical persona nodes so collapsed multi-turn instances
-        # don't drop the spawn edge; dedupe and skip self-edges (a persona spawning
-        # another turn of itself is not a distinct steer).
-        target_node = _canonical_node_for(instance)
-        parent_node = _canonical_node_for(parent)
-        if not target_node or not parent_node or parent_node == target_node:
-            continue
-        if target_node not in nodes_by_id or parent_node not in nodes_by_id:
-            continue
-        key = (parent_node, target_node)
-        if key in seen_spawn_edges:
-            continue
-        seen_spawn_edges.add(key)
-        targets_with_runtime_parent.add(target_node)
-        edges.append(
-            {
-                "source_node_id": parent_node,
-                "target_node_id": target_node,
-                "kind": "steers",
-                "source": "runtime_spawned_by",
-            }
-        )
+        # Multi-parent fan-in (Stage 77): a child can be steered by ≥1 parents.
+        # Iterate the authoritative `steered_by` set (falling back to the legacy
+        # scalar `spawned_by` for un-migrated records) and emit one edge per
+        # distinct parent node.
+        for parent_ref in _instance_parent_refs(instance):
+            parent = _topology_parent_instance(parent_ref, related_instances)
+            if parent is None:
+                continue
+            # Map lineage onto canonical persona nodes so collapsed multi-turn
+            # instances don't drop the spawn edge; dedupe and skip self-edges (a
+            # persona spawning another turn of itself is not a distinct steer).
+            target_node = _canonical_node_for(instance)
+            parent_node = _canonical_node_for(parent)
+            if not target_node or not parent_node or parent_node == target_node:
+                continue
+            if target_node not in nodes_by_id or parent_node not in nodes_by_id:
+                continue
+            key = (parent_node, target_node)
+            if key in seen_spawn_edges:
+                continue
+            seen_spawn_edges.add(key)
+            if target_node in targets_with_runtime_parent:
+                # A second (or later) distinct runtime parent for this node =
+                # true fan-in.
+                fan_in_targets.add(target_node)
+            targets_with_runtime_parent.add(target_node)
+            edges.append(
+                {
+                    "source_node_id": parent_node,
+                    "target_node_id": target_node,
+                    "kind": "steers",
+                    "source": "runtime_spawned_by",
+                }
+            )
 
     if topology_edges:
         for edge in topology_edges:
@@ -2567,6 +3526,7 @@ def _agent_topology(task, *, active_runs, active_workers, runtime_instances, per
         "completeness": {
             "node_count": len(nodes_by_id),
             "edge_count": len(edges),
+            "fan_in_targets": len(fan_in_targets),
             "collapsed_multi_turn_instances": collapsed_instances,
             "stream_event_cap_per_node": 3,
             "id_cap_per_node": AGENT_TOPOLOGY_NODE_ID_CAP,
@@ -2601,6 +3561,7 @@ def _agent_topology_node(*, node_id: str, persona_id: str, instance, owned_stage
         "budget": _actor_budget_summary(runs, stream),
         "current_stage_id": getattr(stage, "id", None),
         "spawned_by": str(getattr(instance, "spawned_by", "") or "").strip() or None,
+        "steered_by": _instance_parent_refs(instance),
         "returned_to": str(getattr(instance, "returned_to", "") or "").strip() or None,
         "stream_event_count": len(stream.get("events") or []) if isinstance(stream, dict) else 0,
         "progress_peek": _progress_peek(stream),
@@ -2677,6 +3638,24 @@ def _instance_for_persona(persona_id: str, instances_by_persona: dict[str, list]
     return sorted(candidates, key=lambda item: str(getattr(item, "updated_at", "") or ""), reverse=True)[0]
 
 
+def _instance_parent_refs(instance) -> list[str]:
+    """The child's steering-parent refs, preferring the authoritative
+    ``steered_by`` set and falling back to the legacy scalar ``spawned_by`` for
+    un-migrated records. De-duplicated, order-preserving (first = primary)."""
+    raw = list(getattr(instance, "steered_by", []) or [])
+    if not raw:
+        scalar = getattr(instance, "spawned_by", None)
+        raw = [scalar] if scalar else []
+    refs: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        ref = str(value or "").strip()
+        if ref and ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+    return refs
+
+
 def _topology_parent_instance(parent_ref: str, instances: list):
     if not parent_ref:
         return None
@@ -2689,7 +3668,7 @@ def _topology_parent_instance(parent_ref: str, instances: list):
     return None
 
 
-def _mission_flow_timeline(task, events) -> dict:
+def _mission_flow_timeline(task, events, *, accountant: ProjectionAccountant | None = None) -> dict:
     plan = getattr(task, "mission_plan", None)
     stages = list(getattr(plan, "stages", []) or [])
     items = []
@@ -2723,12 +3702,41 @@ def _mission_flow_timeline(task, events) -> dict:
                 "artifact_refs": display.get("artifact_refs") or [],
             }
         )
-    return {
+    total = len(items)
+    if accountant is not None:
+        accountant.consider(total)
+    # Keep the office-rendered FRONT window (office takes ``items.take(5)``; the
+    # cap keeps the front MISSION_FLOW_TIMELINE_ITEM_CAP so that render is
+    # byte-identical) and account the evicted tail with a fetch pointer.
+    selected = items[:MISSION_FLOW_TIMELINE_ITEM_CAP]
+    evicted = total - len(selected)
+    if accountant is not None:
+        accountant.include(len(selected))
+        if evicted:
+            accountant.drop(
+                "flow_item_cap",
+                count=evicted,
+                entity_id=getattr(task, "id", None),
+                detail=f"kept front {MISSION_FLOW_TIMELINE_ITEM_CAP} flow items",
+            )
+            accountant.mark_truncated()
+    result = {
         "schema_version": 1,
         "mission_id": task.id,
         "active_stage_id": getattr(plan, "current_stage_id", None) if plan else getattr(task, "current_stage_id", None),
-        "items": items,
+        "items": selected,
+        "items_total": total,
+        "items_evicted": evicted,
     }
+    if evicted:
+        # Honest accounting: a typed pointer to the full paged history, never a
+        # silent truncation (the full timeline is rebuilt from the EventLog).
+        result["items_ref"] = {
+            "evicted": True,
+            "count": evicted,
+            "fetch": "harness goal history <task_id> --json",
+        }
+    return result
 
 
 def _proof_gate_state(task, proofs) -> dict:
@@ -3015,7 +4023,7 @@ def _run_blocked_reason(task, active_runs, open_incidents, *, run_store=None) ->
     return None
 
 
-def _next_action_summary(task, open_incidents, *, run_store=None):
+def _next_action_summary(task, open_incidents, *, run_store=None, event_log=None):
     if open_incidents:
         runs = run_store or RunStore()
         cfg = load_agent_runtime_config()
@@ -3029,7 +4037,7 @@ def _next_action_summary(task, open_incidents, *, run_store=None):
     if task.state in {TaskState.DONE, TaskState.CANCELLED}:
         return {**_stopped_progress(task, [], "settled", "harness"), "action": "terminal", "reason": "mission is terminal"}
     cfg = load_agent_runtime_config()
-    action = MissionStateMachine(config=cfg).next_action(task)
+    action = MissionStateMachine(config=cfg, event_log=event_log).next_action(task)
     reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
     return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "action": action.type.value, "reason": action.reason}
 
@@ -3374,18 +4382,22 @@ def _agent_summary(agent, *, include_tool_details: bool = False):
         "repo_scope_label": _safe_text(getattr(agent, "repo_scope_label", None)) or _safe_repo_scope_label(getattr(agent, "repo_scope", None)),
     }
     if include_tool_details:
+        # Residue-slim R2: same tool-detail eviction as persona_instance_summary.
+        # The heavy payloads (tool_resolution / turn_tool_context /
+        # permission_state / blocked_tools) leave the row behind a typed
+        # ``visibility_ref`` pointer, fetched on demand via
+        # ``harness persona-instance detail``; ``agent_hud_state`` is RETIRED
+        # (runtime_hud.py is the single HUD authority). The head keeps only the
+        # SCALARS the agents drawer renders, derived at emit from the same
+        # tool-visibility resolution.
         summary.update(
             {
+                "permission_mode": tool_resolution.get("permission_mode") or "profile_default",
+                "mutation_boundary": tool_resolution["mutation_boundary"],
+                "tool_count": tool_resolution["final_tool_count"],
                 "blocked_tools_count": len(tool_resolution["blocked_tools"]),
-                "blocked_tools": tool_resolution["blocked_tools"],
-                "tool_resolution": tool_resolution,
-                "turn_tool_context": turn_tool_context_for_persona(agent),
-                "permission_state": permission_state_for_persona(agent),
-                # DEPRECATED: legacy per-persona tools/permissions HUD, due for
-                # migration to the situational-HUD fed path (see runtime_hud.py
-                # and agent_hud_state_for_persona's docstring). Emission kept
-                # until the launcher Agent-HUD dialog is retired.
-                "agent_hud_state": agent_hud_state_for_persona(agent),
+                "effective_toolsets": tool_resolution["effective_toolsets"],
+                "visibility_ref": persona_instance_visibility_ref(agent.id),
             }
         )
     return summary

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -17,7 +18,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
-from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, provision_bundled_personas
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.coordinator_permissions import (
@@ -29,7 +30,7 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.default_plan import ensure_default_mission_plan
-from agent_runtime.daemon import MissionDaemon, daemon_status_schema, read_daemon_status, start_daemon, stop_daemon
+from agent_runtime.default_scope import ensure_default_scope
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
@@ -38,8 +39,11 @@ from agent_runtime.errors import (
     NotFound,
     ProofMissing,
     RuntimeRootMismatch,
+    StaleRevision,
     StaleRun,
     StoreCorrupt,
+    SyncConflict,
+    WorkspaceDeleteBlocked,
 )
 from agent_runtime.events import EventLog
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
@@ -58,19 +62,31 @@ from agent_runtime.models import AgentPersona, Event, Task, apply_instance_model
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     ChatBusyError,
+    PERSONA_INSTANCE_ID_PREFIX,
     PersonaAssignmentSpec,
+    PersonaInstanceRetireError,
+    RetiredPersonaInstanceError,
     StaleModelOverrideWrite,
     PersonaAssignmentStore,
     PersonaInstanceStore,
+    canonical_chat_instance_id,
+    canonical_persona_instance_id,
+    chat_session_owner_instance_id,
+    default_chat_session_id_for_instance,
     persona_assignment_store_enabled,
     persona_assignment_summary,
     persona_chat_session_id_for,
     persona_instance_runtime_enabled,
     persona_instance_summary,
     persona_instance_id_for,
+    resolve_default_chat_session_id_for_instance,
     safe_assignment_token,
     safe_assignment_text,
     safe_optional_token,
+)
+from agent_runtime.persona_chat_mints import (
+    PersonaChatMintError,
+    reserve_persona_chat_mint,
 )
 from agent_runtime.persona_diagnostics import PersonaDiagnosticController, PersonaDiagnosticOptions
 from agent_runtime.profile_context import active_profile_name
@@ -84,13 +100,31 @@ from agent_runtime.realm_sync import (
 from agent_runtime.resolution import resolution_table, resolve_runtime
 from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
-from agent_runtime.mission_chat_turns import MissionChatTurnPersistOutcome, mark_stale_running_turns_interrupted, persist_mission_chat_turn
+from agent_runtime.mission_chat_turns import (
+    MissionChatTurnPersistOutcome,
+    abandon_mission_chat_turn,
+    mark_stale_running_turns_interrupted,
+    mission_chat_turn_record,
+    mission_chat_turn_records,
+    persist_mission_chat_turn,
+    transition_mission_chat_turn,
+)
+from agent_runtime.persona_chat_continuity import (
+    PersonaChatBusyError,
+    PersonaChatMintReceiptStore,
+    PERSONA_CHAT_SESSION_SOURCE,
+    native_history_revision,
+    initialize_persona_chat_runtime_registry,
+    persona_chat_root_lease,
+    persona_chat_runtime_registry,
+    safe_native_history,
+)
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.observability import build_observability
-from agent_runtime.persona_runtime import GPTPersonaRuntime
+from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_runtime_tool_contract
 from agent_runtime.personas import profile_chat_toolsets, seed_personas
-from agent_runtime.prompt_observability import load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context
-from agent_runtime.queued_skills import consume_skills_for_next_turn, queue_skill_for_next_turn
+from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
+from agent_runtime.queued_skills import consume_skills_for_next_turn
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
@@ -131,6 +165,7 @@ ERROR_EXIT_CODES = {
     "invalid_isolation": 2,
     "duplicate_conflict": 4,
     "already_exists": 4,
+    "stale_revision": 4,
     "agent_busy": 4,
     "agent_already_assigned": 4,
     "lane_budget_exceeded": 4,
@@ -224,6 +259,11 @@ def build_parser(parent_subparsers) -> None:
     parser.set_defaults(func=harness_command)
 
     init = subs.add_parser("init", help="Initialize harness store and default personas")
+    init.add_argument(
+        "--with-bundled-personas",
+        action="store_true",
+        help="Persist the profile-backed Neko, Launcher Dev, Backend Dev, and QA team",
+    )
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=_cmd_init)
 
@@ -244,6 +284,13 @@ def build_parser(parent_subparsers) -> None:
     goal_history.add_argument("--limit", type=int, default=50)
     _add_stage42_global_args(goal_history)
     goal_history.set_defaults(func=_cmd_goal_history)
+    goal_detail = goal_subs.add_parser(
+        "detail",
+        help="S8: the heavy goal DETAIL body (role streams, envelopes, checklists, per-event timelines, mission plan) evicted from the steady-state frame; rebuilt read-only on demand",
+    )
+    goal_detail.add_argument("goal_id", help="Goal id or task id (parent/child tasks share a goal_id)")
+    goal_detail.add_argument("--json", action="store_true")
+    goal_detail.set_defaults(func=_cmd_goal_detail)
     goal_create = goal_subs.add_parser("create", help="Create a Harness goal")
     goal_create.add_argument("--title")
     goal_create.add_argument("--description")
@@ -400,8 +447,23 @@ def build_parser(parent_subparsers) -> None:
     workspace_create.add_argument("--realm", default=None)
     workspace_create.add_argument("--agent", action="append", default=[])
     workspace_create.add_argument("--blueprint", default=None)
-    workspace_create.add_argument("--isolation", choices=["soft", "hard"], default="soft")
+    # ``None`` (not "soft") so a template's isolation can win when the operator
+    # did not choose one explicitly; WorkspaceStore.create defaults None→soft.
+    workspace_create.add_argument("--isolation", choices=["soft", "hard"], default=None)
     workspace_create.add_argument("--max-lanes", type=int, default=None)
+    workspace_create.add_argument(
+        "--from-workspace",
+        dest="from_workspace",
+        default=None,
+        help="Use this workspace (any realm) as the template: copy the scopes below into the new workspace",
+    )
+    workspace_create.add_argument(
+        "--copy",
+        action="append",
+        choices=["office", "board", "agents", "settings"],
+        default=None,
+        help="Template scope to copy (repeatable). Default with --from-workspace: every scope. Requires --from-workspace.",
+    )
     _add_stage42_global_args(workspace_create, mutation=True)
     workspace_create.set_defaults(func=_cmd_workspace_create)
     workspace_use = workspace_subs.add_parser("use", help="Set active workspace")
@@ -438,6 +500,12 @@ def build_parser(parent_subparsers) -> None:
     workspace_archive.add_argument("workspace_id")
     _add_stage42_global_args(workspace_archive, mutation=True)
     workspace_archive.set_defaults(func=_cmd_workspace_archive)
+    workspace_delete = workspace_subs.add_parser(
+        "delete", help="Permanently delete a workspace and its office/board content (archive is the reversible path)"
+    )
+    workspace_delete.add_argument("workspace_id")
+    _add_stage42_global_args(workspace_delete, mutation=True)
+    workspace_delete.set_defaults(func=_cmd_workspace_delete)
 
     realm = subs.add_parser("realm", help="Manage Harness realms")
     realm_subs = realm.add_subparsers(dest="realm_command", required=True)
@@ -490,6 +558,213 @@ def build_parser(parent_subparsers) -> None:
     realm_sync_publish.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
     _add_stage42_global_args(realm_sync_publish, mutation=True)
     realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
+
+    realm_skills = realm_subs.add_parser("skills", help="Per-realm selection of which shared skills publish to a realm")
+    realm_skills_subs = realm_skills.add_subparsers(dest="realm_skills_command", required=True)
+    realm_skills_show = realm_skills_subs.add_parser("show", help="Show a realm's shared-skill publish selection (read-only, local store)")
+    realm_skills_show.add_argument("realm_id")
+    _add_stage42_global_args(realm_skills_show)
+    realm_skills_show.set_defaults(func=_cmd_realm_skills_show)
+    realm_skills_set = realm_skills_subs.add_parser(
+        "set",
+        help="Set a realm's shared-skill publish selection (local, reversible store edit — no --yes gate, like `realm use`)",
+    )
+    realm_skills_set.add_argument("realm_id")
+    realm_skills_set.add_argument("--all", dest="publish_all", action="store_true", help="Publish all shared skills (mode=all; the stored selection list is preserved)")
+    realm_skills_set.add_argument("--skills", dest="skills", default=None, help="Comma-separated skill slugs to publish (mode=selected)")
+    realm_skills_set.add_argument("--none", dest="publish_none", action="store_true", help="Publish no skills (mode=selected, empty selection)")
+    _add_stage42_global_args(realm_skills_set, mutation=True)
+    realm_skills_set.set_defaults(func=_cmd_realm_skills_set)
+
+    flow = subs.add_parser("flow", help="Operator flow-graph documents: ingest the Launcher's authored agent map whole and set the referenced instances' steering relations")
+    flow_subs = flow.add_subparsers(dest="flow_command", required=True)
+    flow_set = flow_subs.add_parser("set", help="Store one flow-graph JSON doc and reconcile steering for the EXISTING instances it references (never creates instances; never touches goal membership)")
+    flow_set.add_argument("--graph", default=None, help="The flow-graph JSON document, inline")
+    flow_set.add_argument("--graph-file", default=None, help="Path to a file holding the flow-graph JSON document")
+    flow_set.add_argument("--requested-by", default="operator")
+    flow_set.add_argument("--json", action="store_true")
+    flow_set.set_defaults(func=_cmd_flow_set)
+    flow_show = flow_subs.add_parser("show", help="Show the runtime's stored copy of one flow-graph doc")
+    flow_show.add_argument("graph_id")
+    flow_show.add_argument("--json", action="store_true")
+    flow_show.set_defaults(func=_cmd_flow_show)
+    flow_list = flow_subs.add_parser("list", help="List stored flow-graph doc ids")
+    flow_list.add_argument("--json", action="store_true")
+    flow_list.set_defaults(func=_cmd_flow_list)
+
+    checkpoint = subs.add_parser(
+        "checkpoint",
+        help="Per-actor read-model checkpoint: bundle the on-disk entity-class stores into a keyed transport envelope (the store IS the checkpoint)",
+    )
+    checkpoint_subs = checkpoint.add_subparsers(dest="checkpoint_command", required=True)
+    checkpoint_fetch = checkpoint_subs.add_parser(
+        "fetch",
+        help="Bundle the per-actor store files into a keyed checkpoint envelope (entity class -> actor id -> row read verbatim); read-only, writes nothing",
+    )
+    checkpoint_fetch.add_argument(
+        "--classes",
+        default=None,
+        help="Comma-separated entity-class filter (default: all discovered classes); absent/unknown names are accounted in requested_absent",
+    )
+    checkpoint_fetch.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help="Optional per-class row cap; truncation is accounted ({truncated,total,returned}), never silent",
+    )
+    checkpoint_fetch.add_argument("--json", action="store_true")
+    checkpoint_fetch.set_defaults(func=_cmd_checkpoint_fetch)
+    checkpoint_classes = checkpoint_subs.add_parser(
+        "classes",
+        help="List discovered entity classes with per-class actor counts and byte sizes (stat only; contents not read)",
+    )
+    checkpoint_classes.add_argument("--json", action="store_true")
+    checkpoint_classes.set_defaults(func=_cmd_checkpoint_classes)
+
+    skills = subs.add_parser("skills", help="Inspect the shared skills substrate the Launcher's Skills console consumes")
+    skills_subs = skills.add_subparsers(dest="skills_command", required=True)
+    skills_inventory_cmd = skills_subs.add_parser(
+        "inventory",
+        help="Typed snapshot of the shared skill catalog, per-persona grants, and per-realm publish/drift state",
+    )
+    skills_inventory_cmd.add_argument("--json", action="store_true", help="Emit the skills_inventory/v1 contract as JSON")
+    skills_inventory_cmd.set_defaults(func=_cmd_skills_inventory)
+    skills_catalog_cmd = skills_subs.add_parser(
+        "catalog",
+        help="S8: resolve ONE content-addressed skills catalog by its hash (the frame ships only *_ref hashes; bodies are fetched once and cached forever)",
+    )
+    skills_catalog_cmd.add_argument("--hash", dest="content_hash", required=True, help="The content hash carried by a chat_contexts row's available_skills_ref / accessible_skills_ref")
+    skills_catalog_cmd.add_argument("--json", action="store_true")
+    skills_catalog_cmd.set_defaults(func=_cmd_skills_catalog)
+
+    prompt_context = subs.add_parser(
+        "prompt-context",
+        help="S8: on-demand prompt-observability contexts (the frame ships only LIVE persona instances' current-session rows; historical rows are fetched here)",
+    )
+    prompt_context_subs = prompt_context.add_subparsers(dest="prompt_context_command", required=True)
+    prompt_context_show = prompt_context_subs.add_parser(
+        "show",
+        help="Show one persisted prompt-observability context by id (read-only; the persisted files stay on disk after frame eviction)",
+    )
+    prompt_context_show.add_argument("--context-id", dest="context_id", required=True)
+    prompt_context_show.add_argument("--json", action="store_true")
+    prompt_context_show.set_defaults(func=_cmd_prompt_context_show)
+
+    board = subs.add_parser("board", help="Manage Mission Board planning boards + cards (planning only — cards never mutate goals)")
+    board_subs = board.add_subparsers(dest="board_command", required=True)
+    board_list = board_subs.add_parser("list", help="List boards")
+    board_list.add_argument("--workspace", default=None)
+    _add_stage42_global_args(board_list)
+    board_list.set_defaults(func=_cmd_board_list)
+    board_show = board_subs.add_parser("show", help="Show one board")
+    board_show.add_argument("board_id")
+    board_show.add_argument("--full", action="store_true", help="Include card bodies")
+    _add_stage42_global_args(board_show)
+    board_show.set_defaults(func=_cmd_board_show)
+    board_create = board_subs.add_parser("create", help="Create a board")
+    board_create.add_argument("--workspace", required=True)
+    board_create.add_argument("--title", default=None)
+    _add_stage42_global_args(board_create, mutation=True)
+    board_create.set_defaults(func=_cmd_board_create)
+    board_update = board_subs.add_parser("update", help="Update a board title/columns")
+    board_update.add_argument("board_id")
+    board_update.add_argument("--title", default=None)
+    board_update.add_argument("--columns-json", dest="columns_json", default=None, help="JSON array of {column_id,title,kind,wip_limit}")
+    board_update.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
+    _add_stage42_global_args(board_update, mutation=True)
+    board_update.set_defaults(func=_cmd_board_update)
+
+    board_card = board_subs.add_parser("card", help="Manage board cards")
+    board_card_subs = board_card.add_subparsers(dest="board_card_command", required=True)
+    card_add = board_card_subs.add_parser("add", help="Add a card")
+    card_add.add_argument("--board", default=None, help="Board id (default: active workspace's default board)")
+    card_add.add_argument("--workspace", default=None)
+    card_add.add_argument("--title", required=True)
+    card_add.add_argument("--description", default="")
+    card_add.add_argument("--column", default=None, help="Column id or kind (default: first queued column)")
+    card_add.add_argument("--priority", default=None, choices=["p0", "p1", "p2", "p3"])
+    card_add.add_argument("--labels", default=None, help="Comma-separated labels")
+    card_add.add_argument("--assignee", default=None)
+    card_add.add_argument("--created-by", dest="created_by", default=None, help="operator (default) or a persona id")
+    _add_stage42_global_args(card_add, mutation=True)
+    card_add.set_defaults(func=_cmd_board_card_add)
+    card_edit = board_card_subs.add_parser("edit", help="Edit a card")
+    card_edit.add_argument("card_id")
+    card_edit.add_argument("--title", default=None)
+    card_edit.add_argument("--description", default=None)
+    card_edit.add_argument("--priority", default=None, choices=["p0", "p1", "p2", "p3"])
+    card_edit.add_argument("--labels", default=None, help="Comma-separated labels (replaces)")
+    card_edit.add_argument("--assignee", default=None)
+    card_edit.add_argument("--clear-assignee", dest="clear_assignee", action="store_true")
+    card_edit.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
+    _add_stage42_global_args(card_edit, mutation=True)
+    card_edit.set_defaults(func=_cmd_board_card_edit)
+    card_move = board_card_subs.add_parser("move", help="Move a card to a column / position")
+    card_move.add_argument("card_id")
+    card_move.add_argument("--column", required=True, help="Target column id or kind")
+    card_move.add_argument("--before", default=None, help="Place before this card id")
+    card_move.add_argument("--after", default=None, help="Place after this card id")
+    card_move.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
+    _add_stage42_global_args(card_move, mutation=True)
+    card_move.set_defaults(func=_cmd_board_card_move)
+    card_archive = board_card_subs.add_parser("archive", help="Archive a card (archive-never-delete)")
+    card_archive.add_argument("card_id")
+    _add_stage42_global_args(card_archive, mutation=True)
+    card_archive.set_defaults(func=_cmd_board_card_archive)
+    card_restore = board_card_subs.add_parser("restore", help="Restore an archived card")
+    card_restore.add_argument("card_id")
+    _add_stage42_global_args(card_restore, mutation=True)
+    card_restore.set_defaults(func=_cmd_board_card_restore)
+
+    board_escalate = board_subs.add_parser("escalate", help="Escalate a card to a goal (idempotent orchestration over the standard goal-create envelope)")
+    board_escalate.add_argument("card_id")
+    board_escalate.add_argument("--request-json", dest="request_json", required=True, help="Goal-create envelope (path or inline JSON)")
+    _add_stage42_global_args(board_escalate, mutation=True)
+    board_escalate.set_defaults(func=_cmd_board_escalate)
+    board_resolve = board_subs.add_parser("resolve-conflict", help="Resolve a realm-sync conflict on a card")
+    board_resolve.add_argument("card_id")
+    board_resolve.add_argument("--take", required=True, choices=["local", "remote"])
+    _add_stage42_global_args(board_resolve, mutation=True)
+    board_resolve.set_defaults(func=_cmd_board_resolve_conflict)
+
+    office = subs.add_parser("office", help="Manage the Mission Office layout (one file per actor placement; realm-synced like boards)")
+    office_subs = office.add_subparsers(dest="office_command", required=True)
+    office_show = office_subs.add_parser("show", help="Show a workspace's office surface + actors")
+    office_show.add_argument("--workspace", default=None)
+    office_show.add_argument("--full", action="store_true", help="Include actor item bodies")
+    _add_stage42_global_args(office_show)
+    office_show.set_defaults(func=_cmd_office_show)
+    office_actor_upsert = office_subs.add_parser("actor-upsert", help="Create or update one actor placement (keys are minted store-side)")
+    office_actor_upsert.add_argument("--workspace", default=None)
+    office_actor_upsert.add_argument("--actor-json", dest="actor_json", required=True, help="Actor object (path or inline JSON): {persona_id, persona_instance_id?, backing_profile?, items:[...]}")
+    office_actor_upsert.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
+    office_actor_upsert.add_argument("--updated-by", dest="updated_by", default=None)
+    _add_stage42_global_args(office_actor_upsert, mutation=True)
+    office_actor_upsert.set_defaults(func=_cmd_office_actor_upsert)
+    office_actor_remove = office_subs.add_parser("actor-remove", help="Archive an actor placement (archive-never-delete)")
+    office_actor_remove.add_argument("--workspace", default=None)
+    office_actor_remove.add_argument("--actor", required=True, help="Actor key")
+    office_actor_remove.add_argument("--reason", default=None)
+    office_actor_remove.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
+    _add_stage42_global_args(office_actor_remove, mutation=True)
+    office_actor_remove.set_defaults(func=_cmd_office_actor_remove)
+    office_actor_restore = office_subs.add_parser("actor-restore", help="Restore an archived actor placement")
+    office_actor_restore.add_argument("--workspace", default=None)
+    office_actor_restore.add_argument("--actor", required=True, help="Actor key")
+    _add_stage42_global_args(office_actor_restore, mutation=True)
+    office_actor_restore.set_defaults(func=_cmd_office_actor_restore)
+    office_set_folders = office_subs.add_parser("set-folders", help="Replace the surface's shared folder taxonomy")
+    office_set_folders.add_argument("--workspace", default=None)
+    office_set_folders.add_argument("--folders", required=True, help="Comma-separated folder names (structural defaults always kept)")
+    office_set_folders.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
+    _add_stage42_global_args(office_set_folders, mutation=True)
+    office_set_folders.set_defaults(func=_cmd_office_set_folders)
+    office_resolve = office_subs.add_parser("resolve-conflict", help="Resolve a realm-sync conflict on an actor placement")
+    office_resolve.add_argument("--workspace", default=None)
+    office_resolve.add_argument("--actor", required=True, help="Actor key")
+    office_resolve.add_argument("--take", required=True, choices=["local", "remote"])
+    _add_stage42_global_args(office_resolve, mutation=True)
+    office_resolve.set_defaults(func=_cmd_office_resolve_conflict)
 
     playground = subs.add_parser("playground", help="Replay captured contract-failure scenarios against current contracts")
     playground_subs = playground.add_subparsers(dest="playground_command", required=True)
@@ -574,6 +849,15 @@ def build_parser(parent_subparsers) -> None:
 
     run = subs.add_parser("run", help="Manage harness runs")
     run_subs = run.add_subparsers(dest="run_command")
+    run_list = run_subs.add_parser(
+        "list",
+        help="S8: paged run history — the frame ships only ACTIVE runs; historical/terminal runs are fetched here",
+    )
+    run_list.add_argument("--task", dest="task_id", default=None, help="Filter to one task id")
+    run_list.add_argument("--state", default=None, help="Filter to one run state (e.g. done, failed, cancelled)")
+    run_list.add_argument("--limit", type=int, default=50, help="Max rows (clamped 1..500), newest-first")
+    run_list.add_argument("--json", action="store_true")
+    run_list.set_defaults(func=_cmd_run_list)
     run_show = run_subs.add_parser("show", help="Show one harness run with task-scoped proof/event context")
     run_show.add_argument("run_id")
     run_show.add_argument("--events", type=int, default=25)
@@ -699,6 +983,11 @@ def build_parser(parent_subparsers) -> None:
     persona_chat_delete.add_argument("--requested-by", default="cli")
     persona_chat_delete.add_argument("--json", action="store_true")
     persona_chat_delete.set_defaults(func=_cmd_persona_chat_delete)
+    persona_chat_history = persona_chat_subs.add_parser("history", help="Fetch a persona chat session's redaction-safe message tail (the tail S2 evicts from the frame)")
+    persona_chat_history.add_argument("--session-id", dest="session_id", required=True)
+    persona_chat_history.add_argument("--limit", type=int, default=40, help="Message tail size (clamped 1..40)")
+    persona_chat_history.add_argument("--json", action="store_true")
+    persona_chat_history.set_defaults(func=_cmd_persona_chat_history)
 
     persona_set_model = persona_subs.add_parser("set-model", help="Persist a persona's default provider/model (profile-default lane; future instances inherit it)")
     persona_set_model.add_argument("persona_id", help="Persona id, alias, or profile:<name>")
@@ -723,6 +1012,8 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_create.add_argument("--add-instance", action="store_true", help="Create an additional placement-backed instance instead of targeting the primary placement")
     persona_instance_create.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
+    persona_instance_create.add_argument("--workspace-id", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
+    persona_instance_create.add_argument("--realm-id", dest="realm_id", default=None, help="Mission Control realm the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_create.add_argument("--auto-run", action="store_true", help="Immediately run one bounded chat turn after queuing the message")
     persona_instance_create.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     persona_instance_create.add_argument("--max-actions", type=int, default=1)
@@ -731,14 +1022,30 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.set_defaults(func=_cmd_persona_instance_create)
     persona_instance_open = persona_instance_subs.add_parser("open-chat", help="Bind a persona instance to a durable chat session without ticking")
     persona_instance_open.add_argument("--persona", dest="persona_id", required=True)
+    persona_instance_open.add_argument("--persona-instance-id", default=None, help="Exact existing persona instance to bind when minting a new chat")
     persona_instance_open.add_argument("--session-id", default=None)
+    persona_instance_open.add_argument("--new-session", action="store_true", help="Mint and select a fresh server-owned chat session for the target instance")
+    persona_instance_open.add_argument("--idempotency-key", default=None, help="Stable retry key required with --new-session")
     persona_instance_open.add_argument("--kill-active", action="store_true", help="Cancel the current run/worker before replacing the active chat")
     persona_instance_open.add_argument("--add-instance", action="store_true", help="Open the chat on an additional placement-backed instance")
     persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
+    persona_instance_open.add_argument("--workspace-id", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
+    persona_instance_open.add_argument("--realm-id", dest="realm_id", default=None, help="Mission Control realm the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
+    persona_instance_open.add_argument("--display-name", default=None, help="Authoritative name for a deliberately-placed additional instance (e.g. 'QA Agent (2)'); ignored unless --add-instance")
     persona_instance_open.add_argument("--requested-by", default="cli")
     _add_coordinator_permission_args(persona_instance_open)
     persona_instance_open.add_argument("--json", action="store_true")
     persona_instance_open.set_defaults(func=_cmd_persona_instance_open_chat)
+    persona_instance_resolve_turn = persona_instance_subs.add_parser(
+        "resolve-chat-turn", help="Strictly resolve one ambiguous persona-chat turn"
+    )
+    persona_instance_resolve_turn.add_argument("persona_instance_id")
+    persona_instance_resolve_turn.add_argument("--session-id", required=True)
+    persona_instance_resolve_turn.add_argument("--client-message-id", required=True)
+    persona_instance_resolve_turn.add_argument("--turn-id", required=True)
+    persona_instance_resolve_turn.add_argument("--action", choices=["abandon"], required=True)
+    persona_instance_resolve_turn.add_argument("--json", action="store_true")
+    persona_instance_resolve_turn.set_defaults(func=_cmd_mission_chat_turn_resolve)
     persona_instance_message = persona_instance_subs.add_parser("message", help="Queue a message to a free-floating persona instance without ticking")
     persona_instance_message.add_argument("persona_instance_id")
     persona_instance_message.add_argument("--message", required=True)
@@ -774,19 +1081,37 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_archive.add_argument("--requested-by", default="cli")
     persona_instance_archive.add_argument("--json", action="store_true")
     persona_instance_archive.set_defaults(func=_cmd_persona_instance_archive)
+    persona_instance_retire = persona_instance_subs.add_parser("retire", help="Retire (end-of-life) a placement-backed persona instance: archive its row (chat history preserved)")
+    persona_instance_retire.add_argument("persona_instance_id")
+    persona_instance_retire.add_argument("--reason", default="placement removed")
+    persona_instance_retire.add_argument("--requested-by", default="cli")
+    _add_coordinator_permission_args(persona_instance_retire)
+    persona_instance_retire.add_argument("--json", action="store_true")
+    persona_instance_retire.set_defaults(func=_cmd_persona_instance_retire)
     persona_instance_sweep = persona_instance_subs.add_parser("sweep-orphans", help="Reap stale task-bound persona instances with no live worker/run")
     persona_instance_sweep.add_argument("--reason", default="operator persona instance janitor")
     persona_instance_sweep.add_argument("--json", action="store_true")
     persona_instance_sweep.set_defaults(func=_cmd_persona_instance_sweep_orphans)
-    persona_instance_steer = persona_instance_subs.add_parser("steer", help="Re-route a persona instance's living-graph wiring (Stage 77 steering edge)")
+    persona_instance_steer = persona_instance_subs.add_parser("steer", help="Re-route a persona instance's living-graph wiring (Stage 77 steering edge; supports multi-parent fan-in)")
     persona_instance_steer.add_argument("persona_instance_id")
-    persona_instance_steer.add_argument("--parent", dest="parent_instance_id", default=None, help="Owner/coordinator instance id that steers this sub-agent")
+    persona_instance_steer.add_argument("--parent", dest="parent_instance_id", default=None, help="Back-compat: REPLACE the steering set with this single parent (== --set-parents <p>)")
+    persona_instance_steer.add_argument("--add-parent", dest="add_parent", default=None, help="Additively ADD one parent to the steering set (fan-in; idempotent)")
+    persona_instance_steer.add_argument("--remove-parent", dest="remove_parent", default=None, help="Remove ONE parent from the steering set (detach-one; last one detaches)")
+    persona_instance_steer.add_argument("--set-parents", dest="set_parents", nargs="+", default=None, metavar="PARENT", help="Declaratively REPLACE the whole steering set with these parents (fan-in)")
     persona_instance_steer.add_argument("--goal", dest="goal_id", default=None, help="Goal/task id this sub-agent inherits from its parent container")
-    persona_instance_steer.add_argument("--detach", action="store_true", help="Detach from any parent and goal (becomes a standalone owner)")
+    persona_instance_steer.add_argument("--detach", action="store_true", help="Detach from ALL parents and goal (becomes a standalone owner)")
     persona_instance_steer.add_argument("--requested-by", default="operator")
     _add_coordinator_permission_args(persona_instance_steer)
     persona_instance_steer.add_argument("--json", action="store_true")
     persona_instance_steer.set_defaults(func=_cmd_persona_instance_steer)
+    persona_instance_repair = persona_instance_subs.add_parser(
+        "repair-steering",
+        help="Strip non-instance principals (e.g. the operator) out of a persona instance's steering fields; --dry-run previews without writing or emitting",
+    )
+    persona_instance_repair.add_argument("persona_instance_id", nargs="?", default=None, help="Target one row; omit and pass --all to scan every row")
+    persona_instance_repair.add_argument("--all", action="store_true", help="Scan and repair every persona-instance row")
+    _add_stage42_global_args(persona_instance_repair, mutation=True)
+    persona_instance_repair.set_defaults(func=_cmd_persona_instance_repair_steering)
     persona_instance_return = persona_instance_subs.add_parser("return-summary", help="Post a bounded child summary back into a parent chat session")
     persona_instance_return.add_argument("persona_instance_id")
     persona_instance_return.add_argument("--parent-session-id", required=True)
@@ -826,6 +1151,7 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--persona", dest="persona_id", required=True)
     mission_chat_message.add_argument("--persona-instance-id", default=None)
     mission_chat_message.add_argument("--session-id", default=None)
+    mission_chat_message.add_argument("--new-session", dest="new_session", action="store_true", help="Force a fresh canonical chat session for the target instead of continuing the default thread (agent_chat_send new_session lane); ignored when --session-id is given")
     mission_chat_message.add_argument("--task", dest="task_id", default=None)
     mission_chat_message.add_argument("--goal", dest="goal_id", default=None)
     mission_chat_message.add_argument("--title", default="Operator message")
@@ -840,8 +1166,12 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--intent-hint", default="chat")
     mission_chat_message.add_argument("--requested-by", default="cli")
     mission_chat_message.add_argument("--client-message-id", default=None)
+    mission_chat_message.add_argument("--idempotency-key", default=None)
     mission_chat_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
     mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
+    mission_chat_message.add_argument("--compression-threshold-tokens", type=int, default=None, help="One-turn native-compression proof seam; overrides the compressor token threshold without changing profile config")
+    mission_chat_message.add_argument("--compression-protect-first-n", type=int, default=None, help="One-turn native-compression proof seam; override protected head messages")
+    mission_chat_message.add_argument("--compression-protect-last-n", type=int, default=None, help="One-turn native-compression proof seam; override protected tail messages")
     mission_chat_message.add_argument("--relay-chain", default=None, help="Comma-separated canonical persona ids already on the agent-relay chain (envelope provenance for chained agent_chat_send hops)")
     mission_chat_message.add_argument("--relay-deadline-epoch", type=float, default=None, help="Absolute unix-epoch deadline shared by every hop on the relay chain")
     mission_chat_message.add_argument("--json", action="store_true")
@@ -850,7 +1180,8 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_queue_skill.add_argument("--persona", dest="persona_id", required=True)
     mission_chat_queue_skill.add_argument("--persona-instance-id", default=None)
     mission_chat_queue_skill.add_argument("--session-id", required=True)
-    mission_chat_queue_skill.add_argument("--skill", required=True)
+    mission_chat_queue_skill.add_argument("--skill", action="append", default=[])
+    mission_chat_queue_skill.add_argument("--skills", nargs="+", default=[])
     mission_chat_queue_skill.add_argument("--json", action="store_true")
     mission_chat_queue_skill.set_defaults(func=_cmd_mission_chat_queue_skill)
     mission_chat_steer = mission_chat_subs.add_parser("steer", help="Steer an active streamed Mission Control chat turn")
@@ -861,6 +1192,16 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_steer.add_argument("--persona-instance-id", default=None)
     mission_chat_steer.add_argument("--json", action="store_true")
     mission_chat_steer.set_defaults(func=_cmd_mission_chat_steer)
+    mission_chat_resolve = mission_chat_subs.add_parser(
+        "turn-resolve", help="Resolve one outcome_unknown chat turn"
+    )
+    mission_chat_resolve.add_argument("--session-id", required=True)
+    mission_chat_resolve.add_argument("--client-message-id", required=True)
+    mission_chat_resolve.add_argument("--turn-id", required=True)
+    mission_chat_resolve.add_argument("--persona-instance-id", default=None)
+    mission_chat_resolve.add_argument("--action", choices=["abandon"], required=True)
+    mission_chat_resolve.add_argument("--json", action="store_true")
+    mission_chat_resolve.set_defaults(func=_cmd_mission_chat_turn_resolve)
 
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")
@@ -923,39 +1264,6 @@ def build_parser(parent_subparsers) -> None:
     contracts_verify.add_argument("--json", action="store_true")
     contracts_verify.set_defaults(func=_cmd_contracts_verify_examples)
 
-    daemon = subs.add_parser("daemon", help="Run or inspect the Mission Daemon")
-    daemon.add_argument("--foreground", action="store_true", help="Run the daemon loop in the foreground")
-    daemon.add_argument("--interval", type=float, default=None)
-    daemon.add_argument("--idle-interval", type=float, default=None)
-    daemon.add_argument("--task", default=None, help="Drive one foreground task id")
-    daemon.add_argument("--max-loops", type=int, default=None, help=argparse.SUPPRESS)
-    daemon.add_argument("--json", action="store_true")
-    daemon_subs = daemon.add_subparsers(dest="daemon_command")
-    daemon_start = daemon_subs.add_parser("start", help="Start the Mission Daemon in the background")
-    daemon_start.add_argument("--interval", type=float, default=None)
-    daemon_start.add_argument("--idle-interval", type=float, default=None)
-    daemon_start.add_argument("--task", default=None, help="Drive one foreground task id")
-    daemon_start.add_argument("--json", action="store_true")
-    daemon_status = daemon_subs.add_parser("status", help="Show Mission Daemon status")
-    daemon_status.add_argument("--json", action="store_true")
-    daemon_stop = daemon_subs.add_parser("stop", help="Stop the Mission Daemon")
-    daemon_stop.add_argument("--json", action="store_true")
-    daemon_foreground = daemon_subs.add_parser("foreground", help="Run the Mission Daemon loop in the foreground")
-    daemon_foreground.add_argument("--interval", type=float, default=None)
-    daemon_foreground.add_argument("--idle-interval", type=float, default=None)
-    daemon_foreground.add_argument("--task", default=None, help="Drive one foreground task id")
-    daemon_foreground.add_argument("--max-loops", type=int, default=None, help=argparse.SUPPRESS)
-    daemon_foreground.add_argument("--json", action="store_true")
-    daemon_run_once = daemon_subs.add_parser("run-once", help="Run one bounded Mission Daemon loop and exit")
-    daemon_run_once.add_argument("--task", default=None, help="Drive one foreground task id")
-    daemon_run_once.add_argument("--json", action="store_true")
-    daemon.set_defaults(func=_cmd_daemon)
-    daemon_start.set_defaults(func=_cmd_daemon)
-    daemon_status.set_defaults(func=_cmd_daemon)
-    daemon_stop.set_defaults(func=_cmd_daemon)
-    daemon_foreground.set_defaults(func=_cmd_daemon)
-    daemon_run_once.set_defaults(func=_cmd_daemon)
-
     worktree = subs.add_parser("worktree", help="Manage harness-managed git worktrees")
     worktree_subs = worktree.add_subparsers(dest="worktree_command", required=True)
     worktree_reap = worktree_subs.add_parser(
@@ -984,6 +1292,20 @@ def build_parser(parent_subparsers) -> None:
     )
     persona_instance_reconcile.add_argument("--json", action="store_true")
     persona_instance_reconcile.set_defaults(func=_cmd_persona_instance_reconcile)
+
+    persona_instance_detail = persona_instance_subs.add_parser(
+        "detail",
+        help=(
+            "Serve the tool-detail payloads (tool_resolution / turn_tool_context / "
+            "permission_state / blocked_tools) evicted from the steady-state frame "
+            "behind the visibility_ref pointer"
+        ),
+    )
+    persona_instance_detail.add_argument(
+        "instance_id", help="Persona-instance id (or persona id) whose tool detail to fetch"
+    )
+    persona_instance_detail.add_argument("--json", action="store_true")
+    persona_instance_detail.set_defaults(func=_cmd_persona_instance_detail)
 
     agent = subs.add_parser("agent", help="List harness agent definitions")
     agent_subs = agent.add_subparsers(dest="agent_command", required=True)
@@ -1039,9 +1361,12 @@ def build_parser(parent_subparsers) -> None:
 
     inc = subs.add_parser("incident", help="Manage incidents")
     inc_subs = inc.add_subparsers(dest="incident_command")
-    inc_list = inc_subs.add_parser("list")
+    inc_list = inc_subs.add_parser("list", help="List incidents or page the closed/ancient history tail")
     inc_list.add_argument("--open", action="store_true", help="(default) show only open incidents")
     inc_list.add_argument("--all", action="store_true", help="include closed incidents")
+    inc_list.add_argument("--state", choices=["open", "closed", "all"], default=None, help="Lane to list: open (default), closed (history), or all")
+    inc_list.add_argument("--before", default=None, help="Page: only incidents whose cursor (closed_at/opened_at) is before this ISO-8601 timestamp")
+    inc_list.add_argument("--limit", type=int, default=None, help="Page size (clamped 1..500); JSON output carries next_before for the following page")
     inc_list.add_argument("--json", action="store_true")
     inc_list.set_defaults(func=_cmd_incident_list)
     inc_close = inc_subs.add_parser("close")
@@ -1056,7 +1381,18 @@ def build_parser(parent_subparsers) -> None:
     stream = subs.add_parser("stream", help="Emit Mission Control hydrate/delta frames as NDJSON")
     stream.add_argument("--poll-interval", type=float, default=0.25)
     stream.add_argument("--heartbeat-interval", type=float, default=5.0)
+    stream.add_argument(
+        "--delta-debounce-ms",
+        type=int,
+        default=200,
+        help="Settle window for coalescing an event burst into one delta frame (0 disables)",
+    )
     stream.add_argument("--max-frames", type=int, default=None, help=argparse.SUPPRESS)
+    stream.add_argument(
+        "--resync",
+        action="store_true",
+        help="Force the first post-hydrate batch to a full core (S6: a reconnecting fold client re-baselining before it folds patches)",
+    )
     stream.set_defaults(func=_cmd_stream)
     serve = subs.add_parser("serve", help="Persistent NDJSON stdio bridge: dispatch harness argv requests in one warm process (Mission Control serve lane)")
     serve.add_argument("--ndjson", action="store_true", help="NDJSON frame transport over stdio (the only v1 transport)")
@@ -1105,6 +1441,8 @@ def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None
     safe_details = {"error_class": type(exc).__name__}
     if isinstance(exc, RealmSyncError):
         safe_details.update(exc.safe_details)
+    if isinstance(exc, WorkspaceDeleteBlocked):
+        safe_details.update(exc.safe_details)
     envelope = _error_envelope(
         error_code,
         message or _safe_error_message(exc),
@@ -1138,6 +1476,8 @@ def _error_code_for_exception(exc: BaseException) -> str:
         (StoreCorrupt, "store_corrupt"),
         (EventPayloadTooLarge, "event_payload_too_large"),
         (RuntimeRootMismatch, "wrong_runtime_root"),
+        (StaleRevision, "stale_revision"),
+        (SyncConflict, "sync_conflict"),
     ):
         if isinstance(exc, exc_type):
             return code
@@ -1432,6 +1772,127 @@ def _cmd_goal_list(args) -> int:
     return 0
 
 
+def _cmd_goal_detail(args) -> int:
+    """S8: serve the heavy goal DETAIL body evicted from the steady-state frame.
+
+    Read-only rebuild of the exact bytes the pre-S8 in-frame goal row carried, so
+    a goal detail drawer / blueprint / replay view fetches identical data on
+    open. A miss (unknown goal/task id) is an honest ``not_found`` error, never a
+    fabricated empty goal."""
+
+    from agent_runtime.snapshot import goal_detail_for_task
+
+    detail = goal_detail_for_task(str(getattr(args, "goal_id", "") or ""))
+    if detail is None:
+        return emit_harness_error(
+            ValueError(f"goal/task '{getattr(args, 'goal_id', '')}' did not resolve"),
+            args=args,
+            code="not_found",
+        )
+    print(emit_json(detail))
+    return 0
+
+
+def _cmd_persona_instance_detail(args) -> int:
+    """Serve the persona-instance tool detail evicted from the frame (residue-slim
+    R2), rebuilt read-only from the stores so the launcher's visibility dialog
+    fetches identical bytes on open. A miss is an honest ``not_found``, never a
+    fabricated empty payload."""
+
+    from agent_runtime.snapshot import persona_instance_detail_for_id
+
+    entity_id = str(getattr(args, "instance_id", "") or "")
+    detail = persona_instance_detail_for_id(entity_id)
+    if detail is None:
+        return emit_harness_error(
+            ValueError(f"persona-instance '{entity_id}' did not resolve"),
+            args=args,
+            code="not_found",
+        )
+    print(emit_json(detail))
+    return 0
+
+
+def _cmd_skills_catalog(args) -> int:
+    """S8: resolve one content-addressed skills catalog by hash (frame-evicted)."""
+
+    from agent_runtime.prompt_observability import skills_catalog_by_hash
+
+    content_hash = str(getattr(args, "content_hash", "") or "").strip()
+    catalog = skills_catalog_by_hash(content_hash)
+    payload = {
+        "hash": content_hash,
+        "found": catalog is not None,
+        "skills": catalog or [],
+    }
+    if getattr(args, "json", False):
+        print(emit_json(payload))
+        return 0
+    if catalog is None:
+        print(f"skills catalog {content_hash}: (not resolvable from persisted contexts)")
+        return 0
+    print(f"skills catalog {content_hash}: {len(catalog)} skill(s)")
+    for skill in catalog:
+        if isinstance(skill, dict):
+            print(f"  {skill.get('name')} — {skill.get('status', 'accessible')}")
+    return 0
+
+
+def _cmd_run_list(args) -> int:
+    """S8: paged run history — the frame ships only ACTIVE runs; historical/
+    terminal runs are fetched here (newest-first, id/state filtered)."""
+
+    from agent_runtime.snapshot import _run_summary
+    from agent_runtime.store import RunStore
+
+    limit = max(1, min(500, int(getattr(args, "limit", 50) or 50)))
+    task_id = str(getattr(args, "task_id", "") or "").strip() or None
+    state_filter = str(getattr(args, "state", "") or "").strip().lower() or None
+    runs = RunStore().list_all()
+
+    def _sort_key(run):
+        return str(getattr(run, "started_at", "") or getattr(run, "created_at", "") or "")
+
+    runs = sorted(runs, key=_sort_key, reverse=True)
+    rows: list[dict] = []
+    for run in runs:
+        if task_id is not None and getattr(run, "task_id", None) != task_id:
+            continue
+        row = _run_summary(run)
+        if state_filter is not None and str(row.get("state", "")).lower() != state_filter:
+            continue
+        rows.append(row)
+    truncated = len(rows) > limit
+    rows = rows[:limit]
+    _print_stage42(_list_envelope("run", rows, truncated=truncated), args=args)
+    return 0
+
+
+def _cmd_prompt_context_show(args) -> int:
+    """S8: show one persisted prompt-observability context by id (frame-evicted
+    historical rows stay on disk and are fetched here; C2 retention MOVES older
+    rows to the archive dir, which this verb resolves too — archive-never-delete
+    means the fetch lane keeps working). Honest miss on absence."""
+
+    from agent_runtime.prompt_observability import load_persisted_context_row
+
+    token = str(getattr(args, "context_id", "") or "").strip()
+    if not token:
+        return emit_harness_error(ValueError("--context-id is required"), args=args, code="invalid_request")
+    data = load_persisted_context_row(token)
+    if data is None:
+        return emit_harness_error(
+            ValueError(f"prompt context '{token}' not found on disk"),
+            args=args,
+            code="not_found",
+        )
+    if getattr(args, "json", False):
+        print(emit_json(data))
+        return 0
+    print(f"prompt context {token}: persona={data.get('persona_id')} session={data.get('session_id')}")
+    return 0
+
+
 def _cmd_goal_show(args) -> int:
     task = _resolve_goal(args.goal_id)
     _print_stage42(_object_envelope("goal", _goal_row(task, full=True)), args=args)
@@ -1604,18 +2065,55 @@ def _cmd_workspace_show(args) -> int:
 
 
 def _cmd_workspace_create(args) -> int:
+    from agent_runtime.workspace_template import (
+        CONTENT_COPY_SCOPES,
+        copy_workspace_content,
+        normalize_copy_scopes,
+    )
+
+    template = None
+    scopes: tuple[str, ...] = ()
+    if getattr(args, "from_workspace", None):
+        try:
+            template = WorkspaceStore().get(args.from_workspace)
+        except NotFound as exc:
+            return emit_harness_error(exc, args=args, code="template_workspace_not_found")
+        scopes = normalize_copy_scopes(getattr(args, "copy", None))
+    elif getattr(args, "copy", None):
+        return emit_harness_error(
+            ValueError("--copy requires --from-workspace"), args=args, code="invalid_request"
+        )
     if getattr(args, "dry_run", False):
-        row = {"id": f"ws_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "realm_id": args.realm, "agents": len(args.agent or []), "goals": 0, "isolation": args.isolation, "updated_at": now()}
+        row = {"id": f"ws_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "realm_id": args.realm, "agents": len(args.agent or []), "goals": 0, "isolation": args.isolation or "soft", "updated_at": now()}
+        if template is not None:
+            row["template_workspace_id"] = template.id
+            row["copy_scopes"] = list(scopes)
         _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
         return 0
     if args.realm:
         RealmStore().get(args.realm)
+    # Template settings/roster feed the create itself; explicit flags always
+    # win over the template so the operator can override any copied field.
+    agent_ids = list(args.agent or [])
+    blueprint = args.blueprint
+    isolation = args.isolation
+    max_lanes = args.max_lanes
+    if template is not None:
+        if "agents" in scopes and not agent_ids:
+            agent_ids = list(template.agent_ids or [])
+        if "settings" in scopes:
+            if blueprint is None:
+                blueprint = template.default_blueprint_id
+            if isolation is None:
+                isolation = template.isolation
+            if max_lanes is None:
+                max_lanes = template.max_concurrent_lanes
     item = WorkspaceStore().create(
         name=args.name,
-        agent_ids=list(args.agent or []),
-        default_blueprint_id=args.blueprint,
-        isolation=args.isolation,
-        max_concurrent_lanes=args.max_lanes,
+        agent_ids=agent_ids,
+        default_blueprint_id=blueprint,
+        isolation=isolation or "soft",
+        max_concurrent_lanes=max_lanes,
         realm_id=args.realm,
     )
     if args.realm:
@@ -1623,6 +2121,16 @@ def _cmd_workspace_create(args) -> int:
         if item.id not in realm.workspace_ids:
             realm.workspace_ids.append(item.id)
             RealmStore().save(realm)
+    # Office/board content copies AFTER the workspace exists, through the
+    # store chokepoints, so every copied artifact rides its contract event.
+    warnings: list[dict] = []
+    copied = None
+    if template is not None:
+        content_scopes = tuple(scope for scope in scopes if scope in CONTENT_COPY_SCOPES)
+        if content_scopes:
+            outcome = copy_workspace_content(template.id, item.id, scopes=content_scopes)
+            copied = outcome["copied"]
+            warnings.extend(outcome["warnings"])
     # A workspace created inside the ACTIVE realm becomes active
     # immediately — the operator expects to land in the workspace they
     # just created, not to run a second `workspace use` by hand.
@@ -1630,7 +2138,45 @@ def _cmd_workspace_create(args) -> int:
     # chokepoint — Stage 12.)
     if item.realm_id and item.realm_id == RealmStore().active_id():
         WorkspaceStore().set_active(item.id)
-    _print_stage42(_object_envelope("workspace", _workspace_row(item), warnings=[]), args=args, default_output="json")
+    row = _workspace_row(item)
+    if template is not None:
+        row["template_workspace_id"] = template.id
+        row["copy_scopes"] = list(scopes)
+        if copied is not None:
+            row["copied"] = copied
+    _print_stage42(_object_envelope("workspace", row, warnings=warnings), args=args, default_output="json")
+    return 0
+
+
+def _cmd_workspace_delete(args) -> int:
+    if not _require_yes(args):
+        return 8
+    store = WorkspaceStore()
+    try:
+        item = store.get(args.workspace_id)
+    except NotFound as exc:
+        return emit_harness_error(exc, args=args)
+    if getattr(args, "dry_run", False):
+        row = _workspace_row(item, full=True)
+        row["deleted"] = False
+        row["dry_run"] = True
+        _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
+        return 0
+    was_active = store.active_id() == item.id
+    realm_id = item.realm_id
+    try:
+        row = store.delete(args.workspace_id)
+    except WorkspaceDeleteBlocked as exc:
+        return emit_harness_error(exc, args=args, code=exc.code)
+    # Deleting the ACTIVE workspace falls back to the realm's default (same
+    # reconcile rule as a realm switch) instead of leaving the operator on a
+    # cleared pointer.
+    if was_active and realm_id:
+        try:
+            _reconcile_active_workspace_to_realm(RealmStore().get(realm_id))
+        except Exception:  # noqa: BLE001 — pointer reconcile is best-effort; the delete already landed
+            pass
+    _print_stage42(_object_envelope("workspace", row), args=args, default_output="json")
     return 0
 
 
@@ -1956,6 +2502,67 @@ def _cmd_realm_sync_publish(args) -> int:
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")
+    return 0
+
+
+def _realm_skill_selection_envelope(realm) -> dict:
+    """The realm_skill_selection/v1 envelope (design §5): current mode +
+    selection, the shared-catalog slugs on THIS machine, and the honest
+    ``missing`` accounting (selection − catalog)."""
+    from agent_runtime.skills_inventory import build_shared_catalog
+
+    _root, _exists, catalog = build_shared_catalog()
+    catalog_slugs = sorted({entry["slug"] for entry in catalog})
+    selection = sorted(realm.skill_selection or [])
+    missing = sorted(set(selection) - set(catalog_slugs))
+    return {
+        "schema_version": 1,
+        "id": realm.id,
+        "kind": "realm_skill_selection",
+        "mode": realm.skill_publish_mode,
+        "selection": selection,
+        "catalog": catalog_slugs,
+        "missing": missing,
+    }
+
+
+def _cmd_realm_skills_show(args) -> int:
+    realm = RealmStore().get(args.realm_id)
+    _print_stage42(_realm_skill_selection_envelope(realm), args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_skills_set(args) -> int:
+    chosen = [
+        name
+        for name, present in (
+            ("--all", bool(getattr(args, "publish_all", False))),
+            ("--skills", getattr(args, "skills", None) is not None),
+            ("--none", bool(getattr(args, "publish_none", False))),
+        )
+        if present
+    ]
+    if len(chosen) != 1:
+        return emit_harness_error(
+            ValueError("exactly one of --all, --skills, or --none is required"),
+            args=args,
+            code="invalid_request",
+        )
+    if getattr(args, "publish_all", False):
+        mode, selection = "all", []
+    elif getattr(args, "publish_none", False):
+        mode, selection = "selected", []
+    else:
+        mode = "selected"
+        selection = [slug.strip() for slug in str(args.skills).split(",") if slug.strip()]
+    dry_run = bool(getattr(args, "dry_run", False))
+    realm = RealmStore().set_skill_selection(
+        args.realm_id, mode=mode, selection=selection, dry_run=dry_run
+    )
+    envelope = _realm_skill_selection_envelope(realm)
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
     return 0
 
 
@@ -2431,9 +3038,33 @@ def _matrix_binding_cases(base: dict[str, str], variations: dict[str, list[str]]
 
 
 def _cmd_init(args) -> int:
-    personas = ensure_persisted_personas(load_agent_runtime_config())
-    data = {"personas": [p.id for p in personas]}
-    print(emit_json(data) if args.json else f"Initialized harness personas: {', '.join(data['personas'])}")
+    cfg = load_agent_runtime_config()
+    if getattr(args, "with_bundled_personas", False):
+        try:
+            personas = provision_bundled_personas(cfg)
+        except ValueError as exc:
+            return emit_harness_error(
+                exc,
+                args=args,
+                code="bundled_persona_profiles_missing",
+            )
+    else:
+        personas = ensure_persisted_personas(cfg)
+    persona_ids = [p.id for p in personas]
+    scope = ensure_default_scope(agent_ids=persona_ids)
+    data = {
+        "personas": persona_ids,
+        "default_realm_id": scope.realm.id,
+        "default_workspace_id": scope.workspace.id,
+    }
+    print(
+        emit_json(data)
+        if args.json
+        else (
+            f"Initialized harness personas: {', '.join(data['personas'])}\n"
+            f"Default scope: {scope.realm.name} / {scope.workspace.name}"
+        )
+    )
     return 0
 
 
@@ -2529,7 +3160,89 @@ def build_provider_visibility() -> dict:
                 }
             )
         providers_out.append({"id": provider, "credentials": credentials})
-    return {"schema": "hermes.provider_visibility/v1", "providers": providers_out}
+    payload: dict = {
+        "schema": "hermes.provider_visibility/v2",
+        "providers": providers_out,
+    }
+    # v2 additions (transport plan W4): the fields the launcher used to
+    # scrape out of the human `hermes status` ◆-box — model/provider, API-key
+    # presence (STATUS_API_KEYS is the box's own registry, hoisted so this
+    # cannot drift from it), and OAuth login state. Each block is
+    # failure-isolated: a broken import or status probe drops the block, it
+    # NEVER breaks the credential payload above (which the launcher's model
+    # switcher depends on). Consumers treat an absent block as "fall back to
+    # the scrape", exactly like a v1 hermes.
+    try:
+        payload["environment"] = _provider_visibility_environment()
+    except Exception:
+        pass
+    try:
+        payload["api_keys"] = _provider_visibility_api_keys()
+    except Exception:
+        pass
+    try:
+        payload["auth_logins"] = _provider_visibility_auth_logins()
+    except Exception:
+        pass
+    return payload
+
+
+def _provider_visibility_environment() -> dict:
+    from hermes_cli.status import _configured_model_label, _effective_provider_label
+
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config()
+    except Exception:
+        config = {}
+    return {
+        "model": _configured_model_label(config),
+        "provider": _effective_provider_label(),
+    }
+
+
+def _provider_visibility_api_keys() -> list[dict]:
+    from hermes_cli.auth import get_anthropic_key
+    from hermes_cli.status import STATUS_API_KEYS, resolve_status_env
+
+    out: list[dict] = []
+    for name, env_ref in STATUS_API_KEYS.items():
+        if name == "Anthropic":
+            # Same single source of truth the status box uses (also resolves
+            # OAuth tokens).
+            configured = bool(get_anthropic_key())
+        else:
+            configured = bool(resolve_status_env(env_ref))
+        out.append({"name": name, "configured": configured})
+    return out
+
+
+def _provider_visibility_auth_logins() -> list[dict]:
+    from hermes_cli.auth import (
+        get_codex_auth_status,
+        get_minimax_oauth_auth_status,
+        get_nous_auth_status,
+        get_qwen_auth_status,
+    )
+
+    logins: list[dict] = []
+    for name, probe in (
+        ("Nous Portal", get_nous_auth_status),
+        ("OpenAI Codex", get_codex_auth_status),
+        ("Qwen", get_qwen_auth_status),
+        ("MiniMax", get_minimax_oauth_auth_status),
+    ):
+        try:
+            status = probe() or {}
+        except Exception:
+            status = {}
+        entry: dict = {"name": name, "logged_in": bool(status.get("logged_in"))}
+        refreshed = status.get("last_refresh")
+        if refreshed:
+            entry["refreshed_at"] = str(refreshed)
+        logins.append(entry)
+    return logins
 
 
 def _cmd_providers(args) -> int:
@@ -2550,6 +3263,37 @@ def _cmd_providers(args) -> int:
                 f"  #{credential['index']}  {credential['label']:<20} "
                 f"{credential['auth_type']:<7} {credential['source']}{tag}{marker}"
             )
+    return 0
+
+
+def _cmd_skills_inventory(args) -> int:
+    from agent_runtime.skills_inventory import build_skills_inventory
+
+    payload = build_skills_inventory()
+    if getattr(args, "json", False):
+        print(emit_json(payload))
+        return 0
+
+    root = payload["shared_root"] or "(none)"
+    print(f"Shared skills root: {root}")
+    if not payload["skills"]:
+        print("  (no shared skills)")
+    for skill in payload["skills"]:
+        count = skill["file_count"]
+        files = f"{count} file" + ("" if count == 1 else "s")
+        shadow = f"  shadowed by {', '.join(skill['shadowed_by'])}" if skill["shadowed_by"] else ""
+        print(f"  {skill['slug']:<28} {files}{shadow}")
+        if skill["description"]:
+            print(f"      {skill['description']}")
+    print("Personas:")
+    for persona in payload["personas"]:
+        print(f"  {persona['id']:<16} {len(persona['skills'])} skills")
+    print("Realms:")
+    for realm in payload["realms"]:
+        bound = "server" if realm["server_bound"] else "local"
+        state = realm["sync_state"] or "not checked"
+        drift = f"  drift: {', '.join(realm['skills_drift'])}" if realm["skills_drift"] else ""
+        print(f"  {realm['realm_id']:<20} [{bound}] {state}{drift}")
     return 0
 
 
@@ -2700,7 +3444,7 @@ def _cmd_serve(args) -> int:
 
 def _load_command_parts() -> None:
     parts_dir = Path(__file__).with_name("harness_parts")
-    for filename in ("persona_commands.py", "runtime_commands.py"):
+    for filename in ("persona_commands.py", "runtime_commands.py", "board.py", "office.py", "flow_commands.py", "checkpoint_commands.py"):
         path = parts_dir / filename
         exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), globals())
 

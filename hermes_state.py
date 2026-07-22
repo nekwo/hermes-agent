@@ -121,6 +121,40 @@ def _delete_delegate_children(conn, parent_ids: List[str]) -> List[str]:
 T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
+# Frozen copy of the import-time value. ``DEFAULT_DB_PATH`` is a module-level
+# constant computed once at import, so it captures ``HERMES_HOME`` as it stood
+# when this module was first imported — typically before a test body (or an
+# in-process profile switch) has had a chance to change it. A large body of
+# tests pin ``DEFAULT_DB_PATH`` directly via ``monkeypatch.setattr`` to isolate
+# from the real ``~/.hermes/state.db``; keeping that hook working means we must
+# distinguish "caller/test pinned the constant" from "still the import default".
+_IMPORT_DEFAULT_DB_PATH = DEFAULT_DB_PATH
+
+
+def _resolve_default_db_path() -> Path:
+    """Resolve the path a no-arg :class:`SessionDB` should open.
+
+    Precedence:
+
+    1. An explicitly pinned module-level ``DEFAULT_DB_PATH`` (i.e. reassigned
+       away from its import value — the historical ``monkeypatch.setattr``
+       isolation hook that ~25 gateway/CLI test files rely on).
+    2. Otherwise ``HERMES_HOME`` resolved **at call time** via
+       :func:`get_hermes_home` — which also honors the context-local override.
+
+    Resolving live in case (2) is the fix for a silent test-isolation /
+    cross-profile-corruption hole: ``get_hermes_home()`` reads the env on every
+    call, but ``DEFAULT_DB_PATH`` froze it at import, so a test that only did
+    ``monkeypatch.setenv("HERMES_HOME", tmp)`` (rather than patching the
+    constant) had its no-arg ``SessionDB()`` writes land in whatever home
+    existed at import — on a dev box, the live profile's ``state.db``. See the
+    same hazard called out in :func:`get_hermes_home`'s docstring.
+    """
+
+    if DEFAULT_DB_PATH != _IMPORT_DEFAULT_DB_PATH:
+        return DEFAULT_DB_PATH
+    return get_hermes_home() / "state.db"
+
 
 SCHEMA_VERSION = 19
 
@@ -902,7 +936,7 @@ class SessionDB:
     _OPTIMIZE_EVERY_N_WRITES = 1000
 
     def __init__(self, db_path: Path = None, read_only: bool = False):
-        self.db_path = db_path or DEFAULT_DB_PATH
+        self.db_path = db_path or _resolve_default_db_path()
         self.read_only = read_only
 
         self._lock = threading.Lock()
@@ -3199,7 +3233,7 @@ class SessionDB:
                     ) AS last_active
                 FROM sessions s
                 {where_sql}
-                ORDER BY s.started_at DESC
+                ORDER BY s.started_at DESC, s.id DESC
                 LIMIT ? OFFSET ?
             """
             params.extend([limit, offset])
@@ -4096,12 +4130,14 @@ class SessionDB:
                 msg["message_id"] = row["platform_message_id"]
             if row["observed"]:
                 msg["observed"] = True
+            # finish_reason also carries typed Mission Control presentation
+            # markers on native user rows (for example relay sender identity).
+            if row["finish_reason"]:
+                msg["finish_reason"] = row["finish_reason"]
             # Restore reasoning fields on assistant messages so providers
             # that replay reasoning (OpenRouter, OpenAI, Nous) receive
             # coherent multi-turn reasoning context.
             if row["role"] == "assistant":
-                if row["finish_reason"]:
-                    msg["finish_reason"] = row["finish_reason"]
                 if row["reasoning"]:
                     msg["reasoning"] = row["reasoning"]
                 if row["reasoning_content"] is not None:
@@ -5135,6 +5171,63 @@ class SessionDB:
                 self._remove_session_files(sessions_dir, delegate_id)
             self._remove_session_files(sessions_dir, session_id)
         return bool(deleted)
+
+    def delete_compression_lineage(
+        self,
+        root_session_id: str,
+        sessions_dir: Optional[Path] = None,
+    ) -> List[str]:
+        """Delete a root and only its native compression continuation chain.
+
+        Explicit branches, delegate sessions, and tool children are preserved
+        and detached, matching ``delete_session``'s public child semantics.
+        """
+
+        removed: List[str] = []
+
+        def _do(conn):
+            rows = conn.execute(
+                "SELECT id, parent_session_id, end_reason, model_config FROM sessions"
+            ).fetchall()
+            by_id = {row["id"]: row for row in rows}
+            if root_session_id not in by_id:
+                return []
+            lineage = {root_session_id}
+            changed = True
+            while changed:
+                changed = False
+                for row in rows:
+                    if row["id"] in lineage or row["parent_session_id"] not in lineage:
+                        continue
+                    parent = by_id.get(row["parent_session_id"])
+                    try:
+                        meta = json.loads(row["model_config"] or "{}")
+                    except Exception:
+                        meta = {}
+                    if (
+                        parent is not None
+                        and parent["end_reason"] == "compression"
+                        and not meta.get("_branched_from")
+                        and not meta.get("_delegate_from")
+                    ):
+                        lineage.add(row["id"])
+                        changed = True
+            ids = sorted(lineage)
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"UPDATE sessions SET parent_session_id = NULL "
+                f"WHERE parent_session_id IN ({placeholders}) AND id NOT IN ({placeholders})",
+                tuple(ids + ids),
+            )
+            conn.execute(f"DELETE FROM messages WHERE session_id IN ({placeholders})", tuple(ids))
+            conn.execute(f"DELETE FROM sessions WHERE id IN ({placeholders})", tuple(ids))
+            removed.extend(ids)
+            return ids
+
+        self._execute_write(_do)
+        for session_id in removed:
+            self._remove_session_files(sessions_dir, session_id)
+        return removed
 
     def delete_session_if_empty(
         self,

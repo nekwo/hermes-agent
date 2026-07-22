@@ -74,6 +74,26 @@ HERMES_AGENT_RUNTIME_ROOT=%TEMP%\agent-runtime-probe-<stamp>
 unguarded — mitigated by the loud snapshot warning + the reversible reconcile
 prune. Deeper MCP-side mandatory-root enforcement is a follow-up.
 
+## Steering referential integrity (2026-07-20)
+
+A second stale-instance class can remain even when every persona-instance row
+is backed: a child row may retain a shape-valid `spawned_by` / `steered_by` id
+after the parent placement row has been retired or reaped. JSON decoding cannot
+detect this; the fields are foreign keys and must be checked against the live
+`persona_instances` key set.
+
+- `PersonaInstanceStore` releases child backlinks before every sanctioned
+  retire/reap row removal. Remaining parents and child mission context are
+  preserved; the normal `persona_instance.steered` event records the change.
+- `reconcile_persona_instances` has a final referential-integrity phase that
+  removes already-stranded parent ids and reports `steering_repaired_count`.
+- Snapshot parity emits typed `fk_miss` warnings for unresolved
+  `persona_instance.spawned_by` and `persona_instance.steered_by` targets, with
+  the existing reconcile command as the repair instruction.
+
+This complements schema/contract-version checks: schema validity proves the
+JSON shape; parity FK checks prove that its live object references resolve.
+
 ## Proof (2026-07-12)
 
 - 1730 `tests/agent_runtime` passed; new: classifier truth table + legacy-seeded

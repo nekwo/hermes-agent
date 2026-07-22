@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import paths
+from . import event_rotation, paths
 from .decision_contract_registry import allowed_event_types, validate_event_payload
 from .errors import EventPayloadTooLarge
 from .locks import events_lock
@@ -18,6 +18,45 @@ from .models import Event
 from .serde import from_jsonable, to_jsonable
 
 EVENT_PAYLOAD_LIMIT_BYTES = 4096
+
+# Env override for the rotation cap (operator/test knob). When unset the
+# config-derived cap is used, memoized per store root so the hot append path
+# does not re-parse config on every event.
+_ROTATION_CAP_ENV = "HERMES_EVENT_LOG_ROTATION_CAP_BYTES"
+_ROTATION_CAP_CACHE: dict[str, int] = {}
+
+
+def _rotation_cap_bytes() -> int:
+    """Resolve the live-slice rotation cap. Env override wins; else the
+    ``event_log.rotation_cap_bytes`` config value (default 16 MiB), memoized per
+    store root. ``0`` disables rotation."""
+
+    env = os.environ.get(_ROTATION_CAP_ENV)
+    if env:
+        try:
+            value = int(env)
+            if value >= 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    try:
+        root = str(paths.store_root())
+    except Exception:
+        return event_rotation.DEFAULT_ROTATION_CAP_BYTES
+    cached = _ROTATION_CAP_CACHE.get(root)
+    if cached is not None:
+        return cached
+    cap = event_rotation.DEFAULT_ROTATION_CAP_BYTES
+    try:
+        from .config import load_agent_runtime_config
+
+        raw = getattr(getattr(load_agent_runtime_config(), "event_log", None), "rotation_cap_bytes", None)
+        if raw is not None:
+            cap = max(0, int(raw))
+    except Exception:
+        cap = event_rotation.DEFAULT_ROTATION_CAP_BYTES
+    _ROTATION_CAP_CACHE[root] = cap
+    return cap
 
 ALLOWED_EVENT_TYPES = allowed_event_types()
 
@@ -72,43 +111,98 @@ class EventLog:
             raise EventPayloadTooLarge(
                 f"event payload is {len(payload_bytes)} bytes; limit is {EVENT_PAYLOAD_LIMIT_BYTES}"
             )
-        path = paths.events_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(to_jsonable(evt), ensure_ascii=False, separators=(",", ":"))
         with events_lock():
+            # Rotate-before-write (under the lock): if the current live slice has
+            # reached the cap, seal it and open a fresh one, THEN write this line
+            # into the fresh slice — the live slice is never left empty after a
+            # completed append (keeps tail(1)/watermark honest). Windows-safe:
+            # rotation only creates a new file + rewrites the manifest, so a
+            # concurrent reader holding the sealed file open is never disturbed.
+            path = event_rotation.prepare_live_for_append(_rotation_cap_bytes())
+            path.parent.mkdir(parents=True, exist_ok=True)
             with open(path, "a", encoding="utf-8", newline="\n") as handle:
                 handle.write(line + "\n")
                 handle.flush()
 
     def tail(self, n: int) -> list[Event]:
-        if n <= 0 or not paths.events_path().exists():
+        if n <= 0:
             return []
-        lines = paths.events_path().read_text(encoding="utf-8").splitlines()[-n:]
-        return [from_jsonable(Event, json.loads(line)) for line in lines if line.strip()]
+        # Walk slices newest-first, prepending each older slice's lines, until we
+        # have at least n. Pristine (single live slice) reads only events.jsonl —
+        # byte-identical to the old ``read_text().splitlines()[-n:]``.
+        collected: list[str] = []
+        for sl in event_rotation.reversed_slices():
+            if not sl.path.exists():
+                continue
+            lines = [line for line in sl.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            collected = lines + collected
+            if len(collected) >= n:
+                break
+        tail_lines = collected[-n:]
+        return [from_jsonable(Event, json.loads(line)) for line in tail_lines]
 
     def iter_all(self) -> Iterator[Event]:
-        if not paths.events_path().exists():
-            return
-        with open(paths.events_path(), encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    yield from_jsonable(Event, json.loads(line))
+        for source in event_rotation.ordered_line_sources():
+            if not source.exists():
+                continue
+            with open(source, encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        yield from_jsonable(Event, json.loads(line))
 
     def iter_from_offset(self, offset: int) -> Iterator[tuple[int, Event]]:
-        path = paths.events_path()
-        if not path.exists():
-            return
+        # Logical-offset tailing across slices: resolve which slice(s) a logical
+        # offset lives in and seek there, yielding logical offsets throughout so
+        # every reader/watermark resolves unchanged across a rotation boundary.
         start = max(0, int(offset or 0))
-        size = path.stat().st_size
-        if start > size:
-            start = size
-        with open(path, "rb") as handle:
-            handle.seek(start)
-            for raw in handle:
-                if not raw.strip():
+        for slice_path, slice_start, seek_within in event_rotation.offset_reads(start):
+            if not slice_path.exists():
+                continue
+            with open(slice_path, "rb") as handle:
+                handle.seek(seek_within)
+                for raw in handle:
+                    if not raw.strip():
+                        continue
+                    logical_offset = slice_start + handle.tell()
+                    yield logical_offset, from_jsonable(Event, json.loads(raw.decode("utf-8")))
+
+    def _for_matching(
+        self,
+        token: str,
+        match,
+        *,
+        limit: int,
+        since: datetime | None,
+        types: Collection[str] | None,
+    ) -> list[Event]:
+        """Newest-first reverse scan across slices (newest slice first), stopping
+        once ``limit`` matches are collected, returned oldest-first. Pristine
+        (single slice) is byte-identical to the old whole-file reverse scan; when
+        rotation is active the scan reaches back into sealed slices only as far as
+        the limit needs, so newest-N stays cheap."""
+
+        type_tokens = _type_json_tokens(types)
+        selected: list[Event] = []
+        for sl in event_rotation.reversed_slices():
+            if not sl.path.exists():
+                continue
+            for line in reversed(sl.path.read_text(encoding="utf-8").splitlines()):
+                if token not in line:
                     continue
-                new_offset = handle.tell()
-                yield new_offset, from_jsonable(Event, json.loads(raw.decode("utf-8")))
+                if type_tokens is not None and not any(t in line for t in type_tokens):
+                    continue
+                evt = from_jsonable(Event, json.loads(line))
+                if not match(evt):
+                    continue
+                if types is not None and evt.type not in types:
+                    continue
+                if since is not None and evt.ts < since:
+                    continue
+                selected.append(evt)
+                if limit > 0 and len(selected) >= limit:
+                    return list(reversed(selected))
+        return list(reversed(selected))
 
     def for_task(
         self,
@@ -127,28 +221,13 @@ class EventLog:
         cheap even against such floods.
         """
 
-        if not paths.events_path().exists():
-            return []
-        task_token = _task_id_json_token(task_id)
-        type_tokens = _type_json_tokens(types)
-        selected: list[Event] = []
-        lines = paths.events_path().read_text(encoding="utf-8").splitlines()
-        for line in reversed(lines):
-            if task_token not in line:
-                continue
-            if type_tokens is not None and not any(token in line for token in type_tokens):
-                continue
-            evt = from_jsonable(Event, json.loads(line))
-            if evt.task_id != task_id:
-                continue
-            if types is not None and evt.type not in types:
-                continue
-            if since is not None and evt.ts < since:
-                continue
-            selected.append(evt)
-            if limit > 0 and len(selected) >= limit:
-                break
-        return list(reversed(selected))
+        return self._for_matching(
+            _task_id_json_token(task_id),
+            lambda evt: evt.task_id == task_id,
+            limit=limit,
+            since=since,
+            types=types,
+        )
 
     def for_session(
         self,
@@ -168,48 +247,39 @@ class EventLog:
         post-decode equality check. ``types`` behaves as in :meth:`for_task`.
         """
 
-        if not paths.events_path().exists():
-            return []
-        session_token = _session_id_json_token(session_id)
-        type_tokens = _type_json_tokens(types)
-        selected: list[Event] = []
-        lines = paths.events_path().read_text(encoding="utf-8").splitlines()
-        for line in reversed(lines):
-            if session_token not in line:
-                continue
-            if type_tokens is not None and not any(token in line for token in type_tokens):
-                continue
-            evt = from_jsonable(Event, json.loads(line))
-            if evt.session_id != session_id:
-                continue
-            if types is not None and evt.type not in types:
-                continue
-            if since is not None and evt.ts < since:
-                continue
-            selected.append(evt)
-            if limit > 0 and len(selected) >= limit:
-                break
-        return list(reversed(selected))
+        return self._for_matching(
+            _session_id_json_token(session_id),
+            lambda evt: evt.session_id == session_id,
+            limit=limit,
+            since=since,
+            types=types,
+        )
 
     def iter_since(self, ts: datetime) -> Iterator[Event]:
-        if not paths.events_path().exists():
-            return
-        with open(paths.events_path(), encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                evt = from_jsonable(Event, json.loads(line))
-                if evt.ts >= ts:
-                    yield evt
+        for source in event_rotation.ordered_line_sources():
+            if not source.exists():
+                continue
+            with open(source, encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    evt = from_jsonable(Event, json.loads(line))
+                    if evt.ts >= ts:
+                        yield evt
 
 
 def archive_task_events(task_id: str, archive_dir: Path) -> dict[str, Any]:
-    """Copy a task's live event rows into its archive batch."""
+    """Copy a task's event rows into its archive batch.
 
-    event_path = paths.events_path()
+    Reads across ALL event-log slices (rotated archive slices + live), oldest
+    first, so a task whose events span a rotation boundary is archived whole.
+    Pristine (single live slice) reads only ``events.jsonl`` — unchanged.
+    """
+
     dest = archive_dir / f"events_{_safe_event_task_filename(task_id)}.jsonl"
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if not event_path.exists():
+    sources = [source for source in event_rotation.ordered_line_sources() if source.exists()]
+    if not sources:
         dest.write_text("", encoding="utf-8", newline="\n")
         return {
             "events_path": dest.name,
@@ -220,18 +290,19 @@ def archive_task_events(task_id: str, archive_dir: Path) -> dict[str, Any]:
     token = _task_id_json_token(task_id)
     selected: list[str] = []
     with events_lock():
-        with open(event_path, encoding="utf-8") as handle:
-            for line in handle:
-                if token not in line:
-                    continue
-                if not line.strip():
-                    continue
-                try:
-                    event = from_jsonable(Event, json.loads(line))
-                except Exception:
-                    continue
-                if event.task_id == task_id:
-                    selected.append(line if line.endswith("\n") else f"{line}\n")
+        for event_path in sources:
+            with open(event_path, encoding="utf-8") as handle:
+                for line in handle:
+                    if token not in line:
+                        continue
+                    if not line.strip():
+                        continue
+                    try:
+                        event = from_jsonable(Event, json.loads(line))
+                    except Exception:
+                        continue
+                    if event.task_id == task_id:
+                        selected.append(line if line.endswith("\n") else f"{line}\n")
         with open(dest, "w", encoding="utf-8", newline="\n") as handle:
             handle.writelines(selected)
     return {
@@ -244,12 +315,13 @@ def archive_task_events(task_id: str, archive_dir: Path) -> dict[str, Any]:
 
 def event_log_health() -> dict[str, Any]:
     path = paths.events_path()
-    exists = path.exists()
-    size_bytes = path.stat().st_size if exists else 0
-    line_count = 0
-    if exists:
-        with open(path, "rb") as handle:
-            line_count = sum(1 for line in handle if line.strip())
+    rotation = event_rotation.rotation_health()
+    # Whole-log totals span all slices; ``exists`` stays keyed on the canonical
+    # base file for backward compatibility (it remains present as the sealed
+    # base-0 slice after rotation).
+    size_bytes = rotation["total_bytes"]
+    line_count = rotation["total_lines"]
+    exists = path.exists() or size_bytes > 0
     archive = _archived_event_slices()
     return {
         "exists": exists,
@@ -258,16 +330,43 @@ def event_log_health() -> dict[str, Any]:
         "archived_event_slices": len(archive["slices"]),
         "archived_event_rows": archive["row_count"],
         "index_health": "ok" if exists or archive["row_count"] == 0 else "archive_only",
+        # Rotation accounting (C6a): the live slice is bounded; sealed rotation
+        # slices are archive-never-delete and offset-load-bearing.
+        "rotated_slice_count": rotation["rotated_slice_count"],
+        "live_slice_file": rotation["live_slice_file"],
+        "live_slice_bytes": rotation["live_slice_bytes"],
+        "live_slice_lines": rotation["live_slice_lines"],
+        "log_end_offset": rotation["log_end_offset"],
     }
 
 
 def compact_archived_task_events(*, dry_run: bool = True) -> dict[str, Any]:
-    """Rewrite events.jsonl without rows already copied into archive slices."""
+    """Rewrite events.jsonl without rows already copied into archive slices.
+
+    Superseded by event-log rotation (C6a): once the log has rotated into sealed
+    slices, those slices are immutable and offset-load-bearing — rewriting one
+    would shift every later logical offset and invalidate live watermarks, and on
+    Windows a concurrent slice-spanning reader holds the file open. Rotation
+    already bounds the live log (compaction's goal), so this becomes a typed
+    no-op when any rotation slice exists. When the log is still a single live file
+    (pristine / legacy), it compacts that file exactly as before.
+    """
 
     path = paths.events_path()
     before = event_log_health()
     archive = _archived_event_slices()
     task_ids = sorted(archive["task_ids"])
+    if event_rotation.slice_count() > 1:
+        return {
+            "dry_run": bool(dry_run),
+            "eligible_task_ids": task_ids,
+            "removed_event_count": 0,
+            "removed_bytes": 0,
+            "before": before,
+            "after": before,
+            "watermark_reset": False,
+            "skipped_reason": "event_log_rotation_active",
+        }
     if not path.exists() or not task_ids:
         return {
             "dry_run": bool(dry_run),
@@ -311,16 +410,23 @@ def compact_archived_task_events(*, dry_run: bool = True) -> dict[str, Any]:
 
 
 class CachedEventLog(EventLog):
-    """Build-scoped EventLog that reads ``events.jsonl`` ONCE and serves every
-    read from the cached raw lines.
+    """Build-scoped EventLog that reads the event log ONCE and serves every read
+    from the cached raw lines.
 
     A single snapshot build calls ``for_task`` / ``for_session`` / ``tail`` dozens
-    of times; the base ``EventLog`` re-reads + re-splits the entire (45MB+) file on
-    each call (the dominant repeated cost). This caches the split lines once and
-    keeps the base's *selective* parse (substring pre-filter → ``json.loads`` only
-    on matching lines), so it dedupes the file I/O without paying to parse every
+    of times; the base ``EventLog`` re-reads + re-splits the entire log on each
+    call (the dominant repeated cost). This caches the split lines once and keeps
+    the base's *selective* parse (substring pre-filter → ``json.loads`` only on
+    matching lines), so it dedupes the file I/O without paying to parse every
     event. It is a point-in-time view — created per build and discarded, so appends
     made elsewhere during the build are intentionally not reflected.
+
+    Rotation (C6a): the cache concatenates every slice oldest-first (rotated
+    archive slices + live). Slices are contiguous in logical-offset space and the
+    first slice starts at logical 0, so the flat concatenation's cumulative byte
+    position IS the logical offset — ``iter_from_offset`` keeps resolving watermark
+    cursors unchanged. Pristine (single live slice) reads only ``events.jsonl``,
+    exactly one ``read_text``, as before.
     """
 
     def __init__(self) -> None:
@@ -329,8 +435,11 @@ class CachedEventLog(EventLog):
 
     def _cached_lines(self) -> list[str]:
         if self._lines is None:
-            path = paths.events_path()
-            self._lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+            lines: list[str] = []
+            for source in event_rotation.ordered_line_sources():
+                if source.exists():
+                    lines.extend(source.read_text(encoding="utf-8").splitlines())
+            self._lines = lines
         return self._lines
 
     def _scan(

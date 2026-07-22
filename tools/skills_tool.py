@@ -81,7 +81,10 @@ from hermes_cli.config import cfg_get
 from utils import env_var_enabled
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS,
+    get_all_skills_dirs,
     is_skill_support_path as _is_skill_support_path,
+    resolve_skill,
+    skill_package_content_hash,
 )
 from tools.skills_hub import create_source_router, unified_search
 
@@ -108,6 +111,20 @@ def _skills_dir() -> Path:
     if configured != _SKILLS_DIR_AT_IMPORT:
         return configured
     return get_hermes_home() / "skills"
+
+
+def _runtime_skill_dirs() -> List[Path]:
+    """Canonical registry with the patchable active profile root first."""
+
+    dirs = [_skills_dir(), *get_all_skills_dirs()[1:]]
+    result: List[Path] = []
+    seen: set[Path] = set()
+    for path in dirs:
+        key = path.expanduser().absolute()
+        if key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
 
 
 # Anthropic-recommended limits for progressive disclosure efficiency
@@ -526,12 +543,7 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
     """
     # Try the active profile skills dir first (respects monkeypatching in tests),
     # then fall back to external dirs from config.
-    dirs_to_check = [_skills_dir()]
-    try:
-        from agent.skill_utils import get_external_skills_dirs
-        dirs_to_check.extend(get_external_skills_dirs())
-    except Exception:
-        pass
+    dirs_to_check = _runtime_skill_dirs()
     for skills_dir in dirs_to_check:
         try:
             rel_path = skill_path.relative_to(skills_dir)
@@ -635,7 +647,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     Returns:
         List of skill metadata dicts (name, description, category).
     """
-    from agent.skill_utils import get_external_skills_dirs, iter_skill_index_files
+    from agent.skill_utils import iter_skill_index_files
 
     skills = []
     seen_names: set = set()
@@ -643,12 +655,10 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
 
-    # Scan local dir first, then external dirs (local takes precedence)
-    dirs_to_scan = []
-    active_skills_dir = _skills_dir()
-    if active_skills_dir.exists():
-        dirs_to_scan.append(active_skills_dir)
-    dirs_to_scan.extend(get_external_skills_dirs())
+    # Scan the same ordered registry used by skill_view/readiness. Duplicate
+    # names are omitted from this discovery view; direct loads refuse them as
+    # collisions instead of silently choosing a winner.
+    dirs_to_scan = [path for path in _runtime_skill_dirs() if path.exists()]
 
     for scan_dir in dirs_to_scan:
         for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
@@ -888,15 +898,6 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         active_skills_dir = _skills_dir()
         if not active_skills_dir.exists():
             active_skills_dir.mkdir(parents=True, exist_ok=True)
-            return json.dumps(
-                {
-                    "success": True,
-                    "skills": [],
-                    "categories": [],
-                    "message": f"No skills found. Skills directory created at {display_hermes_home()}/skills/",
-                },
-                ensure_ascii=False,
-            )
 
         # Find all skills
         all_skills = _find_all_skills()
@@ -1151,8 +1152,6 @@ def skill_view(
             if bare:
                 local_category_name = f"{namespace}/{bare}"
 
-        from agent.skill_utils import get_external_skills_dirs
-
         # The categorized fall-through form (namespace/bare) joins onto each
         # search dir too; re-validate it since `bare` is not namespace-checked.
         if local_category_name:
@@ -1167,118 +1166,28 @@ def skill_view(
                     ensure_ascii=False,
                 )
 
-        # Build list of all skill directories to search
-        all_dirs = []
         active_skills_dir = _skills_dir()
-        if active_skills_dir.exists():
-            all_dirs.append(active_skills_dir)
-        all_dirs.extend(get_external_skills_dirs())
-
-        if not all_dirs:
-            return json.dumps(
-                {
-                    "success": False,
-                    "error": "Skills directory does not exist yet. It will be created on first install.",
-                },
-                ensure_ascii=False,
-            )
-
-        skill_dir = None
-        skill_md = None
-
-        # Collision detection: collect ALL candidates across every dir using
-        # every lookup strategy (direct path, recursive by parent dir name,
-        # legacy flat <name>.md). If more than one matches, refuse and tell
-        # the caller — silent shadowing of a local skill by a same-named
-        # external skill is a real bug class (`/skills` shows one, agent
-        # loaded the other) so we surface it loudly instead of guessing.
-        from agent.skill_utils import iter_skill_index_files
-
-        candidates: List[Tuple[Optional[Path], Path]] = []  # (skill_dir, skill_md)
-        seen_md: set = set()
-
-        def _record(sd: Optional[Path], smd: Path) -> None:
-            try:
-                key = smd.resolve()
-            except Exception:
-                key = smd
-            if key in seen_md:
-                return
-            seen_md.add(key)
-            candidates.append((sd, smd))
-
-        for search_dir in all_dirs:
-            # Strategy 1: direct path (e.g., "mlops/axolotl" or bare "axolotl"
-            # at the top of the dir).
-            direct_path = search_dir / name
-            if (
-                not _is_skill_support_path(direct_path)
-                and direct_path.is_dir()
-                and (direct_path / "SKILL.md").exists()
-            ):
-                _record(direct_path, direct_path / "SKILL.md")
-            elif direct_path.with_suffix(".md").exists() and not _is_skill_support_path(
-                direct_path.with_suffix(".md")
-            ):
-                _record(None, direct_path.with_suffix(".md"))
-
-            # Strategy 1b: categorized form for plugin namespace fall-through
-            # (e.g., a "myplugin:explore" name with no plugin registered also
-            # tries the on-disk path "myplugin/explore").
-            if local_category_name:
-                categorized_path = search_dir / local_category_name
-                if (
-                    not _is_skill_support_path(categorized_path)
-                    and categorized_path.is_dir()
-                    and (categorized_path / "SKILL.md").exists()
-                ):
-                    _record(categorized_path, categorized_path / "SKILL.md")
-                elif categorized_path.with_suffix(
-                    ".md"
-                ).exists() and not _is_skill_support_path(
-                    categorized_path.with_suffix(".md")
-                ):
-                    _record(None, categorized_path.with_suffix(".md"))
-
-            # Strategy 2: recursive by directory name (catches nested skills
-            # like "foundations/runtime/explore-codebase" called by bare name),
-            # plus frontmatter `name:` lookup. `skills_list()` exposes the
-            # frontmatter name, so `skill_view(name)` must accept it too even
-            # when the on-disk directory is a shorter category/alias.
-            for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
-                if found_skill_md.parent.name == name:
-                    _record(found_skill_md.parent, found_skill_md)
-                    continue
-                try:
-                    fm_content = found_skill_md.read_text(encoding="utf-8")
-                    fm, _ = _parse_frontmatter(fm_content)
-                except Exception:
-                    fm = {}
-                if fm.get("name") == name:
-                    _record(found_skill_md.parent, found_skill_md)
-
-            # Strategy 3: legacy flat <name>.md files anywhere under the dir.
-            # Exclude skill support docs: references/templates/assets/scripts
-            # are loaded through skill_view(skill, file_path=...) and must not
-            # shadow or collide with real skills that share the same basename.
-            for found_md in search_dir.rglob(f"{name}.md"):
-                if found_md.name != "SKILL.md" and not _is_skill_support_path(
-                    found_md
-                ):
-                    _record(None, found_md)
-
-        if len(candidates) > 1:
-            paths = [str(smd).replace("\\", "/") for _, smd in candidates]
+        all_dirs = [path for path in _runtime_skill_dirs() if path.exists()]
+        resolution = resolve_skill(
+            name,
+            roots=all_dirs,
+            categorized_identifier=local_category_name,
+        )
+        if resolution.status == "collision":
+            paths = [
+                str(candidate.skill_md).replace("\\", "/")
+                for candidate in resolution.candidates
+            ]
             logging.getLogger(__name__).warning(
                 "Skill name collision for '%s': %d candidates — %s",
-                name, len(candidates), "; ".join(paths),
+                name, len(paths), "; ".join(paths),
             )
             return json.dumps(
                 {
                     "success": False,
                     "error": (
-                        f"Ambiguous skill name '{name}': {len(candidates)} skills "
-                        "match across your local skills dir and external_dirs. "
+                        f"Ambiguous skill name '{name}': {len(paths)} skills "
+                        "match across the canonical skill registry. "
                         "Refusing to guess — load one explicitly by its categorized path."
                     ),
                     "matches": paths,
@@ -1291,8 +1200,10 @@ def skill_view(
                 ensure_ascii=False,
             )
 
-        if candidates:
-            skill_dir, skill_md = candidates[0]
+        selected = resolution.candidate
+        skill_dir = selected.skill_dir if selected else None
+        skill_md = selected.skill_md if selected else None
+        source_kind = selected.source_kind if selected else None
 
         if not skill_md or not skill_md.exists():
             available = [s["name"] for s in _sort_skills(_find_all_skills())[:20]]
@@ -1561,7 +1472,7 @@ def skill_view(
             linked_files["scripts"] = script_files
 
         try:
-            rel_path = str(skill_md.relative_to(active_skills_dir))
+            rel_path = skill_md.relative_to(active_skills_dir).as_posix()
         except ValueError:
             # External skill — use path relative to the skill's own parent dir
             rel_path = str(skill_md.relative_to(skill_md.parent.parent)) if skill_md.parent.parent else skill_md.name
@@ -1652,6 +1563,9 @@ def skill_view(
         result = {
             "success": True,
             "name": skill_name,
+            "resolution_status": "resolved",
+            "source_kind": source_kind,
+            "content_hash": skill_package_content_hash(skill_dir, skill_md),
             "description": frontmatter.get("description", ""),
             "tags": tags,
             "related_skills": related_skills,
@@ -1771,7 +1685,7 @@ if __name__ == "__main__":
 
 SKILLS_LIST_SCHEMA = {
     "name": "skills_list",
-    "description": "List available skills (name + description). Use skill_search(query) to find matching skills or skill_view(name) to load full content.",
+    "description": "List available skills (name + description). Disambiguator: skill_search(query) finds matches; skill_view(name) loads full content.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1786,7 +1700,7 @@ SKILLS_LIST_SCHEMA = {
 
 SKILL_SEARCH_SCHEMA = {
     "name": "skill_search",
-    "description": "Search installed skills and the Hermes Skills Hub by query without loading full SKILL.md bodies. Returns compact identifiers/descriptions only; use skill_view for installed matches or hermes skills install for external matches.",
+    "description": "Search installed skills + the Hermes Skills Hub by query without loading SKILL.md bodies (compact ids/descriptions). Disambiguator: skill_view loads an installed match; `hermes skills install` fetches an external one.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1826,7 +1740,7 @@ SKILL_SEARCH_SCHEMA = {
 
 SKILL_VIEW_SCHEMA = {
     "name": "skill_view",
-    "description": "Skills allow for loading information about specific tasks and workflows, as well as scripts and templates. Load a skill's full content or access its linked files (references, templates, scripts). First call returns SKILL.md content plus a 'linked_files' dict showing available references/templates/scripts. To access those, call again with file_path parameter.",
+    "description": "Load a skill's full SKILL.md plus its linked files (references/templates/scripts). First call returns SKILL.md + a linked_files dict; call again with file_path to fetch one. Disambiguator: skill_view READS a skill; skill_manage writes.",
     "parameters": {
         "type": "object",
         "properties": {

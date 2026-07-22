@@ -1,6 +1,11 @@
 ---
 name: harness-runtime-model
 description: Hermes Agent Runtime mental model + first-class commands to view and operate Mission Control (goals / graphs / agents / lanes). Use instead of low-level DB/Python/scripts.
+metadata:
+  hermes:
+    surfaces: [mission_chat, mission_worker]
+    modes: [standard, root_node]
+    load_policy: required_preload
 ---
 
 # Harness Runtime Model
@@ -57,6 +62,27 @@ can differ in ordering — topology is a supervision graph, not the execution or
 | steer a run | `hermes harness run approve\|cancel <run_id>` |
 | steer an agent | `hermes harness worker pause\|resume\|interrupt\|nudge\|possess\|release <session>` |
 | steer a lane | `hermes harness lane pause\|park\|resume\|drain <lane>` |
-| message an agent | `hermes harness mission-chat message --persona <id> --message …` |
+| open or continue the instance default chat | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --json` |
+| create a new server-minted chat on an existing instance | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --new-session --idempotency-key <key> --json` |
+| message an exact chat root | `hermes harness mission-chat message --persona <id> --session-id <root> --client-message-id <id> --message … --json` |
+| abandon an outcome-unknown turn | `hermes harness mission-chat turn-resolve --session-id <root> --client-message-id <id> --turn-id <turn> --action abandon --json` |
 | concurrency gate | `hermes harness swarm enable` / `disable` |
 | manual advance (debug) | `hermes harness tick` / `run-until-settled` |
+
+## Persona chat continuity
+
+`PersonaInstance.default_chat_session_id` is the operator-chat pointer. Worker
+and run session IDs are separate and must never be used as chat roots. Hermes
+mints every new root; callers may use a local draft identity only while waiting
+for the `open-chat --new-session` result.
+
+Treat `session_id` in chat commands as the stable root. Native compression may
+rotate `active_session_id`; it does not change the root selected by Mission
+Control. Runtime-state projections are observer-qualified: only the owning
+long-lived serve process may report `hot`, `busy`, `cold`, or `failed` from its
+resident registry; external CLI snapshots report `unknown`.
+
+If a turn returns `chat_turn_outcome_unknown`, do not retry it. Resolve the
+exact `(root, client_message_id, turn_id)` tuple with `turn-resolve ...
+--action abandon`, then send the text as a new turn with a fresh client
+message ID.

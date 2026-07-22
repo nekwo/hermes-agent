@@ -596,13 +596,22 @@ class TestPatchSchemaShape:
     silently omitting old_string / new_string / patch content."""
 
     def test_per_mode_required_params_documented_in_descriptions(self):
+        # T6b: the authoritative per-mode "REQUIRED when mode=..." signal that
+        # strict models (kimi-k2.x) need lives on the (untrimmed) PARAMETER
+        # descriptions — still on the wire. The top-level brief names the
+        # per-mode param groups compactly; the verbose "REQUIRED PARAMETERS:"
+        # reinforcement moved to the full docs (tool_describe).
         desc = PATCH_SCHEMA["description"]
-        assert "REQUIRED PARAMETERS: mode, path, old_string, new_string" in desc
-        assert "REQUIRED PARAMETERS: mode, patch" in desc
+        assert "path/old_string/new_string" in desc
+        assert "mode='patch'" in desc
         props = PATCH_SCHEMA["parameters"]["properties"]
         for name in ("path", "old_string", "new_string"):
             assert "REQUIRED when mode='replace'" in props[name]["description"]
         assert "REQUIRED when mode='patch'" in props["patch"]["description"]
+        from tools.tool_full_descriptions import full_tool_description
+        full = full_tool_description("patch")
+        assert "REQUIRED PARAMETERS: mode, path, old_string, new_string" in full
+        assert "REQUIRED PARAMETERS: mode, patch" in full
 
     def test_no_anyof_required_stays_mode_only(self):
         # anyOf/oneOf at parameters level break Anthropic, Fireworks, and the

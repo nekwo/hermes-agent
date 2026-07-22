@@ -2,7 +2,6 @@ from agent_runtime.models import AgentPersona
 from agent_runtime.personas import default_personas
 from agent_runtime.tool_visibility import (
     ToolVisibilityOptions,
-    agent_hud_state_for_persona,
     permission_state_for_persona,
     resolve_tool_visibility,
     turn_tool_context_for_persona,
@@ -75,7 +74,10 @@ def test_unbounded_permission_mode_expands_neko_visibility():
     assert visibility["permission_mode"] == "unbounded"
 
 
-def test_turn_context_permission_state_and_hud_share_the_same_resolution():
+def test_turn_context_and_permission_state_share_the_same_resolution():
+    # ``agent_hud_state_for_persona`` was RETIRED (residue-slim R2, 2026-07-17);
+    # the turn-context and permission-state lanes plus the head-scalar count now
+    # all derive from the ONE ``resolve_tool_visibility`` resolution.
     persona = _persona("dev")
     options = ToolVisibilityOptions(
         permission_mode="operator_one_turn",
@@ -89,7 +91,7 @@ def test_turn_context_permission_state_and_hud_share_the_same_resolution():
 
     turn_context = turn_tool_context_for_persona(persona, options)
     permission_state = permission_state_for_persona(persona, options)
-    hud_state = agent_hud_state_for_persona(persona, options)
+    resolution = resolve_tool_visibility(persona, options)
 
     assert turn_context["preview"]["permission_mode"] == "operator_one_turn"
     assert turn_context["preview"]["session_id"] == "session_35"
@@ -98,8 +100,11 @@ def test_turn_context_permission_state_and_hud_share_the_same_resolution():
     assert permission_state["mode"] == "operator_one_turn"
     assert permission_state["turns_remaining"] == 1
     assert permission_state["can_run_terminal"] is False
-    assert hud_state["tool_count"] == len(turn_context["preview"]["final_model_tools"])
-    assert hud_state["model_tool_tokens"] == turn_context["preview"]["model_tool_tokens"]
+    # The head-scalar ``tool_count`` (resolution["final_tool_count"]) the agents
+    # drawer now renders equals the resolved model-callable tool set — the same
+    # fact the retired hud_state["tool_count"] carried.
+    assert resolution["final_tool_count"] == len(turn_context["preview"]["final_model_tools"])
+    assert resolution["model_tool_tokens"] == turn_context["preview"]["model_tool_tokens"]
 
 
 def test_chat_permission_store_can_narrow_dev_chat_to_read_only(tmp_path):
@@ -255,3 +260,106 @@ def test_turn_tool_context_does_not_persist_requested_blocked_tool_names(tmp_pat
 
     assert "blocked_tool_names" not in context["last_actual"]
     assert "blocked_tool_names" not in context["last_actual"]["tool_schema"]
+
+
+# --- T9b: chat-lane preview parity ------------------------------------------
+# The permission-preview resolver historically showed ``effective_toolsets``
+# (the persona's raw configured set), so it omitted BOTH the operator-chat
+# augmentation (mission_goal/agent_chat/board/clarify) AND the T3/T6a chat-lane
+# cost scoping. ``apply_chat_lane_tool_scope`` threads the REAL chat-lane
+# resolution onto the preview options so the preview reflects the schema the
+# chat lane actually ships. These tests pin preview == actual lane.
+
+
+def _actual_chat_lane(persona):
+    """The tools + toolsets the operator chat lane actually ships for ``persona``,
+    computed straight from the chat-lane chokepoint (the authority the preview
+    must mirror)."""
+    from agent_runtime.persona_runtime import (
+        _blocked_tool_names_for_chat,
+        _enabled_toolsets_for_chat,
+    )
+    from agent_runtime.profile_runner import _blocked_tool_names_with_registry_hygiene
+    from agent_runtime.tool_visibility import _tool_names_for_toolsets
+
+    enabled = _enabled_toolsets_for_chat(persona, session_id=None)
+    blocked = _blocked_tool_names_with_registry_hygiene(
+        _blocked_tool_names_for_chat(persona, session_id=None)
+    )
+    tools = set(_tool_names_for_toolsets(enabled, blocked_tool_names=sorted(set(blocked))))
+    return sorted(enabled), tools
+
+
+def _scoped_preview(persona):
+    from agent_runtime.persona_runtime import apply_chat_lane_tool_scope
+
+    options = permission_options_for_chat(persona, session_id=None)
+    apply_chat_lane_tool_scope(persona, options, session_id=None)
+    return resolve_tool_visibility(persona, options)
+
+
+def test_chat_lane_preview_matches_actual_lane_default_scoped():
+    persona = _persona("neko_supervisor")
+    enabled, actual_tools = _actual_chat_lane(persona)
+    preview = _scoped_preview(persona)
+
+    # Toolsets + the resolved model-tool schema are byte-identical to the lane.
+    assert sorted(preview["effective_toolsets"]) == enabled
+    assert set(preview["final_model_tools"]) == actual_tools
+
+    final = set(preview["final_model_tools"])
+    # The chat-lane cost scoping (T3/T6a) is reflected: browser/vision/file/
+    # terminal/code_execution and skill_manage are gone from the preview...
+    assert "browser_navigate" not in final
+    assert "vision_analyze" not in final
+    assert "read_file" not in final
+    assert "write_file" not in final
+    assert "terminal" not in final
+    assert "execute_code" not in final
+    assert "skill_manage" not in final
+    # ...while the operator-chat capability augmentation IS present...
+    assert "mission_goal_create" in final
+    assert "agent_chat_send" in final
+    # ...including clarify, which PERSONA_BLOCKED_TOOLS blocks on autonomous
+    # runs but the chat bridge unblocks — the old preview wrongly hid it.
+    assert "clarify" in final
+    # Read-only skill recall survives the skill_manage cut.
+    assert "skill_view" in final
+
+
+def test_chat_lane_preview_matches_actual_lane_with_restore_config(monkeypatch):
+    # neko with the live config shape `chat_lane_restore_toolsets: [file]`
+    # (constructed in-test — never read the operator's real config.yaml). The
+    # restore un-excludes the `file` toolset on the bounded chat lane; the
+    # preview must show `file` back AND stay byte-identical to the actual lane.
+    import dataclasses
+
+    import agent_runtime.config as cfgmod
+
+    base = cfgmod.load_agent_runtime_config()
+    fake = dataclasses.replace(
+        base,
+        personas={
+            **(base.personas or {}),
+            "neko_supervisor": {"chat_lane_restore_toolsets": ["file"]},
+        },
+    )
+    monkeypatch.setattr(cfgmod, "load_agent_runtime_config", lambda *a, **k: fake)
+
+    persona = _persona("neko_supervisor")
+    enabled, actual_tools = _actual_chat_lane(persona)
+    preview = _scoped_preview(persona)
+
+    assert "file" in enabled
+    assert sorted(preview["effective_toolsets"]) == enabled
+    assert set(preview["final_model_tools"]) == actual_tools
+
+    final = set(preview["final_model_tools"])
+    # `file` toolset restored -> its tools reappear in the preview...
+    assert "read_file" in final
+    assert "write_file" in final
+    # ...but the other cost cuts (terminal, skill_manage) stay off, and the
+    # augmentation/clarify still ride.
+    assert "terminal" not in final
+    assert "skill_manage" not in final
+    assert "clarify" in final

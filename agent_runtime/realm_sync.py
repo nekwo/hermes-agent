@@ -56,6 +56,21 @@ SECRET_ASSIGNMENT_RE = re.compile(
     r"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=:-]{16,}"
 )
 
+# Canonical line-ending policy for the realm sync repo. The publisher already
+# canonicalizes every artifact to LF (see ``_canonicalize_text_bytes``); this
+# repo-root ``.gitattributes`` makes member clones keep LF on checkout no matter
+# what their local ``core.autocrlf`` is set to, so nobody re-flips the endings.
+# ``text=auto`` leaves binary assets (skill PNG/JPG/… ) untouched. It is never an
+# artifact, so it neither enters the artifact manifest nor the secret scanner.
+_REALM_SYNC_GITATTRIBUTES = (
+    "# Realm sync canonical line endings (managed by agent_runtime/realm_sync.py).\n"
+    "# Published artifacts are written LF by the publisher; pin eol=lf so member\n"
+    "# clones never re-flip endings on checkout regardless of local core.autocrlf.\n"
+    "# text=auto leaves binary assets untouched.\n"
+    "* text=auto eol=lf\n"
+)
+_REALM_SYNC_GITATTRIBUTES_MARKER = b"managed by agent_runtime/realm_sync.py"
+
 
 class RealmSyncError(RuntimeError):
     def __init__(self, code: str, message: str, *, retryable: bool = False, safe_details: dict[str, Any] | None = None):
@@ -115,7 +130,7 @@ def realm_sync_status(
     workspace_statuses = _workspace_sync_statuses(realm, repo)
     skills_drift = _skills_drift_for_artifacts(artifacts)
     state = _sync_state(git)
-    _write_sync_sidecar(realm, repo=repo, git=git, skills_drift=skills_drift, artifact_count=len(artifacts))
+    _write_sync_sidecar(realm, repo=repo, git=git, skills_drift=skills_drift, artifacts=artifacts)
     return {
         "schema_version": 1,
         "id": realm.id,
@@ -124,6 +139,9 @@ def realm_sync_status(
         "ahead": git["ahead"],
         "behind": git["behind"],
         "skills_drift": skills_drift,
+        "skill_publish_mode": realm.skill_publish_mode,
+        "skill_selection": sorted(realm.skill_selection or []),
+        "skills_published": _distinct_skill_package_count(artifacts),
         "conflicts": git["conflicts"],
         "last_pull": _timestamp_file(repo, "last_pull.txt"),
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
@@ -154,29 +172,89 @@ def publish_realm_sync(
         return _sync_result(realm, "publish", "dry_run", artifacts, repo=repo, git=git, changed=False)
 
     subtree = _realm_subtree(repo, realm.id)
-    if subtree.exists():
-        shutil.rmtree(subtree)
-    for artifact in artifacts:
-        target = subtree / artifact.relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(artifact.source, target)
-    _write_sync_metadata(subtree, realm=realm, artifacts=artifacts)
-    _git(repo, "add", "--", f"realms/{_safe_token(realm.id)}")
-    changed = bool(_git(repo, "status", "--porcelain", f"realms/{_safe_token(realm.id)}").strip())
-    if changed:
-        _ensure_git_identity(repo)
-        _git(repo, "commit", "-m", f"Publish realm sync {realm.id}")
-        try:
-            _git(repo, "push", extra_config=_credential_git_config(credential))
-        except RealmSyncError as exc:
-            raise RealmSyncError("sync_remote_unreachable", "Realm sync publish committed locally but could not push upstream.", retryable=True, safe_details=exc.safe_details) from exc
+    subtree_rel = f"realms/{_safe_token(realm.id)}"
+    # Canonicalize every published artifact to LF at this single write/copy
+    # chokepoint (binary assets pass through untouched — see
+    # ``_canonicalize_text_bytes``). The store lane writes CRLF on Windows while
+    # the pull lane writes LF; copying those raw bytes made every publish a
+    # whole-file EOL churn and reported changed=true on no-op runs.
+    desired = {
+        artifact.relative_path.replace("\\", "/"): _canonicalize_text_bytes(artifact.source.read_bytes())
+        for artifact in artifacts
+    }
+    # Content-aware change detection: only (re)write the subtree when the
+    # canonical artifact bytes actually differ from what is already published.
+    # manifest.json is excluded from this comparison because it carries a
+    # volatile generated_at — a timestamp-only rewrite is never a real change.
+    content_changed = _published_artifacts_differ(subtree, desired)
+    # The repo-root .gitattributes is materialized at the ensure chokepoint; make
+    # sure a newly-introduced one still rides this publish even when no artifact
+    # changed. It is never an artifact, so it skips the manifest + secret scan.
+    # Only stage .gitattributes when it actually exists — its write is
+    # best-effort, and ``git add`` errors on a pathspec that matches nothing.
+    add_paths = [subtree_rel]
+    if (repo / ".gitattributes").exists():
+        add_paths.append(".gitattributes")
+    gitattributes_pending = ".gitattributes" in add_paths and bool(
+        _git(repo, "status", "--porcelain", "--", ".gitattributes").strip()
+    )
+    if content_changed:
+        if subtree.exists():
+            shutil.rmtree(subtree)
+        for artifact in artifacts:
+            target = subtree / artifact.relative_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(desired[artifact.relative_path.replace("\\", "/")])
+        _write_sync_metadata(subtree, realm=realm, artifacts=artifacts)
+    changed = False
+    if content_changed or gitattributes_pending:
+        _git(repo, "add", "--", *add_paths)
+        changed = bool(_git(repo, "status", "--porcelain", "--", *add_paths).strip())
+        if changed:
+            _ensure_git_identity(repo)
+            _git(repo, "commit", "-m", f"Publish realm sync {realm.id}")
+            try:
+                _git(repo, "push", extra_config=_credential_git_config(credential))
+            except RealmSyncError as exc:
+                raise RealmSyncError("sync_remote_unreachable", "Realm sync publish committed locally but could not push upstream.", retryable=True, safe_details=exc.safe_details) from exc
     _write_timestamp(repo, "last_publish.txt")
+    # Record the published board+card content hashes as the new sync baseline so
+    # a subsequent pull sees local == baseline (no spurious conflict on my own
+    # publish). Board ids are resolved from the local boards that contributed
+    # artifacts (not the tokenized subtree dir names). Baseline is a never-synced
+    # sidecar; best-effort so it never fails a publish.
+    from .board_sync import update_board_baseline_after_sync
+
+    published_board_ids = sorted({
+        artifact.source.parent.parent.name if artifact.kind == "board_card" else artifact.source.parent.name
+        for artifact in artifacts
+        if artifact.kind in ("board", "board_card")
+    })
+    if published_board_ids:
+        try:
+            update_board_baseline_after_sync(realm.id, published_board_ids)
+        except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
+            pass
+    # Mission Office: same baseline discipline, per workspace (tokens resolved
+    # from the local office dirs that contributed artifacts).
+    from .office_sync import update_office_baseline_after_sync
+
+    published_office_workspaces = sorted({
+        artifact.source.parent.parent.name if artifact.kind == "office_actor" else artifact.source.parent.name
+        for artifact in artifacts
+        if artifact.kind in ("office", "office_actor")
+    })
+    if published_office_workspaces:
+        try:
+            update_office_baseline_after_sync(realm.id, published_office_workspaces)
+        except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
+            pass
     warnings = _notify_publish(realm, repo=repo, artifacts=artifacts, credential=credential) if changed else []
     git_after = _git_state(repo)
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
     if warnings:
         result["warnings"] = warnings
-    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifact_count=len(artifacts))
+    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifacts=artifacts)
     _append_realm_sync_event(
         "realm.sync.published",
         realm,
@@ -206,14 +284,41 @@ def pull_realm_sync(
     _assert_no_secret_artifacts(artifacts)
     if dry_run:
         return _sync_result(realm, "pull", "dry_run", artifacts, repo=repo, git=_git_state(repo), changed=False)
+    # W-H4 typed accounting: named profiles materialized by this pull are
+    # reported, never a silent side effect (plan §5.1).
+    pulled_profile_tokens, created_profiles = _pulled_profile_tokens(artifacts)
     changed = False
     for artifact in artifacts:
         artifact.destination.parent.mkdir(parents=True, exist_ok=True)
         before = artifact.destination.read_bytes() if artifact.destination.exists() else None
         data = _pulled_artifact_bytes(artifact, realm=realm)
-        if before != data:
+        # Compare canonically so a CRLF local store file vs an LF published
+        # artifact is not mistaken for a change (the JSON parses identically);
+        # only a real content edit rewrites the destination and flags changed.
+        if before is None or _canonicalize_text_bytes(before) != _canonicalize_text_bytes(data):
             artifact.destination.write_bytes(data)
             changed = True
+    # Mission Board: board card files are excluded from the generic overwrite
+    # loop above (_destination_for_sync_path returns None for store/boards/*);
+    # apply the per-card LWW decision table + baseline + conflict sidecars here.
+    from .board_sync import apply_board_pull
+
+    board_summary = apply_board_pull(realm.id, subtree)
+    if board_summary.adopted or board_summary.converged or board_summary.archived:
+        changed = True
+    # Mission Office: same exclusion (store/office/*), same shape — the
+    # per-actor 3-way baseline merge owns the office pull (plan §5).
+    from .office_sync import apply_office_pull
+
+    office_summary = apply_office_pull(realm.id, subtree)
+    if office_summary.adopted or office_summary.converged or office_summary.archived:
+        changed = True
+    # Workspace deletions: honor the pulled realm's deleted_workspace_ids
+    # resurrection-guard ledger so a member's surviving local copy neither
+    # lingers nor republishes a workspace another member deleted.
+    tombstone_summary = _apply_workspace_tombstones(realm.id)
+    if tombstone_summary["deleted"] or tombstone_summary["archived"]:
+        changed = True
     install_results = [
         *install_harness_skills(skills=sorted(HARNESS_SKILLS)),
         *install_harness_skills_for_personas(ensure_persisted_personas(load_agent_runtime_config())),
@@ -221,12 +326,21 @@ def pull_realm_sync(
     _write_timestamp(repo, "last_pull.txt")
     git_after = _git_state(repo)
     result = _sync_result(realm, "pull", "pulled", artifacts, repo=repo, git=git_after, changed=changed)
+    result["board_sync"] = board_summary.as_dict()
+    result["office_sync"] = office_summary.as_dict()
+    if tombstone_summary["deleted"] or tombstone_summary["archived"] or tombstone_summary["warnings"]:
+        result["workspace_tombstones"] = tombstone_summary
+    if pulled_profile_tokens:
+        result["profile_sync"] = {
+            "profiles": pulled_profile_tokens,
+            "created": created_profiles,
+        }
     result["skill_reconcile"] = {
         "installed": [item.skill for item in install_results],
         "changed": [item.skill for item in install_results if item.changed],
         "ok": all(item.ok for item in install_results),
     }
-    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifact_count=len(artifacts))
+    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifacts=artifacts)
     _append_realm_sync_event(
         "realm.sync.pulled",
         realm,
@@ -261,6 +375,57 @@ def _append_realm_sync_event(event_type: str, realm: Realm, *, changed: bool, ar
         pass
 
 
+def _apply_workspace_tombstones(realm_id: str) -> dict[str, list]:
+    """Apply the realm's ``deleted_workspace_ids`` ledger after a pull.
+
+    A workspace another member deleted must not survive here as a live copy —
+    it would ride this member's next publish straight back into the realm.
+    Hard-delete the local copy through the store chokepoint (cascade + event);
+    a copy that still owns local live-store goals degrades to ARCHIVE instead
+    (evidence is never destroyed by a sync), reported as a warning.
+    """
+    summary: dict[str, list] = {"deleted": [], "archived": [], "warnings": []}
+    try:
+        realm = RealmStore().get(realm_id)  # re-read: the pull may have rewritten it
+    except Exception:  # noqa: BLE001 — no realm, nothing to reconcile
+        return summary
+    ledger = list(getattr(realm, "deleted_workspace_ids", None) or [])
+    if not ledger:
+        return summary
+    from .errors import WorkspaceDeleteBlocked
+    from .store import WorkspaceStore as _WorkspaceStore
+
+    store = _WorkspaceStore()
+    for workspace_id in ledger:
+        if not paths.workspace_path(workspace_id).exists():
+            continue
+        try:
+            store.delete(workspace_id, reason="realm_sync_tombstone")
+            summary["deleted"].append(workspace_id)
+        except WorkspaceDeleteBlocked as exc:
+            try:
+                workspace = store.get(workspace_id)
+                if not workspace.archived:
+                    store.archive(workspace_id)
+                summary["archived"].append(workspace_id)
+                summary["warnings"].append(
+                    {
+                        "code": "workspace_tombstone_archived",
+                        "workspace_id": workspace_id,
+                        "message": f"Deleted in realm but kept archived here: {exc}",
+                    }
+                )
+            except Exception as inner:  # noqa: BLE001 — accounted, never silent
+                summary["warnings"].append(
+                    {"code": "workspace_tombstone_failed", "workspace_id": workspace_id, "message": str(inner)}
+                )
+        except Exception as exc:  # noqa: BLE001 — accounted, never silent
+            summary["warnings"].append(
+                {"code": "workspace_tombstone_failed", "workspace_id": workspace_id, "message": str(exc)}
+            )
+    return summary
+
+
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     realm = RealmStore().get(realm_id)
     workspace_store = WorkspaceStore()
@@ -268,13 +433,24 @@ def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     for workspace in workspace_store.list_all(include_archived=True):
         if workspace.realm_id == realm.id:
             workspace_ids.add(workspace.id)
+    # Tombstoned workspaces never publish (defense-in-depth: the pull already
+    # deletes local copies, but a publish racing ahead of its pull must not
+    # resurrect a deleted workspace into the realm subtree).
+    workspace_ids -= set(realm.deleted_workspace_ids or [])
     workspaces = [workspace_store.get(workspace_id) for workspace_id in sorted(workspace_ids) if paths.workspace_path(workspace_id).exists()]
     cfg = load_agent_runtime_config()
     personas = {persona.id: persona for persona in ensure_persisted_personas(cfg)}
     wanted_persona_ids = list(dict.fromkeys(persona_id for ws in workspaces for persona_id in (ws.agent_ids or [])))
     artifacts: list[RealmSyncArtifact] = []
-    artifacts.extend(_skill_artifacts())
+    artifacts.extend(_skill_artifacts(realm))
     artifacts.extend(_workspace_realm_artifacts(realm, workspaces))
+    artifacts.extend(_board_artifacts(workspaces))
+    artifacts.extend(_office_artifacts(workspaces))
+    # Personas referenced by synced office placements travel with the office
+    # (plan §5): an office-only persona must be materializable on pull. The
+    # wanted set was workspace.agent_ids only, which would sync a placement
+    # referencing a persona the member cannot resolve.
+    wanted_persona_ids = list(dict.fromkeys([*wanted_persona_ids, *_office_wanted_persona_ids(workspaces)]))
     for persona_id in wanted_persona_ids:
         persona = personas.get(persona_id)
         if persona is None:
@@ -292,7 +468,7 @@ def sync_artifacts_for_workspace_agent(workspace_id: str, persona_id: str) -> li
     return [artifact.row() for artifact in artifacts if needle in f"/{artifact.relative_path}"]
 
 
-def _skill_artifacts() -> list[RealmSyncArtifact]:
+def _skill_artifacts(realm: Realm) -> list[RealmSyncArtifact]:
     # Publish the shared canonical skills root (see get_shared_skills_dir) —
     # the one physical dir every persona references. Walk each skill package
     # WHOLE (not just SKILL.md) so multi-file skills — references/, scripts/,
@@ -301,16 +477,47 @@ def _skill_artifacts() -> list[RealmSyncArtifact]:
     # verbatim (rglob cannot emit ``..``) so files like ``__init__.py`` are not
     # mangled. Junk/VCS/cache/dot components are pruned; the shared secret/state
     # validation still runs over the result (_assert_no_secret_artifacts).
+    #
+    # Per-realm selection: mode "all" (default) publishes every catalog skill;
+    # mode "selected" publishes only skills whose directory name is in
+    # realm.skill_selection. Because publish rebuilds the realm subtree from
+    # scratch, filtering here naturally prunes deselected skills on the next
+    # publish — no extra deletion pass. The selection is matched against the
+    # RAW directory name (== the skills_inventory catalog slug), so it lines up
+    # with what the Launcher picker offers the operator.
     root = get_shared_skills_dir()
     artifacts: list[RealmSyncArtifact] = []
     if not root.exists():
         return artifacts
+    selected_only = realm.skill_publish_mode == "selected"
+    selection = set(realm.skill_selection or [])
     for skill_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         skill = skill_dir.name
         # Skip dotdirs (.archive/.hub/.curator_backups/…) and any folder
         # without a SKILL.md manifest — housekeeping, not a skill.
         if skill.startswith(".") or not (skill_dir / "SKILL.md").is_file():
             continue
+        if selected_only and skill not in selection:
+            continue
+        from agent.skill_utils import resolve_skill
+
+        resolution = resolve_skill(skill)
+        selected = resolution.candidate
+        if (
+            resolution.status != "resolved"
+            or selected is None
+            or selected.source_kind != "shared_core"
+        ):
+            raise RealmSyncError(
+                "skill_authority_conflict",
+                f"Skill cannot publish until shared authority resolves uniquely: {skill}",
+                safe_details={
+                    "skill": skill,
+                    "resolution_status": resolution.status,
+                    "candidate_count": len(resolution.candidates),
+                },
+            )
+        skill_dir = selected.skill_dir or selected.skill_md.parent
         safe_skill = _safe_token(skill)
         for source in sorted(skill_dir.rglob("*")):
             if not source.is_file():
@@ -354,6 +561,147 @@ def _workspace_realm_artifacts(realm: Realm, workspaces: list[Workspace]) -> lis
     return [item for item in artifacts if item.source.exists()]
 
 
+def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
+    """Mission Board artifact family: board.json + active card files for boards
+    whose workspace belongs to this realm. ``archive/``, ``conflicts/``,
+    ``idempotency/`` and the never-synced baseline are all excluded (only
+    ``board.json`` and ``cards/`` are walked). Publish replaces the realm subtree
+    wholesale (see ``publish_realm_sync``), so card removals/archives propagate
+    as absences; pull applies per-card LWW via ``board_sync.apply_board_pull``.
+    """
+
+    from .board_store import BoardStore
+
+    workspace_ids = {ws.id for ws in workspaces}
+    store = BoardStore()
+    artifacts: list[RealmSyncArtifact] = []
+    for board in store.list_all():
+        if board.workspace_id not in workspace_ids:
+            continue
+        board_token = _safe_token(board.board_id)
+        def_path = paths.board_def_path(board.board_id)
+        if def_path.exists():
+            artifacts.append(
+                RealmSyncArtifact(
+                    kind="board",
+                    source=def_path,
+                    relative_path=f"store/boards/{board_token}/board.json",
+                    destination=def_path,
+                )
+            )
+        cards_dir = paths.board_cards_dir(board.board_id)
+        if cards_dir.exists():
+            for card_path in sorted(cards_dir.glob("*.json")):
+                artifacts.append(
+                    RealmSyncArtifact(
+                        kind="board_card",
+                        source=card_path,
+                        relative_path=f"store/boards/{board_token}/cards/{card_path.name}",
+                        destination=card_path,
+                    )
+                )
+    return artifacts
+
+
+def _office_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
+    """Mission Office artifact family: office.json + active actor files for
+    surfaces whose workspace belongs to this realm. ``archive/``,
+    ``conflicts/`` and the never-synced baseline are all excluded (only
+    ``office.json`` and ``actors/`` are walked). Publish replaces the realm
+    subtree wholesale (see ``publish_realm_sync``), so actor removals/archives
+    propagate as absences; pull applies the per-actor 3-way baseline merge via
+    ``office_sync.apply_office_pull``.
+    """
+
+    from .office_store import OfficeStore
+
+    workspace_ids = {ws.id for ws in workspaces}
+    store = OfficeStore()
+    artifacts: list[RealmSyncArtifact] = []
+    for workspace_token in store.list_workspaces():
+        try:
+            surface = store.get_surface(workspace_token)
+        except Exception:
+            continue
+        if surface.workspace_id not in workspace_ids:
+            continue
+        ws_token = _safe_token(workspace_token)
+        surface_path = paths.office_surface_path(workspace_token)
+        if surface_path.exists():
+            artifacts.append(
+                RealmSyncArtifact(
+                    kind="office",
+                    source=surface_path,
+                    relative_path=f"store/office/{ws_token}/office.json",
+                    destination=surface_path,
+                )
+            )
+        actors_dir = paths.office_actors_dir(workspace_token)
+        if actors_dir.exists():
+            for actor_path in sorted(actors_dir.glob("*.json")):
+                artifacts.append(
+                    RealmSyncArtifact(
+                        kind="office_actor",
+                        source=actor_path,
+                        relative_path=f"store/office/{ws_token}/actors/{actor_path.name}",
+                        destination=actor_path,
+                    )
+                )
+    return artifacts
+
+
+def _office_wanted_persona_ids(workspaces: list[Workspace]) -> list[str]:
+    """Persona ids referenced by office placements in this realm's workspaces
+    (plan §5's one-line union — office-only personas travel with the office)."""
+
+    from .office_store import OfficeStore
+
+    workspace_ids = {ws.id for ws in workspaces}
+    store = OfficeStore()
+    persona_ids: list[str] = []
+    for workspace_token in store.list_workspaces():
+        try:
+            surface = store.get_surface(workspace_token)
+        except Exception:
+            continue
+        if surface.workspace_id not in workspace_ids:
+            continue
+        for actor in store.list_actors(workspace_token):
+            if actor.persona_id and actor.persona_id not in persona_ids:
+                persona_ids.append(actor.persona_id)
+    return persona_ids
+
+
+def _pulled_profile_tokens(artifacts: list[RealmSyncArtifact]) -> tuple[list[str], list[str]]:
+    """(all profile tokens in the pulled artifact set, the subset that does not
+    exist locally yet). The pull write-loop's ``mkdir(parents=True)``
+    materializes missing profile homes; this makes that adoption a typed row
+    (W-H4, plan §5.1), never a silent side effect."""
+
+    tokens = sorted(
+        {
+            Path(artifact.relative_path).parts[1]
+            for artifact in artifacts
+            if len(Path(artifact.relative_path).parts) > 1 and Path(artifact.relative_path).parts[0] == "profiles"
+        }
+    )
+    if not tokens:
+        return [], []
+    created: list[str] = []
+    active_token = _safe_token(active_profile_name())
+    for token in tokens:
+        if token == active_token:
+            continue
+        try:
+            from hermes_cli.profiles import normalize_profile_name, profile_exists
+
+            if not profile_exists(normalize_profile_name(token)):
+                created.append(token)
+        except Exception:
+            continue
+    return tokens, created
+
+
 def _persona_artifacts(persona: AgentPersona) -> list[RealmSyncArtifact]:
     binding = resolve_persona_profile(persona)
     profile_home = binding.profile_home or get_hermes_home()
@@ -370,8 +718,14 @@ def _persona_artifacts(persona: AgentPersona) -> list[RealmSyncArtifact]:
                 destination=config,
             )
         )
+    from .prompt_sources import resolve_persona_system_prompt_path
+
     for label, raw in (("system_prompt", persona.system_prompt_path), ("soul_overlay", persona.soul_overlay_path)):
-        path = _profile_relative_file(profile_home, raw)
+        path = (
+            resolve_persona_system_prompt_path(persona)
+            if label == "system_prompt"
+            else _profile_relative_file(profile_home, raw)
+        )
         if path is not None and path.exists():
             artifacts.append(
                 RealmSyncArtifact(
@@ -478,8 +832,13 @@ def _destination_for_sync_path(rel: str) -> Path | None:
         return paths.workspaces_dir() / parts[2]
     if len(parts) == 3 and parts[0] == "store" and parts[1] == "realms":
         return paths.realms_dir() / parts[2]
-    if parts and parts[0] == "profiles":
-        profile_home = get_hermes_home() if len(parts) > 1 and parts[1] == _safe_token(active_profile_name()) else get_hermes_home()
+    # store/boards/* and store/office/* deliberately fall through to None: the
+    # generic overwrite loop never touches them — board_sync.apply_board_pull /
+    # office_sync.apply_office_pull own those pulls (3-way baseline merge).
+    if parts and parts[0] == "profiles" and len(parts) > 1:
+        profile_home = _profile_home_for_token(parts[1])
+        if profile_home is None:
+            return None
         if len(parts) == 3 and parts[2] == "config.yaml":
             return profile_home / "config.yaml"
         if "memories" in parts and parts[-1] == "MEMORY.md":
@@ -491,6 +850,33 @@ def _destination_for_sync_path(rel: str) -> Path | None:
     return None
 
 
+def _profile_home_for_token(token: str) -> Path | None:
+    """Profile-aware pull destination (W-H4, plan §5.1).
+
+    Before 2026-07-17 this mapping collapsed EVERY ``profiles/<name>/…``
+    artifact into the active profile home (a degenerate ternary — both
+    branches returned ``get_hermes_home()``), so a multi-profile realm pull
+    last-write-wins'd every profile's config.yaml/MEMORY.md onto one home.
+    Now: the active profile keeps the active home; any other published profile
+    resolves to ITS OWN home via ``get_profile_dir`` (materialized by the pull
+    write-loop's mkdir and reported as a typed ``profile_sync`` row). Untrusted
+    remote component: refuse traversal/absolute/drive-letter shapes.
+    """
+
+    if token in ("", ".", "..") or ":" in token or token.startswith(("/", "\\")):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", token):
+        return None
+    if token == _safe_token(active_profile_name()):
+        return get_hermes_home()
+    try:
+        from hermes_cli.profiles import get_profile_dir, normalize_profile_name
+
+        return get_profile_dir(normalize_profile_name(token))
+    except Exception:
+        return None
+
+
 def _kind_for_sync_path(rel: str) -> str:
     if rel.startswith("skills/"):
         return "skill"
@@ -498,6 +884,8 @@ def _kind_for_sync_path(rel: str) -> str:
         return "workspace"
     if rel.startswith("store/realms/"):
         return "realm"
+    if rel.startswith("store/office/"):
+        return "office_actor" if "/actors/" in rel else "office"
     if rel.endswith("config.yaml"):
         return "persona_config"
     if "/memories/" in rel:
@@ -560,6 +948,7 @@ def _authorize(realm: Realm, action: str, membership: RealmMembershipProvider | 
 def _ensure_sync_repo(realm: Realm, *, credential: "RealmSyncCredential | None" = None) -> Path:
     repo = _sync_repo_path(realm)
     if repo.exists() and (repo / ".git").exists():
+        _ensure_repo_gitattributes(repo)
         return repo
     if _looks_like_remote(str(realm.sync_manifest_ref or "")):
         repo.parent.mkdir(parents=True, exist_ok=True)
@@ -567,7 +956,30 @@ def _ensure_sync_repo(realm: Realm, *, credential: "RealmSyncCredential | None" 
     else:
         repo.mkdir(parents=True, exist_ok=True)
         _git(repo, "init")
+    _ensure_repo_gitattributes(repo)
     return repo
+
+
+def _ensure_repo_gitattributes(repo: Path) -> None:
+    """Materialize the LF line-ending pin at the realm sync repo root.
+
+    Idempotent: rewrites only the file we manage (identified by our marker) and
+    respects any foreign ``.gitattributes`` a repo already carries. It is written
+    here but committed by ``publish_realm_sync`` (it rides the same publish lane
+    as the realm subtree). Best-effort — a write failure never fails the sync
+    verb (the publisher still canonicalizes bytes to LF regardless)."""
+    path = repo / ".gitattributes"
+    desired = _REALM_SYNC_GITATTRIBUTES.encode("utf-8")
+    try:
+        if path.exists():
+            existing = path.read_bytes()
+            if existing == desired:
+                return
+            if _REALM_SYNC_GITATTRIBUTES_MARKER not in existing:
+                return  # respect a foreign .gitattributes; only manage our own
+        path.write_bytes(desired)
+    except OSError:
+        return
 
 
 def _credential_git_config(credential: "RealmSyncCredential | None") -> list[str] | None:
@@ -716,6 +1128,9 @@ def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
         "ahead": raw.get("ahead"),
         "behind": raw.get("behind"),
         "skills_drift": raw.get("skills_drift") or [],
+        "skill_publish_mode": raw.get("skill_publish_mode") or "all",
+        "skill_selection": raw.get("skill_selection") or [],
+        "skills_published": raw.get("skills_published") or 0,
         "conflicts": raw.get("conflicts") or [],
         "last_pull": raw.get("last_pull"),
         "last_publish": raw.get("last_publish"),
@@ -725,7 +1140,7 @@ def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
     }
 
 
-def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills_drift: list[str], artifact_count: int) -> None:
+def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills_drift: list[str], artifacts: list[RealmSyncArtifact]) -> None:
     payload = {
         "schema_version": 2,
         "realm_id": realm.id,
@@ -733,10 +1148,13 @@ def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills
         "ahead": git["ahead"],
         "behind": git["behind"],
         "skills_drift": skills_drift,
+        "skill_publish_mode": realm.skill_publish_mode,
+        "skill_selection": sorted(realm.skill_selection or []),
+        "skills_published": _distinct_skill_package_count(artifacts),
         "conflicts": git["conflicts"],
         "last_pull": _timestamp_file(repo, "last_pull.txt"),
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
-        "artifacts": artifact_count,
+        "artifacts": len(artifacts),
         "checked_at": now().astimezone(timezone.utc).isoformat(),
         "workspace_statuses": _workspace_sync_statuses(realm, repo),
     }
@@ -755,7 +1173,9 @@ def _write_sync_metadata(subtree: Path, *, realm: Realm, artifacts: list[RealmSy
         "generated_at": now().isoformat(),
         "artifacts": [artifact.row() for artifact in artifacts],
     }
-    (subtree / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    (subtree / "manifest.json").write_bytes(
+        _canonicalize_text_bytes(json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"))
+    )
 
 
 def _sync_result(realm: Realm, action: str, state: str, artifacts: list[RealmSyncArtifact], *, repo: Path, git: dict[str, Any], changed: bool) -> dict[str, Any]:
@@ -802,7 +1222,10 @@ def _workspace_sync_statuses(realm: Realm, repo: Path) -> list[dict[str, str]]:
         else:
             published = subtree / f"{_safe_token(workspace_id)}.json"
             try:
-                matches = published.exists() and published.read_bytes() == local.read_bytes()
+                # Canonical compare: the published file is LF while the local
+                # store file is CRLF on Windows — byte-equality would falsely
+                # report a just-published workspace as "unpublished".
+                matches = published.exists() and _canonicalize_text_bytes(published.read_bytes()) == _canonicalize_text_bytes(local.read_bytes())
             except OSError:
                 matches = False
             state = "published" if matches else "unpublished"
@@ -815,9 +1238,27 @@ def _skills_drift_for_artifacts(artifacts: list[RealmSyncArtifact]) -> list[str]
     for artifact in artifacts:
         if artifact.kind != "skill":
             continue
-        if artifact.destination.exists() and artifact.source.exists() and artifact.destination.read_bytes() != artifact.source.read_bytes():
+        if (
+            artifact.destination.exists()
+            and artifact.source.exists()
+            and _canonicalize_text_bytes(artifact.destination.read_bytes())
+            != _canonicalize_text_bytes(artifact.source.read_bytes())
+        ):
             drift.append(Path(artifact.relative_path).parts[1])
     return sorted(set(drift))
+
+
+def _distinct_skill_package_count(artifacts: list[RealmSyncArtifact]) -> int:
+    """Number of distinct skill *packages* (top-level skill dir names) among
+    resolved artifacts — not the file count. A multi-file skill counts once."""
+    packages: set[str] = set()
+    for artifact in artifacts:
+        if artifact.kind != "skill":
+            continue
+        parts = Path(artifact.relative_path).parts
+        if len(parts) >= 2:
+            packages.add(parts[1])
+    return len(packages)
 
 
 def _timestamp_file(repo: Path, name: str) -> str | None:
@@ -831,6 +1272,43 @@ def _write_timestamp(repo: Path, name: str) -> None:
     path = repo / ".git" / "hermes" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(now().isoformat(), encoding="utf-8")
+
+
+def _canonicalize_text_bytes(raw: bytes) -> bytes:
+    """Normalize published-artifact line endings to LF — the ONE canonicalization
+    chokepoint for realm sync.
+
+    Realm-sync artifacts are read from stores that write CRLF on Windows
+    (``atomic_json_write`` / ``str.write_text`` use text mode) while the pull
+    lane writes LF (``json.dumps(...).encode()``). Committing those raw bytes
+    turns every publish into a whole-file CRLF<->LF churn and reports
+    ``changed=true`` on no-op runs; diffs/merges between members carry EOL noise.
+    LF-normalizing at the write/copy boundary keeps the repo tree byte-stable.
+
+    Binary/asset artifacts (skill PNG/JPG/…) are detected by a NUL byte — git's
+    own text/binary heuristic — and passed through byte-for-byte untouched. The
+    3-way merge classifiers and office/board baselines hash the PARSED model
+    (EOL-agnostic), so canonicalizing bytes here never desyncs those hashes.
+    """
+    if b"\x00" in raw:
+        return raw
+    return raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def _published_artifacts_differ(subtree: Path, desired: dict[str, bytes]) -> bool:
+    """True when the canonical published bytes differ from what is already in the
+    realm subtree, ignoring manifest.json (its ``generated_at`` is volatile).
+
+    ``desired`` is canonical (LF); the on-disk bytes are compared RAW, so a legacy
+    CRLF subtree triggers a one-time LF migration on the next publish while an
+    already-canonical subtree is a true no-op (no rewrite, no commit)."""
+    if not subtree.exists():
+        return bool(desired)
+    existing: dict[str, bytes] = {}
+    for path in subtree.rglob("*"):
+        if path.is_file() and path.name != "manifest.json":
+            existing[path.relative_to(subtree).as_posix()] = path.read_bytes()
+    return existing != desired
 
 
 def _dedupe_artifacts(artifacts: list[RealmSyncArtifact]) -> list[RealmSyncArtifact]:

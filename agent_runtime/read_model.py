@@ -14,6 +14,17 @@ from .resolution import resolve_runtime
 from .serde import to_jsonable
 
 
+def _rows(value: Any) -> list:
+    """A snapshot section S4 emits as an id-keyed map, read as an ordered list
+    of rows (map values). Accepts a plain list / ``None`` too."""
+
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, list):
+        return list(value)
+    return []
+
+
 READ_MODEL_SCHEMA_VERSION = 1
 ROW_TABLES = (
     "goals",
@@ -83,12 +94,15 @@ class ReadModel:
                 for key, value in payload.items():
                     if key not in {"goals", "runs", "proofs", "incidents", "persona_instances", "operator_channels"}:
                         self._write_misc(conn, str(key), value)
-                self._write_goals(conn, payload.get("goals") or [])
-                self._write_runs(conn, payload.get("runs") or [])
+                # S4: goals / runs / incidents / persona_instances /
+                # operator_channels ship as id-keyed maps; the writers consume
+                # ordered rows, so read the map values.
+                self._write_goals(conn, _rows(payload.get("goals")))
+                self._write_runs(conn, _rows(payload.get("runs")))
                 self._write_proofs(conn, payload.get("proofs") or [])
-                self._write_incidents(conn, payload.get("incidents") or [])
-                self._write_agent_instances(conn, payload.get("persona_instances") or payload.get("agent_instances") or [])
-                self._write_operator_channels(conn, payload.get("operator_channels") or [])
+                self._write_incidents(conn, _rows(payload.get("incidents")))
+                self._write_agent_instances(conn, _rows(payload.get("persona_instances")) or _rows(payload.get("agent_instances")))
+                self._write_operator_channels(conn, _rows(payload.get("operator_channels")))
             except Exception:
                 conn.rollback()
                 raise

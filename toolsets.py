@@ -42,7 +42,7 @@ _HERMES_CORE_TOOLS = [
     # Vision + image generation
     "vision_analyze", "image_generate",
     # Skills
-    "skills_list", "skill_view", "skill_manage",
+    "skills_list", "skill_search", "skill_view", "skill_manage",
     # Browser automation
     "browser_navigate", "browser_snapshot", "browser_click",
     "browser_type", "browser_scroll", "browser_back",
@@ -165,7 +165,7 @@ TOOLSETS = {
     
     "skills": {
         "description": "Access, create, edit, and manage skill documents with specialized instructions and knowledge",
-        "tools": ["skills_list", "skill_view", "skill_manage"],
+        "tools": ["skills_list", "skill_search", "skill_view", "skill_manage"],
         "includes": []
     },
     
@@ -356,7 +356,7 @@ TOOLSETS = {
             "terminal", "process", "read_terminal", "close_terminal",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
-            "skills_list", "skill_view", "skill_manage",
+            "skills_list", "skill_search", "skill_view", "skill_manage",
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
@@ -388,7 +388,7 @@ TOOLSETS = {
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
-            "skills_list", "skill_view", "skill_manage",
+            "skills_list", "skill_search", "skill_view", "skill_manage",
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
@@ -412,7 +412,7 @@ TOOLSETS = {
             # Vision + image generation
             "vision_analyze", "image_generate",
             # Skills
-            "skills_list", "skill_view", "skill_manage",
+            "skills_list", "skill_search", "skill_view", "skill_manage",
             # Browser automation
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",

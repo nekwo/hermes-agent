@@ -5,7 +5,6 @@ from typing import Any
 
 from hermes_time import now
 
-from .capabilities import capability_descriptors
 from .incidents import CRITICAL_INCIDENT_KINDS
 from .models import Event, Incident, Proof, Task
 from .scope_control import untriaged_issue_discoveries
@@ -194,7 +193,6 @@ def build_observability(
             "stalled_run_threshold_seconds": run_stalled_after_seconds,
             "daemon_stale_threshold_seconds": daemon_stale_after_seconds,
         },
-        "capabilities": capability_descriptors(),
         "signals": {
             "open_tasks": len(open_tasks),
             "running_runs": len(running_runs),

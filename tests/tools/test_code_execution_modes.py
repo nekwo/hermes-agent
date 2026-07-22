@@ -227,14 +227,14 @@ class TestResolveChildCwd(unittest.TestCase):
 
 class TestModeAwareSchema(unittest.TestCase):
 
-    def test_strict_description_mentions_temp_dir(self):
-        desc = build_execute_code_schema(mode="strict")["description"]
-        self.assertIn("temp dir", desc)
-
-    def test_project_description_mentions_session_and_venv(self):
-        desc = build_execute_code_schema(mode="project")["description"]
-        self.assertIn("session", desc)
-        self.assertIn("venv", desc)
+    def test_description_is_mode_independent_brief(self):
+        """T6b: the wire description no longer varies by execution mode — it is a
+        static brief. The mode-specific cwd guidance (temp dir vs session CWD)
+        moved out of the wire; the T6b report records this as a fidelity note
+        (tool_describe serves the default-mode full text)."""
+        strict = build_execute_code_schema(mode="strict")["description"]
+        project = build_execute_code_schema(mode="project")["description"]
+        self.assertEqual(strict, project)
 
     def test_neither_description_uses_sandbox_language(self):
         """REGRESSION GUARD for commit 39b83f34.
@@ -255,14 +255,15 @@ class TestModeAwareSchema(unittest.TestCase):
         project = len(build_execute_code_schema(mode="project")["description"])
         self.assertLess(abs(strict - project), 200)
 
-    def test_default_mode_reads_config(self):
-        """build_execute_code_schema() with mode=None reads config.yaml."""
+    def test_default_mode_description_is_static(self):
+        """T6b: the description is mode-independent, so the config-driven mode no
+        longer changes it (execution still honors the mode; only the wire text
+        is static now)."""
         with _mock_mode("strict"):
-            desc = build_execute_code_schema()["description"]
-            self.assertIn("temp dir", desc)
+            strict = build_execute_code_schema()["description"]
         with _mock_mode("project"):
-            desc = build_execute_code_schema()["description"]
-            self.assertIn("session", desc)
+            project = build_execute_code_schema()["description"]
+        self.assertEqual(strict, project)
 
 
 # ---------------------------------------------------------------------------

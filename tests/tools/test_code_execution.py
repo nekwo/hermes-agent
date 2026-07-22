@@ -613,21 +613,24 @@ class TestBuildExecuteCodeSchema(unittest.TestCase):
         self.assertIn("code", schema["parameters"]["properties"])
         self.assertEqual(schema["parameters"]["required"], ["code"])
 
-    def test_subset_only_lists_enabled_tools(self):
-        enabled = {"terminal", "read_file"}
-        schema = build_execute_code_schema(enabled)
-        desc = schema["description"]
-        self.assertIn("terminal(", desc)
-        self.assertIn("read_file(", desc)
-        self.assertNotIn("web_search(", desc)
-        self.assertNotIn("web_extract(", desc)
-        self.assertNotIn("write_file(", desc)
+    def test_top_level_description_is_static_brief(self):
+        """T6b: the top-level description is now a static brief — it no longer
+        enumerates the enabled tools per-session (that detail moved behind
+        tool_describe). Enabled-tool awareness rides the `code` parameter's
+        import examples instead (see test_import_examples_*)."""
+        a = build_execute_code_schema({"terminal", "read_file"})["description"]
+        b = build_execute_code_schema({"web_search"})["description"]
+        self.assertEqual(a, b, "brief must not vary with the enabled set")
+        self.assertIn("from hermes_tools import", a)
+        self.assertIn("tool_describe", a)  # points at the full helper reference
 
-    def test_single_tool(self):
-        schema = build_execute_code_schema({"terminal"})
-        desc = schema["description"]
-        self.assertIn("terminal(", desc)
-        self.assertNotIn("web_search(", desc)
+    def test_description_does_not_enumerate_tool_signatures(self):
+        """The retired dynamic doc listed `terminal(...)`, `read_file(...)`,
+        etc.; the brief names the standard tools plainly and defers the
+        per-tool signatures to tool_describe."""
+        desc = build_execute_code_schema({"terminal"})["description"]
+        self.assertNotIn("terminal(", desc)
+        self.assertIn("terminal", desc)
 
     def test_import_examples_prefer_web_search_and_terminal(self):
         enabled = {"web_search", "terminal", "read_file"}
@@ -697,18 +700,25 @@ class TestBuildExecuteCodeSchema(unittest.TestCase):
         self.assertNotIn("import , ...", code_desc)
 
     def test_description_mentions_limits(self):
-        schema = build_execute_code_schema()
-        desc = schema["description"]
-        self.assertIn("5-minute timeout", desc)
+        # T6b: the brief keeps the hard limits (in compact phrasing).
+        desc = build_execute_code_schema()["description"]
+        self.assertIn("5-min", desc)
         self.assertIn("50KB", desc)
-        self.assertIn("50 tool calls", desc)
+        self.assertIn("50-call", desc)
 
-    def test_description_mentions_helpers(self):
-        schema = build_execute_code_schema()
-        desc = schema["description"]
-        self.assertIn("json_parse", desc)
-        self.assertIn("shell_quote", desc)
-        self.assertIn("retry", desc)
+    def test_helpers_available_via_tool_describe(self):
+        """T6b: the json_parse/shell_quote/retry helper reference moved out of
+        the wire description and behind tool_describe. The brief points there;
+        the full text (served by tool_describe from the fork-owned mirror) still
+        documents the helpers."""
+        desc = build_execute_code_schema()["description"]
+        self.assertNotIn("json_parse", desc)
+        self.assertIn("tool_describe", desc)
+        from tools.tool_full_descriptions import full_tool_description
+        full = full_tool_description("execute_code")
+        self.assertIn("json_parse", full)
+        self.assertIn("shell_quote", full)
+        self.assertIn("retry", full)
 
     def test_none_defaults_to_all_tools(self):
         schema_none = build_execute_code_schema(None)

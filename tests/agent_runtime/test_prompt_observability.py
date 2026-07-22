@@ -2,7 +2,15 @@ from types import SimpleNamespace
 
 from agent_runtime.prompt_observability import (
     MAX_WORKSPACE_AGENTS_BYTES,
+    _attach_context_file_prompt_contributions,
+    _attach_skills_prompt_contribution,
     _backfill_derived_fields,
+    _context_file_summary,
+    _layer_text_size,
+    _mission_chat_template_prompt_chars,
+    _set_row_prompt_contribution,
+    _workspace_agents_prompt_chars,
+    attach_prompt_observability_turn_results,
     load_workspace_agents_context,
     mission_chat_prompt_observability,
     snapshot_prompt_observability,
@@ -62,6 +70,41 @@ def test_prompt_observability_reports_persona_identity_layer_and_memory_flag():
     assert with_memory["prompt_flags"]["skip_memory"] is False
 
 
+def test_prompt_layers_situational_hud_reports_operator_turn_placement():
+    # T5 observability coherence: after the HUD moved out of the system prompt,
+    # the frame carries a `situational_hud` prompt layer whose status/summary
+    # reflect the NEW placement — injected on the operator's user turn, not the
+    # system prompt. The top-level `situational_hud` block still rides for the
+    # launcher's HUD peek. The layer carries no per-layer token estimate (its
+    # bytes are counted via the user-turn message; a per-layer estimate would
+    # double-count).
+    persona = SimpleNamespace(
+        id="neko_supervisor",
+        hermes_profile="neko",
+        display_name="Neko Mission Lead",
+        role="alice_supervisor",
+    )
+    hud = {"preview": True, "scope": {"realm": "default", "workspace": "alpha"}}
+    with_hud = mission_chat_prompt_observability(
+        persona=persona, session_id="persona_chat_neko", situational_hud=hud
+    )
+    layers = {layer["kind"]: layer for layer in with_hud["prompt_layers"]}
+    assert "situational_hud" in layers
+    hud_layer = layers["situational_hud"]
+    assert hud_layer["status"] == "loaded"
+    assert "user turn" in hud_layer["summary"]
+    assert "NOT the system prompt" in hud_layer["summary"]
+    assert "token_estimate" not in hud_layer
+    # The block still carries the full dict for the launcher's HUD peek.
+    assert with_hud["situational_hud"] == hud
+
+    without_hud = mission_chat_prompt_observability(
+        persona=persona, session_id="persona_chat_neko"
+    )
+    empty_layer = {layer["kind"]: layer for layer in without_hud["prompt_layers"]}["situational_hud"]
+    assert empty_layer["status"] == "empty"
+
+
 def test_prompt_observability_names_live_task_bound_chat_without_session_row():
     context = mission_chat_prompt_observability(
         persona=SimpleNamespace(
@@ -108,6 +151,115 @@ def test_workspace_agents_context_is_loaded_and_reported_from_selected_file(tmp_
     assert context["workspace_name"] == "Launcher"
     assert receipt["path"] == str(agents_file.resolve())
     assert receipt["sha256"]
+    # Per-item token attribution: the workspace receipt carries bytes // 4.
+    assert receipt["token_estimate"] == receipt["bytes"] // 4
+
+
+def test_context_file_summary_carries_bytes_over_four_token_estimate(tmp_path):
+    soul = tmp_path / "SOUL.md"
+    soul.write_bytes(b"x" * 2867)  # today's live SOUL.md size
+
+    summary = _context_file_summary(soul, included=True)
+
+    assert summary["bytes"] == 2867
+    # bytes // 4 — an integer-floor estimate, presented as ~N by the launcher.
+    assert summary["token_estimate"] == 2867 // 4 == 716
+    assert summary["token_estimate"] == summary["bytes"] // 4
+
+
+def test_context_file_summary_absent_file_has_no_token_estimate(tmp_path):
+    missing = tmp_path / "USER.md"  # never created
+
+    summary = _context_file_summary(missing, included=False)
+
+    # Absent file → no bytes, no fabricated token estimate (never a crash).
+    assert summary["included"] is False
+    assert "bytes" not in summary
+    assert "token_estimate" not in summary
+
+
+def test_layer_text_size_helper_relationship():
+    # A present layer text → chars + chars // 4; an empty (blank) layer is a real
+    # 0, distinct from an absent layer (no text seam) which degrades to {}.
+    assert _layer_text_size("abcdefgh") == {"chars": 8, "token_estimate": 2}
+    assert _layer_text_size("") == {"chars": 0, "token_estimate": 0}
+    assert _layer_text_size(None) == {}
+
+
+def test_prompt_layers_surface_carries_chars_and_token_estimate():
+    surface_text = "Keep answers terse and cite the runbook."
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev",
+            hermes_profile="dev",
+            display_name="Launcher Dev",
+            role="dev",
+        ),
+        surface_prompt=surface_text,
+    )
+    layers = {layer["kind"]: layer for layer in context["prompt_layers"]}
+    surface = layers["surface"]
+    assert surface["chars"] == len(surface_text)
+    assert surface["token_estimate"] == len(surface_text) // 4
+
+
+def test_prompt_layers_blank_surface_is_zero_not_absent():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev",
+            hermes_profile="dev",
+            display_name="Launcher Dev",
+            role="dev",
+        ),
+        surface_prompt="",
+    )
+    surface = {layer["kind"]: layer for layer in context["prompt_layers"]}["surface"]
+    # Blank surface is present-but-empty: an explicit 0, never a missing key.
+    assert surface["chars"] == 0
+    assert surface["token_estimate"] == 0
+
+
+def test_prompt_layers_without_available_text_degrade_to_no_estimate():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev",
+            hermes_profile="dev",
+            display_name="Launcher Dev",
+            role="dev",
+        ),
+    )
+    layers = {layer["kind"]: layer for layer in context["prompt_layers"]}
+    # system_core / profile_context text is assembled later in the turn (or
+    # attributed via context files) — no fabricated per-layer number.
+    for kind in ("system_core", "profile_context"):
+        assert kind in layers
+        assert "token_estimate" not in layers[kind]
+        assert "chars" not in layers[kind]
+    # T8: persona_identity now carries its own template (identity + rules)
+    # estimate — measurable at the T5 surface-message seam.
+    assert layers["persona_identity"]["token_estimate"] is not None
+    assert layers["persona_identity"]["chars"] > 0
+
+
+def test_persona_identity_summary_reflects_own_soul_overlay():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="neko_supervisor",
+            hermes_profile="neko",
+            display_name="Neko Mission Lead",
+            role="alice_supervisor",
+        ),
+    )
+    identity = {layer["kind"]: layer for layer in context["prompt_layers"]}[
+        "persona_identity"
+    ]
+    summary = identity["summary"]
+    # Post-deafb825e: a persona's OWN configured soul overlay IS loaded; only the
+    # OPERATOR profile's SOUL is not. The stale "does not load the profile SOUL"
+    # absolute must be gone.
+    assert "does not load the profile SOUL" not in summary
+    assert "soul_overlay_path" in summary
+    assert "OPERATOR profile's SOUL is" in summary
 
 
 def test_workspace_agents_context_refuses_oversized_file_without_blocking_receipt(tmp_path):
@@ -172,6 +324,49 @@ def test_mission_chat_prompt_observability_defaults_mission_hud_to_empty():
     # No task bound → no HUD; the key is always present so the launcher parser
     # has a stable shape rather than a sometimes-missing field.
     assert context["mission_hud"] == {}
+    from agent_runtime.decision_contract_registry import contract_hash
+
+    assert context["prompt_contract_hash"] == contract_hash()
+    assert context["skill_manifest_hash"]
+
+
+def test_accessible_skill_receipt_preserves_instance_policy_and_load_state(
+    monkeypatch, tmp_path
+):
+    import agent.skill_utils as skill_utils
+    from agent_runtime import prompt_observability as po
+
+    shared = tmp_path / "shared"
+    manifest = shared / "instance-skill" / "SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        "---\nname: instance-skill\nmetadata:\n  hermes:\n"
+        "    surfaces: [mission_chat]\n    modes: [standard]\n"
+        "    load_policy: recommended\n---\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [shared])
+
+    rows = po._accessible_skills_context(
+        SimpleNamespace(id="dev", hermes_profile="dev", skills=["instance-skill"]),
+        "dev",
+        loaded_skill_names={"instance-skill"},
+        instance_override_names={"instance-skill"},
+    )
+
+    assert rows[0]["assignment_policy"] == "instance_override"
+    assert rows[0]["assignment_source"] == "persona_instance"
+    assert rows[0]["load_state"] == "loaded_this_turn"
+    assert rows[0]["hash_tracked"] is True
+
+
+def test_unresolved_used_skill_never_claims_hash_tracking():
+    from agent_runtime.prompt_observability import _resolved_skill_receipt
+
+    receipt = _resolved_skill_receipt("definitely-not-installed-skill")
+    assert receipt["hash_tracked"] is False
+    assert receipt["content_hash"] is None
 
 
 def test_snapshot_previews_the_mission_hud_for_a_bound_task(monkeypatch):
@@ -243,12 +438,11 @@ def test_snapshot_includes_situational_hud_for_instance(monkeypatch):
         personas=[persona],
         persona_instances=[instance],
         tasks=[],
-        daemon={"state": "starting", "loops": 0},
+        daemon=None,
         realm="default",
         workspace="default",
     )
     situational = snapshot["chat_contexts"][0]["situational_hud"]
-    assert situational["runtime"]["state"] == "starting"
     assert situational["scope"] == {"realm": "default", "workspace": "default"}
     assert situational["lane"]["persona_instance_id"] == "personainst_neko"
 
@@ -286,6 +480,31 @@ def test_backfill_copies_situational_hud_onto_persisted_row():
     assert persisted["situational_hud"] == {"preview": True, "lane": {"persona_instance_id": "x"}}
 
 
+def test_chat_time_row_carries_situational_hud_verbatim():
+    # Record-at-injection: the chat turn passes the very dict it rendered into
+    # the fed block, so the persisted row IS what the model received — the
+    # CONTEXT peek must never depend on the snapshot backfill's key match
+    # (persona_instance_id, session_id, persona_id), which misses whenever the
+    # console chat session differs from the instance's session field.
+    injected = {
+        "preview": True,
+        "lane": {"persona_instance_id": "personainst_neko"},
+        "steering": {"steered_by": [], "steers": [{"persona_instance_id": "personainst_dev", "display_name": "Dev"}]},
+    }
+    row = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="neko_supervisor",
+            hermes_profile="neko",
+            display_name="Neko Mission Lead",
+            role="supervisor",
+        ),
+        persona_instance_id="personainst_neko",
+        session_id="console_chat_session",
+        situational_hud=injected,
+    )
+    assert row["situational_hud"] == injected
+
+
 def test_backfill_copies_mission_hud_onto_persisted_row():
     persisted = {"persona_instance_id": "x", "session_id": "s", "persona_id": "p"}
     built = {"mission_hud": {"preview": True, "phase": "in_progress"}}
@@ -298,3 +517,198 @@ def test_backfill_does_not_overwrite_an_existing_persisted_hud():
     built = {"mission_hud": {"preview": True}}
     _backfill_derived_fields(persisted, built)
     assert persisted["mission_hud"] == {"real": True}
+
+
+# --------------------------------------------------------------------------- #
+# T8 (2026-07-18): per-file IN-PROMPT contribution + persona-identity template
+# layer estimate. The loaded-file `token_estimate` stays; these additive
+# `prompt_chars` / `prompt_token_estimate` fields answer "how much of the file
+# actually landed in the prompt", omitted (never guessed) where unreachable.
+# --------------------------------------------------------------------------- #
+
+
+def test_set_row_prompt_contribution_semantics():
+    # A real count sets both fields; a deliberate 0 is present-and-zero; None /
+    # negative leave the row untouched (absent -> launcher omits the chip).
+    row = {}
+    _set_row_prompt_contribution(row, 2823)
+    assert row == {"prompt_chars": 2823, "prompt_token_estimate": 705}
+    zero = {}
+    _set_row_prompt_contribution(zero, 0)
+    assert zero == {"prompt_chars": 0, "prompt_token_estimate": 0}
+    absent = {}
+    _set_row_prompt_contribution(absent, None)
+    _set_row_prompt_contribution(absent, -5)
+    assert absent == {}
+
+
+def test_attach_context_file_prompt_contributions_reachable_only():
+    # SOUL.md gets the soul chars; the workspace row gets the workspace part
+    # chars; config.yaml is a deliberate 0; MEMORY.md / USER.md /
+    # .skills_prompt_snapshot.json are left untouched (unreachable at this seam).
+    files = [
+        {"name": "SOUL.md", "kind": "soul", "included": True, "token_estimate": 710},
+        {"name": "MEMORY.md", "kind": "memory", "included": True},
+        {"name": "USER.md", "kind": "user_memory", "included": True},
+        {"name": ".skills_prompt_snapshot.json", "kind": "skills", "included": True},
+        {"name": "config.yaml", "kind": "profile_config", "included": True},
+        {"name": "AGENTS.md", "kind": "workspace_context", "included": True},
+    ]
+    _attach_context_file_prompt_contributions(files, soul_chars=2823, workspace_chars=1694)
+    by_name = {f["name"]: f for f in files}
+    # SOUL.md: soul overlay chars (distinct from the loaded-file estimate 710).
+    assert by_name["SOUL.md"]["prompt_chars"] == 2823
+    assert by_name["SOUL.md"]["prompt_token_estimate"] == 705
+    assert by_name["SOUL.md"]["token_estimate"] == 710  # loaded-file field kept
+    # Workspace part (preamble + body).
+    assert by_name["AGENTS.md"]["prompt_chars"] == 1694
+    assert by_name["AGENTS.md"]["prompt_token_estimate"] == 423
+    # config.yaml: consumed as configuration, never pasted -> a deliberate 0.
+    assert by_name["config.yaml"]["prompt_token_estimate"] == 0
+    # Unreachable rows are untouched -- the launcher keeps their loaded-file chip.
+    for name in ("MEMORY.md", "USER.md", ".skills_prompt_snapshot.json"):
+        assert "prompt_chars" not in by_name[name]
+        assert "prompt_token_estimate" not in by_name[name]
+
+
+def test_attach_context_file_contributions_none_soul_omits_field():
+    files = [{"name": "SOUL.md", "kind": "soul", "included": True}]
+    _attach_context_file_prompt_contributions(files, soul_chars=None, workspace_chars=None)
+    assert "prompt_chars" not in files[0]
+    assert "prompt_token_estimate" not in files[0]
+
+
+def test_workspace_agents_prompt_chars_is_preamble_plus_body(tmp_path):
+    from agent_runtime.persona_runtime import MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE
+
+    agents_file = tmp_path / "AGENTS.md"
+    body = "# Workspace rules\nKeep this workspace isolated.\n"
+    agents_file.write_text(body, encoding="utf-8")
+    workspace_agents = load_workspace_agents_context(str(agents_file))
+    chars = _workspace_agents_prompt_chars(workspace_agents)
+    # The pasted part is the fixed preamble + the STRIPPED loaded body (matching
+    # _mission_chat_surface_message, which strips the content), never the raw
+    # file bytes. Reconcile against the LOADED content (CRLF-safe) rather than
+    # the source string.
+    assert chars == len(MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE) + len(
+        workspace_agents.content.strip()
+    )
+    assert _workspace_agents_prompt_chars(None) is None
+
+
+def test_config_yaml_row_carries_deliberate_zero_in_prompt():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev", hermes_profile="dev", display_name="Launcher Dev", role="dev"
+        ),
+    )
+    config = next(f for f in context["context_files"] if f["name"] == "config.yaml")
+    # A deliberate zero -- config.yaml is consumed as configuration, never pasted.
+    assert config["prompt_token_estimate"] == 0
+    assert config["prompt_chars"] == 0
+
+
+def test_persona_identity_layer_carries_template_estimate():
+    persona = SimpleNamespace(
+        id="dev", hermes_profile="dev", display_name="Launcher Dev", role="dev"
+    )
+    context = mission_chat_prompt_observability(persona=persona)
+    identity = {layer["kind"]: layer for layer in context["prompt_layers"]}[
+        "persona_identity"
+    ]
+    template_chars = _mission_chat_template_prompt_chars(persona)
+    assert template_chars is not None and template_chars > 0
+    # The layer estimate is the identity + operative-rules TEMPLATE only.
+    assert identity["chars"] == template_chars
+    assert identity["token_estimate"] == template_chars // 4
+
+
+def test_persona_section_reconciles_template_plus_soul_no_overlap():
+    # The persona-identity layer estimate (template) + the SOUL.md row
+    # (soul overlay) + memory MUST sum to the whole surface-message persona
+    # section with no overlap and no gap beyond the two joiners -- the
+    # double-count guard the launcher resolver depends on (persona_identity is
+    # a NON-mirror layer summed alongside the SOUL.md file row).
+    from agent_runtime import persona_runtime as PR
+    from agent_runtime.models import AgentPersona
+
+    persona = AgentPersona(
+        id="neko_supervisor",
+        display_name="Neko Mission Lead",
+        role="alice_supervisor",
+        model="",
+        provider="",
+        api_mode="",
+        toolsets=[],
+        system_prompt_path=None,
+    )
+    identity = PR._mission_chat_identity_prompt(persona)
+    rules = PR._mission_chat_operative_rules()
+    template_chars = _mission_chat_template_prompt_chars(persona)
+    assert template_chars == len(identity) + len(rules)
+
+    # With a soul overlay pasted, the surface message == template + soul + the
+    # two joiners (identity . soul . rules). No memory in this lane's surface
+    # message; a persona with populated MEMORY.md/USER.md attributes that via
+    # those rows (Hermes-core stack), never this template layer.
+    soul_text = "SOUL LINE\n" * 40
+    surface = f"{identity}\n\n{soul_text.strip()}\n\n{rules}"
+    assert len(surface) == template_chars + len(soul_text.strip()) + 4
+
+
+def test_skills_row_attached_from_final_model_input_post_turn():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev", hermes_profile="dev", display_name="Launcher Dev", role="dev"
+        ),
+    )
+    skills = next(
+        f for f in context["context_files"] if f["name"] == ".skills_prompt_snapshot.json"
+    )
+    # Pre-turn: the render needs the constructed agent, so no in-prompt number.
+    assert "prompt_chars" not in skills
+    # Post-turn: profile_runner recorded the rendered index chars (measured
+    # against the agent's real tool set) -- attach them to the snapshot row.
+    _attach_skills_prompt_contribution(
+        context, {"messages": [], "skills_prompt_chars": 8989}
+    )
+    skills = next(
+        f for f in context["context_files"] if f["name"] == ".skills_prompt_snapshot.json"
+    )
+    assert skills["prompt_chars"] == 8989
+    assert skills["prompt_token_estimate"] == 2247  # ~4.4x under the loaded 41 KB
+
+
+def test_skills_row_untouched_when_final_model_input_lacks_chars():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev", hermes_profile="dev", display_name="Launcher Dev", role="dev"
+        ),
+    )
+    # No skills_prompt_chars (old build / failure lane) -> row stays loaded-file.
+    _attach_skills_prompt_contribution(context, {"messages": []})
+    _attach_skills_prompt_contribution(context, None)
+    skills = next(
+        f for f in context["context_files"] if f["name"] == ".skills_prompt_snapshot.json"
+    )
+    assert "prompt_chars" not in skills
+    assert "prompt_token_estimate" not in skills
+
+
+def test_attach_turn_results_patches_skills_row_end_to_end():
+    context = mission_chat_prompt_observability(
+        persona=SimpleNamespace(
+            id="dev", hermes_profile="dev", display_name="Launcher Dev", role="dev"
+        ),
+    )
+    attach_prompt_observability_turn_results(
+        context,
+        final_model_input={
+            "messages": [{"role": "system", "content": "x"}],
+            "skills_prompt_chars": 9000,
+        },
+    )
+    skills = next(
+        f for f in context["context_files"] if f["name"] == ".skills_prompt_snapshot.json"
+    )
+    assert skills["prompt_token_estimate"] == 2250

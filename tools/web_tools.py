@@ -1114,7 +1114,7 @@ from tools.registry import registry, tool_error
 
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
-    "description": "Search the web for information. Returns up to 5 results by default with titles, URLs, and descriptions. The query is passed through to the configured backend, so operators such as site:domain, filetype:pdf, intitle:word, -term, and \"exact phrase\" may work when the backend supports them.",
+    "description": "Search the web (up to 5 results: title, URL, description). Backend operators like site:, filetype:, intitle:, -term, and \"exact phrase\" may work. Disambiguator: use web_extract to read a specific page.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1136,7 +1136,7 @@ WEB_SEARCH_SCHEMA = {
 
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
-    "description": "Extract content from web page URLs. Returns clean page content in markdown/text (no LLM summarization — fast). Also works with PDF URLs (arxiv papers, documents) — pass the PDF link directly. Pages within the char budget (default 15000) return whole; larger pages return a head+tail window with a footer telling you the full text's saved file path and the read_file call to page through the omitted middle. Inline images appear as [IMAGE: alt] placeholders; real image URLs are kept as links. If a URL fails or times out, use the browser tool instead.",
+    "description": "Extract clean markdown/text from web page or PDF URLs (no LLM summarization). Large pages return a head+tail window with a saved-file path to read the rest. Disambiguator: for interactive or failed pages use the browser tools; to find pages use web_search.",
     "parameters": {
         "type": "object",
         "properties": {
