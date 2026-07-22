@@ -3,14 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import yaml
 from hermes_cli.auth import AuthError
 from hermes_cli.runtime_environment import missing_runtime_packages_for
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
-from .parse_cache import cached_by_mtime, cached_yaml_file
+from .parse_cache import cached_yaml_file
 from .profile_context import persona_profile_context, resolve_persona_profile
-from .skill_install import harness_skill_hash_mismatches, harness_skill_installed_ok
+from .skill_install import harness_skill_hash_mismatches
 
 READINESS_READY = "ready"
 READINESS_MISSING_PROFILE = "missing_profile"
@@ -18,6 +17,7 @@ READINESS_CONFIG_ERROR = "config_error"
 READINESS_AUTH_ATTENTION = "auth_attention"
 READINESS_MCP_ATTENTION = "mcp_attention"
 READINESS_MISSING_SKILL = "missing_skill"
+READINESS_SKILL_COLLISION = "skill_collision"
 READINESS_SKILL_HASH_MISMATCH = "skill_hash_mismatch"
 READINESS_RUNTIME_DEPENDENCY_MISSING = "runtime_dependency_missing"
 
@@ -28,6 +28,7 @@ _SEVERITY = {
     READINESS_AUTH_ATTENTION: 30,
     READINESS_MCP_ATTENTION: 20,
     READINESS_SKILL_HASH_MISMATCH: 15,
+    READINESS_SKILL_COLLISION: 16,
     READINESS_MISSING_SKILL: 10,
     READINESS_READY: 0,
 }
@@ -39,6 +40,7 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
     missing_mcp: list[str] = []
     missing_skills: list[str] = []
     skill_hash_mismatches: list[str] = []
+    skill_resolutions: list[dict[str, Any]] = []
     effective_required_mcp = _effective_required_mcp_servers(persona, task=task, stage=stage)
 
     if binding.readiness != READINESS_READY:
@@ -46,9 +48,9 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
     elif binding.profile_home is not None:
         try:
             with persona_profile_context(binding):
-                missing_skills = _missing_skill_names(list(persona.skills), skill_root=binding.profile_home / "skills")
+                skill_resolutions = _resolve_skill_names(list(persona.skills))
+                missing_skills = _missing_skill_names(list(persona.skills))
                 skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills), hermes_home=binding.profile_home)
-                missing_skills = [name for name in missing_skills if not harness_skill_installed_ok(name, hermes_home=binding.profile_home)]
                 cfg_path = binding.profile_home / "config.yaml"
                 raw = cached_yaml_file(cfg_path, default={}) or {}
                 configured_mcp = _configured_mcp_server_names(raw or {})
@@ -62,9 +64,9 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
         except Exception as exc:  # pragma: no cover - defensive, covered by behavior tests with monkeypatch
             issues.append((READINESS_CONFIG_ERROR, f"Profile config read failed: {type(exc).__name__}"))
     else:
+        skill_resolutions = _resolve_skill_names(list(persona.skills))
         missing_skills = _missing_skill_names(list(persona.skills))
         skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills))
-        missing_skills = [name for name in missing_skills if not harness_skill_installed_ok(name)]
         if effective_required_mcp:
             missing_mcp = list(effective_required_mcp)
         runtime_issue = _runtime_dependency_issue(persona)
@@ -76,6 +78,9 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
 
     if missing_skills:
         issues.append((READINESS_MISSING_SKILL, f"Missing skills: {', '.join(missing_skills)}"))
+    collisions = [row["skill_id"] for row in skill_resolutions if row["status"] == "collision"]
+    if collisions:
+        issues.append((READINESS_SKILL_COLLISION, f"Skill collisions: {', '.join(collisions)}"))
     if skill_hash_mismatches:
         issues.append((READINESS_SKILL_HASH_MISMATCH, f"Skill hash mismatch: {', '.join(skill_hash_mismatches)}"))
     if missing_mcp:
@@ -89,6 +94,7 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
         "skills": list(persona.skills),
         "missing_skills": missing_skills,
         "skill_hash_mismatches": skill_hash_mismatches,
+        "skill_resolutions": skill_resolutions,
         "required_mcp_servers": list(persona.required_mcp_servers),
         "effective_required_mcp_servers": list(effective_required_mcp),
         "missing_mcp_servers": missing_mcp,
@@ -142,63 +148,43 @@ def _configured_mcp_server_names(raw: dict[str, Any]) -> set[str]:
     return names
 
 
-def _missing_skill_names(skill_names: list[str], *, skill_root: Path | None = None) -> list[str]:
-    from agent.skill_commands import _load_skill_payload
+def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
+    from agent.skill_utils import resolve_skill, skill_package_content_hash
 
-    missing: list[str] = []
+    rows: list[dict[str, Any]] = []
     for name in skill_names:
         clean = str(name).strip()
         if not clean:
             continue
-        if skill_root is not None:
-            if not _skill_exists_in_tree(clean, skill_root):
-                missing.append(clean)
-            continue
-        if _load_skill_payload(clean, task_id=None) is None:
-            missing.append(clean)
-    return missing
+        resolution = resolve_skill(clean)
+        selected = resolution.candidate
+        rows.append(
+            {
+                "skill_id": clean,
+                "status": resolution.status,
+                "source_kind": selected.source_kind if selected else None,
+                "content_hash": (
+                    skill_package_content_hash(selected.skill_dir, selected.skill_md)
+                    if selected
+                    else None
+                ),
+                "candidate_count": len(resolution.candidates),
+            }
+        )
+    return rows
 
 
-def _skill_exists_in_tree(skill_name: str, skill_root: Path) -> bool:
-    if not skill_root.exists():
-        return False
-    normalized = skill_name.strip().strip("/\\")
-    if not normalized:
-        return False
-    direct = skill_root / Path(normalized) / "SKILL.md"
-    if direct.exists():
-        return True
-    wanted = normalized.rsplit("/", 1)[-1]
-    for skill_md in skill_root.rglob("SKILL.md"):
-        if ".archive" in skill_md.parts:
-            continue
-        if skill_md.parent.name == wanted:
-            return True
-        if _skill_frontmatter_name(skill_md) == wanted:
-            return True
-    return False
+def _missing_skill_names(
+    skill_names: list[str], *, skill_root: Path | None = None
+) -> list[str]:
+    """Compatibility wrapper backed by the canonical effective resolver."""
 
-
-def _skill_frontmatter_name(skill_md: Path) -> str | None:
-    return cached_by_mtime(skill_md, _read_skill_frontmatter_name)
-
-
-def _read_skill_frontmatter_name(skill_md: Path) -> str | None:
-    try:
-        text = skill_md.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return None
-    if not text.startswith("---"):
-        return None
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return None
-    try:
-        raw = yaml.safe_load(parts[1]) or {}
-    except yaml.YAMLError:
-        return None
-    name = raw.get("name") if isinstance(raw, dict) else None
-    return str(name).strip() if name else None
+    del skill_root
+    return [
+        row["skill_id"]
+        for row in _resolve_skill_names(skill_names)
+        if row["status"] == "missing"
+    ]
 
 
 def _effective_required_mcp_servers(persona, *, task=None, stage=None) -> list[str]:

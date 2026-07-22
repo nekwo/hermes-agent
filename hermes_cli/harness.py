@@ -124,7 +124,7 @@ from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_runtime_tool_contract
 from agent_runtime.personas import profile_chat_toolsets, seed_personas
 from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
-from agent_runtime.queued_skills import consume_skills_for_next_turn, queue_skill_for_next_turn
+from agent_runtime.queued_skills import consume_skills_for_next_turn
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
@@ -1180,7 +1180,8 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_queue_skill.add_argument("--persona", dest="persona_id", required=True)
     mission_chat_queue_skill.add_argument("--persona-instance-id", default=None)
     mission_chat_queue_skill.add_argument("--session-id", required=True)
-    mission_chat_queue_skill.add_argument("--skill", required=True)
+    mission_chat_queue_skill.add_argument("--skill", action="append", default=[])
+    mission_chat_queue_skill.add_argument("--skills", nargs="+", default=[])
     mission_chat_queue_skill.add_argument("--json", action="store_true")
     mission_chat_queue_skill.set_defaults(func=_cmd_mission_chat_queue_skill)
     mission_chat_steer = mission_chat_subs.add_parser("steer", help="Steer an active streamed Mission Control chat turn")

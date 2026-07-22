@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from agent.skill_utils import (
     extract_skill_conditions,
     get_disabled_skill_names,
@@ -11,8 +13,55 @@ from agent.skill_utils import (
     is_skill_support_path,
     iter_skill_index_files,
     resolve_skill_config_values,
+    resolve_skill,
+    skill_package_content_hash,
+    skill_runtime_compatibility,
     skill_matches_platform,
 )
+
+
+def _write_skill(root, name, *, modes=None):
+    skill_dir = root / name
+    skill_dir.mkdir(parents=True)
+    metadata = ""
+    if modes:
+        metadata = (
+            "metadata:\n  hermes:\n    surfaces: [mission_chat]\n"
+            f"    modes: [{', '.join(modes)}]\n"
+        )
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: test\n{metadata}---\nbody\n",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
+def test_canonical_resolver_reports_collision_and_exact_hash(tmp_path):
+    local = tmp_path / "local"
+    shared = tmp_path / "shared"
+    local.mkdir()
+    shared.mkdir()
+    _write_skill(local, "same")
+    shared_skill = _write_skill(shared, "shared-only")
+
+    resolved = resolve_skill("shared-only", roots=[local, shared])
+    assert resolved.status == "resolved"
+    assert resolved.candidate is not None
+    assert skill_package_content_hash(resolved.candidate.skill_dir, resolved.candidate.skill_md)
+
+    _write_skill(shared, "same")
+    assert resolve_skill("same", roots=[local, shared]).status == "collision"
+
+
+def test_runtime_compatibility_rejects_root_only_skill_in_standard_chat(tmp_path):
+    root = tmp_path / "skills"
+    root.mkdir()
+    _write_skill(root, "lead", modes=["root_node"])
+    candidate = resolve_skill("lead", roots=[root]).candidate
+
+    assert skill_runtime_compatibility(
+        candidate, surface="mission_chat", root_node_mode=False
+    )["reason"] == "mode_not_supported"
 
 
 def test_metadata_as_dict_with_hermes():

@@ -1,6 +1,11 @@
 ---
 name: harness-continuity
 description: Spawn a helper for heavy investigation, sample bounded progress, return a distilled summary into the parent chat, and resume without replaying the child transcript.
+metadata:
+  hermes:
+    surfaces: [mission_chat, mission_worker]
+    modes: [standard, root_node]
+    load_policy: recommended
 ---
 
 # Harness Continuity

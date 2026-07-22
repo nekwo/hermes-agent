@@ -1,6 +1,11 @@
 ---
 name: harness-runtime-model
 description: Hermes Agent Runtime mental model + first-class commands to view and operate Mission Control (goals / graphs / agents / lanes). Use instead of low-level DB/Python/scripts.
+metadata:
+  hermes:
+    surfaces: [mission_chat, mission_worker]
+    modes: [standard, root_node]
+    load_policy: recommended
 ---
 
 # Harness Runtime Model

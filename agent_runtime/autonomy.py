@@ -191,7 +191,13 @@ def _skill_priorities(persona: AgentPersona, ctx: AgentContext) -> list[tuple[st
     cross_stack = _is_cross_stack(ctx)
     text = _task_haystack(ctx)
     if role == "alice_supervisor":
-        return [("harness-mission-lead", "scope, route, join proofs, and deliver final alternatives after completion")]
+        self_heal = getattr(ctx.task, "harness_self_heal", None)
+        root_node_mode = bool(
+            isinstance(self_heal, dict) and self_heal.get("root_node_mode")
+        )
+        if root_node_mode:
+            return [("harness-mission-lead", "scope, route, join proofs, and deliver final alternatives after completion")]
+        return [("harness-runtime-model", "inspect and operate the standard Mission Control surface")]
     if role == "qa":
         priorities = [("harness-qa-verdict", "evidence-backed approval or blocker verdict")]
         if visual:

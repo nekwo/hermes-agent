@@ -1,6 +1,11 @@
 ---
 name: harness-dev-delivery
 description: Shared Backend Dev and Launcher Dev delivery contract for Harness tasks, proof reuse, bounded skill loading, proof requests, graph handoff, and blockers.
+metadata:
+  hermes:
+    surfaces: [mission_chat, mission_worker]
+    modes: [standard]
+    load_policy: required
 ---
 
 # Harness Dev Delivery

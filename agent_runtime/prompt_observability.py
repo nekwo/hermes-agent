@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -121,6 +122,9 @@ def mission_chat_prompt_observability(
     workspace_agents: WorkspaceAgentsContext | None = None,
     mission_hud: dict[str, Any] | None = None,
     situational_hud: dict[str, Any] | None = None,
+    queued_skills: Iterable[str] | None = None,
+    preloaded_skills_loaded: Iterable[str] | None = None,
+    preloaded_skills_missing: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
 
@@ -155,12 +159,45 @@ def mission_chat_prompt_observability(
     surface = safe_assignment_text(surface_prompt, limit=4000) or ""
     history = _chat_history_context(session_db=session_db, session_id=session_id)
     chat = _chat_metadata(session_db=session_db, session_id=session_id, task_id=task_id)
-    accessible_skills = _accessible_skills_context(persona, profile)
-    available_skills = available_skills_context(accessible_skills=accessible_skills)
-    used_skills = used_skills_context(
-        final_model_input=final_model_input,
-        trace_events=trace_events,
-    )
+    try:
+        from .profile_context import persona_profile_context, resolve_persona_profile
+
+        skill_profile_context = persona_profile_context(
+            resolve_persona_profile(persona)
+        )
+    except Exception:
+        skill_profile_context = nullcontext()
+    with skill_profile_context:
+        accessible_skills = _accessible_skills_context(persona, profile)
+        skill_assignment_removals = _persona_skill_assignment_removals(persona)
+        available_skills = available_skills_context(
+            accessible_skills=accessible_skills
+        )
+        used_skills = used_skills_context(
+            final_model_input=final_model_input,
+            trace_events=trace_events,
+            queued_skills=preloaded_skills_loaded,
+        )
+    queued_names = [safe_assignment_token(item) for item in queued_skills or ()]
+    queued_names = [item for item in queued_names if item]
+    loaded_names = [safe_assignment_token(item) for item in preloaded_skills_loaded or ()]
+    loaded_names = [item for item in loaded_names if item]
+    missing_names = [safe_assignment_token(item) for item in preloaded_skills_missing or ()]
+    missing_names = [item for item in missing_names if item]
+    skill_manifest_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "assigned": accessible_skills,
+                "available": available_skills,
+                "queued": queued_names,
+                "loaded": loaded_names,
+                "missing": missing_names,
+                "removed": skill_assignment_removals,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     # T8 per-item in-prompt attribution — the parts reachable at THIS pre-turn
     # seam (T5 made the surface-message parts explicit). The persona-identity
     # layer counts the identity+rules TEMPLATE only (soul/memory ride file rows);
@@ -315,6 +352,11 @@ def mission_chat_prompt_observability(
         ],
         "context_files": context_files,
         "used_skills": used_skills,
+        "queued_skills": queued_names,
+        "preloaded_skills_loaded": loaded_names,
+        "preloaded_skills_missing": missing_names,
+        "skill_manifest_hash": skill_manifest_hash,
+        "skill_assignment_removals": skill_assignment_removals,
         # C1 RECORD-ONCE (2026-07-17): the built row carries ONE copy of each
         # fact — the pre-C1 alias keys (``skills_catalog`` ≡ available_skills,
         # ``skills`` ≡ accessible_skills) are DELETED, no compat emission
@@ -393,6 +435,7 @@ def attach_prompt_observability_turn_results(
     context["used_skills"] = used_skills_context(
         final_model_input=final_model_input,
         trace_events=trace_events,
+        queued_skills=context.get("preloaded_skills_loaded") or [],
     )
     context["context_budget"] = _context_budget(
         model_selection if model_selection is not None else context.get("model_selection"),
@@ -1782,9 +1825,27 @@ def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any
         source_label = "profile_skills_snapshot"
     if not declared:
         return []
+    explicit_additions: set[str] = set()
+    try:
+        from .config import load_agent_runtime_config
+
+        cfg = load_agent_runtime_config()
+        overrides = (getattr(cfg, "personas", {}) or {}).get(
+            str(getattr(persona, "id", "")), {}
+        )
+        if isinstance(overrides, dict):
+            raw_additions = overrides.get("skills") or []
+            if isinstance(raw_additions, str):
+                try:
+                    decoded = json.loads(raw_additions)
+                    raw_additions = decoded if isinstance(decoded, list) else [raw_additions]
+                except Exception:
+                    raw_additions = [raw_additions]
+            explicit_additions = {str(item).strip() for item in raw_additions}
+    except Exception:
+        pass
     tracked: set[str] = set()
     mismatched: set[str] = set()
-    missing: set[str] = set()
     # Resolve the persona's OWN profile home so skill hash/missing checks run against
     # the profile the persona actually runs on — mirroring profile_readiness (the
     # authoritative surface). Without hermes_home these checks fall back to the active
@@ -1806,32 +1867,78 @@ def _accessible_skills_context(persona: Any, profile: str) -> list[dict[str, Any
         mismatched = set(harness_skill_hash_mismatches(sorted(tracked), hermes_home=profile_home))
     except Exception:
         pass
-    try:
-        from .profile_readiness import _missing_skill_names
+    from agent.skill_utils import (
+        resolve_skill,
+        skill_package_content_hash,
+        skill_runtime_compatibility,
+    )
 
-        skill_root = (profile_home / "skills") if profile_home is not None else None
-        missing = set(_missing_skill_names(sorted(tracked), skill_root=skill_root))
-    except Exception:
-        pass
     skills: list[dict[str, Any]] = []
     for name in declared[:80]:
         token = safe_assignment_token(name) or name
-        if name in missing:
-            status = "missing"
+        resolution = resolve_skill(name)
+        selected = resolution.candidate
+        compatibility = skill_runtime_compatibility(
+            selected, surface="mission_chat", root_node_mode=False
+        )
+        if resolution.status != "resolved":
+            status = resolution.status
         elif name in mismatched:
             status = "hash_mismatch"
         else:
-            status = "accessible"
+            status = "assigned_not_loaded"
         skills.append(
             {
                 "name": token,
                 "kind": "skill",
                 "status": status,
-                "hash_tracked": name in tracked,
+                "hash_tracked": selected is not None,
                 "source": source_label,
+                "assignment_source": source_label,
+                "assignment_policy": (
+                    "explicit_addition"
+                    if name in explicit_additions
+                    else str(compatibility.get("load_policy") or "persona_default")
+                ),
+                "load_state": "assigned_not_loaded",
+                "resolution_status": resolution.status,
+                "source_kind": selected.source_kind if selected else None,
+                "content_hash": (
+                    skill_package_content_hash(selected.skill_dir, selected.skill_md)
+                    if selected
+                    else None
+                ),
+                "candidate_count": len(resolution.candidates),
+                "compatibility": compatibility,
             }
         )
     return skills
+
+
+def _persona_skill_assignment_removals(persona: Any) -> list[str]:
+    try:
+        from .config import load_agent_runtime_config
+
+        cfg = load_agent_runtime_config()
+        overrides = (getattr(cfg, "personas", {}) or {}).get(
+            str(getattr(persona, "id", "")), {}
+        )
+        raw = overrides.get("skills_remove") if isinstance(overrides, dict) else []
+        if isinstance(raw, str):
+            try:
+                decoded = json.loads(raw)
+                raw = decoded if isinstance(decoded, list) else [raw]
+            except Exception:
+                raw = [raw]
+        return sorted(
+            {
+                safe_assignment_token(item)
+                for item in raw or []
+                if safe_assignment_token(item)
+            }
+        )
+    except Exception:
+        return []
 
 
 # The installed-skill catalog walk parses every SKILL.md frontmatter (~1k
@@ -1898,7 +2005,33 @@ def available_skills_context(
         if isinstance(item, dict) and safe_assignment_token(item.get("name"))
     }
     rows: list[dict[str, Any]] = []
+    shared_by_name: dict[str, dict[str, Any]] = {}
+    realm_rows: list[dict[str, Any]] = []
+    try:
+        from .skills_inventory import build_realm_publish_states, build_shared_catalog
+
+        _, _, catalog = build_shared_catalog()
+        shared_by_name = {
+            str(item.get("slug") or ""): item
+            for item in catalog
+            if isinstance(item, dict)
+        }
+        realm_rows = build_realm_publish_states()
+    except Exception:
+        pass
     installed = _installed_skill_catalog()
+    from agent.skill_utils import (
+        resolve_skills,
+        skill_package_content_hash,
+        skill_runtime_compatibility,
+    )
+
+    installed_names = [
+        safe_assignment_token(item.get("name"))
+        for item in installed
+        if isinstance(item, dict) and safe_assignment_token(item.get("name"))
+    ]
+    resolutions = resolve_skills(installed_names)
     if isinstance(installed, list):
         for skill in installed:
             if not isinstance(skill, dict):
@@ -1910,6 +2043,15 @@ def available_skills_context(
             status = "accessible" if accessible else "available"
             if accessible and isinstance(accessible.get("status"), str):
                 status = safe_assignment_token(accessible.get("status")) or status
+            resolution = resolutions.get(name)
+            if resolution is None:
+                continue
+            selected = resolution.candidate
+            compatibility = skill_runtime_compatibility(
+                selected, surface="mission_chat", root_node_mode=False
+            )
+            shared = shared_by_name.get(name)
+            realm_sync = _skill_realm_sync(name, realm_rows) if shared else []
             rows.append(
                 {
                     "name": name,
@@ -1919,7 +2061,25 @@ def available_skills_context(
                     "source": "installed_skill_catalog",
                     "category": safe_assignment_token(skill.get("category")) or "skills",
                     "description": safe_assignment_text(skill.get("description"), limit=220) or "",
-                    "loadable": True,
+                    "loadable": bool(
+                        resolution.status == "resolved"
+                        and compatibility.get("compatible")
+                    ),
+                    "resolution_status": resolution.status,
+                    "source_kind": selected.source_kind if selected else None,
+                    "content_hash": (
+                        skill_package_content_hash(selected.skill_dir, selected.skill_md)
+                        if selected
+                        else None
+                    ),
+                    "core_install_state": (
+                        "collision" if resolution.status == "collision"
+                        else "missing" if resolution.status == "missing"
+                        else "current"
+                    ),
+                    "realm_sync": realm_sync,
+                    "shared_catalog": shared is not None,
+                    "compatibility": compatibility,
                 }
             )
     if not rows:
@@ -1949,6 +2109,36 @@ def available_skills_context(
     return deduped
 
 
+def _skill_realm_sync(
+    skill_name: str, realms: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for realm in realms:
+        mode = str(realm.get("skill_publish_mode") or "all")
+        selection = {str(item) for item in realm.get("skill_selection") or []}
+        published = mode == "all" or skill_name in selection
+        state = str(realm.get("sync_state") or "")
+        drift = {str(item) for item in realm.get("skills_drift") or []}
+        if not published:
+            status = "not_published"
+        elif not state:
+            status = "unknown"
+        elif skill_name in drift:
+            status = "drifted"
+        elif state == "in_sync":
+            status = "in_sync"
+        else:
+            status = "unknown"
+        rows.append(
+            {
+                "realm_id": safe_assignment_token(realm.get("realm_id")),
+                "name": safe_assignment_text(realm.get("name"), limit=120),
+                "status": status,
+            }
+        )
+    return rows
+
+
 def used_skills_context(
     *,
     final_model_input: dict[str, Any] | None = None,
@@ -1973,8 +2163,9 @@ def used_skills_context(
             "name": name,
             "kind": "skill",
             "status": "used",
-            "hash_tracked": False,
+            "hash_tracked": True,
             "source": "skill_view_trace",
+            **_resolved_skill_receipt(name),
         }
         for name in names
     ]
@@ -1987,11 +2178,28 @@ def used_skills_context(
                 "name": token,
                 "kind": "skill",
                 "status": "used",
-                "hash_tracked": False,
+                "hash_tracked": True,
                 "source": "queued_next_turn_skill",
+                **_resolved_skill_receipt(token),
             }
         )
     return rows
+
+
+def _resolved_skill_receipt(name: str) -> dict[str, Any]:
+    from agent.skill_utils import resolve_skill, skill_package_content_hash
+
+    resolution = resolve_skill(name)
+    selected = resolution.candidate
+    return {
+        "resolution_status": resolution.status,
+        "source_kind": selected.source_kind if selected else None,
+        "content_hash": (
+            skill_package_content_hash(selected.skill_dir, selected.skill_md)
+            if selected
+            else None
+        ),
+    }
 
 
 def _list_used_skill_entries(final_model_input: dict[str, Any] | None) -> list[Any]:

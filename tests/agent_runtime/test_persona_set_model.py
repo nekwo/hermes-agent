@@ -165,6 +165,29 @@ def test_overlay_partial_and_full(model, provider, api_mode, expected_model, exp
     assert persona.model == "gpt-test"
 
 
+def test_overlay_instance_skill_assignment_matches_execution_persona():
+    from agent_runtime.models import PersonaInstance
+    from agent_runtime.states import WorkerSessionState
+
+    persona = _persona()
+    persona.skills = ["harness-dev-delivery"]
+    instance = PersonaInstance(
+        id="personainst_x",
+        persona_id=persona.id,
+        role="dev",
+        display_name="x",
+        profile_id=None,
+        runtime_root="r",
+        state=WorkerSessionState.IDLE,
+        skill_overrides=["launcher-analyze-proof"],
+    )
+
+    overlaid = apply_instance_model_overrides(persona, instance)
+
+    assert overlaid.skills == ["launcher-analyze-proof"]
+    assert persona.skills == ["harness-dev-delivery"]
+
+
 # --- store mutator -----------------------------------------------------------
 
 

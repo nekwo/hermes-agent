@@ -106,6 +106,7 @@ class WorkerSessionStore:
             provider=persona.provider,
             api_mode=persona.api_mode,
             prompt_contract_hash=_prompt_contract_hash(persona),
+            skill_manifest_hash=_skill_manifest(persona)[0],
         )
         self._write(worker)
         _write_static_prompt_receipt(worker, persona)
@@ -468,6 +469,7 @@ def worker_context_manifest(task_id: str, persona_id: str) -> dict[str, Any]:
 def _write_static_prompt_receipt(worker: WorkerSession, persona: AgentPersona) -> None:
     root = paths.worker_context_dir(worker.task_id, worker.persona_id)
     root.mkdir(parents=True, exist_ok=True)
+    skill_manifest_hash, skill_receipts = _skill_manifest(persona)
     receipt = {
         "schema_version": 1,
         "worker_session_id": worker.id,
@@ -477,7 +479,8 @@ def _write_static_prompt_receipt(worker: WorkerSession, persona: AgentPersona) -
         "created_at": to_jsonable(worker.opened_at),
         "prompt_contract_hash": worker.prompt_contract_hash,
         "system_prompt_ref": _safe_text(getattr(persona, "system_prompt_path", None)),
-        "skill_manifest_hash": worker.skill_manifest_hash,
+        "skill_manifest_hash": skill_manifest_hash,
+        "skills": skill_receipts,
         "strategy": "static_prompt_once_hud_every_tick",
         "raw_prompts_not_stored": True,
     }
@@ -496,6 +499,35 @@ def _prompt_contract_hash(persona: AgentPersona) -> str | None:
         "toolsets": list(getattr(persona, "toolsets", []) or []),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _skill_manifest(persona: AgentPersona) -> tuple[str, list[dict[str, Any]]]:
+    from agent.skill_utils import resolve_skill, skill_package_content_hash
+
+    rows: list[dict[str, Any]] = []
+    for raw_name in list(getattr(persona, "skills", []) or []):
+        name = str(raw_name or "").strip()
+        if not name:
+            continue
+        resolution = resolve_skill(name)
+        selected = resolution.candidate
+        rows.append(
+            {
+                "name": name,
+                "assignment_policy": "persona_default",
+                "resolution_status": resolution.status,
+                "source_kind": selected.source_kind if selected else None,
+                "content_hash": (
+                    skill_package_content_hash(selected.skill_dir, selected.skill_md)
+                    if selected
+                    else None
+                ),
+            }
+        )
+    manifest_hash = hashlib.sha256(
+        json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return manifest_hash, rows
 
 
 def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:

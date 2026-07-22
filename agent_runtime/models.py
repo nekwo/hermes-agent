@@ -562,24 +562,34 @@ class PersonaInstance:
 def apply_instance_model_overrides(
     persona: AgentPersona, instance: PersonaInstance | None
 ) -> AgentPersona:
-    """Overlay a persona instance's model override tier onto its backing persona.
+    """Overlay an instance's runtime overrides onto its backing persona.
 
     Pure: returns a copy, never mutates. ``None`` on the instance means inherit
     the persona value live. Both the chat lane and the run/tick lane must
     resolve model/provider/api_mode through this single overlay so two
-    instances of one persona can run different models without drift between
-    the lanes.
+    instances of one persona can run different models or assigned skill sets
+    without drift between prompt observability and execution.
     """
 
     if instance is None:
         return persona
-    if instance.model is None and instance.provider is None and instance.api_mode is None:
+    if (
+        instance.model is None
+        and instance.provider is None
+        and instance.api_mode is None
+        and instance.skill_overrides is None
+    ):
         return persona
     return replace(
         persona,
         model=instance.model if instance.model is not None else persona.model,
         provider=instance.provider if instance.provider is not None else persona.provider,
         api_mode=instance.api_mode if instance.api_mode is not None else persona.api_mode,
+        skills=(
+            list(instance.skill_overrides)
+            if instance.skill_overrides is not None
+            else list(persona.skills)
+        ),
     )
 
 

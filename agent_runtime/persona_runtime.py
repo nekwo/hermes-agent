@@ -1205,7 +1205,7 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
         cfg = None
     simplified_prompt = _simplified_contract_prompt_enabled(cfg)
     payload_contracts = prompt_contract_markdown(_simplified_contract_decisions_for_role(role) if simplified_prompt else None)
-    parts = [load_bundled_prompt(role)]
+    parts = [_load_persona_system_prompt(persona, role)]
     overlay = Path(__file__).with_name("prompts") / "shared_harness_overlay.md"
     if overlay.exists():
         parts.append(overlay.read_text(encoding="utf-8").strip())
@@ -1252,6 +1252,22 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
         ]
     )
     return "\n\n".join(part for part in parts if part)
+
+
+def _load_persona_system_prompt(persona: AgentPersona, role) -> str:
+    """Load the configured prompt when it is real, otherwise the bundled role prompt."""
+
+    raw = str(getattr(persona, "system_prompt_path", "") or "").strip()
+    if raw:
+        configured = Path(raw).expanduser()
+        candidates = [configured] if configured.is_absolute() else [Path(__file__).parent.parent / configured]
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return candidate.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+    return load_bundled_prompt(role)
 
 
 def _simplified_contract_prompt_enabled(cfg) -> bool:

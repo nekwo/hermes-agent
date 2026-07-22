@@ -1524,6 +1524,9 @@ def _cmd_mission_chat_message(args) -> int:
             else:
                 print(emit_json(data) if args.json else data["error"])
             return 2
+    # Resolve the effective instance once. Prompt receipts and execution must
+    # observe the same model and skill assignment authority.
+    persona = apply_instance_model_overrides(persona, instance)
     message = safe_assignment_text(getattr(args, "message", None), limit=12000)
     if not message:
         data = {"ok": False, "error": "message is required"}
@@ -1866,7 +1869,14 @@ def _cmd_mission_chat_message(args) -> int:
         workspace_name=workspace_name,
         workspace_agents=workspace_agents,
         situational_hud=situational_hud,
+        queued_skills=queued_skills,
+        preloaded_skills_loaded=preloaded_skills_loaded,
+        preloaded_skills_missing=preloaded_skills_missing,
     )
+    instance.skill_manifest_hash = safe_assignment_token(
+        prompt_context.get("skill_manifest_hash")
+    )
+    instance = instance_store.update(instance)
     stream = bool(getattr(args, "stream", False))
     stream_emitter = _ChatProtocolV2Emitter(
         turn_id=safe_assignment_token(client_message_id),
@@ -1985,7 +1995,7 @@ def _cmd_mission_chat_message(args) -> int:
                 # Instance model-override tier folded in (api_mode included);
                 # the chat-session override still wins via the explicit
                 # provider_override/model_override args below.
-                apply_instance_model_overrides(persona, instance),
+                persona,
                 chat_message,
                 session_id=active_session_id,
                 permission_session_id=session_id,
@@ -2047,25 +2057,6 @@ def _cmd_mission_chat_message(args) -> int:
             turn_usage=turn_usage_from_result(chat_result),
             trace_events=trace_payloads,
         )
-        if preloaded_skills_loaded:
-            prompt_context["used_skills"] = prompt_context.get("used_skills") or []
-            existing = {
-                safe_assignment_token(item.get("name"))
-                for item in prompt_context["used_skills"]
-                if isinstance(item, dict)
-            }
-            for skill in preloaded_skills_loaded:
-                token = safe_assignment_token(skill)
-                if token and token not in existing:
-                    prompt_context["used_skills"].append(
-                        {
-                            "name": token,
-                            "kind": "skill",
-                            "status": "used",
-                            "hash_tracked": False,
-                            "source": "queued_next_turn_skill",
-                        }
-                    )
         if preloaded_skills_missing:
             prompt_context["queued_skill_load_errors"] = [
                 {
@@ -2360,44 +2351,55 @@ def _cmd_mission_chat_message(args) -> int:
 def _cmd_mission_chat_queue_skill(args) -> int:
     persona_id = safe_assignment_token(getattr(args, "persona_id", None))
     session_id = safe_assignment_token(getattr(args, "session_id", None))
-    skill = safe_assignment_token(getattr(args, "skill", None))
-    if not persona_id or not session_id or not skill:
+    raw_skills = [
+        *(getattr(args, "skill", None) or []),
+        *(getattr(args, "skills", None) or []),
+    ]
+    skills = list(
+        dict.fromkeys(
+            token
+            for item in raw_skills
+            if (token := safe_assignment_token(item))
+        )
+    )
+    if not persona_id or not session_id or not skills:
         data = {
             "ok": False,
-            "error": "persona, session-id, and skill are required",
+            "error": "persona, session-id, and at least one skill are required",
         }
         print(emit_json(data) if args.json else data["error"])
         return 2
-    try:
-        from tools.skills_tool import _find_all_skills
+    from agent.skill_utils import resolve_skill, skill_runtime_compatibility
 
-        candidates = _find_all_skills()
-    except Exception as exc:
-        data = {
-            "ok": False,
-            "error": "skill catalog is not available",
-            "error_kind": type(exc).__name__,
-        }
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    available = {
-        str(item.get(key) or "").strip()
-        for item in candidates
-        if isinstance(item, dict)
-        for key in ("name", "identifier")
+    resolutions = {skill: resolve_skill(skill) for skill in skills}
+    rejected = {
+        skill: result.status
+        for skill, result in resolutions.items()
+        if result.status != "resolved"
     }
-    if skill not in available:
+    for skill, result in resolutions.items():
+        compatibility = skill_runtime_compatibility(
+            result.candidate,
+            surface="mission_chat",
+            root_node_mode=False,
+        )
+        if not compatibility["compatible"]:
+            rejected[skill] = compatibility["reason"]
+    if rejected:
         data = {
             "ok": False,
-            "error": f"skill is not loadable: {skill}",
+            "error": "one or more skills are not loadable",
+            "rejected_skills": rejected,
         }
         print(emit_json(data) if args.json else data["error"])
         return 2
-    queued = queue_skill_for_next_turn(
+    from agent_runtime.queued_skills import queue_skills_for_next_turn
+
+    queued = queue_skills_for_next_turn(
         persona_id=persona_id,
         session_id=session_id,
         persona_instance_id=getattr(args, "persona_instance_id", None),
-        skill=skill,
+        skills=skills,
     )
     data = {
         "ok": True,
@@ -2405,11 +2407,11 @@ def _cmd_mission_chat_queue_skill(args) -> int:
         "persona_id": persona_id,
         "persona_instance_id": safe_assignment_token(getattr(args, "persona_instance_id", None)),
         "session_id": session_id,
-        "skill": skill,
+        "skills": skills,
         "queued_skills": queued.get("skills", []),
         "next_expected": "send the next Mission Control chat message; queued skills will be preloaded for that turn only",
     }
-    print(emit_json(data) if args.json else f"queued {skill} for next turn")
+    print(emit_json(data) if args.json else f"queued {', '.join(skills)} for next turn")
     return 0
 
 

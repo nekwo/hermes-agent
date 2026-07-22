@@ -5,10 +5,12 @@ heavy dependency chain.  It is safe to import at module level without triggering
 tool registration or provider resolution.
 """
 
+import hashlib
 import logging
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -524,6 +526,263 @@ def get_all_skills_dirs() -> List[Path]:
     return dirs
 
 
+@dataclass(frozen=True, slots=True)
+class SkillResolutionCandidate:
+    """One filesystem skill candidate returned by the canonical resolver."""
+
+    root: Path
+    skill_dir: Path | None
+    skill_md: Path
+    source_kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class SkillResolution:
+    """Deterministic filesystem resolution for one skill identifier.
+
+    ``status`` is one of ``resolved``, ``missing``, or ``collision``.  Callers
+    must never choose a winner for a collision: the point of this result is to
+    make the catalog, loader, readiness checks, and prompt receipts agree.
+    """
+
+    identifier: str
+    status: str
+    candidates: tuple[SkillResolutionCandidate, ...]
+
+    @property
+    def candidate(self) -> SkillResolutionCandidate | None:
+        return self.candidates[0] if self.status == "resolved" else None
+
+
+def _resolved_path(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve()
+    except (OSError, RuntimeError):
+        return path.expanduser().absolute()
+
+
+def skill_source_kind(root: Path) -> str:
+    """Classify a resolver root without exposing its absolute path on wire."""
+
+    resolved = _resolved_path(root)
+    if resolved == _resolved_path(get_skills_dir()):
+        return "profile_local"
+    if resolved == _resolved_path(get_shared_skills_dir()):
+        return "shared_core"
+    return "external"
+
+
+def resolve_skill(
+    identifier: str,
+    *,
+    roots: List[Path] | None = None,
+    categorized_identifier: str | None = None,
+) -> SkillResolution:
+    """Resolve a filesystem skill through the one ordered runtime registry.
+
+    Plugin-qualified skills remain owned by the plugin registry.  This function
+    owns every filesystem skill lookup, including direct/nested/frontmatter-name
+    and legacy flat-file forms.  Duplicate candidates produce ``collision``;
+    root ordering is descriptive only and never silently selects a winner.
+    """
+
+    name = str(identifier or "").strip()
+    search_roots = list(roots) if roots is not None else get_all_skills_dirs()
+    candidates: list[SkillResolutionCandidate] = []
+    seen: set[Path] = set()
+
+    def record(root: Path, skill_dir: Path | None, skill_md: Path) -> None:
+        key = _resolved_path(skill_md)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(
+            SkillResolutionCandidate(
+                root=root,
+                skill_dir=skill_dir,
+                skill_md=skill_md,
+                source_kind=skill_source_kind(root),
+            )
+        )
+
+    lookup_names = [name]
+    categorized = str(categorized_identifier or "").strip()
+    if categorized and categorized not in lookup_names:
+        lookup_names.append(categorized)
+
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+        for lookup in lookup_names:
+            direct = root / lookup
+            manifest = direct / "SKILL.md"
+            if direct.is_dir() and manifest.is_file() and not is_skill_support_path(direct):
+                record(root, direct, manifest)
+            legacy_direct = direct.with_suffix(".md")
+            if legacy_direct.is_file() and not is_skill_support_path(legacy_direct):
+                record(root, None, legacy_direct)
+
+        for manifest in iter_skill_index_files(root, "SKILL.md"):
+            if manifest.parent.name == name:
+                record(root, manifest.parent, manifest)
+                continue
+            try:
+                frontmatter, _ = parse_frontmatter(manifest.read_text(encoding="utf-8"))
+            except Exception:
+                frontmatter = {}
+            if str(frontmatter.get("name") or "").strip() == name:
+                record(root, manifest.parent, manifest)
+
+        for legacy in root.rglob(f"{name}.md"):
+            if legacy.name != "SKILL.md" and not is_skill_support_path(legacy):
+                record(root, None, legacy)
+
+    status = "missing" if not candidates else "resolved" if len(candidates) == 1 else "collision"
+    return SkillResolution(name, status, tuple(candidates))
+
+
+def resolve_skills(
+    identifiers: List[str], *, roots: List[Path] | None = None
+) -> Dict[str, SkillResolution]:
+    """Resolve many bare/path identifiers with one registry walk."""
+
+    names = list(dict.fromkeys(str(item or "").strip() for item in identifiers))
+    names = [name for name in names if name]
+    search_roots = list(roots) if roots is not None else get_all_skills_dirs()
+    found: Dict[str, list[SkillResolutionCandidate]] = {name: [] for name in names}
+    seen: Dict[str, set[Path]] = {name: set() for name in names}
+
+    def record(name: str, root: Path, skill_dir: Path | None, skill_md: Path) -> None:
+        key = _resolved_path(skill_md)
+        if key in seen[name]:
+            return
+        seen[name].add(key)
+        found[name].append(
+            SkillResolutionCandidate(
+                root=root,
+                skill_dir=skill_dir,
+                skill_md=skill_md,
+                source_kind=skill_source_kind(root),
+            )
+        )
+
+    names_set = set(names)
+    for root in search_roots:
+        if not root.is_dir():
+            continue
+        for name in names:
+            direct = root / name
+            manifest = direct / "SKILL.md"
+            if direct.is_dir() and manifest.is_file() and not is_skill_support_path(direct):
+                record(name, root, direct, manifest)
+            legacy = direct.with_suffix(".md")
+            if legacy.is_file() and not is_skill_support_path(legacy):
+                record(name, root, None, legacy)
+        for manifest in iter_skill_index_files(root, "SKILL.md"):
+            matched = manifest.parent.name if manifest.parent.name in names_set else None
+            if matched is None:
+                try:
+                    frontmatter, _ = parse_frontmatter(
+                        manifest.read_text(encoding="utf-8")
+                    )
+                except Exception:
+                    frontmatter = {}
+                declared = str(frontmatter.get("name") or "").strip()
+                matched = declared if declared in names_set else None
+            if matched:
+                record(matched, root, manifest.parent, manifest)
+        for legacy in root.rglob("*.md"):
+            matched = legacy.stem
+            if (
+                legacy.name != "SKILL.md"
+                and matched in names_set
+                and not is_skill_support_path(legacy)
+            ):
+                record(matched, root, None, legacy)
+
+    result: Dict[str, SkillResolution] = {}
+    for name, candidates in found.items():
+        status = "missing" if not candidates else "resolved" if len(candidates) == 1 else "collision"
+        result[name] = SkillResolution(name, status, tuple(candidates))
+    return result
+
+
+def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
+    """Stable content hash for the exact skill package the resolver selected."""
+
+    digest = hashlib.sha256()
+    if skill_dir is None:
+        files = [skill_md]
+        base = skill_md.parent
+    else:
+        files = [
+            path
+            for path in sorted(skill_dir.rglob("*"))
+            if path.is_file()
+            and not any(
+                part.startswith(".") or part in EXCLUDED_SKILL_DIRS
+                for part in path.relative_to(skill_dir).parts
+            )
+        ]
+        base = skill_dir
+    for source in files:
+        try:
+            relative = "/".join(source.relative_to(base).parts)
+        except ValueError:
+            relative = source.name
+        digest.update(relative.encode("utf-8", errors="replace"))
+        digest.update(b"\x00")
+        try:
+            digest.update(source.read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
+        digest.update(b"\x00")
+    return digest.hexdigest()
+
+
+def skill_runtime_compatibility(
+    candidate: SkillResolutionCandidate | None,
+    *,
+    surface: str,
+    root_node_mode: bool = False,
+) -> dict[str, Any]:
+    """Evaluate declared surface/mode compatibility for a resolved skill."""
+
+    if candidate is None:
+        return {"compatible": False, "reason": "unresolved"}
+    try:
+        frontmatter, _ = parse_frontmatter(candidate.skill_md.read_text(encoding="utf-8"))
+    except Exception:
+        frontmatter = {}
+    metadata = frontmatter.get("metadata") if isinstance(frontmatter, dict) else {}
+    hermes = metadata.get("hermes") if isinstance(metadata, dict) else {}
+    surfaces = hermes.get("surfaces") if isinstance(hermes, dict) else None
+    modes = hermes.get("modes") if isinstance(hermes, dict) else None
+    allowed_surfaces = {str(item) for item in surfaces or []}
+    allowed_modes = {str(item) for item in modes or []}
+    load_policy = str(hermes.get("load_policy") or "explicit")
+    if allowed_surfaces and surface not in allowed_surfaces:
+        return {
+            "compatible": False,
+            "reason": "surface_not_supported",
+            "load_policy": load_policy,
+        }
+    active_mode = "root_node" if root_node_mode else "standard"
+    if allowed_modes and active_mode not in allowed_modes:
+        return {
+            "compatible": False,
+            "reason": "mode_not_supported",
+            "load_policy": load_policy,
+        }
+    return {
+        "compatible": True,
+        "reason": "compatible",
+        "surface": surface,
+        "mode": active_mode,
+        "load_policy": load_policy,
+    }
+
+
 def normalize_skill_lookup_name(identifier: str) -> str:
     """Normalize a skill identifier to a ``skill_view()``-safe relative path.
 
@@ -555,7 +814,7 @@ def normalize_skill_lookup_name(identifier: str) -> str:
 
     trusted_roots = [primary_root]
     try:
-        trusted_roots.extend(get_external_skills_dirs())
+        trusted_roots.extend(get_all_skills_dirs()[1:])
     except Exception:
         pass
 
@@ -566,12 +825,12 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     # an arbitrary absolute path that skill_view() refuses to load.
     for root in trusted_roots:
         try:
-            return str(identifier_path.relative_to(root))
+            return identifier_path.relative_to(root).as_posix()
         except ValueError:
             continue
 
     try:
-        return str(identifier_path.resolve().relative_to(primary_root.resolve()))
+        return identifier_path.resolve().relative_to(primary_root.resolve()).as_posix()
     except Exception:
         logger.debug(
             "Skill identifier %r is an absolute path outside trusted skills "

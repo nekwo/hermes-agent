@@ -317,8 +317,14 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         p.max_wall_seconds = _optional_float(overrides.get("max_wall_seconds", p.max_wall_seconds))
         p.max_api_calls = _optional_int(overrides.get("max_api_calls", p.max_api_calls))
         p.max_total_tokens = _optional_int(overrides.get("max_total_tokens", p.max_total_tokens))
-        if "skills" in overrides:
-            p.skills = _string_list(overrides["skills"])
+        if "skills" in overrides or "skills_remove" in overrides:
+            additions = _string_list(overrides.get("skills", []))
+            removals = set(_string_list(overrides.get("skills_remove", [])))
+            # Persona defaults are required/recommended assignments. Config
+            # extends that baseline by id; subtraction is explicit so adding
+            # one skill never accidentally erases every default.
+            merged = list(dict.fromkeys([*p.skills, *additions]))
+            p.skills = [skill_id for skill_id in merged if skill_id not in removals]
         if "required_mcp_servers" in overrides:
             p.required_mcp_servers = _string_list(overrides["required_mcp_servers"])
         if "toolsets" in overrides:
@@ -482,7 +488,7 @@ def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any
         provider=overrides.get("provider") or cfg.default_provider,
         api_mode=overrides.get("api_mode") or cfg.default_api_mode,
         toolsets=validate_toolsets(coerce_agent_role(role), list(overrides.get("toolsets") or [])),
-        system_prompt_path=str(overrides.get("system_prompt_path") or f"personas/{role}/system.md"),
+        system_prompt_path=str(overrides.get("system_prompt_path") or f"agent_runtime/prompts/{role}.md"),
         include_core_context_files=bool(overrides.get("include_core_context_files", False)),
     )
 
