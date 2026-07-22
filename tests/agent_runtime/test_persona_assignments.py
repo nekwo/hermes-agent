@@ -2553,13 +2553,13 @@ def test_mission_chat_queues_skill_for_next_turn_once(
     db = _TranscriptDB()
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
 
-    import tools.skills_tool as skills_tool
+    import agent.skill_utils as skill_utils
 
-    monkeypatch.setattr(
-        skills_tool,
-        "_find_all_skills",
-        lambda: [{"name": "deep-audit", "identifier": "deep-audit"}],
-    )
+    skill_root = isolate_agent_runtime_root / "skills"
+    manifest = skill_root / "deep-audit" / "SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("---\nname: deep-audit\n---\nbody\n", encoding="utf-8")
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [skill_root])
 
     code = harness._cmd_mission_chat_queue_skill(
         SimpleNamespace(
@@ -2635,15 +2635,12 @@ def test_mission_chat_queues_skill_for_next_turn_once(
     payload = json.loads(capsys.readouterr().out)
     assert captured_prompts == ["PRELOADED SKILL PROMPT"]
     assert payload["queued_skills_loaded"] == ["deep-audit"]
-    assert payload["prompt_observability"]["used_skills"] == [
-        {
-            "name": "deep-audit",
-            "kind": "skill",
-            "status": "used",
-            "hash_tracked": False,
-            "source": "queued_next_turn_skill",
-        }
-    ]
+    used = payload["prompt_observability"]["used_skills"]
+    assert used[0]["name"] == "deep-audit"
+    assert used[0]["source"] == "queued_next_turn_skill"
+    assert used[0]["resolution_status"] == "resolved"
+    assert used[0]["hash_tracked"] is True
+    assert used[0]["content_hash"]
     assert pending_skills_for_next_turn(
         persona_id="dev",
         session_id="persona_chat_personainst_dev",
@@ -2707,19 +2704,17 @@ def test_prompt_observability_reports_redaction_safe_available_skill_catalog(
         session_id="persona_chat_personainst_dev",
     )
 
-    assert context["available_skills"] == [
-        {
-            "name": "deep-audit",
-            "kind": "skill",
-            "status": "available",
-            "hash_tracked": False,
-            "source": "installed_skill_catalog",
-            "category": "harness",
-            "description": "Inspect the runtime deeply.",
-            "loadable": True,
-        }
-    ]
-    assert "content" not in context["available_skills"][0]
+    skill = context["available_skills"][0]
+    assert skill["name"] == "deep-audit"
+    assert skill["status"] == "available"
+    assert skill["load_state"] == "catalog_only"
+    assert skill["resolution_status"] == "missing"
+    assert skill["loadable"] is False
+    assert skill["hash_tracked"] is False
+    assert skill["content_hash"] is None
+    assert skill["category"] == "harness"
+    assert skill["description"] == "Inspect the runtime deeply."
+    assert "content" not in skill
     # C1 record-once (2026-07-17): the `skills_catalog` alias key is retired —
     # the row carries ONE canonical copy (`available_skills`), no compat
     # emission (ruling 0).
@@ -4029,9 +4024,11 @@ def test_profile_prompt_observability_uses_profile_skills_and_chat_title(
     assert {item["source"] for item in context["accessible_skills"]} == {
         "profile_skills_snapshot"
     }
-    assert {item["status"] for item in context["accessible_skills"]} == {
-        "accessible"
+    assert {item["status"] for item in context["accessible_skills"]} == {"missing"}
+    assert {item["load_state"] for item in context["accessible_skills"]} == {
+        "assigned_not_loaded"
     }
+    assert all(not item["hash_tracked"] for item in context["accessible_skills"])
 
 
 def test_prompt_observability_reports_used_skill_from_skill_view_trace(
@@ -4239,15 +4236,24 @@ def test_snapshot_prompt_observability_builds_profile_instance_context(
     # content hash of the expected backfilled list (`skills` aliases it → same
     # ref). The on-disk resolver covers persisted lists; this in-memory backfill
     # is pinned by hash equality instead.
-    expected_accessible = [
-        {
-            "name": "alice-profile-skill",
-            "kind": "skill",
-            "status": "accessible",
-            "hash_tracked": False,
-            "source": "profile_skills_snapshot",
-        }
-    ]
+    expected_context = prompt_observability.mission_chat_prompt_observability(
+        persona=AgentPersona(
+            id="profile:alice",
+            display_name="Alice Agent",
+            role="profile",
+            model="gpt-test",
+            provider="openai-codex",
+            api_mode="codex_responses",
+            toolsets=["file", "skills"],
+            system_prompt_path="",
+            hermes_profile="alice",
+            skills=[],
+        ),
+        persona_instance_id="personainst_profile_alice",
+        session_id="persona_chat_personainst_profile_alice",
+        session_db=db,
+    )
+    expected_accessible = expected_context["accessible_skills"]
     assert "skills_catalogs" not in snapshot
     assert context["accessible_skills_ref"] == prompt_observability._skills_list_content_hash(
         expected_accessible

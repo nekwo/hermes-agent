@@ -18,6 +18,7 @@ READINESS_AUTH_ATTENTION = "auth_attention"
 READINESS_MCP_ATTENTION = "mcp_attention"
 READINESS_MISSING_SKILL = "missing_skill"
 READINESS_SKILL_COLLISION = "skill_collision"
+READINESS_SKILL_INVALID_SOURCE = "skill_invalid_source"
 READINESS_SKILL_HASH_MISMATCH = "skill_hash_mismatch"
 READINESS_RUNTIME_DEPENDENCY_MISSING = "runtime_dependency_missing"
 
@@ -29,6 +30,7 @@ _SEVERITY = {
     READINESS_MCP_ATTENTION: 20,
     READINESS_SKILL_HASH_MISMATCH: 15,
     READINESS_SKILL_COLLISION: 16,
+    READINESS_SKILL_INVALID_SOURCE: 17,
     READINESS_MISSING_SKILL: 10,
     READINESS_READY: 0,
 }
@@ -81,6 +83,19 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
     collisions = [row["skill_id"] for row in skill_resolutions if row["status"] == "collision"]
     if collisions:
         issues.append((READINESS_SKILL_COLLISION, f"Skill collisions: {', '.join(collisions)}"))
+    invalid_sources = [
+        row["skill_id"]
+        for row in skill_resolutions
+        if row["status"] == "invalid_source"
+    ]
+    if invalid_sources:
+        issues.append(
+            (
+                READINESS_SKILL_INVALID_SOURCE,
+                "Harness skills must resolve from shared_core: "
+                + ", ".join(invalid_sources),
+            )
+        )
     if skill_hash_mismatches:
         issues.append((READINESS_SKILL_HASH_MISMATCH, f"Skill hash mismatch: {', '.join(skill_hash_mismatches)}"))
     if missing_mcp:
@@ -149,7 +164,14 @@ def _configured_mcp_server_names(raw: dict[str, Any]) -> set[str]:
 
 
 def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
-    from agent.skill_utils import resolve_skill, skill_package_content_hash
+    from agent.skill_utils import (
+        resolve_skill,
+        skill_package_content_hash,
+        skill_runtime_compatibility,
+    )
+    from hermes_constants import CANONICAL_SHARED_SKILL_IDS
+
+    from .skill_install import harness_skill_source
 
     rows: list[dict[str, Any]] = []
     for name in skill_names:
@@ -157,18 +179,59 @@ def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
         if not clean:
             continue
         resolution = resolve_skill(clean)
-        selected = resolution.candidate
+        selected = (
+            resolution.candidates[0] if len(resolution.candidates) == 1 else None
+        )
+        standard = skill_runtime_compatibility(
+            selected, surface="mission_chat", root_node_mode=False
+        )
+        root_node = skill_runtime_compatibility(
+            selected, surface="mission_worker", root_node_mode=True
+        )
+        installed_hash = (
+            skill_package_content_hash(selected.skill_dir, selected.skill_md)
+            if selected
+            else None
+        )
+        expected_hash = None
+        if clean in CANONICAL_SHARED_SKILL_IDS:
+            expected_manifest = harness_skill_source(clean)
+            if expected_manifest.is_file():
+                expected_hash = skill_package_content_hash(
+                    expected_manifest.parent, expected_manifest
+                )
+        candidate_receipts = [
+            {
+                "source_kind": candidate.source_kind,
+                "content_hash": skill_package_content_hash(
+                    candidate.skill_dir, candidate.skill_md
+                ),
+            }
+            for candidate in resolution.candidates
+        ]
         rows.append(
             {
                 "skill_id": clean,
                 "status": resolution.status,
                 "source_kind": selected.source_kind if selected else None,
-                "content_hash": (
-                    skill_package_content_hash(selected.skill_dir, selected.skill_md)
-                    if selected
+                "content_hash": installed_hash,
+                "installed_hash": installed_hash,
+                "expected_hash": expected_hash,
+                "hash_matches_expected": (
+                    installed_hash == expected_hash
+                    if expected_hash is not None and installed_hash is not None
                     else None
                 ),
+                "loadable": bool(
+                    resolution.status == "resolved"
+                    and (standard.get("compatible") or root_node.get("compatible"))
+                ),
+                "loadability": {
+                    "mission_chat": standard,
+                    "root_node": root_node,
+                },
                 "candidate_count": len(resolution.candidates),
+                "candidates": candidate_receipts,
             }
         )
     return rows

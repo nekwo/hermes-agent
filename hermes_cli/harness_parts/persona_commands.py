@@ -1766,23 +1766,39 @@ def _cmd_mission_chat_message(args) -> int:
         persona_id=normalized_persona,
         session_id=session_id,
     )
+    from agent.skill_utils import required_preload_skill_ids
+
+    required_preload_skills = required_preload_skill_ids(
+        list(getattr(persona, "skills", []) or []),
+        surface="mission_chat",
+        root_node_mode=False,
+    )
+    skills_to_preload = list(
+        dict.fromkeys([*required_preload_skills, *queued_skills])
+    )
     preloaded_skill_prompt = ""
     preloaded_skills_loaded: list[str] = []
     preloaded_skills_missing: list[str] = []
-    if queued_skills:
+    if skills_to_preload:
         try:
             from agent.skill_commands import build_preloaded_skills_prompt
 
+            preload_kwargs = (
+                {"required_skill_names": set(required_preload_skills)}
+                if required_preload_skills
+                else {}
+            )
             preloaded_skill_prompt, preloaded_skills_loaded, preloaded_skills_missing = (
                 build_preloaded_skills_prompt(
-                    queued_skills,
+                    skills_to_preload,
                     task_id=session_id,
+                    **preload_kwargs,
                 )
             )
         except Exception:
             preloaded_skill_prompt = ""
             preloaded_skills_loaded = []
-            preloaded_skills_missing = list(queued_skills)
+            preloaded_skills_missing = list(skills_to_preload)
     workspace_agents = load_workspace_agents_context(
         getattr(args, "agents_file", None)
     )
@@ -1870,8 +1886,14 @@ def _cmd_mission_chat_message(args) -> int:
         workspace_agents=workspace_agents,
         situational_hud=situational_hud,
         queued_skills=queued_skills,
+        required_preload_skills=required_preload_skills,
         preloaded_skills_loaded=preloaded_skills_loaded,
         preloaded_skills_missing=preloaded_skills_missing,
+        instance_skill_overrides=(
+            list(instance.skill_overrides)
+            if instance.skill_overrides is not None
+            else None
+        ),
     )
     instance.skill_manifest_hash = safe_assignment_token(
         prompt_context.get("skill_manifest_hash")
@@ -2351,10 +2373,13 @@ def _cmd_mission_chat_message(args) -> int:
 def _cmd_mission_chat_queue_skill(args) -> int:
     persona_id = safe_assignment_token(getattr(args, "persona_id", None))
     session_id = safe_assignment_token(getattr(args, "session_id", None))
-    raw_skills = [
-        *(getattr(args, "skill", None) or []),
-        *(getattr(args, "skills", None) or []),
-    ]
+    single_values = getattr(args, "skill", None) or []
+    batch_values = getattr(args, "skills", None) or []
+    if isinstance(single_values, str):
+        single_values = [single_values]
+    if isinstance(batch_values, str):
+        batch_values = [batch_values]
+    raw_skills = [*single_values, *batch_values]
     skills = list(
         dict.fromkeys(
             token

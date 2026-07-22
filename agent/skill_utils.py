@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import (
+    CANONICAL_SHARED_SKILL_IDS,
     get_config_path,
     get_shared_skills_dir,
     get_skills_dir,
@@ -637,7 +638,7 @@ def resolve_skill(
             if legacy.name != "SKILL.md" and not is_skill_support_path(legacy):
                 record(root, None, legacy)
 
-    status = "missing" if not candidates else "resolved" if len(candidates) == 1 else "collision"
+    status = _skill_resolution_status(name, candidates)
     return SkillResolution(name, status, tuple(candidates))
 
 
@@ -702,9 +703,24 @@ def resolve_skills(
 
     result: Dict[str, SkillResolution] = {}
     for name, candidates in found.items():
-        status = "missing" if not candidates else "resolved" if len(candidates) == 1 else "collision"
+        status = _skill_resolution_status(name, candidates)
         result[name] = SkillResolution(name, status, tuple(candidates))
     return result
+
+
+def _skill_resolution_status(
+    identifier: str, candidates: list[SkillResolutionCandidate]
+) -> str:
+    if not candidates:
+        return "missing"
+    if len(candidates) != 1:
+        return "collision"
+    if (
+        identifier in CANONICAL_SHARED_SKILL_IDS
+        and candidates[0].source_kind != "shared_core"
+    ):
+        return "invalid_source"
+    return "resolved"
 
 
 def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
@@ -781,6 +797,34 @@ def skill_runtime_compatibility(
         "mode": active_mode,
         "load_policy": load_policy,
     }
+
+
+def required_preload_skill_ids(
+    identifiers: List[str],
+    *,
+    surface: str,
+    root_node_mode: bool = False,
+) -> List[str]:
+    """Return assigned skills whose resolved policy requires model loading."""
+
+    names = list(dict.fromkeys(str(item or "").strip() for item in identifiers))
+    names = [name for name in names if name]
+    resolutions = resolve_skills(names)
+    required: List[str] = []
+    for name in names:
+        resolution = resolutions[name]
+        compatibility = skill_runtime_compatibility(
+            resolution.candidate,
+            surface=surface,
+            root_node_mode=root_node_mode,
+        )
+        if (
+            resolution.status == "resolved"
+            and compatibility.get("compatible")
+            and compatibility.get("load_policy") == "required_preload"
+        ):
+            required.append(name)
+    return required
 
 
 def normalize_skill_lookup_name(identifier: str) -> str:

@@ -127,7 +127,14 @@ class GPTPersonaRuntime:
             progress_sink.emit("run.progress", _repo_context_progress_payload(repo_ctx))
         render_started = time.perf_counter()
         user_message = render_context(ctx)
-        system_message = build_system_prompt(persona, task_id=run.id)
+        system_message = build_system_prompt(
+            persona,
+            task_id=run.id,
+            root_node_mode=bool(
+                isinstance(getattr(ctx.task, "harness_self_heal", None), dict)
+                and ctx.task.harness_self_heal.get("root_node_mode")
+            ),
+        )
         timing: dict[str, int] = {}
         timing["prompt_render_ms"] = _emit_timing(progress_sink, "prompt_render", render_started, status="completed")
         provider_started = time.perf_counter()
@@ -1196,7 +1203,12 @@ def _finish_reason_from_result(result: dict | object) -> str | None:
     return None
 
 
-def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) -> str:
+def build_system_prompt(
+    persona: AgentPersona,
+    *,
+    task_id: str | None = None,
+    root_node_mode: bool = False,
+) -> str:
     role = role_from_persona(persona)
     compact_schema = json.dumps(DECISION_SCHEMA, separators=(",", ":"))
     try:
@@ -1215,6 +1227,27 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
     )
     if soul_overlay:
         parts.append(soul_overlay)
+    from agent.skill_commands import build_preloaded_skills_prompt
+    from agent.skill_utils import required_preload_skill_ids
+
+    required_skills = required_preload_skill_ids(
+        list(persona.skills),
+        surface="mission_worker",
+        root_node_mode=root_node_mode,
+    )
+    if required_skills:
+        required_prompt, loaded_required, missing_required = build_preloaded_skills_prompt(
+            required_skills,
+            task_id=task_id,
+            required_skill_names=set(required_skills),
+        )
+        if missing_required:
+            raise ValueError(
+                "Required skill preload failed: " + ", ".join(missing_required)
+            )
+        if set(loaded_required) != set(required_skills):
+            raise ValueError("Required skill preload receipt did not match policy")
+        parts.append(required_prompt)
     skill_guidance = _recommended_skill_guidance(list(persona.skills))
     if skill_guidance:
         parts.append(skill_guidance)
@@ -1257,16 +1290,14 @@ def build_system_prompt(persona: AgentPersona, *, task_id: str | None = None) ->
 def _load_persona_system_prompt(persona: AgentPersona, role) -> str:
     """Load the configured prompt when it is real, otherwise the bundled role prompt."""
 
-    raw = str(getattr(persona, "system_prompt_path", "") or "").strip()
-    if raw:
-        configured = Path(raw).expanduser()
-        candidates = [configured] if configured.is_absolute() else [Path(__file__).parent.parent / configured]
-        for candidate in candidates:
-            try:
-                if candidate.is_file():
-                    return candidate.read_text(encoding="utf-8").strip()
-            except OSError:
-                continue
+    from .prompt_sources import resolve_persona_system_prompt_path
+
+    configured = resolve_persona_system_prompt_path(persona)
+    if configured is not None:
+        try:
+            return configured.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
     return load_bundled_prompt(role)
 
 

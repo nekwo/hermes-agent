@@ -47,6 +47,49 @@ def test_harness_system_prompt_lists_recommended_skills_without_preloading_bodie
     assert "Loaded by Agent Runtime Harness persona skill manifest" not in prompt
 
 
+def test_configured_system_prompt_is_real_and_contract_section_is_generated(tmp_path):
+    configured = tmp_path / "custom-dev.md"
+    configured.write_text("# Custom Dev Identity\nStable invariant.\n", encoding="utf-8")
+
+    prompt = build_system_prompt(
+        _persona(system_prompt_path=str(configured), skills=[]),
+        task_id="run_custom_prompt",
+    )
+
+    assert "# Custom Dev Identity" in prompt
+    assert "# AgentDecision Payload Contracts" in prompt
+    assert "Registry contract_hash:" in prompt
+
+
+def test_root_node_required_policy_loads_mission_lead_body(
+    tmp_path, monkeypatch
+):
+    import agent.skill_utils as skill_utils
+    import tools.skills_tool as skills_tool
+
+    shared = tmp_path / "shared"
+    manifest = shared / "harness-mission-lead" / "SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        "---\nname: harness-mission-lead\nmetadata:\n  hermes:\n"
+        "    surfaces: [mission_worker]\n    modes: [root_node]\n"
+        "    load_policy: required_preload\n---\n# Required Lead Body\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [shared])
+    monkeypatch.setattr(skills_tool, "SKILLS_DIR", shared)
+
+    prompt = build_system_prompt(
+        _persona(skills=["harness-mission-lead"]),
+        task_id="run_root",
+        root_node_mode=True,
+    )
+
+    assert "Runtime policy requires" in prompt
+    assert "# Required Lead Body" in prompt
+
+
 def test_harness_personas_expose_mission_dev_and_qa_skills():
     personas = {persona.id: persona for persona in default_personas()}
 
@@ -146,6 +189,34 @@ def test_harness_skill_install_repairs_hash_mismatch(tmp_path, monkeypatch):
     assert repaired.ok is True
     assert repaired.changed is True
     assert harness_skill_hash_mismatches(["harness-runtime-model"], hermes_home=tmp_path) == []
+
+
+def test_harness_install_receipt_hashes_and_installs_the_complete_package(
+    tmp_path, monkeypatch
+):
+    from agent_runtime import skill_install
+
+    source_root = tmp_path / "source"
+    package = source_root / "package-skill"
+    (package / "references").mkdir(parents=True)
+    (package / "SKILL.md").write_text(
+        "---\nname: package-skill\n---\nbody\n", encoding="utf-8"
+    )
+    (package / "references" / "contract.md").write_text(
+        "contract\n", encoding="utf-8"
+    )
+    shared = tmp_path / "shared"
+    monkeypatch.setattr(skill_install, "HARNESS_SKILLS", frozenset({"package-skill"}))
+    monkeypatch.setattr(skill_install, "harness_skill_source_root", lambda: source_root)
+    monkeypatch.setattr(skill_install, "get_shared_skills_dir", lambda: shared)
+
+    receipt = skill_install.install_harness_skill("package-skill")
+
+    assert receipt.ok is True
+    assert receipt.source_hash == receipt.installed_hash
+    assert (shared / "package-skill" / "references" / "contract.md").read_text(
+        encoding="utf-8"
+    ) == "contract\n"
 
 
 def test_harness_skill_cli_defaults_to_persona_profiles(monkeypatch, capsys):

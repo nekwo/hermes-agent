@@ -5,7 +5,7 @@ metadata:
   hermes:
     surfaces: [mission_chat, mission_worker]
     modes: [standard]
-    load_policy: required
+    load_policy: recommended
 ---
 
 # Harness QA Verdict

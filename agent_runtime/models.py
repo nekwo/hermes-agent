@@ -573,21 +573,25 @@ def apply_instance_model_overrides(
 
     if instance is None:
         return persona
+    instance_model = getattr(instance, "model", None)
+    instance_provider = getattr(instance, "provider", None)
+    instance_api_mode = getattr(instance, "api_mode", None)
+    instance_skills = getattr(instance, "skill_overrides", None)
     if (
-        instance.model is None
-        and instance.provider is None
-        and instance.api_mode is None
-        and instance.skill_overrides is None
+        instance_model is None
+        and instance_provider is None
+        and instance_api_mode is None
+        and instance_skills is None
     ):
         return persona
     return replace(
         persona,
-        model=instance.model if instance.model is not None else persona.model,
-        provider=instance.provider if instance.provider is not None else persona.provider,
-        api_mode=instance.api_mode if instance.api_mode is not None else persona.api_mode,
+        model=instance_model if instance_model is not None else persona.model,
+        provider=instance_provider if instance_provider is not None else persona.provider,
+        api_mode=instance_api_mode if instance_api_mode is not None else persona.api_mode,
         skills=(
-            list(instance.skill_overrides)
-            if instance.skill_overrides is not None
+            list(instance_skills)
+            if instance_skills is not None
             else list(persona.skills)
         ),
     )

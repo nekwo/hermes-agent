@@ -499,6 +499,25 @@ def _skill_artifacts(realm: Realm) -> list[RealmSyncArtifact]:
             continue
         if selected_only and skill not in selection:
             continue
+        from agent.skill_utils import resolve_skill
+
+        resolution = resolve_skill(skill)
+        selected = resolution.candidate
+        if (
+            resolution.status != "resolved"
+            or selected is None
+            or selected.source_kind != "shared_core"
+        ):
+            raise RealmSyncError(
+                "skill_authority_conflict",
+                f"Skill cannot publish until shared authority resolves uniquely: {skill}",
+                safe_details={
+                    "skill": skill,
+                    "resolution_status": resolution.status,
+                    "candidate_count": len(resolution.candidates),
+                },
+            )
+        skill_dir = selected.skill_dir or selected.skill_md.parent
         safe_skill = _safe_token(skill)
         for source in sorted(skill_dir.rglob("*")):
             if not source.is_file():
@@ -699,8 +718,14 @@ def _persona_artifacts(persona: AgentPersona) -> list[RealmSyncArtifact]:
                 destination=config,
             )
         )
+    from .prompt_sources import resolve_persona_system_prompt_path
+
     for label, raw in (("system_prompt", persona.system_prompt_path), ("soul_overlay", persona.soul_overlay_path)):
-        path = _profile_relative_file(profile_home, raw)
+        path = (
+            resolve_persona_system_prompt_path(persona)
+            if label == "system_prompt"
+            else _profile_relative_file(profile_home, raw)
+        )
         if path is not None and path.exists():
             artifacts.append(
                 RealmSyncArtifact(

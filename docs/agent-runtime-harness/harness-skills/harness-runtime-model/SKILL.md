@@ -5,7 +5,7 @@ metadata:
   hermes:
     surfaces: [mission_chat, mission_worker]
     modes: [standard, root_node]
-    load_policy: recommended
+    load_policy: required_preload
 ---
 
 # Harness Runtime Model

@@ -324,6 +324,49 @@ def test_mission_chat_prompt_observability_defaults_mission_hud_to_empty():
     # No task bound → no HUD; the key is always present so the launcher parser
     # has a stable shape rather than a sometimes-missing field.
     assert context["mission_hud"] == {}
+    from agent_runtime.decision_contract_registry import contract_hash
+
+    assert context["prompt_contract_hash"] == contract_hash()
+    assert context["skill_manifest_hash"]
+
+
+def test_accessible_skill_receipt_preserves_instance_policy_and_load_state(
+    monkeypatch, tmp_path
+):
+    import agent.skill_utils as skill_utils
+    from agent_runtime import prompt_observability as po
+
+    shared = tmp_path / "shared"
+    manifest = shared / "instance-skill" / "SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        "---\nname: instance-skill\nmetadata:\n  hermes:\n"
+        "    surfaces: [mission_chat]\n    modes: [standard]\n"
+        "    load_policy: recommended\n---\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [shared])
+
+    rows = po._accessible_skills_context(
+        SimpleNamespace(id="dev", hermes_profile="dev", skills=["instance-skill"]),
+        "dev",
+        loaded_skill_names={"instance-skill"},
+        instance_override_names={"instance-skill"},
+    )
+
+    assert rows[0]["assignment_policy"] == "instance_override"
+    assert rows[0]["assignment_source"] == "persona_instance"
+    assert rows[0]["load_state"] == "loaded_this_turn"
+    assert rows[0]["hash_tracked"] is True
+
+
+def test_unresolved_used_skill_never_claims_hash_tracking():
+    from agent_runtime.prompt_observability import _resolved_skill_receipt
+
+    receipt = _resolved_skill_receipt("definitely-not-installed-skill")
+    assert receipt["hash_tracked"] is False
+    assert receipt["content_hash"] is None
 
 
 def test_snapshot_previews_the_mission_hud_for_a_bound_task(monkeypatch):

@@ -160,6 +160,9 @@ def test_enterprise_worker_session_tracks_tick_context_and_proof(isolate_agent_r
     assert worker.decision_count == 1
     assert worker.proof_count == 1
     assert worker.prompt_contract_hash
+    from agent_runtime.decision_contract_registry import contract_hash
+
+    assert worker.prompt_contract_hash == contract_hash()
     manifest = worker_context_manifest(task.id, "dev")
     assert "static_prompt_receipt.json" in manifest["files"]
 

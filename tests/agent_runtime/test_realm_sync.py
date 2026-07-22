@@ -86,13 +86,9 @@ def test_harness_runtime_model_is_hash_tracked():
 
 
 def test_publish_dry_run_is_allowlisted_and_excludes_state(isolate_agent_runtime_root, tmp_path):
-    home = get_hermes_home()
     skill = get_shared_skills_dir() / "demo-skill" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: demo-skill\n---\n# Demo\n", encoding="utf-8")
-    system_prompt = home / "personas" / "dev" / "system.md"
-    system_prompt.parent.mkdir(parents=True)
-    system_prompt.write_text("# Dev system\n", encoding="utf-8")
     (isolate_agent_runtime_root / "blueprints").mkdir(parents=True)
     (isolate_agent_runtime_root / "blueprints" / "already-git-tracked.yaml").write_text("id: bp\n", encoding="utf-8")
     (isolate_agent_runtime_root / "state.db").write_text("do not sync\n", encoding="utf-8")
@@ -108,7 +104,11 @@ def test_publish_dry_run_is_allowlisted_and_excludes_state(isolate_agent_runtime
     assert f"skills/demo-skill/SKILL.md" in paths
     assert any(path.startswith("store/workspaces/") for path in paths)
     assert f"store/realms/{realm.id}.json" in paths
-    assert "profiles/default/personas/dev/system_prompt/system.md" in paths
+    assert any(
+        path.startswith("profiles/")
+        and path.endswith("/personas/dev/system_prompt/dev.md")
+        for path in paths
+    )
     assert all("blueprint" not in path.lower() for path in paths)
     assert all("state.db" not in path.lower() for path in paths)
     assert all("\\" not in path for path in paths)
@@ -171,6 +171,25 @@ def test_publish_syncs_multi_file_skill_package(isolate_agent_runtime_root, tmp_
     assert "skills/multi-skill/scripts/run.py" in paths
     assert all("__pycache__" not in path for path in paths)
     assert all(".scratch_note" not in path for path in paths)
+
+
+def test_publish_refuses_duplicate_profile_skill_authority(
+    isolate_agent_runtime_root, tmp_path
+):
+    shared = get_shared_skills_dir() / "duplicate-skill" / "SKILL.md"
+    shared.parent.mkdir(parents=True)
+    shared.write_text("---\nname: duplicate-skill\n---\n# Shared\n", encoding="utf-8")
+    profile = get_hermes_home() / "skills" / "duplicate-skill" / "SKILL.md"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("---\nname: duplicate-skill\n---\n# Profile\n", encoding="utf-8")
+    realm, _repo = _realm_with_repo(tmp_path)
+
+    with pytest.raises(RealmSyncError) as exc:
+        publish_realm_sync(realm.id, dry_run=True)
+
+    assert exc.value.code == "skill_authority_conflict"
+    assert exc.value.safe_details["skill"] == "duplicate-skill"
+    assert exc.value.safe_details["resolution_status"] == "collision"
 
 
 def test_sync_destination_maps_nested_skill_and_blocks_traversal(isolate_agent_runtime_root):

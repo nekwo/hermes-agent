@@ -93,6 +93,35 @@ def test_profile_readiness_finds_nested_profile_skills_by_frontmatter_name(tmp_p
     assert readiness["missing_skills"] == []
 
 
+def test_readiness_receipt_reports_effective_hash_and_loadability(
+    tmp_path, monkeypatch
+):
+    import agent.skill_utils as skill_utils
+    from agent_runtime.profile_readiness import _resolve_skill_names
+
+    shared = tmp_path / "shared"
+    manifest = shared / "harness-runtime-model" / "SKILL.md"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text(
+        "---\nname: harness-runtime-model\nmetadata:\n  hermes:\n"
+        "    surfaces: [mission_chat]\n    modes: [standard]\n"
+        "    load_policy: required_preload\n---\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [shared])
+
+    row = _resolve_skill_names(["harness-runtime-model"])[0]
+
+    assert row["status"] == "resolved"
+    assert row["source_kind"] == "shared_core"
+    assert row["installed_hash"] == row["content_hash"]
+    assert row["expected_hash"]
+    assert isinstance(row["hash_matches_expected"], bool)
+    assert row["loadable"] is True
+    assert row["loadability"]["mission_chat"]["load_policy"] == "required_preload"
+
+
 def test_profile_readiness_reports_provider_auth_attention(monkeypatch):
     from hermes_cli.auth import AuthError
     from agent_runtime import profile_readiness

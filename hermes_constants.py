@@ -13,6 +13,22 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 
 
+# Versioned Harness packages are sourced from the repository but execute only
+# from the shared installation. Keeping the identifier set in this import-safe
+# module lets the resolver, installer, readiness, and sync lanes enforce the
+# same authority without introducing dependency cycles.
+CANONICAL_SHARED_SKILL_IDS = frozenset(
+    {
+        "harness-mission-lead",
+        "harness-dev-delivery",
+        "harness-continuity",
+        "harness-qa-verdict",
+        "harness-runtime-model",
+        "launcher-analyze-proof",
+    }
+)
+
+
 _profile_fallback_warned: bool = False
 _UNSET = object()
 _HERMES_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(

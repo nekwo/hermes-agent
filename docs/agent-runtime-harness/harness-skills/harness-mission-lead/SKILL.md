@@ -5,7 +5,7 @@ metadata:
   hermes:
     surfaces: [mission_worker]
     modes: [root_node]
-    load_policy: required
+    load_policy: required_preload
 ---
 
 # Harness Mission Lead
