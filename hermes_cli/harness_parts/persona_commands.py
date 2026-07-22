@@ -1913,12 +1913,19 @@ def _cmd_mission_chat_message(args) -> int:
     # record-at-injection, never a later re-derivation. Best-effort ({} / ''
     # when unavailable); never blocks the turn.
     from agent_runtime.runtime_hud import (
+        render_runtime_context_envelope,
         render_situational_hud_block,
+        runtime_context_delivery,
+        situational_hud_revision,
         situational_hud_for_instance,
     )
 
     situational_hud = situational_hud_for_instance(instance)
-    situational_hud_content = render_situational_hud_block(situational_hud)
+    situational_hud_revision_value = situational_hud_revision(situational_hud)
+    situational_hud_delivery = runtime_context_delivery(
+        native_history,
+        situational_hud_revision_value,
+    )
     prompt_context = mission_chat_prompt_observability(
         persona=persona,
         persona_instance_id=instance.id,
@@ -1935,6 +1942,8 @@ def _cmd_mission_chat_message(args) -> int:
         workspace_name=workspace_name,
         workspace_agents=workspace_agents,
         situational_hud=situational_hud,
+        situational_hud_revision=situational_hud_revision_value,
+        situational_hud_delivery=situational_hud_delivery,
         queued_skills=queued_skills,
         required_preload_skills=required_preload_skills,
         preloaded_skills_loaded=preloaded_skills_loaded,
@@ -1944,6 +1953,12 @@ def _cmd_mission_chat_message(args) -> int:
             if instance.skill_overrides is not None
             else None
         ),
+    )
+    situational_hud_content = render_runtime_context_envelope(
+        context_id=str(prompt_context["context_id"]),
+        revision=situational_hud_revision_value,
+        delivery=situational_hud_delivery,
+        situational_hud_content=render_situational_hud_block(situational_hud),
     )
     instance.skill_manifest_hash = safe_assignment_token(
         prompt_context.get("skill_manifest_hash")

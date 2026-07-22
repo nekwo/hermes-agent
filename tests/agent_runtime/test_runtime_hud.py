@@ -339,3 +339,61 @@ def test_mission_chat_user_message_is_bare_message_without_hud():
     assert _mission_chat_user_message("just this", "") == "just this"
     assert _mission_chat_user_message("just this", None) == "just this"
     assert _mission_chat_user_message("just this", "   ") == "just this"
+
+
+def test_runtime_context_revision_is_canonical_and_changes_with_snapshot():
+    from agent_runtime.runtime_hud import situational_hud_revision
+
+    left = {"scope": {"workspace": "alpha", "realm": "default"}, "preview": True}
+    reordered = {"preview": True, "scope": {"realm": "default", "workspace": "alpha"}}
+    changed = {"preview": True, "scope": {"realm": "default", "workspace": "beta"}}
+
+    assert situational_hud_revision(left) == situational_hud_revision(reordered)
+    assert situational_hud_revision(left) != situational_hud_revision(changed)
+    assert situational_hud_revision({}) == "hud_unavailable"
+
+
+def test_runtime_context_delivery_sends_snapshot_then_unchanged_and_recovers():
+    from agent_runtime.runtime_hud import (
+        render_runtime_context_envelope,
+        runtime_context_delivery,
+    )
+
+    revision = "hud_0123456789abcdef"
+    assert runtime_context_delivery([], revision) == "snapshot"
+    snapshot = render_runtime_context_envelope(
+        context_id="ctx_first",
+        revision=revision,
+        delivery="snapshot",
+        situational_hud_content="## Runtime Situation\n- Scope: alpha",
+    )
+    history = [{"role": "user", "content": f"hello\n\n{snapshot}"}]
+    assert runtime_context_delivery(history, revision) == "unchanged"
+    assert runtime_context_delivery(history, "hud_fedcba9876543210") == "snapshot"
+    # If compression no longer retains the matching full snapshot, re-anchor.
+    assert runtime_context_delivery([{"role": "assistant", "content": "summary"}], revision) == "snapshot"
+
+
+def test_runtime_context_envelope_is_compact_and_strips_only_at_final_boundary():
+    from agent_runtime.runtime_hud import (
+        extract_runtime_context_envelope,
+        render_runtime_context_envelope,
+    )
+
+    envelope = render_runtime_context_envelope(
+        context_id="ctx_second",
+        revision="hud_0123456789abcdef",
+        delivery="unchanged",
+        situational_hud_content=None,
+    )
+    clean, metadata = extract_runtime_context_envelope(f"what now?\n\n{envelope}")
+    assert clean == "what now?"
+    assert metadata == {
+        "context_id": "ctx_second",
+        "revision": "hud_0123456789abcdef",
+        "delivery": "unchanged",
+    }
+    assert "## Runtime Situation" not in envelope
+
+    authored = f"please discuss {envelope}\nthen continue"
+    assert extract_runtime_context_envelope(authored) == (authored, None)

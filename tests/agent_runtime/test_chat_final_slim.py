@@ -29,6 +29,8 @@ def _fat_row() -> dict:
         "model_selection": {"effective_model": "gpt-test", "effective_provider": "p"},
         "context_budget": {"assembled_tokens": 1234, "basis": "metered_first_call"},
         "situational_hud": {"runtime": {"scope": "x"}, "mission_hud": {"plan": []}},
+        "situational_hud_revision": "hud_0123456789abcdef",
+        "situational_hud_delivery": "snapshot",
         "used_skills": [{"name": "deep-audit", "kind": "skill", "status": "used"}],
         # Heavy payloads that must be projected out:
         "final_model_input": {"messages": [{"role": "system", "content": "x" * 5000}]},

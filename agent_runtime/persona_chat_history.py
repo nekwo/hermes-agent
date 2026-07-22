@@ -10,6 +10,7 @@ from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction_mode import redaction_observe_enabled
 from .relay_policy import parse_relay_sender_marker
+from .runtime_hud import extract_runtime_context_envelope
 from .transcript_order import (
     TURN_SEQ_CONTENT,
     TURN_SEQ_OPERATOR,
@@ -958,9 +959,11 @@ def _safe_recent_messages(
         )
         if role == "agent" and client_message_id:
             assistant_client_message_ids.add(client_message_id)
-        curated = _curate_chat_message_text(
-            role, raw.get("content") or raw.get("text")
-        )
+        raw_content = raw.get("content") or raw.get("text")
+        runtime_context = None
+        if role == "operator":
+            raw_content, runtime_context = extract_runtime_context_envelope(raw_content)
+        curated = _curate_chat_message_text(role, raw_content)
         if not curated:
             continue
         text, status = _safe_display_body_text(
@@ -985,6 +988,8 @@ def _safe_recent_messages(
             ),
             "redaction_status": status,
         }
+        if runtime_context is not None:
+            row["runtime_context"] = runtime_context
         # PRE-C8 RESIDUE PATH: acks stopped entering SessionDB with C8 (they
         # are a presentation-only `turn.ack` stream frame now), but rows
         # persisted before that still carry the finish_reason marker

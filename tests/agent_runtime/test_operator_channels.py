@@ -1610,6 +1610,32 @@ def test_conversation_history_message_true_operator_row_is_unchanged():
     assert "actor_display_name" not in message
 
 
+def test_conversation_history_message_carries_runtime_context_reference():
+    message = _conversation_history_message(
+        {
+            "id": "row-op",
+            "role": "operator",
+            "text": "ping",
+            "client_message_id": "cm-op",
+            "runtime_context": {
+                "context_id": "ctx_ping",
+                "revision": "hud_0123456789abcdef",
+                "delivery": "unchanged",
+            },
+        },
+        channel_id="qa::sess",
+        index=0,
+        persona_id="qa",
+        persona_instance_id="personainst_qa",
+    )
+    assert message["display_text"] == "ping"
+    assert message["runtime_context"] == {
+        "context_id": "ctx_ping",
+        "revision": "hud_0123456789abcdef",
+        "delivery": "unchanged",
+    }
+
+
 def test_operator_channel_summary_names_relayed_sender_from_full_roster():
     # display_names is built from the FULL roster, so a relay INTO qa's channel
     # can name neko even though neko is a different channel's owner.

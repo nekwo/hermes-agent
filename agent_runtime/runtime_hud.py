@@ -23,6 +23,9 @@ lane still carries runtime/scope/identity/roster, just no mission).
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from typing import Any, Iterable
 
 from .models import looks_like_persona_instance_id
@@ -30,6 +33,105 @@ from .models import looks_like_persona_instance_id
 # Bound the roster so a large level cannot bloat every chat turn. The operator's
 # widget wraps chips; the fed block lists names and notes the overflow count.
 SITUATIONAL_HUD_ROSTER_CAP = 16
+
+RUNTIME_CONTEXT_DELIVERY_SNAPSHOT = "snapshot"
+RUNTIME_CONTEXT_DELIVERY_UNCHANGED = "unchanged"
+RUNTIME_CONTEXT_DELIVERY_UNAVAILABLE = "unavailable"
+_RUNTIME_CONTEXT_ENVELOPE_RE = re.compile(
+    r'(?:\n\n)?<runtime_context context_id="(?P<context_id>ctx_[a-zA-Z0-9_-]+)" '
+    r'revision="(?P<revision>hud_[a-f0-9]+|hud_unavailable)" '
+    r'delivery="(?P<delivery>snapshot|unchanged|unavailable)">\n'
+    r'(?P<body>.*?)\n</runtime_context>\s*\Z',
+    re.DOTALL,
+)
+
+
+def situational_hud_revision(hud: dict[str, Any] | None) -> str:
+    """Return a stable revision for the exact runtime snapshot fed this turn."""
+
+    if not isinstance(hud, dict) or not hud:
+        return "hud_unavailable"
+    canonical = json.dumps(
+        hud,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8", errors="replace")
+    return "hud_" + hashlib.sha256(canonical).hexdigest()[:16]
+
+
+def extract_runtime_context_envelope(
+    content: Any,
+) -> tuple[str, dict[str, str] | None]:
+    """Strip only our final, well-formed runtime envelope from a user row.
+
+    Anchoring at the end is intentional: operator-authored text which happens to
+    mention the tag remains ordinary transcript content.
+    """
+
+    text = content if isinstance(content, str) else str(content or "")
+    match = _RUNTIME_CONTEXT_ENVELOPE_RE.search(text)
+    if match is None:
+        return text, None
+    return text[: match.start()].rstrip(), {
+        "context_id": match.group("context_id"),
+        "revision": match.group("revision"),
+        "delivery": match.group("delivery"),
+    }
+
+
+def runtime_context_delivery(
+    native_history: Iterable[dict[str, Any]] | None,
+    revision: str,
+) -> str:
+    """Choose snapshot vs delta without relying on resident-process memory.
+
+    A full snapshot is resent when no matching snapshot remains in the effective
+    native lineage. That makes cold resume and post-compression recovery safe.
+    """
+
+    if revision == "hud_unavailable":
+        return RUNTIME_CONTEXT_DELIVERY_UNAVAILABLE
+    for row in reversed(list(native_history or ())):
+        if not isinstance(row, dict) or str(row.get("role") or "").lower() != "user":
+            continue
+        _, metadata = extract_runtime_context_envelope(row.get("content"))
+        if (
+            metadata is not None
+            and metadata.get("revision") == revision
+            and metadata.get("delivery") == RUNTIME_CONTEXT_DELIVERY_SNAPSHOT
+        ):
+            return RUNTIME_CONTEXT_DELIVERY_UNCHANGED
+    return RUNTIME_CONTEXT_DELIVERY_SNAPSHOT
+
+
+def render_runtime_context_envelope(
+    *,
+    context_id: str,
+    revision: str,
+    delivery: str,
+    situational_hud_content: str | None,
+) -> str:
+    """Render the compact per-turn envelope appended to the operator message."""
+
+    if delivery == RUNTIME_CONTEXT_DELIVERY_SNAPSHOT:
+        body = (situational_hud_content or "").strip()
+        if not body:
+            delivery = RUNTIME_CONTEXT_DELIVERY_UNAVAILABLE
+            revision = "hud_unavailable"
+    elif delivery == RUNTIME_CONTEXT_DELIVERY_UNCHANGED:
+        body = (
+            "Runtime Situation unchanged from the most recent full snapshot "
+            f"for revision {revision}."
+        )
+    else:
+        delivery = RUNTIME_CONTEXT_DELIVERY_UNAVAILABLE
+        revision = "hud_unavailable"
+        body = "Runtime Situation unavailable for this turn."
+    return (
+        f'<runtime_context context_id="{context_id}" revision="{revision}" '
+        f'delivery="{delivery}">\n{body}\n</runtime_context>'
+    )
 
 def _clean(value: Any) -> bool:
     """True when a value carries information worth emitting."""

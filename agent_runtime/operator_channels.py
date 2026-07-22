@@ -843,6 +843,13 @@ def _conversation_history_message(
         "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
         "refs": {"source": "persona_chat_history"},
     }
+    runtime_context = row.get("runtime_context")
+    if role == "operator" and isinstance(runtime_context, dict):
+        message["runtime_context"] = {
+            key: value
+            for key in ("context_id", "revision", "delivery")
+            if (value := safe_assignment_text(runtime_context.get(key), limit=200))
+        }
     # Name the sending agent ONLY when its instance id resolves in the roster —
     # never fabricate a name for an instance we cannot see.
     if is_relayed_message and relay_sender_instance_id:

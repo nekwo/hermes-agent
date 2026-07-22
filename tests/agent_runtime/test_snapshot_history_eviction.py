@@ -332,6 +332,32 @@ def test_persona_chat_history_fetch_returns_tail():
     assert [m["role"] for m in data["messages"]] == ["operator", "agent"]
 
 
+def test_persona_chat_history_hides_runtime_envelope_but_keeps_turn_reference():
+    from agent_runtime.persona_chat_history import persona_chat_session_messages
+    from agent_runtime.runtime_hud import render_runtime_context_envelope
+
+    envelope = render_runtime_context_envelope(
+        context_id="ctx_history",
+        revision="hud_0123456789abcdef",
+        delivery="snapshot",
+        situational_hud_content="## Runtime Situation\n- Scope: default",
+    )
+
+    class FakeSessionDB:
+        def get_messages(self, session_id, include_inactive=False):
+            return [{"id": "m1", "role": "user", "content": f"hi\n\n{envelope}"}]
+
+    data = persona_chat_session_messages(
+        session_id="persona_chat_x", limit=40, session_db=FakeSessionDB()
+    )
+    assert data["messages"][0]["text"] == "hi"
+    assert data["messages"][0]["runtime_context"] == {
+        "context_id": "ctx_history",
+        "revision": "hud_0123456789abcdef",
+        "delivery": "snapshot",
+    }
+
+
 def test_persona_chat_history_fetch_empty_without_sessiondb():
     from agent_runtime.persona_chat_history import persona_chat_session_messages
 

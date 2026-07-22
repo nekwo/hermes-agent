@@ -122,6 +122,8 @@ def mission_chat_prompt_observability(
     workspace_agents: WorkspaceAgentsContext | None = None,
     mission_hud: dict[str, Any] | None = None,
     situational_hud: dict[str, Any] | None = None,
+    situational_hud_revision: str | None = None,
+    situational_hud_delivery: str | None = None,
     queued_skills: Iterable[str] | None = None,
     required_preload_skills: Iterable[str] | None = None,
     preloaded_skills_loaded: Iterable[str] | None = None,
@@ -263,6 +265,8 @@ def mission_chat_prompt_observability(
         # and agent share one view. Empty until threaded (snapshot path); the
         # chat lane feeds the same projection into the model. See runtime_hud.py.
         "situational_hud": situational_hud if isinstance(situational_hud, dict) else {},
+        "situational_hud_revision": safe_assignment_token(situational_hud_revision),
+        "situational_hud_delivery": safe_assignment_token(situational_hud_delivery),
         "workspace_id": safe_assignment_token(workspace_id),
         "workspace_name": safe_assignment_text(workspace_name, limit=120),
         "turn_id": safe_assignment_token(turn_id),
@@ -497,6 +501,8 @@ CHAT_FINAL_OBSERVABILITY_FIELDS: tuple[str, ...] = (
     "model_selection",
     "context_budget",
     "situational_hud",
+    "situational_hud_revision",
+    "situational_hud_delivery",
     "used_skills",
 )
 
