@@ -276,6 +276,53 @@ def test_history_row_normalizes_iso_and_drops_garbage_timestamps():
     assert rows[0]["updated_at"] is None
 
 
+def test_history_uses_persisted_instance_binding_and_creation_order():
+    instance_id = "personainst_neko_supervisor_agent_f6f7a51b"
+    older_session = f"persona_chat_{instance_id}_111111111111"
+    newer_session = f"persona_chat_{instance_id}_222222222222"
+    db = FakeHistorySessionDB(
+        [
+            {
+                "id": older_session,
+                "source": "agent_runtime_persona_chat",
+                "title": "Older but recently active",
+                "started_at": "2026-07-22T04:16:30Z",
+                "last_active": "2026-07-22T10:00:00Z",
+                "model_config": json.dumps({"persona_instance_id": instance_id}),
+            },
+            {
+                "id": newer_session,
+                "source": "agent_runtime_persona_chat",
+                "title": "Newest conversation",
+                "started_at": "2026-07-22T05:49:48Z",
+                "last_active": "2026-07-22T05:49:48Z",
+                # The real Mission Control session carries the complete persona
+                # prompt, not the old short identity marker. The persisted
+                # instance binding is therefore the authoritative join.
+                "system_prompt": "Full persona prompt without legacy marker",
+                "model_config": json.dumps({"persona_instance_id": instance_id}),
+            },
+        ]
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=[
+            _chat_persona_instance(
+                instance_id,
+                "neko_supervisor",
+                older_session,
+            )
+        ],
+        session_db=db,
+        limit=1,
+    )
+
+    assert [row["session_id"] for row in rows] == [newer_session]
+    assert rows[0]["persona_id"] == "neko_supervisor"
+    assert rows[0]["persona_instance_id"] == instance_id
+    assert rows[0]["created_at"] == "2026-07-22T05:49:48.000000Z"
+
+
 def test_persona_chat_history_rows_always_emit_kind():
     db = FakeHistorySessionDB(
         [

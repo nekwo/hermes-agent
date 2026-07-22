@@ -78,8 +78,12 @@ def persona_chat_history_summary(
     """
 
     bound_by_session: dict[str, PersonaInstance] = {}
+    instances_by_id: dict[str, PersonaInstance] = {}
     instances_by_persona: dict[str, PersonaInstance] = {}
     for instance in persona_instances:
+        instance_id = safe_assignment_text(getattr(instance, "id", None), limit=160)
+        if instance_id:
+            instances_by_id[instance_id] = instance
         persona_id = _canonical_persona_id(getattr(instance, "persona_id", None))
         if persona_id:
             instances_by_persona[persona_id] = instance
@@ -134,9 +138,16 @@ def persona_chat_history_summary(
             continue
         if accountant is not None:
             accountant.consider(1)
+        persisted_instance_id = _persisted_persona_instance_id(raw)
         inferred_persona = _infer_persona_id(raw, session_id=session_id)
-        instance = bound_by_session.get(session_id) or (
-            instances_by_persona.get(inferred_persona) if is_source_chat and inferred_persona else None
+        instance = (
+            bound_by_session.get(session_id)
+            or instances_by_id.get(persisted_instance_id or "")
+            or (
+                instances_by_persona.get(inferred_persona)
+                if is_source_chat and inferred_persona
+                else None
+            )
         )
         if instance is None:
             if accountant is not None:
@@ -148,12 +159,6 @@ def persona_chat_history_summary(
         row = _history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail)
         rows.append(row)
         seen.add(session_id)
-        if accountant is not None:
-            accountant.include(1)
-        if len(rows) >= limit:
-            if accountant is not None:
-                accountant.mark_truncated()
-            break
 
     # Create/open paths now persist persona chat sessions before exposing them.
     # If the active instance still points at a session that SessionDB no longer
@@ -173,9 +178,6 @@ def persona_chat_history_summary(
         seen.add(session_id)
         if accountant is not None:
             accountant.consider(1)
-            accountant.include(1)
-        if len(rows) >= limit:
-            break
 
     # Live mission sessions. A task-bound instance runs its mission turns in a
     # session that lives in the run/event stream, not the operator SessionDB, so
@@ -228,11 +230,22 @@ def persona_chat_history_summary(
         seen.add(session_id)
         if accountant is not None:
             accountant.consider(1)
-            accountant.include(1)
-        if len(rows) >= limit:
-            break
 
-    return rows
+    # The directory contract is creation order, not activity order. Opening or
+    # continuing an older chat may advance ``updated_at`` but must never move it
+    # above a conversation created later. Resolve every eligible row first, then
+    # sort and truncate so an active old chat cannot crowd a newer chat out of
+    # the bounded projection. Session id is the deterministic tie-breaker for
+    # legacy rows whose creation timestamp is missing.
+    rows.sort(key=_persona_chat_creation_sort_key, reverse=True)
+    visible = rows[: max(0, limit)]
+    if accountant is not None:
+        accountant.include(len(visible))
+        omitted = len(rows) - len(visible)
+        if omitted > 0:
+            accountant.drop("limit", count=omitted)
+            accountant.mark_truncated()
+    return visible
 
 
 def persona_chat_session_messages(
@@ -515,7 +528,9 @@ def _list_sessions(
                 limit=limit,
                 include_children=include_children,
                 min_message_count=0,
-                order_by_last_active=True,
+                # Chat History is a conversation directory, not an inbox.
+                # Creation order is immutable; activity must not reshuffle it.
+                order_by_last_active=False,
                 include_archived=True,
             )
             or []
@@ -800,6 +815,31 @@ def _model_config(value: Any) -> dict[str, Any]:
         if isinstance(decoded, dict):
             return decoded
     return {}
+
+
+def _persisted_persona_instance_id(raw: dict[str, Any]) -> str | None:
+    """Read the session's authoritative owning instance binding.
+
+    Modern Mission Control sessions persist this in ``model_config``. It must
+    outrank persona inference from a display prompt or session-id shape: prompts
+    legitimately contain the complete persona system prompt, and placement ids
+    such as ``personainst_neko_supervisor_agent_f6f7a51b`` are intentionally not
+    reducible to a bare persona id without the instance registry.
+    """
+
+    return safe_assignment_text(
+        _model_config(raw.get("model_config")).get("persona_instance_id"),
+        limit=160,
+    )
+
+
+def _persona_chat_creation_sort_key(row: dict[str, Any]) -> tuple[bool, str, str]:
+    created_at = _iso_timestamp(row.get("created_at"))
+    return (
+        created_at is not None,
+        created_at or "",
+        safe_assignment_text(row.get("session_id"), limit=200),
+    )
 
 
 def _token_usage_fields(raw: dict[str, Any]) -> dict[str, int]:
