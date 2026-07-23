@@ -223,14 +223,17 @@ def mission_chat_prompt_observability(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    # T8 per-item in-prompt attribution — the parts reachable at THIS pre-turn
-    # seam (T5 made the surface-message parts explicit). The persona-identity
-    # layer counts the identity+rules TEMPLATE only (soul/memory ride file rows);
+    # Per-item in-prompt attribution — the parts reachable at THIS pre-turn
+    # seam. Runtime identity and operator-channel rules are separate typed
+    # layers; soul/memory continue to ride their provenance file rows so token
+    # accounting has one owner and never double-counts.
     # SOUL.md / workspace-AGENTS.md rows get their pasted-part chars; config.yaml
     # gets a deliberate 0. .skills_prompt_snapshot.json is attached post-turn.
-    persona_template_chars = _mission_chat_template_prompt_chars(persona)
+    runtime_identity_chars = _mission_chat_identity_prompt_chars(persona)
+    operator_rules_chars = _mission_chat_operative_rules_chars()
     soul_prompt_chars = _soul_overlay_prompt_chars(persona)
     workspace_prompt_chars = _workspace_agents_prompt_chars(workspace_agents)
+    memory_loaded = _mission_chat_memory_loaded(persona)
     context_files: list[dict[str, Any]] = [
         *_profile_context_files(profile),
         *([workspace_agents.receipt] if workspace_agents is not None else []),
@@ -239,14 +242,18 @@ def mission_chat_prompt_observability(
         context_files,
         soul_chars=soul_prompt_chars,
         workspace_chars=workspace_prompt_chars,
+        memory_loaded=memory_loaded,
     )
+    soul_row = next((row for row in context_files if row.get("name") == "SOUL.md"), None)
+    soul_loaded = soul_prompt_chars is not None
+    display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id
     return {
         "context_id": context_id,
         "prompt_mode": prompt_mode,
         "persona_id": persona_id,
         "persona_instance_id": safe_assignment_token(persona_instance_id),
         "profile": profile,
-        "display_name": safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id,
+        "display_name": display_name,
         "role": safe_assignment_token(getattr(persona, "role", None)) or "agent",
         "session_id": safe_assignment_text(session_id, limit=200),
         "chat_id": chat.get("id"),
@@ -273,68 +280,90 @@ def mission_chat_prompt_observability(
         "surface_prompt": surface,
         "surface_prompt_is_blank": surface == "",
         "limiting_wrapper_active": bool(limiting_wrapper_active),
+        "prompt_stack_schema_version": 2,
         "prompt_layers": [
-            {
-                "name": "Persona identity",
-                "kind": "persona_identity",
-                "status": "loaded",
-                "summary": (
-                    "First-person 'you are "
-                    + (safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id)
-                    + "' identity block. The persona's OWN configured soul overlay "
-                    "(config soul_overlay_path, resolved in its profile home) IS "
-                    "loaded since hermes deafb825e; the OPERATOR profile's SOUL is "
-                    "not. Names the persona and forbids self-relay. The per-layer "
-                    "estimate counts the identity + operative-rules TEMPLATE only; "
-                    "the soul overlay and any profile memory are attributed to "
-                    "their own SOUL.md / MEMORY.md / USER.md rows so nothing is "
-                    "double-counted (T8, 2026-07-18)."
-                ),
-                # T8: the identity + operative-rules TEMPLATE is measurable at the
-                # T5 surface-message seam, so this layer now carries its own
-                # per-layer estimate (template only). system_core text is still
-                # assembled later in the turn and folds into the residual; the
-                # soul overlay / memory ride their file rows (never double-counted
-                # — the launcher sums this non-mirror layer AND those file rows).
-                **(
-                    {
-                        "chars": persona_template_chars,
-                        "token_estimate": persona_template_chars // 4,
-                    }
-                    if persona_template_chars is not None
-                    else {}
-                ),
-            },
             {
                 "name": "Hermes core prompt",
                 "kind": "system_core",
                 "status": "loaded_by_profile_runner",
-                "summary": "Normal Hermes profile chat system stack.",
+                "summary": "Universal Hermes identity fallback, tool guidance, skills index, environment guidance, and model/session metadata.",
+                "owner": "hermes",
+                "group": "hermes_core",
+                "order": 10,
+                "injection_location": "system_stable",
+                "included": True,
+                "token_attribution": "residual",
             },
             {
-                "name": "Mission Control surface prompt",
-                "kind": "surface",
-                "status": "blank" if surface == "" else "configured",
-                "summary": "Blank by default; no limiting wrapper is applied.",
-                "preview": surface[:SAFE_PREVIEW_LIMIT],
-                **_layer_text_size(surface),
-            },
-            {
-                "name": "Profile memory",
-                "kind": "profile_context",
-                "status": "loaded" if _mission_chat_memory_loaded(persona) else "skipped",
-                "summary": (
-                    "Profile MEMORY.md / USER.md loaded (persona opts in via include_profile_memory)."
-                    if _mission_chat_memory_loaded(persona)
-                    else "Profile memory skipped; this persona does not opt into its bound profile's memory."
+                "name": "Runtime identity",
+                "kind": "runtime_identity",
+                "status": "loaded",
+                "summary": f"Identifies this channel as {display_name}, names its Mission Control persona id, and prevents self-relay.",
+                "owner": "mission_control",
+                "group": "mission_control_persona",
+                "order": 20,
+                "injection_location": "system_context",
+                "included": True,
+                "token_attribution": "direct",
+                **(
+                    {
+                        "chars": runtime_identity_chars,
+                        "token_estimate": runtime_identity_chars // 4,
+                    }
+                    if runtime_identity_chars is not None
+                    else {}
                 ),
-                # Its bytes are attributed via the MEMORY.md / USER.md context-file
-                # rows; no per-layer estimate here so the launcher never double-counts.
+            },
+            {
+                "name": "Profile SOUL",
+                "kind": "profile_soul",
+                "status": "loaded" if soul_loaded else "not_configured",
+                "summary": (
+                    f"Durable identity and voice from the {profile} Hermes profile."
+                    if soul_loaded
+                    else f"No SOUL overlay resolved for the {profile} Hermes profile."
+                ),
+                "owner": "profile",
+                "group": "mission_control_persona",
+                "order": 30,
+                "injection_location": "system_context",
+                "included": soul_loaded,
+                "token_attribution": "context_file",
+                "source_context_file": "SOUL.md",
+                **(
+                    {
+                        "source_path": soul_row.get("path"),
+                        "source_sha256": soul_row.get("sha256"),
+                        "source_prompt_token_estimate": soul_prompt_chars // 4,
+                    }
+                    if soul_loaded and isinstance(soul_row, dict)
+                    else {}
+                ),
+            },
+            {
+                "name": "Operator-channel rules",
+                "kind": "operator_channel_rules",
+                "status": "loaded",
+                "summary": "Mission Control behavior for real tool use, permissions, clarification, goals, agent threads, and anti-fabrication.",
+                "owner": "mission_control",
+                "group": "mission_control_persona",
+                "order": 40,
+                "injection_location": "system_context",
+                "included": True,
+                "token_attribution": "direct",
+                **(
+                    {
+                        "chars": operator_rules_chars,
+                        "token_estimate": operator_rules_chars // 4,
+                    }
+                    if operator_rules_chars is not None
+                    else {}
+                ),
             },
             *(
                 [
                     {
-                        "name": "Workspace AGENTS.md",
+                        "name": "Workspace instructions",
                         "kind": "workspace_context",
                         "status": workspace_agents.receipt.get("status", "unknown"),
                         "summary": (
@@ -342,35 +371,83 @@ def mission_chat_prompt_observability(
                             if workspace_agents.content is not None
                             else "Workspace instructions were not injected; see the file receipt."
                         ),
+                        "owner": "workspace",
+                        "group": "session_context",
+                        "order": 50,
+                        "injection_location": "system_context",
+                        "included": workspace_agents.content is not None,
+                        "token_attribution": "context_file",
+                        "source_context_file": "AGENTS.md",
                         # Its bytes are attributed via the AGENTS.md context-file
-                        # row (which carries the token_estimate), so this layer
-                        # deliberately carries no per-layer estimate — no double count.
+                        # row, so this layer deliberately carries no estimate.
                     }
                 ]
                 if workspace_agents is not None
                 else []
             ),
             {
+                "name": "Session surface override",
+                "kind": "surface",
+                "status": "blank" if surface == "" else "configured",
+                "summary": (
+                    "No per-session override is configured; the standard persona and channel rules apply."
+                    if surface == ""
+                    else "Additional session-specific instructions supplied by the Mission Control surface."
+                ),
+                "owner": "mission_control",
+                "group": "session_context",
+                "order": 60,
+                "injection_location": "system_context",
+                "included": surface != "",
+                "token_attribution": "direct",
+                "preview": surface[:SAFE_PREVIEW_LIMIT],
+                **_layer_text_size(surface),
+            },
+            {
+                "name": "Profile memory",
+                "kind": "profile_context",
+                "status": "loaded" if memory_loaded else "skipped",
+                "summary": (
+                    "Profile MEMORY.md / USER.md loaded (persona opts in via include_profile_memory)."
+                    if memory_loaded
+                    else "Profile memory skipped; this persona does not opt into its bound profile's memory."
+                ),
+                "owner": "profile",
+                "group": "profile_context",
+                "order": 70,
+                "injection_location": "system_volatile",
+                "included": memory_loaded,
+                "token_attribution": "context_file",
+                # Its bytes are attributed via the MEMORY.md / USER.md context-file
+                # rows; no per-layer estimate here so the launcher never double-counts.
+            },
+            {
                 "name": "Chat history context",
                 "kind": "conversation",
                 "status": "loaded" if history else "empty",
                 "summary": f"{len(history)} prior redaction-safe chat message(s) supplied before this turn.",
+                "owner": "conversation",
+                "group": "runtime_context",
+                "order": 80,
+                "injection_location": "conversation_history",
+                "included": bool(history),
+                "token_attribution": "history_rows",
             },
             {
                 "name": "Runtime Situation HUD",
                 "kind": "situational_hud",
                 "status": "loaded" if (isinstance(situational_hud, dict) and situational_hud) else "empty",
                 "summary": (
-                    "Runtime situational HUD (runtime · scope · mission · lane · "
-                    "roster) injected as per-turn context on the operator's user "
-                    "turn — NOT the system prompt. Its roster/scope/mission state "
-                    "rotates every turn, so keeping it out of the codex "
-                    "instructions preserves the byte-stable cross-turn "
-                    "prompt-cache prefix (T5, 2026-07-18)."
+                    "Live runtime, scope, mission, lane, and roster state added to the operator's user turn."
                     if (isinstance(situational_hud, dict) and situational_hud)
-                    else "No runtime situational HUD resolved for this lane this "
-                    "turn; nothing injected."
+                    else "No runtime situation resolved for this turn."
                 ),
+                "owner": "mission_control",
+                "group": "runtime_context",
+                "order": 90,
+                "injection_location": "user_turn",
+                "included": bool(isinstance(situational_hud, dict) and situational_hud),
+                "token_attribution": "final_model_input",
                 # Its bytes ride in the operator user-turn message
                 # (``final_model_input`` messages), so this layer carries no
                 # per-layer token estimate — the launcher already counts them via
@@ -407,10 +484,12 @@ def mission_chat_prompt_observability(
         "prompt_flags": {
             "skip_context_files": not bool(getattr(persona, "include_core_context_files", False)),
             "skip_memory": not _mission_chat_memory_loaded(persona),
-            # The isolated chat lane runs with skip_context_files=True and never
-            # sets load_soul_identity, so the profile SOUL is NOT the identity —
-            # the first-person persona-identity layer is. Report that honestly.
+            # Legacy profile-runner flag: this lane does not ask Hermes core to
+            # substitute SOUL as its base identity. The independently assembled
+            # profile_soul layer below is the authoritative overlay signal.
             "load_soul_identity": False,
+            "soul_overlay_loaded": soul_loaded,
+            "profile_memory_loaded": memory_loaded,
             "surface_prompt_blank": surface == "",
             "limiting_wrapper_active": bool(limiting_wrapper_active),
             "workspace_agents_injected": bool(
@@ -2551,7 +2630,7 @@ def _layer_text_size(text: str | None) -> dict[str, int]:
     """``{chars, token_estimate}`` for a prompt-layer's actual text.
 
     Returns an EMPTY dict when the layer's text is not available at this seam
-    (e.g. the persona-identity / Hermes-core blocks are assembled later in the
+    (e.g. the Hermes-core block is assembled later in the
     turn) — the launcher then attributes those layers to the residual instead of
     inventing a number. A present-but-empty layer (a blank surface prompt) is a
     real ``0``, distinct from absent.
@@ -2624,14 +2703,15 @@ def _workspace_agents_prompt_chars(
 
 
 def _mission_chat_template_prompt_chars(persona: Any) -> int | None:
-    """Chars of the persona-identity + operative-rules TEMPLATE fed into the
+    """Compatibility helper for runtime-identity + operative-rules characters.
+
+    Returns the combined size of those two independently reported layers,
+    excluding the profile SOUL and memory context-file rows. Retained for
+    callers that predate prompt-stack schema v2.
+
+    The two blocks are fed into the
     surface message (the codex ``instructions``), EXCLUDING the soul overlay and
-    any profile memory — those ride their own file rows. This is the
-    ``persona_identity`` prompt layer's own contribution: the launcher resolver
-    sums it as a non-mirror layer, so it MUST be template-only or it would
-    double-count the SOUL.md / MEMORY.md / USER.md rows. Reachable because T5
-    made the surface-message parts explicit. ``None`` on any failure (the layer
-    then folds into the residual, as before)."""
+    any profile memory — those ride their own file rows. ``None`` on failure."""
 
     try:
         from .persona_runtime import (
@@ -2646,19 +2726,42 @@ def _mission_chat_template_prompt_chars(persona: Any) -> int | None:
         return None
 
 
+def _mission_chat_identity_prompt_chars(persona: Any) -> int | None:
+    """Exact chars of the generated Mission Control runtime-identity block."""
+
+    try:
+        from .persona_runtime import _mission_chat_identity_prompt
+
+        return len(_mission_chat_identity_prompt(persona))
+    except Exception:
+        return None
+
+
+def _mission_chat_operative_rules_chars() -> int | None:
+    """Exact chars of the stable Mission Control operator-channel rules."""
+
+    try:
+        from .persona_runtime import _mission_chat_operative_rules
+
+        return len(_mission_chat_operative_rules())
+    except Exception:
+        return None
+
+
 def _attach_context_file_prompt_contributions(
     context_files: list[dict[str, Any]],
     *,
     soul_chars: int | None,
     workspace_chars: int | None,
+    memory_loaded: bool = False,
 ) -> None:
     """Attach the per-file in-prompt contribution to the rows reachable at this
     PRE-turn seam: SOUL.md (soul overlay), the workspace AGENTS.md row (workspace
     part), and config.yaml (a deliberate 0 — consumed as configuration, never
-    pasted). MEMORY.md / USER.md are left untouched: their in-prompt text is
-    rendered later through the memory tool's dedup/sanitize pipeline and is not
-    reproducible here, so the launcher keeps their loaded-file chip rather than a
-    guess. ``.skills_prompt_snapshot.json`` is attached POST-turn (it needs the
+    pasted). MEMORY.md / USER.md receive an inclusion status here, while their
+    token estimate remains the loaded-file estimate because the later memory
+    dedup/sanitize pipeline is not reproducible at this seam.
+    ``.skills_prompt_snapshot.json`` is attached POST-turn (it needs the
     constructed agent's resolved tool set — see
     ``attach_prompt_observability_turn_results``)."""
 
@@ -2667,12 +2770,24 @@ def _attach_context_file_prompt_contributions(
             continue
         if row.get("kind") == "workspace_context":
             _set_row_prompt_contribution(row, workspace_chars)
+            row["prompt_included"] = workspace_chars is not None
+            row["prompt_status"] = "injected" if workspace_chars is not None else "not_injected"
             continue
         name = row.get("name")
         if name == "SOUL.md":
             _set_row_prompt_contribution(row, soul_chars)
+            row["prompt_included"] = soul_chars is not None
+            row["prompt_status"] = "injected" if soul_chars is not None else "not_injected"
+        elif name in {"MEMORY.md", "USER.md"}:
+            has_content = bool(row.get("included")) and int(row.get("bytes") or 0) > 0
+            row["prompt_included"] = bool(memory_loaded and has_content)
+            row["prompt_status"] = (
+                "injected" if memory_loaded and has_content else "empty" if memory_loaded else "skipped"
+            )
         elif name == "config.yaml":
             _set_row_prompt_contribution(row, 0)
+            row["prompt_included"] = False
+            row["prompt_status"] = "observed_only"
 
 
 def _attach_skills_prompt_contribution(
@@ -2695,6 +2810,8 @@ def _attach_skills_prompt_contribution(
     for row in files:
         if isinstance(row, dict) and row.get("name") == ".skills_prompt_snapshot.json":
             _set_row_prompt_contribution(row, chars)
+            row["prompt_included"] = chars > 0
+            row["prompt_status"] = "injected" if chars > 0 else "empty"
             break
 
 

@@ -566,18 +566,9 @@ def _mission_chat_operative_rules() -> str:
 def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
     """First-person identity block for the canonical Mission Control chat lane.
 
-    The mission-chat lane deliberately runs isolated (``skip_context_files``),
-    so the bound profile's SOUL.md is NOT loaded as the stable-tier identity —
-    the model falls back to the generic ``DEFAULT_AGENT_IDENTITY`` and, without
-    this block, never learns *which* persona it is. That was the root cause of
-    the "Neko messages itself" incident: a persona bound to a supervisor
-    profile (Alice) inherited that profile's "Neko is a separate agent I brief"
-    memory model with no counter-vailing "you ARE Neko" hat, and relayed the
-    operator's question to its own persona id via ``agent_chat_send``.
-
-    This asserts the persona's own identity first, names the persona id so the
-    model can recognize a self-directed relay, and states plainly that the
-    persona is already the one speaking in this channel."""
+    This runtime-owned envelope names the selected Mission Control persona and
+    makes self-relay impossible. It is distinct from the profile-owned SOUL
+    overlay, which is resolved and inserted immediately after this block."""
 
     display = str(getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")).strip()
     persona_id = str(getattr(persona, "id", "") or "").strip()
@@ -593,9 +584,8 @@ def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
     return (
         f"You are {display}{id_clause}. {voice} You are already the persona speaking in this "
         "channel — the operator is talking to you right now, so respond directly in your own "
-        f"voice.{never_self} Dev, Backend Dev, QA, and profile agents are the separate personas "
-        "you may brief with `agent_chat_send`; you are not any of them and you are not your own "
-        "relay target."
+        f"voice.{never_self} Other runtime personas are teammates you may brief with "
+        "`agent_chat_send`; you are not your own relay target."
     )
 
 
@@ -619,10 +609,10 @@ def _mission_chat_surface_message(
     """Compose the operator-chat system message (the codex ``instructions``):
     the persona's first-person identity block first, then the non-negotiable
     operative rules, then the operator's optional per-session surface prompt.
-    The identity block gives the isolated chat lane a "you ARE <persona>" hat
-    (the profile SOUL is not loaded here); the rules always apply so the
-    anti-fabrication invariant holds even when the operator supplies their own
-    surface prompt.
+    The identity block gives the channel its selected runtime persona, the
+    profile's own SOUL overlay supplies durable character and voice, and the
+    rules always apply so the anti-fabrication invariant holds even when the
+    operator supplies a session surface override.
 
     BYTE-STABILITY INVARIANT (T5, 2026-07-18): every part of this string must be
     byte-identical across every turn of a conversation, so the codex transport's

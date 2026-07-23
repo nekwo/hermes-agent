@@ -1,96 +1,56 @@
-# Neko persona identity — deploy runbook (`fix/neko-persona-identity`)
+# Neko persona identity and prompt ownership
 
-Fixes the "Neko Mission Lead messages itself" incident. The code changes on this
-branch (identity block on the mission-chat lane + `include_profile_memory`-gated
-memory + honest prompt observability + relay-guard regression) ship with the
-merge. The steps below are the **operator deploy** that completes the fix on the
-live host; they change live profile/runtime state and are intentionally NOT run
-by the merge.
+Neko's live Mission Control persona is bound to the `neko` Hermes profile. This
+document records the current ownership model and the checks needed when identity
+or prompt assembly changes. It replaces the obsolete one-time deploy runbook.
 
-## Why (root cause, one paragraph)
+## Current ownership model
 
-The canonical Mission Control chat lane (`mission_chat_reply`) runs isolated
-(`skip_context_files=True`), so the bound profile's `SOUL.md` is not loaded as
-the identity — the model got the generic `DEFAULT_AGENT_IDENTITY` and, before
-this branch, **no "you are Neko" hat at all**. Meanwhile it loaded the bound
-profile's memory unconditionally. `neko_supervisor` is bound to the **alice**
-profile (for capabilities), so every Neko turn inherited Alice's
-`MEMORY.md`/`USER.md` — in which "Neko" is a downstream pipeline node
-("goal→Neko→Dev→QA"). Generic identity + Alice's "Neko is someone I dispatch to"
-worldview → the model relayed the operator's question to `neko_supervisor` (i.e.
-itself). Code fix = inject a first-person identity block + stop borrowing a
-profile's memory unless opted in. Deploy fix = give Neko her **own** profile so
-the memory she does load is hers.
+The Mission Control chat system prompt is assembled in this order:
 
-## Step 1 — create the `neko` profile with the OFFICIAL command
+1. **Hermes core** — universal runtime capabilities and environment guidance.
+2. **Runtime identity** — Mission Control names the selected persona and prevents
+   self-relay.
+3. **Profile SOUL** — the persona profile owns durable character, values, and
+   voice.
+4. **Operator-channel rules** — Mission Control owns tool, permission, goal,
+   clarification, and anti-fabrication behavior.
+5. **Workspace/session context** — optional AGENTS.md and surface override.
+6. **Profile memory** — optional volatile profile context.
+7. **Conversation history** — prior redaction-safe turns.
+8. **Runtime Situation HUD** — injected into the operator's user turn, not the
+   system prompt.
 
-Run on the live host (bash reaching the `hermes` shim), NOT hand-built — the
-official path wires the wrapper alias, schema tracking, `.env`, and skill sync:
+For Neko, the SOUL source is
+`X:\Eternia\.hermes\profiles\neko\SOUL.md`. The repository reference is
+`docs/agent-runtime-harness/neko_SOUL_draft.md`.
 
-```bash
-hermes profile create neko --clone --clone-from alice \
-  --description "Neko Mission Lead - Mission Control supervisor persona; coordinates Dev/Backend Dev/QA mission slices."
-```
+## What belongs in SOUL.md
 
-`--clone` copies `config.yaml`, `.env`, `SOUL.md`, skills, and
-`memories/MEMORY.md` + `memories/USER.md` from `alice` (see
-`hermes_cli/profiles.py` `_CLONE_CONFIG_FILES` / `_CLONE_SUBDIR_FILES`). Auth is
-still borrowed from the head profile at runtime via `HERMES_AUTH_HOME`
-(`agent_runtime/profile_context.py`), so no credential/OAuth work is needed.
+SOUL owns Neko's durable identity, personality, values, mission instincts,
+quality bar, and voice. It must not duplicate runtime mechanics such as tool
+names, permission policy, self-relay guards, role routing rules, or per-turn HUD
+behavior. Those are enforced by the runtime identity and operator-channel rule
+layers, where every Mission Control persona receives them consistently.
 
-## Step 2 — curate identity (required; the clone carries Alice's identity)
+## Staleness checks
 
-1. **Overwrite** `X:\Eternia\.hermes\profiles\neko\SOUL.md` with the draft in
-   `neko_SOUL_draft.md` (next to this file). Tony tunes voice before it goes
-   live. It is catgirl-family (nekomimi) but a distinct character — Neko the
-   mission lead, not Alice — with no "deploys Neko" third-person framing and no
-   Alice/Tony relationship text.
-2. **Reset** `X:\Eternia\.hermes\profiles\neko\memories\MEMORY.md` and
-   `...\memories\USER.md` to empty. The clone carries Alice's memories; Neko
-   starts fresh and accumulates her own from her own turns.
+When this contract changes:
 
-## Step 3 — rebind + preserve qa memory in alice's live config
+- Confirm the live persona remains bound to the `neko` profile.
+- Compare the live SOUL with the repository reference.
+- Inspect Context Inspector and verify the distinct Runtime identity, Profile
+  SOUL, and Operator-channel rules rows.
+- Verify Profile SOUL reports its source path/hash and whether it was injected.
+- Verify a blank session surface override is shown as inactive, not as a missing
+  persona layer.
+- Verify Runtime Situation HUD appears under turn injection.
+- Send a direct Neko message and confirm it answers without relaying to itself.
 
-Edit `X:\Eternia\.hermes\profiles\alice\config.yaml` under `agent_runtime.personas`:
+## Historical incident
 
-```yaml
-    neko_supervisor:
-      hermes_profile: neko        # was: alice
-      # display_name / include_profile_memory unchanged; include_profile_memory:
-      # true is now CORRECT — it loads Neko's own memories, not Alice's.
-    qa:
-      hermes_profile: launcher-qa
-      include_profile_memory: true  # ADD: preserve qa chat memory now that the
-                                    # chat lane honors the flag (was implicitly on
-                                    # via the old hardcoded skip_memory=False).
-```
-
-The explicit `hermes_profile: neko` sticks (`agent_runtime/config.py`
-`_explicit_supervisor_profile_override`); the legacy-alice fallback only rewrites
-the literal value `alice` when that profile is missing, which it is not.
-
-Back up first: `cp config.yaml config.yaml.bak-neko-profile-$(date +%Y%m%d)`.
-
-## Step 4 — restart serve + live proof
-
-1. Restart `hermes harness serve` (kill the running serve; it re-execs from the
-   editable checkout).
-2. In Mission Control, message the **Neko Mission Lead** channel:
-   - "what do you see in your hud rn" → trace shows **no** `agent_chat_send →
-     neko_supervisor`; Neko answers directly.
-   - "use agent_chat_send to relay this to neko_supervisor: ping" → trace shows a
-     typed `relay_cycle` refusal (defense-in-depth; already in the running
-     build).
-   - CONTEXT peek → `prompt_layers` shows the `Persona identity` layer, `Profile
-     memory` = loaded (Neko's), and the `final_model_input` contains no Alice
-     sentinel line ("goal→Neko→Dev", "catgirl").
-
-## Blast radius
-
-- Launcher roster palette is profile-keyed → Neko's Mission Control accent color
-  changes (cosmetic).
-- Persona-instance rows keep `persona_id=neko_supervisor`; `profile_id` refreshes
-  to `neko` on the next `derive_from_workers`. Existing chat sessions (keyed on
-  persona_instance_id) survive.
-- Model/provider resolution unchanged (top-level `model.default` authority for
-  harness turns; the cloned config carries the same provider settings).
+The original self-relay incident came from a channel that lacked an explicit
+runtime identity while profile memory described Neko as another agent. The
+runtime now supplies an explicit first-person identity guard, memory loading is
+opt-in, and Neko owns a dedicated profile. Those safeguards belong to runtime
+code; they should not be copied back into SOUL.md.
