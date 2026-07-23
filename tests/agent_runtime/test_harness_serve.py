@@ -77,6 +77,54 @@ def test_concurrent_requests_do_not_bleed_output():
     assert exit_codes == {"a": 0, "b": 0}
 
 
+def test_liveness_pump_emits_busy_frames_while_a_turn_runs_unprompted():
+    # Regression (2026-07-23 live incident): with pool workers deep in
+    # chat-turn work the launcher saw NO frames for the whole turn and raised
+    # the loud "Runtime offline" banner twice inside one healthy 4-minute
+    # turn. The serve must prove life on its own cadence — nothing polls it
+    # here (no ping op), yet typed `busy` frames must keep appearing while
+    # the synthetic chat turn blocks a worker.
+    import time
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def dispatch(argv):
+        started.set()
+        assert release.wait(10)
+        return 0
+
+    def requests():
+        yield _request(
+            "chat-1",
+            ["harness", "mission-chat", "message", "--persona", "dev", "--message", "hi"],
+        )
+        assert started.wait(10)
+        # Hold the turn across many pump intervals before letting it finish.
+        time.sleep(0.5)
+        release.set()
+        yield SHUTDOWN
+
+    out = io.StringIO()
+    assert (
+        serve_loop(
+            requests(),
+            out,
+            dispatch=dispatch,
+            liveness_pump_interval_seconds=0.05,
+        )
+        == 0
+    )
+    frames = _frames(out)
+
+    busy = [f for f in frames if f.get("event") == "busy"]
+    assert len(busy) >= 2, f"expected unprompted busy frames, got: {frames}"
+    assert busy[0]["chat_turns"] == 1 and busy[0]["pending"] == 1
+    # The turn still completes and the loop still shuts down cleanly.
+    assert any(f.get("event") == "exit" and f.get("id") == "chat-1" for f in frames)
+    assert frames[-1]["event"] == "shutdown"
+
+
 def test_ping_reports_in_flight_chat_turns():
     started = threading.Event()
     release = threading.Event()

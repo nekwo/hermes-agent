@@ -442,6 +442,7 @@ def serve_loop(
     dispatch: Callable[[list[str]], int] = dispatch_argv,
     fingerprint: Callable[[], tuple | None] = _runtime_state_fingerprint,
     read_cache_max_age: float = _READ_CACHE_MAX_AGE_SECONDS,
+    liveness_pump_interval_seconds: float = 5.0,
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; a
     future remote lane feeds the same loop (design doc §Future)."""
@@ -581,6 +582,35 @@ def serve_loop(
         threading.Thread(
             target=_prewarm_provider_runtime,
             name="harness-serve-prewarm",
+            daemon=True,
+        ).start()
+        # A busy serve must never look dead. The launcher's stream watchdog
+        # keys on "no frames for N seconds", and when pool workers are deep in
+        # chat-turn work the infinite `stream` request's generator can starve
+        # past that budget — Mission Control then raised the loud "Runtime
+        # offline" banner DURING healthy turns (live incident 2026-07-23,
+        # two flaps inside one 4-minute Neko turn). This dedicated thread
+        # emits the same typed `busy` frame the `ping` op returns whenever
+        # requests are in flight: pure liveness telemetry on the shared
+        # stdout, independent of every pool worker, so the launcher can
+        # distinguish "busy running your turn" from "gone".
+        liveness_stop = threading.Event()
+
+        def _liveness_pump() -> None:
+            while not liveness_stop.wait(liveness_pump_interval_seconds):
+                with inflight_lock:
+                    busy = bool(inflight)
+                if not busy:
+                    continue
+                try:
+                    frames.emit(_busy_frame())
+                except Exception:
+                    # Writer gone — the main loop is on its way down too.
+                    return
+
+        threading.Thread(
+            target=_liveness_pump,
+            name="harness-serve-liveness",
             daemon=True,
         ).start()
         with ThreadPoolExecutor(
@@ -732,6 +762,7 @@ def serve_loop(
                     if request.rid in inflight:
                         inflight_futures[request.rid] = future
             # Context-manager exit drains in-flight work before shutdown.
+        liveness_stop.set()
         frames.emit({"event": "shutdown", "pid": os.getpid()})
         return 0
     finally:
