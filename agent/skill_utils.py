@@ -10,9 +10,11 @@ import logging
 import os
 import re
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from hermes_constants import (
     CANONICAL_SHARED_SKILL_IDS,
@@ -23,6 +25,34 @@ from hermes_constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SKILL_RUNTIME_SURFACE: ContextVar[str | None] = ContextVar(
+    "hermes_skill_runtime_surface", default=None
+)
+_SKILL_RUNTIME_ROOT_NODE_MODE: ContextVar[bool] = ContextVar(
+    "hermes_skill_runtime_root_node_mode", default=False
+)
+
+
+@contextmanager
+def skill_runtime_scope(
+    *, surface: str | None, root_node_mode: bool = False
+) -> Iterator[None]:
+    """Bind the active skill surface/mode for prompt and tool enforcement."""
+
+    surface_token = _SKILL_RUNTIME_SURFACE.set(surface)
+    mode_token = _SKILL_RUNTIME_ROOT_NODE_MODE.set(bool(root_node_mode))
+    try:
+        yield
+    finally:
+        _SKILL_RUNTIME_ROOT_NODE_MODE.reset(mode_token)
+        _SKILL_RUNTIME_SURFACE.reset(surface_token)
+
+
+def current_skill_runtime_context() -> tuple[str | None, bool]:
+    """Return the active surface/mode, or ``(None, False)`` outside a lane."""
+
+    return _SKILL_RUNTIME_SURFACE.get(), _SKILL_RUNTIME_ROOT_NODE_MODE.get()
 
 # ── Platform mapping ──────────────────────────────────────────────────────
 
@@ -756,24 +786,27 @@ def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
     return digest.hexdigest()
 
 
-def skill_runtime_compatibility(
-    candidate: SkillResolutionCandidate | None,
+def skill_frontmatter_runtime_compatibility(
+    frontmatter: dict[str, Any] | None,
     *,
     surface: str,
     root_node_mode: bool = False,
 ) -> dict[str, Any]:
-    """Evaluate declared surface/mode compatibility for a resolved skill."""
+    """Evaluate surface/mode compatibility from parsed skill frontmatter."""
 
-    if candidate is None:
-        return {"compatible": False, "reason": "unresolved"}
-    try:
-        frontmatter, _ = parse_frontmatter(candidate.skill_md.read_text(encoding="utf-8"))
-    except Exception:
-        frontmatter = {}
+    frontmatter = frontmatter if isinstance(frontmatter, dict) else {}
     metadata = frontmatter.get("metadata") if isinstance(frontmatter, dict) else {}
     hermes = metadata.get("hermes") if isinstance(metadata, dict) else {}
     surfaces = hermes.get("surfaces") if isinstance(hermes, dict) else None
     modes = hermes.get("modes") if isinstance(hermes, dict) else None
+    if isinstance(surfaces, str):
+        surfaces = [surfaces]
+    elif not isinstance(surfaces, (list, tuple, set)):
+        surfaces = []
+    if isinstance(modes, str):
+        modes = [modes]
+    elif not isinstance(modes, (list, tuple, set)):
+        modes = []
     allowed_surfaces = {str(item) for item in surfaces or []}
     allowed_modes = {str(item) for item in modes or []}
     load_policy = str(hermes.get("load_policy") or "explicit")
@@ -797,6 +830,27 @@ def skill_runtime_compatibility(
         "mode": active_mode,
         "load_policy": load_policy,
     }
+
+
+def skill_runtime_compatibility(
+    candidate: SkillResolutionCandidate | None,
+    *,
+    surface: str,
+    root_node_mode: bool = False,
+) -> dict[str, Any]:
+    """Evaluate declared surface/mode compatibility for a resolved skill."""
+
+    if candidate is None:
+        return {"compatible": False, "reason": "unresolved"}
+    try:
+        frontmatter, _ = parse_frontmatter(candidate.skill_md.read_text(encoding="utf-8"))
+    except Exception:
+        frontmatter = {}
+    return skill_frontmatter_runtime_compatibility(
+        frontmatter,
+        surface=surface,
+        root_node_mode=root_node_mode,
+    )
 
 
 def required_preload_skill_ids(

@@ -28,7 +28,7 @@ from .decision_contracts import validate_planning_decision
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_plan import current_plan_stage
-from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
+from .personas import ALLOWED_TOOLSETS_BY_ROLE, DEFAULT_SUPERVISOR_PERSONA_ID, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .profile_runner import (
@@ -167,6 +167,11 @@ class GPTPersonaRuntime:
                     skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
                     skip_memory=not _persona_run_uses_memory(persona, ctx),
                     platform="agent_runtime",
+                    skill_surface="mission_worker",
+                    skill_root_node_mode=bool(
+                        isinstance(getattr(ctx.task, "harness_self_heal", None), dict)
+                        and ctx.task.harness_self_heal.get("root_node_mode")
+                    ),
                     session_id=run.session_id,
                     max_iterations=run.iteration_budget,
                     max_wall_seconds=run.max_wall_seconds,
@@ -255,6 +260,8 @@ class GPTPersonaRuntime:
                 # binding is its own; it drops a borrowed profile's memory.
                 skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
+                skill_surface="mission_chat",
+                skill_root_node_mode=False,
                 session_id=session_id,
                 cache_scope_id=cache_scope_id,
                 max_wall_seconds=max_wall_seconds,
@@ -384,6 +391,8 @@ class GPTPersonaRuntime:
                 # binding is its own; it drops a borrowed profile's memory.
                 skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
+                skill_surface="mission_chat",
+                skill_root_node_mode=False,
                 session_id=session_id,
                 # session_id stays None on this lane (the transcript is already
                 # baked into the message), but the ChatGPT-Codex prompt cache is
@@ -534,6 +543,9 @@ def _mission_chat_operative_rules() -> str:
         "- Never fabricate. Do not claim to have run a command, read a file, opened a path, or produced output unless you "
         "actually invoked the tool and are reporting its real result. If a capability isn't available, or your permission "
         "grant blocks it, say so plainly instead of inventing output.\n"
+        "- When the operator asks you to send, brief, or coordinate named agents, use `agent_chat_send` for each agent. "
+        "Do not create a goal unless the operator explicitly asks for a goal, mission, or task. Investigations and "
+        "multi-agent work do not imply goal creation.\n"
         "- When the operator asks you to start, trigger, kick off, or run a goal/mission/task, create a REAL one with the "
         "mission_goal_create tool (it returns a tracked task_id and starts the Mission Daemon so it self-drives). Do NOT "
         "run the no-model smoke test (or any temp/throwaway graph validation) as a stand-in for a real goal — the smoke "
@@ -873,20 +885,25 @@ def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None)
     Resolution order: permission mode → role/persona toolset resolution → chat
     capability augmentation → the chat-lane cost policy
     (``scope_chat_lane_toolsets``) that drops browser / vision / heavy-dev from a
-    conversational lane. ``unbounded`` permission mode is the operator's explicit
-    "full capability" escape hatch and is returned unfiltered; a persona that
-    wants a specific excluded toolset back on its *bounded* chat lane restores it
-    via ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` (see
+    conversational lane. ``unbounded`` permission mode bypasses that cost policy,
+    but does not resurrect product-disabled chat capabilities such as unfinished
+    Neko goal creation. A persona that wants a specific cost-excluded toolset back
+    on its *bounded* chat lane restores it via
+    ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` (see
     ``config.chat_lane_restore_toolsets``). Worker/dev task lanes never call this
     — they resolve toolsets via ``effective_toolsets`` directly."""
 
     options = permission_options_for_chat(persona, session_id=session_id)
     if permission_mode_is_unbounded(options.permission_mode):
-        return all_registered_toolsets()
-    resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
-    return scope_chat_lane_toolsets(
-        resolved, restore=chat_lane_restore_toolsets(persona.id)
-    )
+        resolved = all_registered_toolsets()
+    else:
+        resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+        resolved = scope_chat_lane_toolsets(
+            resolved, restore=chat_lane_restore_toolsets(persona.id)
+        )
+    if persona.id == DEFAULT_SUPERVISOR_PERSONA_ID:
+        resolved = [toolset for toolset in resolved if toolset != "mission_goal"]
+    return resolved
 
 
 def chat_runtime_tool_contract(

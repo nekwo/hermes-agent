@@ -424,6 +424,18 @@ def test_mission_chat_operative_rules_teach_the_chat_session_verbs():
     assert "session_id" in verbs_bullet
 
 
+def test_mission_chat_operative_rules_route_named_agents_without_creating_goals():
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    assert (
+        "When the operator asks you to send, brief, or coordinate named agents, use "
+        "`agent_chat_send` for each agent. Do not create a goal unless the operator "
+        "explicitly asks for a goal, mission, or task. Investigations and multi-agent "
+        "work do not imply goal creation."
+    ) in rules
+
+
 def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkeypatch):
     # A profile-backed persona reads its canonical SOUL.md by default (an
     # explicit `soul_overlay_path` remains an override) from

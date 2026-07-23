@@ -298,6 +298,8 @@ class NodeToolService:
                 skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
                 skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform="agent_runtime",
+                skill_surface="mission_worker",
+                skill_root_node_mode=True,
                 session_id=run.session_id,
                 max_iterations=run.iteration_budget,
                 max_wall_seconds=run.max_wall_seconds,

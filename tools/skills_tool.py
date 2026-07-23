@@ -81,10 +81,13 @@ from hermes_cli.config import cfg_get
 from utils import env_var_enabled
 from agent.skill_utils import (
     EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS,
+    current_skill_runtime_context,
     get_all_skills_dirs,
     is_skill_support_path as _is_skill_support_path,
     resolve_skill,
     skill_package_content_hash,
+    skill_frontmatter_runtime_compatibility,
+    skill_runtime_compatibility,
 )
 from tools.skills_hub import create_source_router, unified_search
 
@@ -654,6 +657,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 
     # Load disabled set once (not per-skill)
     disabled = set() if skip_disabled else _get_disabled_skill_names()
+    active_surface, root_node_mode = current_skill_runtime_context()
 
     # Scan the same ordered registry used by skill_view/readiness. Duplicate
     # names are omitted from this discovery view; direct loads refuse them as
@@ -675,6 +679,13 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                     continue
 
                 if not skill_matches_environment(frontmatter):
+                    continue
+
+                if active_surface and not skill_frontmatter_runtime_compatibility(
+                    frontmatter,
+                    surface=active_surface,
+                    root_node_mode=root_node_mode,
+                ).get("compatible"):
                     continue
 
                 name = frontmatter.get("name", skill_dir.name)[:MAX_NAME_LENGTH]
@@ -990,6 +1001,29 @@ def _serve_plugin_skill(
             ensure_ascii=False,
         )
 
+    active_surface, root_node_mode = current_skill_runtime_context()
+    if active_surface:
+        compatibility = skill_frontmatter_runtime_compatibility(
+            parsed_frontmatter,
+            surface=active_surface,
+            root_node_mode=root_node_mode,
+        )
+        if not compatibility.get("compatible"):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"Skill '{namespace}:{bare}' is not available on the "
+                        f"active {active_surface} surface."
+                    ),
+                    "reason": compatibility.get("reason"),
+                    "surface": active_surface,
+                    "mode": "root_node" if root_node_mode else "standard",
+                    "readiness_status": SkillReadinessStatus.UNSUPPORTED.value,
+                },
+                ensure_ascii=False,
+            )
+
     # Injection scan — log but still serve (matches local-skill behaviour)
     if any(p in content.lower() for p in _INJECTION_PATTERNS):
         logger.warning(
@@ -1216,6 +1250,29 @@ def skill_view(
                 },
                 ensure_ascii=False,
             )
+
+        active_surface, root_node_mode = current_skill_runtime_context()
+        if active_surface:
+            compatibility = skill_runtime_compatibility(
+                selected,
+                surface=active_surface,
+                root_node_mode=root_node_mode,
+            )
+            if not compatibility.get("compatible"):
+                return json.dumps(
+                    {
+                        "success": False,
+                        "error": (
+                            f"Skill '{name}' is not available on the active "
+                            f"{active_surface} surface."
+                        ),
+                        "reason": compatibility.get("reason"),
+                        "surface": active_surface,
+                        "mode": "root_node" if root_node_mode else "standard",
+                        "readiness_status": SkillReadinessStatus.UNSUPPORTED.value,
+                    },
+                    ensure_ascii=False,
+                )
 
         # Read the file once — reused for platform check and main content below
         try:

@@ -97,6 +97,8 @@ class AgentRunRequest:
     compression_protect_first_n_override: int | None = None
     compression_protect_last_n_override: int | None = None
     platform: str = "agent_runtime"
+    skill_surface: str | None = None
+    skill_root_node_mode: bool = False
     quiet_mode: bool = True
     skip_context_files: bool = True
     skip_memory: bool = True
@@ -299,8 +301,18 @@ class ProfileAgentRunner:
     def _execute_agent_run(self, binding: PersonaProfileBinding, request: AgentRunRequest) -> tuple[Any, Any, dict[str, int]]:
         timing: dict[str, int] = {}
         from .persona_chat_continuity import tool_execution_scope
+        from agent.skill_utils import skill_runtime_scope
 
-        with _WORKDIR_LOCK, persona_profile_context(binding, runtime_root=request.runtime_root), _agent_workdir(request.workdir), tool_execution_scope(request.tool_execution_scope_id):
+        with (
+            _WORKDIR_LOCK,
+            persona_profile_context(binding, runtime_root=request.runtime_root),
+            _agent_workdir(request.workdir),
+            tool_execution_scope(request.tool_execution_scope_id),
+            skill_runtime_scope(
+                surface=request.skill_surface,
+                root_node_mode=request.skill_root_node_mode,
+            ),
+        ):
             try:
                 runtime_started = time.perf_counter()
                 runtime = _resolve_request_runtime(request)

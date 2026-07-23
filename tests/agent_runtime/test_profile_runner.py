@@ -154,6 +154,38 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
     ]
 
 
+def test_runner_binds_and_resets_skill_runtime_surface():
+    from agent.skill_utils import current_skill_runtime_context
+
+    seen = []
+
+    class ContextAgent(FakeAgent):
+        def __init__(self, **kwargs):
+            seen.append(current_skill_runtime_context())
+            super().__init__(**kwargs)
+
+        def run_conversation(self, user_message, system_message=None, task_id=None):
+            seen.append(current_skill_runtime_context())
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    result = ProfileAgentRunner(agent_factory=ContextAgent).run(
+        AgentRunRequest(
+            profile=None,
+            user_message="route skills",
+            skill_surface="mission_chat",
+            skill_root_node_mode=False,
+        )
+    )
+
+    assert result.final_response == "ok"
+    assert seen == [("mission_chat", False), ("mission_chat", False)]
+    assert current_skill_runtime_context() == (None, False)
+
+
 def test_persona_chat_runner_forces_native_compression_tip_rotation():
     class CompressionAgent(FakeAgent):
         def __init__(self, **kwargs):

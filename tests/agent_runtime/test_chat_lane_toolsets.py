@@ -160,7 +160,8 @@ def test_default_neko_chat_lane_excludes_dev_toolkit():
     # browser/vision/code_execution (T3) + file/terminal (T6a) all drop.
     assert not {"browser", "vision", "code_execution", "file", "terminal"} & set(enabled)
     # The supervision capabilities the lane legitimately keeps are still present.
-    assert {"session_search", "mission_goal", "skills"}.issubset(set(enabled))
+    assert {"session_search", "agent_chat", "skills"}.issubset(set(enabled))
+    assert "mission_goal" not in enabled
 
 
 def test_chat_lane_scopes_dev_toolkit_when_persona_carries_it():
@@ -191,6 +192,7 @@ def test_unbounded_permission_mode_is_not_scoped(monkeypatch):
     )
     enabled = PR._enabled_toolsets_for_chat(_persona_with_dev_toolkit(), session_id="s1")
     assert {"browser", "vision", "file", "terminal"}.issubset(set(enabled))
+    assert "mission_goal" not in enabled
 
 
 # --------------------------------------------------------------------------- #

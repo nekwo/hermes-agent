@@ -405,8 +405,9 @@ def test_chat_lane_preview_matches_actual_lane_default_scoped():
     assert "terminal" not in final
     assert "execute_code" not in final
     assert "skill_manage" not in final
-    # ...while the operator-chat capability augmentation IS present...
-    assert "mission_goal_create" in final
+    # ...while direct teammate messaging stays present and unfinished goal
+    # creation is absent from standard Neko chat.
+    assert "mission_goal_create" not in final
     assert "agent_chat_send" in final
     # ...including clarify, which PERSONA_BLOCKED_TOOLS blocks on autonomous
     # runs but the chat bridge unblocks — the old preview wrongly hid it.
