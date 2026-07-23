@@ -8,6 +8,8 @@ from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .persona_chat_history import (
     _canonical_persona_id,
+    canonical_persona_chat_turn_id,
+    logical_persona_chat_client_message_id,
     PERSONA_PRE_TRACE_ACK_KIND,
     PERSONA_RELAYED_MESSAGE_KIND,
 )
@@ -307,6 +309,14 @@ class _OperatorChannelBuilder:
                     "entity_id": channel_id,
                 }
             )
+        if _turn_identity_mismatched(conversation.get("messages") or []):
+            warnings.append(
+                {
+                    "code": "operator_conversations.turn_identity_mismatched",
+                    "detail": "a projected terminal reply turn_id disagrees with its typed assistant client_message_id",
+                    "entity_id": channel_id,
+                }
+            )
         # session_without_history and trace_empty are both evaluated AFTER the
         # conversation is built: a channel whose goal turns already flow as
         # canonical messages is not an empty channel, even when the legacy trace
@@ -480,6 +490,30 @@ def _turn_identity_dropped(entries: list[Any], messages: list[Any]) -> bool:
         if not isinstance(refs, dict) or refs.get("source") != "persona_chat_trace":
             continue
         if not safe_assignment_text(message.get("turn_id"), limit=160):
+            return True
+    return False
+
+
+def _turn_identity_mismatched(messages: list[Any]) -> bool:
+    """Detect a projector regression without relying on reply body matching."""
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if safe_assignment_token(message.get("role")) != "agent":
+            continue
+        client_message_id = safe_assignment_text(
+            message.get("client_message_id"), limit=240
+        )
+        expected_turn_id = canonical_persona_chat_turn_id(client_message_id)
+        if (
+            not expected_turn_id
+            or client_message_id
+            == logical_persona_chat_client_message_id(client_message_id)
+        ):
+            continue
+        actual_turn_id = safe_assignment_token(message.get("turn_id"))
+        if actual_turn_id != expected_turn_id:
             return True
     return False
 
@@ -773,7 +807,9 @@ def _conversation_history_message(
         # turn that died without a recorded reply. Keep the typed kind + turn
         # identity so the Launcher can render a retry affordance and settle any
         # still-"running" tool rows of the same turn.
-        turn_id = safe_assignment_token(row.get("turn_id")) or safe_assignment_token(client_message_id)
+        turn_id = canonical_persona_chat_turn_id(
+            client_message_id
+        ) or safe_assignment_token(row.get("turn_id"))
         message = {
             "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
             "seq": 0,
@@ -858,8 +894,11 @@ def _conversation_history_message(
             message["actor_display_name"] = resolved_name
     if role == "operator" and client_message_id:
         message["client_message_id"] = client_message_id
+        message["turn_id"] = canonical_persona_chat_turn_id(client_message_id)
     if role == "agent" and client_message_id:
-        message["turn_id"] = safe_assignment_token(client_message_id) or client_message_id
+        message["turn_id"] = canonical_persona_chat_turn_id(
+            client_message_id
+        ) or safe_assignment_token(row.get("turn_id"))
         message["client_message_id"] = client_message_id
     # C8 ordering key: the history projection stamps the intra-turn position
     # (operator opens, terminal reply/interrupt closes); carry it through this
@@ -1423,7 +1462,7 @@ def _order_conversation_messages(
 ) -> list[dict[str, Any]]:
     """C8: order the conversation by the ONE turn-scoped key.
 
-    Turn-anchored rows (anchor = token(client_message_id | turn_id), position =
+    Turn-anchored rows (anchor = token(turn_id | logical client_message_id), position =
     ``turn_seq``) sort inside their turn by the stamped position — operator row
     first, content band between, terminal reply/interrupt last — immune to the
     two-clock skew between SessionDB stamps and trace ``ts`` values (F17). Rows
@@ -1433,10 +1472,10 @@ def _order_conversation_messages(
 
     return order_transcript_rows(
         messages,
-        anchor=lambda message: safe_assignment_token(
-            message.get("client_message_id") or message.get("turn_id")
-        )
-        or None,
+        anchor=lambda message: (
+            safe_assignment_token(message.get("turn_id"))
+            or canonical_persona_chat_turn_id(message.get("client_message_id"))
+        ),
         turn_seq=lambda message: message.get("turn_seq")
         if isinstance(message.get("turn_seq"), int)
         and not isinstance(message.get("turn_seq"), bool)

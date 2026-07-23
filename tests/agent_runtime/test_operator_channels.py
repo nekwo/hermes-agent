@@ -114,7 +114,7 @@ def test_operator_conversation_projects_turn_identity_keys_and_scopes_tool_pairi
                         "id": "agent_1",
                         "role": "agent",
                         "text": "proof one complete",
-                        "client_message_id": "agent-chat-send-1",
+                        "client_message_id": "agent-chat-send-1:assistant:1",
                         "timestamp": "2026-07-07T14:00:08Z",
                     },
                 ],
@@ -179,7 +179,8 @@ def test_operator_conversation_projects_turn_identity_keys_and_scopes_tool_pairi
     tool_calls = [message for message in messages if message["kind"] == "tool_call"]
 
     assert operator["client_message_id"] == "agent-chat-send-1"
-    assert agent["client_message_id"] == "agent-chat-send-1"
+    assert operator["turn_id"] == "agent-chat-send-1"
+    assert agent["client_message_id"] == "agent-chat-send-1:assistant:1"
     assert agent["turn_id"] == "agent-chat-send-1"
     assert thinking["turn_id"] == "agent-chat-send-1"
     assert {message["turn_id"] for message in tool_calls} == {
@@ -1400,6 +1401,32 @@ def test_conversation_history_message_normal_reply_kind_is_reply():
     )
     assert message is not None
     assert message["kind"] == "reply"
+
+
+def test_conversation_history_message_canonicalizes_typed_assistant_identity():
+    message = _conversation_history_message(
+        {
+            "id": "m_reply",
+            "role": "agent",
+            "text": "Hi Tony — Neko here. What’s the mission?",
+            "client_message_id": "agent-chat-send-1784795889013735:assistant:1",
+            # Preserve rollout compatibility with snapshots produced by the
+            # buggy projector: the typed assistant id remains the authority.
+            "turn_id": "agent-chat-send-1784795889013735_assistant_1",
+            "timestamp": "2026-07-23T08:38:09Z",
+        },
+        channel_id="chan_neko",
+        index=2,
+        persona_id="neko_supervisor",
+        persona_instance_id="personainst_neko_supervisor",
+    )
+
+    assert message is not None
+    assert (
+        message["client_message_id"]
+        == "agent-chat-send-1784795889013735:assistant:1"
+    )
+    assert message["turn_id"] == "agent-chat-send-1784795889013735"
 
 
 def _qa_instance(instance_id: str, *, session_id: str, display_name: str, updated_at: str) -> PersonaInstance:

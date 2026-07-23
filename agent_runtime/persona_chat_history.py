@@ -56,6 +56,24 @@ _TRACE_FETCH_CEILING = 2000
 _SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
 )
+_ASSISTANT_CLIENT_MESSAGE_ID_RE = re.compile(r"^(.+):assistant:\d+$")
+
+
+def logical_persona_chat_client_message_id(value: Any) -> str | None:
+    """Return the durable operator-turn identity for a persisted chat row."""
+
+    client_message_id = safe_assignment_text(value, limit=240)
+    if not client_message_id:
+        return None
+    match = _ASSISTANT_CLIENT_MESSAGE_ID_RE.fullmatch(client_message_id)
+    return match.group(1) if match else client_message_id
+
+
+def canonical_persona_chat_turn_id(value: Any) -> str | None:
+    """Return the tokenized turn id shared by operator and assistant rows."""
+
+    logical_id = logical_persona_chat_client_message_id(value)
+    return safe_assignment_token(logical_id) or None
 
 
 def persona_chat_history_summary(
@@ -1036,8 +1054,12 @@ def _safe_curated_messages(
             or raw.get("client_message_id"),
             limit=240,
         )
-        if role == "agent" and client_message_id:
-            assistant_client_message_ids.add(client_message_id)
+        logical_client_message_id = logical_persona_chat_client_message_id(
+            client_message_id
+        )
+        turn_id = canonical_persona_chat_turn_id(client_message_id)
+        if role == "agent" and logical_client_message_id:
+            assistant_client_message_ids.add(logical_client_message_id)
         raw_content = raw.get("content") or raw.get("text")
         runtime_context = None
         if role == "operator":
@@ -1096,13 +1118,14 @@ def _safe_curated_messages(
                 row["relay_sender_persona_id"] = relay_sender.persona_id
                 row["relay_sender_instance_id"] = relay_sender.instance_id
         if client_message_id:
-            logical_client_id = re.sub(r":assistant:\d+$", "", client_message_id)
-            logical_key = (role, logical_client_id, text)
+            logical_key = (role, logical_client_message_id or client_message_id, text)
             if logical_key in seen_logical_rows:
                 continue
             seen_logical_rows.add(logical_key)
             row["client_message_id"] = client_message_id
-            # C8 ordering key: the turn anchor is the client_message_id; the
+            if turn_id:
+                row["turn_id"] = turn_id
+            # C8 ordering key: the turn anchor is the canonical logical turn id;
             # intra-turn position is stamped HERE (one authority) — the
             # operator message opens its turn, the recorded reply closes it.
             # Elements between them carry the emitter's 1..N seq. Pre-C8 ack
@@ -1114,7 +1137,7 @@ def _safe_curated_messages(
         if role == "agent" and client_message_id:
             elements = mission_chat_turn_elements(
                 session_id=session_id,
-                client_message_id=client_message_id,
+                client_message_id=logical_client_message_id,
             )
             if elements:
                 row["turn_elements"] = elements
@@ -1209,7 +1232,7 @@ def _interrupted_turn_rows(
 
 def _ordered_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # C8: ONE ordering authority. Rows carrying the turn key (anchor =
-    # client_message_id, position = turn_seq) sort by that key inside their
+    # canonical turn_id, position = turn_seq) sort by that key inside their
     # turn — the operator row first, elements by emitter seq, the terminal
     # reply/interrupt last — regardless of clock skew between SessionDB stamps
     # and turn-store settle times (the F17 reorder seam). Rows that predate the
@@ -1226,7 +1249,10 @@ def _ordered_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows,
         # Token-normalized so the anchor is byte-equal to the `turn_id` the
         # emitter/turn store mint from the same client_message_id.
-        anchor=lambda row: safe_assignment_token(row.get("client_message_id")) or None,
+        anchor=lambda row: (
+            safe_assignment_token(row.get("turn_id"))
+            or canonical_persona_chat_turn_id(row.get("client_message_id"))
+        ),
         turn_seq=lambda row: row.get("turn_seq")
         if isinstance(row.get("turn_seq"), int)
         else None,
