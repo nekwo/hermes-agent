@@ -466,7 +466,9 @@ def _write_swarm_state(data: dict) -> None:
 
 
 def _cmd_swarm_status(args) -> int:
-    cfg = load_agent_runtime_config()
+    from agent_runtime.config import load_root_runtime_config
+
+    cfg = load_root_runtime_config()
     swarm_cfg = getattr(cfg, "swarm", None)
     allowed, certification = swarm_certification_allows_production(
         requires_certification=bool(getattr(swarm_cfg, "requires_certification", True)),
@@ -479,7 +481,9 @@ def _cmd_swarm_status(args) -> int:
 
 
 def _cmd_swarm_enable(args) -> int:
-    cfg = load_agent_runtime_config()
+    from agent_runtime.config import load_root_runtime_config
+
+    cfg = load_root_runtime_config()
     swarm_cfg = getattr(cfg, "swarm", None)
     allowed, certification = swarm_certification_allows_production(
         requires_certification=bool(getattr(swarm_cfg, "requires_certification", True)),
@@ -1204,7 +1208,9 @@ def _cmd_incident_close(args) -> int:
 
 
 def _cmd_snapshot(args) -> int:
-    cfg = load_agent_runtime_config()
+    from agent_runtime.config import load_root_runtime_config
+
+    cfg = load_root_runtime_config()
     snap = write_snapshot(build_snapshot())
     read_model_cfg = getattr(cfg, "read_model", None)
     if bool(getattr(read_model_cfg, "enabled", False)) and bool(getattr(read_model_cfg, "serve_snapshot_from_db", True)):
@@ -1244,9 +1250,10 @@ def _cmd_stream(args) -> int:
 def _cmd_rebuild_read_model(args) -> int:
     from agent_runtime.projector import Projector
     from agent_runtime.read_model import ReadModel
+    from agent_runtime.config import load_root_runtime_config
 
     read_model = ReadModel()
-    Projector(read_model, config=load_agent_runtime_config()).full_rebuild()
+    Projector(read_model, config=load_root_runtime_config()).full_rebuild()
     watermark = read_model.projection_watermark("snapshot")
     payload = {"ok": True, "watermark": watermark, "db_path": str(read_model.db_path)}
     print(emit_json(payload) if args.json else f"read model rebuilt: {read_model.db_path}")

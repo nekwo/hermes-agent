@@ -13,7 +13,7 @@ from hermes_constants import get_hermes_home
 
 from . import paths
 from .chat_lane_toolsets import chat_lane_blocked_tools, scope_chat_lane_toolsets
-from .config import chat_lane_restore_toolsets, load_agent_runtime_config
+from .config import chat_lane_restore_toolsets, load_root_runtime_config
 from .context_builder import AgentContext, build_context, render_context
 from .decision_contract_registry import prompt_contract_markdown
 from .decision_schema import (
@@ -1222,7 +1222,7 @@ def build_system_prompt(
     role = role_from_persona(persona)
     compact_schema = json.dumps(DECISION_SCHEMA, separators=(",", ":"))
     try:
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
     except Exception:
         cfg = None
     simplified_prompt = _simplified_contract_prompt_enabled(cfg)
@@ -1399,7 +1399,7 @@ def _specialist_dev_guidance(persona: AgentPersona) -> str:
 
 def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
     try:
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
     except Exception:
         return ""
     flow = getattr(cfg, "normal_worker_flow", None)

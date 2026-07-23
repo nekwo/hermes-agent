@@ -10,7 +10,7 @@ from .errors import EventPayloadTooLarge
 from .events import EventLog
 from .models import Event
 from .child_events import emit_child_progress
-from .config import load_agent_runtime_config
+from .config import load_root_runtime_config
 from .self_test_evidence import record_self_test_from_progress
 from .states import RunState
 from .store import RunStore
@@ -71,7 +71,7 @@ class RunProgressSink:
         self.run_store = run_store
         self.event_log = event_log or EventLog()
         self.run_id = run_id
-        self.config = config or load_agent_runtime_config()
+        self.config = config or load_root_runtime_config()
 
     def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
         try:
@@ -303,7 +303,7 @@ def _maybe_record_visual_screenshot(run, event_type: str, payload: dict[str, Any
     # the tool stream. Gated on root_node_mode so the flag-off legacy path is
     # byte-for-byte unchanged (no new proofs from a shared progress sink).
     try:
-        if not bool(getattr(load_agent_runtime_config(), "root_node_mode", False)):
+        if not bool(getattr(load_root_runtime_config(), "root_node_mode", False)):
             return
         record_screenshot_from_progress(run, event_type, payload, event_log=event_log)
     except Exception:

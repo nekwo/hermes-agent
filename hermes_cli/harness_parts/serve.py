@@ -449,9 +449,9 @@ def serve_loop(
     from agent_runtime.persona_chat_continuity import (
         initialize_persona_chat_runtime_registry,
     )
-    from agent_runtime.config import load_agent_runtime_config
+    from agent_runtime.config import load_root_runtime_config
 
-    persona_chat_cfg = load_agent_runtime_config().persona_chat
+    persona_chat_cfg = load_root_runtime_config().persona_chat
     initialize_persona_chat_runtime_registry(
         enabled=persona_chat_cfg.hot_sessions_enabled,
         max_entries=persona_chat_cfg.max_hot_sessions,

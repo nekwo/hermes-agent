@@ -8,7 +8,7 @@ from typing import Any
 from hermes_time import now
 
 from . import paths
-from .config import get_persisted_persona, load_agent_runtime_config
+from .config import get_persisted_persona, load_agent_runtime_config, load_root_runtime_config
 from .events import EventLog
 from .models import AgentPersona, AgentRun, Event, MissionPlan, MissionPlanStage, Proof, Task
 from .profile_context import resolve_persona_profile
@@ -352,7 +352,7 @@ def steer_node_tool(args: dict[str, Any], *, task_id: str | None = None, **_kwar
 
 def node_tools_available() -> bool:
     try:
-        return bool(getattr(load_agent_runtime_config(), "root_node_mode", False))
+        return bool(getattr(load_root_runtime_config(), "root_node_mode", False))
     except Exception:
         return False
 

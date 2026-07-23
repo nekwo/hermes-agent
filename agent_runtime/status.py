@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from .config import ensure_persisted_personas, load_agent_runtime_config
+from .config import ensure_persisted_personas, load_agent_runtime_config, load_root_runtime_config
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .dirty_state import build_dirty_state
@@ -312,7 +312,7 @@ def _owner_for_action(action, *, task=None, run_store: RunStore | None = None) -
 
 def _has_budget_approval_path(incidents, run_store: RunStore) -> bool:
     for incident in incidents:
-        if budget_incident_can_continue(incident, run_store, cap=load_agent_runtime_config().neko_extension_cap):
+        if budget_incident_can_continue(incident, run_store, cap=load_root_runtime_config().neko_extension_cap):
             return True
     return False
 

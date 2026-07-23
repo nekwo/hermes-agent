@@ -19,7 +19,7 @@ from . import paths
 from .board_store import BoardStore
 from .office_store import OfficeStore
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
-from .config import ensure_persisted_personas, load_agent_runtime_config
+from .config import ensure_persisted_personas, load_agent_runtime_config, load_root_runtime_config
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
@@ -1442,7 +1442,7 @@ def _parity_warnings(data) -> list[dict]:
             }
         )
     try:
-        threshold = int(getattr(load_agent_runtime_config(), "open_incident_warning_threshold", 100))
+        threshold = int(getattr(load_root_runtime_config(), "open_incident_warning_threshold", 100))
     except Exception:
         threshold = 100
     try:
@@ -1562,7 +1562,7 @@ def write_snapshot(snapshot: dict | None = None) -> dict:
         sort_keys=True,
     )
     _sweep_stale_snapshot_tmp_files()
-    cfg = load_agent_runtime_config()
+    cfg = load_root_runtime_config()
     read_model_cfg = getattr(cfg, "read_model", None)
     if bool(getattr(read_model_cfg, "enabled", False)):
         from .read_model import ReadModel
@@ -4039,7 +4039,7 @@ def _run_blocked_reason(task, active_runs, open_incidents, *, run_store=None) ->
         return "mission is terminal"
     if open_incidents:
         runs = run_store or RunStore()
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
         if any(budget_incident_needs_scope_recovery(incident, runs) for incident in open_incidents):
             return "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
         if any(budget_incident_can_continue(incident, runs, cap=cfg.neko_extension_cap) for incident in open_incidents):
@@ -4055,7 +4055,7 @@ def _run_blocked_reason(task, active_runs, open_incidents, *, run_store=None) ->
 def _next_action_summary(task, open_incidents, *, run_store=None, event_log=None):
     if open_incidents:
         runs = run_store or RunStore()
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
         if any(budget_incident_needs_scope_recovery(incident, runs) for incident in open_incidents):
             return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_slot", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
         if any(budget_incident_can_continue(incident, runs, cap=cfg.neko_extension_cap) for incident in open_incidents):
@@ -4065,7 +4065,7 @@ def _next_action_summary(task, open_incidents, *, run_store=None, event_log=None
         return {**_stopped_progress(task, open_incidents, reason, "human"), "action": "blocked_by_incident", "reason": message}
     if task.state in {TaskState.DONE, TaskState.CANCELLED}:
         return {**_stopped_progress(task, [], "settled", "harness"), "action": "terminal", "reason": "mission is terminal"}
-    cfg = load_agent_runtime_config()
+    cfg = load_root_runtime_config()
     action = MissionStateMachine(config=cfg, event_log=event_log).next_action(task)
     reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
     return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "action": action.type.value, "reason": action.reason}

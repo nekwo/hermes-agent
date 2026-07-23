@@ -48,9 +48,9 @@ def _rotation_cap_bytes() -> int:
         return cached
     cap = event_rotation.DEFAULT_ROTATION_CAP_BYTES
     try:
-        from .config import load_agent_runtime_config
+        from .config import load_root_runtime_config
 
-        raw = getattr(getattr(load_agent_runtime_config(), "event_log", None), "rotation_cap_bytes", None)
+        raw = getattr(getattr(load_root_runtime_config(), "event_log", None), "rotation_cap_bytes", None)
         if raw is not None:
             cap = max(0, int(raw))
     except Exception:

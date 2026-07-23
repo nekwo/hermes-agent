@@ -8,7 +8,7 @@ from hermes_time import now
 from .events import EventLog
 from .models import Event
 from .child_events import emit_child_returned
-from .config import load_agent_runtime_config
+from .config import load_root_runtime_config
 from .persona_assignments import PersonaInstanceStore, safe_assignment_text
 
 SUMMARY_LIMIT = 1200
@@ -88,7 +88,7 @@ def return_summary_to_parent_session(
     )
     if child_events_enabled is None:
         try:
-            supervision = getattr(load_agent_runtime_config(), "supervision", None)
+            supervision = getattr(load_root_runtime_config(), "supervision", None)
             child_events_enabled = bool(getattr(supervision, "child_events_enabled", False))
         except Exception:
             child_events_enabled = False

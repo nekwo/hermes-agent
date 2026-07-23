@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from .context_requests import fulfilled_context_bundles
-from .config import load_agent_runtime_config
+from .config import load_root_runtime_config
 from .decision_contract_registry import (
     context_expansion_shape_ids as registry_context_expansion_shape_ids,
     contract_hash,
@@ -798,7 +798,7 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
     handoff = handoff if isinstance(handoff, dict) else {}
     stage_state = _stage_self_heal_state(task, run.stage_id or task.current_stage_id)
     role = _hud_owner(run)
-    config = config or load_agent_runtime_config()
+    config = config or load_root_runtime_config()
     simplified_contract = getattr(config, "simplified_agent_contract", None)
     simplified_contract_enabled = bool(getattr(simplified_contract, "enabled", False))
     worker_actions = worker_actions_for_role(role, task, run, config=config, proof_store=proof_store)

@@ -313,9 +313,9 @@ class ReadModel:
 
     @staticmethod
     def _default_db_path() -> Path:
-        from .config import load_agent_runtime_config
+        from .config import load_root_runtime_config
 
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
         filename = str(getattr(getattr(cfg, "read_model", None), "db_filename", "read_model.db") or "read_model.db")
         return paths.store_root() / filename
 

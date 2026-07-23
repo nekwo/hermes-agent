@@ -267,6 +267,32 @@ def harness_root_config_path() -> Path:
     return get_default_hermes_root() / "config.yaml"
 
 
+def load_root_runtime_config() -> AgentRuntimeConfig:
+    """Load the harness-global runtime config from the ROOT ``config.yaml``.
+
+    Convenience for harness-wide policy readers that must be immune to the CLI
+    profile redirect. A bare invocation runs
+    ``hermes_cli.main._apply_profile_override`` at import time, which reads
+    ``<root>/active_profile`` and points ``HERMES_HOME`` at
+    ``<root>/profiles/<name>``. From that point ``get_config_path()`` — and so
+    ``load_agent_runtime_config()`` with no argument — silently resolves against
+    THAT profile's ``config.yaml``, letting whichever profile is sticky-active
+    shadow harness-global operator policy (live proof 2026-07-23: with ``alice``
+    active, the mission-chat lane resolved ``chat_lane_restore_toolsets`` off
+    ``profiles/alice/config.yaml``, so the root-config ruling was dead on
+    arrival — see :func:`harness_root_config_path`).
+
+    Policy that is a property of the harness as a whole — not of any one
+    profile — loads through this instead of the bare
+    ``load_agent_runtime_config()``. Per-profile facts (``personas``, the
+    ``default_model`` / ``default_provider`` / ``default_api_mode`` resolution,
+    skills) must NOT use this; they stay on ``load_agent_runtime_config()`` so
+    the active profile's own overrides apply.
+    """
+
+    return load_agent_runtime_config(harness_root_config_path())
+
+
 def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> list[str]:
     """Per-persona operator override for the chat-lane toolset cost policy.
 

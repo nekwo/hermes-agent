@@ -61,7 +61,10 @@ def set_delta_patches(monkeypatch):
             cfg.read_model.delta_patches = enabled
             return cfg
 
-        monkeypatch.setattr(sp, "load_agent_runtime_config", _loader)
+        # The producer flag reader (_delta_patches_enabled) is pinned to the
+        # ROOT config via load_root_runtime_config(); patch that symbol so the
+        # fixture still injects the flag through the reader's actual loader.
+        monkeypatch.setattr(sp, "load_root_runtime_config", _loader)
 
     return _apply
 

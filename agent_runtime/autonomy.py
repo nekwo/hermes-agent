@@ -628,9 +628,9 @@ def _handoff_shape(persona: AgentPersona, ctx: AgentContext) -> str:
 
 def _simplified_contract_active() -> bool:
     try:
-        from .config import load_agent_runtime_config
+        from .config import load_root_runtime_config
 
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
     except Exception:
         return False
     simplified = getattr(cfg, "simplified_agent_contract", None)
