@@ -1324,6 +1324,9 @@ _TOOL_DETAIL_STR_FIELDS = (
     # full order, carried onto the tool{} payload under the same names the
     # launcher reads. Already operator-sanitized upstream; straight newest-wins.
     "dispatch_target", "dispatch_order",
+    # Generic tool input/result record (tools with no dedicated detail field) —
+    # feeds the console's collapsed Input/Result dropdowns.
+    "tool_input", "tool_result",
 )
 _TOOL_DETAIL_INT_FIELDS = ("duration_ms", "exit_code")
 

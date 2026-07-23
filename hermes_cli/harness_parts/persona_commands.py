@@ -3737,6 +3737,11 @@ class _ChatProtocolV2Emitter:
             "status": _safe_stream_text(payload.get("status")),
             "summary": _safe_stream_text(payload.get("summary")),
         }
+        # Generic input record (already scrubbed/bounded at the progress sink).
+        # Block-preserving: key-per-line structure is the rendering contract.
+        tool_input = _safe_stream_block(payload.get("tool_input"), limit=1200)
+        if tool_input:
+            tool["tool_input"] = tool_input
         self.elements.append(tool)
         self._active_tools.setdefault(name, []).append(tool)
         self._emit_chat_frame(
@@ -3749,6 +3754,7 @@ class _ChatProtocolV2Emitter:
                 "name": name,
                 "args": _safe_stream_text(payload.get("summary")),
                 "command": command,
+                "tool_input": tool.get("tool_input"),
             }
         )
 
@@ -3801,6 +3807,15 @@ class _ChatProtocolV2Emitter:
         todo_state = payload.get("todo_state")
         if isinstance(todo_state, list):
             tool["todo_state"] = todo_state
+        # Generic input/result record (scrubbed/bounded at the progress sink;
+        # block-preserving). Input carries through from the started element when
+        # the finished payload omits it, mirroring the command carry-through.
+        tool_input = _safe_stream_block(payload.get("tool_input"), limit=1200) or tool.get("tool_input")
+        if tool_input:
+            tool["tool_input"] = tool_input
+        tool_result = _safe_stream_block(payload.get("tool_result"), limit=1800)
+        if tool_result:
+            tool["tool_result"] = tool_result
         self._emit_chat_frame(
             {
                 "type": "tool.finished",
@@ -3816,6 +3831,8 @@ class _ChatProtocolV2Emitter:
                 "detail": tool.get("detail"),
                 "output": tool.get("output"),
                 "exit_code": tool.get("exit_code"),
+                "tool_input": tool.get("tool_input"),
+                "tool_result": tool.get("tool_result"),
                 **({"todo_state": tool["todo_state"]} if "todo_state" in tool else {}),
             }
         )
@@ -3871,6 +3888,22 @@ class _ChatProtocolV2Emitter:
 
 def _safe_stream_text(value: object, *, limit: int = 800) -> str | None:
     return safe_assignment_text(value, limit=limit) or None
+
+
+def _safe_stream_block(value: object, *, limit: int) -> str | None:
+    """Newline-PRESERVING stream text for the tool input/result record.
+
+    ``safe_assignment_text`` whitespace-collapses, which would fold the
+    key-per-line block (the rendering contract for the console's Input/Result
+    dropdowns) into one unreadable line. The value was already secret-scrubbed
+    and bounded at the progress sink; this only re-bounds and strips NULs."""
+
+    text = str(value or "").replace("\x00", " ").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        text = f"{text[:limit]}\n…(rest truncated)…"
+    return text
 
 
 def _safe_exit_code_value(value: object) -> int | None:

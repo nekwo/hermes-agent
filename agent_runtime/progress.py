@@ -50,6 +50,12 @@ _SAFE_PROGRESS_KEYS = {
     # and the FULL order, so the operator console shows exactly what each
     # teammate was told without parsing the 90-char-excerpted target_label prose.
     "dispatch_target", "dispatch_order",
+    # Generic tool-call input/result record for tools with no dedicated field
+    # (non-terminal, non-dev-work): a bounded key-per-line rendering of the raw
+    # invocation and result, produced by profile_runner._attach_tool_io. This is
+    # what lets the operator console expand ANY tool row instead of showing
+    # "no input or result detail was emitted".
+    "tool_input", "tool_result",
 }
 
 # Bounds for the operator-detail fields (event payload cap is 4096 bytes).
@@ -59,6 +65,11 @@ _OPERATOR_OUTPUT_TAIL_MAX = 1200
 _OPERATOR_PATHS_MAX = 12
 _OPERATOR_DISPATCH_TARGET_MAX = 120
 _OPERATOR_DISPATCH_ORDER_MAX = 1500
+# Producer bounds are 1000/1600 (profile_runner) plus a one-line truncation
+# marker; these re-scrub bounds sit just above so the marker itself is never
+# re-truncated into garbage.
+_OPERATOR_TOOL_INPUT_MAX = 1100
+_OPERATOR_TOOL_RESULT_MAX = 1700
 
 _INTERNAL_RUN_PROGRESS_KEYS = {
     "repo_baseline",
@@ -240,12 +251,12 @@ def _chat_progress_has_signal(payload: dict[str, Any]) -> bool:
 def _append_bounded_event(event_log: EventLog, event: Event) -> None:
     """Append, degrading oversized payloads instead of silently dropping them.
 
-    The operator ``output`` tail and the full ``dispatch_order`` are the two
-    variable-size fields that can push a payload past the 4KB event cap; a
-    too-large event previously vanished into the sink's bare except. Shed the
-    largest optional field first (``output``), then ``dispatch_order``, so the
-    tool row itself (command, target, status, files, the ``→ target`` chip)
-    always survives. If the row is still too large after both, the final append
+    The operator detail fields (``tool_result`` / ``output`` / ``tool_input`` /
+    ``dispatch_order``) are the variable-size fields that can push a payload
+    past the 4KB event cap; a too-large event previously vanished into the
+    sink's bare except. Shed them largest-and-least-critical first so the tool
+    row itself (command, target, status, files, the ``→ target`` chip) always
+    survives. If the row is still too large after all four, the final append
     re-raises to the sink's best-effort boundary (unchanged terminal behavior).
     """
 
@@ -255,7 +266,9 @@ def _append_bounded_event(event_log: EventLog, event: Event) -> None:
     except EventPayloadTooLarge:
         payload = dict(event.payload or {})
     for drop_key, marker in (
+        ("tool_result", "tool_result_truncated"),
         ("output", "output_truncated"),
+        ("tool_input", "tool_input_truncated"),
         ("dispatch_order", "dispatch_order_truncated"),
     ):
         if drop_key not in payload:
@@ -363,6 +376,12 @@ def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str
             continue
         if isinstance(value, str) and key == "output":
             text = _safe_operator_output_tail(value)
+            if text:
+                safe[key] = text
+            continue
+        if isinstance(value, str) and key in ("tool_input", "tool_result"):
+            limit = _OPERATOR_TOOL_INPUT_MAX if key == "tool_input" else _OPERATOR_TOOL_RESULT_MAX
+            text = _safe_operator_block_head(value, limit=limit)
             if text:
                 safe[key] = text
             continue
@@ -482,6 +501,34 @@ def _safe_operator_output_tail(value: str) -> str | None:
     text = "\n".join(lines)
     if len(text) > _OPERATOR_OUTPUT_TAIL_MAX:
         text = f"…(earlier output truncated)…\n{text[-_OPERATOR_OUTPUT_TAIL_MAX:]}"
+    return text
+
+
+def _safe_operator_block_head(value: str, *, limit: int) -> str | None:
+    """Bounded HEAD of a key-per-line tool input/result block, line structure
+    kept and secret-bearing lines redacted. Head-biased (unlike the output
+    tail): the leading keys are what the operator reads first. A block whose
+    EVERY line was redacted carries zero signal — dropped whole."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    kept_any = False
+    lines: list[str] = []
+    for line in text.split("\n"):
+        if _looks_sensitive(line):
+            lines.append("[redacted line — contained a secret]")
+        else:
+            lines.append(line)
+            if line.strip():
+                kept_any = True
+    if not kept_any:
+        return None
+    text = "\n".join(lines).strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        text = f"{text[:limit]}\n…(rest truncated)…"
     return text
 
 

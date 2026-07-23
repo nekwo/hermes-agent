@@ -1008,6 +1008,7 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
     skill_name = _safe_skill_tool_name(tool_name, invocation)
     if skill_name:
         payload["skill_name"] = skill_name
+    _attach_tool_io(payload, invocation=invocation)
     return payload
 
 
@@ -1027,8 +1028,10 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
         payload["skill_name"] = skill_name
     dev_work_payload = _dev_work_payload(tool_name, status=status, result=result, invocation=invocation)
     if dev_work_payload:
-        # No target echo for dev-work tools: changed_paths/changed_files ARE
-        # the target, and the raw invocation path may be machine-absolute.
+        # No target echo and NO generic tool_input/tool_result for dev-work
+        # tools: changed_paths/changed_files ARE the record, and the raw
+        # invocation/result carry the diff body and machine-absolute paths
+        # that this lane deliberately never persists.
         payload.update(dev_work_payload)
         return payload
     target_label = (
@@ -1056,6 +1059,14 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
     todo_state = _todo_state_payload(tool_name, result, invocation)
     if todo_state is not None:
         payload["todo_state"] = todo_state
+    # agent_chat_send input is already first-class (dispatch_target/dispatch_order
+    # on the started event) — re-attaching the order as tool_input would spend
+    # the same bytes twice against the event cap. Its RESULT still attaches.
+    _attach_tool_io(
+        payload,
+        invocation=None if tool_name == "agent_chat_send" else invocation,
+        result=result,
+    )
     return payload
 
 
@@ -1259,6 +1270,106 @@ def _safe_operator_output(tool_name: str | None, result: Any) -> str | None:
     if truncated:
         text = f"…(earlier output truncated)…\n{text}"
     return text
+
+
+# Generic tool-call input/result record (the "what was it called with / what
+# came back" lane). Terminal-class calls keep their dedicated fields
+# (command_full / output) and dev-work calls keep changed_paths; every tool
+# call additionally gets a bounded, secret-scrubbed rendering of its raw
+# invocation and result when no dedicated field captured them — so the
+# operator console never has to show a bare "no detail was emitted" row.
+# Dict payloads render one `key: <json>` line per top-level key so the
+# per-line secret scrub drops only the offending pair, never the whole record.
+_OPERATOR_TOOL_INPUT_MAX = 1000
+_OPERATOR_TOOL_RESULT_MAX = 1600
+# Result-envelope keys that dedicated payload fields already carry.
+_TOOL_RESULT_ECHO_KEYS = ("exit_code",)
+
+
+def _render_operator_kv_block(value: Any) -> str | None:
+    try:
+        if isinstance(value, dict):
+            text = "\n".join(
+                f"{key}: {json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)}"
+                for key, item in value.items()
+            )
+        elif isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        text = str(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text or None
+
+
+def _scrub_operator_block_head(text: str, *, limit: int) -> str | None:
+    """Per-line secret scrub, HEAD-bounded: the leading keys/fields are the
+    operator signal (unlike command output, where the tail is), so truncation
+    keeps the front and marks the cut explicitly. A record whose EVERY line was
+    redacted carries zero signal — dropped whole rather than persisted as a
+    marker-only blob."""
+
+    kept_any = False
+    lines: list[str] = []
+    for line in text.split("\n"):
+        if _line_has_secret(line):
+            lines.append("[redacted line — contained a secret]")
+        else:
+            lines.append(line)
+            if line.strip():
+                kept_any = True
+    if not kept_any:
+        return None
+    out = "\n".join(lines).strip()
+    if not out:
+        return None
+    if len(out) > limit:
+        out = f"{out[:limit]}\n…(rest truncated)…"
+    return out
+
+
+def _safe_operator_tool_input(invocation: Any) -> str | None:
+    if not isinstance(invocation, dict) or not invocation:
+        return None
+    rendered = _render_operator_kv_block(invocation)
+    if rendered is None:
+        return None
+    return _scrub_operator_block_head(rendered, limit=_OPERATOR_TOOL_INPUT_MAX)
+
+
+def _safe_operator_tool_result(result: Any) -> str | None:
+    if result is None:
+        return None
+    if isinstance(result, dict):
+        slim = {key: item for key, item in result.items() if key not in _TOOL_RESULT_ECHO_KEYS}
+        if not slim:
+            return None
+        rendered = _render_operator_kv_block(slim)
+    else:
+        rendered = _render_operator_kv_block(result)
+    if rendered is None:
+        return None
+    return _scrub_operator_block_head(rendered, limit=_OPERATOR_TOOL_RESULT_MAX)
+
+
+def _attach_tool_io(payload: dict[str, Any], *, invocation: Any, result: Any = None) -> None:
+    """Attach the generic ``tool_input`` / ``tool_result`` record to a tool payload.
+
+    Dedicated fields stay authoritative and are never duplicated against the
+    4KB event cap: a call whose input already surfaced as a command keeps
+    command_full as its input record, and a terminal-class call's result IS its
+    ``output`` tail. Everything else gets the generic record.
+    """
+
+    if "command_full" not in payload and "command_label" not in payload:
+        tool_input = _safe_operator_tool_input(invocation)
+        if tool_input:
+            payload["tool_input"] = tool_input
+    if result is not None and "output" not in payload:
+        tool_result = _safe_operator_tool_result(result)
+        if tool_result:
+            payload["tool_result"] = tool_result
 
 
 _OPERATOR_TARGET_MAX = 300

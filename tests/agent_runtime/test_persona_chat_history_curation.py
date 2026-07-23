@@ -1194,6 +1194,37 @@ def test_trace_entry_carries_operator_detail_fields():
     assert read["target"] == "lib/main.dart"
 
 
+def test_trace_entry_carries_generic_tool_io():
+    events = EventLog()
+    ts = now()
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.finished",
+            task_id="task_tool_io",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={
+                "tool_name": "agent_chat_threads",
+                "status": "passed",
+                "summary": "Finished tool agent_chat_threads: passed",
+                "tool_input": "limit: 5",
+                "tool_result": 'ok: true\nthreads: [{"id": "t1"}]',
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[_persona_instance("personainst_dev", "dev", "task_tool_io")],
+        event_log=events,
+    )
+
+    entry = rows[0]["entries"][0]
+    assert entry["tool_input"] == "limit: 5"
+    # Newline structure survives into the projection (block scrub, not line).
+    assert entry["tool_result"] == 'ok: true\nthreads: [{"id": "t1"}]'
+
+
 def test_trace_entry_projects_turn_id():
     events = EventLog()
     ts = now()

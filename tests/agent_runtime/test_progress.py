@@ -337,6 +337,72 @@ def test_append_bounded_event_sheds_dispatch_order_when_output_not_enough(isolat
     assert rows[0].payload["dispatch_target"] == "backend_dev"
 
 
+def test_safe_progress_payload_carries_tool_io_blocks():
+    payload = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "agent_chat_open",
+            "tool_input": 'persona_id: "dev"\ninstance_id: "abc"',
+            "tool_result": 'ok: true\nthreads: [{"id": "t1"}]',
+        },
+    )
+
+    # Line structure survives (the console dropdown renders one key per line).
+    assert payload["tool_input"] == 'persona_id: "dev"\ninstance_id: "abc"'
+    assert payload["tool_result"] == 'ok: true\nthreads: [{"id": "t1"}]'
+
+
+def test_safe_progress_payload_redacts_secret_tool_io_lines_and_bounds():
+    payload = _safe_progress_payload(
+        "run.tool.finished",
+        {
+            "type": "run.tool.finished",
+            "tool_name": "web_fetch",
+            "tool_input": 'url: "https://x"\nauthorization: "Bearer abc"',
+            "tool_result": "z" * 4000,
+        },
+    )
+
+    lines = payload["tool_input"].split("\n")
+    assert lines[0] == 'url: "https://x"'
+    assert lines[1] == "[redacted line — contained a secret]"
+    # Head-bounded with an explicit truncation marker (1700 + marker line).
+    assert payload["tool_result"].startswith("z" * 100)
+    assert payload["tool_result"].endswith("…(rest truncated)…")
+    assert len(payload["tool_result"]) <= 1700 + len("\n…(rest truncated)…")
+
+
+def test_append_bounded_event_sheds_tool_result_before_output(isolate_agent_runtime_root):
+    log = EventLog()
+    payload = {
+        "type": "run.tool.finished",
+        "tool_name": "agent_chat_threads",
+        "status": "passed",
+        "tool_input": "limit: 5",
+        "tool_result": "r" * 5000,
+    }
+    _append_bounded_event(
+        log,
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_shed_tool_result",
+            run_id="run_a",
+            persona_id="neko",
+            payload=payload,
+        ),
+    )
+
+    rows = log.for_task("task_shed_tool_result")
+    assert len(rows) == 1
+    # tool_result shed first; the smaller tool_input survives with the row.
+    assert "tool_result" not in rows[0].payload
+    assert rows[0].payload["tool_result_truncated"] is True
+    assert rows[0].payload["tool_input"] == "limit: 5"
+    assert rows[0].payload["tool_name"] == "agent_chat_threads"
+
+
 def test_append_bounded_event_degrades_oversized_output(isolate_agent_runtime_root):
     from hermes_time import now
 

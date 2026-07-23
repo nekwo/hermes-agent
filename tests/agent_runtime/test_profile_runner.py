@@ -14,6 +14,7 @@ from agent_runtime.profile_runner import (
     _agent_chat_target_label,
     _progress_adapter,
     _tool_finished_payload,
+    _tool_started_payload,
     _todo_items_from,
     _todo_state_payload,
     _TODO_STATE_MAX_CONTENT,
@@ -804,6 +805,9 @@ def test_progress_adapter_marks_string_error_lifecycle_result_failed():
             "summary": "Finished tool terminal: failed",
             "command_label": "pytest",
             "command_full": "pytest",
+            # A string lifecycle result is the error itself — real signal for
+            # the console's Result dropdown (scrubbed + bounded like all IO).
+            "tool_result": "ERROR: command failed",
         }
     ]
 
@@ -1251,6 +1255,9 @@ def test_tool_lifecycle_finished_marks_timeout_exit_code_as_failed():
             "summary": "Finished tool terminal: failed",
             "command_label": "pytest",
             "command_full": "pytest",
+            # No output tail came back; the envelope remainder (minus the
+            # exit_code echo) is the honest result record for the dropdown.
+            "tool_result": "timed_out: true",
         }
     ]
 
@@ -1436,6 +1443,119 @@ def test_tool_finished_payload_omits_todo_state_for_other_tools():
         invocation={"skill": "x"},
     )
     assert "todo_state" not in payload
+
+
+# Generic tool input/result record (2026-07-23): every tool call gets a bounded
+# key-per-line rendering of its raw invocation/result when no dedicated field
+# (command_full / output / dispatch_order) captured it — the fix for the
+# console's "No input or result detail was emitted for this tool call" rows.
+
+
+def test_tool_started_payload_records_generic_input():
+    payload = _tool_started_payload(
+        "run.tool.started",
+        "agent_chat_open",
+        invocation={"persona_id": "dev", "instance_id": "abc"},
+    )
+    assert payload["tool_input"] == 'persona_id: "dev"\ninstance_id: "abc"'
+    assert "command_full" not in payload
+
+
+def test_tool_finished_payload_records_generic_input_and_result():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_threads",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "threads": [{"id": "t1"}], "exit_code": 0},
+        invocation={"limit": 5},
+    )
+    assert payload["tool_input"] == "limit: 5"
+    # exit_code is echoed by its dedicated payload field, not the record.
+    assert payload["tool_result"] == 'ok: true\nthreads: [{"id": "t1"}]'
+    assert payload["exit_code"] == 0
+    assert "output" not in payload
+
+
+def test_tool_io_defers_to_dedicated_terminal_fields():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "terminal",
+        duration=None,
+        is_error=False,
+        result={"output": "42 tests passed", "exit_code": 0},
+        invocation={"command": "pytest -q"},
+    )
+    # command_full IS the input record; output IS the result record.
+    assert payload["command_full"] == "pytest -q"
+    assert payload["output"] == "42 tests passed"
+    assert "tool_input" not in payload
+    assert "tool_result" not in payload
+
+
+def test_tool_input_redacts_secret_pairs_line_by_line():
+    payload = _tool_started_payload(
+        "run.tool.started",
+        "web_fetch",
+        invocation={"url": "https://example.com", "api_key": "sk-12345"},
+    )
+    lines = payload["tool_input"].split("\n")
+    assert lines[0] == 'url: "https://example.com"'
+    assert lines[1] == "[redacted line — contained a secret]"
+    assert "sk-12345" not in payload["tool_input"]
+
+
+def test_agent_chat_send_finished_keeps_result_but_not_duplicate_input():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "delivered": True},
+        invocation={"persona_id": "dev", "message": "run the check"},
+    )
+    # The order already rides dispatch_order on the started event.
+    assert "tool_input" not in payload
+    assert payload["tool_result"] == "ok: true\ndelivered: true"
+
+
+def test_dev_work_finished_payload_never_records_raw_tool_io():
+    # Dev-work policy: changed_paths/changed_files ARE the record; the raw
+    # invocation (diff body, machine-absolute paths) never rides the payload.
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "patch",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "diff": "raw diff body"},
+        invocation={"patch": "*** Update File: lib/a.dart\n+x"},
+    )
+    assert payload["phase"] == "dev_work"
+    assert "tool_input" not in payload
+    assert "tool_result" not in payload
+
+
+def test_tool_input_dropped_when_every_line_is_secret():
+    payload = _tool_started_payload(
+        "run.tool.started",
+        "web_fetch",
+        invocation={"api_key": "sk-12345"},
+    )
+    # A record of only redaction markers carries zero operator signal.
+    assert "tool_input" not in payload
+
+
+def test_tool_result_bounded_head_with_marker():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "read_file",
+        duration=None,
+        is_error=False,
+        result={"content": "z" * 5000},
+        invocation={"path": "lib/a.dart"},
+    )
+    assert payload["tool_result"].endswith("…(rest truncated)…")
+    assert len(payload["tool_result"]) <= 1600 + len("\n…(rest truncated)…")
 
 
 # T8 (2026-07-18): the rendered skills-index chars captured on final_model_input.
