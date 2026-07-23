@@ -845,11 +845,13 @@ def snapshot_prompt_observability(
     daemon: dict[str, Any] | None = None,
     realm: str | None = None,
     workspace: str | None = None,
+    active_workspace_id: str | None = None,
     catalog_sink: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     # Deferred import: context_builder pulls a large dependency graph, and this
     # module is imported very early. A function-local import keeps module load
     # order robust while still giving the preview a single-authority HUD builder.
+    from . import workspace_scope
     from .context_builder import mission_hud_preview
     from .runtime_hud import resolve_situational_hud
 
@@ -876,12 +878,24 @@ def snapshot_prompt_observability(
     def _situational_for(instance: Any, task_id: str | None) -> dict[str, Any]:
         try:
             goal_id = getattr(instance, "goal_id", None)
+            # Scope the ADDRESSABLE roster to this lane's own workspace so the
+            # recorded snapshot advertises the exact same "On level" set the live
+            # mission-chat turn feeds — a placement in another workspace must not
+            # appear here either (parity envelope). Identity (steering) resolves
+            # against the full, unscoped roster, matching the HUD wrapper.
+            scope_workspace_id = workspace_scope.effective_workspace_id(
+                instance, active_workspace_id=active_workspace_id
+            )
+            scoped_roster = workspace_scope.scope_roster(
+                roster, scope_workspace_id=scope_workspace_id
+            )
             return resolve_situational_hud(
                 instance,
                 daemon=daemon,
                 realm=realm,
                 workspace=workspace,
-                roster=roster,
+                roster=scoped_roster,
+                identity_roster=roster,
                 task=tasks_by_id.get(safe_assignment_token(task_id) or ""),
                 goal_task=tasks_by_id.get(safe_assignment_token(goal_id) or ""),
                 proof_store=proof_store,

@@ -211,6 +211,10 @@ def agent_chat_send(
         stream=False,
         max_seconds=wall_budget,
         json=True,
+        # Sender provenance (envelope field, not guard logic): the sender's
+        # chat-root session id lets the handler's target chokepoint scope
+        # bare-persona resolution to the SENDER's workspace.
+        requested_by_session=source_token or None,
         # Explicit relay envelope — the handler's chokepoint guard reads
         # these; ambient ContextVars never cross a transport boundary.
         relay_chain=list(chain),

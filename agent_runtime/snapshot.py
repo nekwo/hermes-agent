@@ -583,6 +583,7 @@ def _build_snapshot_uncoalesced(
             daemon=None,
             realm=active_realm_name,
             workspace=active_workspace_name,
+            active_workspace_id=workspace_store.active_id(),
             catalog_sink=prompt_skills_catalogs,
         ),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),

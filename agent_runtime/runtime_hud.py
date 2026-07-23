@@ -298,6 +298,7 @@ def resolve_situational_hud(
     realm: str | None = None,
     workspace: str | None = None,
     roster: Iterable[Any] = (),
+    identity_roster: Iterable[Any] | None = None,
     task: Any = None,
     goal_task: Any = None,
     proof_store: Any = None,
@@ -309,11 +310,19 @@ def resolve_situational_hud(
     (`snapshot_prompt_observability`) and the chat caller
     (`_cmd_mission_chat_message`) resolve these and call in, so the widget and
     the model render the same projection.
+
+    ``roster`` is the ADDRESSABLE set — the workspace-scoped list that feeds the
+    "On level" advertising block and the mission thread count. ``identity_roster``
+    is the FULL, unscoped list used only for identity resolution (who steers
+    whom): a steerer in another workspace must still resolve to a name even
+    though it is not addressable from here. It defaults to ``roster`` so existing
+    callers that pass a single list keep identical behaviour.
     """
 
     if instance is None:
         return {}
     roster = list(roster or ())
+    identity_roster = roster if identity_roster is None else list(identity_roster)
     self_id = _text(getattr(instance, "id", None))
 
     hud: dict[str, Any] = {"preview": True}
@@ -340,8 +349,11 @@ def resolve_situational_hud(
 
     # Steering is always emitted (unlike the other blocks, which drop when
     # empty): an explicit empty block is the honest "standalone" answer, and
-    # its absence is reserved for HUDs that predate steering entirely.
-    hud["steering"] = _steering_block(instance, roster, self_id=self_id)
+    # its absence is reserved for HUDs that predate steering entirely. Identity
+    # resolution reads the FULL roster — a steerer/steered lane in another
+    # workspace is a genuine graph fact even when it is not addressable from
+    # here, so scoping must never blank out a steering name.
+    hud["steering"] = _steering_block(instance, identity_roster, self_id=self_id)
 
     # Advisory Mission Board digest (nudge, not instruction): a one-line
     # awareness cue. Absent when there is no board or it has no open cards, so a
@@ -522,18 +534,31 @@ def situational_hud_for_instance(instance: Any, *, proof_store: Any = None) -> d
     try:
         # Deferred imports keep module load order robust (context_builder, the
         # stores, and daemon all pull sizeable graphs).
+        from . import workspace_scope
         from .persona_assignments import PersonaInstanceStore
         from .store import RealmStore, TaskStore, WorkspaceStore
 
-        roster = PersonaInstanceStore().list_all()
+        # The FULL roster stays available for identity (steering) resolution; the
+        # ADDRESSABLE roster fed to advertising/thread-count is scoped to this
+        # lane's own workspace so a placement in another workspace is never
+        # offered as a target here.
+        identity_roster = PersonaInstanceStore().list_all()
 
         workspace_store = WorkspaceStore()
         realm_store = RealmStore()
+        scope_workspace_id = workspace_scope.effective_workspace_id(
+            instance, active_workspace_id=workspace_store.active_id()
+        )
+        scoped_roster = workspace_scope.scope_roster(
+            identity_roster, scope_workspace_id=scope_workspace_id
+        )
+        # The scope line names the lane's OWN workspace when it carries a pointer
+        # (fallback: the active workspace), so it matches the scoped roster.
         workspace = next(
             (
                 getattr(item, "name", None)
                 for item in workspace_store.list_all(include_archived=True)
-                if getattr(item, "id", None) == workspace_store.active_id()
+                if getattr(item, "id", None) == scope_workspace_id
             ),
             None,
         )
@@ -561,11 +586,12 @@ def situational_hud_for_instance(instance: Any, *, proof_store: Any = None) -> d
             daemon=None,
             realm=realm,
             workspace=workspace,
-            roster=roster,
+            roster=scoped_roster,
+            identity_roster=identity_roster,
             task=_safe_get(getattr(instance, "current_task_id", None)),
             goal_task=_safe_get(getattr(instance, "goal_id", None)),
             proof_store=proof_store,
-            board=_board_digest_for_workspace(workspace_store.active_id()),
+            board=_board_digest_for_workspace(scope_workspace_id),
         )
     except Exception:
         return {}

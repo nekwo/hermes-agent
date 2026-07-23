@@ -204,3 +204,172 @@ def test_agent_chat_send_tool_surfaces_ambiguous_target_with_candidates(tmp_path
     assert result["error_kind"] == "ambiguous_target"
     handles = {c["persona_instance_id"] for c in result["candidates"]}
     assert handles == {"personainst_dev", "personainst_dev_agent_2"}
+
+
+# --------------------------------------------------------------------------- #
+# Workspace-scoped candidate enumeration (D1)                                  #
+#                                                                              #
+# A BARE persona id is resolved only among the placements in the SENDER's      #
+# workspace (plus runtime-global rows). Placements in other workspaces are not #
+# counted, so a two-agent order does not fan out onto duplicate placements in  #
+# unrelated workspaces. Explicit @handle targeting stays allowed cross-        #
+# workspace. The typed ambiguous_target rejection is unchanged for genuine     #
+# in-scope duplicates.                                                         #
+# --------------------------------------------------------------------------- #
+
+
+def _seed_dev_scoped(monkeypatch, tmp_path, placements, *, active="ws_home"):
+    """Fresh runtime root with an ACTIVE workspace and ``dev`` placements.
+
+    ``placements`` is ``[(placement_id, workspace_id), ...]`` for persona
+    ``dev``. Every referenced workspace (and ``active``) is created with an
+    explicit id and ``active`` is set active. The canonical ``personainst_dev``
+    auto-ensured by ``derive_from_workers`` is runtime-global (no workspace
+    pointer), so it is always in scope.
+    """
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.store import WorkspaceStore
+    from agent_runtime.worker_sessions import WorkerSessionStore
+
+    cfg = load_agent_runtime_config()
+    ws_store = WorkspaceStore()
+    for workspace_id in {active, *(wid for _, wid in placements)}:
+        ws_store.create(name=workspace_id, workspace_id=workspace_id)
+    ws_store.set_active(active)
+
+    store = PersonaInstanceStore()
+    store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+    for placement_id, workspace_id in placements:
+        store.add_instance(
+            persona_id="dev",
+            placement_id=placement_id,
+            workspace_id=workspace_id,
+            display_name=placement_id,
+        )
+    return store
+
+
+def _run_bare_dev(capsys, *extra, persona="dev"):
+    """Run a bare mission-chat send and return stdout, tolerating the model
+    plumbing that runs past an ALLOWED guard (the guard emits before it)."""
+    args = _parser().parse_args(
+        [
+            "harness",
+            "mission-chat",
+            "message",
+            "--persona",
+            persona,
+            "--message",
+            "hi",
+            "--json",
+            *extra,
+        ]
+    )
+    try:
+        args.func(args)
+    except Exception:
+        pass
+    return capsys.readouterr().out
+
+
+def test_bare_persona_out_of_scope_siblings_are_not_counted(tmp_path, monkeypatch, capsys):
+    # Two dev placements, both in OTHER workspaces than the active one. Only the
+    # runtime-global canonical personainst_dev is in scope → single target → the
+    # bare persona id resolves cleanly, no ambiguous_target.
+    _seed_dev_scoped(
+        monkeypatch,
+        tmp_path,
+        [("dev_far_1", "ws_far_1"), ("dev_far_2", "ws_far_2")],
+        active="ws_home",
+    )
+    out = _run_bare_dev(capsys)
+    assert "ambiguous_target" not in _emitted_error_kinds(out)
+
+
+def test_bare_persona_two_in_scope_duplicates_still_refused_with_only_those(tmp_path, monkeypatch, capsys):
+    # One dev placement in the active workspace + one in another workspace. The
+    # in-scope set is the global canonical dev + the active-workspace placement
+    # → genuinely ambiguous → refused, and the out-of-scope placement is NOT a
+    # candidate.
+    _seed_dev_scoped(
+        monkeypatch,
+        tmp_path,
+        [("dev_agent_2", "ws_home"), ("dev_far", "ws_far")],
+        active="ws_home",
+    )
+    out = _run_bare_dev(capsys)
+    data = json.loads(out)
+    assert data["error_kind"] == "ambiguous_target"
+    handles = {c["persona_instance_id"] for c in data["candidates"]}
+    assert handles == {"personainst_dev", "personainst_dev_agent_2"}
+    assert "personainst_dev_far" not in handles
+
+
+def test_explicit_handle_targeting_out_of_scope_instance_is_allowed(tmp_path, monkeypatch, capsys):
+    # Even with two in-scope duplicates (which make a BARE persona ambiguous),
+    # naming an out-of-workspace instance by its explicit @handle is caller-
+    # pinned and must never be refused for ambiguity.
+    _seed_dev_scoped(
+        monkeypatch,
+        tmp_path,
+        [("dev_agent_2", "ws_home"), ("dev_far", "ws_far")],
+        active="ws_home",
+    )
+    out = _run_bare_dev(capsys, persona="personainst_dev_far")
+    assert "ambiguous_target" not in _emitted_error_kinds(out)
+
+
+def test_sender_session_scopes_candidates_to_sender_workspace(tmp_path, monkeypatch):
+    # The sender's chat-root session identifies the sender's workspace: the same
+    # seed resolves differently with vs without it. Unit-level so the sender
+    # session can be threaded directly (the CLI arg path has no sender session).
+    from hermes_cli.harness import _mission_chat_target_decision
+
+    from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.store import WorkspaceStore
+    from agent_runtime.worker_sessions import WorkerSessionStore
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    cfg = load_agent_runtime_config()
+    ws_store = WorkspaceStore()
+    for workspace_id in ("ws_home", "ws_a", "ws_b"):
+        ws_store.create(name=workspace_id, workspace_id=workspace_id)
+    ws_store.set_active("ws_home")  # active is neither sender's ws nor a target's
+
+    store = PersonaInstanceStore()
+    store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+    store.add_instance(persona_id="dev", placement_id="dev_ws_a", workspace_id="ws_a", display_name="Dev A")
+    store.add_instance(persona_id="dev", placement_id="dev_ws_b", workspace_id="ws_b", display_name="Dev B")
+    # The sender lives in ws_a; its chat-root session id encodes its owner.
+    sender = store.add_instance(
+        persona_id="neko_supervisor", placement_id="sender", workspace_id="ws_a", display_name="Sender"
+    )
+    sender_session = f"persona_chat_{sender.id}_{'a' * 12}"
+
+    common = dict(
+        instance_store=store,
+        normalized_persona="dev",
+        raw_persona_id="dev",
+        persona_instance_id=None,
+        session_id=None,
+        relay_chain=(),
+    )
+
+    # No sender session → scope is the active workspace (ws_home): neither ws_a
+    # nor ws_b dev is in scope, only the runtime-global canonical dev → allowed.
+    no_sender = _mission_chat_target_decision(**common, requested_by_session=None)
+    assert no_sender.allowed is True
+
+    # With the sender session → scope is the sender's workspace (ws_a): the ws_a
+    # dev joins the global dev → two in-scope → ambiguous, and the ws_b placement
+    # is excluded from the candidates.
+    scoped = _mission_chat_target_decision(**common, requested_by_session=sender_session)
+    assert scoped.allowed is False
+    assert scoped.error_kind == "ambiguous_target"
+    handles = {c.instance_id for c in scoped.candidates}
+    assert handles == {"personainst_dev", "personainst_dev_ws_a"}
+    assert "personainst_dev_ws_b" not in handles

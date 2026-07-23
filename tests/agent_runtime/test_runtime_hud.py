@@ -397,3 +397,119 @@ def test_runtime_context_envelope_is_compact_and_strips_only_at_final_boundary()
 
     authored = f"please discuss {envelope}\nthen continue"
     assert extract_runtime_context_envelope(authored) == (authored, None)
+
+
+# --------------------------------------------------------------------------- #
+# Workspace-scoped addressable roster (D1)                                     #
+#                                                                              #
+# The addressable "On level" roster and mission thread count are the SCOPED    #
+# list (the sender's workspace + runtime-global rows); identity resolution     #
+# (steering names) reads the FULL, unscoped list. These compose the two pure   #
+# pieces the way the chat wrapper / snapshot do: scope_roster for advertising, #
+# the full roster for identity_roster.                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_situational_hud_roster_scoped_to_target_workspace():
+    from agent_runtime import workspace_scope
+
+    target = _instance(id="personainst_dev", persona_id="dev", display_name="Dev", workspace_id="ws_a")
+    same_ws = _instance(id="personainst_qa", persona_id="qa", display_name="QA", workspace_id="ws_a")
+    other_ws = _instance(id="personainst_qa_b", persona_id="qa", display_name="QA (2)", workspace_id="ws_b")
+    global_row = _instance(id="personainst_neko", display_name="Neko Mission Lead", workspace_id=None)
+    full = [target, same_ws, other_ws, global_row]
+
+    scope_ws = workspace_scope.effective_workspace_id(target, active_workspace_id="ws_a")
+    scoped = workspace_scope.scope_roster(full, scope_workspace_id=scope_ws)
+    hud = resolve_situational_hud(target, roster=scoped, identity_roster=full)
+
+    ids = [entry["persona_instance_id"] for entry in hud["roster"]]
+    # ws_a rows + the runtime-global row; the ws_b placement is NOT advertised.
+    assert ids == ["personainst_dev", "personainst_qa", "personainst_neko"]
+    assert "personainst_qa_b" not in ids
+
+
+def test_situational_hud_global_target_scopes_to_active_workspace():
+    from agent_runtime import workspace_scope
+
+    # A runtime-global operator row (no pointer) viewed from active workspace
+    # ws_a: its effective scope is ws_a, so it sees ws_a rows + global rows only.
+    target = _instance(id="personainst_neko", display_name="Neko Mission Lead", workspace_id=None)
+    ws_a_row = _instance(id="personainst_dev", persona_id="dev", display_name="Dev", workspace_id="ws_a")
+    ws_b_row = _instance(id="personainst_qa", persona_id="qa", display_name="QA", workspace_id="ws_b")
+    global_row = _instance(id="personainst_ops", display_name="Ops", workspace_id=None)
+    full = [target, ws_a_row, ws_b_row, global_row]
+
+    scope_ws = workspace_scope.effective_workspace_id(target, active_workspace_id="ws_a")
+    assert scope_ws == "ws_a"
+    scoped = workspace_scope.scope_roster(full, scope_workspace_id=scope_ws)
+    hud = resolve_situational_hud(target, roster=scoped, identity_roster=full)
+
+    ids = [entry["persona_instance_id"] for entry in hud["roster"]]
+    assert ids == ["personainst_neko", "personainst_dev", "personainst_ops"]
+    assert "personainst_qa" not in ids
+
+
+def test_situational_hud_steering_name_resolves_when_steerer_out_of_scope():
+    from agent_runtime import workspace_scope
+
+    # The steerer (Neko) is in ws_a; the child is in ws_b. From the child's
+    # scope Neko is NOT addressable, but its steering NAME must still resolve
+    # because identity reads the full, unscoped roster.
+    steerer = _instance(id="personainst_neko", display_name="Neko Mission Lead", workspace_id="ws_a")
+    child = _instance(
+        id="personainst_dev",
+        persona_id="dev",
+        display_name="Dev",
+        workspace_id="ws_b",
+        steered_by=["personainst_neko"],
+    )
+    full = [steerer, child]
+
+    scope_ws = workspace_scope.effective_workspace_id(child, active_workspace_id="ws_a")
+    assert scope_ws == "ws_b"
+    scoped = workspace_scope.scope_roster(full, scope_workspace_id=scope_ws)
+    hud = resolve_situational_hud(child, roster=scoped, identity_roster=full)
+
+    # Addressable roster is scoped — the out-of-workspace steerer is not on-level.
+    assert [entry["persona_instance_id"] for entry in hud["roster"]] == ["personainst_dev"]
+    # ...but the steerer's identity still resolves to a real name.
+    steered_by = hud["steering"]["steered_by"]
+    assert steered_by[0]["persona_instance_id"] == "personainst_neko"
+    assert steered_by[0]["display_name"] == "Neko Mission Lead"
+
+
+def test_situational_hud_thread_count_uses_scoped_roster():
+    from agent_runtime import workspace_scope
+
+    # A goal with three threads, one of which is a duplicate placement in another
+    # workspace. The thread count reflects only the sender-workspace threads, so
+    # a two-agent order is not inflated by the out-of-scope placement.
+    target = _instance(
+        id="personainst_dev", persona_id="dev", display_name="Dev",
+        goal_id="goal_1", current_task_id="task_1", workspace_id="ws_a",
+    )
+    peer_same = _instance(id="personainst_qa", persona_id="qa", display_name="QA", goal_id="goal_1", workspace_id="ws_a")
+    peer_other_ws = _instance(id="personainst_qa_b", persona_id="qa", display_name="QA (2)", goal_id="goal_1", workspace_id="ws_b")
+    full = [target, peer_same, peer_other_ws]
+
+    scope_ws = workspace_scope.effective_workspace_id(target, active_workspace_id="ws_a")
+    scoped = workspace_scope.scope_roster(full, scope_workspace_id=scope_ws)
+    hud = resolve_situational_hud(
+        target,
+        roster=scoped,
+        identity_roster=full,
+        task=SimpleNamespace(id="task_1", title="t", state="in_progress"),
+        goal_task=SimpleNamespace(id="goal_1", title="Ship it", state="queued"),
+    )
+    # Two ws_a threads (self + peer); the ws_b duplicate placement is excluded.
+    assert hud["mission"]["thread_count"] == 2
+
+
+def test_situational_hud_identity_roster_defaults_to_roster():
+    # Back-compat: callers that pass a single roster (no identity_roster) keep
+    # identical steering behaviour — identity resolves from that one list.
+    lead = _instance(id="personainst_neko", display_name="Neko Mission Lead")
+    child = _instance(id="personainst_dev", display_name="Dev", steered_by=["personainst_neko"])
+    hud = resolve_situational_hud(child, roster=[lead, child])
+    assert hud["steering"]["steered_by"][0]["display_name"] == "Neko Mission Lead"

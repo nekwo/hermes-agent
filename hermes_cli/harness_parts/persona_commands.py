@@ -1291,6 +1291,12 @@ def _cmd_mission_chat_message(args) -> int:
         getattr(args, "persona_instance_id", None), persona_id=normalized_persona
     )
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
+    # Sender identity for workspace-scoped target resolution: the chat-root
+    # session of the agent that requested this send (agent-to-agent relay
+    # threads it through the envelope; a bare operator CLI send omits it).
+    requested_by_session = safe_assignment_text(
+        getattr(args, "requested_by_session", None), limit=200
+    )
     client_message_id = safe_assignment_text(
         getattr(args, "client_message_id", None), limit=200
     ) or f"agent-chat-send-{uuid.uuid4().hex[:12]}"
@@ -1317,6 +1323,7 @@ def _cmd_mission_chat_message(args) -> int:
         persona_instance_id=persona_instance_id,
         session_id=session_id,
         relay_chain=turn_relay_chain,
+        requested_by_session=requested_by_session,
     )
     if not target_decision.allowed:
         data = {
@@ -4989,22 +4996,33 @@ def _mission_chat_target_decision(
     persona_instance_id,
     session_id,
     relay_chain,
+    requested_by_session=None,
 ):
     """Decide the ``ambiguous_target`` refusal for a mission-chat send.
 
     Reads the persona's live instances from the store (the roster's
-    on-the-level set — retired instances are archived out of ``list_all``) and
-    computes whether the caller already pinned a specific instance, then defers
-    the actual decision to the pure ``target_policy.evaluate_target`` authority
-    (unit-testable in isolation, no store).
+    on-the-level set — retired instances are archived out of ``list_all``),
+    NARROWS them to the sender's workspace, and computes whether the caller
+    already pinned a specific instance, then defers the actual decision to the
+    pure ``target_policy.evaluate_target`` authority (unit-testable in
+    isolation, no store).
 
     ``caller_pinned`` is True whenever the send is NOT on the silent-fallback
     path — an explicit ``persona_instance_id``, a ``personainst_*`` target, or
     ANY caller-chosen ``session_id`` (the operator console always carries an
     instance-bearing session id, so its sends never trip this). Only the
     omitted-session + no-instance path can be ambiguous.
+
+    ``requested_by_session`` is the SENDER's chat-root session id (threaded from
+    the relay envelope). A BARE persona id is resolved only among the placements
+    in the sender's own workspace, so a persona placed into several workspace
+    scenes does not fan a two-agent order out onto duplicate placements in
+    unrelated workspaces. Runtime-global instances (no workspace pointer) stay in
+    scope everywhere; an operator CLI invocation with no sender session falls
+    back to the active workspace. Narrowing the candidate list preserves the
+    typed rejection semantics automatically — the count-based policy is unchanged.
     """
-    from agent_runtime import target_policy
+    from agent_runtime import target_policy, workspace_scope
 
     is_profile = normalized_persona.startswith("profile:")
     raw_token = safe_assignment_token(raw_persona_id)
@@ -5013,6 +5031,25 @@ def _mission_chat_target_decision(
         or raw_token.startswith(PERSONA_INSTANCE_ID_PREFIX)
         or safe_assignment_text(session_id, limit=200)
     )
+    # Derive the sender's workspace scope. The sender is identified by the
+    # chat-root session that requested this send; from its owner instance we take
+    # the instance's own workspace pointer (falling back to the active workspace
+    # for a runtime-global sender). No sender session — a bare operator CLI send
+    # — scopes to the active workspace.
+    active_workspace_id = WorkspaceStore().active_id()
+    scope_workspace_id = active_workspace_id
+    sender_session = safe_assignment_text(requested_by_session, limit=200)
+    if sender_session:
+        sender_instance_id = chat_session_owner_instance_id(sender_session)
+        if sender_instance_id:
+            try:
+                sender_instance = instance_store.get(sender_instance_id)
+            except Exception:
+                sender_instance = None
+            if sender_instance is not None:
+                scope_workspace_id = workspace_scope.effective_workspace_id(
+                    sender_instance, active_workspace_id=active_workspace_id
+                )
     candidates = sorted(
         (
             target_policy.TargetCandidate(
@@ -5022,6 +5059,9 @@ def _mission_chat_target_decision(
             )
             for instance in instance_store.list_all()
             if getattr(instance, "persona_id", None) == normalized_persona
+            and workspace_scope.instance_in_scope(
+                getattr(instance, "workspace_id", None), scope_workspace_id
+            )
         ),
         key=lambda candidate: candidate.instance_id,
     )
