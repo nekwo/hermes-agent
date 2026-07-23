@@ -158,6 +158,8 @@ def test_build_skills_inventory_shape_is_stable():
         # Additive per-realm publish-selection fields (design §4).
         assert realm["skill_publish_mode"] in {"all", "selected"}
         assert isinstance(realm["skill_selection"], list)
+        assert realm["agent_publish_mode"] in {"workspace", "selected"}
+        assert isinstance(realm["agent_selection"], list)
 
 
 def test_realm_publish_states_carry_selection_read_from_store():
@@ -168,6 +170,7 @@ def test_realm_publish_states_carry_selection_read_from_store():
 
     realm = RealmStore().create(name="Inventory Realm")
     RealmStore().set_skill_selection(realm.id, mode="selected", selection=["beta", "alpha"])
+    RealmStore().set_agent_selection(realm.id, mode="selected", selection=["qa", "dev"])
 
     row = next(r for r in si.build_realm_publish_states() if r["realm_id"] == realm.id)
 
@@ -175,3 +178,5 @@ def test_realm_publish_states_carry_selection_read_from_store():
     assert row["sync_state"] is None
     assert row["skill_publish_mode"] == "selected"
     assert row["skill_selection"] == ["alpha", "beta"]  # sorted + deduped
+    assert row["agent_publish_mode"] == "selected"
+    assert row["agent_selection"] == ["dev", "qa"]

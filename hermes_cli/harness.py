@@ -94,6 +94,7 @@ from agent_runtime.realm_sync import (
     RealmSyncError,
     publish_realm_sync,
     pull_realm_sync,
+    realm_agent_selection_state,
     realm_sync_status,
     sync_artifacts_for_workspace_agent,
 )
@@ -575,6 +576,44 @@ def build_parser(parent_subparsers) -> None:
     realm_skills_set.add_argument("--none", dest="publish_none", action="store_true", help="Publish no skills (mode=selected, empty selection)")
     _add_stage42_global_args(realm_skills_set, mutation=True)
     realm_skills_set.set_defaults(func=_cmd_realm_skills_set)
+
+    realm_agents = realm_subs.add_parser(
+        "agents", help="Per-realm selection of which persona definitions publish to a realm"
+    )
+    realm_agents_subs = realm_agents.add_subparsers(
+        dest="realm_agents_command", required=True
+    )
+    realm_agents_show = realm_agents_subs.add_parser(
+        "show", help="Show a realm's persona-definition publish selection"
+    )
+    realm_agents_show.add_argument("realm_id")
+    _add_stage42_global_args(realm_agents_show)
+    realm_agents_show.set_defaults(func=_cmd_realm_agents_show)
+    realm_agents_set = realm_agents_subs.add_parser(
+        "set",
+        help="Set a realm's persona-definition selection (required workspace/Office references remain pinned)",
+    )
+    realm_agents_set.add_argument("realm_id")
+    realm_agents_set.add_argument(
+        "--workspace",
+        dest="publish_workspace",
+        action="store_true",
+        help="Publish only definitions required by workspace rosters and Office placements",
+    )
+    realm_agents_set.add_argument(
+        "--agents",
+        dest="agents",
+        default=None,
+        help="Comma-separated persona ids to publish in addition to required references",
+    )
+    realm_agents_set.add_argument(
+        "--none",
+        dest="publish_none",
+        action="store_true",
+        help="Clear the explicit selection; required references remain pinned",
+    )
+    _add_stage42_global_args(realm_agents_set, mutation=True)
+    realm_agents_set.set_defaults(func=_cmd_realm_agents_set)
 
     flow = subs.add_parser("flow", help="Operator flow-graph documents: ingest the Launcher's authored agent map whole and set the referenced instances' steering relations")
     flow_subs = flow.add_subparsers(dest="flow_command", required=True)
@@ -2562,6 +2601,84 @@ def _cmd_realm_skills_set(args) -> int:
     )
     envelope = _realm_skill_selection_envelope(realm)
     if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
+def _realm_agent_selection_envelope(realm_id: str) -> dict:
+    state = realm_agent_selection_state(realm_id)
+    return {
+        "schema_version": 1,
+        "id": realm_id,
+        "kind": "realm_agent_selection",
+        **state,
+    }
+
+
+def _cmd_realm_agents_show(args) -> int:
+    # RealmStore lookup occurs inside the state resolver, so a missing id keeps
+    # the same typed command error behavior as every other Realm read verb.
+    _print_stage42(
+        _realm_agent_selection_envelope(args.realm_id),
+        args=args,
+        default_output="json",
+    )
+    return 0
+
+
+def _cmd_realm_agents_set(args) -> int:
+    chosen = [
+        name
+        for name, present in (
+            ("--workspace", bool(getattr(args, "publish_workspace", False))),
+            ("--agents", getattr(args, "agents", None) is not None),
+            ("--none", bool(getattr(args, "publish_none", False))),
+        )
+        if present
+    ]
+    if len(chosen) != 1:
+        return emit_harness_error(
+            ValueError("exactly one of --workspace, --agents, or --none is required"),
+            args=args,
+            code="invalid_request",
+        )
+    if getattr(args, "publish_workspace", False):
+        mode, selection = "workspace", []
+    elif getattr(args, "publish_none", False):
+        mode, selection = "selected", []
+    else:
+        mode = "selected"
+        selection = [
+            persona_id.strip()
+            for persona_id in str(args.agents).split(",")
+            if persona_id.strip()
+        ]
+    dry_run = bool(getattr(args, "dry_run", False))
+    RealmStore().set_agent_selection(
+        args.realm_id,
+        mode=mode,
+        selection=selection,
+        dry_run=dry_run,
+    )
+    envelope = _realm_agent_selection_envelope(args.realm_id)
+    if dry_run:
+        # The state resolver reads disk, so reflect the validated would-be
+        # selection in the preview without mutating RealmStore.
+        preview = RealmStore().set_agent_selection(
+            args.realm_id,
+            mode=mode,
+            selection=selection,
+            dry_run=True,
+        )
+        envelope["mode"] = preview.agent_publish_mode
+        envelope["selection"] = sorted(preview.agent_selection or [])
+        effective = set(envelope["required"])
+        if preview.agent_publish_mode == "selected":
+            effective.update(envelope["selection"])
+        catalog = set(envelope["catalog"])
+        envelope["published"] = sorted(effective & catalog)
+        envelope["missing"] = sorted(effective - catalog)
         envelope["dry_run"] = True
     _print_stage42(envelope, args=args, default_output="json")
     return 0

@@ -859,6 +859,32 @@ def _normalize_skill_selection(selection: list[str] | None) -> list[str]:
     return sorted(cleaned)
 
 
+def _normalize_agent_selection(selection: list[str] | None) -> list[str]:
+    """Validate, dedupe, and sort Realm persona-definition ids.
+
+    Persona ids use the store's canonical model-id grammar (including ``:``
+    for profile-backed personas). Unknown ids are deliberately preserved: a
+    different Realm member may own the definition locally, so filtering an
+    unrelated save through this machine's catalog would corrupt Realm truth.
+    Every malformed id is reported together and no partial write occurs.
+    """
+    cleaned: set[str] = set()
+    rejected: list[str] = []
+    for raw in selection or []:
+        value = str(raw).strip()
+        normalized = _safe_model_id(value)
+        if not value or normalized is None or value != normalized:
+            rejected.append(value or repr(raw))
+            continue
+        cleaned.add(value)
+    if rejected:
+        raise ValueError(
+            "malformed agent selection id(s): "
+            + ", ".join(repr(value) for value in sorted(set(rejected)))
+        )
+    return sorted(cleaned)
+
+
 class RealmStore:
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
@@ -963,6 +989,35 @@ class RealmStore:
             change="skill_selection",
             mode=mode,
             selection_count=len(item.skill_selection),
+        )
+        return item
+
+    def set_agent_selection(
+        self, realm_id: str, *, mode: str, selection: list[str], dry_run: bool = False
+    ) -> Realm:
+        """Single write chokepoint for Realm persona-definition selection.
+
+        ``workspace`` keeps the explicit list intact but publishes only the
+        definitions required by synced workspace/Office references.
+        ``selected`` publishes the explicit set plus those required references.
+        Unknown persona ids are preserved and reported by the CLI envelope.
+        """
+        if mode not in {"workspace", "selected"}:
+            raise ValueError(f"invalid agent_publish_mode: {mode!r}")
+        item = self.get(realm_id)
+        if mode == "selected":
+            item.agent_selection = _normalize_agent_selection(selection)
+        item.agent_publish_mode = mode
+        if dry_run:
+            return item
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log,
+            "realm.updated",
+            realm_id=item.id,
+            change="agent_selection",
+            mode=mode,
+            selection_count=len(item.agent_selection),
         )
         return item
 

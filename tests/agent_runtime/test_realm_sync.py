@@ -577,6 +577,18 @@ def _resolved_skill_packages(realm_id: str) -> set[str]:
     return packages
 
 
+def _resolved_persona_packages(realm_id: str) -> set[str]:
+    packages: set[str] = set()
+    for artifact in resolve_realm_sync_artifacts(realm_id):
+        parts = Path(artifact.relative_path).parts
+        if "personas" not in parts:
+            continue
+        index = parts.index("personas")
+        if index + 1 < len(parts):
+            packages.add(parts[index + 1])
+    return packages
+
+
 def test_skill_selection_defaults_to_publish_all(isolate_agent_runtime_root, tmp_path):
     # Back-compat lock: a realm with no selection publishes every shared skill.
     for slug in ("alpha", "beta"):
@@ -653,6 +665,8 @@ def test_selection_travels_on_pull_while_authority_preserved(isolate_agent_runti
         # Realm-wide truth authored by another member (travels on pull).
         "skill_publish_mode": "selected",
         "skill_selection": ["alpha"],
+        "agent_publish_mode": "selected",
+        "agent_selection": ["qa"],
         # Stale authority fields must NOT roll our backend-owned pointer back.
         "default_workspace_id": "ws_stale",
         "default_workspace_name": "Stale Office",
@@ -668,6 +682,8 @@ def test_selection_travels_on_pull_while_authority_preserved(isolate_agent_runti
     # Selection is NOT an authority field → it adopts the incoming realm truth.
     assert pulled.skill_publish_mode == "selected"
     assert pulled.skill_selection == ["alpha"]
+    assert pulled.agent_publish_mode == "selected"
+    assert pulled.agent_selection == ["qa"]
     # Authority fields are still preserved against the stale incoming copy.
     assert pulled.default_workspace_id == "ws_backend_default"
     assert pulled.default_workspace_name == "Backend Office"
@@ -863,3 +879,154 @@ def test_realm_skills_set_cli_requires_exactly_one_flag(isolate_agent_runtime_ro
     neither = _run_harness("realm", "skills", "set", realm.id, "--json")
     assert neither.returncode == 2
     assert json.loads(neither.stdout)["error"]["code"] == "invalid_request"
+
+
+# ── per-realm persona-definition selection (Agent Sync) ────────────────────
+
+
+def test_agent_selection_defaults_to_required_workspace_personas(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["dev"])
+
+    stored = RealmStore().get(realm.id)
+    assert stored.agent_publish_mode == "workspace"
+    assert stored.agent_selection == []
+    packages = _resolved_persona_packages(realm.id)
+    assert "dev" in packages
+    assert "qa" not in packages
+
+
+def test_selected_agents_add_to_required_references_and_prune_when_removed(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["dev"])
+
+    RealmStore().set_agent_selection(
+        realm.id, mode="selected", selection=["qa", "qa"]
+    )
+    packages = _resolved_persona_packages(realm.id)
+    assert {"dev", "qa"} <= packages  # dev is pinned by the workspace
+
+    RealmStore().set_agent_selection(realm.id, mode="selected", selection=[])
+    packages = _resolved_persona_packages(realm.id)
+    assert "dev" in packages
+    assert "qa" not in packages
+
+
+def test_agent_selection_preserves_unknown_ids_and_emits_event(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_agent_selection(
+        realm.id,
+        mode="selected",
+        selection=["profile:remote", "qa", "qa"],
+    )
+
+    stored = RealmStore().get(realm.id)
+    assert stored.agent_selection == ["profile:remote", "qa"]
+    events = [event for event in EventLog().tail(20) if event.type == "realm.updated"]
+    match = next(
+        event for event in events if event.payload.get("change") == "agent_selection"
+    )
+    assert match.payload["mode"] == "selected"
+    assert match.payload["selection_count"] == 2
+
+
+def test_agent_selection_rejects_malformed_ids_without_partial_write(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        RealmStore().set_agent_selection(
+            realm.id,
+            mode="selected",
+            selection=["qa", "bad/id", "bad id"],
+        )
+    assert "bad/id" in str(excinfo.value)
+    assert "bad id" in str(excinfo.value)
+    assert RealmStore().get(realm.id).agent_publish_mode == "workspace"
+
+
+def test_realm_agents_cli_show_and_set(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["dev"])
+
+    proc = _run_harness(
+        "realm", "agents", "set", realm.id, "--agents", "qa,profile:remote,qa", "--json"
+    )
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == 0
+    assert payload["kind"] == "realm_agent_selection"
+    assert payload["mode"] == "selected"
+    assert payload["selection"] == ["profile:remote", "qa"]
+    assert "dev" in payload["required"]
+    assert {"dev", "qa"} <= set(payload["published"])
+    assert payload["missing"] == ["profile:remote"]
+
+    proc = _run_harness("realm", "agents", "show", realm.id, "--json")
+    shown = json.loads(proc.stdout)
+    assert proc.returncode == 0
+    assert shown["selection"] == ["profile:remote", "qa"]
+
+
+def test_realm_agents_cli_none_and_workspace_preserve_selection(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    _run_harness("realm", "agents", "set", realm.id, "--agents", "qa", "--json")
+
+    none = _run_harness("realm", "agents", "set", realm.id, "--none", "--json")
+    assert none.returncode == 0
+    assert json.loads(none.stdout)["selection"] == []
+
+    _run_harness("realm", "agents", "set", realm.id, "--agents", "qa", "--json")
+    workspace = _run_harness(
+        "realm", "agents", "set", realm.id, "--workspace", "--json"
+    )
+    payload = json.loads(workspace.stdout)
+    assert workspace.returncode == 0
+    assert payload["mode"] == "workspace"
+    assert payload["selection"] == ["qa"]  # retained for switching back
+
+
+def test_realm_agents_cli_dry_run_and_flag_validation(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    preview = _run_harness(
+        "realm", "agents", "set", realm.id, "--agents", "qa", "--dry-run", "--json"
+    )
+    payload = json.loads(preview.stdout)
+    assert preview.returncode == 0
+    assert payload["dry_run"] is True
+    assert payload["mode"] == "selected"
+    assert payload["selection"] == ["qa"]
+    assert RealmStore().get(realm.id).agent_publish_mode == "workspace"
+
+    both = _run_harness(
+        "realm", "agents", "set", realm.id, "--workspace", "--none", "--json"
+    )
+    assert both.returncode == 2
+    assert json.loads(both.stdout)["error"]["code"] == "invalid_request"
+
+
+def test_status_and_sidecar_carry_agent_selection_fields(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["dev"])
+    RealmStore().set_agent_selection(realm.id, mode="selected", selection=["qa"])
+
+    status = realm_sync_status(realm.id)
+    assert status["agent_publish_mode"] == "selected"
+    assert status["agent_selection"] == ["qa"]
+    assert status["agents_published"] >= 2
+
+    sidecar = read_realm_sync_sidecar(realm.id)
+    assert sidecar["agent_publish_mode"] == "selected"
+    assert sidecar["agent_selection"] == ["qa"]
+    assert sidecar["agents_published"] >= 2

@@ -127,6 +127,7 @@ def realm_sync_status(
     repo = _ensure_sync_repo(realm, credential=credential)
     git = _git_state(repo)
     artifacts = resolve_realm_sync_artifacts(realm_id)
+    agent_state = realm_agent_selection_state(realm_id)
     workspace_statuses = _workspace_sync_statuses(realm, repo)
     skills_drift = _skills_drift_for_artifacts(artifacts)
     state = _sync_state(git)
@@ -142,6 +143,9 @@ def realm_sync_status(
         "skill_publish_mode": realm.skill_publish_mode,
         "skill_selection": sorted(realm.skill_selection or []),
         "skills_published": _distinct_skill_package_count(artifacts),
+        "agent_publish_mode": agent_state["mode"],
+        "agent_selection": agent_state["selection"],
+        "agents_published": len(agent_state["published"]),
         "conflicts": git["conflicts"],
         "last_pull": _timestamp_file(repo, "last_pull.txt"),
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
@@ -428,19 +432,9 @@ def _apply_workspace_tombstones(realm_id: str) -> dict[str, list]:
 
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     realm = RealmStore().get(realm_id)
-    workspace_store = WorkspaceStore()
-    workspace_ids = set(realm.workspace_ids or [])
-    for workspace in workspace_store.list_all(include_archived=True):
-        if workspace.realm_id == realm.id:
-            workspace_ids.add(workspace.id)
-    # Tombstoned workspaces never publish (defense-in-depth: the pull already
-    # deletes local copies, but a publish racing ahead of its pull must not
-    # resurrect a deleted workspace into the realm subtree).
-    workspace_ids -= set(realm.deleted_workspace_ids or [])
-    workspaces = [workspace_store.get(workspace_id) for workspace_id in sorted(workspace_ids) if paths.workspace_path(workspace_id).exists()]
+    workspaces = _workspaces_for_realm(realm)
     cfg = load_agent_runtime_config()
     personas = {persona.id: persona for persona in ensure_persisted_personas(cfg)}
-    wanted_persona_ids = list(dict.fromkeys(persona_id for ws in workspaces for persona_id in (ws.agent_ids or [])))
     artifacts: list[RealmSyncArtifact] = []
     artifacts.extend(_skill_artifacts(realm))
     artifacts.extend(_workspace_realm_artifacts(realm, workspaces))
@@ -450,13 +444,84 @@ def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     # (plan §5): an office-only persona must be materializable on pull. The
     # wanted set was workspace.agent_ids only, which would sync a placement
     # referencing a persona the member cannot resolve.
-    wanted_persona_ids = list(dict.fromkeys([*wanted_persona_ids, *_office_wanted_persona_ids(workspaces)]))
+    required_persona_ids = _required_realm_persona_ids(workspaces)
+    selected_persona_ids = (
+        list(realm.agent_selection or [])
+        if getattr(realm, "agent_publish_mode", "workspace") == "selected"
+        else []
+    )
+    wanted_persona_ids = list(
+        dict.fromkeys([*required_persona_ids, *selected_persona_ids])
+    )
     for persona_id in wanted_persona_ids:
         persona = personas.get(persona_id)
         if persona is None:
             continue
         artifacts.extend(_persona_artifacts(persona))
     return _dedupe_artifacts(artifacts)
+
+
+def _workspaces_for_realm(realm: Realm) -> list[Workspace]:
+    workspace_store = WorkspaceStore()
+    workspace_ids = set(realm.workspace_ids or [])
+    for workspace in workspace_store.list_all(include_archived=True):
+        if workspace.realm_id == realm.id:
+            workspace_ids.add(workspace.id)
+    # Tombstoned workspaces never publish (defense-in-depth: the pull already
+    # deletes local copies, but a publish racing ahead of its pull must not
+    # resurrect a deleted workspace into the realm subtree).
+    workspace_ids -= set(realm.deleted_workspace_ids or [])
+    return [
+        workspace_store.get(workspace_id)
+        for workspace_id in sorted(workspace_ids)
+        if paths.workspace_path(workspace_id).exists()
+    ]
+
+
+def _required_realm_persona_ids(workspaces: list[Workspace]) -> list[str]:
+    """Persona definitions required by synchronized references.
+
+    These rows are pinned regardless of the explicit Realm selection: a
+    pulled workspace roster or Office placement must never reference a persona
+    definition the same publish deliberately omitted.
+    """
+    workspace_ids = [
+        persona_id
+        for workspace in workspaces
+        for persona_id in (workspace.agent_ids or [])
+    ]
+    return list(
+        dict.fromkeys([*workspace_ids, *_office_wanted_persona_ids(workspaces)])
+    )
+
+
+def realm_agent_selection_state(realm_id: str) -> dict[str, Any]:
+    """Return the local catalog and effective Realm persona selection.
+
+    Pure with respect to Realm selection: unknown ids are preserved and
+    reported, while required workspace/Office references remain pinned in the
+    effective published set.
+    """
+    realm = RealmStore().get(realm_id)
+    workspaces = _workspaces_for_realm(realm)
+    catalog_personas = ensure_persisted_personas(load_agent_runtime_config())
+    catalog = sorted({persona.id for persona in catalog_personas})
+    required = sorted(set(_required_realm_persona_ids(workspaces)))
+    selection = sorted(set(getattr(realm, "agent_selection", None) or []))
+    mode = getattr(realm, "agent_publish_mode", "workspace") or "workspace"
+    effective = set(required)
+    if mode == "selected":
+        effective.update(selection)
+    published = sorted(effective & set(catalog))
+    missing = sorted(effective - set(catalog))
+    return {
+        "mode": mode,
+        "selection": selection,
+        "catalog": catalog,
+        "required": required,
+        "published": published,
+        "missing": missing,
+    }
 
 
 def sync_artifacts_for_workspace_agent(workspace_id: str, persona_id: str) -> list[dict[str, str]]:
@@ -1131,6 +1196,9 @@ def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
         "skill_publish_mode": raw.get("skill_publish_mode") or "all",
         "skill_selection": raw.get("skill_selection") or [],
         "skills_published": raw.get("skills_published") or 0,
+        "agent_publish_mode": raw.get("agent_publish_mode") or "workspace",
+        "agent_selection": raw.get("agent_selection") or [],
+        "agents_published": raw.get("agents_published") or 0,
         "conflicts": raw.get("conflicts") or [],
         "last_pull": raw.get("last_pull"),
         "last_publish": raw.get("last_publish"),
@@ -1141,6 +1209,7 @@ def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
 
 
 def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills_drift: list[str], artifacts: list[RealmSyncArtifact]) -> None:
+    agent_state = realm_agent_selection_state(realm.id)
     payload = {
         "schema_version": 2,
         "realm_id": realm.id,
@@ -1151,6 +1220,9 @@ def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills
         "skill_publish_mode": realm.skill_publish_mode,
         "skill_selection": sorted(realm.skill_selection or []),
         "skills_published": _distinct_skill_package_count(artifacts),
+        "agent_publish_mode": agent_state["mode"],
+        "agent_selection": agent_state["selection"],
+        "agents_published": len(agent_state["published"]),
         "conflicts": git["conflicts"],
         "last_pull": _timestamp_file(repo, "last_pull.txt"),
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
