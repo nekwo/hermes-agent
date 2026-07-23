@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -3546,12 +3547,33 @@ def _fetch_usage_lane(provider_id: str):
     return fetch_account_usage(provider_id)
 
 
-def _serialize_usage_window(window) -> dict:
+def _serialize_usage_window(window) -> Optional[dict]:
+    """Serialize one usage window into a lane-window dict, or return None to DROP
+    the window.
+
+    A non-finite ``used_percent`` (NaN / inf leaking out of an upstream fetcher)
+    would serialize through ``emit_json`` — which is ``json.dumps`` with the
+    default ``allow_nan=True`` — as the bare tokens ``NaN`` / ``Infinity``. That
+    is invalid JSON, and the Launcher's strict parser drops the ENTIRE envelope
+    into its failure state. So a non-finite percent drops just this window (never
+    nulled, never clamped) rather than corrupting the whole payload. A genuinely
+    unknown percent (``None``) is still a valid window and is kept.
+    """
     used = window.used_percent
+    if used is not None:
+        try:
+            used = float(used)
+        except (TypeError, ValueError):
+            # Non-numeric percent (shouldn't happen for a typed snapshot): treat
+            # as unknown rather than crash the whole envelope.
+            used = None
+        else:
+            if not math.isfinite(used):
+                return None
     return {
         "label": window.label,
         # Raw float, not clamped — the console decides how to present overage.
-        "used_percent": None if used is None else float(used),
+        "used_percent": used,
         "reset_at": _usage_iso(window.reset_at),
         "detail": window.detail,
     }
@@ -3585,7 +3607,13 @@ def _serialize_usage_lane(provider_id: str, snapshot, *, active: bool) -> dict:
         "plan": snapshot.plan,
         "source": snapshot.source,
         "fetched_at": _usage_iso(snapshot.fetched_at),
-        "windows": [_serialize_usage_window(w) for w in snapshot.windows],
+        # A window whose percent is non-finite serializes to None and is dropped
+        # here — an empty windows list on an otherwise-available lane is honest.
+        "windows": [
+            w
+            for w in (_serialize_usage_window(win) for win in snapshot.windows)
+            if w is not None
+        ],
         "details": [str(d) for d in snapshot.details],
         "unavailable_reason": snapshot.unavailable_reason,
     }
@@ -3731,6 +3759,37 @@ def _parse_usage_iso(value) -> Optional[datetime]:
         return None
 
 
+def _empty_usage_envelope() -> dict:
+    """Minimal, always-serializable ``hermes.account_usage/v1`` envelope with no
+    lanes — the guaranteed fallback whenever a richer build or serialization step
+    fails."""
+    return {
+        "schema": USAGE_SCHEMA,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "active_provider": None,
+        "lanes": [],
+    }
+
+
+def _emit_usage_json(payload: dict) -> None:
+    """Print the envelope as JSON, guaranteeing the ``--json`` branch NEVER
+    raises. The verb's contract is total failure isolation, but ``emit_json`` (or
+    the stdout write itself) can still fail; if it does, fall back to a minimal
+    always-valid empty envelope serialized with the stdlib ``json.dumps`` so the
+    fallback does not depend on the possibly-broken ``emit_json``. If even that
+    write fails there is nothing more we can do, so it is swallowed and the verb
+    still exits 0."""
+    try:
+        print(emit_json(payload))
+        return
+    except Exception:
+        pass
+    try:
+        print(json.dumps(_empty_usage_envelope()))
+    except Exception:
+        pass
+
+
 def _cmd_usage(args) -> int:
     """`hermes harness usage` — typed per-provider account-usage envelope. Total
     failure isolation: nothing here may raise; worst case is a valid envelope
@@ -3740,20 +3799,15 @@ def _cmd_usage(args) -> int:
     try:
         payload = build_account_usage(only_provider=only_provider, timeout=timeout)
     except Exception:
-        payload = {
-            "schema": USAGE_SCHEMA,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "active_provider": None,
-            "lanes": [],
-        }
+        payload = _empty_usage_envelope()
     if getattr(args, "json", False):
-        print(emit_json(payload))
+        _emit_usage_json(payload)
         return 0
     try:
         _render_account_usage_human(payload)
     except Exception:
         # Human rendering must not crash the verb either.
-        print(emit_json(payload))
+        _emit_usage_json(payload)
     return 0
 
 

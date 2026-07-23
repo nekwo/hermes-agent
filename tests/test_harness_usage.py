@@ -6,7 +6,9 @@ tests exercise the envelope build / serialization / failure-isolation logic
 without touching a real provider account.
 """
 
+import argparse
 import json
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -191,3 +193,128 @@ def test_cmd_usage_human_mode_exit_zero(monkeypatch, capsys):
     # Reuses the shared renderer: "% remaining (% used)" grammar + resets line.
     assert "Session:" in out
     assert "85% remaining (15% used)" in out
+
+
+def _reject_non_finite_json_token(name):
+    raise AssertionError(f"non-finite JSON token in output: {name!r}")
+
+
+def test_serialize_window_drops_non_finite_percent_and_json_is_strict(monkeypatch):
+    """A NaN/inf ``used_percent`` would serialize (via emit_json → json.dumps
+    with allow_nan=True) as the bare ``NaN``/``Infinity`` token — invalid JSON
+    that sinks the whole envelope on the Launcher's strict parser. The non-finite
+    window is dropped; the finite window survives; the full output is strict JSON.
+    """
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: "openai-codex")
+    monkeypatch.setattr(harness, "_usage_lane_detected", lambda p: p == "openai-codex")
+    monkeypatch.setattr(
+        harness,
+        "_fetch_usage_lane",
+        lambda p: AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=datetime(2026, 7, 23, 12, 0, 0, tzinfo=timezone.utc),
+            windows=(
+                AccountUsageWindow(label="Session", used_percent=float("nan")),
+                AccountUsageWindow(label="Overage", used_percent=float("inf")),
+                AccountUsageWindow(label="Weekly", used_percent=42.0),
+            ),
+        ),
+    )
+
+    payload = harness.build_account_usage(timeout=5.0)
+    lane = payload["lanes"][0]
+    # Only the finite window survives; the lane stays available (honest data).
+    assert [w["label"] for w in lane["windows"]] == ["Weekly"]
+    assert lane["windows"][0]["used_percent"] == 42.0
+    assert lane["available"] is True
+
+    # The FULL envelope must be strict JSON — parse_constant fires on any
+    # NaN/Infinity/-Infinity token and would fail the test if one leaked.
+    rendered = harness.emit_json(payload)
+    parsed = json.loads(rendered, parse_constant=_reject_non_finite_json_token)
+    assert parsed["lanes"][0]["windows"][0]["label"] == "Weekly"
+
+
+def test_cmd_usage_json_branch_isolates_serialization_failure(monkeypatch, capsys):
+    """If emit_json raises inside the --json branch, the verb still prints a
+    minimal valid empty-lanes envelope and exits 0 (never propagates)."""
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: None)
+    monkeypatch.setattr(harness, "_usage_lane_detected", lambda p: False)
+
+    calls = {"n": 0}
+
+    def boom(_payload):
+        calls["n"] += 1
+        raise RuntimeError("serialization exploded")
+
+    monkeypatch.setattr(harness, "emit_json", boom)
+
+    args = SimpleNamespace(json=True, provider=None, timeout=5.0)
+    rc = harness._cmd_usage(args)
+
+    assert rc == 0
+    assert calls["n"] >= 1  # emit_json was attempted and failed
+    data = json.loads(capsys.readouterr().out)
+    assert data["schema"] == "hermes.account_usage/v1"
+    assert data["lanes"] == []
+
+
+def test_usage_argparse_wires_json_provider_timeout(monkeypatch):
+    """The real parser build routes `harness usage --json --provider X --timeout N`
+    to _cmd_usage with those values."""
+    parser = argparse.ArgumentParser()
+    subs = parser.add_subparsers(dest="command")
+    harness.build_parser(subs)
+
+    args = parser.parse_args(
+        ["harness", "usage", "--json", "--provider", "openai-codex", "--timeout", "5"]
+    )
+    assert args.func is harness._cmd_usage
+    assert args.json is True
+    assert args.provider == "openai-codex"
+    assert args.timeout == 5.0
+
+
+def test_usage_lane_slower_than_deadline_times_out_bounded(monkeypatch):
+    """A lane fetch that sleeps past the wall-clock deadline degrades to an
+    unavailable lane (TimeoutError reason) without blocking the fast lanes or the
+    overall command."""
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: None)
+    monkeypatch.setattr(
+        harness, "_usage_lane_detected", lambda p: p in {"openai-codex", "anthropic"}
+    )
+
+    def fake_fetch(provider_id):
+        if provider_id == "anthropic":
+            time.sleep(0.5)  # far slower than the 0.15s deadline
+            return AccountUsageSnapshot(
+                provider="anthropic",
+                source="usage_api",
+                fetched_at=datetime.now(timezone.utc),
+                windows=(AccountUsageWindow(label="Weekly", used_percent=10.0),),
+            )
+        return AccountUsageSnapshot(
+            provider="openai-codex",
+            source="usage_api",
+            fetched_at=datetime.now(timezone.utc),
+            windows=(AccountUsageWindow(label="Session", used_percent=5.0),),
+        )
+
+    monkeypatch.setattr(harness, "_fetch_usage_lane", fake_fetch)
+
+    started = time.monotonic()
+    payload = harness.build_account_usage(timeout=0.15)
+    elapsed = time.monotonic() - started
+
+    lanes = {lane["provider"]: lane for lane in payload["lanes"]}
+    assert set(lanes) == {"openai-codex", "anthropic"}
+    # Fast lane unaffected.
+    assert lanes["openai-codex"]["available"] is True
+    assert lanes["openai-codex"]["windows"][0]["label"] == "Session"
+    # Slow lane exceeded the deadline → class-name-only timeout reason.
+    assert lanes["anthropic"]["available"] is False
+    assert lanes["anthropic"]["unavailable_reason"] == "usage fetch failed (TimeoutError)"
+    # Wall clock bounded well under the slow fetch (0.5s) and far under
+    # sleep × lane count (1.0s): the deadline short-circuits the hung lane.
+    assert elapsed < 0.4
