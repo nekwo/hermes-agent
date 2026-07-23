@@ -346,7 +346,16 @@ _build_coalesce_state: dict = {
 }
 
 
-def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
+def build_snapshot(
+    task_store=None,
+    run_store=None,
+    agent_store=None,
+    proof_store=None,
+    incident_store=None,
+    event_log=None,
+    worker_session_store=None,
+    prompt_skills_catalogs=None,
+) -> dict:
     custom_stores = any(
         value is not None
         for value in (
@@ -359,9 +368,12 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             worker_session_store,
         )
     )
-    if custom_stores:
+    if custom_stores or prompt_skills_catalogs is not None:
         # Injected stores (tests, doctors) must observe exactly their own
         # fixtures — never a coalesced result built from the default stores.
+        # A detail-fetch catalog capture likewise needs the exact build's
+        # transient bodies; the shared result intentionally contains hashes
+        # only, so it cannot satisfy that internal projection request.
         return _build_snapshot_uncoalesced(
             task_store=task_store,
             run_store=run_store,
@@ -370,6 +382,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             incident_store=incident_store,
             event_log=event_log,
             worker_session_store=worker_session_store,
+            prompt_skills_catalogs=prompt_skills_catalogs,
         )
     state = _build_coalesce_state
     with _BUILD_COALESCE:
@@ -412,7 +425,16 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             _BUILD_COALESCE.notify_all()
 
 
-def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
+def _build_snapshot_uncoalesced(
+    task_store=None,
+    run_store=None,
+    agent_store=None,
+    proof_store=None,
+    incident_store=None,
+    event_log=None,
+    worker_session_store=None,
+    prompt_skills_catalogs=None,
+) -> dict:
     _build_started = time.perf_counter()
     task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
@@ -561,6 +583,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             daemon=None,
             realm=active_realm_name,
             workspace=active_workspace_name,
+            catalog_sink=prompt_skills_catalogs,
         ),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),

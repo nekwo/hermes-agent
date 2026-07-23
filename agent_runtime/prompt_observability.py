@@ -744,6 +744,7 @@ def snapshot_prompt_observability(
     daemon: dict[str, Any] | None = None,
     realm: str | None = None,
     workspace: str | None = None,
+    catalog_sink: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     # Deferred import: context_builder pulls a large dependency graph, and this
     # module is imported very early. A function-local import keeps module load
@@ -889,6 +890,14 @@ def snapshot_prompt_observability(
     # RULING-0: no inline legacy fallback).
     skills_catalogs: dict[str, Any] = {}
     _hoist_skills_catalogs(chat_contexts, skills_catalogs)
+    # The steady-state frame still carries hashes only.  The explicit
+    # ``skills catalog --hash`` detail fetch may provide a sink to capture the
+    # exact bodies from this same projection and materialize its immutable
+    # cache on demand.  A normal snapshot passes no sink and remains write-free.
+    if catalog_sink is not None:
+        for ref, rows in skills_catalogs.items():
+            if isinstance(rows, list):
+                catalog_sink.setdefault(ref, to_jsonable(rows))
     _evict_final_model_input(chat_contexts)
     # C1: ref-shaped persisted rows reach the frame already carrying their
     # ``*_ref`` hashes (no inline lists for the hoist to fold) — the frame's
@@ -960,10 +969,13 @@ def skills_catalog_by_hash(content_hash: str) -> list[dict[str, Any]] | None:
     (``prompt_observability_catalogs/<hash>.json``) and read back directly. The
     pre-C1 walk over the newest persisted rows remains as the LEGACY-ROW
     fallback — rows persisted before the store existed still carry inline lists
-    (archive-never-delete means they exist) and still resolve. Read-only: the
-    store is written only by the persist chokepoint. Returns ``None`` on an
-    honest miss (the launcher renders a pending state and retries next frame),
-    never a fake empty catalog."""
+    (archive-never-delete means they exist) and still resolve. A configured
+    agent can have a freshly projected prompt context before its first persisted
+    chat row; on that final miss the explicit detail fetch rebuilds the live
+    projection once and materializes its immutable catalog bodies. Ordinary
+    snapshot reads remain write-free. Returns ``None`` on an honest miss (the
+    launcher renders a pending state and retries next frame), never a fake empty
+    catalog."""
 
     token = str(content_hash or "").strip()
     if not token:
@@ -978,7 +990,34 @@ def skills_catalog_by_hash(content_hash: str) -> list[dict[str, Any]] | None:
             value = row.get(field)
             if isinstance(value, list) and _skills_list_content_hash(value) == token:
                 return value
-    return None
+    live_catalogs = _materialize_live_skills_catalogs()
+    value = live_catalogs.get(token)
+    return value if isinstance(value, list) else None
+
+
+def _materialize_live_skills_catalogs() -> dict[str, list[dict[str, Any]]]:
+    """Capture and cache the current live projection's immutable catalogs.
+
+    This runs only behind the explicit on-demand detail verb after the O(1)
+    store and legacy-row reads miss.  Capturing through ``build_snapshot``
+    guarantees that every body is byte-identical to the hash the live frame
+    advertised; caching all captured bodies makes a second hash from the same
+    dialog an immediate store hit.
+    """
+
+    catalogs: dict[str, list[dict[str, Any]]] = {}
+    try:
+        from .snapshot import build_snapshot
+
+        build_snapshot(prompt_skills_catalogs=catalogs)
+    except Exception:
+        return {}
+    verified: dict[str, list[dict[str, Any]]] = {}
+    for ref, rows in catalogs.items():
+        if isinstance(rows, list) and _skills_list_content_hash(rows) == ref:
+            _store_skills_catalog(ref, rows)
+            verified[ref] = rows
+    return verified
 
 
 def load_skills_catalog_from_store(content_hash: str) -> list[dict[str, Any]] | None:
