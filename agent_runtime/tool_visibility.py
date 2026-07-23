@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +16,7 @@ from .personas import (
     ALLOWED_TOOLSETS_BY_ROLE,
     PER_ROLE_TOOL_DENIES,
     PERSONA_BLOCKED_TOOLS,
+    REGISTRY_HYGIENE_BLOCKED_TOOLS,
     all_registered_toolsets,
     blocked_tool_names,
     effective_toolsets,
@@ -21,7 +25,7 @@ from .personas import (
 from .profile_readiness import profile_readiness_for_persona
 from .tool_turn_history import load_tool_turn_history
 
-TOOL_VISIBILITY_SCHEMA_VERSION = 1
+TOOL_VISIBILITY_SCHEMA_VERSION = 2
 
 _MUTATING_TOOLS = frozenset(
     {
@@ -49,6 +53,10 @@ class ToolVisibilityOptions:
     runtime_root: str | Path | None = None
     blocked_tool_names: list[str] | None = None
     enabled_toolsets: list[str] | None = None
+    # Toolsets resolved from the persona's default configuration before a
+    # session lane narrows them for cost/safety. When absent, the effective set
+    # is also the configured set (worker/default-resolution compatibility).
+    configured_toolsets: list[str] | None = None
     #: Authoritative final block set for a CHAT-lane preview (T9b). When set, it
     #: is used verbatim as ``final_blocked`` instead of the generic
     #: ``persona_blocked | requested_blocked`` union — because the chat-lane
@@ -68,6 +76,7 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
     role = role_from_persona(persona)
     unbounded = _is_unbounded(opts)
     resolved_toolsets = _resolved_toolsets(persona, opts, unbounded=unbounded)
+    configured_toolsets = list(opts.configured_toolsets or resolved_toolsets)
     role_allowed_toolsets = list(resolved_toolsets) if unbounded else sorted(ALLOWED_TOOLSETS_BY_ROLE[role])
     persona_toolsets = list(getattr(persona, "toolsets", []) or [])
     persona_blocked = frozenset() if unbounded else blocked_tool_names(persona)
@@ -88,8 +97,31 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
         role_denies=PER_ROLE_TOOL_DENIES[role],
         persona_denies=PERSONA_BLOCKED_TOOLS,
         requested_denies=requested_blocked,
+        registry_hygiene_denies=REGISTRY_HYGIENE_BLOCKED_TOOLS,
     )
+    candidate_set = set(candidate_tools)
+    withheld_tools = [entry for entry in blocked_entries if entry["name"] in candidate_set]
+    policy_tools = [entry for entry in blocked_entries if entry["name"] not in candidate_set]
+    excluded_toolsets = [
+        {
+            "name": name,
+            "reason": "session_toolset_policy",
+            "tools": _tool_names_for_toolsets([name], blocked_tool_names=[]),
+        }
+        for name in configured_toolsets
+        if name not in set(resolved_toolsets)
+    ]
     readiness = _profile_readiness_for_visibility(persona)
+    resolved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    resolution_id = _tool_resolution_id(
+        persona_id=persona.id,
+        permission_mode=opts.permission_mode,
+        configured_toolsets=configured_toolsets,
+        effective_toolsets=resolved_toolsets,
+        final_tools=final_tools,
+        blocked_entries=blocked_entries,
+    )
+    token_estimate = _estimate_model_tool_tokens(final_tools)
     return {
         "schema_version": TOOL_VISIBILITY_SCHEMA_VERSION,
         "persona_id": persona.id,
@@ -109,24 +141,51 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
         "runtime_root": str(opts.runtime_root) if opts.runtime_root is not None else None,
         "profile_toolsets": resolved_toolsets,
         "persona_toolsets": persona_toolsets,
+        "configured_toolsets": configured_toolsets,
         "effective_toolsets": resolved_toolsets,
+        "excluded_toolsets": excluded_toolsets,
         "role_allowed_toolsets": role_allowed_toolsets,
         "persona_candidate_tools": candidate_tools,
         "profile_candidate_tools": candidate_tools,
         "final_model_tools": final_tools,
+        "callable_tools": [_tool_entry(name) for name in final_tools],
         "final_tool_count": len(final_tools),
-        "model_tool_tokens": _estimate_model_tool_tokens(final_tools),
+        # Backwards-compatible scalar. New consumers use the typed estimate so
+        # the UI never presents this name-length heuristic as an exact bill.
+        "model_tool_tokens": token_estimate,
+        "model_tool_token_estimate": {
+            "value": token_estimate,
+            "exact": False,
+            "method": "tool_name_envelope_v1",
+        },
         "blocked_tool_names": [entry["name"] for entry in blocked_entries],
         "blocked_tools": blocked_entries,
+        "withheld_tools": withheld_tools,
+        "policy_tools": policy_tools,
+        "availability_counts": {
+            "configured_toolsets": len(configured_toolsets),
+            "effective_toolsets": len(resolved_toolsets),
+            "callable": len(final_tools),
+            "withheld": len(withheld_tools),
+            "policy": len(policy_tools),
+            "excluded_toolsets": len(excluded_toolsets),
+        },
         "requirement_failures": [],
         "mutation_boundary": _mutation_boundary(final_tools),
         "expires_at": opts.expires_at,
         "turns_remaining": opts.turns_remaining,
+        "resolved_at": resolved_at,
+        "resolution_id": resolution_id,
     }
 
 
-def turn_tool_context_for_persona(persona: AgentPersona, options: ToolVisibilityOptions | None = None) -> dict[str, Any]:
-    visibility = resolve_tool_visibility(persona, options)
+def turn_tool_context_for_persona(
+    persona: AgentPersona,
+    options: ToolVisibilityOptions | None = None,
+    *,
+    visibility: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    visibility = visibility or resolve_tool_visibility(persona, options)
     history = load_tool_turn_history(
         persona_id=visibility["persona_id"],
         session_id=visibility.get("session_id"),
@@ -141,12 +200,19 @@ def turn_tool_context_for_persona(persona: AgentPersona, options: ToolVisibility
         "goal_id": visibility.get("goal_id"),
         "preview": visibility,
         "last_actual": history["last_actual"],
+        "latest_persona_actual": history["latest_persona_actual"],
+        "last_actual_session_match": history["last_actual_session_match"],
         "history": history["history"],
     }
 
 
-def permission_state_for_persona(persona: AgentPersona, options: ToolVisibilityOptions | None = None) -> dict[str, Any]:
-    visibility = resolve_tool_visibility(persona, options)
+def permission_state_for_persona(
+    persona: AgentPersona,
+    options: ToolVisibilityOptions | None = None,
+    *,
+    visibility: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    visibility = visibility or resolve_tool_visibility(persona, options)
     return {
         "schema_version": TOOL_VISIBILITY_SCHEMA_VERSION,
         "persona_id": visibility["persona_id"],
@@ -239,12 +305,15 @@ def _blocked_tool_entries(
     role_denies: frozenset[str],
     persona_denies: frozenset[str],
     requested_denies: frozenset[str],
+    registry_hygiene_denies: frozenset[str],
 ) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for name in names:
-        reason = "not_resolved_for_turn"
+        reason = "session_tool_policy"
         if name in requested_denies:
             reason = "turn_runtime_block"
+        elif name in registry_hygiene_denies:
+            reason = "registry_hygiene"
         elif name in role_denies:
             reason = "role_policy"
         elif name in persona_denies:
@@ -258,6 +327,38 @@ def _blocked_tool_entries(
             }
         )
     return entries
+
+
+def _tool_entry(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "toolset": get_toolset_for_tool(name),
+        "mutating": name in _MUTATING_TOOLS,
+    }
+
+
+def _tool_resolution_id(
+    *,
+    persona_id: str,
+    permission_mode: str,
+    configured_toolsets: list[str],
+    effective_toolsets: list[str],
+    final_tools: list[str],
+    blocked_entries: list[dict[str, Any]],
+) -> str:
+    material = {
+        "persona_id": persona_id,
+        "permission_mode": permission_mode,
+        "configured_toolsets": configured_toolsets,
+        "effective_toolsets": effective_toolsets,
+        "final_tools": final_tools,
+        "blocked": [
+            (entry.get("name"), entry.get("reason"), entry.get("toolset"))
+            for entry in blocked_entries
+        ],
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return f"toolres_{hashlib.sha256(encoded).hexdigest()[:16]}"
 
 
 def _mutation_boundary(tool_names: list[str]) -> dict[str, Any]:

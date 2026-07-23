@@ -944,6 +944,14 @@ def apply_chat_lane_tool_scope(
     Display-parity only — no policy change, no parallel resolver.
     """
 
+    permission = permission_options_for_chat(persona, session_id=session_id)
+    if permission_mode_is_unbounded(permission.permission_mode):
+        configured = all_registered_toolsets()
+    else:
+        configured = _augment_chat_capabilities(
+            persona, list(effective_toolsets(persona))
+        )
+    options.configured_toolsets = configured
     options.enabled_toolsets = _enabled_toolsets_for_chat(persona, session_id=session_id)
     options.chat_lane_blocked_tool_names = _blocked_tool_names_with_registry_hygiene(
         _blocked_tool_names_for_chat(persona, session_id=session_id)

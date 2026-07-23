@@ -3032,8 +3032,12 @@ def _agent_tool_detail(agent) -> dict:
         "persona_id": agent.id,
         "display_name": agent.display_name,
         "tool_resolution": tool_resolution,
-        "turn_tool_context": turn_tool_context_for_persona(agent),
-        "permission_state": permission_state_for_persona(agent),
+        "turn_tool_context": turn_tool_context_for_persona(
+            agent, visibility=tool_resolution
+        ),
+        "permission_state": permission_state_for_persona(
+            agent, visibility=tool_resolution
+        ),
         "blocked_tools": tool_resolution["blocked_tools"],
     }
 

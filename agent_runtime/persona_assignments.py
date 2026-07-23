@@ -2439,8 +2439,12 @@ def persona_instance_tool_detail(
         "persona_id": instance.persona_id,
         "display_name": instance.display_name,
         "tool_resolution": tool_resolution,
-        "turn_tool_context": turn_tool_context_for_persona(visibility_persona, tool_options),
-        "permission_state": permission_state_for_persona(visibility_persona, tool_options),
+        "turn_tool_context": turn_tool_context_for_persona(
+            visibility_persona, tool_options, visibility=tool_resolution
+        ),
+        "permission_state": permission_state_for_persona(
+            visibility_persona, tool_options, visibility=tool_resolution
+        ),
         "blocked_tools": tool_resolution["blocked_tools"],
     }
 
