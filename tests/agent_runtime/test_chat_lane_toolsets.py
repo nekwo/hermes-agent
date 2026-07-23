@@ -135,6 +135,48 @@ def test_config_restore_absent_is_empty():
     assert chat_lane_restore_toolsets("neko_supervisor", cfg) == []
 
 
+def test_config_restore_resolves_root_config_under_profile_home(monkeypatch, tmp_path):
+    # Regression (2026-07-23): the CLI bootstrap redirects a bare invocation
+    # into the sticky active profile's home, so a cfg-less call used to read
+    # THAT profile's config.yaml and the operator's root-config restore
+    # rulings were silently dead (live: alice active → dev lane lost its
+    # restored file/terminal toolsets). The restore knob is harness-global
+    # operator policy: with no explicit cfg it must resolve against the ROOT
+    # config.yaml even when the process home points into a profile.
+    import textwrap as _tw
+
+    root = tmp_path / "hermes-root"
+    profile_home = root / "profiles" / "tester"
+    profile_home.mkdir(parents=True)
+    (root / "config.yaml").write_text(
+        _tw.dedent(
+            """
+            agent_runtime:
+              personas:
+                dev:
+                  chat_lane_restore_toolsets: [file, terminal]
+            """
+        ),
+        encoding="utf-8",
+    )
+    # The profile's own config both omits the key for `dev` and tries to
+    # shadow it for `qa` — neither may influence the cfg-less resolution.
+    (profile_home / "config.yaml").write_text(
+        _tw.dedent(
+            """
+            agent_runtime:
+              personas:
+                qa:
+                  chat_lane_restore_toolsets: [browser]
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    assert chat_lane_restore_toolsets("dev") == ["file", "terminal"]
+    assert chat_lane_restore_toolsets("qa") == []
+
+
 # --------------------------------------------------------------------------- #
 # Request-assembly integration at the single chokepoint.
 # --------------------------------------------------------------------------- #

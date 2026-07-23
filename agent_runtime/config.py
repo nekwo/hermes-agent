@@ -246,12 +246,35 @@ def describe_runtime_default_authority(config_path: Path | None = None) -> dict[
     }
 
 
+def harness_root_config_path() -> Path:
+    """The harness-global ``config.yaml`` under the Hermes ROOT home.
+
+    Harness-wide operator policy must resolve against the ROOT config no
+    matter which profile is sticky-active. The CLI bootstrap redirects a bare
+    invocation into the active profile's home
+    (``hermes_cli.main._apply_profile_override``), so ``get_config_path()`` —
+    and therefore ``load_agent_runtime_config()`` with no argument — silently
+    reads THAT profile's ``config.yaml``. Live proof 2026-07-23: with
+    ``alice`` sticky-active, the mission-chat lane resolved
+    ``chat_lane_restore_toolsets`` against ``profiles/alice/config.yaml``,
+    so the operator's root-config ruling (Neko ``file`` restore, 2026-07-18)
+    was dead on arrival. Policy readers that must be immune to that redirect
+    load through this path instead of ``get_config_path()``.
+    """
+
+    from hermes_constants import get_default_hermes_root
+
+    return get_default_hermes_root() / "config.yaml"
+
+
 def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> list[str]:
     """Per-persona operator override for the chat-lane toolset cost policy.
 
     Read from ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` in
-    ``config.yaml``: a list of toolsets to RESTORE onto that persona's operator /
-    mission chat lane after the default policy
+    the ROOT ``config.yaml`` (see :func:`harness_root_config_path` — this is
+    harness-global operator policy, and an active profile's own config must
+    not shadow it): a list of toolsets to RESTORE onto that persona's
+    operator / mission chat lane after the default policy
     (``chat_lane_toolsets.DEFAULT_CHAT_LANE_EXCLUDED_TOOLSETS``) would exclude
     them (browser / vision / heavy-dev). Restore is un-exclusion, not a grant —
     a restored toolset is only kept if the persona's role/permission layer
@@ -264,7 +287,7 @@ def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None =
     persona_id = str(persona_id or "").strip()
     if not persona_id:
         return []
-    cfg = cfg or load_agent_runtime_config()
+    cfg = cfg or load_agent_runtime_config(harness_root_config_path())
     personas = cfg.personas if isinstance(getattr(cfg, "personas", None), dict) else {}
     keys = [persona_id]
     if persona_id == "neko_supervisor":
