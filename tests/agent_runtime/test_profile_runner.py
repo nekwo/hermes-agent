@@ -256,6 +256,72 @@ def test_runner_attaches_redaction_safe_model_input(monkeypatch):
     assert model_input["messages"][1]["content"] == "hello"
 
 
+def test_system_prompt_section_receipts_address_exact_three_tiers(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_runtime.profile_runner import _system_prompt_section_receipts
+    import agent.system_prompt as system_prompt_module
+
+    parts = {
+        "stable": "stable foundation",
+        "context": "mission context\nwith two lines",
+        "volatile": "volatile profile",
+    }
+    monkeypatch.setattr(
+        system_prompt_module,
+        "build_system_prompt_parts",
+        lambda agent, system_message=None: parts,
+    )
+    joined = "\n\n".join(parts.values())
+
+    sections = _system_prompt_section_receipts(
+        agent=SimpleNamespace(),
+        system_message="mission context",
+        system_prompt=joined,
+        captured_content=joined,
+    )
+
+    assert [section["kind"] for section in sections] == [
+        "stable",
+        "context",
+        "volatile",
+    ]
+    assert [
+        joined[section["start_char"] : section["end_char"]]
+        for section in sections
+    ] == list(parts.values())
+    assert all(section["truncated"] is False for section in sections)
+
+
+def test_system_prompt_section_receipts_fail_closed_on_cached_prompt_drift(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from agent_runtime.profile_runner import _system_prompt_section_receipts
+    import agent.system_prompt as system_prompt_module
+
+    monkeypatch.setattr(
+        system_prompt_module,
+        "build_system_prompt_parts",
+        lambda agent, system_message=None: {
+            "stable": "new stable",
+            "context": "new context",
+            "volatile": "new volatile",
+        },
+    )
+
+    assert (
+        _system_prompt_section_receipts(
+            agent=SimpleNamespace(),
+            system_message="new context",
+            system_prompt="cached prompt from an older turn",
+            captured_content="cached prompt from an older turn",
+        )
+        == []
+    )
+
+
 def test_runner_attaches_agent_owned_final_cache_routing_observability(monkeypatch):
     monkeypatch.setattr(
         "agent_runtime.profile_runner.resolve_runtime_provider",

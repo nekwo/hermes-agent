@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -788,6 +789,13 @@ def _final_model_input_stub(final_model_input: dict[str, Any], context_id: Any) 
         # only one-way fingerprints. Keep it in the frame stub so operators can
         # compare a cold turn with adjacent warm turns without a disk fetch.
         stub["cache_routing"] = cache_routing
+    sections = _safe_system_prompt_sections(
+        final_model_input.get("system_prompt_sections")
+    )
+    if sections:
+        # Tiny address metadata only. The actual prompt remains evicted and is
+        # fetched on demand when the operator opens a section.
+        stub["system_prompt_sections"] = sections
     return stub
 
 
@@ -2904,7 +2912,7 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
     for message in messages:
         if not isinstance(message, dict):
             continue
-        content = safe_assignment_text(message.get("content"), limit=65000) or ""
+        content = _safe_prompt_body(message.get("content"), limit=65000)
         safe_messages.append(
             {
                 "role": safe_assignment_token(message.get("role")) or "message",
@@ -2927,6 +2935,9 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
         "system_message_supplied": bool(value.get("system_message_supplied")),
         "message_count": _safe_int(value.get("message_count")) or len(safe_messages),
         "messages": safe_messages,
+        "system_prompt_sections": _safe_system_prompt_sections(
+            value.get("system_prompt_sections")
+        ),
         # Tool schemas ship in full on every API call and are the largest fixed
         # slice of the prompt after the system prompt. This whitelist previously
         # dropped them, which is why the context budget could not see (or
@@ -2934,6 +2945,57 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
         "tool_schema": _safe_tool_schema(value.get("tool_schema")),
         "cache_routing": _safe_cache_routing(value.get("cache_routing")),
     }
+
+
+_OBSERVABILITY_PROMPT_SECRET_PATTERNS = [
+    re.compile(
+        r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|bearer|password|secret)\s*[:=]\s*([^\s,;]+)"
+    ),
+    re.compile(r"(?i)\b(sk-[A-Za-z0-9_-]{12,})\b"),
+    re.compile(r"(?i)\b(xox[baprs]-[A-Za-z0-9-]{12,})\b"),
+]
+
+
+def _safe_prompt_body(value: Any, *, limit: int) -> str:
+    """Redact prompt text while preserving its readable line structure."""
+
+    text = str(value or "").replace("\x00", " ")
+    for pattern in _OBSERVABILITY_PROMPT_SECRET_PATTERNS:
+        text = pattern.sub(
+            lambda match: (
+                f"{match.group(1)}=<redacted>"
+                if match.lastindex and match.lastindex >= 2
+                else "<redacted>"
+            ),
+            text,
+        )
+    return text[:limit]
+
+
+def _safe_system_prompt_sections(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            continue
+        start = _safe_int(item.get("start_char"))
+        end = _safe_int(item.get("end_char"))
+        chars = _safe_int(item.get("chars"))
+        if start is None or end is None or start < 0 or end < start:
+            continue
+        result.append(
+            {
+                "kind": safe_assignment_token(item.get("kind")) or "section",
+                "name": safe_assignment_text(item.get("name"), limit=80)
+                or "Prompt section",
+                "start_char": start,
+                "end_char": end,
+                "chars": chars,
+                "truncated": item.get("truncated") is True,
+            }
+        )
+    return result
 
 
 def _safe_cache_routing(value: Any) -> dict[str, Any] | None:

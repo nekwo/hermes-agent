@@ -72,11 +72,51 @@ def test_prompt_observability_reports_typed_persona_envelope_and_memory_flag():
         ),
         session_id="persona_chat_neko",
     )
-    memory_layer = {layer["kind"]: layer for layer in with_memory["prompt_layers"]}["profile_context"]
+    memory_layer = {layer["kind"]: layer for layer in with_memory["prompt_layers"]}[
+        "profile_context"
+    ]
     assert memory_layer["status"] == "loaded"
     assert memory_layer["included"] is True
     assert with_memory["prompt_flags"]["skip_memory"] is False
 
+
+def test_safe_final_model_input_preserves_prompt_lines_and_section_receipts():
+    from agent_runtime.prompt_observability import _safe_final_model_input
+
+    safe = _safe_final_model_input(
+        {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "stable line\ncontext line\npassword: should-not-leak",
+                }
+            ],
+            "system_prompt_sections": [
+                {
+                    "kind": "stable",
+                    "name": "Stable Hermes foundation",
+                    "start_char": 0,
+                    "end_char": 11,
+                    "chars": 11,
+                    "truncated": False,
+                }
+            ],
+        }
+    )
+
+    assert safe is not None
+    assert "stable line\ncontext line" in safe["messages"][0]["content"]
+    assert "should-not-leak" not in safe["messages"][0]["content"]
+    assert safe["system_prompt_sections"] == [
+        {
+            "kind": "stable",
+            "name": "Stable Hermes foundation",
+            "start_char": 0,
+            "end_char": 11,
+            "chars": 11,
+            "truncated": False,
+        }
+    ]
 
 def test_prompt_layers_situational_hud_reports_operator_turn_placement():
     # T5 observability coherence: after the HUD moved out of the system prompt,

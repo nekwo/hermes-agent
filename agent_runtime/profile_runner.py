@@ -1622,8 +1622,18 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
         except Exception:
             system_prompt = request.system_message or ""
     messages: list[dict[str, Any]] = []
+    system_prompt_sections: list[dict[str, Any]] = []
     if system_prompt:
-        messages.append(_message_preview("system", str(system_prompt), source="hermes_system_prompt"))
+        system_preview = _message_preview(
+            "system", str(system_prompt), source="hermes_system_prompt"
+        )
+        messages.append(system_preview)
+        system_prompt_sections = _system_prompt_section_receipts(
+            agent=agent,
+            system_message=request.system_message,
+            system_prompt=str(system_prompt),
+            captured_content=system_preview["content"],
+        )
     messages.append(_message_preview("user", request.user_message, source="mission_chat_user_message"))
     cache_routing = _agent_cache_routing_observability(agent)
     return {
@@ -1652,6 +1662,11 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
         "system_message_supplied": request.system_message is not None,
         "message_count": len(messages),
         "messages": messages,
+        **(
+            {"system_prompt_sections": system_prompt_sections}
+            if system_prompt_sections
+            else {}
+        ),
         # T8 (2026-07-18): the rendered compact skills-index text's char count —
         # what ``.skills_prompt_snapshot.json`` ACTUALLY contributed to the
         # prompt this turn, distinct from the loaded-file byte estimate the
@@ -1666,6 +1681,66 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
             else {}
         ),
     }
+
+
+def _system_prompt_section_receipts(
+    *,
+    agent: Any,
+    system_message: str | None,
+    system_prompt: str,
+    captured_content: str,
+) -> list[dict[str, Any]]:
+    """Return exact offsets for Hermes' stable/context/volatile prompt tiers.
+
+    The profile runner may restore a cached system prompt from SessionDB.  We
+    therefore re-render the three canonical parts only to prove byte equality;
+    if they do not join to the exact prompt sent this turn, no section metadata
+    is emitted.  Offsets target the already-redacted captured message so the
+    Launcher can slice it without duplicating the full prompt on the wire.
+    """
+
+    try:
+        from agent.system_prompt import build_system_prompt_parts
+
+        parts = build_system_prompt_parts(agent, system_message=system_message)
+    except Exception:
+        return []
+    ordered = [
+        ("stable", "Stable Hermes foundation", str(parts.get("stable") or "")),
+        ("context", "Mission Control context", str(parts.get("context") or "")),
+        ("volatile", "Volatile profile context", str(parts.get("volatile") or "")),
+    ]
+    nonempty = [(kind, name, value) for kind, name, value in ordered if value]
+    if "\n\n".join(value for _, _, value in nonempty) != system_prompt:
+        return []
+
+    safe_parts = [
+        (kind, name, _redact_prompt_text(value)) for kind, name, value in nonempty
+    ]
+    safe_joined = "\n\n".join(value for _, _, value in safe_parts)
+    if not safe_joined.startswith(captured_content):
+        return []
+
+    receipts: list[dict[str, Any]] = []
+    cursor = 0
+    capture_length = len(captured_content)
+    for kind, name, value in safe_parts:
+        start = cursor
+        end = start + len(value)
+        if start < capture_length:
+            captured_end = min(end, capture_length)
+            receipts.append(
+                {
+                    "kind": kind,
+                    "name": name,
+                    "start_char": start,
+                    "end_char": captured_end,
+                    "chars": len(value),
+                    "truncated": captured_end < end,
+                }
+            )
+        cursor = end + 2
+    return receipts
 
 
 def _agent_cache_routing_observability(agent) -> dict[str, Any] | None:
