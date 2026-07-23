@@ -12,6 +12,7 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 from hermes_time import now
 from hermes_constants import get_hermes_home
@@ -144,6 +145,22 @@ from agent_runtime.tool_turn_history import persist_tool_turn_actual
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_session_summary
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
+
+# --- `hermes harness usage` (account-usage lanes) contract ---------------------
+# Typed per-provider account-limit snapshot the Launcher's Mission Control
+# console consumes instead of scraping the human /usage text. v1 envelope is
+# emitted next to `providers`; the same failure-isolation discipline applies —
+# nothing in `_cmd_usage` may raise (worst case: envelope with empty lanes).
+USAGE_SCHEMA = "hermes.account_usage/v1"
+DEFAULT_USAGE_TIMEOUT = 20.0
+# Candidate lanes, in stable emission order. A lane is only emitted when the
+# operator is detected as signed-in / holding credentials for that provider.
+_USAGE_LANE_PROVIDERS: tuple[str, ...] = (
+    "openai-codex",
+    "anthropic",
+    "openrouter",
+    "nous",
+)
 
 
 STAGE42_SCHEMA_VERSION = 1
@@ -1253,6 +1270,24 @@ def build_parser(parent_subparsers) -> None:
     )
     providers.add_argument("--json", action="store_true")
     providers.set_defaults(func=_cmd_providers)
+
+    usage = subs.add_parser(
+        "usage",
+        help="Per-provider account usage/limit windows (machine-readable via --json)",
+    )
+    usage.add_argument("--json", action="store_true")
+    usage.add_argument(
+        "--provider",
+        default=None,
+        help="Restrict to a single provider lane (still emits the full envelope)",
+    )
+    usage.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_USAGE_TIMEOUT,
+        help="Overall wall-clock bound (seconds) for the concurrent lane fetches",
+    )
+    usage.set_defaults(func=_cmd_usage)
 
     doctor = subs.add_parser("doctor", help="Show Harness runtime diagnostics and stale-state report")
     doctor.add_argument("--json", action="store_true")
@@ -3381,6 +3416,344 @@ def _cmd_providers(args) -> int:
                 f"  #{credential['index']}  {credential['label']:<20} "
                 f"{credential['auth_type']:<7} {credential['source']}{tag}{marker}"
             )
+    return 0
+
+
+# --- `hermes harness usage` implementation ------------------------------------
+#
+# Structure mirrors build_provider_visibility: every seam is failure-isolated so
+# a broken probe on one provider can NEVER sink the envelope or another lane.
+# The reusable fetch/render primitives live upstream in agent/account_usage.py
+# (which this module must not modify) — snapshot → dict serialization lives HERE.
+
+
+def _usage_provider_label(provider_id: str) -> str:
+    """Human display name for a provider id, degrading to the id itself."""
+    try:
+        from hermes_cli.models import provider_label
+
+        return provider_label(provider_id)
+    except Exception:
+        return provider_id
+
+
+def _usage_iso(dt) -> Optional[str]:
+    """Serialize a datetime as ISO-8601 UTC, or None. Fail-open → None."""
+    if dt is None:
+        return None
+    try:
+        aware = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return aware.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _resolve_active_provider_id() -> Optional[str]:
+    """Normalized effective provider id, mirroring the CLI runtime resolution
+    seam (`hermes_cli/status.py::_effective_provider_label`) but emitting the id
+    rather than a label. Fail-open → None; ``auto`` (unresolved) also maps to
+    None so callers get a concrete id or nothing.
+    """
+    try:
+        from hermes_cli.auth import AuthError, resolve_provider
+        from hermes_cli.runtime_provider import resolve_requested_provider
+
+        requested = resolve_requested_provider()
+        try:
+            effective = resolve_provider(requested)
+        except AuthError:
+            effective = requested or None
+        normalized = str(effective or "").strip().lower() or None
+        if normalized in {"", "auto"}:
+            return None
+        return normalized
+    except Exception:
+        return None
+
+
+def _codex_usage_login_detected() -> bool:
+    """Codex lane detected when the OAuth status is logged-in OR the credential
+    pool holds any openai-codex entry."""
+    try:
+        from hermes_cli.auth import get_codex_auth_status
+
+        if bool((get_codex_auth_status() or {}).get("logged_in")):
+            return True
+    except Exception:
+        pass
+    try:
+        from agent.credential_pool import load_pool
+
+        return bool(load_pool("openai-codex").entries())
+    except Exception:
+        return False
+
+
+def _openrouter_usage_login_detected() -> bool:
+    """OpenRouter lane detected when the pool holds an entry OR the runtime
+    resolver finds a usable key."""
+    try:
+        from agent.credential_pool import load_pool
+
+        if load_pool("openrouter").entries():
+            return True
+    except Exception:
+        pass
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(requested="openrouter")
+        return bool(str(runtime.get("api_key", "") or "").strip())
+    except Exception:
+        return False
+
+
+def _usage_lane_detected(provider_id: str) -> bool:
+    """True iff the operator is signed-in / holds credentials for ``provider_id``.
+    Only detected lanes are ever emitted (undetected providers are omitted).
+    Fail-open per provider → False."""
+    try:
+        if provider_id == "openai-codex":
+            return _codex_usage_login_detected()
+        if provider_id == "anthropic":
+            from agent.anthropic_adapter import resolve_anthropic_token
+
+            return bool((resolve_anthropic_token() or "").strip())
+        if provider_id == "openrouter":
+            return _openrouter_usage_login_detected()
+        if provider_id == "nous":
+            from hermes_cli.auth import get_provider_auth_state
+
+            tok = (get_provider_auth_state("nous") or {}).get("access_token")
+            return bool(isinstance(tok, str) and tok.strip())
+    except Exception:
+        return False
+    return False
+
+
+def _fetch_usage_lane(provider_id: str):
+    """Fetch the account-usage snapshot for one provider (may return None or
+    raise; callers isolate failures). Nous flows through the portal-account +
+    credits-snapshot path; the rest through the shared usage-API fetcher."""
+    if provider_id == "nous":
+        from agent.account_usage import build_nous_credits_snapshot
+        from hermes_cli.nous_account import get_nous_portal_account_info
+
+        account = get_nous_portal_account_info(force_fresh=True)
+        return build_nous_credits_snapshot(account)
+    from agent.account_usage import fetch_account_usage
+
+    return fetch_account_usage(provider_id)
+
+
+def _serialize_usage_window(window) -> dict:
+    used = window.used_percent
+    return {
+        "label": window.label,
+        # Raw float, not clamped — the console decides how to present overage.
+        "used_percent": None if used is None else float(used),
+        "reset_at": _usage_iso(window.reset_at),
+        "detail": window.detail,
+    }
+
+
+def _unavailable_usage_lane(provider_id: str, reason: str, *, active: bool) -> dict:
+    return {
+        "provider": provider_id,
+        "display_name": _usage_provider_label(provider_id),
+        "active": active,
+        "available": False,
+        "plan": None,
+        "source": None,
+        "fetched_at": None,
+        "windows": [],
+        "details": [],
+        "unavailable_reason": reason,
+    }
+
+
+def _serialize_usage_lane(provider_id: str, snapshot, *, active: bool) -> dict:
+    """Serialize an AccountUsageSnapshot (or None) into a lane dict. A None
+    snapshot on a detected login lane is emitted as ``no usage data``."""
+    if snapshot is None:
+        return _unavailable_usage_lane(provider_id, "no usage data", active=active)
+    return {
+        "provider": provider_id,
+        "display_name": _usage_provider_label(provider_id),
+        "active": active,
+        "available": bool(snapshot.available),
+        "plan": snapshot.plan,
+        "source": snapshot.source,
+        "fetched_at": _usage_iso(snapshot.fetched_at),
+        "windows": [_serialize_usage_window(w) for w in snapshot.windows],
+        "details": [str(d) for d in snapshot.details],
+        "unavailable_reason": snapshot.unavailable_reason,
+    }
+
+
+def _detect_usage_candidates(only_provider: Optional[str]) -> list[str]:
+    providers = _USAGE_LANE_PROVIDERS
+    if only_provider:
+        norm = str(only_provider).strip().lower()
+        providers = tuple(p for p in providers if p == norm)
+    return [p for p in providers if _usage_lane_detected(p)]
+
+
+def _fetch_usage_lanes(
+    candidates: list[str],
+    *,
+    active_provider: Optional[str],
+    timeout: float,
+) -> list[dict]:
+    """Fetch every candidate lane CONCURRENTLY, bounded by an overall wall-clock
+    deadline. Per-lane timeout/failure degrades to an unavailable lane carrying a
+    CLASS-NAME-ONLY reason (never an exception message, which could leak a token
+    or URL). Never blocks process exit on a hung fetch."""
+    import concurrent.futures
+
+    lanes_by_provider: dict[str, dict] = {}
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(candidates)))
+    try:
+        future_map = {pool.submit(_fetch_usage_lane, p): p for p in candidates}
+        for future, provider_id in future_map.items():
+            active = provider_id == active_provider
+            # Deadline-derived remaining bound: forwarding a shared deadline as
+            # each future's result timeout keeps the OVERALL wall clock ≈timeout
+            # even though the futures run concurrently.
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                snapshot = future.result(timeout=remaining)
+            except concurrent.futures.TimeoutError:
+                lanes_by_provider[provider_id] = _unavailable_usage_lane(
+                    provider_id, "usage fetch failed (TimeoutError)", active=active
+                )
+            except Exception as exc:  # noqa: BLE001 — class name only, fail-open
+                lanes_by_provider[provider_id] = _unavailable_usage_lane(
+                    provider_id,
+                    f"usage fetch failed ({type(exc).__name__})",
+                    active=active,
+                )
+            else:
+                lanes_by_provider[provider_id] = _serialize_usage_lane(
+                    provider_id, snapshot, active=active
+                )
+    finally:
+        # Don't let the context-manager shutdown(wait=True) block on a hung
+        # provider fetch — each underlying fetch already carries its own HTTP
+        # timeout, and cancel_futures drops anything not yet started.
+        pool.shutdown(wait=False, cancel_futures=True)
+    return [lanes_by_provider[p] for p in candidates if p in lanes_by_provider]
+
+
+def build_account_usage(
+    *,
+    only_provider: Optional[str] = None,
+    timeout: float = DEFAULT_USAGE_TIMEOUT,
+) -> dict:
+    """Build the ``hermes.account_usage/v1`` envelope: one lane per detected
+    provider login (codex / anthropic / openrouter / nous), fetched concurrently
+    under an overall wall-clock bound. Fail-open at every seam — worst case the
+    envelope carries empty lanes."""
+    try:
+        active_provider = _resolve_active_provider_id()
+    except Exception:
+        active_provider = None
+    payload: dict = {
+        "schema": USAGE_SCHEMA,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "active_provider": active_provider,
+        "lanes": [],
+    }
+    try:
+        candidates = _detect_usage_candidates(only_provider)
+    except Exception:
+        return payload
+    if not candidates:
+        return payload
+    try:
+        payload["lanes"] = _fetch_usage_lanes(
+            candidates, active_provider=active_provider, timeout=timeout
+        )
+    except Exception:
+        payload["lanes"] = []
+    return payload
+
+
+def _render_account_usage_human(payload: dict) -> None:
+    """Render the envelope as human lines, reusing the shared
+    ``render_account_usage_lines`` per available lane."""
+    from agent.account_usage import (
+        AccountUsageSnapshot,
+        AccountUsageWindow,
+        render_account_usage_lines,
+    )
+
+    print(f"Active provider: {payload.get('active_provider') or '(none)'}")
+    lanes = payload.get("lanes") or []
+    if not lanes:
+        print("No account-usage lanes (no signed-in providers detected).")
+        return
+    for lane in lanes:
+        marker = " *" if lane.get("active") else ""
+        print("")
+        print(f"{lane.get('display_name') or lane.get('provider')}{marker}")
+        if not lane.get("available"):
+            print(f"  Unavailable: {lane.get('unavailable_reason') or 'no usage data'}")
+            continue
+        windows = tuple(
+            AccountUsageWindow(
+                label=w.get("label"),
+                used_percent=w.get("used_percent"),
+                reset_at=_parse_usage_iso(w.get("reset_at")),
+                detail=w.get("detail"),
+            )
+            for w in lane.get("windows") or []
+        )
+        snapshot = AccountUsageSnapshot(
+            provider=lane.get("provider") or "",
+            source=lane.get("source") or "",
+            fetched_at=datetime.now(timezone.utc),
+            plan=lane.get("plan"),
+            windows=windows,
+            details=tuple(lane.get("details") or []),
+        )
+        for line in render_account_usage_lines(snapshot):
+            print(f"  {line}")
+
+
+def _parse_usage_iso(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _cmd_usage(args) -> int:
+    """`hermes harness usage` — typed per-provider account-usage envelope. Total
+    failure isolation: nothing here may raise; worst case is a valid envelope
+    with empty lanes."""
+    only_provider = getattr(args, "provider", None)
+    timeout = float(getattr(args, "timeout", DEFAULT_USAGE_TIMEOUT) or DEFAULT_USAGE_TIMEOUT)
+    try:
+        payload = build_account_usage(only_provider=only_provider, timeout=timeout)
+    except Exception:
+        payload = {
+            "schema": USAGE_SCHEMA,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "active_provider": None,
+            "lanes": [],
+        }
+    if getattr(args, "json", False):
+        print(emit_json(payload))
+        return 0
+    try:
+        _render_account_usage_human(payload)
+    except Exception:
+        # Human rendering must not crash the verb either.
+        print(emit_json(payload))
     return 0
 
 
