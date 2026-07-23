@@ -69,6 +69,16 @@ these three are the live truth.
    N0–N3, deletes the ~13.7k-line decision-contract/gate/incident/adjudication tower at
    N3 after burn-in, and makes the 2026-07-03 self-drive bug class unrepresentable at N1.
 
+## Operator forensics
+
+- **[Serve Runtime Truth — interpreter chain + read-model/snapshot freshness](serve-runtime-truth.md)** —
+  two live-serve facts that keep reading as bugs but are healthy: the Windows
+  venv interpreter trampoline (a base-`Python311` grandchild in the process tree
+  is normal; nothing to pin), and frozen `read_model.db` / `snapshot.json` mtimes
+  during a live serve (Mission Control is fed from RAM + a ≤20s cache, so neither
+  file is touched). Retires the old tell "`read_model.db` mtime < session start =
+  no serve".
+
 ## Product stance
 
 Build the smallest reliable core first:
