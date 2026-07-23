@@ -425,7 +425,8 @@ def test_mission_chat_operative_rules_teach_the_chat_session_verbs():
 
 
 def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkeypatch):
-    # A profile-backed persona configured with `soul_overlay_path` reads its
+    # A profile-backed persona reads its canonical SOUL.md by default (an
+    # explicit `soul_overlay_path` remains an override) from
     # soul from ITS OWN profile home (single source — realm sync already models
     # soul_overlay as profile-home-relative) and layers it into BOTH chat lanes
     # — after the identity hat, before the operative rules on the mission-chat
@@ -446,7 +447,7 @@ def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkey
     )
 
     neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
-    souled = replace(neko, soul_overlay_path="SOUL.md", hermes_profile="neko")
+    souled = replace(neko, soul_overlay_path=None, hermes_profile="neko")
 
     composed = pr._mission_chat_surface_message(souled, "")
     identity = pr._mission_chat_identity_prompt(souled)
@@ -467,14 +468,13 @@ def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkey
     assert soul_marker in chat_prompt
     assert chat_prompt.index("operator-channel agent") < chat_prompt.index(soul_marker)
 
-    # No soul configured -> byte-identical legacy composition.
-    assert (
-        pr._mission_chat_surface_message(neko, "")
-        == pr._mission_chat_identity_prompt(neko) + "\n\n" + rules
-    )
-    # A bogus path degrades to no soul, never an error.
+    # A bogus explicit path degrades to no soul, never an error or an implicit
+    # fallback that hides the bad override.
     bogus = replace(neko, soul_overlay_path="does_not_exist.md", hermes_profile="neko")
-    assert pr._mission_chat_surface_message(bogus, "") == pr._mission_chat_surface_message(neko, "")
+    assert (
+        pr._mission_chat_surface_message(bogus, "")
+        == pr._mission_chat_identity_prompt(bogus) + "\n\n" + rules
+    )
 
 
 def test_profile_backed_soul_never_falls_through_to_operator_home(tmp_path, monkeypatch):

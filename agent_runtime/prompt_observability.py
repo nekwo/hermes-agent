@@ -231,6 +231,8 @@ def mission_chat_prompt_observability(
     # gets a deliberate 0. .skills_prompt_snapshot.json is attached post-turn.
     runtime_identity_chars = _mission_chat_identity_prompt_chars(persona)
     operator_rules_chars = _mission_chat_operative_rules_chars()
+    runtime_identity_content = _mission_chat_identity_prompt_content(persona)
+    operator_rules_content = _mission_chat_operative_rules_content()
     soul_prompt_chars = _soul_overlay_prompt_chars(persona)
     workspace_prompt_chars = _workspace_agents_prompt_chars(workspace_agents)
     memory_loaded = _mission_chat_memory_loaded(persona)
@@ -306,6 +308,11 @@ def mission_chat_prompt_observability(
                 "included": True,
                 "token_attribution": "direct",
                 **(
+                    {"content": runtime_identity_content}
+                    if runtime_identity_content is not None
+                    else {}
+                ),
+                **(
                     {
                         "chars": runtime_identity_chars,
                         "token_estimate": runtime_identity_chars // 4,
@@ -352,6 +359,11 @@ def mission_chat_prompt_observability(
                 "included": True,
                 "token_attribution": "direct",
                 **(
+                    {"content": operator_rules_content}
+                    if operator_rules_content is not None
+                    else {}
+                ),
+                **(
                     {
                         "chars": operator_rules_chars,
                         "token_estimate": operator_rules_chars // 4,
@@ -378,6 +390,8 @@ def mission_chat_prompt_observability(
                         "included": workspace_agents.content is not None,
                         "token_attribution": "context_file",
                         "source_context_file": "AGENTS.md",
+                        "source_path": workspace_agents.receipt.get("path"),
+                        "source_sha256": workspace_agents.receipt.get("sha256"),
                         # Its bytes are attributed via the AGENTS.md context-file
                         # row, so this layer deliberately carries no estimate.
                     }
@@ -2672,12 +2686,9 @@ def _soul_overlay_prompt_chars(persona: Any) -> int | None:
     SOUL.md row's in-prompt number is exact, not a re-derivation."""
 
     try:
-        from .persona_runtime import _safe_read_soul_overlay
+        from .persona_runtime import _mission_chat_soul_overlay
 
-        soul = _safe_read_soul_overlay(
-            getattr(persona, "soul_overlay_path", None),
-            hermes_profile=getattr(persona, "hermes_profile", None),
-        )
+        soul = _mission_chat_soul_overlay(persona)
         return len(soul) if isinstance(soul, str) and soul else None
     except Exception:
         return None
@@ -2737,6 +2748,17 @@ def _mission_chat_identity_prompt_chars(persona: Any) -> int | None:
         return None
 
 
+def _mission_chat_identity_prompt_content(persona: Any) -> str | None:
+    """Captured text of the generated Mission Control identity layer."""
+
+    try:
+        from .persona_runtime import _mission_chat_identity_prompt
+
+        return _mission_chat_identity_prompt(persona)
+    except Exception:
+        return None
+
+
 def _mission_chat_operative_rules_chars() -> int | None:
     """Exact chars of the stable Mission Control operator-channel rules."""
 
@@ -2744,6 +2766,17 @@ def _mission_chat_operative_rules_chars() -> int | None:
         from .persona_runtime import _mission_chat_operative_rules
 
         return len(_mission_chat_operative_rules())
+    except Exception:
+        return None
+
+
+def _mission_chat_operative_rules_content() -> str | None:
+    """Captured text of the stable Mission Control channel-rules layer."""
+
+    try:
+        from .persona_runtime import _mission_chat_operative_rules
+
+        return _mission_chat_operative_rules()
     except Exception:
         return None
 

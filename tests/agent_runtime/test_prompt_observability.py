@@ -52,10 +52,12 @@ def test_prompt_observability_reports_typed_persona_envelope_and_memory_flag():
     assert no_memory["prompt_stack_schema_version"] == 2
     assert "persona_identity" not in layers
     assert "Neko Mission Lead" in layers["runtime_identity"]["summary"]
+    assert "You are Neko Mission Lead" in layers["runtime_identity"]["content"]
     assert layers["runtime_identity"]["owner"] == "mission_control"
     assert layers["runtime_identity"]["group"] == "mission_control_persona"
     assert layers["profile_soul"]["owner"] == "profile"
     assert layers["operator_channel_rules"]["owner"] == "mission_control"
+    assert "Mission Control operator-chat rules" in layers["operator_channel_rules"]["content"]
     assert layers["profile_context"]["status"] == "skipped"
     assert no_memory["prompt_flags"]["skip_memory"] is True
     assert no_memory["prompt_flags"]["load_soul_identity"] is False
@@ -159,6 +161,11 @@ def test_workspace_agents_context_is_loaded_and_reported_from_selected_file(tmp_
     assert context["workspace_name"] == "Launcher"
     assert receipt["path"] == str(agents_file.resolve())
     assert receipt["sha256"]
+    workspace_layer = next(
+        layer for layer in context["prompt_layers"] if layer["kind"] == "workspace_context"
+    )
+    assert workspace_layer["source_path"] == str(agents_file.resolve())
+    assert workspace_layer["source_sha256"] == receipt["sha256"]
     # Per-item token attribution: the workspace receipt carries bytes // 4.
     assert receipt["token_estimate"] == receipt["bytes"] // 4
     layer_kinds = [layer["kind"] for layer in context["prompt_layers"]]

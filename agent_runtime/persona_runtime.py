@@ -486,12 +486,8 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         "something specific from a past session you can't already see, and consult your durable memory only when it actually "
         "bears on the reply — don't fish."
     )
-    # Same soul lane as the mission-chat surface: the persona's own configured
-    # soul overlay rides along; absent for personas that don't set one.
-    soul = _safe_read_soul_overlay(
-        getattr(persona, "soul_overlay_path", None),
-        hermes_profile=getattr(persona, "hermes_profile", None),
-    )
+    # Same profile-owned SOUL lane as the mission-chat surface.
+    soul = _mission_chat_soul_overlay(persona)
     return f"{base}\n\n{soul}" if soul else base
 
 
@@ -635,15 +631,14 @@ def _mission_chat_surface_message(
     operator_surface = (surface_prompt or "").strip()
     workspace_agents = (workspace_agents_content or "").strip()
     rules = _mission_chat_operative_rules()
-    # The persona's OWN soul overlay (config `soul_overlay_path`) is the one
-    # identity document this isolated lane does load — who-you-are sits between
-    # the identity hat and the surface rules. For a profile-backed persona it
-    # resolves inside that persona's own profile home (single source), so this
-    # IS the persona's SOUL.md — the OPERATOR profile's SOUL stays not-loaded.
-    soul = _safe_read_soul_overlay(
-        getattr(persona, "soul_overlay_path", None),
-        hermes_profile=getattr(persona, "hermes_profile", None),
-    )
+    # The persona's OWN SOUL is the profile-owned identity layer between the
+    # Mission Control identity hat and the channel rules. Profile personas used
+    # to require a duplicated `soul_overlay_path: SOUL.md` binding on the
+    # Mission Control persona row; profile-derived/free personas do not carry
+    # that field, so a perfectly valid profile SOUL could be observed yet not
+    # injected. `_mission_chat_soul_overlay` makes the profile's canonical
+    # SOUL.md the default while preserving explicit safe relative overrides.
+    soul = _mission_chat_soul_overlay(persona)
     parts = [identity, soul or "", rules]
     if workspace_agents:
         parts.append(MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE + workspace_agents)
@@ -1543,6 +1538,22 @@ def _safe_read_soul_overlay(
         except OSError:
             continue
     return None
+
+
+def _mission_chat_soul_overlay(persona: AgentPersona) -> str | None:
+    """Resolve the profile-owned SOUL text used by Mission Control chat.
+
+    A profile-backed persona owns ``SOUL.md`` by convention.  An explicit safe
+    relative ``soul_overlay_path`` still wins, while an unbound legacy persona
+    keeps the old opt-in behavior.  Resolution remains profile-isolated through
+    :func:`_safe_read_soul_overlay`, so a missing persona profile can never fall
+    through to the operator's SOUL.
+    """
+
+    hermes_profile = getattr(persona, "hermes_profile", None)
+    configured_path = getattr(persona, "soul_overlay_path", None)
+    path_value = configured_path or ("SOUL.md" if hermes_profile else None)
+    return _safe_read_soul_overlay(path_value, hermes_profile=hermes_profile)
 
 
 def _persona_profile_home(name: str) -> Path | None:
