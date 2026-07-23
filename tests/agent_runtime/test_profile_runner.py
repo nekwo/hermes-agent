@@ -1568,3 +1568,41 @@ def test_default_agent_factory_applies_cache_scope_without_ctor_kwarg(monkeypatc
     agent2 = pr._default_agent_factory(session_id="worker-1", cache_scope_id=None)
     assert getattr(agent2, "cache_scope_id", None) is None
     assert "cache_scope_id" not in seen_kwargs
+
+
+# --------------------------------------------------------------------------- #
+# Status honesty: the ok:false harness envelope must project as failed.
+# --------------------------------------------------------------------------- #
+def test_tool_finished_status_fails_on_ok_false_envelope_dict():
+    from agent_runtime.profile_runner import _is_error_result
+
+    assert _is_error_result({"ok": False, "target_persona": "@personainst_dev"})
+    assert not _is_error_result({"ok": True, "reply": "done"})
+
+
+def test_tool_finished_status_fails_on_serialized_ok_false_envelope():
+    # Regression (2026-07-23): agent_chat_send failures return a serialized
+    # {"ok": false, ...} envelope. _is_error_result missed it, so the turn
+    # store recorded status="passed" and the operator console rendered green
+    # OK chips for dispatches that never reached their target.
+    from agent_runtime.profile_runner import _is_error_result
+
+    failed_send = json.dumps(
+        {"ok": False, "target_persona": "@personainst_dev", "reply": ""}
+    )
+    assert _is_error_result(failed_send)
+
+    payload = _tool_finished_payload(
+        "tool.finished", "agent_chat_send", duration=1.2,
+        is_error=_is_error_result(failed_send), result=failed_send,
+    )
+    assert payload["status"] == "failed"
+
+
+def test_tool_result_merely_containing_ok_false_text_is_not_a_failure():
+    # A read_file of a JSON fixture may CONTAIN '"ok": false' — only a
+    # top-level envelope counts, parse-confirmed.
+    from agent_runtime.profile_runner import _is_error_result
+
+    assert not _is_error_result('The fixture body was: {"data": {"ok": false}} etc.')
+    assert not _is_error_result(json.dumps({"content": '{"ok": false}', "path": "x.json"}))

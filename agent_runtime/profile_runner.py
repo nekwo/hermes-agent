@@ -1433,12 +1433,29 @@ def _is_error_result(result: Any) -> bool:
     if isinstance(result, dict):
         if result.get("error") or result.get("success") is False:
             return True
+        # Harness tool envelope: a top-level ok:false IS the failure verdict
+        # (agent_chat_send, harness verbs). Missing this projected failed
+        # dispatches as status="passed" → green OK chips on the operator
+        # console for sends that never reached their target (2026-07-23).
+        if result.get("ok") is False:
+            return True
         exit_code = _safe_exit_code(result.get("exit_code"))
         if exit_code is not None:
             return exit_code != 0
     if isinstance(result, str):
         lowered = result.strip().lower()
-        return lowered.startswith(("error", "traceback", "exception")) or '"success": false' in lowered
+        if lowered.startswith(("error", "traceback", "exception")) or '"success": false' in lowered:
+            return True
+        # Serialized harness envelope. Parse-confirm before trusting the
+        # substring so a tool result that merely CONTAINS such text (e.g. a
+        # read_file of a JSON fixture) can never be misread as a failure —
+        # only a top-level {"ok": false, ...} object counts.
+        if lowered.startswith("{") and ('"ok": false' in lowered or '"ok":false' in lowered):
+            try:
+                parsed = json.loads(result)
+            except (ValueError, TypeError):
+                return False
+            return isinstance(parsed, dict) and parsed.get("ok") is False
     return False
 
 
