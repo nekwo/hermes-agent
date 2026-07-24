@@ -128,9 +128,17 @@ def realm_sync_status(
     git = _git_state(repo)
     artifacts = resolve_realm_sync_artifacts(realm_id)
     agent_state = realm_agent_selection_state(realm_id)
+    workspaces = _workspaces_for_realm(realm)
     workspace_statuses = _workspace_sync_statuses(realm, repo)
     skills_drift = _skills_drift_for_artifacts(artifacts)
     state = _sync_state(git)
+    # Local store drift vs the never-synced baseline sidecar: the git state above
+    # only knows the checked-out realm repo, so a local board card add — which
+    # never touches the repo until publish — leaves git ``in_sync`` while real
+    # unpublished changes sit in the store. This surfaces that honestly (pure
+    # hash/baseline compare — no extra git/network on the status path).
+    board_drift = _board_store_drift(realm.id, workspaces)
+    store_drift = {"boards": board_drift}
     _write_sync_sidecar(realm, repo=repo, git=git, skills_drift=skills_drift, artifacts=artifacts)
     return {
         "schema_version": 1,
@@ -152,6 +160,11 @@ def realm_sync_status(
         "artifacts": len(artifacts),
         "sync_repo": _safe_display_path(repo),
         "workspace_statuses": workspace_statuses,
+        # Additive honesty fields (launcher consumes these; absent-tolerant).
+        # ``state``/``ahead``/``behind`` are UNCHANGED — other consumers key off
+        # them — this only ADDS store-vs-baseline drift accounting on top.
+        "store_drift": store_drift,
+        "unpublished_changes": _any_store_drift(store_drift),
     }
 
 
@@ -666,6 +679,63 @@ def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
                     )
                 )
     return artifacts
+
+
+def _board_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str, int]:
+    """Board content drift vs the never-synced baseline sidecar, for boards whose
+    ``workspace_id`` belongs to this realm's workspaces.
+
+    Compares CURRENT ``BoardStore`` semantic content hashes (``board_content_hash``
+    — revision/timestamps excluded) against ``read_board_baseline(realm_id)``: the
+    exact hash/baseline machinery the publish and pull lanes already use. A
+    missing/empty baseline on a server-bound realm means nothing has been
+    published yet, so every board+card counts as unpublished — that is honest.
+
+    Pure and read-only: no git, no network, no new merge rules (office plan §10
+    simplicity budget). ``boards_changed`` counts board defs whose hash drifted;
+    ``cards_changed`` counts active cards whose hash drifted from a known
+    baseline; ``cards_added`` counts active cards with no baseline entry; and
+    ``cards_removed`` counts baseline cards no longer active locally (archived /
+    deleted since the last publish).
+    """
+
+    from . import board_models
+    from .board_store import BoardStore
+    from .board_sync import read_board_baseline
+
+    workspace_ids = {ws.id for ws in workspaces}
+    baseline = read_board_baseline(realm_id)
+    store = BoardStore()
+    boards_changed = cards_changed = cards_added = cards_removed = 0
+    for board in store.list_all():
+        if board.workspace_id not in workspace_ids:
+            continue
+        if baseline.get(f"{board.board_id}:board") != board_models.board_content_hash(board):
+            boards_changed += 1
+        card_prefix = f"{board.board_id}:card:"
+        baseline_card_ids = {key[len(card_prefix):] for key in baseline if key.startswith(card_prefix)}
+        current_card_ids: set[str] = set()
+        for card in store.list_cards(board.board_id):
+            current_card_ids.add(card.card_id)
+            base_hash = baseline.get(f"{card_prefix}{card.card_id}")
+            if base_hash is None:
+                cards_added += 1
+            elif base_hash != board_models.board_content_hash(card):
+                cards_changed += 1
+        cards_removed += len(baseline_card_ids - current_card_ids)
+    return {
+        "boards_changed": boards_changed,
+        "cards_changed": cards_changed,
+        "cards_added": cards_added,
+        "cards_removed": cards_removed,
+    }
+
+
+def _any_store_drift(store_drift: dict[str, dict[str, int]]) -> bool:
+    """True iff any drift family reports a nonzero count (drives the additive
+    ``unpublished_changes`` status flag)."""
+
+    return any(count for family in store_drift.values() for count in family.values())
 
 
 def _office_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:

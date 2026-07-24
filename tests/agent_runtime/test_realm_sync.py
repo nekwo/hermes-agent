@@ -1030,3 +1030,60 @@ def test_status_and_sidecar_carry_agent_selection_fields(
     assert sidecar["agent_publish_mode"] == "selected"
     assert sidecar["agent_selection"] == ["qa"]
     assert sidecar["agents_published"] >= 2
+
+
+# ── H1: store-drift honesty surfaced in `realm sync status` ────────────────
+
+
+def test_status_surfaces_store_drift_and_unpublished_changes(
+    isolate_agent_runtime_root, tmp_path
+):
+    from agent_runtime import board_models
+    from agent_runtime.board_store import BoardStore
+    from agent_runtime.board_sync import update_board_baseline_after_sync
+
+    realm, _repo = _realm_with_repo(tmp_path)
+    ws = WorkspaceStore().create(name="Board WS", realm_id=realm.id)
+    BoardStore().add_card(workspace_id=ws.id, title="Unpublished card")
+
+    status = realm_sync_status(realm.id)
+    boards = status["store_drift"]["boards"]
+    assert set(boards) == {"boards_changed", "cards_changed", "cards_added", "cards_removed"}
+    # A fresh local board add never touched the repo, so git state is otherwise
+    # in_sync — but the store drift is honest about the unpublished changes.
+    assert boards["cards_added"] >= 1
+    assert boards["boards_changed"] >= 1
+    assert status["unpublished_changes"] is True
+    # The additive fields never disturb the git-derived state vocabulary.
+    assert status["state"] in {"in_sync", "ahead", "behind", "conflict"}
+
+    # After recording the baseline (as a publish/pull would), drift clears.
+    update_board_baseline_after_sync(realm.id, [board_models.default_board_id(ws.id)])
+    cleared = realm_sync_status(realm.id)
+    assert cleared["unpublished_changes"] is False
+    assert cleared["store_drift"]["boards"] == {
+        "boards_changed": 0,
+        "cards_changed": 0,
+        "cards_added": 0,
+        "cards_removed": 0,
+    }
+
+
+# ── H3: publish no-diff no-op is graceful (launcher auto-publishes) ────────
+
+
+def test_publish_no_diff_second_run_is_graceful_noop(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_remote(tmp_path)
+    WorkspaceStore().create(name="WS", realm_id=realm.id, agent_ids=["dev"])
+
+    first = publish_realm_sync(realm.id)
+    assert first["changed"] is True
+    assert first["state"] == "published"
+
+    # Second publish with nothing changed: no crash, no error, no empty
+    # commit/push loop. changed=False proves the commit/push block was skipped.
+    second = publish_realm_sync(realm.id)
+    assert second["changed"] is False
+    assert second["state"] == "published"
+    assert second["conflicts"] == []
+    assert second["ahead"] == 0

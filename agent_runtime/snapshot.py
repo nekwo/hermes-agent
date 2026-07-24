@@ -583,7 +583,7 @@ def _build_snapshot_uncoalesced(
         )
     with _timed_section(_sections_ms, "boards_offices"):
         boards_section = _keyed(
-            _boards_summary(BoardStore(event_log=event_log), {getattr(w, "id", None) for w in workspaces}),
+            _boards_summary(BoardStore(event_log=event_log), workspaces),
             "board_id",
         )
         offices_section = _keyed(
@@ -1008,12 +1008,12 @@ def _mask_board_secrets(text) -> str:
     return _ARCHIVED_CONVERSATION_SECRET_RE.sub(lambda m: f"{m.group(1)}: [redacted]", str(text))
 
 
-def _board_card_row(card) -> dict:
+def _board_card_row(card, *, unpublished: bool | None = None) -> dict:
     description = card.description or ""
     truncated = len(description) > BOARD_CARD_DESC_LIMIT
     if truncated:
         description = description[:BOARD_CARD_DESC_LIMIT]
-    return {
+    row = {
         "card_id": card.card_id,
         "board_id": card.board_id,
         "column_id": card.column_id,
@@ -1036,6 +1036,11 @@ def _board_card_row(card) -> dict:
         "updated_by": card.updated_by,
         "revision": card.revision,
     }
+    # Publication honesty is only meaningful for realm-bound boards; omit the
+    # flag entirely otherwise (mirrors the office ``unpublished=None`` posture).
+    if unpublished is not None:
+        row["unpublished"] = unpublished
+    return row
 
 
 def _board_conflict_card_ids(board_id: str) -> list[str]:
@@ -1048,32 +1053,64 @@ def _board_conflict_card_ids(board_id: str) -> list[str]:
     return sorted(ids)
 
 
-def _boards_summary(board_store, workspace_ids: set) -> list[dict]:
+def _boards_summary(board_store, workspaces) -> list[dict]:
+    """Mission Board projection rows, keyed by board_id. Local reads only:
+    conflict card ids from local sidecar files, ``unpublished`` (per board and
+    per card) from the local realm-sync baseline sidecar — a pure file read, the
+    same Decision-7 posture and baseline machinery ``_offices_summary`` uses."""
+
+    from .board_models import board_content_hash
+    from .board_sync import read_board_baseline
+
+    workspace_ids = {getattr(w, "id", None) for w in workspaces}
+    realm_by_workspace = {getattr(w, "id", None): getattr(w, "realm_id", None) for w in workspaces}
+    baselines: dict[str, dict[str, str]] = {}
     boards: list[dict] = []
     for board in board_store.list_all():
         cards = board_store.list_cards(board.board_id)  # active, (order_key, card_id) sorted
         projected = cards[:MAX_BOARD_CARDS_PROJECTED]
-        boards.append(
-            {
-                "board_id": board.board_id,
-                "workspace_id": board.workspace_id,
-                "title": board.title,
-                "revision": board.revision,
-                "updated_at": to_jsonable(board.updated_at),
-                "columns": [
-                    {"column_id": c.column_id, "title": c.title, "kind": c.kind, "wip_limit": c.wip_limit}
-                    for c in board.columns
-                ],
-                "cards": [_board_card_row(c) for c in projected],
-                "active_card_count": len(cards),
-                "cards_truncated": max(0, len(cards) - len(projected)),
-                "conflict_card_ids": _board_conflict_card_ids(board.board_id),
-                "archived_card_ids": list(board.archived_card_ids),
-                # A board whose workspace no longer resolves is accounted, never
-                # silently hidden (repair via archive) — parity warning below.
-                "orphaned": board.workspace_id not in workspace_ids,
-            }
-        )
+        realm_id = realm_by_workspace.get(board.workspace_id)
+        baseline: dict[str, str] | None = None
+        if realm_id:
+            if realm_id not in baselines:
+                try:
+                    baselines[realm_id] = read_board_baseline(realm_id)
+                except Exception:
+                    baselines[realm_id] = {}
+            baseline = baselines[realm_id]
+
+        def _card_unpublished(card) -> bool | None:
+            # Publication honesty is only meaningful for realm-bound boards.
+            if baseline is None:
+                return None
+            return baseline.get(f"{board.board_id}:card:{card.card_id}") != board_content_hash(card)
+
+        board_unpublished: bool | None = None
+        if baseline is not None:
+            board_unpublished = baseline.get(f"{board.board_id}:board") != board_content_hash(board)
+
+        row = {
+            "board_id": board.board_id,
+            "workspace_id": board.workspace_id,
+            "title": board.title,
+            "revision": board.revision,
+            "updated_at": to_jsonable(board.updated_at),
+            "columns": [
+                {"column_id": c.column_id, "title": c.title, "kind": c.kind, "wip_limit": c.wip_limit}
+                for c in board.columns
+            ],
+            "cards": [_board_card_row(c, unpublished=_card_unpublished(c)) for c in projected],
+            "active_card_count": len(cards),
+            "cards_truncated": max(0, len(cards) - len(projected)),
+            "conflict_card_ids": _board_conflict_card_ids(board.board_id),
+            "archived_card_ids": list(board.archived_card_ids),
+            # A board whose workspace no longer resolves is accounted, never
+            # silently hidden (repair via archive) — parity warning below.
+            "orphaned": board.workspace_id not in workspace_ids,
+        }
+        if board_unpublished is not None:
+            row["unpublished"] = board_unpublished
+        boards.append(row)
     return boards
 
 
