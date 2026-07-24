@@ -694,6 +694,27 @@ def build_parser(parent_subparsers) -> None:
     skills_catalog_cmd.add_argument("--json", action="store_true")
     skills_catalog_cmd.set_defaults(func=_cmd_skills_catalog)
 
+    skills_inbox_cmd = skills_subs.add_parser(
+        "inbox",
+        help="List quarantined per-realm inbox skill packages and how each would reconcile (read-only)",
+    )
+    skills_inbox_cmd.add_argument("--realm", default=None, help="Restrict to one realm id (default: all realms)")
+    _add_stage42_global_args(skills_inbox_cmd)
+    skills_inbox_cmd.set_defaults(func=_cmd_skills_inbox)
+
+    skills_promote_cmd = skills_subs.add_parser(
+        "promote",
+        help="Promote a held / authored / profile-local skill package into the canonical shared root (hash-guarded, never-delete)",
+    )
+    skills_promote_cmd.add_argument("skill", help="Canonical skill slug (bare name or <category>/<name>)")
+    skills_promote_cmd.add_argument("--from-realm", dest="from_realm", default=None, help="Promote from this realm's inbox mirror")
+    skills_promote_cmd.add_argument("--from-profile", dest="from_profile", default=None, help="Promote from a profile's skills/ (implies --move-source)")
+    skills_promote_cmd.add_argument("--from-path", dest="from_path", default=None, help="Promote from an explicit package directory")
+    skills_promote_cmd.add_argument("--adopt-divergent", dest="adopt_divergent", action="store_true", help="Adopt over a divergent canonical (archives the previous copy)")
+    skills_promote_cmd.add_argument("--move-source", dest="move_source", action="store_true", help="Archive the source package after a successful promotion (retire the duplicate)")
+    _add_stage42_global_args(skills_promote_cmd, mutation=True)
+    skills_promote_cmd.set_defaults(func=_cmd_skills_promote)
+
     prompt_context = subs.add_parser(
         "prompt-context",
         help="S8: on-demand prompt-observability contexts (the frame ships only LIVE persona instances' current-session rows; historical rows are fetched here)",
@@ -1912,6 +1933,178 @@ def _cmd_skills_catalog(args) -> int:
         if isinstance(skill, dict):
             print(f"  {skill.get('name')} — {skill.get('status', 'accessible')}")
     return 0
+
+
+def _rel_to_shared_skills(path) -> str | None:
+    """Render a shared-skills path relative to the shared root (never leak the
+    absolute runtime root). Falls back to the basename for outside paths."""
+
+    if path is None:
+        return None
+    from hermes_constants import get_shared_skills_dir
+
+    path = Path(path)
+    try:
+        return path.relative_to(get_shared_skills_dir()).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _cmd_skills_inbox(args) -> int:
+    """C4: read-only listing of quarantined per-realm inbox skill packages and
+    how each would reconcile against the canonical shared root."""
+
+    from agent_runtime.skill_promotion import list_inbox_packages
+
+    realm_token = str(getattr(args, "realm", "") or "").strip() or None
+    rows = list_inbox_packages(realm_token)
+    items = [
+        {
+            "skill": row["skill"],
+            "realm": row["realm"],
+            "action": row["action"],
+            "source_hash": row["source_hash"],
+            "canonical_hash": row["canonical_hash"],
+        }
+        for row in rows
+    ]
+    _print_stage42(_list_envelope("inbox_package", items), args=args, default_output="json")
+    return 0
+
+
+def _resolve_promotion_source(args, skill: str):
+    """Resolve exactly one promotion source.
+
+    Returns ``(source_dir, source_meta, move_source)`` on success, or an
+    ``(error_code, message, safe_details)`` triple wrapped in a
+    :class:`_PromotionSourceError` on failure.
+    """
+
+    from agent_runtime.skill_promotion import list_inbox_packages, realm_inbox_dir
+
+    from_realm = str(getattr(args, "from_realm", "") or "").strip() or None
+    from_profile = str(getattr(args, "from_profile", "") or "").strip() or None
+    from_path = str(getattr(args, "from_path", "") or "").strip() or None
+    provided = [flag for flag, value in (("--from-realm", from_realm), ("--from-profile", from_profile), ("--from-path", from_path)) if value]
+    slug_parts = skill.split("/")
+
+    if len(provided) > 1:
+        raise _PromotionSourceError("invalid_request", "Provide exactly one of --from-realm / --from-profile / --from-path.", {"skill": skill, "provided": provided})
+
+    if not provided:
+        # Implied source: exactly one realm inbox must hold the skill.
+        matches = [row for row in list_inbox_packages() if row["skill"] == skill]
+        if not matches:
+            raise _PromotionSourceError("not_found", "Skill not held in any realm inbox — specify --from-realm / --from-profile / --from-path.", {"skill": skill})
+        if len(matches) > 1:
+            raise _PromotionSourceError("invalid_request", "Skill present in multiple realm inboxes — specify --from-realm <id>.", {"skill": skill, "candidates": sorted(row["realm"] for row in matches)})
+        row = matches[0]
+        return Path(row["source_dir"]), {"kind": "realm", "realm_id": row["realm"]}, False
+
+    if from_realm:
+        source_dir = realm_inbox_dir(from_realm).joinpath(*slug_parts)
+        if not (source_dir / "SKILL.md").is_file():
+            raise _PromotionSourceError("not_found", "Skill not present in that realm's inbox.", {"skill": skill, "realm": from_realm})
+        # An inbox is a byte-faithful realm mirror — promotion never moves it.
+        return source_dir, {"kind": "realm", "realm_id": from_realm}, False
+
+    if from_profile:
+        from hermes_cli.profiles import get_profile_dir, normalize_profile_name
+
+        skills_root = get_profile_dir(normalize_profile_name(from_profile)) / "skills"
+        candidate = skills_root.joinpath(*slug_parts)
+        if (candidate / "SKILL.md").is_file():
+            source_dir = candidate
+        elif "/" not in skill:
+            nested = [
+                child / skill
+                for child in sorted(skills_root.iterdir(), key=lambda p: p.name)
+                if child.is_dir() and not child.name.startswith(".") and (child / skill / "SKILL.md").is_file()
+            ] if skills_root.is_dir() else []
+            if not nested:
+                raise _PromotionSourceError("not_found", "Skill not found in that profile's skills directory.", {"skill": skill, "profile": from_profile})
+            if len(nested) > 1:
+                raise _PromotionSourceError("invalid_request", "Skill found under multiple categories in that profile — use <category>/<name>.", {"skill": skill, "profile": from_profile, "candidates": sorted(p.parent.name for p in nested)})
+            source_dir = nested[0]
+        else:
+            raise _PromotionSourceError("not_found", "Skill not found in that profile's skills directory.", {"skill": skill, "profile": from_profile})
+        # Promoting from a profile retires the duplicate (the collision guard).
+        return source_dir, {"kind": "profile", "profile": from_profile}, True
+
+    # from_path
+    source_dir = Path(from_path).expanduser()
+    if not (source_dir / "SKILL.md").is_file():
+        raise _PromotionSourceError("not_found", "No SKILL.md at that path.", {"skill": skill})
+    return source_dir, {"kind": "path", "path": str(source_dir)}, bool(getattr(args, "move_source", False))
+
+
+class _PromotionSourceError(Exception):
+    def __init__(self, code: str, message: str, safe_details: dict):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.safe_details = safe_details
+
+
+def _cmd_skills_promote(args) -> int:
+    """C4: hash-guarded promotion of a held / authored / profile-local package
+    into the canonical shared root. Honors --dry-run (stage42 gate); never
+    deletes (displaced content is archived)."""
+
+    from agent_runtime.skill_promotion import classify_promotion, execute_promotion
+
+    skill = str(getattr(args, "skill", "") or "").strip()
+    dry_run = bool(getattr(args, "dry_run", False))
+    adopt_divergent = bool(getattr(args, "adopt_divergent", False))
+
+    try:
+        source_dir, source_meta, move_source = _resolve_promotion_source(args, skill)
+    except _PromotionSourceError as exc:
+        _print_stage42(_error_envelope(exc.code, exc.message, safe_details=exc.safe_details), args=args, default_output="json")
+        return ERROR_EXIT_CODES.get(exc.code, 1)
+
+    plan = classify_promotion(skill, source_dir)
+
+    # A real (non-dry-run) divergent promotion without --adopt-divergent is a
+    # hold: surface BOTH hashes in a typed payload and exit non-zero.
+    if not dry_run and plan.action == "hold_divergent" and not adopt_divergent:
+        _print_stage42(
+            _error_envelope(
+                "sync_conflict",
+                "Canonical differs from source — re-run with --adopt-divergent to adopt (archives the previous copy).",
+                safe_details={"skill": skill, "source_hash": plan.source_hash, "canonical_hash": plan.canonical_hash},
+                hint="Re-run with --adopt-divergent to adopt the source over the divergent canonical (the previous copy is archived, never deleted).",
+            ),
+            args=args,
+            default_output="json",
+        )
+        return ERROR_EXIT_CODES.get("sync_conflict", 1)
+
+    result = execute_promotion(
+        plan,
+        source=source_meta,
+        adopt_divergent=adopt_divergent,
+        dry_run=dry_run,
+        move_source=move_source,
+    )
+
+    envelope = _object_envelope(
+        "skill_promotion",
+        {
+            "skill": skill,
+            "source": source_meta,
+            "classification": plan.action,
+            "action": result.action,
+            "source_hash": plan.source_hash,
+            "canonical_hash": plan.canonical_hash,
+            "archived_previous_to": _rel_to_shared_skills(result.archived_previous_to),
+            "provenance_path": _rel_to_shared_skills(result.provenance_path),
+            "reason": result.reason,
+            "dry_run": dry_run,
+        },
+    )
+    _print_stage42(envelope, args=args, default_output="json")
+    return 2 if result.action == "refused" else 0
 
 
 def _cmd_run_list(args) -> int:

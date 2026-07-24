@@ -68,6 +68,14 @@ EXCLUDED_SKILL_DIRS = frozenset(
         ".github",
         ".hub",
         ".archive",
+        # Realm-skill quarantine + promotion provenance live under the shared
+        # skills root but must stay resolver-invisible: ``.realm_inbox`` is a
+        # byte-faithful mirror of each realm's skill packages (never live), and
+        # ``.provenance`` holds promotion sidecars that live OUTSIDE any skill
+        # package so they cannot change a package content hash. Neither ever
+        # resolves a skill nor turns a canonical skill into a collision.
+        ".realm_inbox",
+        ".provenance",
         ".venv",
         "venv",
         "node_modules",
