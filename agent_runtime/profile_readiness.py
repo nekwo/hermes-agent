@@ -137,8 +137,17 @@ def _dominant_issue(issues: list[tuple[str, str]]) -> tuple[str, str]:
 # without a per-build refresh. The memo also keys on the resolver's identity, so
 # a monkeypatched/hot-swapped ``resolve_runtime_provider`` invalidates the entry
 # immediately (same pattern as ``_profile_template_memo``/``_installed_skill_catalog``).
+#
+# The key MUST carry the active profile/auth scope, not just (provider, model):
+# ``_provider_issue`` runs inside ``persona_profile_context``, which diverts the
+# process-global HERMES_HOME/HERMES_AUTH_HOME so ``resolve_runtime_provider``
+# reads PER-PROFILE config and secrets. Keyed on (provider, model) alone, the
+# first profile's verdict leaks to every other profile requesting the same pair
+# within the TTL — one build could show agent B "ready" on agent A's credentials
+# (or falsely flag A with B's auth_attention). Reading the env INSIDE this call
+# reflects the caller's active profile context.
 _PROVIDER_ISSUE_TTL_SECONDS = 60.0
-_provider_issue_memo: dict[tuple[str, str], dict[str, Any]] = {}
+_provider_issue_memo: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
 
 def _provider_issue_cache_clear() -> None:
@@ -151,9 +160,15 @@ def _provider_issue(persona) -> tuple[str, str] | None:
     model = getattr(persona, "model", None)
     if not provider and not model:
         return None
+    import os
     import time
 
-    key = (str(provider or ""), str(model or ""))
+    key = (
+        os.environ.get("HERMES_HOME") or "",
+        os.environ.get("HERMES_AUTH_HOME") or "",
+        str(provider or ""),
+        str(model or ""),
+    )
     fn = resolve_runtime_provider
     now = time.monotonic()
     entry = _provider_issue_memo.get(key)

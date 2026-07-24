@@ -1,3 +1,5 @@
+import os
+
 from agent_runtime.models import AgentPersona
 from agent_runtime.profile_readiness import profile_readiness_for_persona
 from agent_runtime.models import Task
@@ -237,3 +239,46 @@ def test_readiness_missing_set_is_single_source_derivation(tmp_path, monkeypatch
     # The compat wrapper (which re-resolves) agrees with the single-source
     # derivation from the already-computed rows.
     assert derived == _missing_skill_names(names)
+
+
+def test_provider_issue_memo_is_scoped_per_profile_home(monkeypatch):
+    # The memo runs inside persona_profile_context, which diverts HERMES_HOME /
+    # HERMES_AUTH_HOME so the resolver reads PER-PROFILE config and secrets.
+    # Keyed on (provider, model) alone, profile A's verdict would leak to
+    # profile B within the TTL (adversarial review of 7f6ac5208, finding 1).
+    from agent_runtime import profile_readiness
+
+    profile_readiness._provider_issue_cache_clear()
+    calls: list[str] = []
+
+    def _resolver(requested=None, target_model=None):
+        calls.append(os.environ.get("HERMES_HOME") or "")
+        if (os.environ.get("HERMES_HOME") or "").endswith("bob"):
+            raise profile_readiness.AuthError("no credential for bob")
+
+    monkeypatch.setattr(profile_readiness, "resolve_runtime_provider", _resolver)
+    persona = AgentPersona(
+        id="dev",
+        display_name="Dev",
+        role="dev",
+        model="gpt-5",
+        provider="openai",
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="personas/dev/system.md",
+        hermes_profile=None,
+        skills=[],
+    )
+
+    monkeypatch.setenv("HERMES_HOME", r"X:\fake\profiles\alice")
+    assert profile_readiness._provider_issue(persona) is None
+    # Same (provider, model) from a DIFFERENT profile home must re-resolve and
+    # surface ITS OWN verdict, never alice's cached "ready".
+    monkeypatch.setenv("HERMES_HOME", r"X:\fake\profiles\bob")
+    issue = profile_readiness._provider_issue(persona)
+    assert issue is not None and issue[0] == "auth_attention"
+    assert len(calls) == 2
+    # Within the same profile home the TTL memo still deduplicates.
+    assert profile_readiness._provider_issue(persona)[0] == "auth_attention"
+    assert len(calls) == 2
+    profile_readiness._provider_issue_cache_clear()
