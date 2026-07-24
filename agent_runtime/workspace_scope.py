@@ -25,18 +25,38 @@ re-elects identity: explicit ``personainst_*`` targeting stays allowed
 cross-workspace, and identity lookups (who steers whom) continue to resolve
 against the full, unfiltered roster.
 
-On top of workspace scoping it also owns the "placements shadow canonical"
-rule for the addressable view (:func:`shadow_canonical_by_placement`): a
-persona has an auto-derived CANONICAL operator row (runtime plumbing, no scene
-claim) and may also have operator-PLACED rows in a scene. When an in-scope
-placement of a persona exists, that persona's canonical row is NOT advertised
-to — nor bare-persona-resolved for — an AGENT, so a bare persona id lands on the
-deliberate placement instead of the plumbing row. When no in-scope placement
-exists, the canonical row stays addressable (reachability fallback). This
-shadow is a property of the ADDRESSABLE roster only; identity/steering lists
-(``identity_roster``) always read the full, unshadowed set. Kept a SEPARATE
-pure helper rather than folded into :func:`scope_roster`, whose pinned contract
-is a purely additive filter that never drops rows.
+On top of workspace scoping it also owns two canonical-row rules for the
+addressable view:
+
+- "Global canonicals are not on the level" (:func:`exclude_global_canonicals`):
+  a persona's auto-derived CANONICAL operator row (runtime plumbing, no scene
+  claim) is NEVER advertised into a REAL workspace scope. Instance = in-level
+  placement (operator ruling 2026-07-18); the old "reachability fallback" that
+  kept unplaced canonicals addressable everywhere made an agent's Runtime
+  Situation HUD advertise personas that were not on its level (live 2026-07-24:
+  a level with two placements advertised five agents, and the agent's fan-out
+  message to the unplaced ones was refused). A canonical row that DOES carry a
+  workspace pointer follows that pointer like any other row; with no active
+  workspace at all (scope ``None``) the exclusion is off — the degrade path
+  never hides the whole roster.
+- "Placements shadow canonical" (:func:`shadow_canonical_by_placement`): when
+  an in-scope placement of a persona exists, that persona's canonical row is
+  NOT advertised to — nor bare-persona-resolved for — an AGENT, so a bare
+  persona id lands on the deliberate placement instead of the plumbing row.
+  Under a real scope the exclusion above already removed global canonicals;
+  the shadow still de-dupes pointer-bearing canonicals and the ``None``-scope
+  degrade path.
+
+NOTE the deliberate residual asymmetry: bare-persona SEND resolution still
+falls back to the canonical channel when a persona has no in-scope placement
+(``_mission_chat_bare_persona_target`` / ``agent_chat_tool``) — retiring that
+fallback is gated on the global-row adoption migration. This module's change
+narrows what is ADVERTISED/LISTED; it does not add refusals.
+
+Both rules are properties of the ADDRESSABLE roster only; identity/steering
+lists (``identity_roster``) always read the full, unshadowed set. Each is a
+SEPARATE pure helper rather than folded into :func:`scope_roster`, whose
+pinned contract is a purely additive filter that never drops rows.
 
 Pure and stdlib-only — no I/O, no harness imports — so the scoping table is
 unit-testable in isolation (matches :mod:`agent_runtime.target_policy`). The
@@ -153,6 +173,38 @@ def shadow_canonical_by_placement(
     ]
 
 
+def exclude_global_canonicals(
+    instances: Iterable[Any],
+    *,
+    scope_workspace_id: str | None,
+    is_canonical: Callable[[Any], bool],
+) -> list:
+    """Drop pointerless CANONICAL rows when the scope names a real workspace.
+
+    Instance = in-level placement (operator ruling 2026-07-18): a runtime-global
+    canonical row (no ``workspace_id`` claim) is plumbing, not a level presence,
+    so it must not be advertised into a workspace's "On level" roster nor listed
+    to an agent as an addressable peer. A canonical row that carries a workspace
+    pointer made a scene claim and is treated by that pointer (it already passed
+    :func:`scope_roster` to get here). Scope ``None`` (no active workspace)
+    keeps the degrade contract: nothing is dropped.
+
+    Purely subtractive over the ADDRESSABLE view, order preserved, inputs never
+    mutated — identity/steering resolution keeps the full roster.
+    """
+
+    if _norm(scope_workspace_id) is None:
+        return list(instances or ())
+    return [
+        instance
+        for instance in (instances or ())
+        if not (
+            is_canonical(instance)
+            and _norm(getattr(instance, "workspace_id", None)) is None
+        )
+    ]
+
+
 def addressable_roster(
     instances: Iterable[Any],
     *,
@@ -164,13 +216,18 @@ def addressable_roster(
 
     The single composition every addressable surface uses so the rule lives in
     exactly one place: (1) :func:`scope_roster` narrows to the sender's
-    workspace, then (2) :func:`shadow_canonical_by_placement` shadows each
-    persona's canonical row behind an in-scope placement that survived step 1.
-    Never mutates inputs. The FULL roster (for identity/steering) must be kept
-    separately by the caller — this returns only the addressable view.
+    workspace, then (2) :func:`exclude_global_canonicals` drops the pointerless
+    canonical plumbing rows under a real scope (instance = in-level placement),
+    then (3) :func:`shadow_canonical_by_placement` shadows each persona's
+    surviving canonical row behind an in-scope placement. Never mutates inputs.
+    The FULL roster (for identity/steering) must be kept separately by the
+    caller — this returns only the addressable view.
     """
 
     scoped = scope_roster(instances, scope_workspace_id=scope_workspace_id)
+    leveled = exclude_global_canonicals(
+        scoped, scope_workspace_id=scope_workspace_id, is_canonical=is_canonical
+    )
     return shadow_canonical_by_placement(
-        scoped, is_canonical=is_canonical, persona_key=persona_key
+        leveled, is_canonical=is_canonical, persona_key=persona_key
     )

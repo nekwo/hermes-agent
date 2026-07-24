@@ -676,10 +676,12 @@ def situational_hud_for_instance(instance: Any, *, proof_store: Any = None) -> d
 
         # The FULL roster stays available for identity (steering) resolution; the
         # ADDRESSABLE roster fed to advertising/thread-count is scoped to this
-        # lane's own workspace AND has each persona's canonical row shadowed
-        # behind any in-scope placement — so a placement in another workspace is
-        # never offered here, and where a placement IS in scope the "On level"
-        # block shows the deliberate placement, not the plumbing canonical row.
+        # lane's own workspace, has runtime-global canonical plumbing rows
+        # excluded (instance = in-level placement — the "On level" block lists
+        # ONLY what is actually placed on this level), and has each persona's
+        # surviving canonical row shadowed behind any in-scope placement. So a
+        # placement in another workspace is never offered here, and an unplaced
+        # persona no longer advertises its canonical row onto every level.
         identity_roster = PersonaInstanceStore().list_all()
 
         workspace_store = WorkspaceStore()

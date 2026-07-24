@@ -5109,9 +5109,13 @@ def _mission_chat_target_decision(
     the relay envelope). A BARE persona id is resolved only among the placements
     in the sender's own workspace, so a persona placed into several workspace
     scenes does not fan a two-agent order out onto duplicate placements in
-    unrelated workspaces. Runtime-global instances (no workspace pointer) stay in
-    scope everywhere; an operator CLI invocation with no sender session falls
-    back to the active workspace.
+    unrelated workspaces. Runtime-global PLACEMENT rows (no workspace pointer)
+    stay in scope everywhere, but runtime-global CANONICAL rows are excluded
+    from the candidate list under a real scope (instance = in-level placement)
+    — an unplaced persona then has zero candidates, which ``evaluate_target``
+    allows through to today's canonical-channel fallback (retiring that
+    fallback is gated on the global-row adoption migration). An operator CLI
+    invocation with no sender session falls back to the active workspace.
 
     "Placements shadow canonical": when an in-scope PLACEMENT of the persona
     exists, its auto-derived CANONICAL row is dropped from the candidate list —

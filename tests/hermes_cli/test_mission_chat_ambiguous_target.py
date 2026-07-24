@@ -401,7 +401,9 @@ def test_sender_session_scopes_candidates_to_sender_workspace(tmp_path, monkeypa
 # When an in-scope PLACEMENT of a persona exists, its plumbing canonical row   #
 # is shadowed: a bare persona id with exactly ONE in-scope placement is no     #
 # longer ambiguous — it AUTO-ROUTES to that placement. With no in-scope        #
-# placement the canonical row stays addressable (reachability fallback).       #
+# placement the guard sees ZERO candidates (global canonicals are no longer    #
+# advertised under a real scope) — still allowed, and the SEND falls back to   #
+# the canonical channel until the global-row adoption migration retires it.    #
 # --------------------------------------------------------------------------- #
 
 
