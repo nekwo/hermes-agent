@@ -2064,6 +2064,52 @@ def chat_session_owner_instance_id(session_id: str | None) -> str | None:
     return None
 
 
+def sender_scope_workspace_id(
+    session_id: str | None,
+    *,
+    instance_store: "PersonaInstanceStore | None" = None,
+    active_workspace_id: str | None = None,
+) -> str | None:
+    """The workspace scope a chat SENDER addresses a target from.
+
+    The single impure derivation shared by every addressable-roster surface that
+    resolves a target for a SENDER (mission-chat target guard, ``agent_chat``
+    threads/open): session → the owning instance → that instance's own workspace
+    pointer (falling back to the active workspace for a runtime-global sender).
+    A session with no derivable owner, or no session at all (a bare operator/CLI
+    invocation), scopes to the active workspace — so the resolver degrades to the
+    active scene rather than hiding the whole roster.
+
+    Pairs with the pure :mod:`agent_runtime.workspace_scope` filters: this
+    answers "which workspace am I addressing FROM"; those answer "which rows are
+    addressable from that workspace". ``active_workspace_id`` /
+    ``instance_store`` are injectable for tests and to reuse a caller's store.
+    """
+
+    from .workspace_scope import effective_workspace_id
+
+    if active_workspace_id is None:
+        from .store import WorkspaceStore
+
+        active_workspace_id = WorkspaceStore().active_id()
+    scope_workspace_id = active_workspace_id
+    sender_session = safe_assignment_text(session_id, limit=200)
+    if not sender_session:
+        return scope_workspace_id
+    sender_instance_id = chat_session_owner_instance_id(sender_session)
+    if not sender_instance_id:
+        return scope_workspace_id
+    if instance_store is None:
+        instance_store = PersonaInstanceStore()
+    try:
+        sender_instance = instance_store.get(sender_instance_id)
+    except Exception:
+        sender_instance = None
+    if sender_instance is None:
+        return scope_workspace_id
+    return effective_workspace_id(sender_instance, active_workspace_id=active_workspace_id)
+
+
 def chat_session_is_foreign_to_instance(session_id: str | None, instance_id: str | None) -> bool:
     """True when ``session_id`` is a chat session MINTED FOR a DIFFERENT instance.
 

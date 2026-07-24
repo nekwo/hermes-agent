@@ -28,13 +28,17 @@ def _parser():
     return p
 
 
-def _seed_two_instances(monkeypatch, tmp_path, persona="dev", placement="dev_agent_2"):
-    """Fresh runtime root with TWO live instances of ``persona``.
+def _seed_two_instances(monkeypatch, tmp_path, persona="dev"):
+    """Fresh runtime root with two deliberate PLACEMENTS of ``persona``.
 
     The canonical operator channel (``personainst_dev``) is auto-ensured by
-    ``derive_from_workers``; a deliberate placement sibling
-    (``personainst_dev_agent_2``, the "QA Agent (2)" shape) is added on top —
-    exactly the two-live-instances-on-the-level state the defect proved.
+    ``derive_from_workers``, but "placements shadow canonical" now drops it from
+    the addressable candidate set whenever a placement of the persona is in
+    scope. So a genuinely ambiguous bare-persona send needs TWO placements
+    (``personainst_dev_agent_2`` + ``personainst_dev_agent_3``, both runtime-
+    global here so both stay in scope) — canonical + one placement would instead
+    auto-route to that single placement. These two placements are exactly the
+    "two live siblings on the level" state the ambiguity defect proved.
     """
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
 
@@ -45,10 +49,13 @@ def _seed_two_instances(monkeypatch, tmp_path, persona="dev", placement="dev_age
     cfg = load_agent_runtime_config()
     store = PersonaInstanceStore()
     store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
-    store.add_instance(persona_id=persona, placement_id=placement, display_name=f"{persona} (2)")
+    store.add_instance(persona_id=persona, placement_id="dev_agent_2", display_name=f"{persona} (2)")
+    store.add_instance(persona_id=persona, placement_id="dev_agent_3", display_name=f"{persona} (3)")
 
     live = [i for i in store.list_all() if i.persona_id == persona]
-    assert len(live) == 2, f"expected two live {persona} instances, got {[i.id for i in live]}"
+    # canonical + two placements; the two placements are what the shadow leaves
+    # addressable, and that is the ambiguous pair.
+    assert len(live) == 3, f"expected canonical + two live {persona} placements, got {[i.id for i in live]}"
     return store
 
 
@@ -101,7 +108,10 @@ def test_bare_persona_two_instances_is_refused_with_both_candidates(tmp_path, mo
     assert data["error_kind"] == "ambiguous_target"
     assert data["persona_id"] == "dev"
     handles = {c["persona_instance_id"] for c in data["candidates"]}
-    assert handles == {"personainst_dev", "personainst_dev_agent_2"}
+    # The two PLACEMENTS are the candidates; the plumbing canonical row is
+    # shadowed out (placements shadow canonical), so it is never offered.
+    assert handles == {"personainst_dev_agent_2", "personainst_dev_agent_3"}
+    assert "personainst_dev" not in handles
     # display_name travels alongside the handle so the caller can pick the right one.
     assert all(c.get("display_name") for c in data["candidates"])
     # The error text names the addressable @handles.
@@ -203,7 +213,8 @@ def test_agent_chat_send_tool_surfaces_ambiguous_target_with_candidates(tmp_path
     assert result["ok"] is False
     assert result["error_kind"] == "ambiguous_target"
     handles = {c["persona_instance_id"] for c in result["candidates"]}
-    assert handles == {"personainst_dev", "personainst_dev_agent_2"}
+    # Two placements are the candidates; the shadowed canonical row is not offered.
+    assert handles == {"personainst_dev_agent_2", "personainst_dev_agent_3"}
 
 
 # --------------------------------------------------------------------------- #
@@ -290,21 +301,24 @@ def test_bare_persona_out_of_scope_siblings_are_not_counted(tmp_path, monkeypatc
 
 
 def test_bare_persona_two_in_scope_duplicates_still_refused_with_only_those(tmp_path, monkeypatch, capsys):
-    # One dev placement in the active workspace + one in another workspace. The
-    # in-scope set is the global canonical dev + the active-workspace placement
-    # → genuinely ambiguous → refused, and the out-of-scope placement is NOT a
-    # candidate.
+    # TWO dev placements in the active workspace + one in another workspace. Both
+    # active-workspace placements are in scope and shadow the plumbing canonical
+    # row → genuinely ambiguous → refused, and the out-of-scope placement is NOT a
+    # candidate. Two PLACEMENTS (not canonical + one placement, which would
+    # auto-route) are what keeps this ambiguous under "placements shadow canonical".
     _seed_dev_scoped(
         monkeypatch,
         tmp_path,
-        [("dev_agent_2", "ws_home"), ("dev_far", "ws_far")],
+        [("dev_agent_2", "ws_home"), ("dev_agent_3", "ws_home"), ("dev_far", "ws_far")],
         active="ws_home",
     )
     out = _run_bare_dev(capsys)
     data = json.loads(out)
     assert data["error_kind"] == "ambiguous_target"
     handles = {c["persona_instance_id"] for c in data["candidates"]}
-    assert handles == {"personainst_dev", "personainst_dev_agent_2"}
+    assert handles == {"personainst_dev_agent_2", "personainst_dev_agent_3"}
+    # The shadowed canonical row and the out-of-scope placement are both excluded.
+    assert "personainst_dev" not in handles
     assert "personainst_dev_far" not in handles
 
 
@@ -342,7 +356,11 @@ def test_sender_session_scopes_candidates_to_sender_workspace(tmp_path, monkeypa
 
     store = PersonaInstanceStore()
     store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+    # TWO dev placements in ws_a (so the sender-scoped set stays ambiguous under
+    # "placements shadow canonical"; canonical + one placement would auto-route)
+    # plus one in ws_b that must never leak into ws_a's candidates.
     store.add_instance(persona_id="dev", placement_id="dev_ws_a", workspace_id="ws_a", display_name="Dev A")
+    store.add_instance(persona_id="dev", placement_id="dev_ws_a2", workspace_id="ws_a", display_name="Dev A2")
     store.add_instance(persona_id="dev", placement_id="dev_ws_b", workspace_id="ws_b", display_name="Dev B")
     # The sender lives in ws_a; its chat-root session id encodes its owner.
     sender = store.add_instance(
@@ -359,17 +377,81 @@ def test_sender_session_scopes_candidates_to_sender_workspace(tmp_path, monkeypa
         relay_chain=(),
     )
 
-    # No sender session → scope is the active workspace (ws_home): neither ws_a
-    # nor ws_b dev is in scope, only the runtime-global canonical dev → allowed.
+    # No sender session → scope is the active workspace (ws_home): no ws_a/ws_b
+    # placement is in scope, only the runtime-global canonical dev (no placement
+    # shadows it here) → allowed.
     no_sender = _mission_chat_target_decision(**common, requested_by_session=None)
     assert no_sender.allowed is True
 
-    # With the sender session → scope is the sender's workspace (ws_a): the ws_a
-    # dev joins the global dev → two in-scope → ambiguous, and the ws_b placement
-    # is excluded from the candidates.
+    # With the sender session → scope is the sender's workspace (ws_a): the two
+    # ws_a placements are in scope and shadow the canonical dev → two candidates →
+    # ambiguous, and the ws_b placement is excluded.
     scoped = _mission_chat_target_decision(**common, requested_by_session=sender_session)
     assert scoped.allowed is False
     assert scoped.error_kind == "ambiguous_target"
     handles = {c.instance_id for c in scoped.candidates}
-    assert handles == {"personainst_dev", "personainst_dev_ws_a"}
+    assert handles == {"personainst_dev_ws_a", "personainst_dev_ws_a2"}
+    assert "personainst_dev" not in handles
     assert "personainst_dev_ws_b" not in handles
+
+
+# --------------------------------------------------------------------------- #
+# Placements shadow canonical (the new contract)                              #
+#                                                                              #
+# When an in-scope PLACEMENT of a persona exists, its plumbing canonical row   #
+# is shadowed: a bare persona id with exactly ONE in-scope placement is no     #
+# longer ambiguous — it AUTO-ROUTES to that placement. With no in-scope        #
+# placement the canonical row stays addressable (reachability fallback).       #
+# --------------------------------------------------------------------------- #
+
+
+def test_bare_persona_canonical_plus_one_in_scope_placement_auto_routes(tmp_path, monkeypatch):
+    # Canonical dev + exactly one in-scope placement: the canonical is shadowed,
+    # leaving one candidate, so the guard ALLOWS (evaluate_target auto-routes) and
+    # the routing helper resolves the bare send onto the PLACEMENT, not canonical.
+    from hermes_cli.harness import (
+        _mission_chat_bare_persona_target,
+        _mission_chat_target_decision,
+    )
+
+    store = _seed_dev_scoped(monkeypatch, tmp_path, [("dev_agent_2", "ws_home")], active="ws_home")
+    decision = _mission_chat_target_decision(
+        instance_store=store,
+        normalized_persona="dev",
+        raw_persona_id="dev",
+        persona_instance_id=None,
+        session_id=None,
+        relay_chain=(),
+        requested_by_session=None,
+    )
+    assert decision.allowed is True
+    assert (
+        _mission_chat_bare_persona_target(store, normalized_persona="dev", requested_by_session=None)
+        == "personainst_dev_agent_2"
+    )
+
+
+def test_bare_persona_canonical_with_no_placement_routes_to_canonical(tmp_path, monkeypatch):
+    # No in-scope placement (the only placement is in another workspace): the
+    # canonical row stays addressable, the guard allows, and the routing helper
+    # returns None so the caller falls back to the canonical channel.
+    from hermes_cli.harness import (
+        _mission_chat_bare_persona_target,
+        _mission_chat_target_decision,
+    )
+
+    store = _seed_dev_scoped(monkeypatch, tmp_path, [("dev_far", "ws_far")], active="ws_home")
+    decision = _mission_chat_target_decision(
+        instance_store=store,
+        normalized_persona="dev",
+        raw_persona_id="dev",
+        persona_instance_id=None,
+        session_id=None,
+        relay_chain=(),
+        requested_by_session=None,
+    )
+    assert decision.allowed is True
+    assert (
+        _mission_chat_bare_persona_target(store, normalized_persona="dev", requested_by_session=None)
+        is None
+    )

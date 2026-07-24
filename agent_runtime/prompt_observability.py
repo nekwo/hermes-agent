@@ -14,7 +14,11 @@ from hermes_cli.profiles import get_profile_dir
 from utils import atomic_json_write
 
 from . import paths
-from .persona_assignments import safe_assignment_text, safe_assignment_token
+from .persona_assignments import (
+    is_canonical_persona_channel,
+    safe_assignment_text,
+    safe_assignment_token,
+)
 from .serde import to_jsonable
 
 
@@ -878,16 +882,19 @@ def snapshot_prompt_observability(
     def _situational_for(instance: Any, task_id: str | None) -> dict[str, Any]:
         try:
             goal_id = getattr(instance, "goal_id", None)
-            # Scope the ADDRESSABLE roster to this lane's own workspace so the
-            # recorded snapshot advertises the exact same "On level" set the live
-            # mission-chat turn feeds — a placement in another workspace must not
-            # appear here either (parity envelope). Identity (steering) resolves
-            # against the full, unscoped roster, matching the HUD wrapper.
+            # Scope + shadow the ADDRESSABLE roster to this lane's own workspace so
+            # the recorded snapshot advertises the exact same "On level" set the
+            # live mission-chat turn feeds — a placement in another workspace must
+            # not appear here, and a canonical row shadowed by an in-scope
+            # placement is dropped here too (parity envelope). Identity (steering)
+            # resolves against the full, unscoped roster, matching the HUD wrapper.
             scope_workspace_id = workspace_scope.effective_workspace_id(
                 instance, active_workspace_id=active_workspace_id
             )
-            scoped_roster = workspace_scope.scope_roster(
-                roster, scope_workspace_id=scope_workspace_id
+            scoped_roster = workspace_scope.addressable_roster(
+                roster,
+                scope_workspace_id=scope_workspace_id,
+                is_canonical=is_canonical_persona_channel,
             )
             return resolve_situational_hud(
                 instance,

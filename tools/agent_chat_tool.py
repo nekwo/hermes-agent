@@ -319,7 +319,9 @@ AGENT_CHAT_THREADS_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Optional filter: a single persona id or personainst_* handle to list just that "
-                    "teammate's thread. Omit to list every reachable teammate."
+                    "teammate's thread. Omit to list your addressable teammates on this level — each "
+                    "persona's deliberate placement, with the plumbing canonical row shown only when "
+                    "the persona has no placement on your level."
                 ),
             },
         },
@@ -339,9 +341,10 @@ AGENT_CHAT_OPEN_SCHEMA = {
             "persona_id": {
                 "type": "string",
                 "description": (
-                    "Target teammate: a persona id (e.g. 'dev', reaches the canonical primary "
-                    "instance) or a personainst_* handle (reaches THAT specific instance). "
-                    "Display names are not accepted."
+                    "Target teammate: a persona id (e.g. 'dev' — reaches the persona's deliberate "
+                    "placement on your level, or the canonical channel when it has none) or a "
+                    "personainst_* handle (reaches THAT specific instance). Display names are not "
+                    "accepted."
                 ),
             },
             "session_id": {
@@ -372,19 +375,22 @@ def _canonical_persona_token(value) -> str:
     return safe_assignment_token(value)
 
 
-def agent_chat_threads(*, persona_id=None):
+def agent_chat_threads(*, persona_id=None, requested_by_session=None):
     if _scope_off():
         return _refusal(
             "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
             "Tell the operator instead of retrying."
         )
 
+    from agent_runtime import workspace_scope
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import (
         PersonaInstanceStore,
         canonical_persona_instance_id,
+        is_canonical_persona_channel,
         resolve_default_chat_session_id_for_instance,
         safe_assignment_text,
+        sender_scope_workspace_id,
     )
     from agent_runtime.persona_chat_history import persona_chat_history_summary
     from agent_runtime.worker_sessions import WorkerSessionStore
@@ -408,6 +414,25 @@ def agent_chat_threads(*, persona_id=None):
     store = PersonaInstanceStore()
     store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
     instances = store.list_all()
+
+    # The DEFAULT / bare-persona listing is the sender-scoped ADDRESSABLE roster:
+    # each persona's canonical row is shadowed behind an in-scope placement, and
+    # out-of-scope placements are hidden — so an agent is offered the deliberate
+    # placements on its own level, not the plumbing canonical rows. Sender scope
+    # comes from the caller's chat-root session (threaded from the registry
+    # handler), falling back to the active workspace. An explicit personainst_*
+    # filter (wanted_instance_id) is deliberate targeting and BYPASSES the shadow:
+    # that exact instance stays listable cross-workspace (ruling — explicit handle
+    # targeting is never shadowed).
+    if wanted_instance_id is None:
+        scope_workspace_id = sender_scope_workspace_id(
+            requested_by_session, instance_store=store
+        )
+        instances = workspace_scope.addressable_roster(
+            instances,
+            scope_workspace_id=scope_workspace_id,
+            is_canonical=is_canonical_persona_channel,
+        )
 
     # Title / last-activity / message-count come from the SAME projection the
     # persona-chat-history frame uses; keyed by the session the row renders under.
@@ -491,19 +516,22 @@ def _session_belongs_to_chat_lane(session_id: str, *, handle: str, default_sessi
     return len(tail) == 12 and all(ch in "0123456789abcdef" for ch in tail.lower())
 
 
-def agent_chat_open(*, persona_id, session_id=None, limit=20):
+def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_session=None):
     if _scope_off():
         return _refusal(
             "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
             "Tell the operator instead of retrying."
         )
 
+    from agent_runtime import workspace_scope
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import (
         PersonaInstanceStore,
         canonical_chat_instance_id,
+        is_canonical_persona_channel,
         resolve_default_chat_session_id_for_instance,
         safe_assignment_text,
+        sender_scope_workspace_id,
     )
     from agent_runtime.persona_chat_history import (
         MAX_PERSONA_CHAT_MESSAGE_TAIL,
@@ -520,8 +548,9 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20):
     except ValueError as exc:
         return _refusal(safe_assignment_text(str(exc), limit=240), error_kind="unsupported_persona")
     # A personainst_* handle targets THAT specific instance's thread (a persona may
-    # run several); a bare persona id targets the canonical primary. Preserved by
-    # canonical_persona_instance_id (placement-backed sibling ids survive).
+    # run several) and is used as-is; a BARE persona id is resolved through the
+    # sender-scoped addressable roster below (placements shadow canonical), not
+    # collapsed straight onto the canonical channel.
     target_instance_id = target if _looks_like_instance_handle(target) else None
 
     try:
@@ -532,6 +561,34 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20):
     cfg = load_agent_runtime_config()
     store = PersonaInstanceStore()
     store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+
+    # A BARE persona resolves through the sender-scoped ADDRESSABLE roster: a
+    # single in-scope placement is the target (placements shadow canonical), so
+    # "open your thread with qa" reviews the deliberate placement's lane, not the
+    # plumbing canonical channel. With no in-scope placement (or two — which the
+    # send guard would refuse) the canonical channel is the fallback. An explicit
+    # personainst_* handle is deliberate targeting and is used as-is, never
+    # shadowed.
+    if target_instance_id is None:
+        scope_workspace_id = sender_scope_workspace_id(
+            requested_by_session, instance_store=store
+        )
+        addressable = workspace_scope.addressable_roster(
+            (
+                instance
+                for instance in store.list_all()
+                if getattr(instance, "persona_id", None) == resolved_persona
+            ),
+            scope_workspace_id=scope_workspace_id,
+            is_canonical=is_canonical_persona_channel,
+        )
+        placements = [
+            instance
+            for instance in addressable
+            if not is_canonical_persona_channel(instance)
+        ]
+        if len(placements) == 1:
+            target_instance_id = placements[0].id
 
     handle = canonical_chat_instance_id(resolved_persona, target_instance_id)
     default_session = resolve_default_chat_session_id_for_instance(
@@ -610,7 +667,10 @@ registry.register(
     name="agent_chat_threads",
     toolset="agent_chat",
     schema=AGENT_CHAT_THREADS_SCHEMA,
-    handler=lambda args, **kw: agent_chat_threads(persona_id=args.get("persona_id")),
+    handler=lambda args, **kw: agent_chat_threads(
+        persona_id=args.get("persona_id"),
+        requested_by_session=kw.get("session_id"),
+    ),
     description="List your agent-to-agent chat threads with reachable teammates (read-only, no mint).",
     emoji="🧵",
 )
@@ -623,6 +683,7 @@ registry.register(
         persona_id=args.get("persona_id"),
         session_id=args.get("session_id"),
         limit=args.get("limit", 20),
+        requested_by_session=kw.get("session_id"),
     ),
     description="Review the recent message tail of your shared thread with a teammate (read-only, no mint).",
     emoji="📖",

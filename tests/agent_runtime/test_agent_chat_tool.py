@@ -476,31 +476,46 @@ def test_send_forwards_a_personainst_handle_as_the_target_instance(monkeypatch):
     assert seen["persona_instance_id"] is None
 
 
-def test_threads_lists_each_instance_of_a_persona_distinctly(isolate_agent_runtime_root):
+def test_threads_lists_each_placement_distinctly_and_shadows_canonical(isolate_agent_runtime_root):
+    # Placements shadow canonical: two in-scope placements are listed distinctly,
+    # each by its own handle + own thread, and the plumbing canonical row is NOT
+    # advertised (the agent addresses the deliberate placements on its level).
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
-    sibling = PersonaInstanceStore().add_instance(
-        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent 2"
-    )
-    primary_session = _seed_persona_chat("qa", [("primary hi", "primary ack")])
-    sibling_session = _seed_persona_chat(
-        "qa", [("sibling hi", "sibling ack")], persona_instance_id=sibling.id
-    )
-    assert primary_session != sibling_session
+    store = PersonaInstanceStore()
+    sib2 = store.add_instance(persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent 2")
+    sib3 = store.add_instance(persona_id="qa", placement_id="qa_agent_3", display_name="QA Agent 3")
+    # The canonical row even has its own thread — but it is still shadowed.
+    _seed_persona_chat("qa", [("primary hi", "primary ack")])
+    s2 = _seed_persona_chat("qa", [("s2 hi", "s2 ack")], persona_instance_id=sib2.id)
+    s3 = _seed_persona_chat("qa", [("s3 hi", "s3 ack")], persona_instance_id=sib3.id)
+    assert s2 != s3
 
     data = json.loads(agent_chat_threads(persona_id="qa"))
     by_handle = {row["handle"]: row for row in data["threads"] if row["persona_id"] == "qa"}
-    assert {"personainst_qa", "personainst_qa_agent_2"} <= set(by_handle)
-    assert by_handle["personainst_qa"]["session_id"] == primary_session
-    assert by_handle["personainst_qa_agent_2"]["session_id"] == sibling_session
+    assert set(by_handle) == {"personainst_qa_agent_2", "personainst_qa_agent_3"}
+    assert "personainst_qa" not in by_handle  # canonical shadowed by the placements
+    assert by_handle["personainst_qa_agent_2"]["session_id"] == s2
+    assert by_handle["personainst_qa_agent_3"]["session_id"] == s3
 
-    # A handle filter narrows to that one instance.
-    only = json.loads(agent_chat_threads(persona_id=sibling.id))
+    # A handle filter is explicit targeting and narrows to that one instance.
+    only = json.loads(agent_chat_threads(persona_id=sib2.id))
     handles = [row["handle"] for row in only["threads"]]
     assert handles == ["personainst_qa_agent_2"]
 
 
-def test_open_targets_the_specific_instance_not_the_canonical_channel(isolate_agent_runtime_root):
+def test_threads_shows_canonical_when_no_placement_shadows_it(isolate_agent_runtime_root):
+    # Reachability fallback: a persona with only its canonical row (no placement)
+    # is still listed — the canonical channel stays addressable.
+    primary_session = _seed_persona_chat("qa", [("primary hi", "primary ack")])
+
+    data = json.loads(agent_chat_threads(persona_id="qa"))
+    by_handle = {row["handle"]: row for row in data["threads"] if row["persona_id"] == "qa"}
+    assert "personainst_qa" in by_handle
+    assert by_handle["personainst_qa"]["session_id"] == primary_session
+
+
+def test_open_bare_persona_routes_to_the_in_scope_placement(isolate_agent_runtime_root):
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
     sibling = PersonaInstanceStore().add_instance(
@@ -511,17 +526,26 @@ def test_open_targets_the_specific_instance_not_the_canonical_channel(isolate_ag
         "qa", [("sibling hi", "sibling ack")], persona_instance_id=sibling.id
     )
 
-    # The handle reviews the SIBLING's thread; the bare persona reviews the primary.
+    # An explicit handle reviews the SIBLING's thread (deliberate targeting).
     opened_sibling = json.loads(agent_chat_open(persona_id=sibling.id))
     assert opened_sibling["session_id"] == sibling_session
     assert [m["text"] for m in opened_sibling["messages"]] == ["sibling hi", "sibling ack"]
 
-    opened_primary = json.loads(agent_chat_open(persona_id="qa"))
-    assert opened_primary["session_id"] == primary_session
+    # A BARE persona now resolves through addressability: qa_agent_2 is the single
+    # in-scope placement, so "open qa" reviews the PLACEMENT's lane (placements
+    # shadow canonical), not the plumbing canonical channel.
+    opened_bare = json.loads(agent_chat_open(persona_id="qa"))
+    assert opened_bare["handle"] == "personainst_qa_agent_2"
+    assert opened_bare["session_id"] == sibling_session
 
-    # The primary must NOT be able to open the sibling's session (prefix-collision
+    # The explicit CANONICAL handle still reaches the canonical thread (explicit
+    # targeting bypasses the shadow)...
+    opened_canonical = json.loads(agent_chat_open(persona_id="personainst_qa"))
+    assert opened_canonical["session_id"] == primary_session
+
+    # ...and it must NOT be able to open the sibling's session (prefix-collision
     # guard: personainst_qa must not swallow personainst_qa_agent_2's session).
-    refused = json.loads(agent_chat_open(persona_id="qa", session_id=sibling_session))
+    refused = json.loads(agent_chat_open(persona_id="personainst_qa", session_id=sibling_session))
     assert refused["ok"] is False and refused["error_kind"] == "foreign_session"
 
 

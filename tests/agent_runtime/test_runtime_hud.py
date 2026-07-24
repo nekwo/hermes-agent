@@ -654,6 +654,51 @@ def test_situational_hud_thread_count_uses_scoped_roster():
     assert hud["mission"]["thread_count"] == 2
 
 
+def test_situational_hud_on_level_shadows_canonical_when_placement_in_scope():
+    # "Placements shadow canonical" at the HUD roster: when an in-scope PLACEMENT
+    # of a persona exists, its plumbing canonical row is dropped from "On level"
+    # (and from the mission thread count), so the agent sees the deliberate
+    # placement, not the runtime-global canonical. Composes the real
+    # addressable_roster the HUD wrapper uses (scope + shadow), keyed on the
+    # sanctioned canonical discriminator.
+    from agent_runtime import workspace_scope
+    from agent_runtime.persona_assignments import is_canonical_persona_channel
+
+    target = _instance(
+        id="personainst_neko", persona_id="neko_supervisor", display_name="Neko Mission Lead",
+        goal_id="goal_1", current_task_id="task_1", workspace_id="ws_a",
+    )
+    # dev's runtime-global canonical row + an in-scope placement, both on goal_1.
+    dev_canonical = _instance(
+        id="personainst_dev", persona_id="dev", display_name="Dev",
+        goal_id="goal_1", workspace_id=None,
+    )
+    dev_placement = _instance(
+        id="personainst_dev_agent_2", persona_id="dev", display_name="Dev (2)",
+        goal_id="goal_1", workspace_id="ws_a",
+    )
+    full = [target, dev_canonical, dev_placement]
+
+    scope_ws = workspace_scope.effective_workspace_id(target, active_workspace_id="ws_a")
+    addressable = workspace_scope.addressable_roster(
+        full, scope_workspace_id=scope_ws, is_canonical=is_canonical_persona_channel
+    )
+    hud = resolve_situational_hud(
+        target,
+        roster=addressable,
+        identity_roster=full,
+        task=SimpleNamespace(id="task_1", title="t", state="in_progress"),
+        goal_task=SimpleNamespace(id="goal_1", title="Ship it", state="queued"),
+    )
+
+    ids = [entry["persona_instance_id"] for entry in hud["roster"]]
+    assert "personainst_dev" not in ids  # canonical dev shadowed by its placement
+    assert ids == ["personainst_neko", "personainst_dev_agent_2"]
+    # thread_count follows the SAME addressable roster: neko + dev placement = 2,
+    # NOT 3 — the shadowed canonical dev is not counted.
+    assert hud["mission"]["thread_count"] == 2
+
+
 def test_situational_hud_identity_roster_defaults_to_roster():
     # Back-compat: callers that pass a single roster (no identity_roster) keep
     # identical steering behaviour — identity resolves from that one list.

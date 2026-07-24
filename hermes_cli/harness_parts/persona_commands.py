@@ -1409,8 +1409,21 @@ def _cmd_mission_chat_message(args) -> int:
         # canonical mint through the SAME chokepoint (mint= mode), never a
         # parallel pipeline; open_chat then repoints the instance so the pair's
         # new thread becomes the default going forward.
-        resolved_instance_id = persona_instance_id or canonical_chat_instance_id(
-            normalized_persona, None
+        #
+        # BARE persona (no pin, no session): route through the "placements shadow
+        # canonical" ruling — a single in-scope placement is the default target,
+        # so the send lands on the deliberate placement instead of the plumbing
+        # canonical row. The guard above already refused two-or-more in-scope
+        # placements, so this resolves to at most one; with none it returns None
+        # and the canonical channel is the reachability fallback.
+        resolved_instance_id = (
+            persona_instance_id
+            or _mission_chat_bare_persona_target(
+                instance_store,
+                normalized_persona=normalized_persona,
+                requested_by_session=requested_by_session,
+            )
+            or canonical_chat_instance_id(normalized_persona, None)
         )
         existing_root = None
         if not bool(getattr(args, "new_session", False)):
@@ -5086,10 +5099,22 @@ def _mission_chat_target_decision(
     scenes does not fan a two-agent order out onto duplicate placements in
     unrelated workspaces. Runtime-global instances (no workspace pointer) stay in
     scope everywhere; an operator CLI invocation with no sender session falls
-    back to the active workspace. Narrowing the candidate list preserves the
-    typed rejection semantics automatically — the count-based policy is unchanged.
+    back to the active workspace.
+
+    "Placements shadow canonical": when an in-scope PLACEMENT of the persona
+    exists, its auto-derived CANONICAL row is dropped from the candidate list —
+    so a bare persona id with one in-scope placement resolves to that single
+    placement (``evaluate_target`` auto-routes on one candidate, retiring the
+    ambiguity prompt) instead of the plumbing canonical row, while TWO in-scope
+    placements stay genuinely ambiguous. The scope + shadow is the one shared
+    ``workspace_scope.addressable_roster`` authority; the count-based policy is
+    unchanged.
     """
     from agent_runtime import target_policy, workspace_scope
+    from agent_runtime.persona_assignments import (
+        is_canonical_persona_channel,
+        sender_scope_workspace_id,
+    )
 
     is_profile = normalized_persona.startswith("profile:")
     raw_token = safe_assignment_token(raw_persona_id)
@@ -5098,25 +5123,22 @@ def _mission_chat_target_decision(
         or raw_token.startswith(PERSONA_INSTANCE_ID_PREFIX)
         or safe_assignment_text(session_id, limit=200)
     )
-    # Derive the sender's workspace scope. The sender is identified by the
-    # chat-root session that requested this send; from its owner instance we take
-    # the instance's own workspace pointer (falling back to the active workspace
-    # for a runtime-global sender). No sender session — a bare operator CLI send
-    # — scopes to the active workspace.
-    active_workspace_id = WorkspaceStore().active_id()
-    scope_workspace_id = active_workspace_id
-    sender_session = safe_assignment_text(requested_by_session, limit=200)
-    if sender_session:
-        sender_instance_id = chat_session_owner_instance_id(sender_session)
-        if sender_instance_id:
-            try:
-                sender_instance = instance_store.get(sender_instance_id)
-            except Exception:
-                sender_instance = None
-            if sender_instance is not None:
-                scope_workspace_id = workspace_scope.effective_workspace_id(
-                    sender_instance, active_workspace_id=active_workspace_id
-                )
+    # Derive the sender's workspace scope (session → owner instance → its
+    # workspace pointer; bare operator CLI send falls back to the active
+    # workspace), then scope + shadow the persona's rows through the one shared
+    # addressable-roster authority.
+    scope_workspace_id = sender_scope_workspace_id(
+        requested_by_session, instance_store=instance_store
+    )
+    addressable = workspace_scope.addressable_roster(
+        (
+            instance
+            for instance in instance_store.list_all()
+            if getattr(instance, "persona_id", None) == normalized_persona
+        ),
+        scope_workspace_id=scope_workspace_id,
+        is_canonical=is_canonical_persona_channel,
+    )
     candidates = sorted(
         (
             target_policy.TargetCandidate(
@@ -5124,11 +5146,7 @@ def _mission_chat_target_decision(
                 display_name=safe_assignment_text(getattr(instance, "display_name", None), limit=120)
                 or instance.id,
             )
-            for instance in instance_store.list_all()
-            if getattr(instance, "persona_id", None) == normalized_persona
-            and workspace_scope.instance_in_scope(
-                getattr(instance, "workspace_id", None), scope_workspace_id
-            )
+            for instance in addressable
         ),
         key=lambda candidate: candidate.instance_id,
     )
@@ -5139,6 +5157,50 @@ def _mission_chat_target_decision(
         is_profile_target=is_profile,
         relay_chain=relay_chain,
     )
+
+
+def _mission_chat_bare_persona_target(
+    instance_store,
+    *,
+    normalized_persona: str,
+    requested_by_session=None,
+):
+    """Resolve a BARE persona id to its single in-scope PLACEMENT id, or ``None``.
+
+    The routing counterpart to the ambiguous-target guard: both read the one
+    ``workspace_scope.addressable_roster`` authority with the same sender scope,
+    so they never disagree. When exactly one placement of the persona is in the
+    sender's scope, a bare persona send threads onto THAT placement (the
+    "placements shadow canonical" ruling — the plumbing canonical row is not the
+    default target while a deliberate placement is on the level). Returns
+    ``None`` when there is no in-scope placement (the caller falls back to the
+    canonical channel, reachability fallback) or when the guard would already
+    have refused two-or-more in-scope placements.
+    """
+    from agent_runtime import workspace_scope
+    from agent_runtime.persona_assignments import (
+        is_canonical_persona_channel,
+        sender_scope_workspace_id,
+    )
+
+    scope_workspace_id = sender_scope_workspace_id(
+        requested_by_session, instance_store=instance_store
+    )
+    addressable = workspace_scope.addressable_roster(
+        (
+            instance
+            for instance in instance_store.list_all()
+            if getattr(instance, "persona_id", None) == normalized_persona
+        ),
+        scope_workspace_id=scope_workspace_id,
+        is_canonical=is_canonical_persona_channel,
+    )
+    placements = [
+        instance for instance in addressable if not is_canonical_persona_channel(instance)
+    ]
+    if len(placements) == 1:
+        return placements[0].id
+    return None
 
 
 def _persona_id_from_instance_id(persona_instance_id: str) -> str:

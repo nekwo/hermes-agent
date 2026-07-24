@@ -671,13 +671,15 @@ def situational_hud_for_instance(instance: Any, *, proof_store: Any = None) -> d
         # Deferred imports keep module load order robust (context_builder, the
         # stores, and daemon all pull sizeable graphs).
         from . import workspace_scope
-        from .persona_assignments import PersonaInstanceStore
+        from .persona_assignments import PersonaInstanceStore, is_canonical_persona_channel
         from .store import RealmStore, TaskStore, WorkspaceStore
 
         # The FULL roster stays available for identity (steering) resolution; the
         # ADDRESSABLE roster fed to advertising/thread-count is scoped to this
-        # lane's own workspace so a placement in another workspace is never
-        # offered as a target here.
+        # lane's own workspace AND has each persona's canonical row shadowed
+        # behind any in-scope placement — so a placement in another workspace is
+        # never offered here, and where a placement IS in scope the "On level"
+        # block shows the deliberate placement, not the plumbing canonical row.
         identity_roster = PersonaInstanceStore().list_all()
 
         workspace_store = WorkspaceStore()
@@ -685,8 +687,10 @@ def situational_hud_for_instance(instance: Any, *, proof_store: Any = None) -> d
         scope_workspace_id = workspace_scope.effective_workspace_id(
             instance, active_workspace_id=workspace_store.active_id()
         )
-        scoped_roster = workspace_scope.scope_roster(
-            identity_roster, scope_workspace_id=scope_workspace_id
+        scoped_roster = workspace_scope.addressable_roster(
+            identity_roster,
+            scope_workspace_id=scope_workspace_id,
+            is_canonical=is_canonical_persona_channel,
         )
         # The scope line names the lane's OWN workspace when it carries a pointer
         # (fallback: the active workspace), so it matches the scoped roster.

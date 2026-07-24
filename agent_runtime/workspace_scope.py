@@ -21,17 +21,33 @@ Semantics (the whole contract lives here):
   whole roster.
 
 This module scopes ADVERTISING and BARE-PERSONA resolution ONLY. It never
-deletes, dedupes, or re-elects identity: explicit ``personainst_*`` targeting
-stays allowed cross-workspace, and identity lookups (who steers whom) continue
-to resolve against the full, unfiltered roster.
+re-elects identity: explicit ``personainst_*`` targeting stays allowed
+cross-workspace, and identity lookups (who steers whom) continue to resolve
+against the full, unfiltered roster.
+
+On top of workspace scoping it also owns the "placements shadow canonical"
+rule for the addressable view (:func:`shadow_canonical_by_placement`): a
+persona has an auto-derived CANONICAL operator row (runtime plumbing, no scene
+claim) and may also have operator-PLACED rows in a scene. When an in-scope
+placement of a persona exists, that persona's canonical row is NOT advertised
+to — nor bare-persona-resolved for — an AGENT, so a bare persona id lands on the
+deliberate placement instead of the plumbing row. When no in-scope placement
+exists, the canonical row stays addressable (reachability fallback). This
+shadow is a property of the ADDRESSABLE roster only; identity/steering lists
+(``identity_roster``) always read the full, unshadowed set. Kept a SEPARATE
+pure helper rather than folded into :func:`scope_roster`, whose pinned contract
+is a purely additive filter that never drops rows.
 
 Pure and stdlib-only — no I/O, no harness imports — so the scoping table is
-unit-testable in isolation (matches :mod:`agent_runtime.target_policy`).
+unit-testable in isolation (matches :mod:`agent_runtime.target_policy`). The
+canonical discriminator is taken as a passed predicate so this module never
+imports the harness row model; callers hand in
+``agent_runtime.persona_assignments.is_canonical_persona_channel``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 def _norm(value: Any) -> str | None:
@@ -88,3 +104,73 @@ def scope_roster(instances: Iterable[Any], *, scope_workspace_id: str | None) ->
         for instance in (instances or ())
         if instance_in_scope(getattr(instance, "workspace_id", None), scope_workspace_id)
     ]
+
+
+def _persona_key(instance: Any) -> Any:
+    """Default persona grouping key: the row's ``persona_id`` (or ``None``)."""
+
+    return getattr(instance, "persona_id", None)
+
+
+def shadow_canonical_by_placement(
+    instances: Iterable[Any],
+    *,
+    is_canonical: Callable[[Any], bool],
+    persona_key: Callable[[Any], Any] = _persona_key,
+) -> list:
+    """Drop each persona's CANONICAL row when a PLACEMENT of it is in the list.
+
+    "Placements shadow canonical": a persona's auto-derived canonical operator
+    row (runtime plumbing) must not be advertised to — nor bare-persona-resolved
+    for — an AGENT when the same persona also has a deliberate, non-canonical
+    (placement-backed) row present here. A persona with only its canonical row,
+    or with placements but no canonical, is returned unchanged (reachability
+    fallback). ``is_canonical`` is the sanctioned discriminator
+    (``persona_assignments.is_canonical_persona_channel``), passed in so this
+    module stays stdlib-pure; ``persona_key`` groups rows by persona.
+
+    Input order is preserved and inputs are never mutated — a purely subtractive
+    filter over the ADDRESSABLE set, never over identity: callers keep the full
+    roster for steering/identity resolution and pass only the addressable copy
+    through here. Because the drop is decided from the rows PRESENT in this list,
+    compose it AFTER :func:`scope_roster` so an out-of-scope placement (already
+    filtered away) cannot shadow a canonical row that is still reachable.
+    """
+
+    rows = list(instances or ())
+    # Personas with at least one non-canonical (placement-backed) row present.
+    # Only these shadow their canonical row. A ``None`` key never shadows.
+    placed: set = set()
+    for instance in rows:
+        if not is_canonical(instance):
+            key = persona_key(instance)
+            if key is not None:
+                placed.add(key)
+    return [
+        instance
+        for instance in rows
+        if not (is_canonical(instance) and persona_key(instance) in placed)
+    ]
+
+
+def addressable_roster(
+    instances: Iterable[Any],
+    *,
+    scope_workspace_id: str | None,
+    is_canonical: Callable[[Any], bool],
+    persona_key: Callable[[Any], Any] = _persona_key,
+) -> list:
+    """The roster a lane may ADVERTISE / bare-persona-resolve, order preserved.
+
+    The single composition every addressable surface uses so the rule lives in
+    exactly one place: (1) :func:`scope_roster` narrows to the sender's
+    workspace, then (2) :func:`shadow_canonical_by_placement` shadows each
+    persona's canonical row behind an in-scope placement that survived step 1.
+    Never mutates inputs. The FULL roster (for identity/steering) must be kept
+    separately by the caller — this returns only the addressable view.
+    """
+
+    scoped = scope_roster(instances, scope_workspace_id=scope_workspace_id)
+    return shadow_canonical_by_placement(
+        scoped, is_canonical=is_canonical, persona_key=persona_key
+    )
