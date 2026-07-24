@@ -2296,11 +2296,16 @@ def _cmd_mission_chat_message(args) -> int:
     terminal_outcome: MissionChatTurnPersistOutcome | None = None
     try:
         _persona_chat_fault_injection("after_native_commit")
-        _update_persona_chat_token_counts(
-            session_db=session_db,
-            session_id=session_id,
-            result=chat_result,
-        )
+        # Token accounting: NONE here, on purpose. This lane runs the agent
+        # natively bound to the chat session (mission_chat_reply receives
+        # session_id=active_session_id with persist_agent_session=True), so
+        # conversation_loop/codex_runtime already record every API call's usage
+        # onto the bound session row. Adding the turn totals again via
+        # _update_persona_chat_token_counts double-counted every counter
+        # (input/output/cache/reasoning/api_call_count) at exactly 2x — the
+        # per-call runtime writes are the single usage authority on this lane.
+        # The scratch-session assignment lane (session_id=None) keeps its
+        # explicit post-turn write.
         try:
             instance.active_run_id = None
             instance.current_assignment_id = None
@@ -4621,14 +4626,21 @@ def _append_persona_assistant_text(
 
 
 def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:
-    """Record this turn's canonical token usage onto the bound chat session.
+    """Record this turn's canonical token usage onto the bound chat session —
+    SCRATCH-SESSION LANES ONLY.
 
-    Mission Control runs each persona-chat turn under a fresh runtime with an
-    ephemeral scratch session (``session_id=None``), so ``conversation_loop``'s
-    own per-call token writes land on the throwaway scratch row, never here. This
-    is the *only* writer of the bound session the Launcher reads, and each turn's
-    ``result`` carries that turn's totals (the runtime is per-turn), so the
-    increment is a true cumulative — no double count.
+    Valid only where the runtime ran with an ephemeral scratch session
+    (``mission_chat_reply(session_id=None)``, e.g. the assignment relay lane):
+    there ``conversation_loop``'s per-call token writes land on the throwaway
+    scratch row, so this explicit post-turn write is the sole writer of the
+    bound session the Launcher reads.
+
+    It must NEVER run on the native-continuity chat lane, where the runtime is
+    bound to the real chat session (``session_id=active_session_id`` with
+    ``persist_agent_session=True``): the per-call runtime writes already land on
+    the bound row, and stacking this turn-total write on top double-counts every
+    counter at exactly 2x (the 2026-07 "in 20,208 for a bare hi" Runtime-card
+    bug). One lane, one usage writer.
 
     It forwards the COMPLETE canonical usage (cache reads/writes and reasoning,
     not just input/output). ``input_tokens`` is already the uncached, full-price

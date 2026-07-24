@@ -3428,10 +3428,11 @@ def test_mission_chat_post_native_projection_crash_stays_repairable(
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
 
-    def _boom(**_kwargs):
-        raise RuntimeError("transcript write exploded")
-
-    monkeypatch.setattr(harness, "_update_persona_chat_token_counts", _boom)
+    # The native lane no longer calls _update_persona_chat_token_counts (the
+    # per-call runtime writes are its sole usage authority - see the
+    # single-writer guard in test_mission_chat_usage_single_writer.py), so the
+    # post-native crash is injected at the lane's own fault seam instead.
+    monkeypatch.setenv("HERMES_PERSONA_CHAT_FAULT_INJECTION", "after_native_commit")
 
     class _FakeRuntime:
         def __init__(self, *args, **kwargs):
@@ -3473,7 +3474,7 @@ def test_mission_chat_post_native_projection_crash_stays_repairable(
     assert payload["ok"] is False
     assert payload["error_kind"] == "chat_projection_incomplete"
     assert payload["reply"] == "The reply that must not vanish."
-    assert "transcript write exploded" in payload["blocker"]
+    assert "injected persona chat fault at after_native_commit" in payload["blocker"]
     record = mission_chat_turn_record(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_post_crash",
