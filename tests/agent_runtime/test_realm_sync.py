@@ -192,15 +192,17 @@ def test_publish_refuses_duplicate_profile_skill_authority(
     assert exc.value.safe_details["resolution_status"] == "collision"
 
 
-def test_sync_destination_maps_nested_skill_and_blocks_traversal(isolate_agent_runtime_root):
+def test_sync_destination_routes_skills_to_inbox_not_shared_root(isolate_agent_runtime_root):
     from agent_runtime.realm_sync import _destination_for_sync_path
 
-    root = get_shared_skills_dir()
-    assert (
-        _destination_for_sync_path("skills/foo/references/guide.md")
-        == root / "foo" / "references" / "guide.md"
-    )
-    # A hostile realm repo must not escape the shared root.
+    # C3: skills no longer pull straight into the canonical shared root through
+    # the generic overwrite loop. Every skills/* path leaves the loop (returns
+    # None) — apply_skill_inbox_pull mirrors them into the resolver-invisible
+    # per-realm inbox and promotes through the one guarded door, so a realm pull
+    # can never silently clobber a local canonical skill of the same id.
+    assert _destination_for_sync_path("skills/foo/references/guide.md") is None
+    assert _destination_for_sync_path("skills/foo/SKILL.md") is None
+    # A hostile realm repo still cannot escape (and never reaches the shared root).
     assert _destination_for_sync_path("skills/foo/../evil.md") is None
 
 

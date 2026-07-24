@@ -10,7 +10,7 @@ from datetime import timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agent.skill_utils import EXCLUDED_SKILL_DIRS
+from agent.skill_utils import EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS
 from hermes_constants import get_config_path, get_hermes_home, get_shared_skills_dir
 from hermes_time import now
 from utils import atomic_json_write
@@ -130,7 +130,7 @@ def realm_sync_status(
     agent_state = realm_agent_selection_state(realm_id)
     workspaces = _workspaces_for_realm(realm)
     workspace_statuses = _workspace_sync_statuses(realm, repo)
-    skills_drift = _skills_drift_for_artifacts(artifacts)
+    skills_drift = _held_skill_packages_for_realm(realm)
     state = _sync_state(git)
     # Local store drift vs the never-synced baseline sidecar: the git state above
     # only knows the checked-out realm repo, so a local board card add — which
@@ -271,7 +271,7 @@ def publish_realm_sync(
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
     if warnings:
         result["warnings"] = warnings
-    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifacts=artifacts)
+    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_held_skill_packages_for_realm(realm), artifacts=artifacts)
     _append_realm_sync_event(
         "realm.sync.published",
         realm,
@@ -330,6 +330,13 @@ def pull_realm_sync(
     office_summary = apply_office_pull(realm.id, subtree)
     if office_summary.adopted or office_summary.converged or office_summary.archived:
         changed = True
+    # Realm skills: excluded from the generic loop too (skills/* →
+    # _destination_for_sync_path None). Mirror them into the resolver-invisible
+    # per-realm inbox and admit them to the canonical root only through the one
+    # guarded promotion door (auto-adopt new, converge identical, hold divergent).
+    skill_summary = apply_skill_inbox_pull(realm, subtree)
+    if skill_summary.adopted or skill_summary.removed:
+        changed = True
     # Workspace deletions: honor the pulled realm's deleted_workspace_ids
     # resurrection-guard ledger so a member's surviving local copy neither
     # lingers nor republishes a workspace another member deleted.
@@ -345,6 +352,7 @@ def pull_realm_sync(
     result = _sync_result(realm, "pull", "pulled", artifacts, repo=repo, git=git_after, changed=changed)
     result["board_sync"] = board_summary.as_dict()
     result["office_sync"] = office_summary.as_dict()
+    result["skill_sync"] = skill_summary.as_dict()
     if tombstone_summary["deleted"] or tombstone_summary["archived"] or tombstone_summary["warnings"]:
         result["workspace_tombstones"] = tombstone_summary
     if pulled_profile_tokens:
@@ -357,7 +365,7 @@ def pull_realm_sync(
         "changed": [item.skill for item in install_results if item.changed],
         "ok": all(item.ok for item in install_results),
     }
-    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifacts=artifacts)
+    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=skill_summary.held, artifacts=artifacts)
     _append_realm_sync_event(
         "realm.sync.pulled",
         realm,
@@ -550,72 +558,123 @@ def _skill_artifacts(realm: Realm) -> list[RealmSyncArtifact]:
     # Publish the shared canonical skills root (see get_shared_skills_dir) —
     # the one physical dir every persona references. Walk each skill package
     # WHOLE (not just SKILL.md) so multi-file skills — references/, scripts/,
-    # assets/, templates/ — travel intact to every realm member. Only the
-    # top-level skill directory name is tokenized; sub-path filenames are kept
-    # verbatim (rglob cannot emit ``..``) so files like ``__init__.py`` are not
-    # mangled. Junk/VCS/cache/dot components are pruned; the shared secret/state
-    # validation still runs over the result (_assert_no_secret_artifacts).
+    # assets/, templates/ — travel intact to every realm member. Sub-path
+    # filenames are kept verbatim (rglob cannot emit ``..``) so files like
+    # ``__init__.py`` are not mangled. Junk/VCS/cache/dot components are pruned;
+    # the shared secret/state validation still runs over the result
+    # (_assert_no_secret_artifacts).
     #
-    # Per-realm selection: mode "all" (default) publishes every catalog skill;
-    # mode "selected" publishes only skills whose directory name is in
-    # realm.skill_selection. Because publish rebuilds the realm subtree from
-    # scratch, filtering here naturally prunes deselected skills on the next
-    # publish — no extra deletion pass. The selection is matched against the
-    # RAW directory name (== the skills_inventory catalog slug), so it lines up
-    # with what the Launcher picker offers the operator.
+    # Package shapes (C5): a top-level dir WITH a SKILL.md publishes as a bare
+    # slug; a top-level dir WITHOUT one is a category whose immediate child dirs
+    # with a SKILL.md publish as ``<parent>/<child>`` (one level only). A
+    # categorized skill such as ``software-development/hermes-agent`` — selected
+    # BY PATH by personas — otherwise never reaches a realm.
+    #
+    # Per-realm selection: mode "all" (default) publishes every catalog package;
+    # mode "selected" publishes a package whose slug — or, for a categorized
+    # package, the bare child name — is in realm.skill_selection. Because publish
+    # rebuilds the realm subtree from scratch, filtering here naturally prunes
+    # deselected skills on the next publish. Bare slugs line up with what the
+    # Launcher picker offers; categorized selection by bare child name works
+    # today (the picker doesn't yet offer categorized slugs — documented
+    # follow-up), and the categorized id itself is honored too.
     root = get_shared_skills_dir()
     artifacts: list[RealmSyncArtifact] = []
     if not root.exists():
         return artifacts
     selected_only = realm.skill_publish_mode == "selected"
     selection = set(realm.skill_selection or [])
-    for skill_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        skill = skill_dir.name
-        # Skip dotdirs (.archive/.hub/.curator_backups/…) and any folder
-        # without a SKILL.md manifest — housekeeping, not a skill.
-        if skill.startswith(".") or not (skill_dir / "SKILL.md").is_file():
+    for slug, package_dir in _iter_publishable_skill_packages(root):
+        if selected_only and not _skill_slug_selected(slug, selection):
             continue
-        if selected_only and skill not in selection:
-            continue
-        from agent.skill_utils import resolve_skill
+        _append_skill_package_artifacts(artifacts, root, slug, package_dir)
+    return artifacts
 
-        resolution = resolve_skill(skill)
-        selected = resolution.candidate
-        if (
-            resolution.status != "resolved"
-            or selected is None
-            or selected.source_kind != "shared_core"
-        ):
-            raise RealmSyncError(
-                "skill_authority_conflict",
-                f"Skill cannot publish until shared authority resolves uniquely: {skill}",
-                safe_details={
-                    "skill": skill,
-                    "resolution_status": resolution.status,
-                    "candidate_count": len(resolution.candidates),
-                },
-            )
-        skill_dir = selected.skill_dir or selected.skill_md.parent
-        safe_skill = _safe_token(skill)
-        for source in sorted(skill_dir.rglob("*")):
-            if not source.is_file():
-                continue
-            rel_parts = source.relative_to(skill_dir).parts
-            if any(
-                part.startswith(".") or part in EXCLUDED_SKILL_DIRS
-                for part in rel_parts
+
+def _iter_publishable_skill_packages(root: Path):
+    """Yield ``(slug, package_dir)`` for every publishable canonical skill package.
+
+    A top-level dir with a ``SKILL.md`` is a bare package (slug = its name). A
+    top-level dir WITHOUT a ``SKILL.md`` is a category: each immediate child dir
+    with a ``SKILL.md`` publishes as ``<parent>/<child>`` (one level only —
+    multi-level nesting is out of scope). Dot-prefixed dirs (the
+    resolver-invisible ``.realm_inbox`` / ``.provenance`` / ``.archive`` live
+    here), excluded housekeeping dirs, and — under a category — support dirs are
+    skipped, so quarantine and provenance are publish-invisible for free.
+    """
+
+    for top in sorted(p for p in root.iterdir() if p.is_dir()):
+        name = top.name
+        if name.startswith(".") or name in EXCLUDED_SKILL_DIRS:
+            continue
+        if (top / "SKILL.md").is_file():
+            yield name, top
+            continue
+        for child in sorted(p for p in top.iterdir() if p.is_dir()):
+            cname = child.name
+            if (
+                cname.startswith(".")
+                or cname in EXCLUDED_SKILL_DIRS
+                or cname in SKILL_SUPPORT_DIRS
             ):
                 continue
-            rel_within = "/".join(rel_parts)
-            artifacts.append(
-                RealmSyncArtifact(
-                    kind="skill",
-                    source=source,
-                    relative_path=f"skills/{safe_skill}/{rel_within}",
-                    destination=root / safe_skill / Path(*rel_parts),
-                )
+            if (child / "SKILL.md").is_file():
+                yield f"{name}/{cname}", child
+
+
+def _skill_slug_selected(slug: str, selection: set[str]) -> bool:
+    """``selected``-mode match: the package slug itself, or — for a categorized
+    ``<parent>/<child>`` slug — the bare child name (C5)."""
+
+    if slug in selection:
+        return True
+    if "/" in slug:
+        return slug.split("/", 1)[1] in selection
+    return False
+
+
+def _append_skill_package_artifacts(
+    artifacts: list[RealmSyncArtifact], root: Path, slug: str, package_dir: Path
+) -> None:
+    from agent.skill_utils import resolve_skill
+
+    resolution = resolve_skill(slug)
+    selected = resolution.candidate
+    if (
+        resolution.status != "resolved"
+        or selected is None
+        or selected.source_kind != "shared_core"
+    ):
+        raise RealmSyncError(
+            "skill_authority_conflict",
+            f"Skill cannot publish until shared authority resolves uniquely: {slug}",
+            safe_details={
+                "skill": slug,
+                "resolution_status": resolution.status,
+                "candidate_count": len(resolution.candidates),
+            },
+        )
+    skill_dir = selected.skill_dir or selected.skill_md.parent
+    safe_parts = [_safe_token(part) for part in slug.split("/")]
+    prefix = "/".join(safe_parts)
+    dest_root = root.joinpath(*safe_parts)
+    for source in sorted(skill_dir.rglob("*")):
+        if not source.is_file():
+            continue
+        rel_parts = source.relative_to(skill_dir).parts
+        if any(
+            part.startswith(".") or part in EXCLUDED_SKILL_DIRS for part in rel_parts
+        ):
+            continue
+        rel_within = "/".join(rel_parts)
+        artifacts.append(
+            RealmSyncArtifact(
+                kind="skill",
+                source=source,
+                relative_path=f"skills/{prefix}/{rel_within}",
+                destination=dest_root / Path(*rel_parts),
             )
-    return artifacts
+        )
 
 
 def _workspace_realm_artifacts(realm: Realm, workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
@@ -953,16 +1012,15 @@ def _pulled_artifact_bytes(artifact: RealmSyncArtifact, *, realm: Realm) -> byte
 
 def _destination_for_sync_path(rel: str) -> Path | None:
     parts = Path(rel).parts
-    if len(parts) >= 3 and parts[0] == "skills":
-        sub = parts[1:]
-        # Untrusted remote path: refuse traversal / absolute / drive-letter
-        # components so a hostile realm repo can't escape the shared root.
-        if any(
-            p in ("", ".", "..") or ":" in p or p.startswith(("/", "\\"))
-            for p in sub
-        ):
-            return None
-        return get_shared_skills_dir().joinpath(*sub)
+    if parts and parts[0] == "skills":
+        # Skills no longer overwrite the canonical shared root through the generic
+        # pull loop. ``apply_skill_inbox_pull`` mirrors them into the
+        # resolver-invisible per-realm inbox and admits them to the canonical root
+        # only through the one guarded promotion door (C3) — same board/office
+        # exclusion precedent (store/boards/*, store/office/* → None). Returning
+        # None here keeps a realm pull from silently clobbering a local canonical
+        # skill of the same id.
+        return None
     if len(parts) == 3 and parts[0] == "store" and parts[1] == "workspaces":
         return paths.workspaces_dir() / parts[2]
     if len(parts) == 3 and parts[0] == "store" and parts[1] == "realms":
@@ -1375,19 +1433,178 @@ def _workspace_sync_statuses(realm: Realm, repo: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _skills_drift_for_artifacts(artifacts: list[RealmSyncArtifact]) -> list[str]:
-    drift: list[str] = []
-    for artifact in artifacts:
-        if artifact.kind != "skill":
-            continue
-        if (
-            artifact.destination.exists()
-            and artifact.source.exists()
-            and _canonicalize_text_bytes(artifact.destination.read_bytes())
-            != _canonicalize_text_bytes(artifact.source.read_bytes())
-        ):
-            drift.append(Path(artifact.relative_path).parts[1])
-    return sorted(set(drift))
+@dataclass(frozen=True, slots=True)
+class SkillSyncSummary:
+    """Outcome of :func:`apply_skill_inbox_pull` — the per-package reconcile
+    verdicts for one realm pull. ``adopted`` were promoted new into the canonical
+    root, ``converged`` already matched canonical (no write), ``held`` diverge and
+    were quarantined without touching canonical (an operator resolves them via
+    ``hermes harness skills promote --adopt-divergent``), ``removed`` were pruned
+    from the inbox because the realm no longer publishes them. All lists are
+    sorted, de-duplicated skill slugs (bare or ``<category>/<name>``)."""
+
+    adopted: list[str]
+    converged: list[str]
+    held: list[str]
+    removed: list[str]
+
+    def as_dict(self) -> dict[str, list[str]]:
+        return {
+            "adopted": list(self.adopted),
+            "converged": list(self.converged),
+            "held": list(self.held),
+            "removed": list(self.removed),
+        }
+
+
+def apply_skill_inbox_pull(realm: Realm, subtree: Path) -> SkillSyncSummary:
+    """Mirror the pulled ``subtree/skills/**`` into the realm's resolver-invisible
+    inbox, then reconcile each package through the one guarded promotion door.
+
+    Mirrors the board/office pull-applier precedent (``apply_board_pull`` /
+    ``apply_office_pull``): the generic overwrite loop no longer touches
+    ``skills/…`` (``_destination_for_sync_path`` returns ``None``), so this owns
+    the whole skill lane. The inbox is a byte-faithful, LF-canonical copy of that
+    realm's current skill packages that the resolver never sees
+    (``EXCLUDED_SKILL_DIRS`` — C1). Each package is then classified against the
+    canonical shared root:
+
+    - ``promote_new`` (no canonical copy) → auto-adopted, provenance recorded
+      (``source={"kind": "realm", "realm_id": realm.id}``); the inbox mirror is
+      **never** moved (``move_source=False``).
+    - ``noop_identical`` → converged; canonical untouched.
+    - ``hold_divergent`` → held; canonical untouched, surfaced as drift.
+
+    Never called on a dry-run pull (``pull_realm_sync`` returns before this),
+    so the mirror — itself a mutation — is skipped when ``dry_run=True``.
+    """
+
+    from .skill_promotion import (
+        classify_promotion,
+        execute_promotion,
+        list_inbox_packages,
+        realm_inbox_dir,
+    )
+
+    inbox = realm_inbox_dir(realm.id)
+    removed = _mirror_realm_skill_inbox(subtree / "skills", inbox)
+
+    adopted: list[str] = []
+    converged: list[str] = []
+    held: list[str] = []
+    for row in list_inbox_packages(realm.id):
+        slug = row["skill"]
+        plan = classify_promotion(slug, row["source_dir"])
+        if plan.action == "promote_new":
+            result = execute_promotion(
+                plan,
+                source={"kind": "realm", "realm_id": realm.id},
+                move_source=False,
+            )
+            if result.action == "promoted":
+                adopted.append(slug)
+            elif result.action == "held":
+                held.append(slug)
+        elif plan.action == "noop_identical":
+            converged.append(slug)
+        elif plan.action == "hold_divergent":
+            held.append(slug)
+        # refuse_* packages are neither adopted nor held — a malformed inbox
+        # package simply never becomes canonical (accounted by omission).
+    return SkillSyncSummary(
+        adopted=sorted(set(adopted)),
+        converged=sorted(set(converged)),
+        held=sorted(set(held)),
+        removed=sorted(set(removed)),
+    )
+
+
+def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> list[str]:
+    """Mirror ``source_skills`` (the pulled ``subtree/skills``) into ``inbox`` as
+    an LF-canonical, resolver-invisible copy; return the top-level packages pruned
+    (present in the inbox, gone from the subtree).
+
+    Text is LF-normalized at this write chokepoint (matching the publisher's
+    ``_canonicalize_text_bytes``) so a package converges against an LF canonical
+    regardless of the incoming EOL; binary assets (NUL byte) pass through
+    byte-for-byte. A file whose only difference from the existing inbox copy is
+    its line endings is left untouched, so a no-op pull neither rewrites bytes nor
+    churns mtimes (the content-hash cache stays warm — same discipline as the
+    publish EOL guard, ``test_realm_sync_eol.py``).
+    """
+
+    desired: dict[str, bytes] = {}
+    if source_skills.is_dir():
+        for src in sorted(p for p in source_skills.rglob("*") if p.is_file()):
+            rel_parts = src.relative_to(source_skills).parts
+            # Untrusted remote tree: a mirror path must never escape the inbox
+            # (rglob cannot emit ``..``, but guard defensively regardless).
+            if any(part in ("", ".", "..") for part in rel_parts):
+                continue
+            desired["/".join(rel_parts)] = _canonicalize_text_bytes(src.read_bytes())
+
+    existing: dict[str, bytes] = {}
+    if inbox.is_dir():
+        for path in sorted(p for p in inbox.rglob("*") if p.is_file()):
+            existing[path.relative_to(inbox).as_posix()] = path.read_bytes()
+
+    desired_top = {rel.split("/", 1)[0] for rel in desired}
+    existing_top = {rel.split("/", 1)[0] for rel in existing}
+    removed = sorted(existing_top - desired_top)
+
+    for rel, data in desired.items():
+        prior = existing.get(rel)
+        if prior is not None and _canonicalize_text_bytes(prior) == data:
+            continue  # EOL-only (or no) difference — leave it to avoid churn
+        target = inbox.joinpath(*rel.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    for rel in existing:
+        if rel not in desired:
+            inbox.joinpath(*rel.split("/")).unlink()
+    _prune_empty_dirs(inbox)
+    return removed
+
+
+def _prune_empty_dirs(root: Path) -> None:
+    """Remove now-empty subdirectories left behind by inbox pruning (deepest
+    first). ``root`` itself is preserved even when empty — it is the realm's
+    inbox anchor."""
+
+    if not root.is_dir():
+        return
+    for directory in sorted(
+        (p for p in root.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    ):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass  # not empty (or vanished) — leave it
+
+
+def _held_skill_packages_for_realm(realm: Realm) -> list[str]:
+    """``skills_drift`` = the realm's inbox packages whose canonical copy diverges.
+
+    Scans this realm's resolver-invisible inbox and returns the sorted slugs
+    classified ``hold_divergent`` against the current canonical root — the set an
+    operator must explicitly resolve (``promote --adopt-divergent``). Redefines
+    the historic drift meaning (formerly a source-vs-destination byte compare over
+    publish artifacts, which was structurally always empty since publish source
+    and destination were the same canonical file) while keeping the sidecar/result
+    key name and ``list[str]`` shape stable (Launcher realm-sync sheet compat)."""
+
+    from .skill_promotion import list_inbox_packages
+
+    return sorted(
+        {
+            row["skill"]
+            for row in list_inbox_packages(realm.id)
+            if row["action"] == "hold_divergent"
+        }
+    )
 
 
 def _distinct_skill_package_count(artifacts: list[RealmSyncArtifact]) -> int:
