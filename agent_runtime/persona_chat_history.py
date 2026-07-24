@@ -1383,11 +1383,14 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
         "output": _safe_trace_operator_block(payload.get("output"), limit=1600),
         # Generic tool input/result record (tools with no dedicated field):
-        # producer-bounded key-per-line blocks; block scrub keeps line structure
-        # so the console dropdown renders one key per line. Limits sit above the
-        # producer bound + truncation marker so the marker survives intact.
-        "tool_input": _safe_trace_operator_block(payload.get("tool_input"), limit=1100),
-        "tool_result": _safe_trace_operator_block(payload.get("tool_result"), limit=1700),
+        # key-per-line blocks; block scrub keeps line structure so the console
+        # dropdown renders one key per line. Limits sit ABOVE the progress-sink
+        # ceiling (1100/1700 + its truncation marker, which can inflate the
+        # producer bound by re-redacting lines with the broader marker set) so
+        # this tail-bounded scrub never truncates — a truncation here would cut
+        # the HEAD, which is this record's operator signal.
+        "tool_input": _safe_trace_operator_block(payload.get("tool_input"), limit=1200),
+        "tool_result": _safe_trace_operator_block(payload.get("tool_result"), limit=1800),
         "paths": _safe_trace_operator_paths(payload.get("changed_paths")),
         "duration_ms": _safe_trace_int(payload.get("duration_ms")),
         "exit_code": _safe_trace_int(payload.get("exit_code")),

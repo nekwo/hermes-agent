@@ -1286,11 +1286,21 @@ _OPERATOR_TOOL_RESULT_MAX = 1600
 _TOOL_RESULT_ECHO_KEYS = ("exit_code",)
 
 
+def _render_kv_line_token(value: Any) -> str:
+    """One-line rendering of a dict KEY (or the last-resort repr). Newlines and
+    NULs are REMOVED (not replaced with spaces) — the per-line secret scrub
+    keys on contiguous marker words, so a hostile key like ``"pass\\nword"``
+    must reconstitute to ``password`` on ONE line rather than split the marker
+    across two lines and defeat every scrub layer downstream."""
+
+    return re.sub(r"[\r\n\x00]+", "", str(value))
+
+
 def _render_operator_kv_block(value: Any) -> str | None:
     try:
         if isinstance(value, dict):
             text = "\n".join(
-                f"{key}: {json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)}"
+                f"{_render_kv_line_token(key)}: {json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)}"
                 for key, item in value.items()
             )
         elif isinstance(value, str):
@@ -1298,7 +1308,14 @@ def _render_operator_kv_block(value: Any) -> str | None:
         else:
             text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     except Exception:
-        text = str(value)
+        # Last-resort repr, itself guarded: str() can re-raise on pathological
+        # values (RecursionError on deep nesting). Losing the IO record is
+        # acceptable; losing the WHOLE tool event (via the sink's best-effort
+        # boundary swallowing the raise) is not.
+        try:
+            text = _render_kv_line_token(value)
+        except Exception:
+            return None
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     return text or None
 

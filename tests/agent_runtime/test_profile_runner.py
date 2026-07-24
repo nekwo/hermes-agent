@@ -1545,6 +1545,48 @@ def test_tool_input_dropped_when_every_line_is_secret():
     assert "tool_input" not in payload
 
 
+def test_tool_io_newline_in_key_cannot_split_a_secret_marker():
+    # Review finding (2026-07-23): a hostile/foreign dict KEY carrying a raw
+    # newline used to split the marker word across two rendered lines
+    # ("pass" / "word: <secret>"), defeating every per-line scrub layer.
+    # Keys are now newline-STRIPPED (removed, not spaced) so the marker
+    # reconstitutes on one line and the pair redacts.
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "mcp__srv__do_thing",
+        duration=None,
+        is_error=False,
+        result={"pass\nword": "hunter2-Xy9", "ok": True},
+        invocation={"limit": 1},
+    )
+    assert "hunter2-Xy9" not in payload.get("tool_result", "")
+    assert "[redacted line — contained a secret]" in payload["tool_result"]
+    assert "ok: true" in payload["tool_result"]
+
+
+def test_tool_io_pathological_result_never_kills_the_tool_event():
+    # Review finding (2026-07-23): a result json.dumps AND str() both choke on
+    # (deeply nested containers → RecursionError) must lose only the IO
+    # record, never the whole run.tool.finished event.
+    deep: list = []
+    tail = deep
+    for _ in range(4000):
+        nested: list = []
+        tail.append(nested)
+        tail = nested
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "parser",
+        duration=None,
+        is_error=False,
+        result=deep,
+        invocation={"path": "x"},
+    )
+    assert payload["tool_name"] == "parser"
+    assert payload["status"] == "passed"
+    assert "tool_result" not in payload
+
+
 def test_tool_result_bounded_head_with_marker():
     payload = _tool_finished_payload(
         "run.tool.finished",

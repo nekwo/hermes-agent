@@ -1225,6 +1225,43 @@ def test_trace_entry_carries_generic_tool_io():
     assert entry["tool_result"] == 'ok: true\nthreads: [{"id": "t1"}]'
 
 
+def test_trace_entry_never_retruncates_a_sink_ceiling_tool_io_block():
+    # Review finding (2026-07-23): the trace limits used to EQUAL the
+    # progress-sink ceiling, so a sink-inflated block (redaction markers can
+    # grow the producer bound) got tail-truncated here — cutting the HEAD (the
+    # record's operator signal) and garbling the truncation marker. The trace
+    # limits now sit above the sink ceiling (1120/1720), so a maximal block
+    # passes through byte-identical.
+    max_result = "\n".join(["r" * 85 for _ in range(20)])  # 1719 chars, 20 lines
+    assert len(max_result) == 1719
+    events = EventLog()
+    events.append(
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_tool_io_max",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={
+                "tool_name": "agent_chat_threads",
+                "status": "passed",
+                "tool_result": max_result,
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[
+            _persona_instance("personainst_dev", "dev", "task_tool_io_max")
+        ],
+        event_log=events,
+    )
+
+    entry = rows[0]["entries"][0]
+    assert entry["tool_result"] == max_result
+    assert "truncated" not in entry["tool_result"]
+
+
 def test_trace_entry_projects_turn_id():
     events = EventLog()
     ts = now()
