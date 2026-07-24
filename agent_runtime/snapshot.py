@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import hashlib
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 # The snapshot roster does not render per-profile model/provider settings. Use
@@ -56,7 +57,6 @@ from .parse_cache import cached_by_mtime
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
 from .prompt_observability import snapshot_prompt_observability
-from .profile_readiness import profile_readiness_for_persona
 from .proof_gates import task_verdict_proof_satisfied
 from .realm_sync import read_realm_sync_sidecar
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
@@ -73,7 +73,10 @@ from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
 from .steering import build_steer_actions
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RealmStore, RunStore, TaskStore, WorkspaceStore
-from .tool_visibility import resolve_tool_visibility
+from .tool_visibility import (
+    _profile_readiness_for_visibility,
+    resolve_tool_visibility,
+)
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
 AGENT_TOPOLOGY_NODE_ID_CAP = 20
@@ -346,6 +349,21 @@ _build_coalesce_state: dict = {
 }
 
 
+@contextmanager
+def _timed_section(sink: dict[str, int], key: str):
+    """Accumulate wall time (ms) for a build section into ``sink[key]``.
+
+    Additive/observability only — powers the parity envelope's ``sections_ms``
+    next to ``build_ms``. Accumulates (``+=``) so a section timed across more than
+    one span sums rather than overwrites. Keys are stable and lowercase.
+    """
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        sink[key] = sink.get(key, 0) + int(max(0.0, (time.perf_counter() - start)) * 1000)
+
+
 def build_snapshot(
     task_store=None,
     run_store=None,
@@ -436,6 +454,7 @@ def _build_snapshot_uncoalesced(
     prompt_skills_catalogs=None,
 ) -> dict:
     _build_started = time.perf_counter()
+    _sections_ms: dict[str, int] = {}
     task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
     agent_store = agent_store or AgentStore()
@@ -444,6 +463,12 @@ def _build_snapshot_uncoalesced(
     # A snapshot calls for_task/for_session/tail dozens of times on the same log;
     # CachedEventLog reads events.jsonl once and serves all of them from memory.
     event_log = event_log or CachedEventLog()
+    # Force + time the one-shot CachedEventLog materialization here (the ~1s
+    # event-log read, measured 2026-07-23) before other consumers warm it, so
+    # ``sections_ms.events`` honestly attributes that cost. ``recent_events`` is
+    # a pure read reused later (build_observability / parity watermark).
+    with _timed_section(_sections_ms, "events"):
+        recent_events = event_log.tail(20)
     worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
     tasks = task_store.list_all()
     runs = run_store.list_all()
@@ -490,14 +515,14 @@ def _build_snapshot_uncoalesced(
         (getattr(r, "name", None) for r in realms if getattr(r, "id", None) == realm_store.active_id()),
         None,
     )
-    agent_summaries = [_agent_summary(a, include_tool_details=True) for a in agents]
+    with _timed_section(_sections_ms, "agents_readiness"):
+        agent_summaries = [_agent_summary(a, include_tool_details=True) for a in agents]
     available_personas = _available_persona_summary(agents)
     proofs = []
     self_tests = []
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
         self_tests.extend(SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id))
-    recent_events = event_log.tail(20)
     active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
     active_workers = worker_session_store.find_active()
     running_runs = [run for run in active_runs if run.state == RunState.RUNNING]
@@ -540,6 +565,31 @@ def _build_snapshot_uncoalesced(
     frame_run_rows = [row for row in run_rows if row.get("run_id") in active_run_id_set]
     incident_rows = [_incident_summary(i) for i in incident_frame_rows]
     migration = migration_status()
+    # Hoisted out of the ``data`` literal so their cost is attributable in
+    # ``sections_ms`` (both were profiled hot: prompt_observability ~5s, the
+    # skills-catalog walks inside it; boards/offices are local-only reads).
+    with _timed_section(_sections_ms, "prompt_observability"):
+        prompt_observability_section = snapshot_prompt_observability(
+            personas=agents,
+            persona_instances=persona_instances,
+            session_db=session_db,
+            tasks=tasks,
+            proof_store=proof_store,
+            daemon=None,
+            realm=active_realm_name,
+            workspace=active_workspace_name,
+            active_workspace_id=workspace_store.active_id(),
+            catalog_sink=prompt_skills_catalogs,
+        )
+    with _timed_section(_sections_ms, "boards_offices"):
+        boards_section = _keyed(
+            _boards_summary(BoardStore(event_log=event_log), {getattr(w, "id", None) for w in workspaces}),
+            "board_id",
+        )
+        offices_section = _keyed(
+            _offices_summary(OfficeStore(event_log=event_log), workspaces),
+            "workspace_id",
+        )
     data = {
         "schema_version": 2,
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
@@ -574,18 +624,7 @@ def _build_snapshot_uncoalesced(
         },
         "runtime_config": effective_config_summary(cfg, migration=migration),
         "migration": migration,
-        "prompt_observability": snapshot_prompt_observability(
-            personas=agents,
-            persona_instances=persona_instances,
-            session_db=session_db,
-            tasks=tasks,
-            proof_store=proof_store,
-            daemon=None,
-            realm=active_realm_name,
-            workspace=active_workspace_name,
-            active_workspace_id=workspace_store.active_id(),
-            catalog_sink=prompt_skills_catalogs,
-        ),
+        "prompt_observability": prompt_observability_section,
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
         # S4: ONE keyed ``goals`` map is the wire entity (operator decision:
@@ -644,18 +683,12 @@ def _build_snapshot_uncoalesced(
         # snapshot path (conflict state comes from local sidecar files, never a
         # git call). Cards never carry goal state; a linked_goal_id is resolved
         # against the snapshot's goals at render time on the client.
-        "boards": _keyed(
-            _boards_summary(BoardStore(event_log=event_log), {getattr(w, "id", None) for w in workspaces}),
-            "board_id",
-        ),
+        "boards": boards_section,
         # Mission Office projection: surface defs + bounded actor rows, keyed by
         # workspace. Local reads only — conflict state comes from local sidecar
         # files and the `unpublished` honesty flag from the local baseline
         # sidecar; NEVER a git call in the snapshot path.
-        "offices": _keyed(
-            _offices_summary(OfficeStore(event_log=event_log), workspaces),
-            "workspace_id",
-        ),
+        "offices": offices_section,
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
@@ -719,6 +752,7 @@ def _build_snapshot_uncoalesced(
         # operator_channels conversations (their tail slimming is S4's concern).
         # The FRAME carries recency pointers only (S2) — the tail bytes leave, the
         # anchors stay.
+        _persona_chat_started = time.perf_counter()
         persona_chat_history_full = persona_chat_history_summary(
             persona_instances=persona_instances,
             session_db=session_db,
@@ -741,6 +775,9 @@ def _build_snapshot_uncoalesced(
             tasks=tasks,
             run_summaries=run_rows,
             accountant=conversation_accountant,
+        )
+        _sections_ms["persona_chat"] = int(
+            max(0.0, (time.perf_counter() - _persona_chat_started)) * 1000
         )
         live_channel_task_ids = {
             str(channel.get("task_id") or "")
@@ -801,6 +838,18 @@ def _build_snapshot_uncoalesced(
     drop_samples.extend(stage_verification_accountant.drop_samples())
     completeness["mission_flow_timeline"] = flow_timeline_accountant.summary()
     drop_samples.extend(flow_timeline_accountant.drop_samples())
+    # Guarantee the documented section keys exist even when a lane was skipped
+    # (e.g. persona_chat when persona-instance runtime is disabled) so consumers
+    # can rely on a stable shape.
+    for _section_key in (
+        "agents_readiness",
+        "prompt_observability",
+        "events",
+        "persona_chat",
+        "boards_offices",
+    ):
+        _sections_ms.setdefault(_section_key, 0)
+    _parity_started = time.perf_counter()
     data["parity"] = _parity_envelope(
         data,
         build_started=_build_started,
@@ -808,11 +857,15 @@ def _build_snapshot_uncoalesced(
         recent_events=recent_events,
         completeness=completeness,
         drop_samples=drop_samples,
+        sections_ms=_sections_ms,
     )
+    # ``_sections_ms`` is stored by reference in the envelope, so recording the
+    # parity section's own duration after the call is reflected in the frame.
+    _sections_ms["parity"] = int(max(0.0, (time.perf_counter() - _parity_started)) * 1000)
     return data
 
 
-def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples, recent_events=None):
+def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples, recent_events=None, sections_ms=None):
     """The S0 observability envelope: provenance + completeness + parity warnings.
 
     Additive and self-describing — turns the snapshot's silent drops into reported
@@ -861,6 +914,11 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
         "build_ms": int(max(0.0, (time.perf_counter() - build_started)) * 1000),
+        # Additive per-section wall-time breakdown (ms) alongside build_ms — a
+        # small, stable, lowercase-keyed dict so a reader can see where a slow
+        # build spent its time. Held BY REFERENCE so the caller can record the
+        # parity section's own duration after this envelope is assembled.
+        "sections_ms": sections_ms if sections_ms is not None else {},
         "snapshot_bytes": _snapshot_payload_size(data),
         "event_log_bytes": int(watermark.get("event_offset") or 0),
         "projection_age_ms": _projection_age_ms(last_ts),
@@ -4386,7 +4444,12 @@ def _event_display_title(event_type: str, payload: dict, kind: str) -> str:
 
 
 def _agent_summary(agent, *, include_tool_details: bool = False):
-    readiness = profile_readiness_for_persona(agent)
+    # Route through the same TTL-memoized readiness resolve_tool_visibility uses
+    # (below) instead of a direct profile_readiness_for_persona call, so one build
+    # computes readiness at most once per agent instead of twice. Identical result
+    # for this path: readiness is task/stage-independent here, and the memo shares
+    # the exact inputs (id/profile/skills/mcp/provider/model/api_mode).
+    readiness = _profile_readiness_for_visibility(agent)
     tool_resolution = resolve_tool_visibility(agent)
     summary = {
         "persona_id": agent.id,

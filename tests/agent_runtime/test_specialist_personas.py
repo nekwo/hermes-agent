@@ -51,8 +51,11 @@ def test_dev_specialists_share_implementation_toolsets_but_remain_non_qa_roles()
 
 
 def test_snapshot_agent_summaries_are_collection_based_and_redaction_safe(monkeypatch):
+    # _agent_summary sources readiness through the shared TTL-memoized
+    # _profile_readiness_for_visibility seam (one compute per agent per build),
+    # so stub that rather than the raw profile_readiness_for_persona.
     monkeypatch.setattr(
-        "agent_runtime.snapshot.profile_readiness_for_persona",
+        "agent_runtime.snapshot._profile_readiness_for_visibility",
         lambda persona: {
             "readiness": "ready",
             "summary": "ready",

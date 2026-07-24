@@ -205,3 +205,35 @@ def test_profile_readiness_injects_launcher_qa_only_for_visual_scope(monkeypatch
     assert plain["effective_required_mcp_servers"] == []
     assert visual["effective_required_mcp_servers"] == ["launcher_qa"]
     assert visual["missing_mcp_servers"] == ["launcher_qa"]
+
+
+def test_readiness_missing_set_is_single_source_derivation(tmp_path, monkeypatch):
+    """Item 1: profile_readiness derives the missing-skill set from the ONE
+    resolution it already computed (no redundant second resolver walk). The
+    derived set must equal both the rows' ``status == 'missing'`` ids and the
+    re-resolving compatibility wrapper — proving the removal is behavior-identical
+    including duplicate occurrences and order."""
+    import agent.skill_utils as skill_utils
+    from agent_runtime.profile_readiness import (
+        _missing_skill_ids,
+        _missing_skill_names,
+        _resolve_skill_names,
+    )
+
+    shared = tmp_path / "shared"
+    (shared / "present-skill").mkdir(parents=True)
+    (shared / "present-skill" / "SKILL.md").write_text(
+        "---\nname: present-skill\n---\nbody\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [shared])
+
+    names = ["present-skill", "absent-one", "absent-two", "present-skill"]
+    rows = _resolve_skill_names(names)
+    # One row per occurrence, original order preserved (dedup would drop the dup).
+    assert [row["skill_id"] for row in rows] == names
+    derived = _missing_skill_ids(rows)
+    assert derived == ["absent-one", "absent-two"]
+    # The compat wrapper (which re-resolves) agrees with the single-source
+    # derivation from the already-computed rows.
+    assert derived == _missing_skill_names(names)

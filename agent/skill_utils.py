@@ -753,10 +753,34 @@ def _skill_resolution_status(
     return "resolved"
 
 
-def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
-    """Stable content hash for the exact skill package the resolver selected."""
+# Aggregate-mtime keyed cache for skill package content hashes.
+#
+# ``skill_package_content_hash`` was measured at 653 calls / 2.44s across one
+# snapshot core (2026-07-23) — every candidate re-rglob'd + re-read from disk.
+# The returned digest here is byte-identical to the uncached computation (same
+# relpath+bytes algorithm); the cache only skips re-reading files that have not
+# changed. INVALIDATION KEY: ``(base_dir, ((relpath, mtime_ns, size), ...))`` for
+# every member file. A content edit changes ``mtime_ns``/``size`` and misses the
+# cache — the same identity+mtime+size contract as ``_RAW_CONFIG_CACHE`` and
+# ``parse_cache``. It cannot go stale silently on a nested content change: a
+# directory-mtime-only key would (editing a nested file leaves the containing
+# dir's mtime untouched), which is exactly why every member file is stamped.
+_CONTENT_HASH_CACHE: Dict[Tuple[Any, ...], str] = {}
+_CONTENT_HASH_CACHE_MAX = 4096
 
-    digest = hashlib.sha256()
+
+def _content_hash_cache_clear() -> None:
+    """Test hook — drop the skill package content-hash cache."""
+    _CONTENT_HASH_CACHE.clear()
+
+
+def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
+    """Stable content hash for the exact skill package the resolver selected.
+
+    mtime-cached (see ``_CONTENT_HASH_CACHE``): the returned digest is identical
+    to an uncached run; repeats within a build skip re-reading unchanged files.
+    """
+
     if skill_dir is None:
         files = [skill_md]
         base = skill_md.parent
@@ -771,11 +795,28 @@ def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
             )
         ]
         base = skill_dir
-    for source in files:
+
+    def _relative(source: Path) -> str:
         try:
-            relative = "/".join(source.relative_to(base).parts)
+            return "/".join(source.relative_to(base).parts)
         except ValueError:
-            relative = source.name
+            return source.name
+
+    entries: list[tuple[str, Path]] = [(_relative(source), source) for source in files]
+    stamps: list[tuple[str, int | None, int | None]] = []
+    for relative, source in entries:
+        try:
+            st = source.stat()
+            stamps.append((relative, st.st_mtime_ns, st.st_size))
+        except OSError:
+            stamps.append((relative, None, None))
+    cache_key = (str(base), tuple(stamps))
+    cached = _CONTENT_HASH_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    digest = hashlib.sha256()
+    for relative, source in entries:
         digest.update(relative.encode("utf-8", errors="replace"))
         digest.update(b"\x00")
         try:
@@ -783,7 +824,11 @@ def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
         except OSError:
             digest.update(b"<unreadable>")
         digest.update(b"\x00")
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    if len(_CONTENT_HASH_CACHE) >= _CONTENT_HASH_CACHE_MAX:
+        _CONTENT_HASH_CACHE.clear()
+    _CONTENT_HASH_CACHE[cache_key] = value
+    return value
 
 
 def skill_frontmatter_runtime_compatibility(
@@ -832,6 +877,27 @@ def skill_frontmatter_runtime_compatibility(
     }
 
 
+def _cached_skill_frontmatter(skill_md: Path) -> Dict[str, Any]:
+    """mtime-cached frontmatter parse for a SKILL.md manifest.
+
+    ``skill_runtime_compatibility`` is evaluated per skill, per surface, per
+    persona across a snapshot build (~12.9k ``parse_frontmatter`` calls / ~3.8s
+    measured 2026-07-23), yet a manifest's bytes only change when the file
+    changes on disk. Cache the (read_text + parse_frontmatter) by the file's
+    identity+mtime+size (``parse_cache.cached_by_mtime``) so repeats within a
+    build are free while an on-disk edit invalidates the entry. Behavior is
+    identical to the inline parse on a cache miss; the result is read-only, never
+    mutated, so sharing the cached dict is safe.
+    """
+    from agent_runtime.parse_cache import cached_by_mtime
+
+    def _load(path: Path) -> Dict[str, Any]:
+        frontmatter, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        return frontmatter if isinstance(frontmatter, dict) else {}
+
+    return cached_by_mtime(skill_md, _load, default={})
+
+
 def skill_runtime_compatibility(
     candidate: SkillResolutionCandidate | None,
     *,
@@ -842,10 +908,7 @@ def skill_runtime_compatibility(
 
     if candidate is None:
         return {"compatible": False, "reason": "unresolved"}
-    try:
-        frontmatter, _ = parse_frontmatter(candidate.skill_md.read_text(encoding="utf-8"))
-    except Exception:
-        frontmatter = {}
+    frontmatter = _cached_skill_frontmatter(candidate.skill_md)
     return skill_frontmatter_runtime_compatibility(
         frontmatter,
         surface=surface,

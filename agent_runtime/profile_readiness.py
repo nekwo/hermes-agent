@@ -51,7 +51,7 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
         try:
             with persona_profile_context(binding):
                 skill_resolutions = _resolve_skill_names(list(persona.skills))
-                missing_skills = _missing_skill_names(list(persona.skills))
+                missing_skills = _missing_skill_ids(skill_resolutions)
                 skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills), hermes_home=binding.profile_home)
                 cfg_path = binding.profile_home / "config.yaml"
                 raw = cached_yaml_file(cfg_path, default={}) or {}
@@ -67,7 +67,7 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
             issues.append((READINESS_CONFIG_ERROR, f"Profile config read failed: {type(exc).__name__}"))
     else:
         skill_resolutions = _resolve_skill_names(list(persona.skills))
-        missing_skills = _missing_skill_names(list(persona.skills))
+        missing_skills = _missing_skill_ids(skill_resolutions)
         skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills))
         if effective_required_mcp:
             missing_mcp = list(effective_required_mcp)
@@ -122,11 +122,55 @@ def _dominant_issue(issues: list[tuple[str, str]]) -> tuple[str, str]:
     return max(issues, key=lambda item: _SEVERITY.get(item[0], 0))
 
 
+# Provider readiness TTL memo.
+#
+# ``resolve_runtime_provider`` selects a credential and, when a token is near
+# expiry, performs a LIVE OAuth refresh (``refresh_codex_oauth_pure``, ~2.8s and
+# the dominant 8s↔20s snapshot variance driver, measured 2026-07-23). A snapshot
+# is a read-only observability build and must NOT do a network round-trip per
+# agent per build. Cleanly separating "inspect cached token state" from "refresh"
+# lives deep in the auth credential pool and would risk changing auth semantics
+# (explicitly out of scope), so this caches the READINESS ANSWER with a short TTL
+# instead: the same resolve (and, on the TTL boundary, the same possible refresh)
+# runs at most once per 60s per (provider, model), and a genuinely expired
+# credential surfaces the SAME ``auth_attention`` answer it does today — just
+# without a per-build refresh. The memo also keys on the resolver's identity, so
+# a monkeypatched/hot-swapped ``resolve_runtime_provider`` invalidates the entry
+# immediately (same pattern as ``_profile_template_memo``/``_installed_skill_catalog``).
+_PROVIDER_ISSUE_TTL_SECONDS = 60.0
+_provider_issue_memo: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def _provider_issue_cache_clear() -> None:
+    """Test hook — drop the provider readiness TTL memo."""
+    _provider_issue_memo.clear()
+
+
 def _provider_issue(persona) -> tuple[str, str] | None:
-    if not getattr(persona, "provider", None) and not getattr(persona, "model", None):
+    provider = getattr(persona, "provider", None)
+    model = getattr(persona, "model", None)
+    if not provider and not model:
         return None
+    import time
+
+    key = (str(provider or ""), str(model or ""))
+    fn = resolve_runtime_provider
+    now = time.monotonic()
+    entry = _provider_issue_memo.get(key)
+    if (
+        entry is not None
+        and entry["fn"] is fn
+        and now - entry["at"] < _PROVIDER_ISSUE_TTL_SECONDS
+    ):
+        return entry["issue"]
+    issue = _compute_provider_issue(fn, provider, model)
+    _provider_issue_memo[key] = {"at": now, "fn": fn, "issue": issue}
+    return issue
+
+
+def _compute_provider_issue(resolver, provider, model) -> tuple[str, str] | None:
     try:
-        resolve_runtime_provider(requested=persona.provider, target_model=persona.model)
+        resolver(requested=provider, target_model=model)
     except AuthError as exc:
         return (READINESS_AUTH_ATTENTION, _safe_provider_summary(str(exc)))
     except Exception as exc:
@@ -165,7 +209,7 @@ def _configured_mcp_server_names(raw: dict[str, Any]) -> set[str]:
 
 def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
     from agent.skill_utils import (
-        resolve_skill,
+        resolve_skills,
         skill_package_content_hash,
         skill_runtime_compatibility,
     )
@@ -173,12 +217,22 @@ def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
 
     from .skill_install import harness_skill_source
 
+    cleaned = [name for name in (str(item).strip() for item in skill_names) if name]
+    if not cleaned:
+        return []
+    # ONE registry walk for every assigned name. ``resolve_skills`` is the
+    # batched form of ``resolve_skill`` (same authoritative resolver semantics,
+    # same per-name candidates/status) — the per-name loop below was measured at
+    # 102 recursive rglob/scandir walks × ~104ms across one snapshot core
+    # (2026-07-23). Iterate over ``cleaned`` (not the deduped resolver keys) so
+    # a name repeated in ``persona.skills`` still yields one row per occurrence,
+    # exactly as the old per-name loop did.
+    resolutions = resolve_skills(cleaned)
     rows: list[dict[str, Any]] = []
-    for name in skill_names:
-        clean = str(name).strip()
-        if not clean:
+    for clean in cleaned:
+        resolution = resolutions.get(clean)
+        if resolution is None:
             continue
-        resolution = resolve_skill(clean)
         selected = (
             resolution.candidates[0] if len(resolution.candidates) == 1 else None
         )
@@ -237,17 +291,24 @@ def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
     return rows
 
 
+def _missing_skill_ids(skill_resolutions: list[dict[str, Any]]) -> list[str]:
+    """Missing-skill ids derived from already-resolved rows.
+
+    Single source of truth for "missing" (the resolver's ``status == 'missing'``)
+    so ``profile_readiness_for_persona`` derives the missing set from the rows it
+    already computed instead of walking the resolver a second time.
+    """
+
+    return [row["skill_id"] for row in skill_resolutions if row["status"] == "missing"]
+
+
 def _missing_skill_names(
     skill_names: list[str], *, skill_root: Path | None = None
 ) -> list[str]:
     """Compatibility wrapper backed by the canonical effective resolver."""
 
     del skill_root
-    return [
-        row["skill_id"]
-        for row in _resolve_skill_names(skill_names)
-        if row["status"] == "missing"
-    ]
+    return _missing_skill_ids(_resolve_skill_names(skill_names))
 
 
 def _effective_required_mcp_servers(persona, *, task=None, stage=None) -> list[str]:

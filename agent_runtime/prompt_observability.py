@@ -2036,6 +2036,40 @@ class _SkillObservabilityResolver:
     def __init__(self) -> None:
         self._resolutions_by_roots: dict[tuple[str, ...], dict[str, Any]] = {}
         self._hashes: dict[tuple[str, str], str | None] = {}
+        self._shared_catalog: dict[str, dict[str, Any]] | None = None
+        self._realm_rows: list[dict[str, Any]] | None = None
+
+    def shared_catalog(self) -> dict[str, dict[str, Any]]:
+        """Build-scoped ``{slug: catalog_row}`` for the canonical shared skills
+        root.  ``build_shared_catalog`` walks + content-hashes every shared skill;
+        without this memo it re-ran once per projected persona (measured 12× per
+        build, 2026-07-23).  Read-only for callers — the same dict is shared."""
+        if self._shared_catalog is None:
+            catalog: list[dict[str, Any]] = []
+            try:
+                from .skills_inventory import build_shared_catalog
+
+                _, _, catalog = build_shared_catalog()
+            except Exception:
+                catalog = []
+            self._shared_catalog = {
+                str(item.get("slug") or ""): item
+                for item in catalog
+                if isinstance(item, dict)
+            }
+        return self._shared_catalog
+
+    def realm_publish_states(self) -> list[dict[str, Any]]:
+        """Build-scoped realm publish/drift rows.  ``build_realm_publish_states``
+        also re-ran once per projected persona; memoize it for the build."""
+        if self._realm_rows is None:
+            try:
+                from .skills_inventory import build_realm_publish_states
+
+                self._realm_rows = build_realm_publish_states()
+            except Exception:
+                self._realm_rows = []
+        return self._realm_rows
 
     def resolve(self, identifiers: Iterable[str]) -> dict[str, Any]:
         from agent.skill_utils import get_all_skills_dirs, resolve_skills
@@ -2305,18 +2339,25 @@ def available_skills_context(
     rows: list[dict[str, Any]] = []
     shared_by_name: dict[str, dict[str, Any]] = {}
     realm_rows: list[dict[str, Any]] = []
-    try:
-        from .skills_inventory import build_realm_publish_states, build_shared_catalog
+    if skill_resolver is not None:
+        # Hoisted to once-per-build: the build-scoped resolver memoizes both
+        # walks, so every projected persona shares one shared-catalog walk + one
+        # realm publish-state read instead of repeating both per persona.
+        shared_by_name = skill_resolver.shared_catalog()
+        realm_rows = skill_resolver.realm_publish_states()
+    else:
+        try:
+            from .skills_inventory import build_realm_publish_states, build_shared_catalog
 
-        _, _, catalog = build_shared_catalog()
-        shared_by_name = {
-            str(item.get("slug") or ""): item
-            for item in catalog
-            if isinstance(item, dict)
-        }
-        realm_rows = build_realm_publish_states()
-    except Exception:
-        pass
+            _, _, catalog = build_shared_catalog()
+            shared_by_name = {
+                str(item.get("slug") or ""): item
+                for item in catalog
+                if isinstance(item, dict)
+            }
+            realm_rows = build_realm_publish_states()
+        except Exception:
+            pass
     installed = _installed_skill_catalog()
     from agent.skill_utils import (
         resolve_skills,

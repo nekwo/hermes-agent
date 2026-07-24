@@ -467,3 +467,97 @@ class TestNormalizeSkillLookupName:
         monkeypatch.setattr("agent.skill_utils.get_skills_dir", lambda: tmp_path / "skills")
         outside = str(tmp_path / "outside" / "skill")
         assert normalize_skill_lookup_name(outside) == outside
+
+
+def test_skill_package_content_hash_mtime_cache_invalidates_on_edit(tmp_path):
+    """Item 4: the mtime-keyed content-hash cache returns identical hashes on a
+    repeat, and a real on-disk edit (mtime/size change) invalidates the entry —
+    it is never process-lifetime stale for changed content."""
+    import os
+
+    from agent.skill_utils import _content_hash_cache_clear, skill_package_content_hash
+
+    _content_hash_cache_clear()
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    md = skill_dir / "SKILL.md"
+    md.write_text("---\nname: s\n---\nv1\n", encoding="utf-8")
+
+    h1 = skill_package_content_hash(skill_dir, md)
+    assert skill_package_content_hash(skill_dir, md) == h1  # cache hit, identical
+
+    # Same-length edit with an explicitly advanced mtime still invalidates
+    # (proves the cache keys on mtime, not only size).
+    md.write_text("---\nname: s\n---\nvX\n", encoding="utf-8")
+    os.utime(md, ns=(1, 5_000_000_000))
+    h2 = skill_package_content_hash(skill_dir, md)
+    assert h2 != h1
+
+    # The cached value equals a freshly-cleared (uncached) recompute — caching is
+    # transparent, only cost differs.
+    _content_hash_cache_clear()
+    assert skill_package_content_hash(skill_dir, md) == h2
+
+
+def test_skill_runtime_compatibility_mtime_cache_reflects_edit(tmp_path):
+    """Item 3: the frontmatter parse behind skill_runtime_compatibility is
+    mtime-cached; editing the manifest (new mtime/size) is reflected, so the
+    cache never masks an on-disk change."""
+    import os
+
+    from agent.skill_utils import (
+        SkillResolutionCandidate,
+        skill_runtime_compatibility,
+    )
+    from agent_runtime.parse_cache import clear_parse_cache
+
+    clear_parse_cache()
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    md = skill_dir / "SKILL.md"
+    md.write_text(
+        "---\nname: s\nmetadata:\n  hermes:\n    surfaces: [mission_chat]\n---\nbody\n",
+        encoding="utf-8",
+    )
+    cand = SkillResolutionCandidate(
+        root=tmp_path, skill_dir=skill_dir, skill_md=md, source_kind="external"
+    )
+
+    assert skill_runtime_compatibility(cand, surface="mission_chat")["compatible"] is True
+    # Not yet allowed on mission_worker (proves the frontmatter is actually read).
+    assert skill_runtime_compatibility(cand, surface="mission_worker")["compatible"] is False
+
+    md.write_text(
+        "---\nname: s\nmetadata:\n  hermes:\n    surfaces: [mission_chat, mission_worker]\n---\nbody\n",
+        encoding="utf-8",
+    )
+    os.utime(md, ns=(1, 5_000_000_000))
+    assert skill_runtime_compatibility(cand, surface="mission_worker")["compatible"] is True
+
+
+def test_resolve_skills_batched_matches_per_name_resolve_skill(tmp_path):
+    """Item 2: the batched resolve_skills is behavior-equivalent to per-name
+    resolve_skill (same status + same candidate manifests) for present, missing,
+    and collision names."""
+    from agent.skill_utils import resolve_skill, resolve_skills
+
+    local = tmp_path / "local"
+    shared = tmp_path / "shared"
+    local.mkdir()
+    shared.mkdir()
+    _write_skill(shared, "alpha")
+    _write_skill(local, "collide")
+    _write_skill(shared, "collide")
+    roots = [local, shared]
+
+    names = ["alpha", "collide", "missing-one"]
+    batched = resolve_skills(names, roots=roots)
+    for name in names:
+        single = resolve_skill(name, roots=roots)
+        assert batched[name].status == single.status
+        assert [c.skill_md for c in batched[name].candidates] == [
+            c.skill_md for c in single.candidates
+        ]
+    assert batched["alpha"].status == "resolved"
+    assert batched["collide"].status == "collision"
+    assert batched["missing-one"].status == "missing"

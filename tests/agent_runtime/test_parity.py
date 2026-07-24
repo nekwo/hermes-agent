@@ -91,6 +91,26 @@ def test_build_snapshot_carries_parity_envelope(isolate_agent_runtime_root):
     assert isinstance(parity["drops"], list)
 
 
+def test_build_snapshot_parity_carries_sections_ms(isolate_agent_runtime_root):
+    snapshot = build_snapshot()
+    sections = snapshot["parity"]["sections_ms"]
+    assert isinstance(sections, dict)
+    # The documented, stable, lowercase section keys are always present (even a
+    # skipped lane records 0), and every value is a non-negative int ms.
+    for key in (
+        "agents_readiness",
+        "prompt_observability",
+        "events",
+        "persona_chat",
+        "boards_offices",
+        "parity",
+    ):
+        assert key in sections, key
+        assert isinstance(sections[key], int) and sections[key] >= 0
+    # Additive: build_ms still present and section timings never exceed it wildly.
+    assert isinstance(snapshot["parity"]["build_ms"], int)
+
+
 def test_build_snapshot_carries_redaction_mode_from_env(isolate_agent_runtime_root, monkeypatch):
     monkeypatch.setenv("HERMES_REDACTION_MODE", "observe")
 

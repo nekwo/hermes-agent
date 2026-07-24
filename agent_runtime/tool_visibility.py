@@ -262,7 +262,27 @@ def _profile_readiness_for_visibility(persona: AgentPersona) -> dict[str, Any]:
     )
 
 
-@lru_cache(maxsize=128)
+# Readiness is assembled from on-disk profile/skill/config state and is consumed
+# BOTH by resolve_tool_visibility (below) and by the agents-drawer summary
+# (snapshot._agent_summary) — computing it twice per agent per build was pure
+# waste. A short-TTL memo (mirroring _installed_skill_catalog /
+# _profile_template_memo, 15s) shares one computation across both callers within
+# a build. It is NOT a process-lifetime lru_cache: the leaf skill/config reads
+# under profile_readiness_for_persona are themselves mtime-invalidated, and this
+# memo lapses every 15s, so a genuine on-disk change surfaces on the first build
+# after the TTL — never process-lifetime stale. Keyed on the readiness inputs AND
+# the resolver's identity, so a monkeypatched profile_readiness_for_persona
+# invalidates the entry immediately.
+_PROFILE_READINESS_TTL_SECONDS = 15.0
+_PROFILE_READINESS_MEMO_MAX = 512
+_profile_readiness_memo: dict[tuple[Any, ...], dict[str, Any]] = {}
+
+
+def _profile_readiness_cache_clear() -> None:
+    """Test hook — drop the readiness TTL memo."""
+    _profile_readiness_memo.clear()
+
+
 def _cached_profile_readiness_for_visibility(
     persona_id: str,
     hermes_profile: str,
@@ -272,6 +292,26 @@ def _cached_profile_readiness_for_visibility(
     model: str,
     api_mode: str,
 ) -> tuple[tuple[str, Any], ...]:
+    import time
+
+    key = (
+        persona_id,
+        hermes_profile,
+        skills,
+        required_mcp_servers,
+        provider,
+        model,
+        api_mode,
+    )
+    fn = profile_readiness_for_persona
+    now = time.monotonic()
+    entry = _profile_readiness_memo.get(key)
+    if (
+        entry is not None
+        and entry["fn"] is fn
+        and now - entry["at"] < _PROFILE_READINESS_TTL_SECONDS
+    ):
+        return entry["value"]
     persona = AgentPersona(
         id=persona_id,
         display_name=persona_id,
@@ -285,7 +325,11 @@ def _cached_profile_readiness_for_visibility(
         skills=list(skills),
         required_mcp_servers=list(required_mcp_servers),
     )
-    return tuple(profile_readiness_for_persona(persona).items())
+    value = tuple(fn(persona).items())
+    if len(_profile_readiness_memo) >= _PROFILE_READINESS_MEMO_MAX:
+        _profile_readiness_memo.clear()
+    _profile_readiness_memo[key] = {"at": now, "fn": fn, "value": value}
+    return value
 
 
 @lru_cache(maxsize=128)
