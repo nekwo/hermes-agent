@@ -12,7 +12,10 @@ from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction_mode import redaction_observe_enabled
 from .relay_policy import parse_relay_sender_marker
-from .runtime_hud import extract_runtime_context_envelope
+from .runtime_hud import (
+    extract_runtime_context_envelope,
+    extract_skill_preload_envelope,
+)
 from .transcript_order import (
     TURN_SEQ_CONTENT,
     TURN_SEQ_OPERATOR,
@@ -1062,8 +1065,13 @@ def _safe_curated_messages(
             assistant_client_message_ids.add(logical_client_message_id)
         raw_content = raw.get("content") or raw.get("text")
         runtime_context = None
+        skill_preload = None
         if role == "operator":
+            # Composition order is message · skill_preload · runtime_context,
+            # so strip the end-anchored HUD envelope first; the skill-preload
+            # envelope is end-anchored on the remainder.
             raw_content, runtime_context = extract_runtime_context_envelope(raw_content)
+            raw_content, skill_preload = extract_skill_preload_envelope(raw_content)
         curated = _curate_chat_message_text(role, raw_content)
         if not curated:
             continue
@@ -1091,6 +1099,8 @@ def _safe_curated_messages(
         }
         if runtime_context is not None:
             row["runtime_context"] = runtime_context
+        if skill_preload is not None:
+            row["skill_preload"] = skill_preload
         # PRE-C8 RESIDUE PATH: acks stopped entering SessionDB with C8 (they
         # are a presentation-only `turn.ack` stream frame now), but rows
         # persisted before that still carry the finish_reason marker

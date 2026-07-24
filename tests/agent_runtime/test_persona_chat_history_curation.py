@@ -137,6 +137,59 @@ def test_clean_operator_message_is_kept():
     assert rows[0]["text"] == "hi neko"
 
 
+def test_operator_row_strips_skill_preload_and_runtime_context_envelopes():
+    # The required-skill preload and the Runtime Situation HUD ride the
+    # operator's persisted user turn for prompt-cache stability. Both travel in
+    # structural envelopes, and the projection strips both — the operator must
+    # see exactly what they typed, never the injected turn context (live
+    # 2026-07-23: the full harness-runtime-model skill body rendered as the
+    # operator's own message).
+    from agent_runtime.runtime_hud import (
+        render_runtime_context_envelope,
+        render_skill_preload_envelope,
+    )
+
+    skill_envelope = render_skill_preload_envelope(
+        skill_names=["harness-runtime-model"],
+        skill_preload_content=(
+            '[IMPORTANT: Runtime policy requires the "harness-runtime-model" skill '
+            "on this surface.]\n# Harness Runtime Model\nfull skill body"
+        ),
+    )
+    hud_envelope = render_runtime_context_envelope(
+        context_id="ctx_operator_turn",
+        revision="hud_0123456789abcdef",
+        delivery="snapshot",
+        situational_hud_content="## Runtime Situation\n- Scope: realm default",
+    )
+    composed = "\n\n".join(["message launcher dev say hi", skill_envelope, hud_envelope])
+    db = FakeSessionDB([{"role": "user", "content": composed}])
+
+    rows, status = _safe_recent_messages(db, session_id="s1")
+
+    assert status == "safe"
+    assert len(rows) == 1
+    assert rows[0]["role"] == "operator"
+    assert rows[0]["text"] == "message launcher dev say hi"
+    assert rows[0]["skill_preload"] == {"skills": ["harness-runtime-model"]}
+    assert rows[0]["runtime_context"]["revision"] == "hud_0123456789abcdef"
+
+
+def test_operator_row_strips_skill_preload_envelope_without_hud():
+    from agent_runtime.runtime_hud import render_skill_preload_envelope
+
+    skill_envelope = render_skill_preload_envelope(
+        skill_names=["deep-audit"],
+        skill_preload_content="skill body",
+    )
+    db = FakeSessionDB([{"role": "user", "content": f"run the audit\n\n{skill_envelope}"}])
+
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+
+    assert rows[0]["text"] == "run the audit"
+    assert rows[0]["skill_preload"] == {"skills": ["deep-audit"]}
+
+
 def test_long_markdown_agent_message_is_not_preview_truncated():
     body = "\n\n".join(
         [

@@ -1856,6 +1856,18 @@ def _cmd_mission_chat_message(args) -> int:
             preloaded_skill_prompt = ""
             preloaded_skills_loaded = []
             preloaded_skills_missing = list(skills_to_preload)
+    # The preload rides the operator's user turn (cache-stable system prompt),
+    # so it must travel inside its structural envelope — the transcript
+    # projection strips the envelope from the displayed operator text the same
+    # way it strips the runtime-context envelope. Wrapped HERE, at the one
+    # producer of this lane's preload, so the persisted native row is
+    # projection-safe by construction.
+    from agent_runtime.runtime_hud import render_skill_preload_envelope
+
+    preloaded_skill_prompt = render_skill_preload_envelope(
+        skill_names=preloaded_skills_loaded,
+        skill_preload_content=preloaded_skill_prompt,
+    )
     workspace_agents = load_workspace_agents_context(
         getattr(args, "agents_file", None)
     )
@@ -3963,7 +3975,11 @@ def _persona_chat_persistence_failed(
 def _default_persona_session_db():
     try:
         from hermes_state import SessionDB
-        from hermes_constants import get_hermes_head_home, get_hermes_home_override
+        from hermes_constants import (
+            get_hermes_head_home,
+            get_hermes_home_override,
+            hermes_head_home_is_authoritative,
+        )
 
         # The persona-chat SessionDB is the OPERATOR-visible transcript store —
         # the exact DB ``persona_chat_history`` (the snapshot projection) reads.
@@ -3972,12 +3988,19 @@ def _default_persona_session_db():
         # launcher also supplies an explicit HERMES_HEAD_HOME so changing its
         # selected runtime profile cannot split one shared persona-instance
         # pointer across multiple profile-local SessionDBs.
+        #
+        # Fail closed ONLY when no head authority exists: with an override
+        # active and no recorded/configured head, get_hermes_head_home()
+        # degenerates to the override itself and the operator home is unknown.
+        # An authoritative head that happens to EQUAL the override is the
+        # legitimate same-DB case — a persona bound to the head profile (e.g.
+        # Neko on the seeded base profile) relaying in-process. The former
+        # path-equality check conflated the two and killed every relay such a
+        # persona sent (live 2026-07-23, chat_session_db_unavailable).
         override = get_hermes_home_override()
-        head_home = get_hermes_head_home()
-        if override is not None:
-            if head_home == Path(override):
-                raise PersonaChatPersistenceError("session_db_acquire")
-        return SessionDB(db_path=head_home / "state.db")
+        if override is not None and not hermes_head_home_is_authoritative():
+            raise PersonaChatPersistenceError("session_db_acquire")
+        return SessionDB(db_path=get_hermes_head_home() / "state.db")
     except PersonaChatPersistenceError:
         raise
     except Exception as exc:

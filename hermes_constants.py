@@ -111,6 +111,26 @@ def get_hermes_head_home() -> Path:
     return get_hermes_home()
 
 
+def hermes_head_home_is_authoritative() -> bool:
+    """True when :func:`get_hermes_head_home` answers from an explicit head
+    authority — the context-recorded outermost home (relay nesting) or the
+    operator-supplied ``HERMES_HEAD_HOME`` environment value.
+
+    False means the head has degenerated to the ambient :func:`get_hermes_home`
+    resolution, so under an active profile-home override the "head" IS the
+    override and the real operator home is unknown. Operator-visible stores
+    must fail closed in that state instead of writing a transcript into a
+    profile-local DB the Mission Control projection never reads. When the head
+    is authoritative, it may legitimately EQUAL the active override (a persona
+    bound to the operator's own head profile, e.g. the seeded base agent) —
+    that is the same database, not a divergence.
+    """
+    head = _HERMES_HEAD_HOME.get()
+    if head is not _UNSET and head:
+        return True
+    return bool(os.environ.get("HERMES_HEAD_HOME", "").strip())
+
+
 def _get_platform_default_hermes_home() -> Path:
     """Return the platform-native default Hermes home path."""
     if sys.platform == "win32":

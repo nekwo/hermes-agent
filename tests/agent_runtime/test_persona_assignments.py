@@ -2702,7 +2702,16 @@ def test_mission_chat_queues_skill_for_next_turn_once(
 
     assert harness._cmd_mission_chat_message(_message_args("client_skill_1")) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert captured_prompts == ["PRELOADED SKILL PROMPT"]
+    # The preload reaches the runtime inside its structural envelope so the
+    # transcript projection can strip it from the displayed operator text.
+    from agent_runtime.runtime_hud import render_skill_preload_envelope
+
+    expected_preload = render_skill_preload_envelope(
+        skill_names=["deep-audit"],
+        skill_preload_content="PRELOADED SKILL PROMPT",
+    )
+    assert captured_prompts == [expected_preload]
+    assert "PRELOADED SKILL PROMPT" in expected_preload
     assert payload["queued_skills_loaded"] == ["deep-audit"]
     used = payload["prompt_observability"]["used_skills"]
     assert used[0]["name"] == "deep-audit"
@@ -2717,7 +2726,8 @@ def test_mission_chat_queues_skill_for_next_turn_once(
 
     assert harness._cmd_mission_chat_message(_message_args("client_skill_2")) == 0
     json.loads(capsys.readouterr().out)
-    assert captured_prompts == ["PRELOADED SKILL PROMPT", ""]
+    # No skill queued on the second turn -> no envelope at all.
+    assert captured_prompts == [expected_preload, ""]
 
 
 def test_queue_skill_rejects_missing_skill_without_pending_state(

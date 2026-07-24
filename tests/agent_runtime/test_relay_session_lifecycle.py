@@ -387,6 +387,56 @@ def test_explicit_head_home_is_stable_across_launcher_profile_selection(
         assert Path(persona_chat_history._default_session_db().db_path) == shared_head / "state.db"
 
 
+def test_head_bound_persona_override_equal_to_head_home_is_the_same_db(
+    isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    # A persona bound to the operator's own head profile (e.g. Neko on the
+    # seeded ``base`` profile) relays in-process with the override EQUAL to the
+    # authoritative head home. That is the same database, not a lost head —
+    # the acquire must succeed and bind to the head DB. The former
+    # path-equality fail-closed check raised here and killed every relay such
+    # a persona sent (live 2026-07-23: agent_chat_send →
+    # chat_session_db_unavailable in ~20ms).
+    from hermes_cli import harness
+    from hermes_constants import get_hermes_head_home, get_hermes_home
+
+    shared_head = tmp_path / "profiles" / "base"
+    shared_head.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(shared_head))
+
+    with persona_profile_context(_qa_profile_binding(shared_head)):
+        assert get_hermes_home() == shared_head
+        assert get_hermes_head_home() == shared_head
+        db = harness._default_persona_session_db()
+        assert Path(db.db_path) == shared_head / "state.db"
+
+
+def test_override_without_any_head_authority_still_fails_closed(
+    isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    # The original 2026-07-18 incident shape: an override is active but no
+    # head was recorded and no HERMES_HEAD_HOME is configured, so the "head"
+    # degenerates to the override and the operator home is unknown. Writing
+    # there would create a transcript invisible to Mission Control — the
+    # acquire must keep failing closed.
+    from hermes_cli import harness
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    profile_home = tmp_path / "orphan_profile"
+    profile_home.mkdir()
+
+    token = set_hermes_home_override(str(profile_home))
+    try:
+        with pytest.raises(harness.PersonaChatPersistenceError):
+            harness._default_persona_session_db()
+    finally:
+        reset_hermes_home_override(token)
+
+
 def test_relay_under_profile_override_persists_transcript_to_the_projection_home(
     isolate_agent_runtime_root, tmp_path
 ):

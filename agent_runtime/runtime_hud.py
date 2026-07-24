@@ -44,6 +44,20 @@ _RUNTIME_CONTEXT_ENVELOPE_RE = re.compile(
     r'(?P<body>.*?)\n</runtime_context>\s*\Z',
     re.DOTALL,
 )
+# Operator-turn skill-preload envelope. The required/queued skill preload rides
+# the operator's user turn for the same prompt-cache reason the HUD does (see
+# ``_mission_chat_user_message``), so — like the HUD — it needs a structural
+# envelope the transcript projection can strip. Without one, the projection
+# renders the whole skill body as operator-authored text (live 2026-07-23:
+# "message launcher dev say hi" displayed with the full harness-runtime-model
+# skill appended). Same grammar rules as the runtime-context envelope: strict
+# attribute charset, well-formed-only, end-anchored extraction.
+_SKILL_PRELOAD_ENVELOPE_RE = re.compile(
+    r'(?:\n\n)?<skill_preload skills="(?P<skills>[a-zA-Z0-9_.:+-]*(?:,[a-zA-Z0-9_.:+-]+)*)">\n'
+    r'(?P<body>.*?)\n</skill_preload>\s*\Z',
+    re.DOTALL,
+)
+_SKILL_PRELOAD_NAME_RE = re.compile(r"^[a-zA-Z0-9_.:+-]+$")
 
 
 def situational_hud_revision(hud: dict[str, Any] | None) -> str:
@@ -132,6 +146,52 @@ def render_runtime_context_envelope(
         f'<runtime_context context_id="{context_id}" revision="{revision}" '
         f'delivery="{delivery}">\n{body}\n</runtime_context>'
     )
+
+
+def render_skill_preload_envelope(
+    *,
+    skill_names: Iterable[str] | None,
+    skill_preload_content: str | None,
+) -> str:
+    """Wrap the per-turn skill preload in its structural envelope.
+
+    Returns ``""`` when there is nothing to preload, so callers can keep the
+    "join non-empty parts" composition unchanged. Names that fail the strict
+    attribute charset are dropped from the attribute (the body still carries
+    the full preload text) — the attribute exists for projection metadata and
+    must never break extraction.
+    """
+
+    body = (skill_preload_content or "").strip()
+    if not body:
+        return ""
+    names = ",".join(
+        name
+        for name in (str(item or "").strip() for item in (skill_names or ()))
+        if name and _SKILL_PRELOAD_NAME_RE.fullmatch(name)
+    )
+    return f'<skill_preload skills="{names}">\n{body}\n</skill_preload>'
+
+
+def extract_skill_preload_envelope(
+    content: Any,
+) -> tuple[str, dict[str, Any] | None]:
+    """Strip only our final, well-formed skill-preload envelope from a user row.
+
+    Mirrors :func:`extract_runtime_context_envelope`: end-anchored so operator
+    text that merely mentions the tag stays ordinary transcript content. Run it
+    AFTER the runtime-context extraction — composition order is
+    ``message · skill_preload · runtime_context``, so the skill envelope is
+    end-anchored only once the HUD envelope has been stripped.
+    """
+
+    text = content if isinstance(content, str) else str(content or "")
+    match = _SKILL_PRELOAD_ENVELOPE_RE.search(text)
+    if match is None:
+        return text, None
+    skills = [name for name in match.group("skills").split(",") if name]
+    return text[: match.start()].rstrip(), {"skills": skills}
+
 
 def _clean(value: Any) -> bool:
     """True when a value carries information worth emitting."""

@@ -399,6 +399,67 @@ def test_runtime_context_envelope_is_compact_and_strips_only_at_final_boundary()
     assert extract_runtime_context_envelope(authored) == (authored, None)
 
 
+def test_skill_preload_envelope_round_trips_and_strips_only_at_final_boundary():
+    from agent_runtime.runtime_hud import (
+        extract_skill_preload_envelope,
+        render_skill_preload_envelope,
+    )
+
+    envelope = render_skill_preload_envelope(
+        skill_names=["harness-runtime-model"],
+        skill_preload_content='[IMPORTANT: Runtime policy requires the "harness-runtime-model" skill]\n# Harness Runtime Model\nbody',
+    )
+    clean, metadata = extract_skill_preload_envelope(f"message launcher dev say hi\n\n{envelope}")
+    assert clean == "message launcher dev say hi"
+    assert metadata == {"skills": ["harness-runtime-model"]}
+
+    # Nothing to preload → empty string, so composition joins stay unchanged.
+    assert render_skill_preload_envelope(skill_names=["x"], skill_preload_content="  ") == ""
+
+    # Operator-authored text that mentions the tag mid-message stays content.
+    authored = f"please discuss {envelope}\nthen continue"
+    assert extract_skill_preload_envelope(authored) == (authored, None)
+
+    # Names failing the strict attribute charset are dropped from the attribute
+    # without breaking the envelope.
+    quoted = render_skill_preload_envelope(
+        skill_names=['bad"name', "deep-audit"],
+        skill_preload_content="skill body",
+    )
+    _, meta = extract_skill_preload_envelope(f"hi\n\n{quoted}")
+    assert meta == {"skills": ["deep-audit"]}
+
+
+def test_skill_preload_envelope_extracts_between_message_and_runtime_context():
+    # Composition order is message · skill_preload · runtime_context. The
+    # projection strips the HUD envelope first, then the skill envelope is
+    # end-anchored on the remainder — the operator sees only their message.
+    from agent_runtime.runtime_hud import (
+        extract_runtime_context_envelope,
+        extract_skill_preload_envelope,
+        render_runtime_context_envelope,
+        render_skill_preload_envelope,
+    )
+
+    skill_envelope = render_skill_preload_envelope(
+        skill_names=["harness-runtime-model"],
+        skill_preload_content="# Harness Runtime Model\nfull skill body",
+    )
+    hud_envelope = render_runtime_context_envelope(
+        context_id="ctx_compose",
+        revision="hud_0123456789abcdef",
+        delivery="snapshot",
+        situational_hud_content="## Runtime Situation\n- Scope: realm default",
+    )
+    composed = "\n\n".join(["message launcher dev say hi", skill_envelope, hud_envelope])
+
+    remainder, runtime_context = extract_runtime_context_envelope(composed)
+    assert runtime_context is not None
+    clean, skill_preload = extract_skill_preload_envelope(remainder)
+    assert clean == "message launcher dev say hi"
+    assert skill_preload == {"skills": ["harness-runtime-model"]}
+
+
 # --------------------------------------------------------------------------- #
 # Workspace-scoped addressable roster (D1)                                     #
 #                                                                              #
