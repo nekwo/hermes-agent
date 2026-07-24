@@ -33,7 +33,11 @@ from pathlib import Path
 
 import pytest
 
-from agent.skill_utils import _content_hash_cache_clear, resolve_skills
+from agent.skill_utils import (
+    _content_hash_cache_clear,
+    resolve_skills,
+    skill_package_content_hash,
+)
 from agent_runtime.realm_sync import (
     publish_realm_sync,
     pull_realm_sync,
@@ -328,6 +332,105 @@ def test_publish_categorized_package_and_selected_matching(tmp_path):
     ]
     assert "skills/software-development/hermes-agent/SKILL.md" in by_id
     assert "skills/plain/SKILL.md" not in by_id
+
+
+# ── occupancy refusals: pull COMPLETES, package refused, canonical untouched ──
+
+
+def test_pull_refuses_bare_slug_over_existing_category_dir_and_completes(tmp_path):
+    # F1 (regression, pull-wide DoS): canonical holds a CATEGORIZED skill, which
+    # makes top-level ``software-development`` a category dir WITHOUT its own
+    # SKILL.md. A realm publishing a BARE skill of that name must be REFUSED (an
+    # os.replace onto the non-empty category dir would raise and abort the entire
+    # pull); the pull must still COMPLETE and the healthy sibling must promote.
+    realm, repo = _local_realm(tmp_path)
+    _seed_canonical("software-development/hermes-agent", body="# Child\n")
+    child_before = _snapshot(_canonical("software-development/hermes-agent"))
+    _write_subtree_skill(repo, realm, "healthy", files={"SKILL.md": "---\nname: healthy\n---\n# H\n"})
+    _write_subtree_skill(
+        repo, realm, "software-development",
+        files={"SKILL.md": "---\nname: software-development\n---\n# Bare\n"},
+    )
+
+    result = pull_realm_sync(realm.id)
+
+    # Pull completed (never aborted) and the healthy package promoted.
+    assert result["state"] == "pulled"
+    assert "healthy" in result["skill_sync"]["adopted"]
+    # The colliding bare package is refused — not adopted, not held.
+    assert "software-development" in result["skill_sync"]["refused"]
+    assert "software-development" not in result["skill_sync"]["adopted"]
+    assert "software-development" not in result["skill_sync"]["held"]
+    # Canonical category + child untouched; no bare SKILL.md injected.
+    assert not (_canonical("software-development") / "SKILL.md").exists()
+    assert _snapshot(_canonical("software-development/hermes-agent")) == child_before
+    # Refused packages are deliberately NOT surfaced as drift.
+    assert "software-development" not in read_realm_sync_sidecar(realm.id)["skills_drift"]
+
+
+def test_pull_refuses_categorized_into_existing_bare_skill(tmp_path):
+    # F2 (trust boundary): canonical ``foo`` is a BARE skill package. A realm
+    # publishing categorized ``foo/bar`` must be REFUSED — writing bar inside foo
+    # would change foo's content hash and inject a new resolvable skill with no
+    # gate. Pull completes; foo's hash is unchanged; no new ``bar`` resolves.
+    realm, repo = _local_realm(tmp_path)
+    foo = _seed_canonical("foo", body="# Foo bare\n")
+    _content_hash_cache_clear()
+    foo_hash_before = skill_package_content_hash(foo, foo / "SKILL.md")
+    foo_snapshot = _snapshot(_canonical("foo"))
+    _write_subtree_skill(repo, realm, "healthy", files={"SKILL.md": "---\nname: healthy\n---\n# H\n"})
+    _write_subtree_skill(repo, realm, "foo/bar", files={"SKILL.md": "---\nname: bar\n---\n# Bar\n"})
+
+    result = pull_realm_sync(realm.id)
+
+    assert result["state"] == "pulled"
+    assert "healthy" in result["skill_sync"]["adopted"]
+    assert "foo/bar" in result["skill_sync"]["refused"]
+    assert "foo/bar" not in result["skill_sync"]["adopted"]
+    # foo's package hash unchanged; no ``bar`` injected inside it.
+    _content_hash_cache_clear()
+    assert (
+        skill_package_content_hash(_canonical("foo"), _canonical("foo") / "SKILL.md")
+        == foo_hash_before
+    )
+    assert _snapshot(_canonical("foo")) == foo_snapshot
+    assert not (_canonical("foo") / "bar").exists()
+    # No new resolvable ``bar`` skill was injected.
+    assert resolve_skills(["bar"], roots=[get_shared_skills_dir()])["bar"].status == "missing"
+
+
+def test_pull_refuses_reserved_name_package_and_completes(tmp_path, monkeypatch):
+    # F3: a realm publishing a package whose path carries a Windows reserved
+    # device name must be skipped by the mirror (no write) and reported refused,
+    # while the pull COMPLETES and healthy packages promote. A real reserved
+    # dir/file can't be materialized on Windows (the OS forbids it / redirects to
+    # the device), so a benign marker stands in for the device name here; the
+    # reserved-name recognition itself is proven in test_skill_promotion.py.
+    from agent_runtime import skill_promotion
+
+    monkeypatch.setattr(
+        skill_promotion,
+        "is_windows_reserved_component",
+        lambda c: str(c or "").split(".", 1)[0].strip().lower() == "blocked",
+    )
+
+    realm, repo = _local_realm(tmp_path)
+    _write_subtree_skill(repo, realm, "healthy", files={"SKILL.md": "---\nname: healthy\n---\n# H\n"})
+    _write_subtree_skill(repo, realm, "blocked", files={"SKILL.md": "---\nname: blocked\n---\n# B\n"})
+
+    result = pull_realm_sync(realm.id)
+
+    assert result["state"] == "pulled"
+    assert "healthy" in result["skill_sync"]["adopted"]
+    assert "blocked" in result["skill_sync"]["refused"]
+    assert "blocked" not in result["skill_sync"]["adopted"]
+    # Nothing written for the reserved package — neither inbox nor canonical.
+    inbox = realm_inbox_dir(realm.id)
+    assert not (inbox / "blocked").exists()
+    assert not _canonical("blocked").exists()
+    # The healthy package IS mirrored + promoted.
+    assert (inbox / "healthy" / "SKILL.md").is_file()
+    assert (_canonical("healthy") / "SKILL.md").is_file()
 
 
 # ── dry-run pull writes nothing ──────────────────────────────────────────────

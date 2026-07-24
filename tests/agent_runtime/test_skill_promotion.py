@@ -144,6 +144,111 @@ def test_classify_refuse_missing_skill_md(tmp_path):
     assert "SKILL.md" in plan.reason
 
 
+# ── F1: bare slug landing on an existing category dir ────────────────────────
+
+
+def test_classify_refuses_bare_slug_over_existing_category_dir(tmp_path):
+    # Canonical already holds a CATEGORIZED skill, which makes the top-level
+    # ``software-development`` a category dir WITHOUT its own SKILL.md. A realm
+    # publishing a BARE skill of that same name must NOT classify promote_new —
+    # os.replace onto the non-empty category dir would raise and abort the pull.
+    shared = _shared()
+    _write_package(shared, "software-development/hermes-agent", body="# Child\n")
+    src = _write_package(tmp_path / "src", "software-development", body="# Bare\n")
+
+    plan = classify_promotion("software-development", src)
+
+    assert plan.action == "refuse_invalid"
+    # The reason names the occupied canonical path.
+    assert str(shared / "software-development") in plan.reason
+    # Classification is pure — the child package is untouched.
+    assert (shared / "software-development" / "hermes-agent" / "SKILL.md").is_file()
+    assert not (shared / "software-development" / "SKILL.md").exists()
+
+
+def test_classify_refuses_bare_slug_over_canonical_file(tmp_path):
+    # A non-directory occupying the canonical slot is equally un-adoptable.
+    shared = _shared()
+    (shared / "occupied").write_text("i am a file, not a package\n", encoding="utf-8")
+    src = _write_package(tmp_path / "src", "occupied", body="# Bare\n")
+
+    plan = classify_promotion("occupied", src)
+
+    assert plan.action == "refuse_invalid"
+
+
+# ── F2: categorized child whose parent is an existing bare skill ─────────────
+
+
+def test_classify_refuses_categorized_child_of_existing_bare_skill(tmp_path):
+    # Canonical ``foo`` is a BARE skill package (has SKILL.md). A categorized
+    # ``foo/bar`` whose leaf does not yet exist must NOT classify promote_new —
+    # writing bar INSIDE foo would change foo's content hash and inject a new
+    # resolvable skill with no gate (the trust-boundary defect).
+    shared = _shared()
+    foo = _write_package(shared, "foo", body="# Foo bare\n")
+    foo_hash_before = _pkg_hash(foo)
+    src = _write_package(tmp_path / "src", "foo/bar", body="# Bar child\n")
+
+    plan = classify_promotion("foo/bar", src)
+
+    assert plan.action == "refuse_invalid"
+    assert str(shared / "foo") in plan.reason
+    # Parent package is untouched by the pure classification.
+    _content_hash_cache_clear()
+    assert _pkg_hash(foo) == foo_hash_before
+    assert not (shared / "foo" / "bar").exists()
+
+
+def test_classify_categorized_child_ok_when_parent_is_pure_category(tmp_path):
+    # The symmetric happy path: parent is a PURE category dir (no SKILL.md), so a
+    # new categorized child is safe to adopt.
+    shared = _shared()
+    _write_package(shared, "software-development/existing", body="# Sibling\n")
+    src = _write_package(tmp_path / "src", "software-development/newbie", body="# New\n")
+
+    plan = classify_promotion("software-development/newbie", src)
+
+    assert plan.action == "promote_new"
+    assert plan.canonical_dir == shared / "software-development" / "newbie"
+
+
+# ── F3: Windows reserved device names ────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "reserved_slug",
+    [
+        "con",
+        "CON",
+        "con.md",  # reserved check is on the STEM before the first dot
+        "nul",
+        "prn",
+        "aux",
+        "com1",
+        "com9",
+        "lpt1",
+        "lpt9",
+        "software-development/con",  # reserved child of a category
+        "con/child",  # reserved category component
+    ],
+)
+def test_classify_refuses_windows_reserved_slug(tmp_path, reserved_slug):
+    _shared()
+    src = _write_package(tmp_path / "src", "demo")
+    plan = classify_promotion(reserved_slug, src)
+    assert plan.action == "refuse_invalid"
+
+
+@pytest.mark.parametrize("ok_slug", ["com0", "lpt0", "com10", "console", "aux-tool"])
+def test_classify_accepts_non_reserved_lookalikes(tmp_path, ok_slug):
+    # Only con/prn/aux/nul/com1-9/lpt1-9 are reserved — near-misses are fine.
+    _shared()
+    src = _write_package(tmp_path / "src", "demo")
+    plan = classify_promotion(ok_slug, src)
+    assert plan.action == "promote_new"
+
+
 # ── execute ────────────────────────────────────────────────────────────────
 
 
@@ -294,6 +399,90 @@ def test_execute_refuses_invalid_plan_without_writes(tmp_path):
     result = execute_promotion(plan, source={"kind": "path"})
     assert result.action == "refused"
     assert _snapshot(shared) == before
+
+
+def test_execute_toctou_occupied_canonical_returns_refused_not_raise(tmp_path):
+    # F1b: classify a clean promote_new, THEN let the world change so the
+    # canonical slot is occupied by something the plan never anticipated (a
+    # non-package dir holding a child skill). execute_promotion must return a
+    # TYPED refusal — never raise (an os.replace onto the occupied dir would, and
+    # in the pull lane that would abort the whole pull) — and touch nothing.
+    shared = _shared()
+    src = _write_package(tmp_path / "src", "demo", body="# Demo\n")
+    plan = classify_promotion("demo", src)
+    assert plan.action == "promote_new"
+
+    occupied = shared / "demo"
+    occupied.mkdir(parents=True)
+    (occupied / "child").mkdir()
+    (occupied / "child" / "SKILL.md").write_text(
+        "---\nname: child\n---\n# c\n", encoding="utf-8"
+    )
+    before = _snapshot(shared)
+
+    result = execute_promotion(plan, source={"kind": "realm", "realm_id": "r"})
+
+    assert isinstance(result, PromotionResult)
+    assert result.action == "refused"
+    assert "install time" in result.reason
+    # Canonical untouched, no provenance written.
+    assert _snapshot(shared) == before
+    assert promotion_provenance("demo") is None
+
+
+# ── F3: mirror-level reserved-name skip ─────────────────────────────────────
+
+
+def test_is_windows_reserved_component_matrix():
+    from agent_runtime.skill_promotion import is_windows_reserved_component
+
+    for reserved in ("con", "CON", "Con", "con.md", "con.tar.gz", "nul", "prn",
+                     "aux", "com1", "com9", "lpt1", "lpt9", "  con  "):
+        assert is_windows_reserved_component(reserved), reserved
+    for ok in ("con0", "com0", "com10", "lpt0", "console", "aux-tool", "nulled",
+               "a.con", "", "software-development"):
+        assert not is_windows_reserved_component(ok), ok
+
+
+def test_mirror_skips_reserved_name_package(tmp_path, monkeypatch):
+    # The pull MIRROR must skip a package whose path components include a Windows
+    # reserved device name BEFORE any write (creating a ``con`` dir crashes the
+    # mirror on Windows → pull DoS) and report it so the caller records it
+    # refused. A real reserved dir/file can't be materialized on Windows at all
+    # (the OS forbids it or silently redirects to the device), so this decouples
+    # the mirror's skip-and-report machinery from OS quirks by treating a benign
+    # marker as "reserved" — ``is_windows_reserved_component`` itself is proven
+    # over the real device names by ``test_is_windows_reserved_component_matrix``.
+    from agent_runtime import skill_promotion
+    from agent_runtime.realm_sync import _mirror_realm_skill_inbox
+
+    monkeypatch.setattr(
+        skill_promotion,
+        "is_windows_reserved_component",
+        lambda c: str(c or "").split(".", 1)[0].strip().lower() == "blocked",
+    )
+
+    src = tmp_path / "skills"
+    (src / "ok").mkdir(parents=True)
+    (src / "ok" / "SKILL.md").write_text("---\nname: ok\n---\n# ok\n", encoding="utf-8")
+    # A package literally named after the (marker) reserved device...
+    (src / "blocked").mkdir()
+    (src / "blocked" / "SKILL.md").write_text("---\nname: blocked\n---\n# b\n", encoding="utf-8")
+    # ...and a healthy package that merely CONTAINS a reserved-named file — its
+    # whole family must be quarantined (never half-written).
+    (src / "carrier").mkdir()
+    (src / "carrier" / "SKILL.md").write_text("---\nname: carrier\n---\n# c\n", encoding="utf-8")
+    (src / "carrier" / "blocked.md").write_text("device\n", encoding="utf-8")
+
+    inbox = tmp_path / "inbox"
+    removed, reserved = _mirror_realm_skill_inbox(src, inbox)
+
+    assert removed == []
+    assert reserved == ["blocked", "carrier"]
+    # The healthy package IS mirrored; both reserved families are written NOWHERE.
+    assert (inbox / "ok" / "SKILL.md").is_file()
+    assert not (inbox / "blocked").exists()
+    assert not (inbox / "carrier").exists()
 
 
 def test_categorized_slug_round_trip(tmp_path):

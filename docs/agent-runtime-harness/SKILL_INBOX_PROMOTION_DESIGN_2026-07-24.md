@@ -247,6 +247,54 @@ Update existing tests that assert skills pull straight into the shared root
 - Provenance-driven update notifications.
 - skills_inventory/Launcher picker support for categorized selection slugs.
 
+## Post-review hardening (2026-07-24, adversarial review confirmed 4 defects)
+
+Fixes landed on `feat/skill-inbox-promotion` after an adversarial reviewer
+reproduced four defects. They tighten C2/C3 without changing the target model:
+
+- **Symmetric occupancy rule in `classify_promotion` (F1a + F2).** The canonical
+  target *and*, for a categorized slug, its parent must each be
+  *unoccupied-or-compatible* before an adopt is safe:
+  - a bare slug whose canonical path exists as a **non-skill-package** (a
+    category dir without `SKILL.md`, or a file) → `refuse_invalid` (previously
+    `promote_new`, which then `os.replace`d onto the non-empty dir and raised —
+    aborting the whole pull; repro: canonical `software-development/hermes-agent`
+    vs a realm publishing bare `software-development`);
+  - a categorized `<cat>/<child>` whose **parent** `<cat>` is an existing bare
+    skill package → `refuse_invalid` (previously wrote the child *inside* the
+    parent, changing the parent's content hash and injecting an ungated
+    resolvable skill).
+- **TOCTOU guard in `execute_promotion` (F1b).** Before `_atomic_install`, if the
+  canonical slot is unexpectedly occupied (a concurrent writer, or a non-package
+  dir that slipped past classification) it returns a typed `refused`
+  `PromotionResult` instead of raising; the install itself is wrapped so any
+  `OSError` also degrades to `refused`, never an exception.
+- **Per-package isolation in `apply_skill_inbox_pull` (F1c).** Each inbox package
+  is classified/executed inside its own `try`; a refusing *or* raising package is
+  recorded and reconciliation continues — one bad package can never abort the
+  pull. `SkillSyncSummary` gains an additive **`refused`** list (in `as_dict()`
+  and `result["skill_sync"]`) beside `adopted/converged/held/removed`. Refused
+  packages are deliberately **kept out of `skills_drift`** (which stays the
+  held-divergent set, `list[str]` shape unchanged) — they surface only in
+  `refused`.
+- **Windows reserved device names (F3).** `_validate_slug` rejects any component
+  whose stem is a reserved device (`con`/`prn`/`aux`/`nul`/`com1-9`/`lpt1-9`,
+  case-insensitive, extension-ignoring — `con.md` too), via the shared
+  `is_windows_reserved_component` helper. The pull **mirror** skips (and reports
+  as `refused`) any package whose path components include a reserved name
+  *before* any write, on every platform, so a realm publishing `con` cannot
+  crash the mirror.
+
+`result["skill_sync"]` shape after this work:
+`{"adopted": [...], "converged": [...], "held": [...], "removed": [...], "refused": [...]}`.
+
+## Out of scope (recorded, do not build)
+
+- Mission Control inbox UI (Launcher-side slice; later).
+- Multi-level (>1 category) skill nesting.
+- Provenance-driven update notifications.
+- skills_inventory/Launcher picker support for categorized selection slugs.
+
 ## Deploy note
 
 The live runtime runs from the installed venv (`.hermes\venvs\hermes-agent`),

@@ -74,6 +74,37 @@ _ARCHIVE_DIRNAME = ".archive"
 # a single ``/`` (multi-level nesting is out of scope — design §"Out of scope").
 _SLUG_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
 
+# Windows reserved device basenames. A path component whose STEM (the text
+# before the first ``.``, case-insensitive, trailing dots/spaces stripped)
+# resolves to one of these names is illegal as a directory/file on Windows —
+# ``con``, ``con.md``, ``NUL`` etc. all address the device, not a path — so a
+# realm publishing a package named after one would crash the inbox mirror on
+# Windows (a pull DoS). Rejected here in :func:`_validate_slug` (so it can never
+# be promoted) and skipped by the pull mirror (``_mirror_realm_skill_inbox``)
+# before any write is attempted, on every platform for deterministic behaviour.
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{i}" for i in range(1, 10)),
+        *(f"lpt{i}" for i in range(1, 10)),
+    }
+)
+
+
+def is_windows_reserved_component(component: str) -> bool:
+    """True when a single path component maps to a Windows reserved device name.
+
+    Windows resolves ``con``, ``con.txt``, ``CON``, ``nul``, ``com1`` … to the
+    device regardless of extension or case, and strips trailing dots/spaces, so
+    the check is on the lower-cased stem (text before the first ``.``, trimmed).
+    """
+
+    stem = str(component or "").split(".", 1)[0].strip().rstrip(".").lower()
+    return stem in _WINDOWS_RESERVED_NAMES
+
 
 # ── Dataclasses (pinned API) ───────────────────────────────────────────────
 
@@ -162,8 +193,10 @@ def _validate_slug(skill: str) -> str | None:
     :data:`_SLUG_COMPONENT_RE`, must not be ``.``/``..`` and must not start with
     a dot (dot-leading components are how the excluded ``.realm_inbox`` /
     ``.provenance`` / ``.archive`` dirs are named — they can never be a promotion
-    target). Traversal, absolute and drive-letter shapes are rejected as a side
-    effect of the alphabet (no ``/`` inside a component, no ``\\``, no ``:``).
+    target), and must not resolve to a Windows reserved device name (``con``,
+    ``nul``, ``com1`` … — including with an extension like ``con.md``). Traversal,
+    absolute and drive-letter shapes are rejected as a side effect of the
+    alphabet (no ``/`` inside a component, no ``\\``, no ``:``).
     """
 
     raw = str(skill or "").strip()
@@ -187,6 +220,8 @@ def _validate_slug(skill: str) -> str | None:
             return "dot-leading slug component is not allowed"
         if not _SLUG_COMPONENT_RE.match(part):
             return f"invalid slug component {part!r}"
+        if is_windows_reserved_component(part):
+            return f"reserved device name in skill slug component {part!r}"
     return None
 
 
@@ -242,6 +277,65 @@ def classify_promotion(skill: str, source_dir: Path) -> PromotionPlan:
         )
 
     source_hash = _package_hash(source_dir)
+
+    # Symmetric occupancy guard — the canonical target and (for a categorized
+    # slug) its parent must each be unoccupied-or-compatible before an adopt can
+    # be safe. Refuse rather than ``promote_new`` when either slot is occupied by
+    # something the promotion door cannot treat as a skill package:
+    #
+    #   F2 — categorized ``<cat>/<child>`` whose PARENT ``<cat>`` is an existing
+    #        BARE skill package (has SKILL.md): writing the child INSIDE it would
+    #        silently change the parent's content hash and inject a new resolvable
+    #        skill with no gate. The parent may only be nothing or a pure category
+    #        dir (a dir WITHOUT a SKILL.md).
+    #   F1 — the target ``<slug>`` exists but is NOT a skill package (a dir
+    #        without a SKILL.md — e.g. a category dir holding child skills — or a
+    #        non-directory). ``execute_promotion`` would ``os.replace`` onto it and
+    #        raise, aborting the whole pull. It may only be nothing (adopt) or a
+    #        skill package (for the identical/divergent comparison below).
+    parts = slug.split("/")
+    if len(parts) == 2:
+        parent_dir = get_shared_skills_dir() / parts[0]
+        if parent_dir.exists() and not parent_dir.is_dir():
+            return PromotionPlan(
+                skill=slug,
+                action="refuse_invalid",
+                source_dir=source_dir,
+                source_hash=source_hash,
+                canonical_dir=canonical_dir,
+                canonical_hash=None,
+                reason=(
+                    f"parent path {parent_dir} is occupied by a non-directory — "
+                    "cannot host a categorized skill"
+                ),
+            )
+        if _has_skill_md(parent_dir):
+            return PromotionPlan(
+                skill=slug,
+                action="refuse_invalid",
+                source_dir=source_dir,
+                source_hash=source_hash,
+                canonical_dir=canonical_dir,
+                canonical_hash=None,
+                reason=(
+                    f"parent path {parent_dir} is an existing skill package — "
+                    "refusing to write a categorized child inside a bare skill"
+                ),
+            )
+
+    if canonical_dir.exists() and not _has_skill_md(canonical_dir):
+        return PromotionPlan(
+            skill=slug,
+            action="refuse_invalid",
+            source_dir=source_dir,
+            source_hash=source_hash,
+            canonical_dir=canonical_dir,
+            canonical_hash=None,
+            reason=(
+                f"canonical path {canonical_dir} is occupied by a non-skill-package "
+                "(directory without SKILL.md, or a file) — refusing to overwrite"
+            ),
+        )
 
     if not _has_skill_md(canonical_dir):
         return PromotionPlan(
@@ -459,7 +553,35 @@ def execute_promotion(
         previous_hash = plan.canonical_hash
         archived_previous_to = _archive_package(plan.canonical_dir, plan.skill)
 
-    _atomic_install(plan.source_dir, plan.canonical_dir)
+    # TOCTOU / occupancy guard. The canonical slot must be empty now:
+    # ``promote_new`` was classified against no canonical copy, and an adopt just
+    # archived the previous package away. If something the plan did not
+    # anticipate occupies it — a concurrent writer, or a non-package dir (e.g. a
+    # category dir holding child skills) that slipped past classification — refuse
+    # instead of ``os.replace``-ing onto it, which raises and, in the pull lane,
+    # would abort the entire ``pull_realm_sync``. Never overwrite blind.
+    if plan.canonical_dir.exists():
+        return PromotionResult(
+            skill=plan.skill,
+            action="refused",
+            archived_previous_to=archived_previous_to,
+            provenance_path=None,
+            reason=(
+                f"canonical path {plan.canonical_dir} is unexpectedly occupied at "
+                "install time — refusing to overwrite (canonical left untouched)"
+            ),
+        )
+
+    try:
+        _atomic_install(plan.source_dir, plan.canonical_dir)
+    except OSError as exc:
+        return PromotionResult(
+            skill=plan.skill,
+            action="refused",
+            archived_previous_to=archived_previous_to,
+            provenance_path=None,
+            reason=f"atomic install failed ({exc}) — canonical left untouched",
+        )
     provenance_path = _write_provenance(
         plan.skill,
         content_hash=plan.source_hash or _package_hash(plan.canonical_dir),

@@ -192,8 +192,9 @@ def test_publish_refuses_duplicate_profile_skill_authority(
     assert exc.value.safe_details["resolution_status"] == "collision"
 
 
-def test_sync_destination_routes_skills_to_inbox_not_shared_root(isolate_agent_runtime_root):
-    from agent_runtime.realm_sync import _destination_for_sync_path
+def test_sync_destination_routes_skills_to_inbox_not_shared_root(isolate_agent_runtime_root, tmp_path):
+    from agent_runtime.realm_sync import _destination_for_sync_path, _mirror_realm_skill_inbox
+    from agent_runtime.skill_promotion import classify_promotion, realm_inbox_dir
 
     # C3: skills no longer pull straight into the canonical shared root through
     # the generic overwrite loop. Every skills/* path leaves the loop (returns
@@ -202,8 +203,35 @@ def test_sync_destination_routes_skills_to_inbox_not_shared_root(isolate_agent_r
     # can never silently clobber a local canonical skill of the same id.
     assert _destination_for_sync_path("skills/foo/references/guide.md") is None
     assert _destination_for_sync_path("skills/foo/SKILL.md") is None
-    # A hostile realm repo still cannot escape (and never reaches the shared root).
-    assert _destination_for_sync_path("skills/foo/../evil.md") is None
+
+    # Real (non-vacuous) traversal proof: the INBOX MIRROR route confines every
+    # write strictly UNDER the realm inbox — a hostile source tree can never
+    # escape it — and the guarded promotion door refuses traversal / absolute /
+    # drive-letter / multi-level slugs so none can become canonical. (The old
+    # ``_destination_for_sync_path("skills/foo/../evil.md") is None`` assertion was
+    # vacuous: EVERY skills/* path returns None regardless of traversal.)
+    source_skills = tmp_path / "subtree" / "skills"
+    (source_skills / "legit").mkdir(parents=True)
+    (source_skills / "legit" / "SKILL.md").write_text(
+        "---\nname: legit\n---\n# L\n", encoding="utf-8"
+    )
+    inbox = realm_inbox_dir("hostile-realm")
+    removed, reserved = _mirror_realm_skill_inbox(source_skills, inbox)
+    assert removed == [] and reserved == []
+    written = [p for p in inbox.rglob("*") if p.is_file()]
+    assert written, "mirror should have written the legit package"
+    inbox_resolved = inbox.resolve()
+    for path in written:
+        # Every mirrored file is strictly contained under the inbox root — no
+        # write escapes to a parent/sibling location.
+        assert inbox_resolved in path.resolve().parents
+    assert not (inbox.parent / "evil.md").exists()
+
+    # The guarded promotion door refuses hostile slugs outright — never promoted,
+    # so never written to the canonical root.
+    for hostile in ("../x", "a/../../x", "/abs/x", "C:evil", "skills/../x"):
+        plan = classify_promotion(hostile, source_skills / "legit")
+        assert plan.action == "refuse_invalid", hostile
 
 
 def test_realm_sync_status_cli_uses_stage42_envelope(isolate_agent_runtime_root, tmp_path):

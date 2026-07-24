@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -25,6 +26,8 @@ from .models import AgentPersona, Event, Realm, Workspace
 from .profile_context import active_profile_name, resolve_persona_profile
 from .skill_install import HARNESS_SKILLS, install_harness_skills, install_harness_skills_for_personas
 from .store import RealmStore, WorkspaceStore
+
+logger = logging.getLogger(__name__)
 
 
 SYNC_STATES = {"in_sync", "behind", "ahead", "conflict", "publishing"}
@@ -1440,13 +1443,20 @@ class SkillSyncSummary:
     root, ``converged`` already matched canonical (no write), ``held`` diverge and
     were quarantined without touching canonical (an operator resolves them via
     ``hermes harness skills promote --adopt-divergent``), ``removed`` were pruned
-    from the inbox because the realm no longer publishes them. All lists are
-    sorted, de-duplicated skill slugs (bare or ``<category>/<name>``)."""
+    from the inbox because the realm no longer publishes them, and ``refused`` are
+    packages the guarded door would not admit — an invalid/hostile/reserved slug,
+    a canonical slot occupied by a non-skill-package (a bare-slug landing on an
+    existing category dir, or a categorized child whose parent is a bare skill),
+    or a per-package error — isolated so ONE bad package can never abort the pull.
+    Refused packages are deliberately kept OUT of ``skills_drift`` (which stays the
+    held-divergent set the operator resolves); they are surfaced only here. All
+    lists are sorted, de-duplicated skill slugs (bare or ``<category>/<name>``)."""
 
     adopted: list[str]
     converged: list[str]
     held: list[str]
     removed: list[str]
+    refused: list[str]
 
     def as_dict(self) -> dict[str, list[str]]:
         return {
@@ -1454,6 +1464,7 @@ class SkillSyncSummary:
             "converged": list(self.converged),
             "held": list(self.held),
             "removed": list(self.removed),
+            "refused": list(self.refused),
         }
 
 
@@ -1480,49 +1491,75 @@ def apply_skill_inbox_pull(realm: Realm, subtree: Path) -> SkillSyncSummary:
     """
 
     from .skill_promotion import (
+        _iter_packages,
         classify_promotion,
         execute_promotion,
-        list_inbox_packages,
         realm_inbox_dir,
     )
 
     inbox = realm_inbox_dir(realm.id)
-    removed = _mirror_realm_skill_inbox(subtree / "skills", inbox)
+    removed, reserved_refused = _mirror_realm_skill_inbox(subtree / "skills", inbox)
 
     adopted: list[str] = []
     converged: list[str] = []
     held: list[str] = []
-    for row in list_inbox_packages(realm.id):
-        slug = row["skill"]
-        plan = classify_promotion(slug, row["source_dir"])
-        if plan.action == "promote_new":
-            result = execute_promotion(
-                plan,
-                source={"kind": "realm", "realm_id": realm.id},
-                move_source=False,
-            )
-            if result.action == "promoted":
-                adopted.append(slug)
-            elif result.action == "held":
+    # Packages the mirror skipped (a reserved device-name component would crash a
+    # Windows write) start the refused set; each is already NOT on disk.
+    refused: list[str] = list(reserved_refused)
+    # Iterate the mirrored inbox package-by-package with per-package isolation:
+    # a package that refuses OR raises (a malformed source, a TOCTOU-occupied
+    # canonical slot, an unexpected I/O error) must never abort the whole pull —
+    # it is recorded as ``refused`` and reconciliation continues (F1c).
+    for slug, source_dir in _iter_packages(inbox):
+        try:
+            plan = classify_promotion(slug, source_dir)
+            if plan.action == "promote_new":
+                result = execute_promotion(
+                    plan,
+                    source={"kind": "realm", "realm_id": realm.id},
+                    move_source=False,
+                )
+                if result.action == "promoted":
+                    adopted.append(slug)
+                elif result.action == "held":
+                    held.append(slug)
+                else:  # 'refused' / anything non-terminal — never became canonical
+                    refused.append(slug)
+            elif plan.action == "noop_identical":
+                converged.append(slug)
+            elif plan.action == "hold_divergent":
                 held.append(slug)
-        elif plan.action == "noop_identical":
-            converged.append(slug)
-        elif plan.action == "hold_divergent":
-            held.append(slug)
-        # refuse_* packages are neither adopted nor held — a malformed inbox
-        # package simply never becomes canonical (accounted by omission).
+            else:  # refuse_invalid / refuse_ambiguous_source
+                refused.append(slug)
+        except Exception:  # noqa: BLE001 — one bad package must not abort the pull
+            logger.exception(
+                "skill inbox reconcile raised for %r (realm %s); refusing package",
+                slug,
+                realm.id,
+            )
+            refused.append(slug)
     return SkillSyncSummary(
         adopted=sorted(set(adopted)),
         converged=sorted(set(converged)),
         held=sorted(set(held)),
         removed=sorted(set(removed)),
+        refused=sorted(set(refused)),
     )
 
 
-def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> list[str]:
+def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> tuple[list[str], list[str]]:
     """Mirror ``source_skills`` (the pulled ``subtree/skills``) into ``inbox`` as
-    an LF-canonical, resolver-invisible copy; return the top-level packages pruned
-    (present in the inbox, gone from the subtree).
+    an LF-canonical, resolver-invisible copy.
+
+    Returns ``(removed, reserved_refused)``: ``removed`` are the top-level packages
+    pruned (present in the inbox, gone from the subtree); ``reserved_refused`` are
+    the top-level packages skipped WITHOUT any write because a relative path
+    component maps to a Windows reserved device name (``con`` / ``nul`` /
+    ``com1`` … — a realm publishing such a package would otherwise crash the
+    mirror on Windows, a pull DoS). Reserved packages are skipped on every
+    platform for deterministic behaviour (a reserved slug can never be promoted
+    anyway — ``_validate_slug`` refuses it) and reported so the caller can record
+    them as ``refused``.
 
     Text is LF-normalized at this write chokepoint (matching the publisher's
     ``_canonicalize_text_bytes``) so a package converges against an LF canonical
@@ -1533,7 +1570,15 @@ def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> list[str]:
     publish EOL guard, ``test_realm_sync_eol.py``).
     """
 
-    desired: dict[str, bytes] = {}
+    from .skill_promotion import is_windows_reserved_component
+
+    # First pass: collect legal source files and the set of top-level package
+    # families that contain a reserved-device-name component anywhere in their
+    # subtree. Any file under such a family is skipped BEFORE a write is attempted
+    # (creating a dir/file named ``con`` on Windows fails), and the whole family
+    # is quarantined out so a package is never partially mirrored.
+    reserved_tops: set[str] = set()
+    candidates: list[tuple[tuple[str, ...], Path]] = []
     if source_skills.is_dir():
         for src in sorted(p for p in source_skills.rglob("*") if p.is_file()):
             rel_parts = src.relative_to(source_skills).parts
@@ -1541,7 +1586,18 @@ def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> list[str]:
             # (rglob cannot emit ``..``, but guard defensively regardless).
             if any(part in ("", ".", "..") for part in rel_parts):
                 continue
-            desired["/".join(rel_parts)] = _canonicalize_text_bytes(src.read_bytes())
+            if any(is_windows_reserved_component(part) for part in rel_parts):
+                reserved_tops.add(rel_parts[0])
+                continue
+            candidates.append((rel_parts, src))
+
+    desired: dict[str, bytes] = {}
+    for rel_parts, src in candidates:
+        # A sibling file of a reserved path within the same top-level family is
+        # dropped too, so the family is quarantined whole (never half-written).
+        if rel_parts[0] in reserved_tops:
+            continue
+        desired["/".join(rel_parts)] = _canonicalize_text_bytes(src.read_bytes())
 
     existing: dict[str, bytes] = {}
     if inbox.is_dir():
@@ -1550,7 +1606,7 @@ def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> list[str]:
 
     desired_top = {rel.split("/", 1)[0] for rel in desired}
     existing_top = {rel.split("/", 1)[0] for rel in existing}
-    removed = sorted(existing_top - desired_top)
+    removed = sorted(existing_top - desired_top - reserved_tops)
 
     for rel, data in desired.items():
         prior = existing.get(rel)
@@ -1564,7 +1620,7 @@ def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> list[str]:
         if rel not in desired:
             inbox.joinpath(*rel.split("/")).unlink()
     _prune_empty_dirs(inbox)
-    return removed
+    return removed, sorted(reserved_tops)
 
 
 def _prune_empty_dirs(root: Path) -> None:
