@@ -52,8 +52,8 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "stream_frames"
 
 @pytest.fixture
 def set_delta_patches(monkeypatch):
-    """Flip ``read_model.delta_patches`` for BOTH the producer chokepoints and
-    the stream lane (both read it through ``load_agent_runtime_config``)."""
+    """Flip ``read_model.delta_patches`` for BOTH the producer chokepoints
+    (root-pinned via ``load_root_runtime_config``) and the stream lane."""
 
     from agent_runtime import state_patches as sp
     from agent_runtime import stream as st
@@ -65,7 +65,10 @@ def set_delta_patches(monkeypatch):
             cfg.read_model.delta_patches = enabled
             return cfg
 
-        monkeypatch.setattr(sp, "load_agent_runtime_config", _loader)
+        # The producer flag reader (_delta_patches_enabled) is pinned to the
+        # ROOT config via load_root_runtime_config(); patch that symbol so the
+        # fixture still injects the flag through the reader's actual loader.
+        monkeypatch.setattr(sp, "load_root_runtime_config", _loader)
         monkeypatch.setattr(st, "delta_patches_enabled", lambda config=None: enabled)
 
     return _apply
