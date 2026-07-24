@@ -171,7 +171,8 @@ def test_operator_row_strips_skill_preload_and_runtime_context_envelopes():
     assert len(rows) == 1
     assert rows[0]["role"] == "operator"
     assert rows[0]["text"] == "message launcher dev say hi"
-    assert rows[0]["skill_preload"] == {"skills": ["harness-runtime-model"]}
+    assert rows[0]["skill_preload"]["skills"] == ["harness-runtime-model"]
+    assert rows[0]["skill_preload"]["delivery"] == "snapshot"
     assert rows[0]["runtime_context"]["revision"] == "hud_0123456789abcdef"
 
 
@@ -187,7 +188,30 @@ def test_operator_row_strips_skill_preload_envelope_without_hud():
     rows, _ = _safe_recent_messages(db, session_id="s1")
 
     assert rows[0]["text"] == "run the audit"
-    assert rows[0]["skill_preload"] == {"skills": ["deep-audit"]}
+    assert rows[0]["skill_preload"]["skills"] == ["deep-audit"]
+
+
+def test_operator_row_strips_unchanged_skill_preload_stub():
+    # Later turns carry the compact "unchanged" stub instead of the full body;
+    # the projection strips it the same way.
+    from agent_runtime.runtime_hud import (
+        render_skill_preload_envelope,
+        skill_preload_revision,
+    )
+
+    body = "# Harness Runtime Model\nfull skill body"
+    stub = render_skill_preload_envelope(
+        skill_names=["harness-runtime-model"],
+        skill_preload_content=body,
+        revision=skill_preload_revision(body),
+        delivery="unchanged",
+    )
+    db = FakeSessionDB([{"role": "user", "content": f"and the next step?\n\n{stub}"}])
+
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+
+    assert rows[0]["text"] == "and the next step?"
+    assert rows[0]["skill_preload"]["delivery"] == "unchanged"
 
 
 def test_long_markdown_agent_message_is_not_preview_truncated():

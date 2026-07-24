@@ -403,15 +403,21 @@ def test_skill_preload_envelope_round_trips_and_strips_only_at_final_boundary():
     from agent_runtime.runtime_hud import (
         extract_skill_preload_envelope,
         render_skill_preload_envelope,
+        skill_preload_revision,
     )
 
+    body = '[IMPORTANT: Runtime policy requires the "harness-runtime-model" skill]\n# Harness Runtime Model\nbody'
     envelope = render_skill_preload_envelope(
         skill_names=["harness-runtime-model"],
-        skill_preload_content='[IMPORTANT: Runtime policy requires the "harness-runtime-model" skill]\n# Harness Runtime Model\nbody',
+        skill_preload_content=body,
     )
     clean, metadata = extract_skill_preload_envelope(f"message launcher dev say hi\n\n{envelope}")
     assert clean == "message launcher dev say hi"
-    assert metadata == {"skills": ["harness-runtime-model"]}
+    assert metadata == {
+        "skills": ["harness-runtime-model"],
+        "revision": skill_preload_revision(body),
+        "delivery": "snapshot",
+    }
 
     # Nothing to preload → empty string, so composition joins stay unchanged.
     assert render_skill_preload_envelope(skill_names=["x"], skill_preload_content="  ") == ""
@@ -427,7 +433,14 @@ def test_skill_preload_envelope_round_trips_and_strips_only_at_final_boundary():
         skill_preload_content="skill body",
     )
     _, meta = extract_skill_preload_envelope(f"hi\n\n{quoted}")
-    assert meta == {"skills": ["deep-audit"]}
+    assert meta["skills"] == ["deep-audit"]
+
+    # Rows persisted by the envelope's first revision carry no
+    # revision/delivery attributes — they must keep stripping.
+    legacy = '<skill_preload skills="deep-audit">\nskill body\n</skill_preload>'
+    legacy_clean, legacy_meta = extract_skill_preload_envelope(f"hi\n\n{legacy}")
+    assert legacy_clean == "hi"
+    assert legacy_meta == {"skills": ["deep-audit"]}
 
 
 def test_skill_preload_envelope_extracts_between_message_and_runtime_context():
@@ -457,7 +470,81 @@ def test_skill_preload_envelope_extracts_between_message_and_runtime_context():
     assert runtime_context is not None
     clean, skill_preload = extract_skill_preload_envelope(remainder)
     assert clean == "message launcher dev say hi"
-    assert skill_preload == {"skills": ["harness-runtime-model"]}
+    assert skill_preload["skills"] == ["harness-runtime-model"]
+
+
+def test_skill_preload_delivery_sends_snapshot_then_unchanged_and_recovers():
+    # Mirror of the runtime-context delivery contract: the full body rides only
+    # when no matching snapshot survives in the effective native lineage.
+    from agent_runtime.runtime_hud import (
+        render_runtime_context_envelope,
+        render_skill_preload_envelope,
+        skill_preload_delivery,
+        skill_preload_revision,
+    )
+
+    body = "# Harness Runtime Model\nfull skill body"
+    revision = skill_preload_revision(body)
+    assert skill_preload_delivery([], revision) == "snapshot"
+
+    snapshot = render_skill_preload_envelope(
+        skill_names=["harness-runtime-model"],
+        skill_preload_content=body,
+        revision=revision,
+        delivery="snapshot",
+    )
+    hud = render_runtime_context_envelope(
+        context_id="ctx_dedup",
+        revision="hud_0123456789abcdef",
+        delivery="snapshot",
+        situational_hud_content="## Runtime Situation\n- Scope: realm default",
+    )
+    # History rows carry the skill envelope BEFORE the trailing HUD envelope.
+    history = [{"role": "user", "content": "\n\n".join(["hello", snapshot, hud])}]
+    assert skill_preload_delivery(history, revision) == "unchanged"
+    # Changed preload content (skill edited / different set) → re-snapshot.
+    assert skill_preload_delivery(history, skill_preload_revision("other")) == "snapshot"
+    # Compression dropped the snapshot row → re-anchor with a full snapshot.
+    assert skill_preload_delivery([{"role": "assistant", "content": "summary"}], revision) == "snapshot"
+    # Legacy rows (no revision attribute) cannot vouch for content → snapshot.
+    legacy_row = {"role": "user", "content": 'hi\n\n<skill_preload skills="a">\nbody\n</skill_preload>'}
+    assert skill_preload_delivery([legacy_row], revision) == "snapshot"
+    # An "unchanged" stub row is not a snapshot anchor either.
+    stub = render_skill_preload_envelope(
+        skill_names=["harness-runtime-model"],
+        skill_preload_content=body,
+        revision=revision,
+        delivery="unchanged",
+    )
+    assert skill_preload_delivery([{"role": "user", "content": f"hi\n\n{stub}"}], revision) == "snapshot"
+
+
+def test_skill_preload_unchanged_stub_is_compact_and_projection_safe():
+    from agent_runtime.runtime_hud import (
+        extract_skill_preload_envelope,
+        render_skill_preload_envelope,
+        skill_preload_revision,
+    )
+
+    body = "# Harness Runtime Model\n" + ("skill body line\n" * 200)
+    revision = skill_preload_revision(body)
+    stub = render_skill_preload_envelope(
+        skill_names=["harness-runtime-model"],
+        skill_preload_content=body,
+        revision=revision,
+        delivery="unchanged",
+    )
+    # The stub re-asserts activation without carrying the body.
+    assert len(stub) < 400
+    assert "skill body line" not in stub
+    assert revision in stub
+    clean, metadata = extract_skill_preload_envelope(f"next question\n\n{stub}")
+    assert clean == "next question"
+    assert metadata == {
+        "skills": ["harness-runtime-model"],
+        "revision": revision,
+        "delivery": "unchanged",
+    }
 
 
 # --------------------------------------------------------------------------- #

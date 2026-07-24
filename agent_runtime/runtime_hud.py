@@ -52,8 +52,19 @@ _RUNTIME_CONTEXT_ENVELOPE_RE = re.compile(
 # "message launcher dev say hi" displayed with the full harness-runtime-model
 # skill appended). Same grammar rules as the runtime-context envelope: strict
 # attribute charset, well-formed-only, end-anchored extraction.
+#
+# Delivery mirrors the runtime-context contract: the full body is a
+# ``snapshot`` sent only when no matching snapshot survives in the effective
+# native lineage; otherwise a compact ``unchanged`` stub re-asserts the active
+# skills. Required-preload skills ride EVERY chat turn, so without this a
+# skill-bearing persona pays the full body per turn. ``revision``/``delivery``
+# are optional in the extraction grammar so rows persisted by the envelope's
+# first revision (no attributes) keep stripping.
+SKILL_PRELOAD_DELIVERY_SNAPSHOT = "snapshot"
+SKILL_PRELOAD_DELIVERY_UNCHANGED = "unchanged"
 _SKILL_PRELOAD_ENVELOPE_RE = re.compile(
-    r'(?:\n\n)?<skill_preload skills="(?P<skills>[a-zA-Z0-9_.:+-]*(?:,[a-zA-Z0-9_.:+-]+)*)">\n'
+    r'(?:\n\n)?<skill_preload skills="(?P<skills>[a-zA-Z0-9_.:+-]*(?:,[a-zA-Z0-9_.:+-]+)*)"'
+    r'(?: revision="(?P<revision>skills_[a-f0-9]+)" delivery="(?P<delivery>snapshot|unchanged)")?>\n'
     r'(?P<body>.*?)\n</skill_preload>\s*\Z',
     re.DOTALL,
 )
@@ -148,10 +159,55 @@ def render_runtime_context_envelope(
     )
 
 
+def skill_preload_revision(skill_preload_content: str | None) -> str:
+    """Return a stable revision for the exact preload content built this turn.
+
+    Hashing the CONTENT (not the name list) means a skill edited on disk — or a
+    changed queued/required set — re-snapshots, exactly like a changed runtime
+    HUD does.
+    """
+
+    body = (skill_preload_content or "").strip()
+    if not body:
+        return "skills_unavailable"
+    return "skills_" + hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def skill_preload_delivery(
+    native_history: Iterable[dict[str, Any]] | None,
+    revision: str,
+) -> str:
+    """Choose snapshot vs unchanged without relying on resident-process memory.
+
+    Mirror of :func:`runtime_context_delivery`: the full preload body is resent
+    when no matching snapshot remains in the effective native lineage, so cold
+    resume and post-compression recovery stay safe. History rows carry the skill
+    envelope BEFORE the trailing runtime-context envelope, so the scan strips
+    the HUD envelope first.
+    """
+
+    if revision == "skills_unavailable":
+        return SKILL_PRELOAD_DELIVERY_SNAPSHOT
+    for row in reversed(list(native_history or ())):
+        if not isinstance(row, dict) or str(row.get("role") or "").lower() != "user":
+            continue
+        remainder, _ = extract_runtime_context_envelope(row.get("content"))
+        _, metadata = extract_skill_preload_envelope(remainder)
+        if (
+            metadata is not None
+            and metadata.get("revision") == revision
+            and metadata.get("delivery") == SKILL_PRELOAD_DELIVERY_SNAPSHOT
+        ):
+            return SKILL_PRELOAD_DELIVERY_UNCHANGED
+    return SKILL_PRELOAD_DELIVERY_SNAPSHOT
+
+
 def render_skill_preload_envelope(
     *,
     skill_names: Iterable[str] | None,
     skill_preload_content: str | None,
+    revision: str | None = None,
+    delivery: str = SKILL_PRELOAD_DELIVERY_SNAPSHOT,
 ) -> str:
     """Wrap the per-turn skill preload in its structural envelope.
 
@@ -160,6 +216,10 @@ def render_skill_preload_envelope(
     attribute charset are dropped from the attribute (the body still carries
     the full preload text) — the attribute exists for projection metadata and
     must never break extraction.
+
+    ``delivery == "unchanged"`` swaps the full body for a compact stub that
+    re-asserts the active skills against the earlier snapshot ``revision`` —
+    the snapshot row itself stays in the native lineage the model reads.
     """
 
     body = (skill_preload_content or "").strip()
@@ -170,7 +230,19 @@ def render_skill_preload_envelope(
         for name in (str(item or "").strip() for item in (skill_names or ()))
         if name and _SKILL_PRELOAD_NAME_RE.fullmatch(name)
     )
-    return f'<skill_preload skills="{names}">\n{body}\n</skill_preload>'
+    resolved_revision = revision or skill_preload_revision(body)
+    if delivery == SKILL_PRELOAD_DELIVERY_UNCHANGED:
+        body = (
+            "Skill instructions unchanged from the full snapshot for revision "
+            f"{resolved_revision} earlier in this conversation. The listed "
+            "skills remain active for this session."
+        )
+    else:
+        delivery = SKILL_PRELOAD_DELIVERY_SNAPSHOT
+    return (
+        f'<skill_preload skills="{names}" revision="{resolved_revision}" '
+        f'delivery="{delivery}">\n{body}\n</skill_preload>'
+    )
 
 
 def extract_skill_preload_envelope(
@@ -190,7 +262,11 @@ def extract_skill_preload_envelope(
     if match is None:
         return text, None
     skills = [name for name in match.group("skills").split(",") if name]
-    return text[: match.start()].rstrip(), {"skills": skills}
+    metadata: dict[str, Any] = {"skills": skills}
+    if match.group("revision") is not None:
+        metadata["revision"] = match.group("revision")
+        metadata["delivery"] = match.group("delivery")
+    return text[: match.start()].rstrip(), metadata
 
 
 def _clean(value: Any) -> bool:

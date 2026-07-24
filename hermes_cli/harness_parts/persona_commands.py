@@ -1861,12 +1861,23 @@ def _cmd_mission_chat_message(args) -> int:
     # projection strips the envelope from the displayed operator text the same
     # way it strips the runtime-context envelope. Wrapped HERE, at the one
     # producer of this lane's preload, so the persisted native row is
-    # projection-safe by construction.
-    from agent_runtime.runtime_hud import render_skill_preload_envelope
+    # projection-safe by construction. Delivery mirrors the HUD contract:
+    # required-preload skills recur every turn, so the full body is sent only
+    # when no matching snapshot survives in the effective native lineage
+    # (cold resume / compression re-anchor), and a compact ``unchanged`` stub
+    # otherwise — the model keeps the snapshot row in its history either way.
+    from agent_runtime.runtime_hud import (
+        render_skill_preload_envelope,
+        skill_preload_delivery,
+        skill_preload_revision,
+    )
 
+    skill_preload_revision_value = skill_preload_revision(preloaded_skill_prompt)
     preloaded_skill_prompt = render_skill_preload_envelope(
         skill_names=preloaded_skills_loaded,
         skill_preload_content=preloaded_skill_prompt,
+        revision=skill_preload_revision_value,
+        delivery=skill_preload_delivery(native_history, skill_preload_revision_value),
     )
     workspace_agents = load_workspace_agents_context(
         getattr(args, "agents_file", None)
