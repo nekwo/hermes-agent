@@ -423,6 +423,23 @@ def test_binding_files_resolve_against_the_new_profile_home(profiles):
     assert binding_files(persona)["hermes_profile"] == "alpha"
 
 
+#: ``_persona()`` carries a profile-ROOT ``soul.md`` overlay and opts into
+#: profile memory, so its published profile-file set is exactly these two
+#: destinations. Pinned as literal strings on purpose: this delta IS the
+#: ``agent set-profile`` confirmation output, and the way it broke on 2026-07-25
+#: was by silently going EMPTY when the publish grammar moved. A "something
+#: appeared" assertion would not have caught that — `next(...)` raising
+#: StopIteration was the only signal.
+_ALPHA_PATHS = [
+    "store/profile_files/alpha/memories/MEMORY.md",
+    "store/profile_files/alpha/soul.md",
+]
+_BETA_PATHS = [
+    "store/profile_files/beta/memories/MEMORY.md",
+    "store/profile_files/beta/soul.md",
+]
+
+
 def test_realm_artifact_delta_reports_the_paths_that_move(profiles):
     _seed(_persona())
     realm = RealmStore().create(name="Test Realm")
@@ -432,14 +449,15 @@ def test_realm_artifact_delta_reports_the_paths_that_move(profiles):
     projected = preview["realm_artifact_delta"]
     assert projected["measured"] is False
     projected_realm = next(row for row in projected["realms"] if row["realm_id"] == realm.id)
-    assert any("profiles/alpha/personas/widget/" in path for path in projected_realm["disappears"])
-    assert any("profiles/beta/personas/widget/" in path for path in projected_realm["appears"])
+    assert projected_realm["disappears"] == _ALPHA_PATHS
+    assert projected_realm["appears"] == _BETA_PATHS
 
     applied = rebind_persona_profile("widget", profile="beta")["realm_artifact_delta"]
     assert applied["measured"] is True
     measured_realm = next(row for row in applied["realms"] if row["realm_id"] == realm.id)
-    assert sorted(measured_realm["disappears"]) == sorted(projected_realm["disappears"])
-    assert sorted(measured_realm["appears"]) == sorted(projected_realm["appears"])
+    # The MEASURED apply must land on exactly what the operator confirmed.
+    assert measured_realm["disappears"] == _ALPHA_PATHS
+    assert measured_realm["appears"] == _BETA_PATHS
 
 
 def test_projected_delta_drops_an_artifact_the_new_profile_cannot_back(profiles):
@@ -453,8 +471,10 @@ def test_projected_delta_drops_an_artifact_the_new_profile_cannot_back(profiles)
     preview = rebind_persona_profile("widget", profile="beta", dry_run=True)
     row = next(item for item in preview["realm_artifact_delta"]["realms"] if item["realm_id"] == realm.id)
 
-    assert any("memories/MEMORY.md" in path for path in row["disappears"])
-    assert not any("memories/MEMORY.md" in path for path in row["appears"])
+    assert row["disappears"] == _ALPHA_PATHS
+    # Beta cannot back the memory file, so ONLY the soul overlay reappears.
+    assert row["appears"] == ["store/profile_files/beta/soul.md"]
+    assert "store/profile_files/beta/memories/MEMORY.md" not in row["appears"]
 
 
 # --------------------------------------------------------------------------- #

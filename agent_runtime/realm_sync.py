@@ -1101,6 +1101,7 @@ def _persona_artifacts(persona: AgentPersona) -> tuple[list[RealmSyncArtifact], 
     from .profile_artifact_sync import (
         CORE_CONTEXT_FILENAMES,
         MEMORY_DESTINATION,
+        classify_destination,
         published_relative_path,
     )
     from .prompt_sources import resolve_persona_system_prompt_path
@@ -1112,6 +1113,21 @@ def _persona_artifacts(persona: AgentPersona) -> tuple[list[RealmSyncArtifact], 
     withheld: list[dict[str, str]] = []
 
     def _add(kind: str, source: Path, dest_rel: str) -> None:
+        # Publish through the SAME admissibility authority the pull side applies.
+        # Without it the two sides can disagree and a file publishes into a realm
+        # that every member then refuses — a silent one-way loss. That shipped for
+        # a profile-root ``soul.md`` and was caught by the rebind-delta suite on
+        # 2026-07-25; this call is why it cannot recur.
+        if classify_destination(dest_rel) is None:
+            withheld.append(
+                {
+                    "persona_id": persona.id,
+                    "kind": kind,
+                    "reason": "destination_not_publishable",
+                    "message": f"{dest_rel} is not an admissible profile-file destination; members would refuse it",
+                }
+            )
+            return
         artifacts.append(
             RealmSyncArtifact(
                 kind=kind,

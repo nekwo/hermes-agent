@@ -88,19 +88,89 @@ def test_destination_allowlist_is_opt_in():
         assert classify_destination(name) == "core_context"
     assert classify_destination("personas/dev/prompt.md") == "persona_prompt"
     assert classify_destination("personas/prompt.md") == "persona_prompt"
-    # Everything else is refused. ``config.yaml`` and ``.env`` are the two that
-    # would be catastrophic; ``memories/other.md`` proves the rule is exact-match
-    # rather than "anything under memories".
+    # A prompt/overlay is profile-relative to ANYWHERE in the home. Restricting
+    # it to ``personas/**`` shipped a silent one-way loss: publish emitted a
+    # profile-root ``soul.md`` and every member refused it (caught 2026-07-25).
+    assert classify_destination("soul.md") == "persona_prompt"
+    assert classify_destination("prompts/role/dev.txt") == "persona_prompt"
+    # Everything dangerous in a profile home is a NON-document, so the suffix
+    # rule — not a directory prefix — is what closes the door.
     for rel in (
         "config.yaml",
         ".env",
-        "memories/other.md",
+        "state.db",
+        "plugins/thing/plugin.py",
+        "skins/custom.yaml",
+        ".hidden/prompt.md",
+        "memories/other.md",  # the member-state dir is closed to prompt writes
         "personas",
         "",
-        "NOTES.md",
         "a/b/c/d/e/f/g/h/i/j.md",
     ):
         assert classify_destination(rel) is None, rel
+
+
+def test_publish_and_pull_agree_on_every_destination(homes, tmp_path, monkeypatch):
+    """The asymmetry guard.
+
+    ``realm_sync._persona_artifacts`` (publish) and ``classify_destination``
+    (pull) are two sides of ONE contract. When they disagreed, a file published
+    into the realm that every member then refused — silently, one-way, with no
+    accounting. This pins that every destination publish EMITS is one the pull
+    side ADMITS, and that anything inadmissible is withheld with a typed row.
+    """
+
+    from types import SimpleNamespace
+
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.realm_sync import _persona_artifacts
+
+    home = homes / "alice"
+    for rel in ("soul.md", "memories/MEMORY.md", "AGENTS.md"):
+        path = home.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+    monkeypatch.setattr(
+        realm_sync,
+        "resolve_persona_profile",
+        lambda persona: SimpleNamespace(profile_home=home, hermes_profile="alice"),
+    )
+
+    def _make(**over):
+        base = dict(
+            id="dev",
+            role="dev",
+            display_name="Dev",
+            model="",
+            provider="",
+            api_mode="",
+            toolsets=[],
+            system_prompt_path="",
+            include_profile_memory=True,
+            include_core_context_files=True,
+        )
+        base.update(over)
+        return AgentPersona(**base)
+
+    prefix = f"{PROFILE_FILES_ROOT}/alice/"
+    artifacts, withheld = _persona_artifacts(_make(soul_overlay_path="soul.md"))
+    published = sorted(item.relative_path for item in artifacts)
+    assert published == [
+        f"{prefix}AGENTS.md",
+        f"{prefix}memories/MEMORY.md",
+        f"{prefix}soul.md",
+    ]
+    assert withheld == []
+    for rel in published:
+        assert classify_destination(rel[len(prefix):]) is not None, rel
+
+    # An inadmissible destination is withheld with a typed row, never emitted.
+    (home / "notes.yaml").write_text("x\n", encoding="utf-8")
+    artifacts, withheld = _persona_artifacts(_make(soul_overlay_path="notes.yaml"))
+    assert all(not item.relative_path.endswith("notes.yaml") for item in artifacts)
+    assert [(row["kind"], row["reason"]) for row in withheld] == [
+        ("soul_overlay", "destination_not_publishable")
+    ]
 
 
 # ── decision table, per artifact kind ──────────────────────────────────────

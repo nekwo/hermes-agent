@@ -365,17 +365,35 @@ def binding_files(persona: AgentPersona) -> dict[str, Any]:
 
 
 def _persona_realm_artifacts(persona_id: str) -> list[dict[str, Any]]:
-    """Per realm, the ``profiles/*`` artifacts this persona currently publishes.
+    """Per realm, the profile-file artifacts this persona currently publishes.
 
     Read-only consumption of ``realm_sync.resolve_realm_sync_artifacts`` (the
     single authority for "what does this realm publish"); a realm that fails to
     resolve is reported with its error instead of being silently dropped.
+
+    Selection is on the artifact's EXPLICIT ``persona_id`` attribution, not on a
+    ``/personas/<persona>/`` substring of the published path. That substring was
+    a guess about the publish grammar, and when the grammar moved to
+    ``store/profile_files/<profile>/<destination>`` (2026-07-25) it matched
+    nothing — so this delta, which IS the ``agent set-profile`` confirmation
+    output, silently reported an empty move on both the dry-run projection and
+    the measured apply. A confirmation surface that quietly goes blank is exactly
+    the failure mode this workstream exists to retire, so the coupling is now a
+    typed field the producer sets, not a path convention two modules must agree
+    on by hand.
+
+    The substring fallback is deliberately NOT retained. It cannot help: this
+    reads the LOCAL publish-side resolver, which always emits the current layout,
+    so a legacy-layout path can never appear here (legacy paths exist only inside
+    a PULLED subtree, which this never reads, and the pull-side
+    ``legacy_flat_layout``/``superseded`` row reports a leftover LOCAL file, not a
+    published artifact). And it can actively harm: a persona whose prompt lives
+    in a directory named after a DIFFERENT persona would be mis-attributed.
     """
 
     from .realm_sync import resolve_realm_sync_artifacts
     from .store import RealmStore
 
-    marker = f"/personas/{_artifact_token(persona_id)}/"
     realms: list[dict[str, Any]] = []
     try:
         catalog = RealmStore().list_all(include_archived=False)
@@ -390,7 +408,7 @@ def _persona_realm_artifacts(persona_id: str) -> list[dict[str, Any]]:
         entries = [
             {"kind": artifact.kind, "relative_path": artifact.relative_path, "source": _path_text(artifact.source)}
             for artifact in artifacts
-            if marker in str(artifact.relative_path or "")
+            if getattr(artifact, "persona_id", None) == persona_id
         ]
         if entries:
             realms.append(
@@ -444,10 +462,15 @@ def _projected_artifact_delta(
 ) -> list[dict[str, Any]]:
     """PROJECTED delta for ``--dry-run``, derived from MEASURED artifacts.
 
-    The publish grammar is ``profiles/<profile>/personas/<persona>/...`` — only
-    the profile segment moves — so the projection is a transform on the measured
-    ``relative_path``s, never a re-derivation of the grammar (which would drift
-    from ``realm_sync._persona_artifacts``).
+    The publish grammar is ``store/profile_files/<profile>/<destination>``, where
+    the destination is the file's path RELATIVE TO the profile home — so a rebind
+    moves exactly one segment and the tail is invariant. The projection stays a
+    transform on the measured ``relative_path``s, never a re-derivation of the
+    grammar (which would drift from ``realm_sync._persona_artifacts``), and both
+    prefixes come from ``profile_artifact_sync.published_relative_path`` so the
+    grammar is spelled in ONE place. It used to be hard-coded here as
+    ``profiles/<profile>/``; when the layout moved, that produced an empty
+    projection — the same silent-blank defect as the selector above, one layer up.
 
     An artifact whose SOURCE lives under the old profile home only reappears if
     the equivalent file exists under the new one: a persona bound to a profile
@@ -456,8 +479,10 @@ def _projected_artifact_delta(
     and always reappear.
     """
 
-    old_prefix = f"profiles/{_artifact_token(old_profile)}/" if old_profile else None
-    new_prefix = f"profiles/{_artifact_token(new_profile)}/"
+    from .profile_artifact_sync import published_relative_path
+
+    old_prefix = published_relative_path(_artifact_token(old_profile), "") if old_profile else None
+    new_prefix = published_relative_path(_artifact_token(new_profile), "")
     delta: list[dict[str, Any]] = []
     for row in before:
         disappears: list[str] = []
