@@ -568,10 +568,26 @@ def merge_persona_def(local_raw: Any, remote_body: dict[str, Any]) -> dict[str, 
     return {**preserved, **remote_body}
 
 
-def _contains_secret_assignment(body: Any) -> bool:
-    from .realm_sync import SECRET_ASSIGNMENT_RE
+def _admission_refusal(persona_id: str, remote_body: dict[str, Any]) -> dict[str, str] | None:
+    """Per-definition admission through the SHARED guard.
 
-    return bool(SECRET_ASSIGNMENT_RE.search(json.dumps(body, sort_keys=True, default=str)))
+    Was two inline scans here; ``sync_admission`` is now the one authority every
+    specialized applier runs (defect (b) — board / office / skill had no scan at
+    all because their families are excluded from the generic loop that carries
+    ``_assert_no_secret_artifacts``). ``prose_keys=frozenset()`` keeps this lane
+    scanning EVERY key: a persona definition is 100% wiring — its keys are
+    themselves an allowlist — so nothing here is exempt prose.
+    """
+
+    from .sync_admission import refuse_entity
+
+    refusal = refuse_entity(
+        persona_id,
+        payload=remote_body,
+        prefix=f"personas.{persona_id}",
+        prose_keys=frozenset(),
+    )
+    return None if refusal is None else _refusal(persona_id, refusal.code, refusal.message)
 
 
 def apply_persona_config_pull(
@@ -615,20 +631,9 @@ def apply_persona_config_pull(
             )
             continue
         if remote_body is not None:
-            offenders = find_nonportable_values(remote_body, prefix=f"personas.{persona_id}")
-            if offenders:
-                summary.refused.append(
-                    _refusal(
-                        persona_id,
-                        "nonportable_path",
-                        "machine-shaped value(s): " + ", ".join(row["key"] for row in offenders),
-                    )
-                )
-                continue
-            if _contains_secret_assignment(remote_body):
-                summary.refused.append(
-                    _refusal(persona_id, "secret_shaped_value", "definition carries a secret-shaped assignment")
-                )
+            refusal = _admission_refusal(persona_id, remote_body)
+            if refusal is not None:
+                summary.refused.append(refusal)
                 continue
 
         local_body = _allowlist_persona_def(persona_id, local.get(persona_id), []) if persona_id in local else None

@@ -1,13 +1,21 @@
-"""W-H4 (office plan §5.1): profile-aware realm-sync pull destinations.
+"""Profile-scoped realm-sync pull destinations — W-H4 (office plan §5.1) and its
+2026-07-25 supersession.
 
-Before 2026-07-17 `_destination_for_sync_path` collapsed every
+Before 2026-07-17 ``_destination_for_sync_path`` collapsed every
 ``profiles/<name>/…`` artifact into the ACTIVE profile home — a degenerate
 ternary whose two branches both returned ``get_hermes_home()`` — so a
 multi-profile realm pull silently last-write-wins'd every profile's
-config.yaml / MEMORY.md onto one home. Invisible to the B1 drill because both
-ends were single-profile; these are the first tests that can see it. The
-cross-profile clobber test is the sabotage guard: restoring the degenerate
-mapping turns it red.
+config.yaml / MEMORY.md onto one home. W-H4 made it profile-aware.
+
+**Superseded 2026-07-25:** profile-scoping fixed WHERE a pulled file landed but
+kept the blind wholesale overwrite AND kept prompt destinations keyed by the file
+basename. ``profiles/…`` now has NO generic pull destination at all — the whole
+family belongs to ``profile_artifact_sync`` (baseline merge, hold on divergence)
+and ``persona_config_sync`` (allowlisted key-wise merge). These tests pin that
+exclusion; the merge behaviour itself lives in ``test_profile_artifact_sync.py``.
+
+``_profile_home_for_token`` survives as the shared, hostile-token-refusing
+profile resolver both appliers call.
 """
 
 from __future__ import annotations
@@ -15,12 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import agent_runtime.realm_sync as realm_sync
-from agent_runtime.realm_sync import (
-    RealmSyncArtifact,
-    _destination_for_sync_path,
-    _profile_home_for_token,
-    _pulled_profile_tokens,
-)
+from agent_runtime.realm_sync import _destination_for_sync_path, _profile_home_for_token
 
 
 def _pin_profiles(monkeypatch, tmp_path, *, active: str = "alice") -> Path:
@@ -33,18 +36,9 @@ def _pin_profiles(monkeypatch, tmp_path, *, active: str = "alice") -> Path:
 
 
 def test_profile_config_is_never_a_generic_pull_destination(monkeypatch, tmp_path):
-    """SUPERSEDED W-H4 detail (2026-07-25): a profile ``config.yaml`` no longer
-    has a generic pull destination AT ALL.
-
-    W-H4 made the mapping profile-aware so a multi-profile pull stopped
-    collapsing every config onto the active home. That fixed WHERE the file
-    landed but kept the blind wholesale overwrite — a raw publisher config
-    (machine paths, ``mcp_servers``, and the base fork seed) replacing a
-    member's file. The lane now belongs to
-    ``persona_config_sync.apply_persona_config_pull``, which merges only
-    allowlisted persona definitions key-wise. Same exclusion precedent as
-    store/boards/*, store/office/*, skills/* → ``None``.
-    """
+    """A profile ``config.yaml`` has no generic pull destination: the lane belongs
+    to ``persona_config_sync.apply_persona_config_pull``, which merges only
+    allowlisted persona definitions key-wise."""
 
     _pin_profiles(monkeypatch, tmp_path, active="alice")
     for token in ("alice", "bob", "neko", "base"):
@@ -53,14 +47,44 @@ def test_profile_config_is_never_a_generic_pull_destination(monkeypatch, tmp_pat
     assert _destination_for_sync_path("store/personas.yaml") is None
 
 
-def test_named_profile_memory_and_prompts_stay_profile_scoped(monkeypatch, tmp_path):
+def test_profile_files_are_never_a_generic_pull_destination(monkeypatch, tmp_path):
+    """THE data-loss guard (2026-07-25).
+
+    A member's ``MEMORY.md``, core-context files and persona prompts were
+    overwritten wholesale by the generic write-loop. Restoring ANY of these
+    mappings hands the family back to that loop and re-arms the defect, so this
+    assertion is the structural half of the sabotage guard in
+    ``test_profile_artifact_sync.py``.
+    """
+
+    _pin_profiles(monkeypatch, tmp_path, active="alice")
+    for rel in (
+        "profiles/alice/personas/dev/memories/MEMORY.md",
+        "profiles/bob/personas/dev/memories/MEMORY.md",
+        "profiles/bob/personas/dev/context/AGENTS.md",
+        "profiles/bob/personas/dev/context/CLAUDE.md",
+        "profiles/bob/personas/dev/system_prompt/dev.md",
+        "profiles/bob/personas/dev/soul_overlay/SOUL.md",
+        "store/profile_files/bob/memories/MEMORY.md",
+        "store/profile_files/bob/AGENTS.md",
+        "store/profile_files/bob/personas/dev/prompt.md",
+    ):
+        assert _destination_for_sync_path(rel) is None, rel
+
+
+def test_generic_loop_still_owns_workspaces_and_realms(monkeypatch, tmp_path):
+    """The exclusions above must not have swallowed the two families the generic
+    loop legitimately owns."""
+
+    _pin_profiles(monkeypatch, tmp_path, active="alice")
+    assert _destination_for_sync_path("store/workspaces/ws_1.json") is not None
+    assert _destination_for_sync_path("store/realms/realm_1.json") is not None
+
+
+def test_named_profile_homes_stay_profile_scoped(monkeypatch, tmp_path):
     profiles_root = _pin_profiles(monkeypatch, tmp_path, active="alice")
-    memory = _destination_for_sync_path("profiles/bob/personas/dev/memories/MEMORY.md")
-    prompt = _destination_for_sync_path("profiles/bob/personas/dev/system_prompt/dev.md")
-    context = _destination_for_sync_path("profiles/bob/personas/dev/context/AGENTS.md")
-    assert memory == profiles_root / "bob" / "memories" / "MEMORY.md"
-    assert prompt == profiles_root / "bob" / "personas" / "dev.md"
-    assert context == profiles_root / "bob" / "AGENTS.md"
+    assert _profile_home_for_token("bob") == profiles_root / "bob"
+    assert _profile_home_for_token("alice") == realm_sync.get_hermes_home()
 
 
 def test_hostile_profile_tokens_are_refused(monkeypatch, tmp_path):
@@ -68,27 +92,3 @@ def test_hostile_profile_tokens_are_refused(monkeypatch, tmp_path):
     for token in ("..", ".", "", "c:evil", "/abs", "\\\\share", "a/b"):
         assert _profile_home_for_token(token) is None, token
     assert _destination_for_sync_path("profiles/../config.yaml") is None
-
-
-def test_pulled_profile_tokens_report_created_profiles(monkeypatch, tmp_path):
-    _pin_profiles(monkeypatch, tmp_path, active="alice")
-    import hermes_cli.profiles as profiles_mod
-
-    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name == "bob")
-    artifacts = [
-        RealmSyncArtifact(kind="persona_config", source=tmp_path / "a", relative_path="profiles/alice/config.yaml", destination=tmp_path / "a"),
-        RealmSyncArtifact(kind="persona_config", source=tmp_path / "b", relative_path="profiles/bob/config.yaml", destination=tmp_path / "b"),
-        RealmSyncArtifact(kind="persona_config", source=tmp_path / "c", relative_path="profiles/neko/config.yaml", destination=tmp_path / "c"),
-        RealmSyncArtifact(kind="skill", source=tmp_path / "s", relative_path="skills/x/SKILL.md", destination=tmp_path / "s"),
-    ]
-    tokens, created = _pulled_profile_tokens(artifacts)
-    assert tokens == ["alice", "bob", "neko"]
-    # alice = active (never "created"); bob exists; neko is materialized by this pull.
-    assert created == ["neko"]
-
-
-def test_no_profile_artifacts_reports_nothing(tmp_path):
-    artifacts = [
-        RealmSyncArtifact(kind="skill", source=tmp_path / "s", relative_path="skills/x/SKILL.md", destination=tmp_path / "s"),
-    ]
-    assert _pulled_profile_tokens(artifacts) == ([], [])

@@ -605,6 +605,22 @@ def build_parser(parent_subparsers) -> None:
     realm_sync_publish.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
     _add_stage42_global_args(realm_sync_publish, mutation=True)
     realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
+    realm_sync_held = realm_sync_subs.add_parser(
+        "held",
+        help="List profile files (MEMORY.md / core context / persona prompts) a pull HELD because the member's copy diverged from the realm's",
+    )
+    realm_sync_held.add_argument("realm_id")
+    _add_stage42_global_args(realm_sync_held)
+    realm_sync_held.set_defaults(func=_cmd_realm_sync_held)
+    realm_sync_resolve = realm_sync_subs.add_parser(
+        "resolve",
+        help="Resolve one held profile file: --take local keeps the member's content, --take remote adopts the realm's",
+    )
+    realm_sync_resolve.add_argument("realm_id")
+    realm_sync_resolve.add_argument("--key", required=True, help="Entity key from `realm sync held` (e.g. alice:memories/MEMORY.md)")
+    realm_sync_resolve.add_argument("--take", required=True, choices=["local", "remote"])
+    _add_stage42_global_args(realm_sync_resolve, mutation=True)
+    realm_sync_resolve.set_defaults(func=_cmd_realm_sync_resolve)
 
     realm_skills = realm_subs.add_parser("skills", help="Per-realm selection of which shared skills publish to a realm")
     realm_skills_subs = realm_skills.add_subparsers(dest="realm_skills_command", required=True)
@@ -3004,6 +3020,56 @@ def _cmd_realm_sync_publish(args) -> int:
     except RealmSyncError as exc:
         return emit_harness_error(exc, args=args)
     _print_stage42(data, args=args, default_output="json")
+    return 0
+
+
+def _realm_sync_subtree(realm_id: str):
+    """The checked-out realm subtree the profile-file lane reconciles against.
+
+    Read-only: never clones, never fetches, never mutates the repo — the resolve
+    verb operates on what the last pull already put on disk.
+    """
+    from agent_runtime.realm_sync import _realm_subtree, _sync_repo_path
+
+    realm = RealmStore().get(realm_id)
+    return _realm_subtree(_sync_repo_path(realm), realm.id)
+
+
+def _cmd_realm_sync_held(args) -> int:
+    from agent_runtime.profile_artifact_sync import apply_profile_artifact_pull
+
+    summary = apply_profile_artifact_pull(args.realm_id, _realm_sync_subtree(args.realm_id), dry_run=True)
+    rows = [
+        {"id": key, "kind": "profile_artifact_hold", "realm_id": args.realm_id, "take_hint": "--take local|remote"}
+        for key in sorted(set(summary.held))
+    ]
+    _print_stage42(_list_envelope("profile_artifact_hold", rows), args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_sync_resolve(args) -> int:
+    from agent_runtime.profile_artifact_sync import (
+        ProfileArtifactResolveError,
+        resolve_profile_artifact,
+    )
+
+    if not _require_yes(args):
+        return 8
+    dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        row = resolve_profile_artifact(
+            args.realm_id,
+            _realm_sync_subtree(args.realm_id),
+            args.key,
+            take=args.take,
+            dry_run=dry_run,
+        )
+    except ProfileArtifactResolveError as exc:
+        return emit_harness_error(exc, args=args, code=exc.code)
+    envelope = _object_envelope("profile_artifact_hold", {"id": row["key"], **row})
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
     return 0
 
 

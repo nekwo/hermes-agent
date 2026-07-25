@@ -104,11 +104,19 @@ def test_publish_dry_run_is_allowlisted_and_excludes_state(isolate_agent_runtime
     assert f"skills/demo-skill/SKILL.md" in paths
     assert any(path.startswith("store/workspaces/") for path in paths)
     assert f"store/realms/{realm.id}.json" in paths
-    assert any(
-        path.startswith("profiles/")
-        and path.endswith("/personas/dev/system_prompt/dev.md")
-        for path in paths
-    )
+    # ``dev``'s role prompt is REPOSITORY-bundled
+    # (``agent_runtime/prompts/dev.md``): it already ships with every member's
+    # hermes and no persona definition addresses a copy inside a profile home, so
+    # publishing it only ever wrote a dead file there. It is now withheld — and
+    # ACCOUNTED, never silently omitted. Nothing publishes under ``profiles/``
+    # any more; the persona definitions travel as the projection.
+    assert all(not path.startswith("profiles/") for path in paths)
+    assert "store/personas.yaml" in paths
+    withheld = {
+        (row["persona_id"], row["kind"], row["reason"])
+        for row in result["profile_files"]["withheld"]
+    }
+    assert ("dev", "system_prompt", "not_profile_owned") in withheld
     assert all("blueprint" not in path.lower() for path in paths)
     assert all("state.db" not in path.lower() for path in paths)
     assert all("\\" not in path for path in paths)
@@ -608,15 +616,22 @@ def _resolved_skill_packages(realm_id: str) -> set[str]:
 
 
 def _resolved_persona_packages(realm_id: str) -> set[str]:
-    packages: set[str] = set()
-    for artifact in resolve_realm_sync_artifacts(realm_id):
-        parts = Path(artifact.relative_path).parts
-        if "personas" not in parts:
-            continue
-        index = parts.index("personas")
-        if index + 1 < len(parts):
-            packages.add(parts[index + 1])
-    return packages
+    """Persona ids this realm publishes.
+
+    Reads the persona-definition PROJECTION plus any profile FILE attributed to a
+    persona. It used to scrape ``…/personas/<id>/…`` out of the published path;
+    since 2026-07-25 the profile-file family publishes at destination-shaped
+    paths where the persona id is not a path segment, and a repository-bundled
+    prompt is deliberately withheld — so the path scrape would now report nothing
+    and quietly turn these assertions vacuous.
+    """
+
+    from agent_runtime.realm_sync import _resolve_artifacts_with_projection
+
+    artifacts, projection, _withheld = _resolve_artifacts_with_projection(realm_id)
+    return set(projection.personas) | {
+        artifact.persona_id for artifact in artifacts if artifact.persona_id
+    }
 
 
 def test_skill_selection_defaults_to_publish_all(isolate_agent_runtime_root, tmp_path):
@@ -1117,3 +1132,58 @@ def test_publish_no_diff_second_run_is_graceful_noop(isolate_agent_runtime_root,
     assert second["state"] == "published"
     assert second["conflicts"] == []
     assert second["ahead"] == 0
+
+
+# ── held profile files: the operator resolution path ───────────────────────
+
+
+def _publish_profile_file(repo: Path, realm_id: str, profile: str, dest_rel: str, body: str) -> None:
+    from agent_runtime.profile_artifact_sync import PROFILE_FILES_ROOT
+    from agent_runtime.realm_sync import _realm_subtree
+
+    path = _realm_subtree(repo, realm_id).joinpath(*PROFILE_FILES_ROOT.split("/"), profile, *dest_rel.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body.encode("utf-8"))
+
+
+def test_held_profile_file_is_listed_and_resolvable_and_honors_dry_run(
+    isolate_agent_runtime_root, tmp_path
+):
+    """A held ``MEMORY.md`` must be visible AND actionable, and the mutation verb
+    must honor ``--dry-run``.
+
+    ``_add_stage42_global_args(mutation=True)`` auto-registers ``--dry-run``; a
+    verb that does not READ ``args.dry_run`` silently mutates on a preview — a
+    defect that has recurred twice in this repo. Pinned here at the CLI boundary
+    (the store-level chokepoint is pinned in ``test_profile_artifact_sync.py``).
+    """
+
+    from agent_runtime.profile_artifact_sync import entity_key
+    from agent_runtime.realm_sync import _safe_token, active_profile_name
+
+    realm, repo = _realm_with_repo(tmp_path)
+    profile = _safe_token(active_profile_name())
+    _publish_profile_file(repo, realm.id, profile, "memories/MEMORY.md", "realm memories\n")
+    local = get_hermes_home() / "memories" / "MEMORY.md"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_bytes(b"the member's accumulated memories\n")
+
+    result = pull_realm_sync(realm.id)
+    key = entity_key(profile, "memories/MEMORY.md")
+    assert result["profile_artifact_sync"]["held"] == [key]
+    assert local.read_bytes() == b"the member's accumulated memories\n"
+    assert realm_sync_status(realm.id)["profile_artifacts_held"] == [key]
+
+    listed = _run_harness("realm", "sync", "held", realm.id, "--json")
+    assert listed.returncode == 0
+    assert [row["id"] for row in json.loads(listed.stdout)["items"]] == [key]
+
+    preview = _run_harness("realm", "sync", "resolve", realm.id, "--key", key, "--take", "remote", "--dry-run", "--json")
+    assert preview.returncode == 0
+    assert json.loads(preview.stdout)["dry_run"] is True
+    assert local.read_bytes() == b"the member's accumulated memories\n"  # untouched
+
+    applied = _run_harness("realm", "sync", "resolve", realm.id, "--key", key, "--take", "remote", "--yes", "--json")
+    assert applied.returncode == 0
+    assert local.read_bytes() == b"realm memories\n"
+    assert realm_sync_status(realm.id)["profile_artifacts_held"] == []
