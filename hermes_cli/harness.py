@@ -722,6 +722,26 @@ def build_parser(parent_subparsers) -> None:
     skills_catalog_cmd.add_argument("--json", action="store_true")
     skills_catalog_cmd.set_defaults(func=_cmd_skills_catalog)
 
+    skills_publishable_cmd = skills_subs.add_parser(
+        "publishable",
+        help="List every resolvable skill with whether it can reach a realm, and if not, the typed reason (read-only)",
+    )
+    skills_publishable_cmd.add_argument(
+        "--source-kind",
+        dest="source_kind",
+        default=None,
+        choices=["profile_local", "shared_core", "external"],
+        help="Restrict to one resolver tier (default: all three)",
+    )
+    skills_publishable_cmd.add_argument(
+        "--unpublishable-only",
+        dest="unpublishable_only",
+        action="store_true",
+        help="Show only packages that cannot reach a realm as they stand",
+    )
+    _add_stage42_global_args(skills_publishable_cmd)
+    skills_publishable_cmd.set_defaults(func=_cmd_skills_publishable)
+
     skills_inbox_cmd = skills_subs.add_parser(
         "inbox",
         help="List quarantined per-realm inbox skill packages and how each would reconcile (read-only)",
@@ -2092,6 +2112,28 @@ def _rel_to_shared_skills(path) -> str | None:
         return path.name
 
 
+def _cmd_skills_publishable(args) -> int:
+    """Read-only: every resolvable skill package, whether it can reach a realm,
+    and — when it cannot be promoted into the shared root — the typed reason.
+
+    Names ALL offenders in one listing with a per-row typed code; a surface that
+    reported only the shared root is exactly how "resolvable but structurally
+    unable to travel" stayed invisible."""
+
+    from agent_runtime.skill_publishability import build_publishability_rows
+
+    source_kind = str(getattr(args, "source_kind", "") or "").strip() or None
+    unpublishable_only = bool(getattr(args, "unpublishable_only", False))
+
+    rows = build_publishability_rows()
+    if source_kind is not None:
+        rows = [row for row in rows if row["source_kind"] == source_kind]
+    if unpublishable_only:
+        rows = [row for row in rows if not row["publishable"]]
+    _print_stage42(_list_envelope("skill_publishability", rows), args=args, default_output="json")
+    return 0
+
+
 def _cmd_skills_inbox(args) -> int:
     """C4: read-only listing of quarantined per-realm inbox skill packages and
     how each would reconcile against the canonical shared root."""
@@ -2107,6 +2149,8 @@ def _cmd_skills_inbox(args) -> int:
             "action": row["action"],
             "source_hash": row["source_hash"],
             "canonical_hash": row["canonical_hash"],
+            "promotion_block_reason": row["promotion_block_reason"],
+            "promotion_block_detail": row["promotion_block_detail"],
         }
         for row in rows
     ]
@@ -2207,6 +2251,39 @@ def _cmd_skills_promote(args) -> int:
 
     plan = classify_promotion(skill, source_dir)
 
+    # Installer-ownership policy, consulted BEFORE the divergence branch below.
+    # The door enforces this too (``execute_promotion`` refuses without writing),
+    # but reporting it here keeps the operator from being told "re-run with
+    # --adopt-divergent" for a promotion that adopting could never make legal.
+    # Same seam, one authority — the CLI adds only the exit code and hint.
+    if plan.action in ("promote_new", "hold_divergent"):
+        from agent_runtime.skill_publishability import promotion_refusal
+
+        refusal = promotion_refusal(skill, source_dir)
+        if refusal is not None:
+            _print_stage42(
+                _error_envelope(
+                    "invalid_request",
+                    refusal.message,
+                    safe_details={
+                        "skill": skill,
+                        "reason_code": refusal.code,
+                        "manifest_name": refusal.manifest_name,
+                        "profile": refusal.profile,
+                        "source_hash": plan.source_hash,
+                        "canonical_hash": plan.canonical_hash,
+                    },
+                    hint=(
+                        "The hermes installer owns this skill package. Promote a "
+                        "package of your own under a distinct slug instead — see "
+                        "`hermes harness skills publishable --json`."
+                    ),
+                ),
+                args=args,
+                default_output="json",
+            )
+            return ERROR_EXIT_CODES.get("invalid_request", 1)
+
     # A real (non-dry-run) divergent promotion without --adopt-divergent is a
     # hold: surface BOTH hashes in a typed payload and exit non-zero.
     if not dry_run and plan.action == "hold_divergent" and not adopt_divergent:
@@ -2242,6 +2319,10 @@ def _cmd_skills_promote(args) -> int:
             "archived_previous_to": _rel_to_shared_skills(result.archived_previous_to),
             "provenance_path": _rel_to_shared_skills(result.provenance_path),
             "reason": result.reason,
+            # Machine-readable companion to ``reason`` when the guarded door
+            # refuses on installer-ownership policy, so a UI branches on a code
+            # instead of pattern-matching prose (None otherwise).
+            "reason_code": result.reason_code,
             "dry_run": dry_run,
         },
     )

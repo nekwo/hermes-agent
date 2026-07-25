@@ -131,13 +131,22 @@ class PromotionPlan:
 @dataclass(frozen=True)
 class PromotionResult:
     """Outcome of :func:`execute_promotion`. ``action`` is one of
-    :data:`RESULT_ACTIONS`."""
+    :data:`RESULT_ACTIONS`.
+
+    ``reason_code`` is an optional MACHINE-readable companion to ``reason``:
+    when the door refuses on installer-ownership policy it carries the matching
+    :data:`agent_runtime.skill_publishability.PROMOTION_BLOCK_REASONS` code so a
+    UI can branch on the cause instead of pattern-matching prose. ``None`` for
+    outcomes whose ``reason`` is already the whole story (promoted / noop / held
+    / the structural refusals classified in :func:`classify_promotion`).
+    """
 
     skill: str
     action: str
     archived_previous_to: Path | None
     provenance_path: Path | None
     reason: str
+    reason_code: str | None = None
 
 
 # ── Path helpers ───────────────────────────────────────────────────────────
@@ -479,6 +488,10 @@ def execute_promotion(
     - ``noop_identical`` → ``noop``; ``move_source`` archives the redundant source
       (the dedupe lane).
     - ``refuse_*`` → ``refused``, no writes.
+    - an installer-owned source, or a target slug the hermes installer manages
+      in some profile → ``refused`` with a typed ``reason_code`` (see
+      :func:`agent_runtime.skill_publishability.promotion_refusal`); no writes,
+      on the real run AND on a dry run.
     - ``dry_run`` on any actionable plan → ``dry_run``, no filesystem writes.
 
     All writes are atomic; nothing is ever deleted (displaced content is
@@ -508,6 +521,27 @@ def execute_promotion(
             provenance_path=None,
             reason=f"unknown plan action {action!r}",
         )
+
+    # Installer-ownership policy — the LAST gate before any write path, and
+    # deliberately BEFORE the dry-run short-circuit so a preview reports the
+    # refusal it would actually get instead of promising a promotion the real
+    # run would reject. ``noop_identical`` is exempt: it writes nothing (bar the
+    # optional ``move_source`` archive of a redundant duplicate, which is the
+    # collision-retiring dedupe lane and never touches the installer's copy —
+    # that copy is byte-identical to canonical by definition of "identical").
+    if action in ("promote_new", "hold_divergent"):
+        from .skill_publishability import promotion_refusal
+
+        refusal = promotion_refusal(plan.skill, plan.source_dir)
+        if refusal is not None:
+            return PromotionResult(
+                skill=plan.skill,
+                action="refused",
+                archived_previous_to=None,
+                provenance_path=None,
+                reason=refusal.message,
+                reason_code=refusal.code,
+            )
 
     if dry_run:
         return PromotionResult(
@@ -613,7 +647,7 @@ def execute_promotion(
 # ── Inbox enumeration + provenance read ────────────────────────────────────
 
 
-def _iter_packages(root: Path):
+def iter_skill_packages(root: Path):
     """Yield ``(slug, package_dir)`` for skill packages directly under ``root``.
 
     A top-level dir containing ``SKILL.md`` is a bare package (slug = dir name).
@@ -647,18 +681,31 @@ def _iter_packages(root: Path):
                 yield f"{name}/{cname}", child
 
 
+# Historical private name — ``agent_runtime.realm_sync`` imports it. Kept as an
+# alias so the public rename does not require an edit to that file (another
+# agent works there concurrently).
+_iter_packages = iter_skill_packages
+
+
 def list_inbox_packages(realm_token: str | None = None) -> list[dict]:
     """List quarantined inbox packages and how each would reconcile.
 
     Returns one row per ``(realm, skill)`` with the classification against the
     current canonical root::
 
-        {"skill", "realm", "action", "source_hash", "canonical_hash", "source_dir"}
+        {"skill", "realm", "action", "source_hash", "canonical_hash", "source_dir",
+         "promotion_block_reason", "promotion_block_detail"}
 
     ``action`` is the :func:`classify_promotion` classification
     (``promote_new`` / ``noop_identical`` / ``hold_divergent`` / ``refuse_invalid``).
+    ``promotion_block_reason`` is the installer-ownership policy verdict the
+    guarded door would apply on top of it (``None`` when the promotion may
+    proceed) — without it a row could advertise ``promote_new`` for a package
+    the very next write would refuse.
     When ``realm_token`` is given only that realm's inbox is scanned.
     """
+
+    from .skill_publishability import promotion_refusal
 
     root = realm_inbox_root()
     rows: list[dict] = []
@@ -677,8 +724,13 @@ def list_inbox_packages(realm_token: str | None = None) -> list[dict]:
 
     for realm_dir in realm_dirs:
         token = realm_dir.name
-        for slug, package_dir in _iter_packages(realm_dir):
+        for slug, package_dir in iter_skill_packages(realm_dir):
             plan = classify_promotion(slug, package_dir)
+            refusal = (
+                promotion_refusal(slug, package_dir)
+                if plan.action in ("promote_new", "hold_divergent")
+                else None
+            )
             rows.append(
                 {
                     "skill": slug,
@@ -687,6 +739,8 @@ def list_inbox_packages(realm_token: str | None = None) -> list[dict]:
                     "source_hash": plan.source_hash,
                     "canonical_hash": plan.canonical_hash,
                     "source_dir": package_dir,
+                    "promotion_block_reason": refusal.code if refusal else None,
+                    "promotion_block_detail": refusal.message if refusal else None,
                 }
             )
     return rows

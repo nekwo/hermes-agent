@@ -2403,6 +2403,18 @@ def available_skills_context(
             )
             shared = shared_by_name.get(name)
             realm_sync = _skill_realm_sync(name, realm_rows) if shared else []
+            # A skill resolved from a profile-local / external root is
+            # STRUCTURALLY unable to reach a realm — realm publish reads the
+            # shared root only. Such a row previously carried an empty
+            # ``realm_sync`` list, which reads as "no realms configured" rather
+            # than "cannot travel": a silent omission. Say it, with a typed
+            # reason. Only the CHEAP source-kind verdict is computed here; the
+            # installer-ownership / promotability classification hashes package
+            # trees and belongs to the on-demand ``skills inventory`` /
+            # ``skills publishable`` surfaces, never this per-persona build.
+            publishable, publishable_reason = _skill_publishability(
+                selected.source_kind if selected else None
+            )
             content_hash = (
                 skill_resolver.content_hash(selected)
                 if skill_resolver is not None
@@ -2435,6 +2447,8 @@ def available_skills_context(
                     ),
                     "realm_sync": realm_sync,
                     "shared_catalog": shared is not None,
+                    "publishable": publishable,
+                    "publishable_reason": publishable_reason,
                     "compatibility": compatibility,
                 }
             )
@@ -2463,6 +2477,35 @@ def available_skills_context(
         if len(deduped) >= limit:
             break
     return deduped
+
+
+def _skill_publishability(source_kind: str | None) -> tuple[bool, str]:
+    """``(publishable, typed_reason)`` for one resolved skill's source root.
+
+    Delegates the vocabulary to :mod:`agent_runtime.skill_publishability` so
+    this row and the ``skills_inventory/v1`` rows can never disagree about what
+    "publishable" means. An UNRESOLVED skill (no candidate) is reported as
+    not publishable with an explicit ``unresolved`` reason rather than being
+    silently defaulted either way.
+    """
+
+    from .skill_publishability import (
+        REASON_EXTERNAL_DIR_ONLY,
+        REASON_PROFILE_LOCAL_ONLY,
+        REASON_SHARED_ROOT,
+        REASON_UNKNOWN_ROOT,
+    )
+
+    if source_kind is None:
+        return False, "unresolved"
+    return (
+        source_kind == "shared_core",
+        {
+            "shared_core": REASON_SHARED_ROOT,
+            "profile_local": REASON_PROFILE_LOCAL_ONLY,
+            "external": REASON_EXTERNAL_DIR_ONLY,
+        }.get(source_kind, REASON_UNKNOWN_ROOT),
+    )
 
 
 def _skill_realm_sync(

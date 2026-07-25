@@ -295,6 +295,65 @@ reproduced four defects. They tighten C2/C3 without changing the target model:
 - Provenance-driven update notifications.
 - skills_inventory/Launcher picker support for categorized selection slugs.
 
+## Publishability + installer-ownership (2026-07-25)
+
+Follow-on slice. New module `agent_runtime/skill_publishability.py` — the ONE
+authority for "can this resolvable skill reach a realm, and may it be promoted".
+
+**Frozen ruling: the shared root stays the SOLE publish source.** Publishing
+`profile_local` was considered and rejected — the installer already distributes
+the bundled catalog to every member, so a realm republishing it creates a second
+authority for the same artifact, turns every hermes version bump into
+HELD-divergent noise on every member's pull, and re-creates the multi-root
+collision class the shared-skills-root migration retired. Do not add a second
+publish source; the answer for a profile-local skill is promotion through the
+existing guarded door.
+
+- **Reported, never inferred.** `publishable` + a typed `publishable_reason`
+  (`shared_root` / `profile_local_only` / `external_dir_only` / `unknown_root`)
+  now ride on: `skills_inventory/v1` `skills[]` rows, a new
+  `resolvable_skills[]` sweep across ALL three resolver tiers with a
+  `publishability_summary` tally, the per-persona
+  `prompt_observability.available_skills_context` rows (which previously carried
+  an empty `realm_sync` list for an unpublishable skill — indistinguishable from
+  "no realms"), and the new read-only verb
+  `hermes harness skills publishable [--source-kind …] [--unpublishable-only]`.
+- **Installer-owned packages are never offered and never admitted.** A profile
+  package tracked by `<profile_home>/skills/.bundled_manifest` classifies as
+  `installer_owned_pristine` (on-disk hash == recorded origin hash),
+  `installer_owned_edited` (differs — the same test `hermes update` uses to
+  decide "user-modified, keep"), or `installer_owned_state_unknown` (v1 entry
+  with no origin hash, or the upstream hash primitive unavailable → fail-closed).
+  Bundled-state detection imports `tools.skills_sync._dir_hash` /
+  `_read_skill_name` rather than copying them, so the manifest's hash contract
+  can never drift; if those move, everything classifies `…_state_unknown`.
+- **Edited-bundled is a distinct class, still refused.** Promoting an edited
+  bundled package under the installer's own name forks the catalog AND
+  guarantees a `skill_collision` (installer copy at resolver index 0 vs the
+  promoted shared copy). The refusal text names the non-forking route: author
+  the work as a package of your own under a distinct slug outside the profile's
+  installer-managed tree, then `promote --from-path`.
+- **Reserved target slugs.** A promotion whose target slug (or the leaf of a
+  `<category>/<name>` slug) is a name the installer manages in ANY profile is
+  refused (`installer_catalog_slug_reserved`) whatever the source — this also
+  covers realm pulls, where a realm publishing a bundled-named package would
+  otherwise auto-promote into the shared root and break resolution for every
+  persona. The pull already isolates refusals per package, so no `realm_sync.py`
+  change was needed.
+- **Enforced at the write paths only.** `classify_promotion` stays a pure
+  comparison (unchanged; no new `PLAN_ACTIONS`). `execute_promotion` consults
+  `promotion_refusal` for `promote_new` / adopt, BEFORE the `dry_run`
+  short-circuit so a preview never promises a promotion the real run refuses,
+  and returns `PromotionResult(action="refused", reason_code=<typed code>)`.
+  `noop_identical` is exempt (it writes nothing).
+- `_iter_packages` is now public as `iter_skill_packages`; the private name
+  remains as an alias because `realm_sync.py` imports it.
+
+Known live condition found while building this (NOT fixed — live state is
+operator-owned): `writing-plans` exists BOTH in the shared root and as an
+installer-tracked package at `<home>/skills/software-development/writing-plans`,
+so `resolve_skill("writing-plans")` is a `collision` today.
+
 ## Deploy note
 
 The live runtime runs from the installed venv (`.hermes\venvs\hermes-agent`),
