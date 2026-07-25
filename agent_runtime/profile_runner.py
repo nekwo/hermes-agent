@@ -16,6 +16,7 @@ from hermes_cli.runtime_provider import resolve_runtime_provider
 
 from .personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
 from .profile_context import PersonaProfileBinding, persona_profile_context
+from .redaction import TEXT_SECRET_VALUE_ASSIGNMENT_RE
 
 
 def _blocked_tool_names_with_registry_hygiene(requested: list[str] | None) -> list[str]:
@@ -2011,8 +2012,14 @@ def _message_preview(role: str, content: str, *, source: str) -> dict[str, Any]:
     }
 
 
+# The assignment rule is single-homed in ``agent_runtime.redaction`` (see the
+# header there for the JSON blind spot every local spelling shared). This lane
+# captures the FINAL MODEL PROMPT for observability, so a JSON-encoded
+# credential inside a prompt used to be persisted verbatim. The two-group
+# contract is preserved — ``_redact_prompt_text`` branches on ``lastindex >= 2``
+# to decide between ``key=<redacted>`` and a whole-match ``<redacted>``.
 _PROMPT_SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|bearer|password|secret)\s*[:=]\s*([^\s,;]+)"),
+    TEXT_SECRET_VALUE_ASSIGNMENT_RE,
     re.compile(r"(?i)\b(sk-[A-Za-z0-9_-]{12,})\b"),
     re.compile(r"(?i)\b(xox[baprs]-[A-Za-z0-9-]{12,})\b"),
 ]

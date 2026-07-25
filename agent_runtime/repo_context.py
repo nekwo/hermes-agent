@@ -16,6 +16,7 @@ from typing import Any
 from hermes_time import now
 
 from . import paths
+from .redaction import TEXT_SECRET_VALUE_ASSIGNMENT_RE
 
 HARNESS_WORKTREE_GC_TTL_SECONDS = 24 * 60 * 60
 # Bound same-day churn: keep at most this many clean worktrees per source repo.
@@ -1091,7 +1092,7 @@ def _sanitize_context_text(raw: str) -> tuple[str, bool]:
     for line in raw.replace("\x00", "").splitlines():
         clean = line.rstrip()
         if _SECRET_ASSIGNMENT_RE.search(clean):
-            clean = _SECRET_ASSIGNMENT_RE.sub(r"\1<redacted>", clean)
+            clean = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=<redacted>", clean)
         if len(clean) > _MAX_CONTEXT_LINE_CHARS:
             clean = f"{clean[:_MAX_CONTEXT_LINE_CHARS].rstrip()} ... [truncated]"
             truncated = True
@@ -1191,10 +1192,16 @@ _REPO_ALIAS_DISPLAY_LABELS = {
 _MAX_CONTEXT_FILE_CHARS = 2500
 _MAX_CONTEXT_TOTAL_CHARS = 7000
 _MAX_CONTEXT_LINE_CHARS = 500
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"((?:api[_-]?key|token|secret|password|authorization|bearer|credential)\s*[:=]\s*)[^,\s]+",
-    re.IGNORECASE,
-)
+# Single-homed in ``agent_runtime.redaction`` (see the header there: every
+# local spelling of this rule was blind to JSON). The surgical value shape is
+# deliberate — a repo-context excerpt is fed back to an agent, so the text
+# around a removed value must stay readable.
+#
+# Group contract changed with the move: group(1) is now the KEY ALONE, where
+# the retired local spelling captured "key + separator". The substitution below
+# re-emits the ``=`` explicitly, so the rendered output is unchanged for the
+# ``KEY=value`` form and normalized (``:`` -> ``=``) for the ``key: value`` one.
+_SECRET_ASSIGNMENT_RE = TEXT_SECRET_VALUE_ASSIGNMENT_RE
 
 
 def _repo_alias_display_label(alias: str) -> str | None:

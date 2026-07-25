@@ -10,6 +10,7 @@ from .models import PersonaInstance
 from .mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_records
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
+from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .redaction_mode import redaction_observe_enabled
 from .relay_policy import parse_relay_sender_marker
 from .runtime_hud import (
@@ -56,9 +57,11 @@ _TRACE_EVENT_TYPES = {
 _TRACE_FETCH_HEADROOM = 6
 _TRACE_FETCH_CEILING = 2000
 
-_SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
-)
+# Single-homed in ``agent_runtime.redaction`` — see the header there for the
+# JSON blind spot every local spelling shared. Detection here (a matching line
+# is dropped/blocked whole), so the shared pattern's group(2) is inert.
+# ``snapshot`` imports this name; it stays a module attribute on purpose.
+_SECRET_RE = TEXT_SECRET_ASSIGNMENT_RE
 _ASSISTANT_CLIENT_MESSAGE_ID_RE = re.compile(r"^(.+):assistant:\d+$")
 
 

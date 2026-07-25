@@ -27,6 +27,7 @@ from .events import EventLog
 from .machine_roots import MACHINE_ROOTS_FILENAME
 from .models import AgentPersona, Event, Realm, Workspace
 from .profile_context import active_profile_name, resolve_persona_profile
+from .redaction import SECRET_ASSIGNMENT_RE
 from .skill_install import HARNESS_SKILLS, install_harness_skills, install_harness_skills_for_personas
 from .store import RealmStore, WorkspaceStore
 
@@ -67,10 +68,14 @@ HARD_EXCLUDED_PATH_PARTS = {
     "state.db",
     "worker_sessions",
 }
-SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(api[_-]?key|authorization|bearer|client[_-]?secret|oauth[_-]?token|password|private[_-]?key|secret|token)\b"
-    r"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=:-]{16,}"
-)
+# ``SECRET_ASSIGNMENT_RE`` — the publish gate's secret rule — is imported from
+# ``agent_runtime.redaction``, the ONE home for every spelling of "secret-ish
+# key + separator + value". Read the header there for the JSON blind spot that
+# consolidation retired (``{"token": "…"}`` matched none of the twelve
+# copies). It stays re-exported from this module under its historical name, so
+# ``office_store``/``sync_admission`` keep importing it from here; both may now
+# do so eagerly if they wish, since ``redaction`` is stdlib-only and carries
+# none of this module's weight.
 
 # Canonical line-ending policy for the realm sync repo. The publisher already
 # canonicalizes every artifact to LF (see ``_canonicalize_text_bytes``); this

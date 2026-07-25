@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import threading
 import time
 from collections.abc import Iterator
@@ -14,6 +13,7 @@ from . import paths
 from .events import EventLog
 from .models import Event
 from .patch_coverage import batch_is_patch_coverable
+from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .request_control import request_cancelled
 from .serde import to_jsonable
 from .snapshot import build_snapshot
@@ -31,9 +31,10 @@ STREAM_SCHEMA_VERSION = 1
 #: flag is a new-lane activation gate, not an old-shape toggle).
 STREAM_PATCH_SCHEMA_VERSION = 2
 
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b((?:[A-Za-z0-9]+_)*(?:SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL|API_?KEY|KEY)(?:_[A-Za-z0-9]+)*)\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s'\"]+)"
-)
+# Single-homed in ``agent_runtime.redaction`` — see the header there for the
+# JSON blind spot every local spelling shared. group(1) is still the full key,
+# so the ``f"{match.group(1)}=[redacted]"`` rebuild below is unchanged.
+_SECRET_ASSIGNMENT_RE = ENV_SECRET_ASSIGNMENT_RE
 
 
 def hydrate_frame(

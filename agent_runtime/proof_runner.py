@@ -30,13 +30,15 @@ from .proof_command_policy import (
     task_requires_launcher_contract_consumption_proof,
 )
 from .proof_rules import ProofType
+from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .store import ProofStore
 
-_SECRET_ASSIGNMENT_PATTERN = re.compile(
-    r"(?i)\b("
-    r"(?:[A-Za-z0-9]+_)*(?:SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL|API_?KEY|KEY)(?:_[A-Za-z0-9]+)*"
-    r")\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s'\"]+)"
-)
+# Single-homed in ``agent_runtime.redaction`` — see the header there. Beyond
+# the JSON fix this lane also gains ``:`` as a separator (it was ``=``-only),
+# which matters most here: this redactor scrubs the stdout/stderr of ARBITRARY
+# proof commands, and command output is routinely JSON. group(1) is still the
+# full key, so the ``f"{match.group(1)}=[REDACTED]"`` rebuild is unchanged.
+_SECRET_ASSIGNMENT_PATTERN = ENV_SECRET_ASSIGNMENT_RE
 
 _SECRET_PATTERNS = (
     _SECRET_ASSIGNMENT_PATTERN,

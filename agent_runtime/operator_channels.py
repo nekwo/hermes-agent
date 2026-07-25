@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
+from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .persona_chat_history import (
     _canonical_persona_id,
     canonical_persona_chat_turn_id,
@@ -31,9 +32,10 @@ _TOOL_OK_STATUSES = {"passed", "ok", "completed", "success", "succeeded", "done"
 _TOOL_FAILED_STATUSES = {"failed", "error", "blocked", "crashed", "timeout"}
 
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
-_SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
-)
+# Single-homed in ``agent_runtime.redaction`` — see the header there for the
+# JSON blind spot every local spelling shared. Detection only here (a matching
+# line is dropped whole), so the shared pattern's group(2) is inert.
+_SECRET_RE = TEXT_SECRET_ASSIGNMENT_RE
 _TELEMETRY_SUMMARY_RE = re.compile(
     r"(?i)\b("
     r"agent init|provider client|provider responses|provider stream|provider call|"

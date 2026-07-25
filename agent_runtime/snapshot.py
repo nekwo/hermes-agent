@@ -46,6 +46,7 @@ from .persona_assignments import (
     persona_instance_visibility_ref,
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _SECRET_RE, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
+from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .persona_instance_identity import (
     backed_persona_identity,
     classify_orphan_persona_instances,
@@ -292,9 +293,12 @@ def snapshot_section_bytes(data: dict, key: str) -> int:
         )
     except Exception:
         return 0
-_ARCHIVED_CONVERSATION_SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
-)
+# Single-homed in ``agent_runtime.redaction`` — see the header there for the
+# JSON blind spot every local spelling shared. This is the same rule as
+# ``persona_chat_history._SECRET_RE`` (also imported into this module); both now
+# resolve to the one shared object. group(1) is still the key, so the
+# ``f"{m.group(1)}: [redacted]"`` rebuild below is unchanged.
+_ARCHIVED_CONVERSATION_SECRET_RE = TEXT_SECRET_ASSIGNMENT_RE
 
 
 def _runtime_paths_diagnostic(available_personas: list) -> dict:

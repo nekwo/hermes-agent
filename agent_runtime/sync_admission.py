@@ -12,9 +12,11 @@ four drifting copies.
 
 Two deliberate posture rules, both learned the hard way in this subsystem:
 
-1. **Secrets are scanned everywhere.** The regex, the secret-ish path markers
-   and the hard-excluded path parts are ``realm_sync``'s (imported lazily — this
-   module never defines a second copy). A pulled entity carrying a secret-shaped
+1. **Secrets are scanned everywhere.** The regex is
+   ``agent_runtime.redaction``'s single-homed :data:`~agent_runtime.redaction.
+   SECRET_ASSIGNMENT_RE`; the secret-ish path markers and the hard-excluded path
+   parts are still ``realm_sync``'s (imported lazily). This module never defines
+   a second copy of either. A pulled entity carrying a secret-shaped
    assignment is refused at the door. This is strictly *less* destructive than
    the generic loop's behaviour, which raises and aborts the whole pull: here one
    bad entity is refused and the pull continues (per-entity isolation).
@@ -35,6 +37,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from .redaction import SECRET_ASSIGNMENT_RE
 
 #: Free-text keys pruned before the portability walk, at ANY depth. These carry
 #: operator/agent English (board card titles + descriptions + checklist text,
@@ -75,8 +79,9 @@ class Refusal:
 
 
 def _secret_assignment_re():
-    from .realm_sync import SECRET_ASSIGNMENT_RE  # lazy: avoid import cycle/weight
-
+    # Eager import is safe now: the rule lives in stdlib-only
+    # ``agent_runtime.redaction``, not in heavyweight ``realm_sync``. Kept as a
+    # function so existing callers/monkeypatches keep their seam.
     return SECRET_ASSIGNMENT_RE
 
 

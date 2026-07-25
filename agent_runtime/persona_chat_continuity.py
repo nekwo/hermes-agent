@@ -28,15 +28,18 @@ from .persona_assignments import (
     safe_assignment_text,
     safe_assignment_token,
 )
+from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 _TOOL_EXECUTION_SCOPE: ContextVar[str | None] = ContextVar(
     "persona_chat_tool_execution_scope", default=None
 )
-_SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*([^\s,;]+)"
-)
+# Single-homed in ``agent_runtime.redaction`` — see the header there for the
+# JSON blind spot every local spelling shared. group(1) is still the key, so
+# the ``\1: [redacted]`` rebuild below is unchanged; the value shape widens
+# from ``[^\s,;]+`` to ``\S+``, which only removes MORE of the offending run.
+_SECRET_RE = TEXT_SECRET_ASSIGNMENT_RE
 _MAX_CONTENT = 20_000
 _MAX_ARGUMENTS = 4_000
 

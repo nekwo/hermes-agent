@@ -14,6 +14,7 @@ from hermes_cli.profiles import get_profile_dir
 from utils import atomic_json_write
 
 from . import paths
+from .redaction import TEXT_SECRET_VALUE_ASSIGNMENT_RE
 from .persona_assignments import (
     is_canonical_persona_channel,
     safe_assignment_text,
@@ -3054,10 +3055,11 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
     }
 
 
+# The assignment rule is single-homed in ``agent_runtime.redaction`` (see the
+# header there for the JSON blind spot every local spelling shared). Two-group
+# contract preserved — the substitution below branches on ``lastindex >= 2``.
 _OBSERVABILITY_PROMPT_SECRET_PATTERNS = [
-    re.compile(
-        r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|bearer|password|secret)\s*[:=]\s*([^\s,;]+)"
-    ),
+    TEXT_SECRET_VALUE_ASSIGNMENT_RE,
     re.compile(r"(?i)\b(sk-[A-Za-z0-9_-]{12,})\b"),
     re.compile(r"(?i)\b(xox[baprs]-[A-Za-z0-9-]{12,})\b"),
 ]
