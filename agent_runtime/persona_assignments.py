@@ -55,9 +55,18 @@ def _session_presence_probe(session_db: Any | None = None) -> tuple[Any | None, 
     make an unreadable database indistinguishable from a deleted chat, and a
     repair built on that would reap live pointers on a transient failure.
 
-    Two preconditions must hold before ANY binding may be called stale, and both
-    fail closed (probe ``None`` + a typed skip reason):
+    Three preconditions must hold before ANY binding may be called stale, and
+    all fail closed (probe ``None`` + a typed skip reason):
 
+    * when the database is self-resolved, the head home must be an EXPLICIT
+      authority (``head_home_not_authoritative``). ``_default_session_db``
+      falls back to the ambient ``HERMES_HOME`` when ``HERMES_HEAD_HOME`` is
+      unset, so a maintenance verb run under a profile home probes that
+      profile's database and reads every operator chat as absent — a
+      POPULATED wrong database sails straight past the empty-DB guard (live
+      2026-07-25: a reconcile under the alice profile home cleared 10 live
+      chat bindings on a false ``session_missing_from_session_db`` verdict).
+      A caller that passes ``session_db`` explicitly owns its own routing;
     * a database must resolve at all (``session_db_unavailable``);
     * it must positively enumerate at least one session (``session_db_empty``).
       A zero-row database is indistinguishable from a fresh or misrouted
@@ -68,8 +77,12 @@ def _session_presence_probe(session_db: Any | None = None) -> tuple[Any | None, 
     db = session_db
     if db is None:
         try:
+            from hermes_constants import hermes_head_home_is_authoritative
+
             from .persona_chat_history import _default_session_db
 
+            if not hermes_head_home_is_authoritative():
+                return None, "head_home_not_authoritative"
             db = _default_session_db()
         except Exception:
             db = None

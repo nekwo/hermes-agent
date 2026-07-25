@@ -741,10 +741,40 @@ def test_repair_missing_chat_session_bindings_refuses_on_blind_database():
     assert _binding_cleared_events() == []
 
 
-def test_reconcile_repairs_stale_chat_bindings_and_dry_run_is_inert(monkeypatch):
+def test_repair_skips_when_head_home_is_not_authoritative(monkeypatch):
+    """The self-resolved SessionDB is only trustworthy under an explicit head
+    authority. Without HERMES_HEAD_HOME, a maintenance verb run under a
+    profile home probes that profile's (populated!) database and reads every
+    operator chat as absent — the live 2026-07-25 reconcile cleared 10 live
+    bindings exactly this way. Fail closed with a typed skip instead."""
+
     from agent_runtime import persona_chat_history
 
     _bind("personainst_gone", persona_id="dev", session_id="persona_chat_gone")
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    monkeypatch.setattr(
+        persona_chat_history,
+        "_default_session_db",
+        lambda: (_ for _ in ()).throw(AssertionError("guard must refuse before resolving the DB")),
+    )
+
+    report = PersonaInstanceStore().repair_missing_chat_session_bindings()
+
+    assert report["skipped"] == "head_home_not_authoritative"
+    assert report["repaired_count"] == 0
+    assert PersonaInstanceStore().get("personainst_gone").session_id == "persona_chat_gone"
+    assert _binding_cleared_events() == []
+
+
+def test_reconcile_repairs_stale_chat_bindings_and_dry_run_is_inert(monkeypatch):
+    import os
+
+    from agent_runtime import persona_chat_history
+
+    _bind("personainst_gone", persona_id="dev", session_id="persona_chat_gone")
+    # The presence probe fails closed without an explicit head authority; the
+    # repair path under test assumes correctly-routed maintenance.
+    monkeypatch.setenv("HERMES_HEAD_HOME", os.environ.get("HERMES_HOME", ""))
     monkeypatch.setattr(
         persona_chat_history,
         "_default_session_db",
