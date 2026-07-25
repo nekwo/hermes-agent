@@ -11,6 +11,8 @@ from datetime import timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
 from agent.skill_utils import EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS
 from hermes_constants import get_config_path, get_hermes_home, get_shared_skills_dir
 from hermes_time import now
@@ -45,6 +47,12 @@ SECRET_PATH_MARKERS = {
     "token",
     "tokens",
 }
+# The machine seed every free Hermes profile forks from. Its RAW settings never
+# travel through realm sync (Office layout realm-sync plan §5.1) — only the
+# allowlisted persona definitions bound to it do. Same spelling as
+# ``personas.BASE_PERSONA_ID``; kept as its own constant here because the guard
+# is about the profile HOME, which is what the original persona-id guard missed.
+BASE_PROFILE_NAME = "base"
 HARD_EXCLUDED_PATH_PARTS = {
     "blueprints",
     "blueprint_runs",
@@ -89,6 +97,23 @@ class RealmSyncArtifact:
     source: Path
     relative_path: str
     destination: Path
+    #: Synthesized published bytes. When set, THESE are what publish writes and
+    #: ``source`` degrades to provenance (the file the projection was derived
+    #: from). Added for the portable persona-config projection: the one artifact
+    #: family that must never ship a raw file verbatim still rides the single
+    #: publish lane — manifest, secret scan, EOL canonicalization, change
+    #: detection — instead of growing a side channel.
+    content: bytes | None = None
+
+    def read_bytes(self) -> bytes:
+        """The bytes this artifact publishes: synthesized content when present,
+        otherwise the source file. Every publish-side reader MUST go through
+        here — reading ``source`` directly would publish the raw file a
+        synthesized artifact exists precisely to avoid."""
+
+        if self.content is not None:
+            return self.content
+        return self.source.read_bytes()
 
     def row(self) -> dict[str, str]:
         return {
@@ -186,10 +211,14 @@ def publish_realm_sync(
         raise RealmSyncError("sync_conflict", "Realm sync repo has unresolved git conflicts.", safe_details={"conflicts": git["conflicts"]})
     if git["behind"] > 0:
         raise RealmSyncError("sync_behind", "Realm sync repo is behind its upstream; pull before publishing.", retryable=True, safe_details={"behind": git["behind"]})
-    artifacts = resolve_realm_sync_artifacts(realm_id)
+    artifacts, projection = _resolve_artifacts_with_projection(realm_id)
     _assert_no_secret_artifacts(artifacts)
+    _assert_no_raw_profile_config(artifacts)
+    _assert_portable_artifacts(artifacts)
     if dry_run:
-        return _sync_result(realm, "publish", "dry_run", artifacts, repo=repo, git=git, changed=False)
+        result = _sync_result(realm, "publish", "dry_run", artifacts, repo=repo, git=git, changed=False)
+        result["persona_projection"] = _persona_projection_row(projection)
+        return result
 
     subtree = _realm_subtree(repo, realm.id)
     subtree_rel = f"realms/{_safe_token(realm.id)}"
@@ -199,7 +228,7 @@ def publish_realm_sync(
     # the pull lane writes LF; copying those raw bytes made every publish a
     # whole-file EOL churn and reported changed=true on no-op runs.
     desired = {
-        artifact.relative_path.replace("\\", "/"): _canonicalize_text_bytes(artifact.source.read_bytes())
+        artifact.relative_path.replace("\\", "/"): _canonicalize_text_bytes(artifact.read_bytes())
         for artifact in artifacts
     }
     # Content-aware change detection: only (re)write the subtree when the
@@ -269,9 +298,18 @@ def publish_realm_sync(
             update_office_baseline_after_sync(realm.id, published_office_workspaces)
         except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
             pass
+    # Persona definitions: same baseline discipline as boards/office, so my own
+    # publish never comes back as a pull conflict.
+    from .persona_config_sync import update_persona_config_baseline_after_publish
+
+    try:
+        update_persona_config_baseline_after_publish(realm.id, projection)
+    except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
+        pass
     warnings = _notify_publish(realm, repo=repo, artifacts=artifacts, credential=credential) if changed else []
     git_after = _git_state(repo)
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
+    result["persona_projection"] = _persona_projection_row(projection)
     if warnings:
         result["warnings"] = warnings
     _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_held_skill_packages_for_realm(realm), artifacts=artifacts)
@@ -340,6 +378,16 @@ def pull_realm_sync(
     skill_summary = apply_skill_inbox_pull(realm, subtree)
     if skill_summary.adopted or skill_summary.removed:
         changed = True
+    # Persona definitions: excluded from the generic loop too
+    # (profiles/<name>/config.yaml → _destination_for_sync_path None). The member's
+    # config is merged key-wise against a never-synced baseline — the realm owns
+    # the shared persona surface, the member keeps every machine section they
+    # authored, and divergent definitions are HELD, never clobbered.
+    from .persona_config_sync import apply_persona_config_pull
+
+    persona_summary = apply_persona_config_pull(realm.id, subtree)
+    if persona_summary.changed:
+        changed = True
     # Workspace deletions: honor the pulled realm's deleted_workspace_ids
     # resurrection-guard ledger so a member's surviving local copy neither
     # lingers nor republishes a workspace another member deleted.
@@ -358,10 +406,15 @@ def pull_realm_sync(
     result["skill_sync"] = skill_summary.as_dict()
     if tombstone_summary["deleted"] or tombstone_summary["archived"] or tombstone_summary["warnings"]:
         result["workspace_tombstones"] = tombstone_summary
-    if pulled_profile_tokens:
+    # ``profile_sync`` carries the W-H4 rows (which profile homes this pull
+    # touched/materialized) PLUS the persona-definition merge accounting. It is
+    # emitted whenever either half has something to say — a realm that publishes
+    # persona definitions but no per-profile files must still report its merge.
+    if pulled_profile_tokens or persona_summary.source is not None:
         result["profile_sync"] = {
             "profiles": pulled_profile_tokens,
             "created": created_profiles,
+            "personas": persona_summary.as_dict(),
         }
     result["skill_reconcile"] = {
         "installed": [item.skill for item in install_results],
@@ -455,6 +508,19 @@ def _apply_workspace_tombstones(realm_id: str) -> dict[str, list]:
 
 
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
+    return _resolve_artifacts_with_projection(realm_id)[0]
+
+
+def _resolve_artifacts_with_projection(realm_id: str):
+    """``(artifacts, persona projection)``.
+
+    The publish lane needs the projection's ACCOUNTING (which keys the allowlist
+    dropped, which definitions were synthesized from a store record, which wanted
+    personas had no definition at all) alongside the artifacts. Resolving both in
+    one pass keeps a single authority for "what does this realm publish" — a
+    second independent computation could drift from the bytes actually written.
+    """
+
     realm = RealmStore().get(realm_id)
     workspaces = _workspaces_for_realm(realm)
     cfg = load_agent_runtime_config()
@@ -477,12 +543,27 @@ def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     wanted_persona_ids = list(
         dict.fromkeys([*required_persona_ids, *selected_persona_ids])
     )
+    published_persona_ids: list[str] = []
     for persona_id in wanted_persona_ids:
         persona = personas.get(persona_id)
         if persona is None:
             continue
+        published_persona_ids.append(persona_id)
         artifacts.extend(_persona_artifacts(persona))
-    return _dedupe_artifacts(artifacts)
+    # ONE synthesized, portable persona-definition document for the whole realm,
+    # pruned to exactly the personas above. Replaces the per-profile raw
+    # ``config.yaml`` artifact that used to leak the base seed and every
+    # machine-shaped MCP/env/path value on it.
+    from .persona_config_sync import project_persona_definitions
+
+    projection = project_persona_definitions(
+        published_persona_ids,
+        raw_config=_raw_active_config(),
+        records=personas,
+    )
+    if projection.personas:
+        artifacts.append(_persona_config_artifact(projection))
+    return _dedupe_artifacts(artifacts), projection
 
 
 def _workspaces_for_realm(realm: Realm) -> list[Workspace]:
@@ -900,21 +981,25 @@ def _pulled_profile_tokens(artifacts: list[RealmSyncArtifact]) -> tuple[list[str
 
 
 def _persona_artifacts(persona: AgentPersona) -> list[RealmSyncArtifact]:
+    """Per-profile files a persona carries: prompts, soul overlay, memory, core
+    context.
+
+    The bound profile home's RAW ``config.yaml`` is deliberately NOT here any
+    more. It used to publish as ``profiles/<profile>/config.yaml`` and overwrite
+    the member's file wholesale on pull, which (a) clobbered the base fork seed
+    whenever a persona bound to ``hermes_profile: base`` (Office plan §5.1 ruled
+    that must never happen) and (b) shipped machine-shaped ``mcp_servers``
+    commands/env and absolute Windows paths that resolve to nothing on any other
+    machine. The persona DEFINITIONS that were the only shareable part of that
+    file now travel as one synthesized, allowlisted projection
+    (``persona_config_sync.project_persona_definitions``).
+    """
+
     binding = resolve_persona_profile(persona)
     profile_home = binding.profile_home or get_hermes_home()
     profile = _safe_token(binding.hermes_profile or active_profile_name() or "default")
     persona_token = _safe_token(persona.id)
     artifacts: list[RealmSyncArtifact] = []
-    config = profile_home / "config.yaml"
-    if config.exists():
-        artifacts.append(
-            RealmSyncArtifact(
-                kind="persona_config",
-                source=config,
-                relative_path=f"profiles/{profile}/config.yaml",
-                destination=config,
-            )
-        )
     from .prompt_sources import resolve_persona_system_prompt_path
 
     for label, raw in (("system_prompt", persona.system_prompt_path), ("soul_overlay", persona.soul_overlay_path)):
@@ -965,6 +1050,150 @@ def _profile_relative_file(profile_home: Path, raw: str | None) -> Path | None:
     if path.is_absolute() or ".." in path.parts:
         return None
     return profile_home / path
+
+
+def _raw_active_config() -> dict[str, Any]:
+    """The parsed ``config.yaml`` persona definitions are authored in.
+
+    ``agent_runtime.personas.<id>`` is read by ``load_agent_runtime_config()``
+    from ``get_config_path()`` — the ACTIVE profile's config — not from each
+    persona's bound profile home. The projection is sourced from the same file
+    the runtime resolves definitions out of, so publish and pull are symmetric.
+    """
+
+    from .persona_config_sync import load_raw_config
+
+    return load_raw_config()
+
+
+def _persona_config_artifact(projection) -> RealmSyncArtifact:
+    """The single synthesized ``persona_config`` artifact.
+
+    Published at ``store/personas.yaml``, NOT ``profiles/<name>/config.yaml``:
+    an older hermes maps the latter onto ``<profile_home>/config.yaml`` and would
+    overwrite a member's real config with this personas-only document. The new
+    path is unknown to every older client (``_destination_for_sync_path`` →
+    ``None`` → skipped), so an old member degrades to "no persona definitions"
+    instead of losing their configuration.
+    """
+
+    from .persona_config_sync import PROJECTION_RELATIVE_PATH
+
+    config = get_config_path()
+    return RealmSyncArtifact(
+        kind="persona_config",
+        source=config,
+        relative_path=PROJECTION_RELATIVE_PATH,
+        destination=config,
+        content=projection.to_bytes(),
+    )
+
+
+def _persona_projection_row(projection) -> dict[str, Any]:
+    """Typed publish accounting for the projection — including the explicit
+    base-seed guard (Office plan §5.1).
+
+    ``profiles_withheld`` names every profile home whose RAW settings this
+    publish deliberately did not ship; ``base_seed_guarded`` is the §5.1 answer
+    specifically. The guard is reported even though (and precisely because) the
+    projection makes the clobber structurally impossible — a silent skip is not
+    accounting.
+    """
+
+    withheld = sorted(_bound_profile_names(projection.personas))
+    return {
+        **projection.as_dict(),
+        "profiles_withheld": withheld,
+        "base_seed_guarded": BASE_PROFILE_NAME in withheld,
+    }
+
+
+def _bound_profile_names(personas: dict[str, Any]) -> set[str]:
+    """Profile names the published personas bind to (``hermes_profile``), plus
+    the active profile for personas that inherit it. These are exactly the
+    profile homes whose raw ``config.yaml`` publish now withholds."""
+
+    names: set[str] = set()
+    for body in personas.values():
+        bound = str((body or {}).get("hermes_profile") or "").strip()
+        names.add(bound or str(active_profile_name() or "default"))
+    return names
+
+
+def _assert_no_raw_profile_config(artifacts: list[RealmSyncArtifact]) -> None:
+    """Structural base-seed guard (Office plan §5.1), enforced for EVERY profile.
+
+    §5.1 ruled the base profile — the machine seed every free profile forks from
+    — must never travel: overwriting a member's fork seed changes every agent
+    they create afterwards, including outside this realm. The original guard was
+    written against the base PERSONA id (``personas.BASE_PERSONA_ID``), so a
+    persona merely *bound to* ``hermes_profile: base`` walked past it and
+    published ``profiles/base/config.yaml`` anyway.
+
+    The rule is now structural and profile-agnostic: no raw profile
+    ``config.yaml`` may ever be an artifact. Only allowlisted persona definitions
+    leave, via the synthesized projection.
+    """
+
+    offenders = sorted(
+        artifact.relative_path.replace("\\", "/")
+        for artifact in artifacts
+        if _is_raw_profile_config_path(artifact.relative_path.replace("\\", "/"))
+    )
+    if offenders:
+        raise RealmSyncError(
+            "sync_profile_config_excluded",
+            "Realm sync refused to publish a raw profile config.yaml; only the "
+            "portable persona-definition projection may travel.",
+            safe_details={"paths": offenders, "base_profile": BASE_PROFILE_NAME},
+        )
+
+
+def _is_raw_profile_config_path(rel: str) -> bool:
+    parts = Path(rel).parts
+    return len(parts) == 3 and parts[0] == "profiles" and parts[2] == "config.yaml"
+
+
+def _assert_portable_artifacts(artifacts: list[RealmSyncArtifact]) -> None:
+    """Refuse to publish machine/installation-shaped values in CONFIGURATION.
+
+    Scope is deliberate. This runs over the STRUCTURED persona-definition
+    projection — parsed, key by key — not over free text. A skill's SKILL.md, a
+    profile ``MEMORY.md``, or an ``AGENTS.md`` legitimately mentions absolute
+    paths as prose; refusing those would brick every publish on this machine
+    without protecting anything, and "a refusal that bricks a publish over a
+    false positive" is a failure class this file has already paid for. What
+    matters is that no absolute path ends up as live WIRING on another member's
+    machine — and wiring only ever comes from the projection.
+
+    Refuse rather than warn: the projection is synthesized under our own
+    allowlist, so a machine-shaped value in it is a genuine authoring defect, and
+    shipping it silently is exactly the bug being retired. ALL offenders are
+    named in one typed error so an operator fixes them in a single pass.
+    """
+
+    from .persona_config_sync import NONPORTABLE_HINT, find_nonportable_values, raw_persona_overrides
+
+    offenders: list[dict[str, str]] = []
+    for artifact in artifacts:
+        if artifact.kind != "persona_config":
+            continue
+        try:
+            data = yaml.safe_load(artifact.read_bytes().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        personas = data.get("personas") if isinstance(data, dict) else None
+        if not isinstance(personas, dict):
+            personas = raw_persona_overrides(data)
+        for row in find_nonportable_values(personas, prefix="personas"):
+            offenders.append({**row, "value": _redact_text(row["value"])})
+    if offenders:
+        raise RealmSyncError(
+            "sync_nonportable_path",
+            "Realm sync refused to publish machine-shaped values that cannot "
+            "resolve on another member's machine.",
+            safe_details={"offenders": offenders, "hint": NONPORTABLE_HINT},
+        )
 
 
 def _artifacts_from_subtree(subtree: Path) -> list[RealmSyncArtifact]:
@@ -1031,12 +1260,23 @@ def _destination_for_sync_path(rel: str) -> Path | None:
     # store/boards/* and store/office/* deliberately fall through to None: the
     # generic overwrite loop never touches them — board_sync.apply_board_pull /
     # office_sync.apply_office_pull own those pulls (3-way baseline merge).
+    if parts and parts[0] == "store" and len(parts) == 2 and parts[1] == "personas.yaml":
+        # The portable persona-definition projection. Owned by
+        # ``persona_config_sync.apply_persona_config_pull`` (key-wise merge
+        # against a never-synced baseline), never the generic overwrite loop —
+        # same exclusion precedent as store/boards/*, store/office/*, skills/*.
+        return None
     if parts and parts[0] == "profiles" and len(parts) > 1:
         profile_home = _profile_home_for_token(parts[1])
         if profile_home is None:
             return None
         if len(parts) == 3 and parts[2] == "config.yaml":
-            return profile_home / "config.yaml"
+            # LEGACY artifact from an older publisher. It used to be written here
+            # wholesale, which overwrote the member's real config — including the
+            # base fork seed — with the publisher's machine-shaped file. The same
+            # applier now ingests it, projects it through the allowlist, and
+            # merges only persona definitions.
+            return None
         if "memories" in parts and parts[-1] == "MEMORY.md":
             return profile_home / "memories" / "MEMORY.md"
         if "context" in parts:
@@ -1082,6 +1322,8 @@ def _kind_for_sync_path(rel: str) -> str:
         return "realm"
     if rel.startswith("store/office/"):
         return "office_actor" if "/actors/" in rel else "office"
+    if rel == "store/personas.yaml":
+        return "persona_config"
     if rel.endswith("config.yaml"):
         return "persona_config"
     if "/memories/" in rel:
@@ -1099,7 +1341,7 @@ def _assert_no_secret_artifacts(artifacts: list[RealmSyncArtifact]) -> None:
     blocked: list[str] = []
     for artifact in artifacts:
         rel = artifact.relative_path.replace("\\", "/")
-        if _is_secretish_path(rel) or _is_hard_excluded_path(rel) or _file_contains_secret_assignment(artifact.source):
+        if _is_secretish_path(rel) or _is_hard_excluded_path(rel) or _artifact_contains_secret_assignment(artifact):
             blocked.append(rel)
     if blocked:
         raise RealmSyncError("sync_secret_excluded", "Realm sync refused to include excluded secret/state artifacts.", safe_details={"paths": blocked[:20]})
@@ -1113,6 +1355,20 @@ def _is_secretish_path(rel: str) -> bool:
 def _is_hard_excluded_path(rel: str) -> bool:
     parts = {part.lower() for part in Path(rel).parts}
     return bool(parts & HARD_EXCLUDED_PATH_PARTS)
+
+
+def _artifact_contains_secret_assignment(artifact: RealmSyncArtifact) -> bool:
+    """Scan what actually publishes.
+
+    A synthesized artifact must be scanned by its CONTENT — scanning its
+    provenance ``source`` would test a file whose secrets the projection already
+    filtered out, and (worse) could refuse a publish over a secret that never
+    leaves the machine. The secret-exclusion path itself is unchanged.
+    """
+
+    if artifact.content is not None:
+        return bool(SECRET_ASSIGNMENT_RE.search(artifact.content.decode("utf-8", errors="ignore")))
+    return _file_contains_secret_assignment(artifact.source)
 
 
 def _file_contains_secret_assignment(path: Path) -> bool:
@@ -1729,7 +1985,10 @@ def _published_artifacts_differ(subtree: Path, desired: dict[str, bytes]) -> boo
 def _dedupe_artifacts(artifacts: list[RealmSyncArtifact]) -> list[RealmSyncArtifact]:
     deduped: dict[str, RealmSyncArtifact] = {}
     for artifact in artifacts:
-        if not artifact.source.exists():
+        # A synthesized artifact has no file to exist — its bytes ARE the
+        # artifact. Only file-backed artifacts are dropped when their source
+        # vanished between resolution and publish.
+        if artifact.content is None and not artifact.source.exists():
             continue
         rel = artifact.relative_path.replace("\\", "/")
         if _is_hard_excluded_path(rel):

@@ -32,28 +32,25 @@ def _pin_profiles(monkeypatch, tmp_path, *, active: str = "alice") -> Path:
     return profiles_root
 
 
-def test_active_profile_maps_to_active_home(monkeypatch, tmp_path):
+def test_profile_config_is_never_a_generic_pull_destination(monkeypatch, tmp_path):
+    """SUPERSEDED W-H4 detail (2026-07-25): a profile ``config.yaml`` no longer
+    has a generic pull destination AT ALL.
+
+    W-H4 made the mapping profile-aware so a multi-profile pull stopped
+    collapsing every config onto the active home. That fixed WHERE the file
+    landed but kept the blind wholesale overwrite — a raw publisher config
+    (machine paths, ``mcp_servers``, and the base fork seed) replacing a
+    member's file. The lane now belongs to
+    ``persona_config_sync.apply_persona_config_pull``, which merges only
+    allowlisted persona definitions key-wise. Same exclusion precedent as
+    store/boards/*, store/office/*, skills/* → ``None``.
+    """
+
     _pin_profiles(monkeypatch, tmp_path, active="alice")
-    from hermes_constants import get_hermes_home
-
-    dest = _destination_for_sync_path("profiles/alice/config.yaml")
-    assert dest == get_hermes_home() / "config.yaml"
-
-
-def test_named_profiles_map_to_their_own_homes_not_the_active_one(monkeypatch, tmp_path):
-    """THE cross-profile clobber regression (plan §5.1). With the degenerate
-    mapping, alice's and bob's config.yaml resolved to the SAME file."""
-
-    profiles_root = _pin_profiles(monkeypatch, tmp_path, active="alice")
-    bob_config = _destination_for_sync_path("profiles/bob/config.yaml")
-    neko_config = _destination_for_sync_path("profiles/neko/config.yaml")
-    alice_config = _destination_for_sync_path("profiles/alice/config.yaml")
-    assert bob_config == profiles_root / "bob" / "config.yaml"
-    assert neko_config == profiles_root / "neko" / "config.yaml"
-    assert len({str(alice_config), str(bob_config), str(neko_config)}) == 3, (
-        "profiles/<name> pull destinations collapsed — the W-H4 cross-profile "
-        "clobber is back"
-    )
+    for token in ("alice", "bob", "neko", "base"):
+        assert _destination_for_sync_path(f"profiles/{token}/config.yaml") is None, token
+    # The NEW projection path is owned by the same applier, never the loop.
+    assert _destination_for_sync_path("store/personas.yaml") is None
 
 
 def test_named_profile_memory_and_prompts_stay_profile_scoped(monkeypatch, tmp_path):
