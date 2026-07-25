@@ -1336,7 +1336,20 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
         "persona.profile_rebound",
         "Persona rebound to a different Hermes profile",
         ("persona_id", "from_profile", "to_profile"),
-        ("actor", "instance_count", "instances", "instances_truncated"),
+        (
+            "actor",
+            "instance_count",
+            "instances",
+            "instances_truncated",
+            # Partial-apply accounting: the persona authority moved but these
+            # projection rows did not. Emitted ON the run that stranded them —
+            # the `_agent_*` placement rows have no self-heal, so this event is
+            # the only durable record that they need a retry.
+            "status",
+            "failed_count",
+            "failed",
+            "failed_truncated",
+        ),
     ),
     # Synthetic watchdog event: appended by stream_frames when the scope/catalog
     # fingerprint changed while the EventLog offset did not — an event-less write

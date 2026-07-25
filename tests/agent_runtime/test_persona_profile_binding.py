@@ -583,3 +583,119 @@ def test_a_no_op_rebind_writes_nothing_and_emits_nothing(profiles):
     assert result["instances_moved"] == []
     assert _store_bytes() == before
     assert len(EventLog().tail(10_000)) == events_before
+
+
+# --------------------------------------------------------------------------- #
+# 10. partial-failure isolation
+# --------------------------------------------------------------------------- #
+def test_a_failing_row_is_isolated_accounted_and_still_emits_evidence(profiles, monkeypatch):
+    """One unwritable row must not abort the cascade, vanish, or fake success.
+
+    Aborting mid-loop would leave the persona authority already moved (it is
+    written first) with an arbitrary suffix of rows stranded, no event, and a
+    traceback instead of an envelope. The `_agent_*` placement rows have NO
+    self-heal, so a stranded row stays stranded until someone retries.
+    """
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.persona_profile_binding import STATUS_PARTIALLY_APPLIED
+
+    _seed(_persona(), placements=("agent_aaa", "agent_bbb", "agent_ccc", "agent_ddd"))
+    real = PersonaInstanceStore.set_backing_profile
+
+    def _fail_on_bbb(self, persona_instance_id, profile_id):
+        if persona_instance_id == "personainst_widget_agent_bbb":
+            raise OSError("disk on fire")
+        return real(self, persona_instance_id, profile_id)
+
+    monkeypatch.setattr(PersonaInstanceStore, "set_backing_profile", _fail_on_bbb)
+
+    result = rebind_persona_profile("widget", profile="beta")
+
+    # The authority moved, and every row EXCEPT the broken one moved with it --
+    # the failure did not abort the rows that came after it.
+    assert AgentStore().get("widget").hermes_profile == "beta"
+    bound = {item.id: item.profile_id for item in PersonaInstanceStore().list_all()}
+    assert bound["personainst_widget"] == "beta"
+    assert bound["personainst_widget_agent_aaa"] == "beta"
+    assert bound["personainst_widget_agent_ccc"] == "beta"
+    assert bound["personainst_widget_agent_ddd"] == "beta"
+    assert bound["personainst_widget_agent_bbb"] == "alpha"
+
+    # ...and the envelope reports a PARTIAL success, never a clean one.
+    assert result["ok"] is False
+    assert result["status"] == STATUS_PARTIALLY_APPLIED
+    assert result["error_code"] == "cascade_partial_failure"
+    assert [item["persona_instance_id"] for item in result["instances_failed"]] == [
+        "personainst_widget_agent_bbb"
+    ]
+    assert "disk on fire" in result["instances_failed"][0]["reason"]
+    assert "personainst_widget_agent_bbb" in result["error"]
+    assert "STRANDED" in result["next_expected"]
+    assert {row["persona_instance_id"] for row in result["instances_moved"]} == {
+        "personainst_widget",
+        "personainst_widget_agent_aaa",
+        "personainst_widget_agent_ccc",
+        "personainst_widget_agent_ddd",
+    }
+
+    # The evidence channel must survive the run that went wrong.
+    event = next(item for item in EventLog().tail(50) if item.type == REBIND_EVENT_TYPE)
+    assert event.payload["status"] == STATUS_PARTIALLY_APPLIED
+    assert event.payload["instance_count"] == 4
+    assert event.payload["failed_count"] == 1
+    assert event.payload["failed"][0]["persona_instance_id"] == "personainst_widget_agent_bbb"
+    assert {item["persona_instance_id"] for item in event.payload["instances"]} == {
+        "personainst_widget",
+        "personainst_widget_agent_aaa",
+        "personainst_widget_agent_ccc",
+        "personainst_widget_agent_ddd",
+    }
+
+
+def test_rerunning_after_a_partial_apply_repairs_only_the_stranded_row(profiles, monkeypatch):
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    _seed(_persona(), placements=("agent_aaa", "agent_bbb"))
+    real = PersonaInstanceStore.set_backing_profile
+    broken = {"on": True}
+
+    def _fail_once(self, persona_instance_id, profile_id):
+        if broken["on"] and persona_instance_id == "personainst_widget_agent_bbb":
+            raise OSError("transient")
+        return real(self, persona_instance_id, profile_id)
+
+    monkeypatch.setattr(PersonaInstanceStore, "set_backing_profile", _fail_once)
+    assert rebind_persona_profile("widget", profile="beta")["ok"] is False
+
+    broken["on"] = False
+    retry = rebind_persona_profile("widget", profile="beta")
+
+    assert retry["ok"] is True
+    assert retry["persona_changed"] is False
+    assert [row["persona_instance_id"] for row in retry["instances_moved"]] == [
+        "personainst_widget_agent_bbb"
+    ]
+    assert retry["instances_failed"] == []
+    assert PersonaInstanceStore().get("personainst_widget_agent_bbb").profile_id == "beta"
+
+
+def test_partial_failure_event_stays_inside_the_payload_cap(profiles, monkeypatch):
+    from agent_runtime.events import EVENT_PAYLOAD_LIMIT_BYTES
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    _seed(_persona(), placements=tuple(f"agent_{index:04d}" for index in range(60)))
+    monkeypatch.setattr(
+        PersonaInstanceStore,
+        "set_backing_profile",
+        lambda self, persona_instance_id, profile_id: (_ for _ in ()).throw(OSError("x" * 500)),
+    )
+
+    result = rebind_persona_profile("widget", profile="beta")
+
+    assert result["ok"] is False
+    assert len(result["instances_failed"]) == 61
+    event = next(item for item in EventLog().tail(50) if item.type == REBIND_EVENT_TYPE)
+    assert event.payload["failed_count"] == 61
+    assert event.payload["failed_truncated"] == 61 - len(event.payload["failed"])
+    assert len(json.dumps(event.payload).encode("utf-8")) <= EVENT_PAYLOAD_LIMIT_BYTES

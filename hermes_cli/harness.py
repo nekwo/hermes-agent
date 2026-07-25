@@ -3248,7 +3248,10 @@ def _cmd_agent_set_profile(args) -> int:
         _print_stage42(_object_envelope("agent_profile_rebind", data), args=args, default_output="json")
         return 2
     _print_stage42(_object_envelope("agent_profile_rebind", result), args=args, default_output="json")
-    return 0
+    # A partial apply moved the persona authority but stranded projection rows.
+    # Placement rows have no self-heal, so exiting 0 would tell a script the
+    # binding is fully consistent when it is not.
+    return 0 if result.get("ok", True) else 2
 
 
 def _cmd_pets_gallery(args) -> int:

@@ -90,9 +90,19 @@ BUSY_NON_IDLE_STATE = "non_idle_state"
 #: are also idle for rebinding purposes — nothing is executing.
 _IDLE_STATES = frozenset({"", "idle", "completed", "blocked", "closed"})
 
+#: Terminal status of an apply. ``partially_applied`` = the persona authority
+#: moved but at least one instance projection could not be written; those rows
+#: are STRANDED (placement rows have no self-heal), so the operation must never
+#: report a clean success.
+STATUS_APPLIED = "applied"
+STATUS_PARTIALLY_APPLIED = "partially_applied"
+
 #: Event payloads are capped at 4KB (``EVENT_PAYLOAD_LIMIT_BYTES``). Bound the
-#: per-instance detail list and account the overflow rather than blowing the cap.
+#: per-instance detail lists and account the overflow rather than blowing the
+#: cap. The failure list gets a smaller cap because each entry also carries a
+#: reason string.
 _EVENT_INSTANCE_CAP = 24
+_EVENT_FAILED_CAP = 8
 
 
 class PersonaProfileRebindError(AgentRuntimeError):
@@ -592,6 +602,7 @@ def rebind_persona_profile(
     old_binding = resolve_persona_profile(persona)
     moving = [row for row in instance_rows if _clean(row["profile_id"]) != target_profile]
     moving_ids = {row["persona_instance_id"] for row in moving}
+    _mode_by_id = {row["persona_instance_id"]: row["mode"] for row in instance_rows}
     persona_changes = from_profile != target_profile
     before_artifacts = _persona_realm_artifacts(persona_id)
 
@@ -616,6 +627,9 @@ def rebind_persona_profile(
         "instances_already_bound": [
             row["persona_instance_id"] for row in instance_rows if row["persona_instance_id"] not in moving_ids
         ],
+        # Always present so a consumer never has to distinguish "no failures"
+        # from "this envelope shape does not report failures".
+        "instances_failed": [],
         "binding_files": binding_files(probe),
         "previous_binding_files": binding_files(persona),
     }
@@ -643,24 +657,37 @@ def rebind_persona_profile(
         envelope["next_expected"] = "no store write and no event were emitted; re-run without --dry-run to apply"
         return envelope
 
-    # Authority first, projections second: if a cascade write fails midway, the
-    # canonical row's self-heal (``ensure_for_persona``) converges TOWARD the new
-    # binding rather than reverting it.
+    # Authority first, projections second. Note what this ordering does and does
+    # NOT buy: if a projection write fails, ``ensure_for_persona`` will later
+    # re-heal the canonical ``personainst_<persona_id>`` row toward the new
+    # binding, but the ``personainst_<persona>_agent_<hex>`` placement rows have
+    # NO self-heal at all (live evidence 2026-07-25 — that permanent drift is the
+    # whole reason this verb exists). So the rows that most need the cascade are
+    # exactly the ones no later pass repairs. A failed row is therefore recorded
+    # and reported, never swallowed and never allowed to abort the rest.
     if persona_changes:
         persona.hermes_profile = target_profile
         store.save(persona)
-    moved = _cascade_instance_profiles(target_profile, moving, event_log=log)
+    moved, failed = _cascade_instance_profiles(target_profile, moving, event_log=log)
     changed = bool(persona_changes or moved)
     envelope["dry_run"] = False
     envelope["changed"] = changed
+    # On apply, `instances_moved` reports what ACTUALLY moved, not the plan the
+    # envelope was seeded with — a stranded row must never appear as moved.
+    envelope["instances_moved"] = [
+        {**row, "mode": _mode_by_id.get(row["persona_instance_id"])} for row in moved
+    ]
+    envelope["instances_failed"] = failed
     envelope["realm_artifact_delta"] = {
         "measured": True,
         "realms": _artifact_delta(before_artifacts, _persona_realm_artifacts(persona_id)),
     }
-    if changed:
+    if changed or failed:
         # Only a real mutation emits. A no-op rebind (already bound, nothing
         # drifted) wrote nothing, so an event here would be pure watermark noise
         # that forces every gated consumer into a full-core rebuild for nothing.
+        # A PARTIAL run always emits: the event is the evidence channel, and
+        # losing it on the exact run that stranded rows is the worst case.
         _emit_rebind_event(
             log,
             persona_id=persona_id,
@@ -668,7 +695,23 @@ def rebind_persona_profile(
             to_profile=target_profile,
             actor=actor,
             moved=moved,
+            failed=failed,
         )
+    if failed:
+        envelope["ok"] = False
+        envelope["status"] = STATUS_PARTIALLY_APPLIED
+        envelope["error_code"] = "cascade_partial_failure"
+        envelope["error"] = (
+            "the persona binding moved but "
+            f"{len(failed)} instance projection(s) did not: "
+            + ", ".join(f"{item['persona_instance_id']} ({item['reason']})" for item in failed)
+        )
+        envelope["next_expected"] = (
+            "these rows are STRANDED on the old profile and placement rows have no self-heal; "
+            "re-run the same command to retry only the rows that are still drifted"
+        )
+        return envelope
+    envelope["status"] = STATUS_APPLIED
     envelope["next_expected"] = (
         "refresh the Harness snapshot; this agent's next chat turn and mission run resolve the new profile's "
         "prompt, soul overlay, memory, skills and credentials"
@@ -681,17 +724,40 @@ def _cascade_instance_profiles(
     moving: list[dict[str, Any]],
     *,
     event_log: EventLog,
-) -> list[dict[str, Any]]:
-    """Re-point every drifted instance projection at the new backing profile."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Re-point every drifted instance projection; ``(moved, failed)``.
+
+    Per-row isolation, mirroring ``skill_promotion.apply_skill_inbox_pull``'s
+    per-package isolation: one unwritable row can never abort the rest of the
+    cascade. Aborting mid-loop would leave the persona authority already moved
+    (it is written first) with an arbitrary suffix of rows stranded, no event
+    emitted, and no envelope returned — the operator would get a traceback and
+    no record of the partial state. A failed row is recorded with its typed
+    reason and reported; the caller degrades the whole operation to a partial
+    success rather than claiming a clean one.
+    """
 
     from .persona_assignments import PersonaInstanceStore
 
     store = PersonaInstanceStore(event_log=event_log)
     moved: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
     for row in moving:
-        instance = store.get(row["persona_instance_id"])
-        before = _clean(instance.profile_id)
-        store.set_backing_profile(instance.id, target_profile)
+        instance_id = str(row["persona_instance_id"])
+        before = _clean(row.get("profile_id"))
+        try:
+            instance = store.get(instance_id)
+            before = _clean(instance.profile_id)
+            store.set_backing_profile(instance.id, target_profile)
+        except Exception as exc:  # noqa: BLE001 — one bad row must not strand the others
+            failed.append(
+                {
+                    "persona_instance_id": instance_id,
+                    "from_profile": before,
+                    "reason": _safe_text(exc, limit=200),
+                }
+            )
+            continue
         moved.append(
             {
                 "persona_instance_id": instance.id,
@@ -699,7 +765,7 @@ def _cascade_instance_profiles(
                 "to_profile": target_profile,
             }
         )
-    return moved
+    return moved, failed
 
 
 def _emit_rebind_event(
@@ -710,7 +776,17 @@ def _emit_rebind_event(
     to_profile: str,
     actor: str,
     moved: list[dict[str, Any]],
+    failed: list[dict[str, Any]] | None = None,
 ) -> None:
+    """The single evidence record for one rebind operation.
+
+    Always names what ACTUALLY moved, and on a partial run also names the rows
+    that did not — a run that stranded rows is precisely the run whose evidence
+    must not go missing. Both lists are bounded by the 4KB payload cap with the
+    overflow accounted, never silently dropped.
+    """
+
+    stranded = list(failed or [])
     detail = [
         {"persona_instance_id": row["persona_instance_id"], "from_profile": row["from_profile"]}
         for row in moved[:_EVENT_INSTANCE_CAP]
@@ -725,6 +801,16 @@ def _emit_rebind_event(
     }
     if len(moved) > len(detail):
         payload["instances_truncated"] = len(moved) - len(detail)
+    if stranded:
+        failed_detail = [
+            {"persona_instance_id": row["persona_instance_id"], "reason": _safe_text(row.get("reason"), limit=120)}
+            for row in stranded[:_EVENT_FAILED_CAP]
+        ]
+        payload["status"] = STATUS_PARTIALLY_APPLIED
+        payload["failed_count"] = len(stranded)
+        payload["failed"] = failed_detail
+        if len(stranded) > len(failed_detail):
+            payload["failed_truncated"] = len(stranded) - len(failed_detail)
     event_log.append(Event(now(), REBIND_EVENT_TYPE, None, None, persona_id, payload))
 
 
@@ -808,6 +894,8 @@ __all__ = [
     "EffectiveBinding",
     "PersonaProfileRebindError",
     "REBIND_EVENT_TYPE",
+    "STATUS_APPLIED",
+    "STATUS_PARTIALLY_APPLIED",
     "binding_files",
     "binding_index",
     "diverged_bindings",
