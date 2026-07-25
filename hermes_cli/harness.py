@@ -106,7 +106,7 @@ from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.mission_chat_turns import (
     MissionChatTurnPersistOutcome,
     abandon_mission_chat_turn,
-    mark_stale_running_turns_interrupted,
+    mark_stale_inflight_turns_interrupted,
     mission_chat_turn_record,
     mission_chat_turn_records,
     persist_mission_chat_turn,

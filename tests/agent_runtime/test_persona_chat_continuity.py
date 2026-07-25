@@ -338,3 +338,58 @@ def test_31_resident_finish_detaches_turn_handles_without_erasing_history():
     assert agent._stream_callback is None
     assert agent._persona_chat_client_message_id is None
     assert agent._persona_chat_turn_id is None
+
+
+def test_orphan_sweep_repairs_only_lease_free_sessions(isolate_agent_runtime_root):
+    """Live incident 2026-07-25: a reaped Launcher killed the serve child
+    mid-turn and the QA record froze at ``executing``. The boot sweep must
+    settle exactly the sessions whose root lease is acquirable (dead
+    executor) and leave lease-held sessions (live turns) alone."""
+
+    from agent_runtime.events import EventLog
+    from agent_runtime.persona_chat_continuity import repair_orphaned_chat_turns
+
+    for root in ("root_dead", "root_live"):
+        transition_mission_chat_turn(
+            session_id=root,
+            client_message_id="m1",
+            turn_id="t1",
+            state="pending",
+            metadata={"root_chat_session_id": root},
+        )
+        transition_mission_chat_turn(
+            session_id=root,
+            client_message_id="m1",
+            turn_id="t1",
+            state="executing",
+        )
+
+    with persona_chat_root_lease("root_live"):
+        repaired = repair_orphaned_chat_turns()
+
+    assert repaired == ["root_dead"]
+    dead = mission_chat_turn_record(session_id="root_dead", client_message_id="m1")
+    assert dead["state"] == "interrupted"
+    live = mission_chat_turn_record(session_id="root_live", client_message_id="m1")
+    assert live["state"] == "executing"
+    # The repair is a store mutation: watermark-gated consumers must converge.
+    tail = EventLog().tail(1)
+    assert tail and tail[0].type == "state.reconciled"
+    assert tail[0].payload["source"] == "chat_orphan_sweep"
+
+
+def test_orphan_sweep_without_orphans_appends_no_event(isolate_agent_runtime_root):
+    from agent_runtime.events import EventLog
+    from agent_runtime.persona_chat_continuity import repair_orphaned_chat_turns
+
+    for state in ("pending", "executing", "native_committed", "projected"):
+        transition_mission_chat_turn(
+            session_id="root_settled",
+            client_message_id="m1",
+            turn_id="t1",
+            state=state,
+            metadata={"root_chat_session_id": "root_settled"},
+        )
+
+    assert repair_orphaned_chat_turns() == []
+    assert EventLog().tail(1) == []

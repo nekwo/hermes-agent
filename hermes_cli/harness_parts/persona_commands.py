@@ -2048,7 +2048,7 @@ def _cmd_mission_chat_message(args) -> int:
 
     provider_submitted = False
     try:
-        mark_stale_running_turns_interrupted(
+        mark_stale_inflight_turns_interrupted(
             session_id=session_id,
             active_client_message_id=client_message_id,
         )
@@ -4863,7 +4863,7 @@ def _run_free_floating_assignment_once(
         stream_emitter.progress(payload)
 
     try:
-        mark_stale_running_turns_interrupted(
+        mark_stale_inflight_turns_interrupted(
             session_id=session_id,
             active_client_message_id=client_message_id,
         )

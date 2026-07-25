@@ -563,14 +563,28 @@ def serve_loop(
             runtime_root = str(_paths.store_root())
         except Exception:
             runtime_root = None
-        frames.emit(
-            {
-                "event": "ready",
-                "pid": os.getpid(),
-                "schema_version": SERVE_SCHEMA_VERSION,
-                "runtime_root": runtime_root,
-            }
-        )
+        # Orphaned-turn sweep BEFORE the ready frame: serve boot is the moment
+        # a launcher restart replaces a dead runtime, and the first hydrate is
+        # only requested after ready — so records a dead executor left frozen
+        # in-flight (lease provably free) already project as typed
+        # ``turn_interrupted`` markers in that hydrate instead of a console
+        # stuck "running" forever. Bounded (≤50 session files) and fail-open.
+        orphaned_repaired: list[str] = []
+        try:
+            from agent_runtime.persona_chat_continuity import repair_orphaned_chat_turns
+
+            orphaned_repaired = repair_orphaned_chat_turns()
+        except Exception:
+            orphaned_repaired = []
+        ready_frame: dict[str, Any] = {
+            "event": "ready",
+            "pid": os.getpid(),
+            "schema_version": SERVE_SCHEMA_VERSION,
+            "runtime_root": runtime_root,
+        }
+        if orphaned_repaired:
+            ready_frame["orphaned_turns_repaired"] = len(orphaned_repaired)
+        frames.emit(ready_frame)
         # Prewarm the first chat turn's one-time costs in the background:
         # lazy OpenAI SDK import (~1.7s), shared SSL context / CA-guard
         # verification (~0.7s), and the tool-definition module imports +

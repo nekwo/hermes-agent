@@ -73,6 +73,11 @@ JOURNAL_TURN_STATES = {
 }
 _LEGACY_TURN_STATES = {"running", "completed", "failed", "interrupted"}
 _VALID_TURN_STATES = JOURNAL_TURN_STATES | _LEGACY_TURN_STATES
+# A record in one of these states has an executor that has not settled it: the
+# legacy streaming state plus every non-terminal journal state. Retention never
+# evicts them, GC never archives their session file, and the stale-turn repairs
+# (next-send + serve-boot orphan sweep) flip exactly this set.
+INFLIGHT_TURN_STATES = frozenset({"running", "pending", "executing", "outcome_unknown"})
 _JOURNAL_TRANSITIONS = {
     None: {"pending"},
     "pending": {"pending", "executing", "abandoned"},
@@ -373,11 +378,26 @@ def mission_chat_turn_records(
     )
 
 
-def mark_stale_running_turns_interrupted(
+def mark_stale_inflight_turns_interrupted(
     *,
     session_id: str | None,
     active_client_message_id: str | None,
 ) -> list[str]:
+    """Flip a session's dead in-flight turn records to ``interrupted``.
+
+    Callers MUST guarantee no live executor on the session: hold its root
+    lease (``persona_chat_root_lease`` — held for a native turn's entire
+    execution and released by the kernel when the executor dies), or run from
+    a lane that already serializes sends per session (the free-floating
+    assignment queue). Under that guarantee every OTHER in-flight record —
+    journal ``pending``/``executing``/``outcome_unknown`` as much as legacy
+    ``running`` — is a corpse that can no longer settle itself (live incident
+    2026-07-25: a reaped Launcher took its serve child down mid-turn and the
+    QA relay record froze at ``executing`` forever, a permanently "running"
+    console). ``interrupted`` is the one repair state the history projection
+    renders as a typed ``turn_interrupted`` marker row.
+    """
+
     session_key = safe_assignment_text(session_id, limit=240)
     active_key = safe_assignment_text(active_client_message_id, limit=240)
     if not session_key:
@@ -390,7 +410,7 @@ def mark_stale_running_turns_interrupted(
             safe_key = safe_assignment_text(message_key, limit=240)
             if not safe_key or safe_key == active_key or not isinstance(record, dict):
                 continue
-            if _record_state(record) != "running":
+            if _record_state(record) not in INFLIGHT_TURN_STATES:
                 continue
             record["state"] = "interrupted"
             record["updated_at"] = now_iso
@@ -405,6 +425,36 @@ def mark_stale_running_turns_interrupted(
         timeout_result=[],
         protected_message=active_key,
     )
+
+
+def inflight_chat_session_roots() -> list[str]:
+    """Root chat session ids of sessions holding at least one in-flight record.
+
+    Read-only scan feeding the serve-boot orphan sweep. The root id comes from
+    record metadata (``root_chat_session_id``, then ``active_session_id``) —
+    the session file stem is a one-way digest and cannot be reversed, so a
+    record that predates the metadata stays invisible here and keeps relying
+    on the next-send repair. Torn/unreadable files are skipped; the sweep is
+    best-effort and retries on the next boot.
+    """
+
+    _migrate_legacy_if_present()
+    roots: list[str] = []
+    seen: set[str] = set()
+    for path in _iter_session_files():
+        for record in _read_session_map(path).values():
+            if not isinstance(record, dict):
+                continue
+            if _record_state(record) not in INFLIGHT_TURN_STATES:
+                continue
+            root = safe_assignment_text(
+                record.get("root_chat_session_id") or record.get("active_session_id"),
+                limit=240,
+            )
+            if root and root not in seen:
+                seen.add(root)
+                roots.append(root)
+    return roots
 
 
 def _mutate_session(
@@ -477,7 +527,7 @@ def _apply_session_turn_cap(
         for message_key, record in session.items()
         if not (
             str(message_key) == str(protected_message)
-            or _record_state(record) in {"running", "pending", "executing", "outcome_unknown"}
+            or _record_state(record) in INFLIGHT_TURN_STATES
         )
     )
     for _, message_key in evictable[:excess]:
@@ -521,7 +571,7 @@ def _gc_session_files(*, protected_session_key: str | None = None) -> None:
                         continue
                     session = _read_session_map(path)
                     if any(
-                        _record_state(record) in {"running", "pending", "executing", "outcome_unknown"}
+                        _record_state(record) in INFLIGHT_TURN_STATES
                         for record in session.values()
                     ):
                         continue

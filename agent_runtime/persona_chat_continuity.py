@@ -325,6 +325,67 @@ def persona_chat_root_lease(
         os.close(fd)
 
 
+def repair_orphaned_chat_turns() -> list[str]:
+    """Settle in-flight turn records whose executor process died (boot sweep).
+
+    A native turn holds the OS-backed root lease for its ENTIRE execution and
+    the kernel releases the lock when the holding process dies, so "in-flight
+    record AND acquirable lease" is proof the turn can no longer settle itself
+    (live incident 2026-07-25: the Stage C MCP flow reaped the Launcher, which
+    took the serve child executing a QA relay turn with it; the record froze
+    at ``executing`` and the console showed a running turn forever). A session
+    whose lease is HELD is a live turn in another process and is skipped.
+
+    Runs at ``harness serve`` boot — the moment a launcher restart replaces a
+    dead runtime — before the first hydrate is served, so the repaired records
+    project as typed ``turn_interrupted`` markers instead of frozen output.
+    When anything flips, a ``state.reconciled`` event is appended so any
+    already-connected watermark-gated consumer converges too (turn files are
+    not patch-covered). Best-effort per session; the next boot retries.
+    """
+
+    from .mission_chat_turns import (
+        inflight_chat_session_roots,
+        mark_stale_inflight_turns_interrupted,
+    )
+
+    repaired: list[str] = []
+    for root in inflight_chat_session_roots():
+        try:
+            with persona_chat_root_lease(root, observer_kind="orphan_sweep"):
+                flipped = mark_stale_inflight_turns_interrupted(
+                    session_id=root,
+                    active_client_message_id=None,
+                )
+        except PersonaChatBusyError:
+            continue
+        except Exception:  # noqa: BLE001 — sweep must never block serve boot
+            continue
+        if flipped:
+            repaired.append(root)
+    if repaired:
+        try:
+            from hermes_time import now
+
+            from .events import EventLog
+            from .models import Event
+
+            digest = hashlib.sha1("|".join(sorted(repaired)).encode("utf-8")).hexdigest()[:16]
+            EventLog().append(
+                Event(
+                    now(),
+                    "state.reconciled",
+                    None,
+                    None,
+                    None,
+                    {"fingerprint": digest, "source": "chat_orphan_sweep"},
+                )
+            )
+        except Exception:  # noqa: BLE001 — the repair itself already landed
+            pass
+    return repaired
+
+
 class PersonaChatMintReceiptStore:
     def _path(self, instance_id: str, key: str) -> Path:
         digest = hashlib.sha256(f"{instance_id}\0{key}".encode("utf-8")).hexdigest()

@@ -66,6 +66,17 @@ launcher-visible history by `agent_runtime/persona_chat_history.py` (~line
   different client id flips to `interrupted`; returns flipped client ids.
   This is repair-on-next-write: a killed turn is visibly `interrupted` no
   later than the next send in that session.
+  - 2026-07-25 extension: renamed `mark_stale_inflight_turns_interrupted` and
+    widened to every in-flight state (`running`, `pending`, `executing`,
+    `outcome_unknown`) after a live incident left a journal record frozen at
+    `executing` when its executor process was killed mid-turn — the old
+    `running`-only filter never repaired journal-lane corpses. A serve-boot
+    orphan sweep (`repair_orphaned_chat_turns` in `persona_chat_continuity`)
+    additionally probes each in-flight session's root lease non-blocking and
+    repairs sessions whose lease is free — kernel lease release on process
+    death makes "in-flight record + acquirable lease" proof of a dead
+    executor, so a launcher restart settles frozen turns with no operator
+    action.
 
 ### Emitter — `_ChatProtocolV2Emitter` (persona_commands.py ~1535)
 

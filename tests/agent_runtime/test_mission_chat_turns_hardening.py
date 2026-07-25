@@ -21,7 +21,7 @@ import pytest
 from agent_runtime import mission_chat_turns
 from agent_runtime.mission_chat_turns import (
     MissionChatTurnPersistOutcome,
-    mark_stale_running_turns_interrupted,
+    mark_stale_inflight_turns_interrupted,
     mission_chat_turn_record,
     next_turn_state,
     persist_mission_chat_turn,
@@ -88,7 +88,7 @@ def test_stale_on_update_cannot_resurrect_interrupted_record():
         state="running",
         write_ahead=True,
     )
-    flipped = mark_stale_running_turns_interrupted(
+    flipped = mark_stale_inflight_turns_interrupted(
         session_id="s1",
         active_client_message_id="m2",
     )
@@ -109,6 +109,79 @@ def test_stale_on_update_cannot_resurrect_interrupted_record():
     assert record["elements"] == []  # stale flush must not overwrite either
 
 
+def test_repair_flips_journal_inflight_states_not_terminal_ones():
+    """Live incident 2026-07-25: a killed executor left a journal record at
+    `executing` forever — the `running`-only repair never touched it. The
+    repair must cover every in-flight journal state while settled journal
+    records stay untouched."""
+
+    from agent_runtime.mission_chat_turns import transition_mission_chat_turn
+
+    for message_key, states in (
+        ("m_pending", ("pending",)),
+        ("m_executing", ("pending", "executing")),
+        ("m_unknown", ("pending", "executing", "outcome_unknown")),
+        ("m_committed", ("pending", "executing", "native_committed")),
+    ):
+        for state in states:
+            transition_mission_chat_turn(
+                session_id="s1",
+                client_message_id=message_key,
+                turn_id=message_key,
+                state=state,
+            )
+
+    flipped = mark_stale_inflight_turns_interrupted(
+        session_id="s1",
+        active_client_message_id=None,
+    )
+
+    assert sorted(flipped) == ["m_executing", "m_pending", "m_unknown"]
+    for message_key in ("m_pending", "m_executing", "m_unknown"):
+        record = mission_chat_turn_record(session_id="s1", client_message_id=message_key)
+        assert record["state"] == "interrupted"
+    committed = mission_chat_turn_record(session_id="s1", client_message_id="m_committed")
+    assert committed["state"] == "native_committed"
+
+
+def test_inflight_session_roots_come_from_record_metadata():
+    from agent_runtime.mission_chat_turns import (
+        inflight_chat_session_roots,
+        transition_mission_chat_turn,
+    )
+
+    transition_mission_chat_turn(
+        session_id="root_chat_a",
+        client_message_id="m1",
+        turn_id="t1",
+        state="pending",
+        metadata={"root_chat_session_id": "root_chat_a"},
+    )
+    transition_mission_chat_turn(
+        session_id="root_chat_a",
+        client_message_id="m1",
+        turn_id="t1",
+        state="executing",
+    )
+    # A fully settled session contributes nothing.
+    transition_mission_chat_turn(
+        session_id="root_chat_b",
+        client_message_id="m1",
+        turn_id="t1",
+        state="pending",
+        metadata={"root_chat_session_id": "root_chat_b"},
+    )
+    for state in ("executing", "native_committed", "projected"):
+        transition_mission_chat_turn(
+            session_id="root_chat_b",
+            client_message_id="m1",
+            turn_id="t1",
+            state=state,
+        )
+
+    assert inflight_chat_session_roots() == ["root_chat_a"]
+
+
 def test_explicit_completed_still_wins_after_repair_flip():
     persist_mission_chat_turn(
         session_id="s1",
@@ -118,7 +191,7 @@ def test_explicit_completed_still_wins_after_repair_flip():
         state="running",
         write_ahead=True,
     )
-    mark_stale_running_turns_interrupted(session_id="s1", active_client_message_id="m2")
+    mark_stale_inflight_turns_interrupted(session_id="s1", active_client_message_id="m2")
 
     outcome = persist_mission_chat_turn(
         session_id="s1",
@@ -288,7 +361,7 @@ def test_persist_skips_with_typed_outcome_when_lock_is_held(monkeypatch):
         assert mission_chat_turn_record(session_id="s1", client_message_id="m1") is None
         # The opportunistic repair skips silently by design (retries next send).
         assert (
-            mark_stale_running_turns_interrupted(
+            mark_stale_inflight_turns_interrupted(
                 session_id="s1",
                 active_client_message_id="m2",
             )

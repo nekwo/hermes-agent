@@ -16,7 +16,7 @@ from hermes_time import now
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event, PersonaAssignment, PersonaInstance
 from agent_runtime.mission_chat_turns import (
-    mark_stale_running_turns_interrupted,
+    mark_stale_inflight_turns_interrupted,
     mission_chat_turn_elements,
     mission_chat_turn_record,
     persist_mission_chat_turn,
@@ -887,7 +887,7 @@ def test_mission_chat_turn_marks_stale_running_turns_interrupted(isolate_agent_r
         state="running",
     )
 
-    flipped = mark_stale_running_turns_interrupted(
+    flipped = mark_stale_inflight_turns_interrupted(
         session_id="s1",
         active_client_message_id="client_active",
     )
