@@ -490,10 +490,21 @@ def _scope_fingerprint() -> str:
 
     Covers exactly the state whose writers have historically slipped the
     event rule or sit outside ``agent_runtime/store.py``: the active-scope
-    pointer files, the workspace/realm/persona stores, and the blueprint
-    catalog. Evented, high-churn stores (tasks/runs/proofs/incidents) are
-    guarded by the store/event CI invariant instead — fingerprinting them
-    here would only mask violations that test already prevents.
+    pointer files, the workspace/realm/persona stores, the blueprint
+    catalog, and the head-home SessionDB. Evented, high-churn stores
+    (tasks/runs/proofs/incidents) are guarded by the store/event CI
+    invariant instead — fingerprinting them here would only mask violations
+    that test already prevents.
+
+    The SessionDB matters because the persona-chat directory (Chat History)
+    is derived from it and its writers emit no EventLog events: with the S6
+    patch lane on, a chat-session mint never appears in any patch frame, so
+    watermark-gated consumers kept their hydrate-time chat list for the
+    stream's whole lifetime (live incident 2026-07-25: the Launcher's Chat
+    History froze for ~36h until a restart re-hydrated). The per-session
+    turn-element files are deliberately NOT statted here: element flushes
+    land many times per second during a streaming turn and would make the
+    watchdog append a reconcile (= one full-core delta) every heartbeat.
     """
 
     parts: list[str] = []
@@ -525,6 +536,19 @@ def _scope_fingerprint() -> str:
                 parts.append(f"{entry.name}:{stat.st_mtime_ns}:{stat.st_size}")
             except OSError:
                 continue
+    try:
+        from hermes_constants import get_hermes_head_home
+
+        db_path = get_hermes_head_home() / "state.db"
+        for suffix in ("", "-wal", "-journal"):
+            candidate = db_path.with_name(db_path.name + suffix)
+            try:
+                stat = candidate.stat()
+                parts.append(f"{candidate.name}:{stat.st_mtime_ns}:{stat.st_size}")
+            except OSError:
+                parts.append(f"{candidate.name}:absent")
+    except Exception:  # noqa: BLE001 — chat persistence absence is itself stable
+        parts.append("session_db:unresolved")
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
