@@ -38,6 +38,59 @@ from .tool_permissions import permission_options_for_chat
 TERMINAL_ASSIGNMENT_STATES = frozenset({"completed", "blocked", "cancelled"})
 _RELEASABLE_OWNER_TASK_STATES = frozenset({"done", "cancelled", "failed"})
 
+# Modes that only exist because the instance is holding a chat open; once its
+# last chat pointer is cleared the row demotes back to a plain configured agent.
+_CHAT_MODES = frozenset({"chat", "free_floating"})
+
+# Typed reasons carried on ``persona_instance.chat_binding_cleared``.
+_BINDING_REPAIR_REASON = "session_missing_from_session_db"
+CHAT_BINDING_CLEARED_REASON_DELETED = "chat_deleted"
+
+
+def _session_presence_probe(session_db: Any | None = None) -> tuple[Any | None, str | None]:
+    """Return ``(probe, skip_reason)`` for chat-session existence checks.
+
+    The probe answers ``"present" | "absent" | "unknown"`` — tri-state on
+    purpose. ``get_session`` swallowing an error and returning ``None`` would
+    make an unreadable database indistinguishable from a deleted chat, and a
+    repair built on that would reap live pointers on a transient failure.
+
+    Two preconditions must hold before ANY binding may be called stale, and both
+    fail closed (probe ``None`` + a typed skip reason):
+
+    * a database must resolve at all (``session_db_unavailable``);
+    * it must positively enumerate at least one session (``session_db_empty``).
+      A zero-row database is indistinguishable from a fresh or misrouted
+      ``HERMES_HOME``, and "the home moved" must never present as "every chat
+      was deleted".
+    """
+
+    db = session_db
+    if db is None:
+        try:
+            from .persona_chat_history import _default_session_db
+
+            db = _default_session_db()
+        except Exception:
+            db = None
+    if db is None:
+        return None, "session_db_unavailable"
+    try:
+        sample = db.list_sessions_rich(limit=1, include_archived=True)
+    except Exception:
+        return None, "session_db_unavailable"
+    if not sample:
+        return None, "session_db_empty"
+
+    def probe(session_id: str) -> str:
+        try:
+            row = db.get_session(session_id)
+        except Exception:
+            return "unknown"
+        return "present" if row else "absent"
+
+    return probe, None
+
 
 def _owning_task_release_state(task_id: str) -> str | None:
     """Terminal state name of the owning task, ``"archived"`` when the task file
@@ -674,6 +727,163 @@ class PersonaInstanceStore:
             "dry_run": not apply,
             "repaired": repairs,
             "repaired_count": len(repairs),
+        }
+
+    def clear_chat_session_binding(
+        self,
+        instance: PersonaInstance,
+        *,
+        session_id: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """THE write path that unbinds one instance from a chat session.
+
+        Nulls only the pointers that actually reference ``session_id``, demotes a
+        conversational mode back to ``configured`` once the instance is left with
+        no chat, persists once, and emits ``persona_instance.chat_binding_cleared``
+        (store mutations always emit an event). Returns the repair record, or
+        ``None`` when the instance never pointed at that session.
+
+        Every unbind — the operator ``persona chat delete`` verb and the
+        ``repair_missing_chat_session_bindings`` reconcile sweep — goes through
+        here so a stale binding can never be cleared silently by one path and
+        loudly by another.
+        """
+
+        target = safe_assignment_text(session_id, limit=200)
+        if not target:
+            return None
+        cleared: list[str] = []
+        if safe_assignment_text(instance.default_chat_session_id, limit=200) == target:
+            instance.default_chat_session_id = None
+            cleared.append("default_chat_session_id")
+        if safe_assignment_text(instance.session_id, limit=200) == target:
+            instance.session_id = None
+            cleared.append("session_id")
+        if not cleared:
+            return None
+        mode_before = instance.mode
+        if (
+            not instance.default_chat_session_id
+            and not instance.session_id
+            and (instance.mode or "").lower() in _CHAT_MODES
+        ):
+            instance.mode = "configured"
+        updated = self.update(instance)
+        payload = {
+            "persona_id": updated.persona_id,
+            "session_id": target,
+            "cleared_fields": cleared,
+            "mode_before": mode_before,
+            "mode_after": updated.mode,
+            "reason": reason,
+        }
+        self._event("persona_instance.chat_binding_cleared", updated, payload)
+        return {"persona_instance_id": updated.id, **payload}
+
+    def repair_missing_chat_session_bindings(
+        self,
+        *,
+        apply: bool = True,
+        session_db: Any | None = None,
+    ) -> dict[str, Any]:
+        """Clear chat-session bindings whose session SessionDB no longer has.
+
+        A persona instance can outlive its chat: the operator deletes the
+        conversation through a path that does not own the instance store (the
+        generic ``hermes sessions delete``, a gateway/web delete, a scrub), and
+        the pointer is left dangling. The snapshot's persona-chat projection is
+        READ-ONLY, so it can only hide the row and account a ``session_not_in_db``
+        drop — one permanent parity anomaly per orphan, forever. This is the
+        write-path repair that retires them.
+
+        Fail-safe by construction:
+
+        * a binding is cleared ONLY on a positive "absent" answer from a
+          positively-enumerating SessionDB; an unavailable, unreadable or empty
+          database repairs nothing at all (see :func:`_session_presence_probe`),
+          because a blind read must never reap a live pointer;
+        * ``task_bound`` instances are skipped entirely — a mission turn runs in
+          a session that lives in the run/event stream and is legitimately absent
+          from the operator SessionDB;
+        * an instance with a live worker/run binding is held;
+        * ``apply=False`` is a pure report: no writes, no events.
+        """
+
+        probe, skip_reason = _session_presence_probe(session_db)
+        if probe is None:
+            return {
+                "applied": False,
+                "dry_run": not apply,
+                "skipped": skip_reason,
+                "repaired": [],
+                "repaired_count": 0,
+                "held": [],
+                "held_count": 0,
+            }
+
+        repairs: list[dict[str, Any]] = []
+        held: list[dict[str, Any]] = []
+        for instance in self.list_all():
+            pointers = {
+                safe_assignment_text(instance.default_chat_session_id, limit=200),
+                safe_assignment_text(instance.session_id, limit=200),
+            }
+            pointers.discard(None)
+            if not pointers:
+                continue
+            if (instance.mode or "").lower() == "task_bound" or safe_optional_token(
+                instance.current_task_id
+            ):
+                # Mission sessions live in the run/event stream, not SessionDB.
+                continue
+            missing = sorted(session_id for session_id in pointers if probe(session_id) == "absent")
+            if not missing:
+                continue
+            if self._has_live_binding(instance):
+                held.extend(
+                    {
+                        "persona_instance_id": instance.id,
+                        "persona_id": instance.persona_id,
+                        "session_id": session_id,
+                        "reason": "active-binding",
+                    }
+                    for session_id in missing
+                )
+                continue
+            for session_id in missing:
+                if not apply:
+                    repairs.append(
+                        {
+                            "persona_instance_id": instance.id,
+                            "persona_id": instance.persona_id,
+                            "session_id": session_id,
+                            "cleared_fields": [
+                                field_name
+                                for field_name, value in (
+                                    ("default_chat_session_id", instance.default_chat_session_id),
+                                    ("session_id", instance.session_id),
+                                )
+                                if safe_assignment_text(value, limit=200) == session_id
+                            ],
+                            "reason": _BINDING_REPAIR_REASON,
+                        }
+                    )
+                    continue
+                record = self.clear_chat_session_binding(
+                    instance,
+                    session_id=session_id,
+                    reason=_BINDING_REPAIR_REASON,
+                )
+                if record is not None:
+                    repairs.append(record)
+        return {
+            "applied": bool(apply),
+            "dry_run": not apply,
+            "repaired": repairs,
+            "repaired_count": len(repairs),
+            "held": held,
+            "held_count": len(held),
         }
 
     def _release_parent_references(self, parent_instance_id: str) -> list[str]:

@@ -2842,11 +2842,13 @@ def _stage_verification(task, proofs: list, *, accountant: ProjectionAccountant 
     selected = items[-STAGE_VERIFICATION_STAGE_CAP:]
     if len(items) > len(selected):
         if accountant is not None:
+            # Deliberate bound: the lane keeps the latest N stage rows.
             accountant.drop(
                 "stage_cap",
                 count=len(items) - len(selected),
                 entity_id=getattr(task, "id", None),
                 detail=f"kept latest {STAGE_VERIFICATION_STAGE_CAP} stage verification rows",
+                by_design=True,
             )
             accountant.mark_truncated()
 
@@ -2881,7 +2883,10 @@ def _stage_verification(task, proofs: list, *, accountant: ProjectionAccountant 
         )
         source_diff_truncated = bool(diff.get("truncated"))
         if source_diff_truncated and accountant is not None:
-            accountant.drop("source_diff_truncated", entity_id=stage_id)
+            # Deliberate bound, applied upstream at capture time (the repo-diff
+            # capture is char-capped) and mirrored honestly into the envelope —
+            # the diff is bounded, not lost.
+            accountant.drop("source_diff_truncated", entity_id=stage_id, by_design=True)
             accountant.mark_truncated()
         lane_truncated = observed_truncated or authoritative_truncated or excluded_truncated
         if lane_truncated and accountant is not None:
@@ -2946,11 +2951,24 @@ def _stage_owner_by_id(task) -> dict[str, str]:
 
 
 def _bounded_projection_strings(raw, *, cap: int, accountant: ProjectionAccountant | None, drop_code: str, entity_id: str) -> tuple[list[str], bool]:
+    """Cap a string list and account the overflow.
+
+    Every caller of this helper IS a deliberate cap (proof-id / excluded-path
+    windows), so the drop it records is declared by-design. Do not route an
+    identity/consistency drop through here.
+    """
+
     values = [str(value).strip()[:160] for value in (raw or []) if str(value or "").strip()] if isinstance(raw, list) else []
     if len(values) <= cap:
         return values, False
     if accountant is not None:
-        accountant.drop(drop_code, count=len(values) - cap, entity_id=entity_id, detail=f"kept {cap}")
+        accountant.drop(
+            drop_code,
+            count=len(values) - cap,
+            entity_id=entity_id,
+            detail=f"kept {cap}",
+            by_design=True,
+        )
     return values[:cap], True
 
 
@@ -3841,11 +3859,14 @@ def _mission_flow_timeline(task, events, *, accountant: ProjectionAccountant | N
     if accountant is not None:
         accountant.include(len(selected))
         if evicted:
+            # Deliberate bound: the front window is kept and the evicted tail is
+            # disclosed with a typed fetch pointer below.
             accountant.drop(
                 "flow_item_cap",
                 count=evicted,
                 entity_id=getattr(task, "id", None),
                 detail=f"kept front {MISSION_FLOW_TIMELINE_ITEM_CAP} flow items",
+                by_design=True,
             )
             accountant.mark_truncated()
     result = {

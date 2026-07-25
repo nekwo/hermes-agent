@@ -198,6 +198,12 @@ def persona_chat_history_summary(
         raw = _get_session_row(db, session_id)
         if raw is None:
             if accountant is not None:
+                # Anomalous on purpose: the instance still points at a session
+                # SessionDB no longer has. Hiding the row is correct here (this
+                # projection is READ-ONLY), but the stale binding is a real
+                # defect a write path must clear —
+                # ``PersonaInstanceStore.repair_missing_chat_session_bindings``
+                # via ``harness persona-instance reconcile``.
                 accountant.consider(1)
                 accountant.drop("session_not_in_db", entity_id=session_id)
             continue
@@ -270,7 +276,12 @@ def persona_chat_history_summary(
         accountant.include(len(visible))
         omitted = len(rows) - len(visible)
         if omitted > 0:
-            accountant.drop("limit", count=omitted)
+            # Deliberate bound: the directory keeps the newest ``limit`` rows by
+            # creation order and every omitted row stays fetchable per-session.
+            # A busy runtime drops here on EVERY build — steady state, not a
+            # symptom — so it is declared by-design; a reader that counts it as
+            # an anomaly pins its health pill amber forever.
+            accountant.drop("limit", count=omitted, by_design=True)
             accountant.mark_truncated()
     return visible
 
@@ -533,7 +544,13 @@ class _TraceAccumulator:
                 accountant.drop("unrenderable_entry", count=unrenderable, entity_id=self.instance_id)
             truncated = len(rendered) - len(kept)
             if truncated > 0:
-                accountant.drop("tail_truncated", count=truncated, entity_id=self.instance_id)
+                # Deliberate bound: the trace lane keeps a tail window.
+                accountant.drop(
+                    "tail_truncated",
+                    count=truncated,
+                    entity_id=self.instance_id,
+                    by_design=True,
+                )
                 accountant.mark_truncated()
         return kept
 

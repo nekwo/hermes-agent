@@ -1131,6 +1131,9 @@ def _conversation_turn_messages(
             if emitted:
                 accountant.include(emitted)
             else:
+                # Anomalous: a run that produced no renderable turn signal is a
+                # run whose activity the operator can never see — lost data, not
+                # a bound this projection chose to apply.
                 accountant.drop("run_without_turn_signal", entity_id=run_id)
     return messages
 
@@ -1396,7 +1399,14 @@ def _apply_conversation_cap(
         "refs": {"collapsed_count": len(dropped)},
     }
     if accountant is not None:
-        accountant.drop("turn_cap_trimmed", count=len(dropped), entity_id=channel_id)
+        # Deliberate bound: the channel keeps the newest turns and the trimmed
+        # span is disclosed in-band by the ``turns_collapsed`` marker above.
+        accountant.drop(
+            "turn_cap_trimmed",
+            count=len(dropped),
+            entity_id=channel_id,
+            by_design=True,
+        )
         accountant.mark_truncated()
     return _order_conversation_messages([*protected, marker, *kept])
 

@@ -881,12 +881,20 @@ def _cmd_persona_chat_delete(args) -> int:
     except Exception:
         pass
     closed_assignment_ids: list[str] = []
+    # Unbind EVERY instance still pointing at the session that was just deleted —
+    # on either pointer, and regardless of which identity was named on the
+    # request. Ownership was already enforced above (a foreign request is refused
+    # with ``foreign_chat_session``), so anything still holding this session id is
+    # by definition a dangling pointer: id-scheme drift, a sibling steal, or the
+    # legacy ``session_id`` mirror. Leaving one behind is exactly how a permanent
+    # ``session_not_in_db`` parity drop is minted — the projection can only hide
+    # the row, it can never repair the binding.
     for instance in instance_store.list_all():
-        if safe_assignment_text(getattr(instance, "default_chat_session_id", None), limit=200) != session_id:
-            continue
-        if requested_instance and instance.id != requested_instance:
-            continue
-        if requested_persona and instance.persona_id != requested_persona:
+        bound_here = session_id in {
+            safe_assignment_text(getattr(instance, "default_chat_session_id", None), limit=200),
+            safe_assignment_text(getattr(instance, "session_id", None), limit=200),
+        }
+        if not bound_here:
             continue
 
         assignment_id = safe_assignment_token(getattr(instance, "current_assignment_id", None))
@@ -907,12 +915,16 @@ def _cmd_persona_chat_delete(args) -> int:
             except Exception:
                 pass
 
-        instance.default_chat_session_id = None
-        instance.session_id = None
-        if instance.mode in {"chat", "free_floating"}:
-            instance.mode = "configured"
-        instance_store.update(instance)
-        cleared_bindings.append(instance.id)
+        # One write path for every unbind (delete verb + reconcile sweep): it
+        # nulls only the pointers that name THIS session, demotes the mode, and
+        # emits ``persona_instance.chat_binding_cleared``.
+        record = instance_store.clear_chat_session_binding(
+            instance,
+            session_id=session_id,
+            reason=CHAT_BINDING_CLEARED_REASON_DELETED,
+        )
+        if record is not None:
+            cleared_bindings.append(instance.id)
 
     if not deleted_session and not cleared_bindings:
         data = {

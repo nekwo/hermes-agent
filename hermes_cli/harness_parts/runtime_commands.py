@@ -28,6 +28,7 @@ def _cmd_persona_instance_reconcile(args) -> int:
             f"renamed={data['renamed_count']} skipped={data['skipped_count']} "
             f"pruned={data.get('pruned_count', 0)} held={data.get('held_count', 0)} "
             f"steering_repaired={data.get('steering_repaired_count', 0)} "
+            f"chat_bindings_cleared={data.get('session_binding_repaired_count', 0)} "
             f"aliases={data['alias_count']}"
         )
         for item in data["actions"]:
@@ -41,6 +42,18 @@ def _cmd_persona_instance_reconcile(args) -> int:
                 f"  - steering repaired: {item['persona_instance_id']} "
                 f"removed {item['missing_parent_ids']}"
             )
+        for item in data.get("session_binding_repairs") or []:
+            print(
+                f"  - chat binding cleared: {item['persona_instance_id']} "
+                f"-> missing session {item['session_id']} ({', '.join(item.get('cleared_fields') or [])})"
+            )
+        for item in data.get("session_binding_held") or []:
+            print(
+                f"  - chat binding held ({item['reason']}): {item['persona_instance_id']} "
+                f"-> {item['session_id']}"
+            )
+        if data.get("session_binding_skipped"):
+            print(f"  - chat binding repair skipped: {data['session_binding_skipped']}")
     return 0
 
 

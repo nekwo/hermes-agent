@@ -1603,6 +1603,45 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
     ]
 
 
+def test_persona_chat_history_parity_separates_the_bound_limit_from_lost_sessions(
+    isolate_agent_runtime_root,
+):
+    """The directory's ``limit`` is a bound; ``session_not_in_db`` is a defect.
+
+    Live 2026-07-25 the same envelope carried both (103 + 10) and the Launcher,
+    reading only ``dropped``, showed a permanent amber "projection drops 113".
+    The classification now travels WITH the envelope.
+    """
+
+    from agent_runtime.parity import ProjectionAccountant
+
+    store = PersonaInstanceStore()
+    newer = store.open_chat(persona_id="dev", session_id="chat_new")
+    older = store.open_chat(persona_id="backend_dev", session_id="chat_old")
+    ghost = store.open_chat(persona_id="qa", session_id="chat_ghost")
+    accountant = ProjectionAccountant("persona_chat_history")
+
+    rows = persona_chat_history_summary(
+        persona_instances=[newer, older, ghost],
+        session_db=_FakeSessionDB(
+            [
+                {"id": "chat_new", "title": "new", "started_at": 20},
+                {"id": "chat_old", "title": "old", "started_at": 10},
+            ]
+        ),
+        limit=1,
+        accountant=accountant,
+    )
+
+    assert len(rows) == 1
+    summary = accountant.summary()
+    assert summary["reasons"]["limit"] == 1
+    assert summary["reasons"]["session_not_in_db"] == 1
+    # Only the deliberate bound is declared by-design; the orphaned binding is
+    # a real anomaly an operator can act on (harness persona-instance reconcile).
+    assert summary["by_design"] == ["limit"]
+
+
 def test_persona_chat_history_emits_cache_policy_for_known_provider(isolate_agent_runtime_root):
     # A session whose effective model is an automatic-prefix provider must carry
     # the estimated warm-window policy so the Launcher can render an honest
@@ -2310,6 +2349,104 @@ def test_persona_chat_delete_clears_stale_binding_when_session_already_missing(
     assert payload["deleted_session"] is False
     assert payload["cleared_bindings"] == [instance.id]
     assert PersonaInstanceStore().get(instance.id).session_id is None
+
+
+def test_persona_chat_delete_unbinds_every_row_pointing_at_the_deleted_session(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    """Delete is the moment the pointer becomes dangling — clear ALL of them.
+
+    A drifted/sibling row holding the same session id used to survive the
+    owner-filtered loop, and the projection could then only hide it and account
+    a permanent ``session_not_in_db`` parity drop (live 2026-07-25: 10 of them).
+    """
+
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    store = PersonaInstanceStore()
+    owner = store.create_operator_chat(persona_id="profile:reviewer", display_name="Reviewer")
+    db.create_session(owner.session_id, "agent_runtime_persona_chat")
+
+    sibling = store.open_chat(persona_id="qa", session_id="persona_chat_sibling_seed")
+    sibling.default_chat_session_id = owner.session_id
+    sibling.session_id = owner.session_id
+    store.update(sibling)
+
+    code = harness._cmd_persona_chat_delete(
+        SimpleNamespace(
+            session_id=owner.session_id,
+            persona_id=owner.persona_id,
+            persona_instance_id=owner.id,
+            requested_by="test",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert sorted(payload["cleared_bindings"]) == sorted([owner.id, sibling.id])
+    healed = PersonaInstanceStore()
+    assert healed.get(owner.id).default_chat_session_id is None
+    assert healed.get(sibling.id).default_chat_session_id is None
+    assert healed.get(sibling.id).session_id is None
+    # Store mutations always emit an event.
+    cleared = [
+        event
+        for event in EventLog().tail(200)
+        if getattr(event, "type", None) == "persona_instance.chat_binding_cleared"
+    ]
+    assert {event.payload["persona_instance_id"] for event in cleared} == {owner.id, sibling.id}
+    assert {event.payload["reason"] for event in cleared} == {"chat_deleted"}
+
+
+def test_persona_chat_delete_leaves_a_pointer_to_another_session_alone(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    """Only the pointers naming THIS session are nulled.
+
+    The old delete blanked ``session_id`` unconditionally, so deleting one chat
+    could silently drop an unrelated live pointer.
+    """
+
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    store = PersonaInstanceStore()
+    instance = store.create_operator_chat(persona_id="profile:reviewer", display_name="Reviewer")
+    deleted_session = instance.default_chat_session_id
+    db.create_session(deleted_session, "agent_runtime_persona_chat")
+    instance.session_id = "persona_chat_other_live"
+    store.update(instance)
+
+    code = harness._cmd_persona_chat_delete(
+        SimpleNamespace(
+            session_id=deleted_session,
+            persona_id=instance.persona_id,
+            persona_instance_id=instance.id,
+            requested_by="test",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    json.loads(capsys.readouterr().out)
+    updated = PersonaInstanceStore().get(instance.id)
+    # The deleted session is gone from BOTH pointers, and the unrelated live
+    # session survives (the v1 back-fill in PersonaInstance.__post_init__ then
+    # re-derives the default pointer from it — the instance keeps its real chat).
+    assert deleted_session not in {updated.default_chat_session_id, updated.session_id}
+    assert updated.session_id == "persona_chat_other_live"  # untouched
+    assert updated.default_chat_session_id == "persona_chat_other_live"
+    assert updated.mode == "chat"  # still holds a chat pointer
 
 
 def test_persona_chat_delete_reports_missing_without_silent_success(

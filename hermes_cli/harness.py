@@ -63,6 +63,7 @@ from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_neede
 from agent_runtime.models import AgentPersona, Event, Task, apply_instance_model_overrides
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
+    CHAT_BINDING_CLEARED_REASON_DELETED,
     ChatBusyError,
     PERSONA_INSTANCE_ID_PREFIX,
     PersonaAssignmentSpec,
@@ -1445,7 +1446,9 @@ def build_parser(parent_subparsers) -> None:
         "reconcile",
         help=(
             "Archive-and-fold legacy-id persona-instance rows onto their canonical "
-            "channel (duplicate agent cards repair); records identity_map aliases"
+            "channel (duplicate agent cards repair); records identity_map aliases; "
+            "prunes orphan rows; repairs missing steering parents and chat-session "
+            "bindings whose session SessionDB no longer has"
         ),
     )
     persona_instance_reconcile.add_argument(
