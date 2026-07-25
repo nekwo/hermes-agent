@@ -1452,12 +1452,22 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_detail.add_argument("--json", action="store_true")
     persona_instance_detail.set_defaults(func=_cmd_persona_instance_detail)
 
-    agent = subs.add_parser("agent", help="List harness agent definitions")
+    agent = subs.add_parser("agent", help="Inspect and rebind harness agent definitions")
     agent_subs = agent.add_subparsers(dest="agent_command", required=True)
     agent_list = agent_subs.add_parser("list", help="List persisted/configured agent definitions")
     agent_list.add_argument("--all-profiles", action="store_true")
     _add_stage42_global_args(agent_list)
     agent_list.set_defaults(func=_cmd_agent_list)
+
+    agent_set_profile = agent_subs.add_parser(
+        "set-profile",
+        help="Rebind an agent to a different Hermes profile (the ONE door; cascades every instance projection)",
+    )
+    agent_set_profile.add_argument("persona_id", help="Store-persisted agent id (e.g. neko_supervisor)")
+    agent_set_profile.add_argument("--profile", required=True, help="Target Hermes profile name; must exist and resolve ready")
+    agent_set_profile.add_argument("--requested-by", default="operator")
+    _add_stage42_global_args(agent_set_profile, mutation=True)
+    agent_set_profile.set_defaults(func=_cmd_agent_set_profile)
 
     agents = subs.add_parser("agents", help="Deprecated alias for `agent list`")
     agents.add_argument("--all-profiles", action="store_true")
@@ -3137,35 +3147,108 @@ def _cmd_realm_agents_set(args) -> int:
 
 
 def _cmd_agent_list(args) -> int:
+    from agent_runtime.persona_profile_binding import binding_index
+
     rows: list[dict] = []
     if getattr(args, "all_profiles", False):
         for profile in list_profiles():
             try:
                 cfg = load_agent_runtime_config(Path(profile.path) / "config.yaml")
                 personas = ensure_persisted_personas(cfg)
+                # Same asymmetry `ensure_persisted_personas(cfg)` already has:
+                # the config side comes from the ENUMERATED profile's
+                # config.yaml, the store side from the ACTIVE runtime root
+                # (there is one agent store per runtime root, not per profile).
+                # The binding columns therefore describe exactly the merge the
+                # row above came from.
+                bindings = binding_index(cfg)
             except Exception:
                 continue
             for persona in personas:
-                rows.append(_agent_definition_row(persona, profile_name=profile.name))
+                rows.append(_agent_definition_row(persona, source_profile=profile.name, bindings=bindings))
     else:
-        for persona in ensure_persisted_personas(load_agent_runtime_config()):
-            rows.append(_agent_definition_row(persona, profile_name=active_profile_name()))
+        cfg = load_agent_runtime_config()
+        try:
+            bindings = binding_index(cfg)
+        except Exception:
+            bindings = {}
+        for persona in ensure_persisted_personas(cfg):
+            rows.append(_agent_definition_row(persona, source_profile=active_profile_name(), bindings=bindings))
     deduped: dict[tuple[str, str | None], dict] = {}
     for row in rows:
-        deduped[(row["id"], row.get("profile"))] = row
+        # Dedup on the ENUMERATED Hermes profile the definition was read from,
+        # not on `profile` — `profile` is now the agent's own binding, and two
+        # agents in different profile homes can legitimately share one binding.
+        deduped[(row["id"], row.get("source_profile"))] = row
     _print_stage42(_list_envelope("agent", _sort_rows(list(deduped.values()), getattr(args, "sort", None))), args=args)
     return 0
 
 
-def _agent_definition_row(persona: AgentPersona, *, profile_name: str | None) -> dict:
-    return {
+def _agent_definition_row(persona: AgentPersona, *, source_profile: str | None, bindings: dict | None = None) -> dict:
+    """One `agent list` row.
+
+    ``profile`` is the agent's OWN ``hermes_profile`` binding — the thing the
+    column name promises. It used to be filled with ``active_profile_name()``,
+    so every row printed the operator's current profile (live evidence
+    2026-07-25: all five agents printed ``alice`` both before AND after a real
+    rebind — a first-class surface that structurally could not answer the
+    question it appeared to answer). The enumeration source keeps its own,
+    honestly-named ``source_profile`` column, and the config-vs-store
+    disagreement that ``ensure_persisted_personas`` silently resolves
+    store-wins is surfaced rather than hidden.
+    """
+
+    binding = (bindings or {}).get(persona.id)
+    row = {
         "id": persona.id,
         "name": persona.display_name,
         "role": str(persona.role),
-        "profile": profile_name or persona.hermes_profile,
+        "profile": persona.hermes_profile,
+        "source_profile": source_profile,
         "state": "available",
         "updated_at": None,
     }
+    if binding is not None:
+        row["config_profile"] = binding.config_profile
+        row["store_profile"] = binding.store_profile
+        row["binding_source"] = binding.source
+        row["binding_diverged"] = binding.diverged
+    return row
+
+
+def _cmd_agent_set_profile(args) -> int:
+    """`harness agent set-profile` — the ONE persona⇄profile rebind door.
+
+    ``_add_stage42_global_args(mutation=True)`` auto-registers ``--dry-run``;
+    it is READ here and threaded into the store chokepoint, which validates
+    fully, writes nothing and emits nothing on a preview. A mutation verb that
+    ignores the flag silently mutates on a preview — this repo has shipped that
+    bug twice (the 2026-07-17 office verb family).
+    """
+
+    from agent_runtime.persona_profile_binding import PersonaProfileRebindError, rebind_persona_profile
+
+    dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        result = rebind_persona_profile(
+            str(getattr(args, "persona_id", "") or ""),
+            profile=str(getattr(args, "profile", "") or ""),
+            dry_run=dry_run,
+            actor=str(getattr(args, "requested_by", None) or "operator"),
+        )
+    except PersonaProfileRebindError as exc:
+        data = {
+            "ok": False,
+            "error_code": exc.code,
+            "error": str(exc),
+            **exc.details,
+            "dry_run": dry_run,
+            "next_expected": "fix the arguments and retry; no agent binding was changed",
+        }
+        _print_stage42(_object_envelope("agent_profile_rebind", data), args=args, default_output="json")
+        return 2
+    _print_stage42(_object_envelope("agent_profile_rebind", result), args=args, default_output="json")
+    return 0
 
 
 def _cmd_pets_gallery(args) -> int:

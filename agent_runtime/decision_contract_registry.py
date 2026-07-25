@@ -1324,6 +1324,20 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "office.actor.conflict_resolved": EventContract("office.actor.conflict_resolved", "Office actor sync conflict resolved", ("workspace_id", "actor_key", "take"), ("revision",)),
     "blueprint.saved": EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title")),
     "persona.updated": EventContract("persona.updated", "Persona updated", ("persona_id",), ("display_name",)),
+    # The persona ⇄ Hermes-profile rebind chokepoint
+    # (``persona_profile_binding.rebind_persona_profile``). ONE event per
+    # operation: it moves the persona authority through ``AgentStore.save`` AND
+    # cascades every ``persona_instance.profile_id`` projection, so the payload
+    # names each moved row (bounded; the overflow is accounted in
+    # ``instances_truncated``, never dropped silently). Deliberately NOT added to
+    # ``patch_coverage.COVERED_DOMAIN_EVENT_TYPES`` — a rebind batch must degrade
+    # to a full core, not ship a patch frame that folds nothing.
+    "persona.profile_rebound": EventContract(
+        "persona.profile_rebound",
+        "Persona rebound to a different Hermes profile",
+        ("persona_id", "from_profile", "to_profile"),
+        ("actor", "instance_count", "instances", "instances_truncated"),
+    ),
     # Synthetic watchdog event: appended by stream_frames when the scope/catalog
     # fingerprint changed while the EventLog offset did not — an event-less write
     # slipped the Stage 12 rule. Advances the watermark so gated consumers

@@ -931,6 +931,36 @@ class PersonaInstanceStore:
             )
         return self.get(instance.id)
 
+    def set_backing_profile(self, persona_instance_id: str, profile_id: str | None) -> PersonaInstance:
+        """Re-point one instance's ``profile_id`` at a new backing Hermes profile.
+
+        Deliberately NOT part of :meth:`update_profile`: everything that method
+        writes is an operator-editable RUNTIME override that belongs to the
+        instance. ``profile_id`` is not — it is a PROJECTION of the owning
+        persona's ``hermes_profile``. Folding it into ``update_profile`` would
+        create a second, instance-local rebind authority competing with the
+        persona record.
+
+        The ONE sanctioned caller is
+        :func:`agent_runtime.persona_profile_binding.rebind_persona_profile`,
+        which moves the persona authority and cascades every instance row in the
+        same operation, refuses while any instance is in flight, and emits the
+        single typed ``persona.profile_rebound`` event that accounts for every
+        row this method touched. That is why no event is appended here: the
+        operation's event names each moved row, and it is deliberately an
+        UNCOVERED type (see ``patch_coverage``) so the batch degrades to a full
+        core rather than shipping a patch frame that folds nothing.
+        """
+
+        instance = self.get(persona_instance_id)
+        value = safe_optional_token(profile_id)
+        if instance.profile_id == value:
+            return instance
+        instance.profile_id = value
+        instance.updated_at = now()
+        self._write(instance)
+        return self.get(instance.id)
+
     def _validate_no_steering_cycle(self, persona_instance_id: str, parent_instance_id: str) -> None:
         # Multi-parent DAG walk: adding parent → child must not let the child
         # reach itself through the steering graph. We only reject when the child

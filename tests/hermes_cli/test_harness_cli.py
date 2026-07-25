@@ -569,3 +569,96 @@ def test_harness_cli_init_create_tick_status_snapshot_e2e(tmp_path, monkeypatch,
     output = capsys.readouterr().out
     assert "pm fleshed" in output
     assert (tmp_path / "runtime" / "snapshot.json").exists()
+
+
+def _seed_rebind_fixture(tmp_path, monkeypatch):
+    """A store-persisted agent bound to `alpha`, with two real profile homes."""
+
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.store import AgentStore
+
+    home = tmp_path / "hermes-home"
+    for name in ("alpha", "beta"):
+        (home / "profiles" / name).mkdir(parents=True, exist_ok=True)
+        (home / "profiles" / name / "config.yaml").write_text("model: {}\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+
+    persona = AgentStore().save(
+        AgentPersona(
+            id="widget",
+            display_name="Widget Agent",
+            role="dev",
+            model=None,
+            provider=None,
+            api_mode="codex_responses",
+            toolsets=["file"],
+            system_prompt_path="",
+            hermes_profile="alpha",
+        )
+    )
+    PersonaInstanceStore().ensure_for_persona(persona)
+    return persona
+
+
+def test_harness_parser_exposes_agent_set_profile_with_dry_run():
+    args = parser().parse_args(
+        ["harness", "agent", "set-profile", "widget", "--profile", "beta", "--dry-run", "--json"]
+    )
+
+    assert args.harness_command == "agent"
+    assert args.agent_command == "set-profile"
+    assert args.persona_id == "widget"
+    assert args.profile == "beta"
+    # _add_stage42_global_args(mutation=True) registers --dry-run; the verb must READ it.
+    assert args.dry_run is True
+
+
+def test_agent_set_profile_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
+    from agent_runtime.store import AgentStore
+
+    _seed_rebind_fixture(tmp_path, monkeypatch)
+
+    args = parser().parse_args(
+        ["harness", "agent", "set-profile", "widget", "--profile", "beta", "--dry-run", "--json"]
+    )
+    assert args.func(args) == 0
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is True
+    assert data["dry_run"] is True
+    assert data["from_profile"] == "alpha"
+    assert data["to_profile"] == "beta"
+    assert AgentStore().get("widget").hermes_profile == "alpha"
+
+
+def test_agent_set_profile_applies_and_cascades(tmp_path, monkeypatch, capsys):
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.store import AgentStore
+
+    _seed_rebind_fixture(tmp_path, monkeypatch)
+
+    args = parser().parse_args(["harness", "agent", "set-profile", "widget", "--profile", "beta", "--json"])
+    assert args.func(args) == 0
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["dry_run"] is False
+    assert data["changed"] is True
+    assert data["binding_files"]["hermes_profile"] == "beta"
+    assert data["realm_artifact_delta"]["measured"] is True
+    assert AgentStore().get("widget").hermes_profile == "beta"
+    assert PersonaInstanceStore().get("personainst_widget").profile_id == "beta"
+
+
+def test_agent_set_profile_reports_typed_refusal(tmp_path, monkeypatch, capsys):
+    _seed_rebind_fixture(tmp_path, monkeypatch)
+
+    args = parser().parse_args(
+        ["harness", "agent", "set-profile", "widget", "--profile", "definitely-missing", "--json"]
+    )
+    assert args.func(args) == 2
+
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is False
+    assert data["error_code"] == "profile_missing"
