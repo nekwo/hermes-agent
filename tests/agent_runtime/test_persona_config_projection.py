@@ -40,7 +40,8 @@ from agent_runtime.realm_sync import (
     publish_realm_sync,
     resolve_realm_sync_artifacts,
 )
-from agent_runtime.store import RealmStore, WorkspaceStore
+from agent_runtime.models import AgentPersona
+from agent_runtime.store import AgentStore, RealmStore, WorkspaceStore
 from hermes_constants import get_config_path
 
 
@@ -209,6 +210,144 @@ def test_projection_synthesizes_a_definition_for_a_store_only_persona():
     assert projection.synthesized == ["storeonly"]
     assert projection.personas["storeonly"]["display_name"] == "Store Only"
     assert "repo_scope" not in projection.personas["storeonly"]
+
+
+# ── record-vs-override merge (2026-07-25 partial-publish regression) ───────
+
+
+def _live_shape_record(**overrides) -> AgentPersona:
+    """A resolved store record shaped like the live machine's
+    ``agent-runtime/agents/neko_supervisor.json``: the whole definition,
+    ``repo_scope`` absolute path included (the allowlist must keep it out)."""
+
+    values = dict(
+        id="neko_supervisor",
+        display_name="Neko Mission Lead",
+        role="pm",
+        model="claude-opus-4",
+        provider="anthropic",
+        api_mode="chat_completions",
+        toolsets=["file", "terminal", "web"],
+        system_prompt_path="agent_runtime/prompts/alice_supervisor.md",
+        autonomy="propose_only",
+        hermes_profile="base",
+        skills=["harness-mission-lead", "harness-continuity"],
+        soul_overlay_path="SOUL.md",
+        required_mcp_servers=["launcher_qa"],
+        include_profile_memory=True,
+        include_core_context_files=True,
+        repo_scope="X:/Unreal Engine/Engine/Launcher/EterniaLauncher",
+        repo_scope_label="EterniaLauncher",
+        iteration_budget=40,
+        max_wall_seconds=1800.0,
+        max_api_calls=90,
+        max_total_tokens=400000,
+        readiness={"state": "ready"},
+    )
+    values.update(overrides)
+    return AgentPersona(**values)
+
+
+#: The EXACT live shape: ``config.yaml`` carries ONE key per persona while the
+#: agent store carries the whole definition.
+_ONE_KEY_OVERRIDE_CONFIG = {
+    "agent_runtime": {
+        "personas": {"neko_supervisor": {"chat_lane_restore_toolsets": ["browser", "vision"]}}
+    }
+}
+
+
+def test_one_key_override_does_not_amputate_the_resolved_record():
+    """REGRESSION (2026-07-25, live machine): ``config.yaml`` held a single
+    ``chat_lane_restore_toolsets`` key per persona while the store held the full
+    definition. Presence in the override map was treated as COMPLETENESS, so the
+    publish shipped a 304-byte ``store/personas.yaml`` of one-key bodies — and
+    reported ``dropped_keys: []``, ``synthesized: []``, ``missing: []``: a clean
+    publish. A member pulling it adopted ``chat_lane_restore_toolsets`` and
+    nothing else, so every Office placement referenced a persona they could not
+    materialize."""
+
+    projection = project_persona_definitions(
+        ["neko_supervisor"],
+        raw_config=_ONE_KEY_OVERRIDE_CONFIG,
+        records={"neko_supervisor": _live_shape_record()},
+    )
+    body = projection.personas["neko_supervisor"]
+
+    assert body["display_name"] == "Neko Mission Lead"
+    assert body["role"] == "pm"
+    assert body["hermes_profile"] == "base"
+    assert body["model"] == "claude-opus-4"
+    assert body["provider"] == "anthropic"
+    assert body["skills"] == ["harness-mission-lead", "harness-continuity"]
+    assert body["toolsets"] == ["file", "terminal", "web"]
+    assert body["system_prompt_path"] == "agent_runtime/prompts/alice_supervisor.md"
+    assert body["soul_overlay_path"] == "SOUL.md"
+    assert body["iteration_budget"] == 40
+    # The config-only key the record cannot carry still travels, and says so.
+    assert body["chat_lane_restore_toolsets"] == ["browser", "vision"]
+    assert projection.config_contributed_keys == [
+        "personas.neko_supervisor.chat_lane_restore_toolsets"
+    ]
+    assert projection.missing == []
+    assert projection.incomplete == []
+    # The record's machine path is still refused — and now accounted from the
+    # record side too, not merely absent.
+    assert "repo_scope" not in body
+    assert "personas.neko_supervisor.repo_scope" in projection.dropped_keys
+    assert "personas.neko_supervisor.readiness" in projection.dropped_keys
+    assert find_nonportable_values(projection.personas, prefix="personas") == []
+
+
+def test_the_record_wins_a_disagreement_and_the_shadowed_config_key_is_named():
+    """``ensure_persisted_personas`` resolves ``{**catalog, **stored}`` — for a
+    persona with a store row the RECORD is what this machine runs. Publishing the
+    config value instead would ship a definition the publisher's own runtime does
+    not use. The disagreement is reported so a config-vs-store drift cannot hide
+    until a member pulls it."""
+
+    config = {
+        "agent_runtime": {
+            "personas": {
+                "neko_supervisor": {"model": "gpt-5-stale", "display_name": "Stale Name"}
+            }
+        }
+    }
+    projection = project_persona_definitions(
+        ["neko_supervisor"], raw_config=config, records={"neko_supervisor": _live_shape_record()}
+    )
+    body = projection.personas["neko_supervisor"]
+
+    assert body["model"] == "claude-opus-4"
+    assert body["display_name"] == "Neko Mission Lead"
+    assert projection.config_shadowed_keys == [
+        "personas.neko_supervisor.display_name",
+        "personas.neko_supervisor.model",
+    ]
+    # ``synthesized`` now means "config.yaml contributed no key to this body".
+    assert projection.synthesized == ["neko_supervisor"]
+    assert projection.config_contributed_keys == []
+
+
+def test_a_persona_with_only_a_config_declaration_still_publishes():
+    """No resolvable record (an unknown role, a definition the catalog refuses):
+    the raw declaration is all that exists, so it travels — and is labelled."""
+
+    config = {"agent_runtime": {"personas": {"ghostwriter": {"display_name": "Ghost", "role": "dev"}}}}
+    projection = project_persona_definitions(["ghostwriter"], raw_config=config, records={})
+
+    assert projection.personas["ghostwriter"] == {"display_name": "Ghost", "role": "dev"}
+    assert projection.config_only == ["ghostwriter"]
+    assert projection.synthesized == []
+    assert projection.missing == []
+
+
+def test_a_body_missing_required_keys_is_reported_not_shipped_silently():
+    config = {"agent_runtime": {"personas": {"thin": {"hermes_profile": "base"}}}}
+    projection = project_persona_definitions(["thin"], raw_config=config, records={})
+
+    assert projection.personas["thin"] == {"hermes_profile": "base"}
+    assert projection.incomplete == [{"persona_id": "thin", "missing_keys": ["display_name", "role"]}]
 
 
 def test_projection_reports_wanted_personas_it_cannot_define():
@@ -398,6 +537,40 @@ def test_republishing_an_unchanged_projection_is_a_noop(tmp_path):
 
     assert publish_realm_sync(realm.id)["changed"] is True
     assert publish_realm_sync(realm.id)["changed"] is False
+
+
+def test_publish_ships_the_whole_resolved_definition_under_a_one_key_override(tmp_path):
+    """The live shape, end to end through the real publish lane.
+
+    Before the fix this produced a 304-byte ``store/personas.yaml``, and — because
+    ``profiles_withheld`` was re-derived by reading ``hermes_profile`` back out of
+    the projected body — the §5.1 base-seed row went blind with it and reported
+    ``base_seed_guarded: false``."""
+
+    _write_config(_ONE_KEY_OVERRIDE_CONFIG)
+    AgentStore().save(_live_shape_record())
+    realm, repo = _realm_with_remote(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["neko_supervisor"])
+
+    result = publish_realm_sync(realm.id)
+    published = (repo / "realms" / realm.id / Path(PROJECTION_RELATIVE_PATH)).read_text(encoding="utf-8")
+    body = yaml.safe_load(published)["personas"]["neko_supervisor"]
+
+    assert body["display_name"] == "Neko Mission Lead"
+    assert body["hermes_profile"] == "base"
+    assert body["skills"] == ["harness-mission-lead", "harness-continuity"]
+    assert body["chat_lane_restore_toolsets"] == ["browser", "vision"]
+    assert len(body) >= 15, sorted(body)
+    assert "repo_scope" not in body  # ``repo_scope_label`` travels; the path does not
+    assert "readiness" not in body
+    for leaked in ("X:\\", "X:/"):
+        assert leaked not in published, leaked
+
+    row = result["persona_projection"]
+    assert row["profiles_withheld"] == ["base"]
+    assert row["base_seed_guarded"] is True
+    assert row["incomplete"] == []
+    assert row["missing"] == []
 
 
 def test_resolved_artifacts_carry_synthesized_content_not_the_raw_file(tmp_path):

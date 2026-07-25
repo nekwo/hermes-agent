@@ -628,9 +628,9 @@ def _resolved_persona_packages(realm_id: str) -> set[str]:
 
     from agent_runtime.realm_sync import _resolve_artifacts_with_projection
 
-    artifacts, projection, _withheld = _resolve_artifacts_with_projection(realm_id)
-    return set(projection.personas) | {
-        artifact.persona_id for artifact in artifacts if artifact.persona_id
+    resolved = _resolve_artifacts_with_projection(realm_id)
+    return set(resolved.projection.personas) | {
+        artifact.persona_id for artifact in resolved.artifacts if artifact.persona_id
     }
 
 

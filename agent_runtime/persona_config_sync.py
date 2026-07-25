@@ -30,6 +30,25 @@ publishes, deterministic (sorted keys, LF) so republish is a no-op, and merged
 key-wise on the pull side against a never-synced baseline with the same
 adopt / converge / hold vocabulary the board / office / skill lanes use.
 
+**Which SOURCE a published body is built from** (2026-07-25 regression, fixed):
+the first cut treated *presence in* ``agent_runtime.personas.<id>`` as
+completeness and published the raw override alone whenever the id appeared
+there. On the live machine every persona carried a ONE-key override
+(``chat_lane_restore_toolsets``) next to a 24-key resolved store record, so the
+published ``store/personas.yaml`` was 304 bytes of one-key bodies — and the
+accounting reported no drops, nothing synthesized, nothing missing: a clean
+publish. A member pulling it adopted ``chat_lane_restore_toolsets`` and nothing
+else, leaving Office placements pointing at personas they could not materialize.
+
+Every published body is now built from the RESOLVED PERSONA RECORD — what
+``config.ensure_persisted_personas`` returns (``{**catalog, **stored}``, store
+wins) — with the allowlisted raw override filling in only the keys a record
+cannot carry (``chat_lane_restore_toolsets`` and ``skills_remove`` are not
+``AgentPersona`` fields, so config is their only source). The record wins on
+conflict because the record is what this machine's runtime actually runs;
+publishing the config value instead would ship a definition nothing here uses.
+Disagreements are ACCOUNTED (``config_shadowed_keys``), never silently resolved.
+
 Everything in this module is pure with respect to its inputs (the raw config
 mapping and the persona records are injectable) so the allowlist, the pruning,
 the portability validator, and the merge decision table are unit-testable
@@ -41,7 +60,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +132,20 @@ PERSONA_DEF_ALLOWED_KEYS: frozenset[str] = frozenset(
 #: promoting a genuinely portable policy key later is a one-line, reviewable
 #: change with a test — not a quiet widening of the projection.
 PORTABLE_CONFIG_KEYS: frozenset[str] = frozenset()
+
+#: Persona-record attributes that are structural identity/versioning rather than
+#: authored definition content. Excluded from the projection AND from the drop
+#: accounting: reporting ``personas.dev.id`` as a dropped key on every publish is
+#: noise that buries the drops an operator must actually read.
+RECORD_STRUCTURAL_FIELDS: frozenset[str] = frozenset({"id", "schema_version"})
+
+#: Keys without which a pulled definition cannot be materialized into a usable
+#: persona — an Office placement would reference a name and a role that are not
+#: there. The projection cannot invent what neither source carries, so a body
+#: missing one of these is ACCOUNTED (``PersonaConfigProjection.incomplete``)
+#: rather than refused: refusing would brick the whole realm publish over one
+#: under-declared persona. What it must never be again is SILENT.
+PERSONA_DEF_REQUIRED_KEYS: frozenset[str] = frozenset({"display_name", "role"})
 
 #: Persona ids are written back with ``atomic_roundtrip_yaml_update`` on a
 #: DOTTED key path (``agent_runtime.personas.<id>``), so a ``.`` in an id would
@@ -201,15 +234,39 @@ NONPORTABLE_HINT = (
 class PersonaConfigProjection:
     """The synthesized, publishable persona-definition document.
 
-    ``personas`` is the pruned + allowlisted definition map. ``dropped_keys``
-    accounts for every key the allowlist removed, ``synthesized`` for persona ids
-    with no raw ``config.yaml`` override (their definition was rebuilt from the
-    resolved persona record), and ``missing`` for wanted ids with neither.
+    ``personas`` is the pruned + allowlisted definition map. Everything else is
+    accounting, and every key that was dropped, shadowed, borrowed from config,
+    or absent has a row — a publish must never again be able to ship a partial
+    definition and report a clean result.
+
+    - ``dropped_keys`` — every key the allowlist removed, from EITHER source
+      (record attributes such as ``repo_scope`` / ``readiness`` included).
+    - ``synthesized`` — ids whose published body came entirely from the resolved
+      persona record: ``config.yaml`` contributed no key to it. (Before
+      2026-07-25 this meant "the id had no raw override at all"; the record is
+      now the base for every body, so the useful signal is what config added.)
+    - ``config_only`` — ids with a raw override but NO resolvable record. Their
+      body is the raw declaration alone; nothing else exists to build from.
+    - ``config_contributed_keys`` — dotted paths whose value came from the raw
+      override because the record could not carry them
+      (``chat_lane_restore_toolsets``, ``skills_remove``, or a key the record
+      resolved empty).
+    - ``config_shadowed_keys`` — dotted paths where ``config.yaml`` and the
+      resolved record disagreed and the RECORD won. This is a config-vs-store
+      divergence made visible at publish time instead of at a member's pull.
+    - ``incomplete`` — published bodies missing a
+      :data:`PERSONA_DEF_REQUIRED_KEYS` key; a member can adopt them but cannot
+      fully materialize them.
+    - ``missing`` — wanted ids with neither a record nor a usable override.
     """
 
     personas: dict[str, dict[str, Any]] = field(default_factory=dict)
     dropped_keys: list[str] = field(default_factory=list)
     synthesized: list[str] = field(default_factory=list)
+    config_only: list[str] = field(default_factory=list)
+    config_contributed_keys: list[str] = field(default_factory=list)
+    config_shadowed_keys: list[str] = field(default_factory=list)
+    incomplete: list[dict[str, Any]] = field(default_factory=list)
     missing: list[str] = field(default_factory=list)
 
     def document(self) -> dict[str, Any]:
@@ -241,6 +298,10 @@ class PersonaConfigProjection:
             "personas": sorted(self.personas),
             "dropped_keys": list(self.dropped_keys),
             "synthesized": list(self.synthesized),
+            "config_only": list(self.config_only),
+            "config_contributed_keys": list(self.config_contributed_keys),
+            "config_shadowed_keys": list(self.config_shadowed_keys),
+            "incomplete": [dict(row) for row in self.incomplete],
             "missing": list(self.missing),
         }
 
@@ -293,25 +354,55 @@ def _allowlist_persona_def(persona_id: str, raw: Any, dropped: list[str]) -> dic
     return body
 
 
-def _record_to_def(record: Any) -> dict[str, Any]:
-    """Rebuild a definition mapping from a resolved persona record.
+def _record_field_names(record: Any) -> list[str]:
+    """Definition-bearing attribute names carried by a resolved persona record.
 
-    Used only for personas that exist in the store with no ``config.yaml``
-    override — without this they would publish an Office placement referencing a
-    persona no member can materialize. Values still pass the allowlist.
+    Dataclass fields when the record is one (``AgentPersona``), else its public
+    attributes — the merge stays duck-typed so it is unit-testable without
+    constructing a full store record. Deriving the name set FROM the record
+    rather than hard-coding it is what keeps a newly added ``AgentPersona`` field
+    accounted (as a drop) the day it lands instead of silently invisible: new
+    keys are opt-in to the projection, never opt-out of the reporting.
+    """
+
+    try:
+        names = [item.name for item in fields(record)]
+    except TypeError:
+        names = [name for name in dir(record) if not name.startswith("_")]
+    return sorted(
+        name
+        for name in names
+        if name not in RECORD_STRUCTURAL_FIELDS and not callable(getattr(record, name, None))
+    )
+
+
+def _record_to_def(persona_id: str, record: Any, dropped: list[str]) -> dict[str, Any]:
+    """Project ONE resolved persona record through :data:`PERSONA_DEF_ALLOWED_KEYS`.
+
+    This is the BASE of every published body (see the module docstring). The
+    record is what ``config.ensure_persisted_personas`` resolves, so building
+    from it is what keeps the projection in agreement with the runtime — and
+    what retired the 2026-07-25 partial publish, where an id's mere presence in
+    the raw override map was mistaken for a complete definition.
+
+    Every attribute the allowlist excludes is appended to ``dropped``, so
+    ``repo_scope`` (an absolute checkout path that exists only on this machine),
+    ``readiness`` (derived runtime state) and ``model_override_issued_at`` (a
+    local write-ordering clock) are reported rather than silently absent.
     """
 
     body: dict[str, Any] = {}
-    for name in sorted(PERSONA_DEF_ALLOWED_KEYS):
-        if not hasattr(record, name):
+    for name in _record_field_names(record):
+        if name not in PERSONA_DEF_ALLOWED_KEYS:
+            dropped.append(f"personas.{persona_id}.{name}")
             continue
-        value = getattr(record, name)
+        value = getattr(record, name, None)
         if value is None or value == [] or value == {}:
             continue
         try:
             body[name] = _plain(value)
         except TypeError:
-            continue
+            dropped.append(f"personas.{persona_id}.{name}")
     return body
 
 
@@ -344,6 +435,14 @@ def project_persona_definitions(
 ) -> PersonaConfigProjection:
     """Build the portable projection for exactly ``persona_ids``.
 
+    Each body is the RESOLVED RECORD projected through the allowlist, with the
+    allowlisted raw ``config.yaml`` override contributing ONLY the keys the
+    record could not resolve. Presence in ``agent_runtime.personas.<id>`` is not
+    completeness — treating it as completeness is exactly the defect this
+    ordering retires (module docstring). Where both sources carry a key and
+    disagree the record wins, because the record is what the runtime runs; the
+    shadowed config key is reported, not silently discarded.
+
     Pruning to the wanted set is part of the contract: the projection must not
     leak definitions for personas this realm is not publishing
     (``resolve_realm_sync_artifacts`` already computes that set).
@@ -354,23 +453,47 @@ def project_persona_definitions(
     personas: dict[str, dict[str, Any]] = {}
     dropped: list[str] = []
     synthesized: list[str] = []
+    config_only: list[str] = []
+    config_contributed: list[str] = []
+    config_shadowed: list[str] = []
+    incomplete: list[dict[str, Any]] = []
     missing: list[str] = []
     for persona_id in sorted({str(item) for item in persona_ids}):
         if not _PERSONA_ID_RE.match(persona_id):
             dropped.append(f"personas.{persona_id}")
             continue
-        if persona_id in overrides:
-            body = _allowlist_persona_def(persona_id, overrides[persona_id], dropped)
-        elif persona_id in records:
-            body = _record_to_def(records[persona_id])
-            synthesized.append(persona_id)
-        else:
+        record = records.get(persona_id)
+        raw_override = overrides[persona_id] if persona_id in overrides else None
+        if record is None and raw_override is None:
             missing.append(persona_id)
             continue
-        if body:
-            personas[persona_id] = body
-        elif persona_id not in missing:
+        body = _record_to_def(persona_id, record, dropped) if record is not None else {}
+        override_body = (
+            _allowlist_persona_def(persona_id, raw_override, dropped) if raw_override is not None else {}
+        )
+        contributed = 0
+        for name in sorted(override_body):
+            if name in body:
+                # Both sources carry it. The record is runtime truth; naming the
+                # divergence is how a config-vs-store drift stops being invisible
+                # until a member pulls a definition their publisher never read.
+                if body[name] != override_body[name]:
+                    config_shadowed.append(f"personas.{persona_id}.{name}")
+                continue
+            body[name] = override_body[name]
+            config_contributed.append(f"personas.{persona_id}.{name}")
+            contributed += 1
+        if not body:
             missing.append(persona_id)
+            continue
+        personas[persona_id] = body
+        if record is None:
+            config_only.append(persona_id)
+        elif not contributed:
+            synthesized.append(persona_id)
+        absent = sorted(PERSONA_DEF_REQUIRED_KEYS - set(body))
+        if absent:
+            incomplete.append({"persona_id": persona_id, "missing_keys": absent})
     # ``PORTABLE_CONFIG_KEYS`` is empty by design (see the constant). Promoting a
     # key means wiring it into ``document()`` AND the pull merge; fail loud rather
     # than let a widened allowlist look like it published something it did not.
@@ -379,6 +502,10 @@ def project_persona_definitions(
         personas=personas,
         dropped_keys=sorted(set(dropped)),
         synthesized=sorted(set(synthesized)),
+        config_only=sorted(set(config_only)),
+        config_contributed_keys=sorted(set(config_contributed)),
+        config_shadowed_keys=sorted(set(config_shadowed)),
+        incomplete=sorted(incomplete, key=lambda row: str(row.get("persona_id"))),
         missing=sorted(set(missing)),
     )
 

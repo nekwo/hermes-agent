@@ -241,13 +241,16 @@ def publish_realm_sync(
         raise RealmSyncError("sync_conflict", "Realm sync repo has unresolved git conflicts.", safe_details={"conflicts": git["conflicts"]})
     if git["behind"] > 0:
         raise RealmSyncError("sync_behind", "Realm sync repo is behind its upstream; pull before publishing.", retryable=True, safe_details={"behind": git["behind"]})
-    artifacts, projection, profile_files_withheld = _resolve_artifacts_with_projection(realm_id)
+    resolved = _resolve_artifacts_with_projection(realm_id)
+    artifacts = resolved.artifacts
+    projection = resolved.projection
+    profile_files_withheld = resolved.profile_files_withheld
     _assert_no_secret_artifacts(artifacts)
     _assert_no_raw_profile_config(artifacts)
     _assert_portable_artifacts(artifacts)
     if dry_run:
         result = _sync_result(realm, "publish", "dry_run", artifacts, repo=repo, git=git, changed=False)
-        result["persona_projection"] = _persona_projection_row(projection)
+        result["persona_projection"] = _persona_projection_row(projection, resolved.bound_profiles)
         result["profile_files"] = _profile_files_row(artifacts, profile_files_withheld)
         return result
 
@@ -348,7 +351,7 @@ def publish_realm_sync(
     warnings = _notify_publish(realm, repo=repo, artifacts=artifacts, credential=credential) if changed else []
     git_after = _git_state(repo)
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
-    result["persona_projection"] = _persona_projection_row(projection)
+    result["persona_projection"] = _persona_projection_row(projection, resolved.bound_profiles)
     result["profile_files"] = _profile_files_row(artifacts, profile_files_withheld)
     if warnings:
         result["warnings"] = warnings
@@ -566,22 +569,40 @@ def _apply_workspace_tombstones(realm_id: str) -> dict[str, list]:
     return summary
 
 
-def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
-    return _resolve_artifacts_with_projection(realm_id)[0]
-
-
-def _resolve_artifacts_with_projection(realm_id: str):
-    """``(artifacts, persona projection, profile-file withheld rows)``.
+@dataclass(frozen=True, slots=True)
+class _ResolvedPublish:
+    """Everything ONE resolution pass of "what does this realm publish" yields.
 
     The publish lane needs the projection's ACCOUNTING (which keys the allowlist
-    dropped, which definitions were synthesized from a store record, which wanted
-    personas had no definition at all) alongside the artifacts. Resolving both in
-    one pass keeps a single authority for "what does this realm publish" — a
-    second independent computation could drift from the bytes actually written.
-    The third element is the same discipline for the profile-FILE family: a
-    prompt that could not travel is a typed row, never a silent omission.
+    dropped, which definitions came purely from a store record, which config keys
+    the record shadowed, which wanted personas had no definition at all)
+    alongside the artifacts. Resolving them in one pass keeps a single authority
+    for "what does this realm publish" — a second independent computation could
+    drift from the bytes actually written.
+
+    - ``profile_files_withheld`` — the same discipline for the profile-FILE
+      family: a prompt that could not travel is a typed row, never a silent
+      omission.
+    - ``bound_profiles`` — the profile HOMES this publish resolved persona files
+      out of, taken from ``resolve_persona_profile`` (the binding authority
+      ``_persona_artifacts`` itself uses). ``profiles_withheld`` used to be
+      re-derived by reading ``hermes_profile`` back out of the projected bodies,
+      which went blind for the same reason the projection did: a partial body
+      reported the wrong profile set and ``base_seed_guarded: false``. A derived
+      artifact is not an authority.
     """
 
+    artifacts: list[RealmSyncArtifact]
+    projection: Any
+    profile_files_withheld: list[dict[str, str]]
+    bound_profiles: list[str]
+
+
+def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
+    return _resolve_artifacts_with_projection(realm_id).artifacts
+
+
+def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
     realm = RealmStore().get(realm_id)
     workspaces = _workspaces_for_realm(realm)
     cfg = load_agent_runtime_config()
@@ -606,11 +627,13 @@ def _resolve_artifacts_with_projection(realm_id: str):
     )
     published_persona_ids: list[str] = []
     profile_files_withheld: list[dict[str, str]] = []
+    bound_profiles: set[str] = set()
     for persona_id in wanted_persona_ids:
         persona = personas.get(persona_id)
         if persona is None:
             continue
         published_persona_ids.append(persona_id)
+        bound_profiles.add(_bound_profile_name(persona))
         persona_artifacts, withheld = _persona_artifacts(persona)
         artifacts.extend(persona_artifacts)
         profile_files_withheld.extend(withheld)
@@ -627,7 +650,12 @@ def _resolve_artifacts_with_projection(realm_id: str):
     )
     if projection.personas:
         artifacts.append(_persona_config_artifact(projection))
-    return _dedupe_artifacts(artifacts), projection, profile_files_withheld
+    return _ResolvedPublish(
+        artifacts=_dedupe_artifacts(artifacts),
+        projection=projection,
+        profile_files_withheld=profile_files_withheld,
+        bound_profiles=sorted(bound_profiles),
+    )
 
 
 def _workspaces_for_realm(realm: Realm) -> list[Workspace]:
@@ -1234,7 +1262,7 @@ def _persona_config_artifact(projection) -> RealmSyncArtifact:
     )
 
 
-def _persona_projection_row(projection) -> dict[str, Any]:
+def _persona_projection_row(projection, bound_profiles: list[str]) -> dict[str, Any]:
     """Typed publish accounting for the projection — including the explicit
     base-seed guard (Office plan §5.1).
 
@@ -1243,26 +1271,35 @@ def _persona_projection_row(projection) -> dict[str, Any]:
     specifically. The guard is reported even though (and precisely because) the
     projection makes the clobber structurally impossible — a silent skip is not
     accounting.
+
+    ``bound_profiles`` arrives from the resolution pass, which reads it off the
+    binding authority. It used to be recovered by reading ``hermes_profile`` back
+    out of the projected bodies — so when the projection published partial
+    bodies (2026-07-25) this row reported ``profiles_withheld: ["default"]`` and
+    ``base_seed_guarded: false``, a false all-clear on the §5.1 guard produced by
+    the very defect it was meant to watch. Accounting derived from the artifact
+    it is accounting for cannot detect that the artifact is wrong.
     """
 
-    withheld = sorted(_bound_profile_names(projection.personas))
     return {
         **projection.as_dict(),
-        "profiles_withheld": withheld,
-        "base_seed_guarded": BASE_PROFILE_NAME in withheld,
+        "profiles_withheld": list(bound_profiles),
+        "base_seed_guarded": BASE_PROFILE_NAME in bound_profiles,
     }
 
 
-def _bound_profile_names(personas: dict[str, Any]) -> set[str]:
-    """Profile names the published personas bind to (``hermes_profile``), plus
-    the active profile for personas that inherit it. These are exactly the
-    profile homes whose raw ``config.yaml`` publish now withholds."""
+def _bound_profile_name(persona: AgentPersona) -> str:
+    """The profile HOME this persona's files publish out of.
 
-    names: set[str] = set()
-    for body in personas.values():
-        bound = str((body or {}).get("hermes_profile") or "").strip()
-        names.add(bound or str(active_profile_name() or "default"))
-    return names
+    Same authority and same fallback chain ``_persona_artifacts`` uses
+    (``resolve_persona_profile`` → declared binding, else the active profile), so
+    "profiles whose raw config.yaml was withheld" is exactly the set of profile
+    homes this publish actually read from. Un-tokenized on purpose: this names a
+    profile, not a published path segment.
+    """
+
+    binding = resolve_persona_profile(persona)
+    return str(binding.hermes_profile or active_profile_name() or "default")
 
 
 def _assert_no_raw_profile_config(artifacts: list[RealmSyncArtifact]) -> None:
