@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 from . import paths
 from .config import ensure_persisted_personas, load_agent_runtime_config
 from .events import EventLog
+from .machine_roots import MACHINE_ROOTS_FILENAME
 from .models import AgentPersona, Event, Realm, Workspace
 from .profile_context import active_profile_name, resolve_persona_profile
 from .skill_install import HARNESS_SKILLS, install_harness_skills, install_harness_skills_for_personas
@@ -56,6 +57,10 @@ BASE_PROFILE_NAME = "base"
 HARD_EXCLUDED_PATH_PARTS = {
     "blueprints",
     "blueprint_runs",
+    # The machine-root registry binds logical roots to absolute paths on THIS
+    # box. It is the half of the portable-config split that must never travel —
+    # publishing it would push one member's drive layout onto everyone else.
+    MACHINE_ROOTS_FILENAME,
     "packet_artifacts",
     "proofs",
     "runs",

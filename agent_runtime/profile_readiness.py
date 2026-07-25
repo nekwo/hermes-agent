@@ -7,6 +7,7 @@ from hermes_cli.auth import AuthError
 from hermes_cli.runtime_environment import missing_runtime_packages_for
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
+from .machine_roots import contains_path_tokens, mcp_server_issues, path_token_issues
 from .parse_cache import cached_yaml_file
 from .profile_context import persona_profile_context, resolve_persona_profile
 from .skill_install import harness_skill_hash_mismatches
@@ -43,7 +44,9 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
     missing_skills: list[str] = []
     skill_hash_mismatches: list[str] = []
     skill_resolutions: list[dict[str, Any]] = []
+    machine_root_issues: list[dict[str, Any]] = []
     effective_required_mcp = _effective_required_mcp_servers(persona, task=task, stage=stage)
+    machine_root_issues.extend(_persona_path_token_issues(persona))
 
     if binding.readiness != READINESS_READY:
         issues.append((binding.readiness, binding.summary))
@@ -57,6 +60,17 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
                 raw = cached_yaml_file(cfg_path, default={}) or {}
                 configured_mcp = _configured_mcp_server_names(raw or {})
                 missing_mcp = [name for name in effective_required_mcp if name not in configured_mcp]
+                # A server that IS configured but whose machine binding cannot
+                # resolve here (unbound logical root, root bound to a path that
+                # no longer exists, gated to another OS) is not "present" — it
+                # would be dropped before spawn. Report the typed reason rather
+                # than letting the agent discover a dead path at tool time.
+                machine_root_issues.extend(
+                    issue.row()
+                    for issue in mcp_server_issues(
+                        _configured_mcp_servers(raw or {}), only=effective_required_mcp
+                    )
+                )
                 runtime_issue = _runtime_dependency_issue(persona)
                 if runtime_issue:
                     issues.append(runtime_issue)
@@ -100,6 +114,13 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
         issues.append((READINESS_SKILL_HASH_MISMATCH, f"Skill hash mismatch: {', '.join(skill_hash_mismatches)}"))
     if missing_mcp:
         issues.append((READINESS_MCP_ATTENTION, f"Missing MCP servers: {', '.join(missing_mcp)}"))
+    for row in machine_root_issues:
+        issues.append(
+            (
+                READINESS_MCP_ATTENTION,
+                f"{row['summary']} — fix: {row['fix_hint']}" if row.get("fix_hint") else row["summary"],
+            )
+        )
 
     readiness, summary = _dominant_issue(issues)
     return {
@@ -113,6 +134,7 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
         "required_mcp_servers": list(persona.required_mcp_servers),
         "effective_required_mcp_servers": list(effective_required_mcp),
         "missing_mcp_servers": missing_mcp,
+        "machine_root_issues": machine_root_issues,
     }
 
 
@@ -211,15 +233,43 @@ def _safe_provider_summary(message: str) -> str:
     return text
 
 
-def _configured_mcp_server_names(raw: dict[str, Any]) -> set[str]:
-    names: set[str] = set()
+def _configured_mcp_servers(raw: dict[str, Any]) -> dict[str, Any]:
+    """Merged ``mcp_servers`` map across the three accepted config spellings."""
+
+    merged: dict[str, Any] = {}
     for key_path in (("mcp", "servers"), ("mcp_servers",), ("mcpServers",)):
         node: Any = raw
         for key in key_path:
             node = node.get(key) if isinstance(node, dict) else None
         if isinstance(node, dict):
-            names.update(str(name) for name in node.keys())
-    return names
+            for name, cfg in node.items():
+                merged[str(name)] = cfg
+    return merged
+
+
+def _configured_mcp_server_names(raw: dict[str, Any]) -> set[str]:
+    return set(_configured_mcp_servers(raw))
+
+
+def _persona_path_token_issues(persona) -> list[dict[str, Any]]:
+    """Typed issues for persona path fields whose tokens never expanded.
+
+    ``agent_runtime.config`` expands ``${roots.…}`` at load time; a token that
+    is still literal here means resolution failed, and the persona would
+    otherwise run against a path that cannot exist. Surfacing it as readiness
+    keeps the failure visible instead of degrading into a silent no-workdir.
+    """
+
+    scope = getattr(persona, "repo_scope", None)
+    if not contains_path_tokens(scope):
+        return []
+    persona_id = str(getattr(persona, "id", "") or "persona")
+    return [
+        issue.row()
+        for issue in path_token_issues(
+            scope, field=f"agent_runtime.personas.{persona_id}.repo_scope"
+        )
+    ]
 
 
 def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:

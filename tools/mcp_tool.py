@@ -3816,6 +3816,20 @@ def _filter_suspicious_mcp_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
     return safe_servers
 
 
+def _resolve_machine_root_tokens(servers: Dict[str, dict]) -> Dict[str, dict]:
+    """Apply the machine-root / platform-gate chokepoint to an mcp_servers map.
+
+    Fails OPEN on import error only (a checkout without ``agent_runtime``
+    behaves exactly as before); it never invents a path. Resolution itself
+    fails LOUD — unresolvable servers are dropped and logged with a typed code.
+    """
+    try:
+        from agent_runtime.machine_roots import resolve_mcp_servers
+    except Exception:  # pragma: no cover — agent_runtime is optional at this layer
+        return servers
+    return resolve_mcp_servers(servers)
+
+
 def _load_mcp_config() -> Dict[str, dict]:
     """Read ``mcp_servers`` from the Hermes config file.
 
@@ -3826,6 +3840,13 @@ def _load_mcp_config() -> Dict[str, dict]:
 
     ``${ENV_VAR}`` placeholders in string values are resolved from
     ``os.environ`` (which includes ``~/.hermes/.env`` loaded at startup).
+
+    ``${roots.<name>}`` / ``${exe_suffix}`` placeholders and the optional
+    ``platforms:`` gate are resolved first, through the single chokepoint in
+    ``agent_runtime.machine_roots`` — a server whose logical root is unbound on
+    this machine, or that is gated to another OS, is DROPPED with a loud typed
+    log rather than spawned against a dead path. Configs without those tokens
+    are untouched.
     """
     try:
         from hermes_cli.config import load_config
@@ -3837,6 +3858,7 @@ def _load_mcp_config() -> Dict[str, dict]:
         servers = config.get("mcp_servers")
         if not servers or not isinstance(servers, dict):
             return {}
+        servers = _resolve_machine_root_tokens(servers)
         # Ensure .env vars are available for interpolation
         try:
             from hermes_cli.env_loader import load_hermes_dotenv

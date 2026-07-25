@@ -17,7 +17,8 @@ import yaml
 from hermes_constants import get_config_path, get_default_hermes_root
 from hermes_time import now
 
-from . import paths
+from . import machine_roots, paths
+from .machine_roots import MachineRootError, expand_config_paths
 from .profile_context import active_profile_name
 from .proof_capture import CapturedArtifact, ScreenshotRequest, VideoRequest
 
@@ -51,6 +52,27 @@ class StageCMcpSmokeResult:
     ok: bool
     code: str
     summary: str
+
+
+@dataclass(frozen=True, slots=True)
+class StageCMcpConfigResolution:
+    """Why the launcher_qa binding is (un)available on THIS machine.
+
+    ``load_launcher_qa_mcp_config`` collapses this to ``config or None`` for
+    back-compat; anything that reports to a human (preflight, readiness) should
+    read the typed ``code``/``summary``/``fix_hint`` so an unbound machine root
+    is never displayed as a generic "not configured".
+    """
+
+    config: StageCMcpServerConfig | None
+    code: str
+    summary: str
+    fix_hint: str = ""
+    issues: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return self.config is not None
 
 
 class StageCMcpJsonRpcClient:
@@ -276,30 +298,88 @@ def default_launcher_qa_visual_provider() -> StageCLauncherMcpVisualCaptureProvi
 
 
 def load_launcher_qa_mcp_config(*, persona_target: str = "qa", profile_name: str | None = None) -> StageCMcpServerConfig | None:
+    """Back-compat accessor — the config, or ``None`` when it is unusable here.
+
+    Callers that must explain the ``None`` (preflight, readiness) should use
+    :func:`resolve_launcher_qa_mcp_config` instead of guessing "not configured".
+    """
+
+    return resolve_launcher_qa_mcp_config(persona_target=persona_target, profile_name=profile_name).config
+
+
+def resolve_launcher_qa_mcp_config(
+    *, persona_target: str = "qa", profile_name: str | None = None
+) -> StageCMcpConfigResolution:
     profile_home = _profile_home_for(persona_target=persona_target, profile_name=profile_name)
     config_path = (profile_home / "config.yaml") if profile_home is not None else get_config_path()
     if not config_path.exists():
-        return None
+        return StageCMcpConfigResolution(
+            None,
+            "missing",
+            f"No Hermes profile config at {config_path}",
+            "Configure mcp_servers.launcher_qa in the launcher-qa Hermes profile.",
+        )
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return None
+    except Exception as exc:
+        return StageCMcpConfigResolution(
+            None,
+            "config_unreadable",
+            f"Hermes profile config did not parse ({type(exc).__name__}): {config_path}",
+            "Repair the profile config.yaml, then re-run preflight.",
+        )
     server = _server_config_dict(raw, "launcher_qa")
     if not server:
-        return None
+        return StageCMcpConfigResolution(
+            None,
+            "missing",
+            "launcher_qa MCP server is not configured for the QA persona",
+            "Configure mcp_servers.launcher_qa in the launcher-qa Hermes profile.",
+        )
+    if not machine_roots.platform_supported(server.get("platforms")):
+        declared = machine_roots.normalize_platforms(server.get("platforms"))
+        here = machine_roots.current_platform_key()
+        return StageCMcpConfigResolution(
+            None,
+            "platform_unsupported",
+            f"launcher_qa MCP is declared for {declared}; this machine is {here}",
+            f"Stage C visual proof needs a {declared} host; capture it there or provide a {here} binding.",
+        )
+    try:
+        server = expand_config_paths(
+            {key: value for key, value in server.items() if key != "platforms"},
+            field="mcp_servers.launcher_qa",
+        )
+    except MachineRootError as exc:
+        return StageCMcpConfigResolution(
+            None,
+            exc.code,
+            exc.summary,
+            exc.fix_hint,
+            tuple(exc.rows()),
+        )
     command = str(server.get("command") or "").strip()
     if not command:
-        return None
+        return StageCMcpConfigResolution(
+            None,
+            "missing",
+            "launcher_qa MCP server entry has no command",
+            "Set mcp_servers.launcher_qa.command in the launcher-qa Hermes profile.",
+        )
     args = [str(item) for item in server.get("args") or []]
     env = {str(k): str(v) for k, v in (server.get("env") or {}).items()}
-    return StageCMcpServerConfig(
-        name="launcher_qa",
-        command=command,
-        args=args,
-        env=env,
-        timeout_seconds=_positive_float(server.get("timeout"), 260.0),
-        connect_timeout_seconds=_positive_float(server.get("connect_timeout"), 60.0),
-        profile_home=profile_home,
+    return StageCMcpConfigResolution(
+        StageCMcpServerConfig(
+            name="launcher_qa",
+            command=command,
+            args=args,
+            env=env,
+            timeout_seconds=_positive_float(server.get("timeout"), 260.0),
+            connect_timeout_seconds=_positive_float(server.get("connect_timeout"), 60.0),
+            profile_home=profile_home,
+        ),
+        "ready",
+        "launcher_qa MCP binding resolved",
     )
 
 

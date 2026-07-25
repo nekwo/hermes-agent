@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,9 @@ from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PER
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
 from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass(slots=True)
 class AgentRuntimeConfig(RuntimeConfig):
@@ -327,6 +331,28 @@ def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None =
     return []
 
 
+def _expand_machine_root_tokens(value, *, field: str):
+    """Expand ``${roots.…}`` in a persona path field at config-load time.
+
+    Unresolvable tokens are left LITERAL on purpose: substituting a guess would
+    hand a persona a fabricated workdir, and blanking the field would look like
+    "no repo scope configured". The literal token is the signal
+    ``profile_readiness`` turns into a typed ``mcp_attention`` row with the
+    exact `hermes harness roots set …` fix, and it can never be mistaken for a
+    real path. Values with no token are returned unchanged.
+    """
+
+    from .machine_roots import MachineRootError, contains_path_tokens, expand_config_paths
+
+    if not contains_path_tokens(value):
+        return value
+    try:
+        return expand_config_paths(value, field=field)
+    except MachineRootError as exc:
+        logger.error("Persona path field %s is unresolved: %s | fix: %s", field, exc.summary, exc.fix_hint)
+        return value
+
+
 def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
     # Full resolvable catalog: the typed pipeline personas remain here (dormant, so the
@@ -360,7 +386,10 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         p.soul_overlay_path = overrides.get("soul_overlay_path", p.soul_overlay_path)
         p.include_profile_memory = bool(overrides.get("include_profile_memory", p.include_profile_memory))
         p.include_core_context_files = bool(overrides.get("include_core_context_files", p.include_core_context_files))
-        p.repo_scope = overrides.get("repo_scope", p.repo_scope)
+        p.repo_scope = _expand_machine_root_tokens(
+            overrides.get("repo_scope", p.repo_scope),
+            field=f"agent_runtime.personas.{persona_id}.repo_scope",
+        )
         p.repo_scope_label = overrides.get("repo_scope_label", p.repo_scope_label)
         p.iteration_budget = _optional_int(overrides.get("iteration_budget", p.iteration_budget))
         p.max_wall_seconds = _optional_float(overrides.get("max_wall_seconds", p.max_wall_seconds))

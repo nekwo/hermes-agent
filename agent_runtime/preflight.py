@@ -18,7 +18,11 @@ from .models import Event, Incident, Proof, Task, TaskStage
 from .packets import latest_packet
 from .proof_rules import ProofType
 from .repo_context import safe_affected_repo_labels
-from .stagec_mcp_visual_provider import load_launcher_qa_mcp_config, smoke_launcher_qa_mcp
+from .stagec_mcp_visual_provider import (
+    load_launcher_qa_mcp_config,
+    resolve_launcher_qa_mcp_config,
+    smoke_launcher_qa_mcp,
+)
 from .states import TaskState
 from .store import IncidentStore, ProofStore, TaskStore
 
@@ -522,7 +526,17 @@ def _flutter_check() -> PreflightCheck:
 def _mcp_exposure_check() -> PreflightCheck:
     config = load_launcher_qa_mcp_config(persona_target="qa")
     if config is None:
-        return PreflightCheck("launcher_qa_mcp", False, "launcher_qa_mcp=missing", "launcher_qa MCP server is not configured for the QA persona", "Configure mcp_servers.launcher_qa in the launcher-qa Hermes profile.")
+        # Explain the miss instead of reporting a flat "missing": an unbound
+        # machine root and an unconfigured server need different fixes, and the
+        # operator must not have to guess which one they hit.
+        reason = resolve_launcher_qa_mcp_config(persona_target="qa")
+        return PreflightCheck(
+            "launcher_qa_mcp",
+            False,
+            f"launcher_qa_mcp={reason.code or 'missing'}",
+            reason.summary or "launcher_qa MCP server is not configured for the QA persona",
+            reason.fix_hint or "Configure mcp_servers.launcher_qa in the launcher-qa Hermes profile.",
+        )
     result = smoke_launcher_qa_mcp(config)
     return PreflightCheck(
         "launcher_qa_mcp",
