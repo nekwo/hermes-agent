@@ -959,7 +959,7 @@ def _stub_admission(monkeypatch, outcome: McpAdmissionOutcome):
     monkeypatch.setattr(
         profile_runner.ProfileAgentRunner,
         "_admit_mcp_servers",
-        lambda self, request, timing: outcome,
+        lambda self, request, timing, **_kwargs: outcome,
     )
 
 

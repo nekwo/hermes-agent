@@ -18,6 +18,15 @@ from . import turn_budget
 from .personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
 from .profile_context import PersonaProfileBinding, persona_profile_context
 from .redaction import TEXT_SECRET_VALUE_ASSIGNMENT_RE
+from .run_budget import (
+    UNIT_CALLS,
+    UNIT_SECONDS,
+    UNIT_TOKENS,
+    RunBudgetEnforcement,
+    RunBudgetKind,
+    RunBudgetLedger,
+    RunBudgetTripReason,
+)
 from .turn_budget import TurnWallBudget
 
 
@@ -96,6 +105,12 @@ class RunBudgetExceeded(ProfileRunnerError):
     (not the api-call / token / read-search budgets) is what tripped, so the
     caller can settle the turn as ``budget_exhausted`` — a known, terminal
     outcome — instead of the ambiguous ``outcome_unknown``.
+
+    ``run_budget`` carries the run's WHOLE budget accounting block (see
+    ``run_budget.RunBudgetLedger.accounting``) — the same block the completed
+    path writes into ``profile_timing``. Without it a tripped run is the one
+    case where the accounting is unreadable after the fact, because the result
+    that would have carried it is never returned.
     """
 
     def __init__(
@@ -104,10 +119,12 @@ class RunBudgetExceeded(ProfileRunnerError):
         *,
         session_id: str | None = None,
         wall_budget: dict[str, Any] | None = None,
+        run_budget: dict[str, Any] | None = None,
     ):
         super().__init__(message)
         self.session_id = session_id
         self.wall_budget = wall_budget
+        self.run_budget = run_budget
 
 
 # Stand-in "budget" for runs that carry no wall budget at all. The checkpoint is
@@ -230,7 +247,12 @@ class AgentRunResult:
     # Written at the accrual sites (agent.usage_pricing.record_api_call_usage).
     usage_ledger: list[dict[str, Any]] = field(default_factory=list)
     latency_ms: int | None = None
-    profile_timing: dict[str, int] = field(default_factory=dict)
+    # Mostly ``_ms`` / ``_count`` integers, plus the one structured entry
+    # ``run_budget`` (the accounting block from ``run_budget.RunBudgetLedger``).
+    # Downstream readers either copy the dict wholesale or filter to
+    # ``_ms``/``_count`` keys (``persona_runtime._record_timing_value``), so the
+    # structured entry is additive for every existing consumer.
+    profile_timing: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -265,10 +287,15 @@ class WallBudgetCheckpoint:
         *,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         clock: Callable[[], float] | None = None,
+        ledger: RunBudgetLedger | None = None,
     ):
         self.budget = budget
         self._progress_callback = progress_callback
         self._clock = clock or time.time
+        # The run's budget ledger, for accounting only — the checkpoint's own
+        # decision path is untouched by it. Defaulted so a directly-constructed
+        # checkpoint (tests, and any future caller) still records somewhere.
+        self.ledger = ledger or RunBudgetLedger()
         self._lock = RLock()
         self._agent: Any | None = None
         self._engaged = False
@@ -326,8 +353,22 @@ class WallBudgetCheckpoint:
         drained = turn_budget.drain_iteration_budget(agent)
         with self._lock:
             self._iterations_drained = drained
+        # Accounting only — the wall bound LANDS the turn, and recording that
+        # here is what makes "the reply you are reading is a checkpoint reply"
+        # readable from the run record instead of only from the progress lane.
+        self.ledger.trip(
+            RunBudgetKind.WALL,
+            RunBudgetTripReason.WALL_CHECKPOINT_ENGAGED,
+            consumed=self.consumed_seconds(),
+            detail=f"trigger={trigger}",
+        )
         self._emit_progress()
         return True
+
+    def consumed_seconds(self) -> float:
+        """Wall spent so far, from the same budget the enforcement reads."""
+
+        return max(0.0, self.budget.total_seconds - self.budget.remaining_seconds(now=self._clock()))
 
     def summary(self) -> dict[str, Any]:
         with self._lock:
@@ -383,16 +424,38 @@ class _ToolBudgetGuard:
     # Wall-clock checkpoint consulted before each tool execution. Distinct from
     # the tool-count budgets above: those TRIP the run, this one lands it.
     wall_checkpoint: WallBudgetCheckpoint | None = None
+    # The run's budget ledger. Accounting only: every enforcement decision below
+    # is made exactly where it was before, then declared here.
+    ledger: RunBudgetLedger = field(default_factory=RunBudgetLedger)
 
     @classmethod
-    def from_limits(cls, *, stop_on_repeated_read_search: bool, tool_budget_limits: dict[str, Any] | None):
+    def from_limits(
+        cls,
+        *,
+        stop_on_repeated_read_search: bool,
+        tool_budget_limits: dict[str, Any] | None,
+        ledger: RunBudgetLedger | None = None,
+    ):
         limits = tool_budget_limits or {}
-        return cls(
+        guard = cls(
             stop_on_repeated_read_search=stop_on_repeated_read_search,
             read_search_limit=_positive_limit(limits.get("read_search_limit"), fallback=6),
             skill_load_limit=_positive_limit(limits.get("skill_load_limit"), fallback=2),
             has_patch_progress=bool(limits.get("has_patch_progress")),
+            ledger=ledger or RunBudgetLedger(),
         )
+        if stop_on_repeated_read_search:
+            # Declared only when the bound is actually enforced: a run that does
+            # not stop on read/search loops is not bounded by one, and a row
+            # claiming otherwise would be a bound that does not exist.
+            guard.ledger.declare(
+                RunBudgetKind.READ_SEARCH,
+                enforcement=RunBudgetEnforcement.TRIPS_RUN,
+                unit=UNIT_CALLS,
+                limit=guard.read_search_limit,
+                consumed_provider=lambda: guard.aggregate_read_search_count,
+            )
+        return guard
 
     @property
     def skill_warning_threshold(self) -> int:
@@ -401,9 +464,23 @@ class _ToolBudgetGuard:
     def set_interrupt_callback(self, callback: Callable[[str], None]) -> None:
         self.interrupt_callback = callback
 
-    def trip(self, reason: str) -> None:
+    def trip(
+        self,
+        reason: str,
+        *,
+        kind: RunBudgetKind = RunBudgetKind.READ_SEARCH,
+        trip_reason: RunBudgetTripReason = RunBudgetTripReason.AGGREGATE_READ_SEARCH_EXCEEDED,
+    ) -> None:
+        """Trip this run. ``reason`` stays the exception's message, verbatim.
+
+        ``kind`` / ``trip_reason`` are the typed half of the SAME fact, recorded
+        for the accounting block so no downstream reader has to parse the
+        message string to learn which bound fired.
+        """
+
         if not self.tripped_reason:
             self.tripped_reason = reason
+            self.ledger.trip(kind, trip_reason, detail=reason)
         if self.interrupt_callback is None:
             return
         try:
@@ -482,9 +559,13 @@ class ProfileAgentRunner:
             request.persona_chat_runtime_registry is not None
             and request.root_chat_session_id
         )
+        # ONE ledger per run, minted here so the post-run budgets enforced below
+        # land in the same accounting block as the in-run ones. Every mechanism
+        # keeps its own enforcement; only the bookkeeping is shared.
+        ledger = RunBudgetLedger()
         try:
             raw_result, agent, profile_timing = self._execute_agent_run(
-                binding, request
+                binding, request, ledger=ledger
             )
         except Exception:
             if resident:
@@ -502,13 +583,17 @@ class ProfileAgentRunner:
             if resident:
                 _finish_resident_persona_chat_agent(agent)
         result.latency_ms = _elapsed_ms(started)
+        profile_timing["run_budget"] = ledger.accounting()
         result.profile_timing = profile_timing
         if isinstance(result.raw, dict):
             result.raw["profile_timing"] = dict(profile_timing)
         budget_started = time.perf_counter()
         _emit_budget_pressure_warning(result, request)
-        _enforce_result_budgets(result, request)
+        _enforce_result_budgets(result, request, ledger=ledger)
         profile_timing["budget_checks_ms"] = _emit_request_timing(request, "budget_checks", budget_started)
+        # Re-rendered AFTER the post-run budgets so the block an operator reads
+        # covers every bound this turn had, not only the in-run ones.
+        profile_timing["run_budget"] = ledger.accounting()
         result.profile_timing = profile_timing
         if isinstance(result.raw, dict):
             result.raw["profile_timing"] = dict(profile_timing)
@@ -516,12 +601,24 @@ class ProfileAgentRunner:
             raise ProfileRunnerError(str(result.raw.get("error")))
         return result
 
-    def _admit_mcp_servers(self, request: AgentRunRequest, timing: dict[str, int]):
+    def _admit_mcp_servers(
+        self,
+        request: AgentRunRequest,
+        timing: dict[str, Any],
+        *,
+        ledger: RunBudgetLedger | None = None,
+    ):
         """Register this run's admitted MCP servers; return the typed outcome.
 
         Never raises and never blocks past the admission budget — the outcome is
         typed either way, and an empty ``admitted`` simply means "this run gets
         no MCP tools", which is the state every run is in today.
+
+        ``ledger`` is accounting only, and only for the ONE fact this function
+        can observe that the caller cannot: the per-run MCP call budget trips
+        mid-turn, on whichever thread dispatched the tool, so its trip has to be
+        recorded from the exhaustion callback installed here. The budget's
+        limit/consumption rows are declared by the caller.
         """
 
         admission = request.mcp_admission
@@ -538,8 +635,8 @@ class ProfileAgentRunner:
                 # event rides this callback rather than the outcome. The
                 # agent-facing half is the refused tool's own typed result — the
                 # one surface a looping model cannot miss.
-                on_budget_exhausted=lambda denial, snapshot: _emit_mcp_budget_exhausted(
-                    request, denial, snapshot
+                on_budget_exhausted=lambda denial, snapshot: _on_mcp_budget_exhausted(
+                    request, denial, snapshot, ledger=ledger
                 ),
             )
         except Exception:  # pragma: no cover - admit_mcp_servers already swallows
@@ -578,7 +675,7 @@ class ProfileAgentRunner:
         self,
         request: AgentRunRequest,
         servers: tuple[str, ...],
-        timing: dict[str, int],
+        timing: dict[str, Any],
         budget: Any | None = None,
     ) -> None:
         """Remove this run's MCP registry scope. Advisory — never fails the turn.
@@ -643,8 +740,15 @@ class ProfileAgentRunner:
         except Exception:
             pass
 
-    def _execute_agent_run(self, binding: PersonaProfileBinding, request: AgentRunRequest) -> tuple[Any, Any, dict[str, int]]:
-        timing: dict[str, int] = {}
+    def _execute_agent_run(
+        self,
+        binding: PersonaProfileBinding,
+        request: AgentRunRequest,
+        *,
+        ledger: RunBudgetLedger | None = None,
+    ) -> tuple[Any, Any, dict[str, Any]]:
+        timing: dict[str, Any] = {}
+        ledger = ledger if ledger is not None else RunBudgetLedger()
         from .persona_chat_continuity import tool_execution_scope
         from .terminal_envelope import terminal_envelope_scope
         from agent.skill_utils import skill_runtime_scope
@@ -684,6 +788,7 @@ class ProfileAgentRunner:
             budget_guard = _ToolBudgetGuard.from_limits(
                 stop_on_repeated_read_search=request.stop_on_repeated_read_search,
                 tool_budget_limits=request.tool_budget_limits,
+                ledger=ledger,
             )
             # Wall-clock checkpoint. Built even when the run carries no wall
             # budget (deadline in the far future ⇒ it never engages) so the
@@ -698,8 +803,20 @@ class ProfileAgentRunner:
                     + (_positive_float(request.max_wall_seconds) or _NO_WALL_BUDGET_SECONDS),
                 ),
                 progress_callback=request.progress_callback,
+                ledger=ledger,
             )
             budget_guard.wall_checkpoint = wall_checkpoint
+            # Declared only for a run that HAS a wall budget — the stand-in
+            # above exists to give the tool-start gate one unconditional shape,
+            # and accounting a 115-year "limit" would be a bound nobody has.
+            if _positive_float(request.max_wall_seconds) is not None:
+                ledger.declare(
+                    RunBudgetKind.WALL,
+                    enforcement=RunBudgetEnforcement.LANDS_TURN,
+                    unit=UNIT_SECONDS,
+                    limit=wall_checkpoint.budget.total_seconds,
+                    consumed_provider=wall_checkpoint.consumed_seconds,
+                )
             # MCP admission. Inside persona_profile_context (so HERMES_HOME
             # already points at the persona's own profile) and before agent
             # construction (so the admitted tools exist in the registry by the
@@ -707,15 +824,39 @@ class ProfileAgentRunner:
             # non-raising: a capability probe must never be able to fail a turn,
             # so every degradation comes back as a typed row and the turn
             # continues on the fallback lane.
-            admission_outcome = self._admit_mcp_servers(request, timing)
+            admission_outcome = self._admit_mcp_servers(request, timing, ledger=ledger)
             admitted_servers = admission_outcome.admitted if admission_outcome else ()
             if admitted_servers:
+                # Declared only for a run that actually got MCP tools: a run with
+                # nothing admitted has no MCP calls to bound. The MCP meter is
+                # its own authority for the count, so the ledger READS it rather
+                # than keeping a second tally that could disagree with the one
+                # the refusal itself used.
+                call_budget = getattr(admission_outcome, "call_budget", None)
+                ledger.declare(
+                    RunBudgetKind.MCP_CALLS,
+                    enforcement=RunBudgetEnforcement.REFUSES_CALL,
+                    unit=UNIT_CALLS,
+                    limit=(
+                        getattr(call_budget, "limit", None)
+                        if call_budget is not None
+                        else _positive_int(
+                            getattr(request.mcp_admission, "max_tool_calls_per_run", None)
+                        )
+                    ),
+                    consumed=0 if call_budget is None else None,
+                    consumed_provider=(
+                        None
+                        if call_budget is None
+                        else lambda: (call_budget.snapshot() or {}).get("spent")
+                    ),
+                )
                 mcp_scope.callback(
                     self._teardown_mcp_admission,
                     request,
                     admitted_servers,
                     timing,
-                    budget=getattr(admission_outcome, "call_budget", None),
+                    budget=call_budget,
                 )
             status_callback = _profile_status_callback(request, timing)
             construct_started = time.perf_counter()
@@ -823,7 +964,12 @@ class ProfileAgentRunner:
                     _attach_model_input_observability(raw_result, agent=agent, request=request)
                     timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started)
                     if budget_guard.tripped_reason:
-                        raise RunBudgetExceeded(budget_guard.tripped_reason, session_id=getattr(agent, "session_id", None))
+                        raise RunBudgetExceeded(
+                            budget_guard.tripped_reason,
+                            session_id=getattr(agent, "session_id", None),
+                            run_budget=ledger.accounting(),
+                        )
+                    timing["run_budget"] = ledger.accounting()
                     return raw_result, agent, timing
                 finally:
                     _cleanup_agent_ready(agent_ready_cleanup, request)
@@ -833,6 +979,18 @@ class ProfileAgentRunner:
 
             def interrupt_for_budget() -> None:
                 expired.set()
+                # Recorded where the bound actually FIRED (the timer thread), so
+                # the accounting is already true by the time the main thread
+                # raises. An ESCALATION: if the graceful checkpoint had already
+                # opened, this replaces the `lands_turn` row with the hard kill
+                # that followed it — both happened, and the kill is the fact.
+                ledger.trip(
+                    RunBudgetKind.WALL,
+                    RunBudgetTripReason.WALL_CLOCK_EXCEEDED,
+                    consumed=wall_checkpoint.consumed_seconds(),
+                    detail=f"wall_seconds={max_wall_seconds:g}",
+                    enforcement=RunBudgetEnforcement.TRIPS_RUN,
+                )
                 if hasattr(agent, "interrupt"):
                     try:
                         agent.interrupt("live run budget exceeded")
@@ -890,6 +1048,7 @@ class ProfileAgentRunner:
                         f"live run budget exceeded: wall_seconds={max_wall_seconds:g}",
                         session_id=getattr(agent, "session_id", None),
                         wall_budget=wall_checkpoint.summary(),
+                        run_budget=ledger.accounting(),
                     )
                 raise
             finally:
@@ -902,28 +1061,79 @@ class ProfileAgentRunner:
                     f"live run budget exceeded: wall_seconds={max_wall_seconds:g}",
                     session_id=getattr(agent, "session_id", None),
                     wall_budget=wall_checkpoint.summary(),
+                    run_budget=ledger.accounting(),
                 )
             if budget_guard.tripped_reason:
-                raise RunBudgetExceeded(budget_guard.tripped_reason, session_id=getattr(agent, "session_id", None))
+                raise RunBudgetExceeded(
+                    budget_guard.tripped_reason,
+                    session_id=getattr(agent, "session_id", None),
+                    run_budget=ledger.accounting(),
+                )
             # The checkpoint fired and the turn still landed a reply: hand the
             # caller the typed provenance so it settles the turn as a
             # budget-ended turn instead of a plain completion.
             if wall_checkpoint.engaged and isinstance(raw_result, dict):
                 raw_result["wall_budget_checkpoint"] = wall_checkpoint.summary()
+            timing["run_budget"] = ledger.accounting()
             return raw_result, agent, timing
 
 
-def _enforce_result_budgets(result: AgentRunResult, request: AgentRunRequest) -> None:
+def _enforce_result_budgets(
+    result: AgentRunResult,
+    request: AgentRunRequest,
+    *,
+    ledger: RunBudgetLedger | None = None,
+) -> None:
+    """The two POST-run bounds. Same order, same messages, same exception.
+
+    ``ledger`` is accounting only: each bound declares its limit and actual
+    consumption whether or not it trips, so an operator can read the headroom of
+    a turn that finished as easily as the bound of one that did not.
+    """
+
+    ledger = ledger if ledger is not None else RunBudgetLedger()
     max_api_calls = _positive_int(request.max_api_calls)
     if max_api_calls is not None:
         api_calls = _positive_int(result.api_calls)
+        ledger.declare(
+            RunBudgetKind.API_CALLS,
+            enforcement=RunBudgetEnforcement.TRIPS_RUN,
+            unit=UNIT_CALLS,
+            limit=max_api_calls,
+            consumed=api_calls,
+        )
         if api_calls is not None and api_calls > max_api_calls:
-            raise RunBudgetExceeded(f"live run budget exceeded: api_calls={api_calls}/{max_api_calls}", session_id=result.session_id)
+            message = f"live run budget exceeded: api_calls={api_calls}/{max_api_calls}"
+            ledger.trip(
+                RunBudgetKind.API_CALLS,
+                RunBudgetTripReason.API_CALLS_EXCEEDED,
+                consumed=api_calls,
+                detail=message,
+            )
+            raise RunBudgetExceeded(
+                message, session_id=result.session_id, run_budget=ledger.accounting()
+            )
     max_total_tokens = _positive_int(request.max_total_tokens)
     if max_total_tokens is not None:
         total_tokens = _positive_int(result.total_tokens)
+        ledger.declare(
+            RunBudgetKind.TOTAL_TOKENS,
+            enforcement=RunBudgetEnforcement.TRIPS_RUN,
+            unit=UNIT_TOKENS,
+            limit=max_total_tokens,
+            consumed=total_tokens,
+        )
         if total_tokens is not None and total_tokens > max_total_tokens:
-            raise RunBudgetExceeded(f"live run budget exceeded: total_tokens={total_tokens}/{max_total_tokens}", session_id=result.session_id)
+            message = f"live run budget exceeded: total_tokens={total_tokens}/{max_total_tokens}"
+            ledger.trip(
+                RunBudgetKind.TOTAL_TOKENS,
+                RunBudgetTripReason.TOTAL_TOKENS_EXCEEDED,
+                consumed=total_tokens,
+                detail=message,
+            )
+            raise RunBudgetExceeded(
+                message, session_id=result.session_id, run_budget=ledger.accounting()
+            )
 
 
 def _steer_mcp_admission_notice(agent: Any, request: AgentRunRequest, outcome: Any) -> bool:
@@ -962,6 +1172,35 @@ def _steer_mcp_admission_notice(agent: Any, request: AgentRunRequest, outcome: A
     except Exception:  # pragma: no cover - a notice must never fail a turn
         return False
     return True
+
+
+def _on_mcp_budget_exhausted(
+    request: AgentRunRequest,
+    denial: Any,
+    snapshot: dict[str, Any],
+    *,
+    ledger: RunBudgetLedger | None = None,
+) -> None:
+    """First refusal of an admitted MCP call: record it, then tell the operator.
+
+    Fires once per run (``_metered_handler`` gates on ``refused == 1``) from the
+    dispatching thread. The ledger record is what makes a refusal readable from
+    the run record afterwards — the refusal itself only ever reached the agent's
+    tool result and one progress warning, both of which are gone by the time
+    anyone asks "why did that turn stop driving the launcher?".
+    """
+
+    if ledger is not None:
+        try:
+            ledger.trip(
+                RunBudgetKind.MCP_CALLS,
+                RunBudgetTripReason.MCP_CALLS_EXHAUSTED,
+                consumed=(snapshot or {}).get("spent"),
+                detail=getattr(denial, "code", None) or None,
+            )
+        except Exception:  # pragma: no cover - accounting must never fail a tool call
+            pass
+    _emit_mcp_budget_exhausted(request, denial, snapshot)
 
 
 def _emit_mcp_budget_exhausted(request: AgentRunRequest, denial: Any, snapshot: dict[str, Any]) -> None:
@@ -1146,7 +1385,7 @@ def _emit_request_timing(request: AgentRunRequest, timing_key: str, started: flo
     return duration_ms
 
 
-def _profile_status_callback(request: AgentRunRequest, timing: dict[str, int]):
+def _profile_status_callback(request: AgentRunRequest, timing: dict[str, Any]):
     def emit(payload: Any) -> None:
         if isinstance(payload, dict):
             timing_key = payload.get("timing_key")
@@ -1301,8 +1540,15 @@ def _progress_adapter(
                         summary=f"Repeated {tool_name} calls indicate a read/search loop without proof, verdict, patch, or test progress; stop and produce a bounded verdict, proof handoff, Neko slicing request, or exact blocker.",
                     )
                     callback(warning)
-                    guard.trip(f"repeated read/search loop: {tool_name}")
-                    raise RunBudgetExceeded(f"repeated read/search loop: {tool_name}")
+                    guard.trip(
+                        f"repeated read/search loop: {tool_name}",
+                        kind=RunBudgetKind.READ_SEARCH,
+                        trip_reason=RunBudgetTripReason.REPEATED_READ_SEARCH_LOOP,
+                    )
+                    raise RunBudgetExceeded(
+                        f"repeated read/search loop: {tool_name}",
+                        run_budget=guard.ledger.accounting(),
+                    )
                 if guard.repeated_counts[key] >= 6 and key not in guard.warned:
                     guard.warned.add(key)
                     callback(
@@ -1354,8 +1600,12 @@ def _enforce_aggregate_read_search_budget(guard: _ToolBudgetGuard, callback: Cal
     )
     callback(warning)
     reason = f"aggregate read/search budget exceeded: {guard.aggregate_read_search_count}/{guard.read_search_limit}"
-    guard.trip(reason)
-    raise RunBudgetExceeded(reason)
+    guard.trip(
+        reason,
+        kind=RunBudgetKind.READ_SEARCH,
+        trip_reason=RunBudgetTripReason.AGGREGATE_READ_SEARCH_EXCEEDED,
+    )
+    raise RunBudgetExceeded(reason, run_budget=guard.ledger.accounting())
 
 
 def _read_search_warning_payload(event_type: str, *, tool_name: str, read_search_count: int, read_search_limit: int, summary: str) -> dict[str, Any]:

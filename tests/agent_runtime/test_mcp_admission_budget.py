@@ -638,7 +638,7 @@ def test_the_runner_records_the_run_s_call_accounting(monkeypatch):
     monkeypatch.setattr(
         profile_runner.ProfileAgentRunner,
         "_admit_mcp_servers",
-        lambda self, request, timing: McpAdmissionOutcome(
+        lambda self, request, timing, **_kwargs: McpAdmissionOutcome(
             attempted=True, admitted=("launcher_qa",), call_budget=budget
         ),
     )

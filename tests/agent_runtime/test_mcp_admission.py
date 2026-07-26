@@ -914,7 +914,7 @@ def test_an_admitted_run_carries_its_toolset_and_blocks(qa_profile, monkeypatch)
     monkeypatch.setattr(
         profile_runner.ProfileAgentRunner,
         "_admit_mcp_servers",
-        lambda self, request, timing: McpAdmissionOutcome(
+        lambda self, request, timing, **_kwargs: McpAdmissionOutcome(
             attempted=True, admitted=tuple(request.mcp_admission.server_names)
         ),
     )
@@ -938,7 +938,7 @@ def test_a_failed_admission_does_not_leave_the_toolset_on_the_run(qa_profile, mo
     monkeypatch.setattr(
         profile_runner.ProfileAgentRunner,
         "_admit_mcp_servers",
-        lambda self, request, timing: McpAdmissionOutcome(attempted=True),
+        lambda self, request, timing, **_kwargs: McpAdmissionOutcome(attempted=True),
     )
 
     kwargs = _run_capturing(enabled_toolsets=["file"], mcp_admission=admission)
@@ -956,7 +956,7 @@ def test_registry_hygiene_still_applies_alongside_admission(qa_profile, monkeypa
     monkeypatch.setattr(
         profile_runner.ProfileAgentRunner,
         "_admit_mcp_servers",
-        lambda self, request, timing: McpAdmissionOutcome(
+        lambda self, request, timing, **_kwargs: McpAdmissionOutcome(
             attempted=True, admitted=tuple(request.mcp_admission.server_names)
         ),
     )
