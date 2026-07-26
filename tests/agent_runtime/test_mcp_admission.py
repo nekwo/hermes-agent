@@ -361,11 +361,15 @@ def test_explain_is_stable_and_machine_readable(qa_profile):
         "requested",
         "admitted",
         "denied",
+        "tool_include",
         "blocked_tool_names",
         "connect_timeout_seconds",
     }
     assert explained["admitted"] == ["launcher_qa"]
     assert explained["role"] == "qa"
+    # profile_default compiles no include filter: the launcher's full-capability
+    # rows are a glob, and a 25-name list would deny the next tool it ships.
+    assert explained["tool_include"] == {"launcher_qa": []}
 
 
 # ── permission-mode composition ─────────────────────────────────────────────

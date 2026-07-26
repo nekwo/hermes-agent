@@ -126,6 +126,16 @@ def _cmd_persona_tool_diff(args) -> int:
             )
             print(f"  requested: {', '.join(admission['requested']) or '-'}")
             print(f"  admitted:  {', '.join(admission['admitted']) or '-'}")
+            # What would actually REGISTER. An empty include is the launcher's
+            # full-capability glob ("everything this server advertises"), not an
+            # empty admission — say which, or the operator has to infer it.
+            for server, include in sorted((admission.get("tool_include") or {}).items()):
+                shape = (
+                    f"{len(include)} tool(s): {', '.join(include)}"
+                    if include
+                    else "every tool the server advertises (no include filter)"
+                )
+                print(f"  include {server}: {shape}")
             for row in admission["denied"]:
                 print(f"  denied {row['server']} ({row['code']}): {row['summary']}")
         if visibility["blocked_tools"]:

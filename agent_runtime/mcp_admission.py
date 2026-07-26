@@ -288,6 +288,15 @@ class McpAdmission:
             "requested": list(self.requested),
             "admitted": list(self.server_names),
             "denied": self.denial_rows(),
+            # The COMPILED positive allowlist per admitted server — what will
+            # actually be registered. Absent/empty means "everything this server
+            # advertises" (the launcher's full-capability glob rows). An operator
+            # checking a read_only shape before flipping the flag needs to see
+            # the include, not infer it from the block list.
+            "tool_include": {
+                name: sorted(str(tool) for tool in (config.get("tools") or {}).get("include") or [])
+                for name, config in self.server_configs.items()
+            },
             "blocked_tool_names": list(self.blocked_tool_names),
             "connect_timeout_seconds": self.connect_timeout_seconds,
         }

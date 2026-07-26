@@ -603,6 +603,23 @@ def test_read_only_registers_the_reviewer_row_and_nothing_else(qa_profile):
     )
 
 
+def test_explain_shows_the_compiled_include_before_the_flag_is_flipped(qa_profile):
+    """The operator's pre-flip inspection must show what will REGISTER.
+
+    ``--explain-mcp`` previously showed only the block list, from which the
+    include had to be inferred. An operator approving a read_only shape needs the
+    positive list on the surface that never connects to anything.
+    """
+
+    explained = resolve_mcp_admission(
+        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    ).explain()
+
+    assert explained["tool_include"]["launcher_qa"] == sorted(
+        READ_ONLY_INCLUDED_TOOLS["launcher_qa"]
+    )
+
+
 def test_profile_default_compiles_no_include_filter(qa_profile):
     """The full-glob row means "everything this server advertises".
 
