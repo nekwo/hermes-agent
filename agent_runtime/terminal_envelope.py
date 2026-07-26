@@ -722,18 +722,69 @@ ENVELOPE_DECISION_LOG = "terminal_envelope_decisions.jsonl"
 BLOCKED_ATTEMPT_LOG = "blocked_tool_attempts.jsonl"
 
 
+#: Where a receipt root came from. Recorded on the row so an operator reading
+#: a receipt can tell a scope-carried root from a resolved one.
+AUDIT_ROOT_SOURCE_SCOPE = "scope"
+AUDIT_ROOT_SOURCE_ENV = "env"
+AUDIT_ROOT_SOURCE_RESOLVER = "resolver"
+
+
 def _audit_root(scope: TerminalEnvelopeScope | None) -> Path | None:
+    """The directory a governed decision's receipt lands in — a full ladder.
+
+    Three rungs, first non-empty wins: the bound scope's ``runtime_root``, then
+    ``HERMES_AGENT_RUNTIME_ROOT``, then the canonical resolver
+    (``paths.store_root`` → ``resolution.resolve_runtime``, which has its own
+    env → config → default ladder and always answers).
+
+    The third rung is the point. Rungs 1 and 2 can BOTH be empty — ``scope`` is
+    optional and ``scope_for_persona``'s ``runtime_root`` argument defaults to
+    ``None``, and a profile-less persona never exports the variable
+    (``profile_context.py``'s ``profile_home is None`` early-yield). Without a
+    resolver rung, that combination silently drops the receipt for a decision
+    that was itself made deterministically — the SAME ambient-presence
+    dependence this module was written to retire, one layer down: the decision
+    became a policy, but whether anyone could later prove it happened was still
+    decided by process ancestry.
+
+    Never raises: the resolver can refuse (``ProbeIsolationViolation`` under
+    ``HERMES_REQUIRE_ISOLATED_ROOT``), and auditability must not gate the
+    answer. Returning ``None`` after all three rungs means "genuinely nowhere
+    to write", not "nobody exported a variable".
+    """
+
     root = ""
     if scope is not None:
         root = str(scope.runtime_root or "").strip()
     if not root:
         root = str(os.getenv("HERMES_AGENT_RUNTIME_ROOT", "") or "").strip()
     if not root:
+        try:
+            from .paths import store_root
+
+            root = str(store_root() or "").strip()
+        except Exception:
+            # A refusing resolver (probe isolation) or an unimportable module
+            # is a real "nowhere to write" — fall through to None rather than
+            # inventing a path.
+            logger.debug("Envelope audit root unresolvable", exc_info=True)
+            root = ""
+    if not root:
         return None
     try:
         return Path(root).expanduser()
     except Exception:  # pragma: no cover - defensive
         return None
+
+
+def audit_root_source(scope: TerminalEnvelopeScope | None) -> str:
+    """Which rung of :func:`_audit_root` answered. Pure; for receipts + tests."""
+
+    if scope is not None and str(scope.runtime_root or "").strip():
+        return AUDIT_ROOT_SOURCE_SCOPE
+    if str(os.getenv("HERMES_AGENT_RUNTIME_ROOT", "") or "").strip():
+        return AUDIT_ROOT_SOURCE_ENV
+    return AUDIT_ROOT_SOURCE_RESOLVER
 
 
 def _append_jsonl(root: Path, name: str, event: Mapping[str, Any]) -> None:
@@ -770,6 +821,10 @@ def record_envelope_decision(
     event: dict[str, Any] = {
         "ts": time.time(),
         "tool": "terminal",
+        # Which rung answered, so a receipt is self-describing: an operator
+        # reading a row never has to guess whether the root came from the run's
+        # own scope or from ambient process state.
+        "audit_root_source": audit_root_source(resolved),
         "decision": decision.outcome,
         "lane": decision.lane,
         "role": decision.role,
@@ -870,6 +925,9 @@ def explain_terminal_envelope(
 
 
 __all__ = [
+    "AUDIT_ROOT_SOURCE_ENV",
+    "AUDIT_ROOT_SOURCE_RESOLVER",
+    "AUDIT_ROOT_SOURCE_SCOPE",
     "BLOCKED_ATTEMPT_LOG",
     "CLASS_SUMMARY",
     "COMMAND_CLASSES",
@@ -897,6 +955,7 @@ __all__ = [
     "TerminalEnvelopeGrantIssue",
     "TerminalEnvelopeGrants",
     "TerminalEnvelopeScope",
+    "audit_root_source",
     "blocked_result",
     "canonical_role",
     "classify_command",

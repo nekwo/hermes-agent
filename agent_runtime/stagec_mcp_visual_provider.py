@@ -432,7 +432,15 @@ def _marionette_preflight_enabled_for_config(metadata: dict[str, Any], config: S
         return False
     if any(str(metadata.get(key) or "").strip() for key in ("launcher_repo", "launcher_repo_root")):
         return True
-    if any(os.getenv(key, "").strip() for key in ("HERMES_STAGEC_LAUNCHER_REPO", "HERMES_LAUNCHER_REPO", "ETERNIA_LAUNCHER_ROOT")):
+    # Env rung: gate on the SAME validated content the consumer requires, not
+    # on the bare presence of a variable. ``_launcher_repo_from_metadata`` only
+    # accepts one of these keys when it names a real directory; enabling here on
+    # presence alone let a stale value inherited from process ancestry (a warm
+    # ``hermes harness serve`` keeps whatever env it booted with) switch on a
+    # preflight that then rebuilt a DIFFERENT repo than the variable named — or
+    # none at all. ``flutter build`` is not a cheap surprise. One predicate, one
+    # answer.
+    if _env_launcher_repo() is not None:
         return True
     if str(config.command or "").strip() == "fake":
         return True
@@ -534,6 +542,38 @@ def _metadata_bool(metadata: dict[str, Any], key: str, *, default: bool) -> bool
     return default
 
 
+#: Environment keys that may name the launcher repo, in precedence order. ONE
+#: spelling, shared by the enable predicate and the resolver, so the two can
+#: never answer "is a launcher repo named here?" differently.
+LAUNCHER_REPO_ENV_KEYS: tuple[str, ...] = (
+    "HERMES_STAGEC_LAUNCHER_REPO",
+    "HERMES_LAUNCHER_REPO",
+    "ETERNIA_LAUNCHER_ROOT",
+)
+
+
+def _env_launcher_repo() -> Path | None:
+    """The launcher repo the ENVIRONMENT names, or ``None``.
+
+    Validated content, never bare presence: a variable set to a path that is
+    not a directory on this machine names no repo, and must not be able to
+    switch on behavior that then resolves somewhere else. Never raises — a
+    disconnected network root answers "no" rather than failing the caller.
+    """
+
+    for env_key in LAUNCHER_REPO_ENV_KEYS:
+        raw = os.getenv(env_key, "").strip()
+        if not raw:
+            continue
+        try:
+            path = Path(raw).expanduser()
+            if path.is_dir():
+                return path
+        except OSError:  # pragma: no cover - defensive
+            continue
+    return None
+
+
 def _launcher_repo_from_metadata(metadata: dict[str, Any]) -> Path | None:
     for key in ("launcher_repo", "launcher_repo_root"):
         raw = str(metadata.get(key) or "").strip()
@@ -541,12 +581,9 @@ def _launcher_repo_from_metadata(metadata: dict[str, Any]) -> Path | None:
             path = Path(raw).expanduser()
             if path.is_dir():
                 return path
-    for env_key in ("HERMES_STAGEC_LAUNCHER_REPO", "HERMES_LAUNCHER_REPO", "ETERNIA_LAUNCHER_ROOT"):
-        raw = os.getenv(env_key, "").strip()
-        if raw:
-            path = Path(raw).expanduser()
-            if path.is_dir():
-                return path
+    env_repo = _env_launcher_repo()
+    if env_repo is not None:
+        return env_repo
     try:
         from .repo_context import resolve_affected_repo_workdir
 

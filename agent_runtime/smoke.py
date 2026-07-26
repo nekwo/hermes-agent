@@ -39,6 +39,36 @@ def _runtime_root(root: Path | None) -> Iterator[Path]:
             os.environ["HERMES_AGENT_RUNTIME_ROOT"] = previous
 
 
+def _configured_smoke_root() -> Path:
+    """The root ``--no-temp-root`` means: the CONFIGURED one, resolved once.
+
+    This used to be ``os.environ.get("HERMES_AGENT_RUNTIME_ROOT",
+    ".hermes-agent-runtime")`` — two independent nondeterminisms in one
+    expression:
+
+    * **Ambient presence.** The variable is ``os.environ.setdefault``-ed by
+      *some* harness command handlers and not others, so a long-lived
+      ``hermes harness serve`` process answered this differently depending on
+      what ran in it earlier. Same command, different store, decided by
+      process ancestry.
+    * **A RELATIVE literal.** ``.hermes-agent-runtime`` resolves against the
+      process working directory — which is no longer stable. Mission-chat
+      workdir grounding (``mission_chat_workdir`` → ``AgentRunRequest.workdir``
+      → ``profile_runner._agent_workdir``) ``os.chdir``s the serve process per
+      turn, so the fallback root moved with whichever persona spoke last.
+
+    ``paths.store_root()`` is the ONE definition of "the configured runtime
+    root" in this repo, and its ladder (env → ``agent_runtime.store_root`` in
+    the root config → platform default) is traced and always answers. Reading
+    it here keeps the env-set case byte-identical and replaces "wherever the
+    process happens to stand" with the documented resolution.
+    """
+
+    from .paths import store_root
+
+    return Path(store_root())
+
+
 def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
     if not no_model:
         return {
@@ -52,7 +82,7 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
                 "safe_default": "Use --no-model for deterministic CI/local smoke until live provider credentials are intentionally exercised.",
             },
         }
-    root_arg = None if temp_root else Path(os.environ.get("HERMES_AGENT_RUNTIME_ROOT", ".hermes-agent-runtime"))
+    root_arg = None if temp_root else _configured_smoke_root()
     with _runtime_root(root_arg) as root:
         task_store = TaskStore(); run_store = RunStore(); proof_store = ProofStore()
         ts = now()
