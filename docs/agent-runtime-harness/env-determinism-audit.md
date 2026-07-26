@@ -1,13 +1,32 @@
 # Ambient-environment determinism audit (2026-07-26)
 
-Status: **audit complete; three class-2 fixes landed; six operator questions
-open.** Scope: every reader of `HERMES_AGENT_RUNTIME_ROOT` in the repo, plus
-sibling ambient environment keys in `agent_runtime/` that gate behavior on
-**presence** rather than **validated content**.
+Status (wave 4, 2026-07-26): **audit complete; every class-2 fix landed; all six
+operator questions RULED AND IMPLEMENTED on the fork side.** What remains is a
+short, exact list of `tools/`-side one-liners that only an owner of that
+boundary can apply — §7. Scope: every reader of `HERMES_AGENT_RUNTIME_ROOT` in
+the repo, plus sibling ambient environment keys in `agent_runtime/` that gate
+behavior on **presence** rather than **validated content**.
+
+Wave-4 disposition at a glance:
+
+| Q | Ruling | Where it landed |
+|---|---|---|
+| **Q1** | export the runtime root unconditionally | `agent_runtime/profile_context.py` — landed |
+| **Q2** | key on a bound scope, every harness lane | `terminal_envelope.py` + the 4 lane sites — landed; `tools/` half retired **by construction** |
+| **Q3** | one import, not a re-derivation | fork-owned `record_legacy_block` landed; **one-line upstream delegation owed** (§7.1) |
+| **Q4** | assert something real | `agent_runtime/preflight.py` — landed |
+| **Q5** | a smoke run is always synthetic | `agent_runtime/smoke.py` — landed; **flag registration removal owed** (§7.3) |
+| **Q6** | no handler seeds; every reader resolves | 7 `setdefault` sites removed — landed |
+| **§3** | call-time home, not an import-time freeze | drift tests landed; **`tools/skills_sync.py` diff owed** (§7.2) |
+
+Q2 and Q1 were landed **together in one change, Q2 first**, because Q1 alone
+arms the legacy env-keyed envelope on every lane that previously ran with the
+variable unset. See Q1's blast radius.
 
 Parent: [`mission-chat-terminal-envelope-grants.md`](mission-chat-terminal-envelope-grants.md)
-§7.3 — *"anything else keyed on `HERMES_AGENT_RUNTIME_ROOT` inherits the same
-nondeterminism. Worth an explicit audit of that variable's other readers."*
+§7.3 *of that document* — *"anything else keyed on `HERMES_AGENT_RUNTIME_ROOT`
+inherits the same nondeterminism. Worth an explicit audit of that variable's
+other readers."*
 This is that audit. Precedent instance:
 [`mission-chat-lane-gap-audit.md`](mission-chat-lane-gap-audit.md) G4/G5b.
 
@@ -66,24 +85,26 @@ inventoried too.
 | 3 | `agent_runtime/paths.py:8-13` `store_root` | the one accessor | **1** | `resolve_runtime()` + `assert_probe_isolation`. Every store path in the repo derives from it. Not an env reader itself — which is exactly why it is safe. |
 | 4 | `agent_runtime/terminal_envelope.py:725-736` `_audit_root` | receipt root | **2** | **FIXED.** Scope → env → *nothing*. With no scope-carried root (`scope_for_persona`'s `runtime_root` argument defaults to `None`) and no exported variable, a governed refusal wrote **no receipt, silently**. K made the decision deterministic; whether anyone could later *prove* it happened was still decided by ancestry. Added the canonical resolver as rung 3, and `audit_root_source` on every row so a receipt says which rung answered. Never raises; `None` now means "genuinely nowhere to write". |
 | 5 | `agent_runtime/smoke.py:55` `run_smoke` | `--no-temp-root` root | **2** | **FIXED.** Was `os.environ.get(RUNTIME_ROOT_ENV, ".hermes-agent-runtime")` — **two** nondeterminisms in one expression: presence-keyed, and the fallback is **relative to the process cwd**, which mission-chat workdir grounding now `chdir`s per turn (§4). Replaced with `paths.store_root()`, the one definition of "the configured root". Env-set behavior byte-identical. See operator question **Q5** for the residual policy issue this exposed. |
-| 6 | `agent_runtime/profile_context.py:110` (W) | the exporter | **3** | The `profile_home is None` early-`yield` at `:84-86` is path 1 of the split. Retiring it is live-visible on every profile-less persona. → **Q1**. |
+| 6 | `agent_runtime/profile_context.py:110` (W) | the exporter | **3 → FIXED (Q1)** | The `profile_home is None` early-`yield` at `:84-86` was path 1 of the split. The runtime root is now exported for **every** persona (resolved through `paths.store_root()` when no argument is passed, and resolved BEFORE the `HERMES_HOME` override so it is the head resolution); `HERMES_HOME`/`HOME`/`HERMES_AUTH_HOME` stay gated on the binding; both degradations emit a typed `ProfileContextRow`. |
 | 7 | `agent_runtime/profile_context.py:88-91` (W) | save/restore | **1** | Snapshots the prior value and restores it in `finally`, including the `None` case (pops rather than writing `"None"`). Correct scoping; not a gate. |
 | 8 | `agent_runtime/smoke.py:24-39` (W) `_runtime_root` | save/restore | **1** | Same correct save/restore shape as #7. |
-| 9 | `agent_runtime/preflight.py:389` `_runtime_root_check` | preflight check | **1** (weak) | Deterministic — it calls `store_root()`, which reads the value through #1. But the assertion is **vacuous**: the resolver always returns a non-empty path (the default rung), so `ok = bool(str(root).strip())` can only be false if `store_root()` *raises*. It reports `runtime_root=present` for a root that does not exist, and its fix hint names a variable it never actually checked. → **Q4**. |
+| 9 | `agent_runtime/preflight.py:389` `_runtime_root_check` | preflight check | **1 (weak) → FIXED (Q4)** | Was **vacuous**: the resolver always returns a non-empty path (the default rung), so `ok = bool(str(root).strip())` could only be false if `store_root()` *raised*. It reported `runtime_root=present` for a root that does not exist, with a fix hint naming a variable it never checked. Now reports the winning layer, the resolved path, `exists` and `store` (tasks/ present), and fails on exactly `suspect_default_root` — default layer AND not a store. |
 | 10 | `agent_runtime/snapshot.py:314` `_runtime_paths_diagnostic` | diagnostic | **1** | Reports the raw value or `<unset>` alongside the resolved paths. A report of the ambient state is the correct use of a read — it is how an operator *sees* the split rather than being subject to it. |
-| 11 | `tools/terminal_tool.py:2047` `_harness_safety_block` | legacy envelope gate | **3** | The precedent instance, still live on every **ungoverned** lane. `if not os.getenv(RUNTIME_ROOT_ENV, "").strip(): return None` — the entire safety envelope is inert when the variable is unset. Governed mission-chat turns no longer reach it; worker ticks, free-chat, `hermes chat`, cron, gateway and acp all still do. → **Q2**. |
-| 12 | `tools/terminal_tool.py:2138` `_log_harness_blocked_attempt` | legacy receipt | **3** | Same silent-drop shape as #4, on the legacy path: env unset ⇒ the block happened and nothing recorded it. The fix is #4's, applied one file over — but `tools/` is outside this slice's edit boundary. → **Q3**. |
-| 13 | `hermes_cli/harness.py:4509` `_cmd_goal_run` (W) | `setdefault` | **3** | One of seven handlers that seed the variable. Which handlers do and do not is the *process-history* half of the split. → **Q6**. |
-| 14 | `hermes_cli/harness_parts/persona_commands.py:3562` `_cmd_persona_instance_run_once` (W) | `setdefault` | **3** | ″ |
-| 15 | `hermes_cli/harness_parts/persona_commands.py:5049` `_run_free_floating_assignment_once` (W) | `setdefault` | **3** | ″ |
-| 16 | `hermes_cli/harness_parts/persona_commands.py:5520` `_cmd_persona_diagnose` (W) | `setdefault` | **3** | ″ |
-| 17 | `hermes_cli/harness_parts/runtime_commands.py:579` `_cmd_tick` (W) | `setdefault` | **3** | ″ |
-| 18 | `hermes_cli/harness_parts/runtime_commands.py:590` `_cmd_run_until_settled` (W) | `setdefault` | **3** | ″ |
-| 19 | `hermes_cli/harness_parts/runtime_commands.py:613` `_cmd_burn_in_run` (W) | `setdefault` | **3** | ″ |
+| 11 | `tools/terminal_tool.py:2047` `_harness_safety_block` | legacy envelope gate | **3 → RETIRED BY CONSTRUCTION (Q2)** | `if not os.getenv(RUNTIME_ROOT_ENV, "").strip(): return None` — the entire safety envelope is inert when the variable is unset. **No harness run reaches this line any more.** `envelope_decision` now answers for every *bound scope*, and `_harness_envelope_block` returns before consulting the legacy table whenever it gets a non-`None` answer. The line still exists (it is upstream's) but its remaining reachable callers are runs that bind no scope — i.e. not harness runs — which is the audit's target semantics. Residual + exact diff: §7.1. |
+| 12 | `tools/terminal_tool.py:2138` `_log_harness_blocked_attempt` | legacy receipt | **3 → MIRROR-SEAM (Q3)** | Same silent-drop shape as #4: env unset ⇒ the block happened and nothing recorded it. `tools/` is outside the edit boundary, so the ladder ships as the fork-owned `terminal_envelope.record_legacy_block` and the upstream change is a **one-line delegation** (§7.1) rather than a re-derivation. Harness runs are already covered — they never reach this writer (row #11). |
+| 13 | `hermes_cli/harness.py:4509` `_cmd_goal_run` (W) | `setdefault` | **3 → REMOVED (Q6)** | One of seven handlers that seeded the variable. Which handlers did and did not is the *process-history* half of the split. All seven removed. |
+| 14 | `hermes_cli/harness_parts/persona_commands.py:3581` `_cmd_persona_instance_run_once` (W) | `setdefault` | **3 → REMOVED (Q6)** | ″ |
+| 15 | `hermes_cli/harness_parts/persona_commands.py:5068` `_run_free_floating_assignment_once` (W) | `setdefault` | **3 → REMOVED (Q6)** | ″ |
+| 16 | `hermes_cli/harness_parts/persona_commands.py:5539` `_cmd_persona_diagnose` (W) | `setdefault` | **3 → REMOVED (Q6)** | ″ |
+| 17 | `hermes_cli/harness_parts/runtime_commands.py:579` `_cmd_tick` (W) | `setdefault` | **3 → REMOVED (Q6)** | ″ |
+| 18 | `hermes_cli/harness_parts/runtime_commands.py:590` `_cmd_run_until_settled` (W) | `setdefault` | **3 → REMOVED (Q6)** | ″ |
+| 19 | `hermes_cli/harness_parts/runtime_commands.py:613` `_cmd_burn_in_run` (W) | `setdefault` | **3 → REMOVED (Q6)** | ″ |
 
 Notably **absent** from this list: `_cmd_mission_chat_message`. The primary work
 lane is the one handler that never seeds the variable — which is why the split
-surfaced there first.
+surfaced there first. After Q6 that is no longer an anomaly: **no** handler
+seeds it, and `tests/agent_runtime/test_runtime_root_request_ordering.py` fails
+CI if one starts again.
 
 ## 3. Sibling ambient keys in `agent_runtime/`
 
@@ -109,16 +130,33 @@ classified. Only one gated on presence.
 | `stagec_mcp_visual_provider.py:450-465,545` | Stage C repo/helper pins | **1** | `_first_nonempty` precedence chains; the repo resolver validates `is_dir()`. |
 | `snapshot.py:313,315` | `HERMES_HOME`, `LOCALAPPDATA` | **1** | Diagnostic report of the ambient state. |
 
-**`HERMES_HOME` readers outside `agent_runtime/` — flagged, not fixed.**
+**`HERMES_HOME` readers outside `agent_runtime/` — one is unmitigated.**
 `tools/skills_sync.py:39`, `tools/skills_tool.py:100` and
 `tools/skill_manager_tool.py:151` capture `HERMES_HOME` **at import time** into
-a module-level constant. That is the same ancestry dependence in a different
+module-level constants. That is the same ancestry dependence in a different
 shape: in a long-lived serve process the frozen value is whatever home the
-*first* import saw, and every later profile switch is invisible to it. Already
-known — `agent_runtime/skill_publishability.py:200` documents it — and the
-call-time accessors in those modules are the mitigation. Out of this slice's
-boundary (`tools/`), and the module-level names are load-bearing for tests. → **Q3**
-covers the `tools/` boundary generally.
+*first* import saw, and every later profile switch is invisible to it.
+
+Wave 4 sharpened this. The three are **not** in the same state, and lumping them
+hid the one that bites:
+
+| Module | Call-time accessor | Frozen constant used directly | State |
+|---|---|---|---|
+| `tools/skills_tool.py` | `_skills_dir()` ✔ | only inside the accessor | **mitigated** |
+| `tools/skill_manager_tool.py` | `_skills_dir()` ✔ | only inside the accessor | **mitigated** |
+| `tools/skills_sync.py` | **none** | ~25 sites (`SKILLS_DIR`, `MANIFEST_FILE`, `HERMES_HOME`) | **UNMITIGATED** |
+
+The staleness is reproducible, not theoretical — `test_env_determinism_audit.py`
+switches `HERMES_HOME` after import and asserts `skills_sync.SKILLS_DIR` does
+not follow while `skills_tool._skills_dir()` does.
+
+**No fork-owned accessor was added, on purpose.** `agent_runtime/` is already
+immune by construction: `skill_publishability.py` imports only the two *pure*
+helpers (`_dir_hash`, `_read_skill_name`) and derives every skills root itself
+(`:200` documents exactly this). A new fork module here would have zero callers
+— dead code standing in for a fix. What ships instead is the drift guard plus
+the exact owed diff (§7.2), and an AST test that fails if any `agent_runtime`
+module ever imports one of the frozen names.
 
 ---
 
@@ -219,6 +257,16 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
   fail-open/fail-closed reproductions pin both branches by construction).
 * **Recommendation.** Do it, jointly with Q2 — but only after Q2 is answered,
   because Q1 alone silently arms the legacy envelope on every lane.
+* **RULED + LANDED (wave 4).** `persona_profile_context` now resolves the root
+  through `paths.store_root()` when no argument is passed, exports it for every
+  persona, and keeps profile-home redirection gated on the binding. Two typed
+  rows: `persona_profile_context_no_profile_binding` and
+  `persona_profile_context_runtime_root_unresolved` (the resolver refusing under
+  `HERMES_REQUIRE_ISOLATED_ROOT` is now *named* rather than silently skipped),
+  readable via `current_profile_context_rows()`. The resolution happens BEFORE
+  the `HERMES_HOME` override so the exported value is the head resolution, not
+  one re-derived through the profile home this context just diverted to. Landed
+  in the same change as Q2, after it, exactly as this bullet required.
 
 ### Q2 — Should the legacy terminal envelope stop keying on the variable?
 
@@ -247,6 +295,35 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
 * **Recommendation.** Yes, scope-keyed, staged lane by lane starting with the
   worker lane (harness-constructed, so a scope is free) and explicitly **never**
   for `hermes chat` (the operator's own shell — an envelope there is wrong).
+* **RULED + LANDED (wave 4), without editing `tools/`.** The `tools/` half was
+  retired by construction rather than by a diff, which is the better outcome:
+  * `envelope_decision` now answers for **any bound scope**, not only a governed
+    lane. A harness lane outside `GOVERNED_LANES` gets a typed refusal
+    (`envelope_lane_not_governed`) carrying the same legacy reason code, and its
+    fix hint deliberately names **no** config key — grants resolve per lane, so
+    pointing anyone at a stanza for that lane would be a fresh lie.
+  * `_harness_envelope_block` returns as soon as it gets a non-`None` decision,
+    so `_harness_safety_block`'s env-presence gate is **unreachable from any
+    harness run**. No upstream edit was needed to close it there.
+  * Scopes are bound at all four harness-constructed `AgentRunRequest` sites:
+    `persona_runtime.py` worker tick (`mission_worker`) and free-chat
+    (`persona_chat`), `node_tools.py` child node (`mission_node`),
+    `root_node_engine.py` root node (`mission_root_node`). `HARNESS_LANES`
+    names the set; `GOVERNED_LANES` stays `{mission_chat}` — widening it is
+    still a product decision.
+  * **`hermes chat` is excluded structurally, not by convention.** It never
+    constructs an `AgentRunRequest`, so no site exists that could bind it, and
+    no lane spelling for it exists to bind. A test pins that.
+  * No lane-construction site inside `profile_runner.py` needed a new label —
+    it consumes `AgentRunRequest.terminal_envelope_scope` and binds it for the
+    whole run, which is already the right shape. It was not edited.
+* **Test plan, executed.** The per-lane × {env set, env unset} matrix is
+  `test_every_harness_lane_answers_identically_with_and_without_the_env_var`
+  (5 lanes × gated/ungated × both env states). One existing assertion moved:
+  `test_a_grant_does_not_leak_off_the_governed_lane` used to assert `None`
+  ("no opinion, fall through to the env-keyed table") and now asserts a typed
+  refusal that is explicitly *not* granted — same property, strictly stronger,
+  and no longer dependent on the ambient environment to hold.
 
 ### Q3 — Do the `tools/` receipt writers get the resolver fallback that `agent_runtime/` just got?
 
@@ -265,6 +342,22 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
   the legacy path: env present and env absent, same row, different root.
 * **Recommendation.** Yes — this is the lowest-risk item in this list. It needs
   a boundary approval, not a design decision.
+* **RULED; fork side LANDED, one upstream line OWED (§7.1).** The ladder is now
+  `terminal_envelope.record_legacy_block(command, reason)` — `_audit_root`'s
+  three rungs, the legacy row shape verbatim (`ts`/`tool`/`reason`/
+  `command_preview`, deliberately **no** `failure_class`, which existing
+  `blocked_tool_attempts.jsonl` readers distinguish on) plus
+  `audit_root_source`. It returns whether a row was written; `False` means
+  "genuinely nowhere to write", never "nobody exported a variable".
+* **Scope of what is still owed is much smaller than it was.** Q2 means no
+  harness run reaches `_log_harness_blocked_attempt` at all, so the silent drop
+  now only affects runs that bind no scope — `hermes chat`, cron, gateway, acp,
+  plain CLI. Those are exactly the runs where an envelope block is rare, but
+  "rare" is not "recorded", so the diff is still worth applying.
+* **Drift is guarded.** `test_the_upstream_receipt_writer_still_has_the_shape_the_doc_s_diff_targets`
+  asserts the upstream function still has the `os.getenv(...)` / `if not root:`
+  / early-`return` shape §7.1 patches. If upstream reshapes it, that test fails
+  and routes the reader back here instead of letting §7.1 rot into a lie.
 
 ### Q4 — Should the `runtime_root` preflight check assert something real?
 
@@ -289,6 +382,21 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
 * **Recommendation.** Fix it, but ship it behind the same review as any other
   gate change — a newly-failing preflight in an automated flow is a stop-the-line
   event and should not arrive as a surprise.
+* **RULED + LANDED (wave 4).** The check now reports
+  `runtime_root=<ok|uninitialized> layer=… path=… exists=… store=…` and fails on
+  exactly `resolution.suspect_default_root` — default layer AND no `tasks/`. A
+  resolver that *raises* (probe isolation) is its own typed token,
+  `runtime_root=unresolvable`, instead of being folded into the same `False` as
+  a missing store. The fix hint names what the check actually read.
+* **Deliberately NOT a failure: an explicit root that does not exist yet.** An
+  env- or config-resolved root is an operator statement; a first run legitimately
+  creates it. The check reports `exists=false` honestly and passes. Failure is
+  reserved for "nobody said anything **and** nothing is there".
+* **Operator-visible change (the stop-the-line warning above, made concrete).**
+  `hermes harness preflight` will now FAIL on a machine that has never
+  initialized a store and has no `agent_runtime.store_root` configured. That is
+  the intended new signal, and it is the one behavior in this wave that can gate
+  a flow which passed yesterday.
 
 ### Q5 — Should `harness smoke --no-temp-root` write into the LIVE store at all?
 
@@ -311,6 +419,21 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
 * **Recommendation.** (a). The flag's only stated purpose is exercising the
   *configured* root, and `hermes harness preflight` already covers "is the real
   store reachable" without writing to it.
+* **Correction to this question's premise.** The flag is not spelled
+  `--no-temp-root`. It is `smoke.add_argument("--temp-root",
+  action="store_true", default=False)` — so the DEFAULT is the configured root
+  and `--temp-root` opts *into* the temp one. Plain `hermes harness smoke` was
+  therefore already writing `task_smoke` into the operator's live store. Worse
+  than stated, same fix.
+* **RULED + LANDED (wave 4), ruling (a).** `_runtime_root()` always creates a
+  fresh temp root; the configured-root branch is gone. `run_smoke` keeps its
+  `temp_root=` parameter (the CLI still passes it — §7.3) and, when asked for
+  the old behavior, ignores it **out loud**: a typed `deprecations` row,
+  `smoke_runtime_root_always_temp`. Silently ignoring a flag would be its own
+  small lie. The payload also reports `configured_runtime_root` — the store the
+  run deliberately did **not** touch — which is what keeps
+  `_configured_smoke_root` (and its cwd-independence guarantee) live rather than
+  dead code.
 
 ### Q6 — Should the seven `setdefault` sites be replaced by one entry-point seam?
 
@@ -341,22 +464,186 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
 * **Recommendation.** Yes, target the second shape — but sequence it **after**
   Q2/Q3, since those are the two readers that still depend on the variable being
   exported.
+* **RULED + LANDED (wave 4), the second shape.** All seven `setdefault` sites
+  removed, and nothing else in those three files touched — they were under
+  concurrent structural refactor, so the diff is exactly seven deletions.
+  Sequenced after Q2/Q3 as required: neither `tools/` reader depends on the
+  variable being *set* any more — #11 is unreachable from a harness run, and
+  #12's fork-owned replacement resolves its own root.
+* **Blast radius, enumerated rather than assumed.** The stated risk was children
+  launched with a scrubbed environment or a different `HERMES_HOME`. Every
+  spawn site in `agent_runtime/` and `hermes_cli/harness*` was read:
+  * **No site anywhere in the repo constructs an env containing
+    `HERMES_AGENT_RUNTIME_ROOT`.** The only spawns that pass `env=` at all are
+    in `stagec_mcp_visual_provider.py`, and they build it as
+    `os.environ.copy()` + the server's declared `env` — inherit, never scrub.
+  * The only child that is itself a `HERMES_AGENT_RUNTIME_ROOT` reader is
+    `runtime_commands.py::_cmd_verify`, which spawns
+    `python -m hermes_cli.main harness …` (`:877-893`) with no `env=`.
+    `_cmd_verify` was **never a seeder**, so pre-Q6 its children inherited
+    whatever ancestry the process had — the bug itself. Post-Q6 they resolve
+    through the same ladder off the same inherited `HERMES_HOME` and land on the
+    same root, deterministically.
+  * Every other spawn runs `git`, `docker`, `flutter` or a proof command
+    (`proof_runner._run_bounded_process`, no `env=`) — none reads the variable,
+    and a proof command that *is* a hermes invocation resolves it the same way.
+  * The one case where a child could see a **different** `HERMES_HOME` is a
+    spawn from inside `persona_profile_context` (which diverts it). That case is
+    covered by Q1, which exports an explicitly-resolved root there — so the
+    child inherits a value that was resolved from the HEAD home rather than
+    re-deriving one through the diverted profile home. Q1 and Q6 close each
+    other's edge here; that is a second reason they belong in one wave.
+* **The request-ordering test exists now** —
+  `tests/agent_runtime/test_runtime_root_request_ordering.py`. It runs a REAL
+  former seeder (`_cmd_goal_run`, failing fast on a malformed `--bind`, but only
+  *after* `load_agent_runtime_config()` — the exact line the `setdefault` sat
+  behind), then observes `store_root` / `_audit_root` / `audit_root_source` /
+  `_configured_smoke_root` in the same process, and asserts the observation is
+  identical to the same observation made alone in a **fresh subprocess**. A
+  companion test pins that the handler still reaches that point, so the ordering
+  test cannot be silently hollowed out by a restructure. Two AST guards make the
+  removal permanent: no module may `setdefault` the variable, and no module
+  outside the two save/restore context managers may assign it.
 
-**Suggested order:** Q3 (trivial, one-directional) → Q2 (decides the semantics)
-→ Q1 (safe once Q2 is answered) → Q6 (removes the ancestry at the source) →
-Q4, Q5 (independent, small).
+**Executed order:** Q3 (fork seam) → Q2 (semantics) → Q1 (with Q2, never before)
+→ Q6 (ancestry removed at the source) → Q4, Q5.
 
 ---
 
-## 6. What landed in this slice
+## 6. What landed
+
+### 6.1 Wave 3 — the class-2 fixes
 
 | Fix | Site | Guarantee |
 |---|---|---|
 | Receipt-root ladder | `agent_runtime/terminal_envelope.py` `_audit_root` + `audit_root_source` | A governed decision always leaves a receipt, and the receipt names which rung resolved its root. |
-| Configured smoke root | `agent_runtime/smoke.py` `_configured_smoke_root` | `--no-temp-root` resolves through the one canonical ladder; no cwd dependence. |
+| Configured smoke root | `agent_runtime/smoke.py` `_configured_smoke_root` | Resolves through the one canonical ladder; no cwd dependence. (Wave 4 re-purposed it from "where smoke writes" to "what smoke reports".) |
 | Validated launcher-repo env rung | `agent_runtime/stagec_mcp_visual_provider.py` `_env_launcher_repo` + `LAUNCHER_REPO_ENV_KEYS` | The enable predicate and the resolver answer "does the environment name a launcher repo?" identically. A stale value cannot trigger a `flutter build`. |
 | Serve-cwd invariant guard | `tests/agent_runtime/test_serve_cwd_serialization_invariant.py` | Turn serialization cannot be removed silently. |
 
-Tests: `tests/agent_runtime/test_env_determinism_audit.py` (16 cases — every
-fix asserted with the variable **present** and **absent**),
-`tests/agent_runtime/test_serve_cwd_serialization_invariant.py` (3 cases).
+### 6.2 Wave 4 — the six operator rulings
+
+| Q | Fix | Site | Guarantee |
+|---|---|---|---|
+| **Q1** | Unconditional runtime-root export + typed rows | `agent_runtime/profile_context.py` — `ProfileContextRow`, `current_profile_context_rows`, `_resolved_runtime_root` | Every persona runs with a resolved runtime root, profile-bound or not. The two ways it can degrade are named, not inferred from an absent variable. |
+| **Q2** | Scope-keyed envelope on every harness lane | `agent_runtime/terminal_envelope.py` (`HARNESS_LANES`, `ENVELOPE_LANE_NOT_GOVERNED`, decision answers on any bound scope) + `persona_runtime.py` ×2, `node_tools.py`, `root_node_engine.py` | "Is this a harness run?" is a fact the policy layer owns. `tools/`'s env-presence gate is unreachable from a harness run. `hermes chat` is excluded structurally. |
+| **Q3** | Fork-owned legacy receipt ladder | `agent_runtime/terminal_envelope.py` `record_legacy_block` | A legacy block can leave a receipt with no variable exported. Upstream adoption is one line (§7.1), guarded against drift. |
+| **Q4** | An honest preflight assertion | `agent_runtime/preflight.py` `_runtime_root_check` | Reports winning layer / path / exists / store-shape; fails only on an uninitialized default root; a refusing resolver is its own typed token. |
+| **Q5** | A smoke run is always synthetic | `agent_runtime/smoke.py` `_runtime_root`, `SMOKE_RUNTIME_ROOT_ALWAYS_TEMP` | `hermes harness smoke` cannot write into the operator's live store, and says so when a caller asks it to. |
+| **Q6** | No handler seeds the variable | 7 `setdefault` sites removed across `hermes_cli/harness.py`, `harness_parts/persona_commands.py`, `harness_parts/runtime_commands.py` | A request's runtime root is a function of configuration, never of request history. |
+
+Tests:
+
+| File | Cases | Covers |
+|---|---|---|
+| `tests/agent_runtime/test_env_determinism_audit.py` | 32 | wave-3 fixes + Q4 + Q5 + §3 freeze drift, each asserted with the variable **present** and **absent** |
+| `tests/agent_runtime/test_terminal_envelope_grants.py` | 72 | Q2 per-lane × env matrix, ungoverned-lane refusals, Q3 receipt ladder + upstream drift guard |
+| `tests/agent_runtime/test_profile_context.py` | 10 | Q1 profile-less export/restore, typed rows, refusing resolver |
+| `tests/agent_runtime/test_runtime_root_request_ordering.py` | 5 | Q6 real-handler request ordering + AST seeding/assignment invariants |
+| `tests/agent_runtime/test_serve_cwd_serialization_invariant.py` | 3 | §4 turn serialization (unchanged, still green) |
+
+---
+
+## 7. Operator-owed upstream changes
+
+Everything below is outside the fork's edit boundary (`tools/`, and one argparse
+registration contended by a parallel refactor). Each is decision-ready and
+exact. None of them gates the wave-4 fixes — they close residuals.
+
+### 7.1 `tools/terminal_tool.py::_log_harness_blocked_attempt` → delegate (Q3)
+
+Replace the whole body. The fork-owned function already exists and is tested.
+
+```diff
+ def _log_harness_blocked_attempt(command: str, reason: str) -> None:
+-    root = os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()
+-    if not root:
+-        return
+-    try:
+-        path = Path(root).expanduser() / "blocked_tool_attempts.jsonl"
+-        path.parent.mkdir(parents=True, exist_ok=True)
+-        event = {
+-            "ts": time.time(),
+-            "tool": "terminal",
+-            "reason": reason,
+-            "command_preview": command[:500],
+-        }
+-        with path.open("a", encoding="utf-8", newline="\n") as handle:
+-            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+-    except Exception:
+-        logger.warning("Failed to write Harness blocked-command audit", exc_info=True)
++    try:
++        from agent_runtime.terminal_envelope import record_legacy_block
++
++        record_legacy_block(command, reason)
++    except Exception:
++        logger.warning("Failed to write Harness blocked-command audit", exc_info=True)
+```
+
+Row shape is preserved verbatim, plus `audit_root_source`. Blast radius: one
+direction only — strictly more receipts, no decision changes.
+
+### 7.2 `tools/skills_sync.py` → call-time home (§3)
+
+Give it the accessor its two sibling modules already have, keeping the
+module-level names (they are load-bearing for tests and external patchers).
+
+```diff
+ HERMES_HOME = get_hermes_home()
+ SKILLS_DIR = HERMES_HOME / "skills"
+ MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
++_SKILLS_DIR_AT_IMPORT = SKILLS_DIR
++
++
++def _skills_dir() -> Path:
++    """The ACTIVE profile's skills dir, resolved at call time.
++
++    Mirrors tools/skills_tool.py and tools/skill_manager_tool.py: honor an
++    explicitly patched module-level SKILLS_DIR (tests), otherwise re-resolve
++    from the live profile-scoped HERMES_HOME on every call.
++    """
++    configured = Path(SKILLS_DIR)
++    if configured != _SKILLS_DIR_AT_IMPORT:
++        return configured
++    return get_hermes_home() / "skills"
+```
+
+Then replace the ~25 direct uses of `SKILLS_DIR` / `MANIFEST_FILE` /
+`HERMES_HOME` in that module with `_skills_dir()` / `_skills_dir() /
+".bundled_manifest"` / `get_hermes_home()`. **Read the wipe guard at `:733-750`
+before touching it** — it requires a strict-child relationship precisely to stop
+a bad `SKILLS_DIR` from deleting a home, and it must keep comparing against the
+same value the deletion uses.
+
+Blast radius: every profile switch in a long-lived serve becomes visible to
+skills sync — which is the point, and is the behavior the other two modules
+already have.
+
+### 7.3 the `smoke` subparser → retire the `--temp-root` flag (Q5)
+
+In `hermes_cli/harness.py`, where the `smoke` subparser is built:
+
+```diff
+-    smoke.add_argument("--temp-root", action="store_true", default=False)
+```
+
+…and drop the argument where `_cmd_smoke` calls the handler in
+`harness_parts/runtime_commands.py`:
+
+```diff
+-    data = run_smoke(temp_root=args.temp_root, no_model=args.no_model)
++    data = run_smoke(no_model=args.no_model)
+```
+
+While in that file: `hermes_cli/harness.py`'s `import os` became unused when the
+Q6 seeder was removed from `_cmd_goal_run` (it was that module's only `os`
+reference). It was deliberately left in place — the import block is the highest
+-collision region of a file under concurrent refactor, and a dead import is a
+cheaper debt than a lost race. Remove it with this diff.
+
+None of this was landed in wave 4 because both files were under concurrent
+structural refactor by a parallel agent, and a two-file signature change is
+exactly the kind of edit that loses a race. The behavior is already correct
+without it: the fork-owned handler ignores the flag and emits the typed
+`smoke_runtime_root_always_temp` deprecation, so this diff is cleanup, not a
+fix. `run_smoke`'s `temp_root=` parameter can go with it.
