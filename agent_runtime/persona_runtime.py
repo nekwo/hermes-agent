@@ -45,6 +45,7 @@ from .mission_plan import current_plan_stage
 from .personas import ALLOWED_TOOLSETS_BY_ROLE, DEFAULT_SUPERVISOR_PERSONA_ID, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
+from .terminal_envelope import scope_for_persona as terminal_envelope_scope_for_persona
 from .profile_runner import (
     AgentRunRequest,
     AgentRunResult,
@@ -406,6 +407,24 @@ class GPTPersonaRuntime:
         workdir = mission_chat_workdir_for_persona(
             persona, workspace_agents_path=workspace_agents_path
         )
+        # Lane/role identity for the terminal safety envelope. Bound for the
+        # WHOLE run so envelope enforcement on this lane is deterministic and
+        # operator-governed instead of keyed on whether the persona happens to
+        # bind a Hermes profile (the historical fail-open/fail-closed split —
+        # see agent_runtime/terminal_envelope.py). Carrying the runtime root on
+        # the scope also means the decision receipt lands even for a persona
+        # that never exports HERMES_AGENT_RUNTIME_ROOT.
+        #
+        # Note how G6 and this slice compose: the workdir above puts a REAL repo
+        # in front of the terminal tool, which is exactly what makes the envelope
+        # gate load-bearing rather than theoretical — a grounded turn can now
+        # actually reach a git remote.
+        envelope_scope = terminal_envelope_scope_for_persona(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            session_id=perm_session_id,
+            runtime_root=paths.store_root(),
+        )
         result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
@@ -413,6 +432,7 @@ class GPTPersonaRuntime:
                 model=runtime_model,
                 api_mode=persona.api_mode,
                 reasoning_effort=reasoning_effort,
+                terminal_envelope_scope=envelope_scope,
                 mcp_admission=admission,
                 enabled_toolsets=_enabled_toolsets_for_chat(
                     persona, session_id=perm_session_id, admission=admission
@@ -592,8 +612,13 @@ def _mission_chat_operative_rules() -> str:
         "Acknowledge, then act, then report the result.\n"
         "- You are talking directly to your operator — a trusted teammate, not an end user.\n"
         "- You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
-        "change state — actually use your tools and report the real result. The operator's current permission grant is the "
-        "only gate on what you can do; there is no separate 'hand it off first' step.\n"
+        "change state — actually use your tools and report the real result; there is no separate 'hand it off first' step.\n"
+        "- Exactly TWO things gate what you can do, and both name themselves when they refuse: (1) the operator's current "
+        "permission grant, and (2) the terminal safety envelope, which requires a per-role operator grant in the ROOT "
+        "config.yaml for a small set of command classes (git push, destructive git, recursive delete, network egress) and "
+        "hard-blocks a few others outright. An envelope refusal tells you the class, the exact config key that would grant "
+        "it, and whether a grant is even possible. Relay that to the operator — do not retry, reword, or split the command, "
+        "and never claim a capability gap you have not actually hit.\n"
         "- Never fabricate. Do not claim to have run a command, read a file, opened a path, or produced output unless you "
         "actually invoked the tool and are reporting its real result. If a capability isn't available, or your permission "
         "grant blocks it, say so plainly instead of inventing output.\n"

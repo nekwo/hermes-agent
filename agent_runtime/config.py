@@ -14,7 +14,7 @@ from hermes_cli.profiles import profile_exists
 from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig, TerminalEnvelopeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +117,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
     mission_chat = _mission_chat_config(raw.get("mission_chat") or {})
     mcp_admission = _mcp_admission_config(raw.get("mcp_admission") or {})
+    terminal_envelope = _terminal_envelope_config(raw.get("terminal_envelope") or {})
     continuous_role_sessions = _apply_enterprise_role_session_compat(
         continuous_role_sessions,
         enterprise_worker_sessions=enterprise_worker_sessions,
@@ -176,6 +177,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         coordinator_permissions=coordinator_permissions,
         mission_chat=mission_chat,
         mcp_admission=mcp_admission,
+        terminal_envelope=terminal_envelope,
         personas=raw.get("personas", {}) or {},
         default_model_source=default_model_source,
         default_provider_source=default_provider_source,
@@ -929,6 +931,41 @@ def _mcp_admission_config(raw: dict[str, Any]) -> McpAdmissionConfig:
         connect_timeout_seconds=min(120.0, max(1.0, float(timeout))),
         roles=roles,
     )
+
+
+def _terminal_envelope_config(raw: dict[str, Any]) -> TerminalEnvelopeConfig:
+    """Parse ``agent_runtime.terminal_envelope`` — deny-by-default at every step.
+
+    Structural parsing only: this keeps well-shaped ``<role>.<lane>: [classes]``
+    entries and drops anything else. Whether a *named* class is a real class,
+    and whether it is grantable at all, is decided by
+    ``terminal_envelope.resolve_terminal_envelope_grants`` so an unknown or
+    non-grantable class produces a TYPED config issue at decision time instead
+    of vanishing silently here. A malformed block must never read as "allow": a
+    non-mapping ``grants`` or a non-mapping lane map collapses to the empty
+    grant table, and a non-list class list is carried through verbatim so the
+    resolver can report the shape fault rather than leave the operator staring
+    at a stanza that appears to be in force.
+    """
+
+    raw = raw if isinstance(raw, dict) else {}
+    grants: dict[str, dict[str, Any]] = {}
+    raw_grants = raw.get("grants")
+    if isinstance(raw_grants, dict):
+        for role, lanes in raw_grants.items():
+            if not isinstance(lanes, dict):
+                continue
+            parsed_lanes: dict[str, Any] = {}
+            for lane, classes in lanes.items():
+                if not isinstance(classes, (list, tuple, set, frozenset)):
+                    parsed_lanes[str(lane)] = classes
+                    continue
+                names = _string_list(classes)
+                if names:
+                    parsed_lanes[str(lane)] = names
+            if parsed_lanes:
+                grants[str(role)] = parsed_lanes
+    return TerminalEnvelopeConfig(grants=grants)
 
 
 def _mission_plan_config(raw: dict[str, Any]) -> MissionPlanConfig:

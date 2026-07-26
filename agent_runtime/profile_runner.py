@@ -193,6 +193,13 @@ class AgentRunRequest:
     # the persona profile context and before agent construction, so the decision
     # (policy) and the side effect (spawn) stay separable and separately tested.
     mcp_admission: Any | None = None
+    # Lane/role identity for the terminal safety envelope
+    # (agent_runtime.terminal_envelope.TerminalEnvelopeScope). Set ONLY by
+    # lanes the envelope grant policy governs — mission-chat today. Left None
+    # everywhere else, which is how "no other lane changes" is enforced
+    # structurally: with no scope bound, ``envelope_decision`` returns None and
+    # the terminal tool keeps its legacy pattern-table behavior byte-for-byte.
+    terminal_envelope_scope: Any | None = None
 
 
 @dataclass(slots=True)
@@ -613,6 +620,7 @@ class ProfileAgentRunner:
     def _execute_agent_run(self, binding: PersonaProfileBinding, request: AgentRunRequest) -> tuple[Any, Any, dict[str, int]]:
         timing: dict[str, int] = {}
         from .persona_chat_continuity import tool_execution_scope
+        from .terminal_envelope import terminal_envelope_scope
         from agent.skill_utils import skill_runtime_scope
 
         with (
@@ -620,6 +628,13 @@ class ProfileAgentRunner:
             persona_profile_context(binding, runtime_root=request.runtime_root),
             _agent_workdir(request.workdir),
             tool_execution_scope(request.tool_execution_scope_id),
+            # Bound for the whole run so the terminal tool can resolve which
+            # lane/role it is executing under. Deliberately INSIDE
+            # persona_profile_context but independent of it: the envelope's
+            # historical activation signal (HERMES_AGENT_RUNTIME_ROOT, exported
+            # only when the persona binds a Hermes profile) is exactly what made
+            # enforcement nondeterministic on this lane.
+            terminal_envelope_scope(request.terminal_envelope_scope),
             skill_runtime_scope(
                 surface=request.skill_surface,
                 root_node_mode=request.skill_root_node_mode,

@@ -234,6 +234,34 @@ class McpAdmissionConfig:
 
 
 @dataclass(slots=True)
+class TerminalEnvelopeConfig:
+    """Which envelope-gated command classes a role may run on a governed lane.
+
+    There is deliberately NO ``enabled`` kill switch: enforcement is
+    unconditional, and the deny-by-default property comes from the grant table
+    being EMPTY rather than from a flag. One authority, no double negative — an
+    operator revokes a grant by deleting the class from the list.
+
+    ``grants`` is deny-by-default with no wildcard and no inheritance: a role
+    with no entry, or a lane with no entry under that role, grants nothing. The
+    classes an operator may name at all are bounded by
+    ``agent_runtime.terminal_envelope.GRANTABLE_COMMAND_CLASSES``; anything
+    else is a typed config error rather than a silent grant.
+
+    Root ``config.yaml`` shape (see
+    ``docs/agent-runtime-harness/mission-chat-terminal-envelope-grants.md``)::
+
+        agent_runtime:
+          terminal_envelope:
+            grants:
+              dev:
+                mission_chat: [git_push]
+    """
+
+    grants: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class RuntimeConfig:
     schema_version: int = 1
     heartbeat_ttl_seconds: int = 900
@@ -286,3 +314,4 @@ class RuntimeConfig:
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
     mission_chat: MissionChatConfig = field(default_factory=MissionChatConfig)
     mcp_admission: McpAdmissionConfig = field(default_factory=McpAdmissionConfig)
+    terminal_envelope: TerminalEnvelopeConfig = field(default_factory=TerminalEnvelopeConfig)
