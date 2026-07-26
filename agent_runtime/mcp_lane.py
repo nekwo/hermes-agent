@@ -214,6 +214,106 @@ def mcp_lane_requirement_failures(
     ]
 
 
+# ── the agent-visible half of the same fact (G5) ────────────────────────────
+#
+# The rows above are the OPERATOR's account. Until 2026-07-26 that was the only
+# account: an agent whose declared server is dark on this lane saw a tool list
+# with no ``mcp__<server>__*`` entries and NO explanation, and — being a language
+# model — invented alternatives. That is how ``pwsh -File`` calls end up in agent
+# output, and why the launcher repo needs a grep gate forbidding them. The
+# admission design (§D3, W3) says it plainly: telling the agent the truth is
+# cheaper than fencing every workaround it can invent.
+#
+# The admission module renders this line when admission is ENABLED. With the
+# flag off — the default, and every deployment today — admission is inert by
+# design and renders nothing, so the drop stayed operator-only. This renderer is
+# the flag-off half, and it costs what the R0 row costs: no root-config load, no
+# profile read, no MCP SDK import.
+
+#: Bullet prefix, so the line sits in the same volatile-tail list the wall-budget
+#: line renders into. Byte-identical to ``mcp_admission._ADMISSION_LINE_PREFIX``
+#: on purpose — the agent must hear ONE voice about MCP whether the flag is on or
+#: off. ``test_mcp_lane_agent_context_line.py`` pins the two against drift.
+MCP_CONTEXT_LINE_PREFIX = "- MCP tools:"
+
+#: Everything after the ``<server> (<code>)`` detail. Shared verbatim with
+#: ``mcp_admission.render_mcp_admission_line``.
+MCP_CONTEXT_LINE_TAIL = (
+    " — declared for this persona but NOT available on this turn, so no "
+    "mcp__<server>__* tools for it are in your tool list. This is a capability "
+    "fact, not a permission problem: do not retry, do not hunt for a permission "
+    "mode, and do not substitute a shell/PowerShell workaround or a second lane. "
+    "Use the server's harness-side contract instead (for launcher_qa: the "
+    "qa.request_screenshot decision contract), and say plainly in your reply that "
+    "the tools were unavailable."
+)
+
+
+def render_mcp_lane_line(rows: Iterable[dict[str, Any]] | None) -> str:
+    """One compact, agent-visible line for the drops ``rows`` accounts for.
+
+    Takes the SAME rows the operator's ``requirement_failures`` carries — one
+    producer, two surfaces, so the agent and the operator can never be told
+    different things. Returns ``""`` when there is nothing to say: a turn that
+    HAS its tools must not pay a line explaining a mechanism it never met.
+    """
+
+    ordered: dict[str, str] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        server = str(row.get("server") or "").strip()
+        code = str(row.get("code") or "").strip()
+        if server and code:
+            ordered.setdefault(server, code)
+    if not ordered:
+        return ""
+    detail = ", ".join(f"{server} ({code})" for server, code in ordered.items())
+    return f"{MCP_CONTEXT_LINE_PREFIX} {detail}{MCP_CONTEXT_LINE_TAIL}"
+
+
+def mission_chat_mcp_lane_line(persona: Any, *, lane: str | None = None) -> str:
+    """The agent-visible line for what THIS persona declared and this lane dropped.
+
+    Deliberately narrower than the operator's rows, in both directions that
+    matter:
+
+    * **Declaration source.** Reads ``_effective_required_mcp_servers`` — the
+      persona's own ``required_mcp_servers`` plus the existing role policy — and
+      NOT ``declared_mcp_server_names``, which additionally parses the profile's
+      ``config.yaml``. Two reasons, and the cheapness is the lesser one: the
+      admission design fixes that a flag-off turn pays no profile read, and a
+      server that is merely CONFIGURED in the ambient profile was never
+      something this agent was going to reach for — telling it about that is
+      noise, telling it about what it requires is the fix. The operator's
+      ``requirement_failures`` still carries the wider union.
+    * **One policy authority.** The role policy (``qa`` + visual proof ⇒
+      ``launcher_qa``) is imported, never re-implemented — the design's standing
+      "do not write a second copy" rule.
+
+    Never raises: a context line must not be able to fail a turn.
+    """
+
+    try:
+        # Local import: ``profile_readiness`` pulls in ``hermes_cli`` and this
+        # module is imported by every visibility resolve. Private-but-canonical
+        # is the deliberate trade — a second copy of the role policy is worse
+        # than reaching across for the first one.
+        from .profile_readiness import _effective_required_mcp_servers
+
+        declared = _effective_required_mcp_servers(persona)
+    except Exception:  # pragma: no cover - defensive; a declaration probe is best-effort
+        return ""
+    if not declared:
+        return ""
+    try:
+        return render_mcp_lane_line(
+            mcp_lane_requirement_failures(declared_servers=declared, lane=lane)
+        )
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+
 def _clean(values: Iterable[str] | None) -> list[str]:
     out: list[str] = []
     for value in values or []:

@@ -14,7 +14,9 @@ a hash-pinned parity fixture against the launcher's own allowlist — which pull
 most of R3 forward — and the §D3 agent-visible denial line. **R2's remaining
 obligation is the live 6-row acceptance-matrix proof from the harness lane**;
 until that runs the flag stays off. See §6 for what each stage actually
-contains.
+contains. G5 (2026-07-26) then closed the §D3 flag-off blind spot: the agent now
+hears the R0 fact in its own turn context even with admission disabled — the
+flag gates admission, not honesty (Log entry "G5 — the flag-off blind spot").
 
 Sibling docs: `harness-serve-design.md` (the warm-process lane this design
 depends on), `04-decision-hud-simplification-map.md` (the "agents work
@@ -1072,7 +1074,56 @@ of R2 rather than a nice-to-have.
   Known limit 2: with the flag OFF the line is not rendered at all (the flag-off
   path stays byte-identical and pays no profile read), so a declared-but-dropped
   server is reported to the OPERATOR via R0 `requirement_failures` but not to the
-  agent. Turning the flag on is what makes the agent-facing half live.
+  agent. Turning the flag on is what makes the agent-facing half live. —
+  **CLOSED 2026-07-26 (G5), below. The flag still gates ADMISSION; it no longer
+  gates HONESTY.**
+
+- **2026-07-26 (G5 — the flag-off blind spot)** — R2's §D3 gave the agent a
+  voice only when admission is ENABLED. The flag is false in every deployment,
+  so the surface that matters most in practice — the agent's own turn context —
+  was the one surface still silent about a declared server going dark. The
+  operator's R0 `requirement_failures` said exactly what happened; the agent saw
+  an unexplained absence and, per W3, improvises. Fixed by making the ONE
+  volatile-tail slot have two producers:
+
+  | admission | producer | says |
+  | --- | --- | --- |
+  | ON | `mcp_admission.render_mcp_admission_line` | the resolved denial codes |
+  | OFF | `mcp_lane.mission_chat_mcp_lane_line` | the R0 `mcp_not_registered_on_lane` fact |
+
+  `persona_runtime.mission_chat_admission_line` picks between them; **no call
+  site changed** (`persona_commands.py` still renders one entry in
+  `volatile_lines`), and the MCP line stays its own voice, separate from
+  `render_capability_block` — folding them would give one fact two voices.
+
+  **Why this does not violate the flag-off invariant.** The invariant the design
+  actually states is that flag-off pays no root-config load and no
+  persona-profile read, and that admission is inert. All three still hold:
+  `mission_chat_mcp_lane_line` reads `_effective_required_mcp_servers` (the
+  persona's own `required_mcp_servers` plus the existing role policy — in-memory
+  arithmetic, and the role policy is imported, never re-implemented), the
+  process-lane label, and the tool registry. No YAML is opened; admission is
+  never resolved. A persona that declares nothing renders nothing, so the
+  envelope stays byte-identical for every turn that had nothing to be told.
+
+  **Deliberate asymmetry, stated rather than hidden.** The agent line is
+  NARROWER than the operator's rows: `requirement_failures` reads
+  `declared_mcp_server_names`, which also parses the profile's `mcp_servers`
+  block, while the agent line reads only what the persona itself requires. That
+  is not merely the cheaper read — a server merely configured in the ambient
+  profile was never something this agent was going to reach for, so naming it
+  would be noise in the one place noise is most expensive. Diagnosis stays
+  wide (operator); the behavioral nudge stays narrow (agent).
+
+  Prose is shared verbatim between the two renderers
+  (`mcp_lane.MCP_CONTEXT_LINE_PREFIX` / `MCP_CONTEXT_LINE_TAIL`) and pinned
+  against drift by `test_the_flag_off_and_flag_on_lines_are_ONE_voice`, because
+  an agent must not learn that "MCP tools:" means two different registers
+  depending on a flag it cannot see. **Debt recorded, not silent:** the two
+  copies of that prose exist only because the renderers live in modules with
+  different owners; folding them into one renderer is a mechanical follow-up the
+  drift test makes safe. Tests:
+  `tests/agent_runtime/test_mcp_lane_agent_context_line.py` (12).
 
 - **2026-07-26 (R1)** — admission implemented and landed with the flag OFF.
   `agent_runtime/mcp_admission.py` + the `profile_runner` seam + the

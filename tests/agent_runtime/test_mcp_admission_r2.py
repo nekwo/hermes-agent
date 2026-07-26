@@ -838,7 +838,15 @@ def test_the_line_rides_the_volatile_tail_and_never_the_hud_revision():
 
 
 def test_the_mission_chat_line_is_empty_with_the_flag_off(qa_profile, monkeypatch):
-    """Flag-off stays byte-identical — no root-config load, no profile read."""
+    """Flag-off never resolves ADMISSION policy — no root-config load, no
+    profile read.
+
+    Since G5 (2026-07-26) flag-off is no longer silent: a persona that DECLARES
+    a server the lane never registered gets the R0 line instead of ``""``. This
+    persona declares none, so it still pays nothing and the envelope is
+    byte-identical — which is the half of the invariant that had to survive.
+    See ``test_mcp_lane_agent_context_line.py`` for the declaring case.
+    """
 
     import agent_runtime.persona_runtime as persona_runtime
 

@@ -38,6 +38,7 @@ from .mcp_admission import (
     resolve_mcp_admission,
     scope_toolsets_to_admission,
 )
+from .mcp_lane import mission_chat_mcp_lane_line
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_chat_workdir import mission_chat_workdir_for_persona
@@ -1057,24 +1058,34 @@ def chat_lane_capability_drops(
 def mission_chat_admission_line(
     persona: AgentPersona, *, session_id: str | None
 ) -> str:
-    """The agent-visible MCP admission line for this turn's volatile envelope tail.
+    """The agent-visible MCP line for this turn's volatile envelope tail.
 
-    Design §D3. Resolves the SAME pure policy the turn itself resolves — same
-    function, same inputs, so the line and the turn's admission can never
-    disagree — and renders the compact denial line. Returns ``""`` when there is
-    nothing to say.
+    ONE slot on the tail, two producers behind it, because the agent must hear
+    one voice about MCP:
 
-    Gated on the kill switch exactly like ``_enabled_toolsets_for_chat``: with
-    admission off, the flag-off hot path pays neither a root-config load nor a
-    persona-profile read, and the envelope is byte-identical to what it was
-    before admission existed. The consequence is deliberate and recorded: with
-    the flag OFF a declared-but-unregistered server is reported to the OPERATOR
-    (R0 ``requirement_failures``) but not in the agent's own context. Turning the
-    flag on is what makes the agent-facing half live.
+    * **Admission ON** — design §D3. Resolves the SAME pure policy the turn
+      itself resolves (same function, same inputs, so the line and the turn's
+      admission can never disagree) and renders the compact denial line.
+    * **Admission OFF** — the R0 half (``mcp_lane``). Admission is inert with
+      the flag off, so this used to return ``""`` and a declared-but-dark server
+      was reported to the OPERATOR (``requirement_failures``) and to NOBODY the
+      agent could hear. That blind spot was G5: the agent saw a tool list with
+      no ``mcp__<server>__*`` entries and no explanation, and improvised — the
+      exact W3 failure the design says is cheaper to prevent by telling the
+      truth. It now renders the same honest fact from the same rows the operator
+      reads.
+
+    The kill switch still gates ADMISSION, not honesty. The flag-off path pays
+    neither a root-config load nor a persona-profile read (see
+    ``mcp_lane.mission_chat_mcp_lane_line`` for how that is preserved), and a
+    persona that declares no MCP server pays nothing and renders nothing — so
+    the envelope stays byte-identical for every turn that had nothing to be told.
+
+    Returns ``""`` when there is nothing to say.
     """
 
     if not admission_enabled():
-        return ""
+        return mission_chat_mcp_lane_line(persona)
     try:
         admission = resolve_mcp_admission(
             persona,
