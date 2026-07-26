@@ -11,6 +11,7 @@ from typing import Any
 from model_tools import get_toolset_for_tool
 from tools.registry import registry
 
+from .chat_lane_toolsets import ChatLaneDrop, chat_lane_drop_rows
 from .mcp_admission import (
     LANE_MISSION_CHAT,
     admission_enabled,
@@ -18,6 +19,7 @@ from .mcp_admission import (
     resolve_mcp_admission,
 )
 from .mcp_lane import current_entry_point_lane, mcp_lane_requirement_failures
+from .mission_chat_workdir import MissionChatWorkdir
 from .models import AgentPersona
 from .personas import (
     ALLOWED_TOOLSETS_BY_ROLE,
@@ -80,6 +82,20 @@ class ToolVisibilityOptions:
     #: from a silent absence into a typed ``requirement_failures`` row. Left
     #: ``None``, the lane is inferred from the running process.
     entry_point_lane: str | None = None
+    #: Typed account of what the CHAT-lane cost policy removed for this persona
+    #: (``chat_lane_toolsets.ChatLaneDrop``), threaded by the callers that model a
+    #: chat lane — ``persona_runtime.apply_chat_lane_tool_scope`` and the
+    #: ``persona tool-diff`` preview. Each drop becomes one typed
+    #: ``requirement_failures`` row, because a list of what SURVIVED was never an
+    #: account of what was removed and why (G5). Left ``None`` by callers that do
+    #: not model a chat lane — a worker-lane resolve must not claim a chat-lane
+    #: drop it never applied.
+    chat_lane_capability_drops: tuple[ChatLaneDrop, ...] | None = None
+    #: Resolved mission-chat repo grounding for this persona
+    #: (``mission_chat_workdir.MissionChatWorkdir``). Contributes rows only when a
+    #: CONFIGURED workdir could not be used — the fallback is safe, but silent
+    #: fallback is exactly the defect this lane exists to retire (G6).
+    mission_chat_workdir: MissionChatWorkdir | None = None
     expires_at: str | None = None
     turns_remaining: int | None = None
 
@@ -126,7 +142,12 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
     ]
     readiness = _profile_readiness_for_visibility(persona)
     entry_point_lane = str(opts.entry_point_lane or "").strip() or current_entry_point_lane()
-    requirement_failures = _requirement_failures(persona, opts, lane=entry_point_lane)
+    requirement_failures = _requirement_failures(
+        persona,
+        opts,
+        lane=entry_point_lane,
+        role=str(role.value if hasattr(role, "value") else role),
+    )
     resolved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     resolution_id = _tool_resolution_id(
         persona_id=persona.id,
@@ -199,31 +220,51 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
 
 
 def _requirement_failures(
-    persona: AgentPersona, opts: ToolVisibilityOptions, *, lane: str
+    persona: AgentPersona, opts: ToolVisibilityOptions, *, lane: str, role: str = ""
 ) -> list[dict[str, Any]]:
     """Typed capability accounting for this persona on this entry-point lane.
 
-    With MCP admission disabled — the default, and every deployment until an
-    operator flips the flag — this is exactly the R0 answer: one
-    ``mcp_not_registered_on_lane`` row per declared server the lane never
-    registers. With admission enabled it becomes truthful in BOTH directions: a
-    server this persona was admitted and that actually registered stops
-    producing a drop row, and a server denied for a typed reason reports THAT
-    reason instead of the generic lane row.
+    One list, one row shape, every accounted drop — the generalization the MCP
+    row proved out (see ``chat_lane_toolsets`` and the audit's G5). Composition,
+    in order:
 
-    The admission resolve is skipped entirely when the flag is off, so the
-    default path costs nothing beyond the R0 read it already performed.
+    * **MCP** — with admission disabled (the default, and every deployment until
+      an operator flips the flag) exactly the R0 answer: one
+      ``mcp_not_registered_on_lane`` row per declared server the lane never
+      registers. With admission enabled it is truthful in BOTH directions: a
+      server this persona was admitted and that actually registered stops
+      producing a drop row, and a server denied for a typed reason reports THAT
+      reason instead of the generic lane row. The admission resolve is skipped
+      entirely when the flag is off, so the default path costs nothing beyond
+      the R0 read it already performed.
+    * **Chat-lane cost policy** — one row per toolset / tool the policy removed,
+      but only for callers that actually modeled a chat lane and threaded the
+      typed drops. A worker-lane resolve threads none and claims none.
+    * **Mission-chat workdir** — a row only when a CONFIGURED grounding path
+      could not be used (the turn still runs, in the safe cwd).
+
+    Rows are appended in that order so the MCP payload of an
+    MCP-declaring persona stays byte-identical to what R0/R1 emitted.
     """
 
     declared = declared_mcp_server_names(persona)
     if not declared or not admission_enabled():
-        return mcp_lane_requirement_failures(declared_servers=declared, lane=lane)
-    admission = resolve_mcp_admission(
-        persona, lane=LANE_MISSION_CHAT, permission_mode=opts.permission_mode
+        rows = mcp_lane_requirement_failures(declared_servers=declared, lane=lane)
+    else:
+        admission = resolve_mcp_admission(
+            persona, lane=LANE_MISSION_CHAT, permission_mode=opts.permission_mode
+        )
+        rows = admission_requirement_failures(
+            admission, declared_servers=declared, lane=lane
+        )
+    rows.extend(
+        chat_lane_drop_rows(
+            opts.chat_lane_capability_drops, role=role, entry_point_lane=lane
+        )
     )
-    return admission_requirement_failures(
-        admission, declared_servers=declared, lane=lane
-    )
+    if opts.mission_chat_workdir is not None:
+        rows.extend(opts.mission_chat_workdir.rows(entry_point_lane=lane))
+    return rows
 
 
 def turn_tool_context_for_persona(

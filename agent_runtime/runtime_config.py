@@ -170,6 +170,43 @@ class CoordinatorPermissionConfig:
 
 
 @dataclass(slots=True)
+class MissionChatConfig:
+    """Harness-wide defaults for the canonical Mission Control chat lane.
+
+    ``default_max_seconds`` is the wall budget a mission-chat turn gets when the
+    caller passes no ``--max-seconds``. It defaults to **240 s** — the value the
+    CLI parser hardcoded before this block existed, so an absent stanza keeps
+    today's behavior exactly.
+
+    Why it is configurable: the mission-chat lane is the primary home for agent
+    work, but 240 s is a *conversation*-shaped window (the last
+    ``max(60s, 15%)`` is reserved for the graceful checkpoint, so a default turn
+    has ~180 s of tool-using time — see ``turn_budget`` and G10 of
+    ``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md``). A deployment
+    that runs real work here raises the floor once, in one place, instead of
+    teaching every caller to pass a flag.
+
+    An explicit ``--max-seconds`` on a turn ALWAYS wins over this default — the
+    config sets the budget for callers that express no opinion, it caps nobody.
+    The configured value itself is clamped to ``[30 s, 86400 s]``: below the
+    clamp the checkpoint reserve leaves no working window at all, and above it
+    one conversational turn outlives the mission wall-clock deadline.
+
+    Root ``config.yaml`` shape::
+
+        agent_runtime:
+          mission_chat:
+            # Wall budget for a mission-chat turn when --max-seconds is absent.
+            # Default 240; clamped to [30, 86400]. An explicit --max-seconds
+            # always wins. The last max(60s, 15%) of the window is reserved for
+            # the turn's graceful checkpoint reply.
+            default_max_seconds: 1800
+    """
+
+    default_max_seconds: float = 240.0
+
+
+@dataclass(slots=True)
 class McpAdmissionConfig:
     """Which personas may have their declared MCP servers registered for a run.
 
@@ -247,4 +284,5 @@ class RuntimeConfig:
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
     supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
+    mission_chat: MissionChatConfig = field(default_factory=MissionChatConfig)
     mcp_admission: McpAdmissionConfig = field(default_factory=McpAdmissionConfig)

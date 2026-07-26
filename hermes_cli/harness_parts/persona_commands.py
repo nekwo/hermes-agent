@@ -75,10 +75,11 @@ def _cmd_persona_tool_diff(args) -> int:
         data = {"ok": False, "error": f"persona not found: {args.persona_id}"}
         print(emit_json(data) if args.json else data["error"])
         return 2
+    permission_mode = str(args.permission_mode or "profile_default")
     visibility = resolve_tool_visibility(
         persona,
         ToolVisibilityOptions(
-            permission_mode=str(args.permission_mode or "profile_default"),
+            permission_mode=permission_mode,
             permission_source="cli_preview",
             repo_scope=args.repo_scope,
             workdir=args.workdir,
@@ -88,6 +89,18 @@ def _cmd_persona_tool_diff(args) -> int:
             # This command IS the harness lane; say so rather than letting the
             # lane be inferred from argv.
             entry_point_lane=HARNESS_LANE,
+            # G5: account for what the CHAT lane takes AWAY from this persona,
+            # under the mode the operator is asking about (``--permission-mode
+            # unbounded`` genuinely bypasses the cost policy and so honestly
+            # reports no drops). Accounting only — the resolved tool list is
+            # unchanged; these rows explain absences it would otherwise show as
+            # nothing at all.
+            chat_lane_capability_drops=chat_lane_capability_drops(
+                persona,
+                session_id=args.session_id,
+                permission_mode=permission_mode,
+            ),
+            mission_chat_workdir=mission_chat_workdir_for_persona(persona),
         ),
     )
     data = {"ok": True, "tool_visibility": visibility}
@@ -98,7 +111,7 @@ def _cmd_persona_tool_diff(args) -> int:
         data["mcp_admission"] = resolve_mcp_admission(
             persona,
             lane=LANE_MISSION_CHAT,
-            permission_mode=str(args.permission_mode or "profile_default"),
+            permission_mode=permission_mode,
         ).explain()
     if args.json:
         print(emit_json(data))
@@ -2040,8 +2053,14 @@ def _cmd_mission_chat_message(args) -> int:
     # TARGET's HUD shows the SHARED remaining budget — that is how a supervisor
     # learns what window a dispatch actually has instead of briefing 50 minutes
     # of work into a 9-minute hop (live incident 2026-07-26).
+    #
+    # G10: an explicit --max-seconds ALWAYS wins; only its absence (None) falls
+    # through to the operator's configured lane default
+    # (agent_runtime.mission_chat.default_max_seconds, itself 240s when unset),
+    # so the deployment sets the work-shaped window once instead of every caller
+    # remembering a flag.
     wall_budget = _turn_budget.resolve_turn_wall_budget(
-        max_seconds=getattr(args, "max_seconds", 240.0),
+        max_seconds=resolve_mission_chat_max_seconds(getattr(args, "max_seconds", None)),
         relay_deadline_epoch=relay_deadline,
         relay_chain=turn_relay_chain,
         min_relay_seconds=relay_policy.MIN_RELAY_BUDGET_SECONDS,
@@ -2255,6 +2274,16 @@ def _cmd_mission_chat_message(args) -> int:
                 preloaded_skill_prompt=preloaded_skill_prompt,
                 workspace_agents_content=(
                     workspace_agents.content if workspace_agents is not None else None
+                ),
+                # The workspace POINTER (G6): the loaded AGENTS.md's own path, from
+                # the receipt the loader already produced. Only a file that actually
+                # LOADED points at a real workspace root — an invalid/missing/too
+                # large selection must not ground the turn somewhere it never read.
+                workspace_agents_path=(
+                    str(workspace_agents.receipt.get("path") or "")
+                    if workspace_agents is not None
+                    and workspace_agents.receipt.get("included")
+                    else None
                 ),
                 situational_hud_content=situational_hud_content,
                 turn_id=safe_assignment_token(client_message_id),

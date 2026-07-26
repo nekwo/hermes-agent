@@ -4,6 +4,18 @@ Status: **decision-ready audit, read-only.** No code changed by this document.
 Owner of every seam named here: fork (`agent_runtime/`, `hermes_cli/harness*`,
 `tools/terminal_tool.py`).
 
+**Landed since publication.** The audit text below is preserved as written;
+this table records what has since shipped, so nobody re-derives it:
+
+| Gap | State | Seam |
+|---|---|---|
+| G5 | **LANDED** — every chat-lane cost-policy drop is now a typed `requirement_failures` row (`toolset_dropped_by_chat_lane_policy`, `tool_dropped_by_chat_lane_policy`) on the SAME list as the MCP rows, printed by `harness persona tool-diff`. Restored toolsets emit nothing; `unbounded` emits nothing (it genuinely bypasses the policy). | `agent_runtime/chat_lane_toolsets.py`, `persona_runtime.chat_lane_capability_drops`, `tool_visibility._requirement_failures` |
+| G6 | **LANDED** — per-persona workdir ladder (`agent_runtime.personas.<id>.workdir` → the `--agents-file` workspace pointer → the persona's `repo_scope` → process cwd), threaded into the EXISTING `AgentRunRequest.workdir` seam. A configured path that does not exist degrades to the safe cwd and emits `mission_chat_workdir_unresolved`; it never fails the turn. | `agent_runtime/mission_chat_workdir.py`, `persona_runtime.mission_chat_reply` |
+| G10 | **LANDED** — the 240 s default moved to `agent_runtime.mission_chat.default_max_seconds` (absent ⇒ 240 s, unchanged; clamped to [30 s, 86400 s]). An explicit `--max-seconds` always wins. | `agent_runtime/runtime_config.MissionChatConfig`, `config.resolve_mission_chat_max_seconds` |
+
+G1/G2 (the drops themselves — now accounted for, still applied), G3, G4/G5b,
+G7–G9, and G11–G18 remain open exactly as written below.
+
 **Why this exists.** The operator has ruled that the mission-chat lane
 (Mission Control persona instances — `hermes harness mission-chat message` →
 `GPTPersonaRuntime.mission_chat_reply`) becomes the **primary home for all

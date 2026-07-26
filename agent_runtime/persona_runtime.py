@@ -12,7 +12,13 @@ if TYPE_CHECKING:
 from hermes_constants import get_hermes_home
 
 from . import paths
-from .chat_lane_toolsets import chat_lane_blocked_tools, scope_chat_lane_toolsets
+from .chat_lane_toolsets import (
+    ChatLaneDrop,
+    chat_lane_blocked_tools,
+    chat_lane_tool_drops,
+    chat_lane_toolset_drops,
+    scope_chat_lane_toolsets,
+)
 from .config import chat_lane_restore_toolsets, load_root_runtime_config
 from .context_builder import AgentContext, build_context, render_context
 from .decision_contract_registry import prompt_contract_markdown
@@ -33,6 +39,7 @@ from .mcp_admission import (
 )
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
+from .mission_chat_workdir import mission_chat_workdir_for_persona
 from .mission_plan import current_plan_stage
 from .personas import ALLOWED_TOOLSETS_BY_ROLE, DEFAULT_SUPERVISOR_PERSONA_ID, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
@@ -320,6 +327,12 @@ class GPTPersonaRuntime:
         agent_ready_callback: Callable[[object], Callable[[], None] | None] | None = None,
         preloaded_skill_prompt: str | None = None,
         workspace_agents_content: str | None = None,
+        # Absolute path of the operator-selected workspace ``AGENTS.md`` (the
+        # ``--agents-file`` receipt). Content and PATH are threaded separately on
+        # purpose: the content is prompt material, the path is the workspace
+        # POINTER rung of the workdir ladder (G6) — the directory the operator
+        # aimed this turn at. Never read for content here.
+        workspace_agents_path: str | None = None,
         situational_hud_content: str | None = None,
         conversation_history: list[dict] | None = None,
         reuse_current_user_message: bool = False,
@@ -380,6 +393,17 @@ class GPTPersonaRuntime:
             permission_mode=permission_options_for_chat(
                 persona, session_id=perm_session_id
             ).permission_mode,
+        )
+        # Repo grounding for this turn (G6). Resolved ONCE, here, and handed to
+        # the EXISTING ``AgentRunRequest.workdir`` seam the worker lane already
+        # uses — ``profile_runner`` chdirs and exports ``TERMINAL_CWD`` under its
+        # workdir lock, which is what puts a real repo in front of the terminal /
+        # file tools. ``None`` (nothing configured, nothing derivable) keeps the
+        # pre-G6 behavior exactly: the turn runs in the process cwd. A configured
+        # path that does not exist degrades to that same safe cwd and is reported
+        # as a typed row on the preview lane — it never fails the turn.
+        workdir = mission_chat_workdir_for_persona(
+            persona, workspace_agents_path=workspace_agents_path
         )
         result = self._runner.run(
             AgentRunRequest(
@@ -471,11 +495,18 @@ class GPTPersonaRuntime:
                     on_trace=trace_callback,
                 ),
                 runtime_root=paths.store_root(),
+                workdir=Path(workdir.path) if workdir.grounded else None,
             )
         )
         ChatToolPermissionStore().consume_turn(persona_id=persona.id, session_id=perm_session_id)
         if clarify_capture.requested and isinstance(result.raw, dict):
             result.raw["clarify_request"] = clarify_capture.request
+        if isinstance(result.raw, dict):
+            # Per-turn receipt of where the turn actually ran (and of any
+            # configured-but-unusable path it degraded past). The caller records
+            # it beside the turn's other receipts; the persona-level preview
+            # carries the same typed rows in ``requirement_failures``.
+            result.raw["mission_chat_workdir"] = workdir.receipt()
         return result
 
 
@@ -948,6 +979,55 @@ def _enabled_toolsets_for_chat(
     return scope_toolsets_to_admission(resolved, admitted_servers=admitted)
 
 
+def chat_lane_capability_drops(
+    persona: AgentPersona,
+    *,
+    session_id: str | None = None,
+    permission_mode: str | None = None,
+) -> tuple[ChatLaneDrop, ...]:
+    """What the chat-lane cost policy REMOVES for this persona, typed (G5).
+
+    The accounting twin of :func:`_enabled_toolsets_for_chat`: it walks the same
+    resolution in the same order — permission mode, role/persona resolution,
+    chat capability augmentation — and then asks the same droppers what they
+    took out instead of what they left in. Same inputs, same policy, one
+    authority; the kept list and the drop list cannot disagree.
+
+    ``unbounded`` returns no drops because that mode genuinely bypasses the cost
+    policy (``_enabled_toolsets_for_chat`` resolves the full registry) — a row
+    there would report a drop that did not happen. ``permission_mode`` may be
+    passed to account for a HYPOTHETICAL mode (the ``persona tool-diff
+    --permission-mode`` preview); left ``None`` the stored chat permission for
+    ``session_id`` is resolved, exactly as a live turn would.
+
+    Pure accounting: it registers nothing, restores nothing, and is never
+    consulted to decide what a turn ships.
+    """
+
+    mode = str(permission_mode or "").strip() or permission_options_for_chat(
+        persona, session_id=session_id
+    ).permission_mode
+    if permission_mode_is_unbounded(mode):
+        return ()
+    restore = chat_lane_restore_toolsets(persona.id)
+    resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+    kept = scope_chat_lane_toolsets(resolved, restore=restore)
+    # Local import: the tool→toolset map is the REGISTRY's answer, never a mirror
+    # kept here (a silently drifting mirror is the bug class ``mcp_lane`` needed a
+    # guard test for), and importing it lazily keeps ``persona_runtime``'s module
+    # import free of ``model_tools``.
+    from model_tools import get_toolset_for_tool
+
+    return chat_lane_toolset_drops(
+        resolved, restore=restore, persona_id=persona.id
+    ) + chat_lane_tool_drops(
+        restore=restore,
+        persona_id=persona.id,
+        enabled_toolsets=kept,
+        toolset_for_tool=get_toolset_for_tool,
+    )
+
+
 def chat_runtime_tool_contract(
     persona: AgentPersona, *, session_id: str | None
 ) -> dict[str, list[str]]:
@@ -986,6 +1066,13 @@ def apply_chat_lane_tool_scope(
     ``clarify`` unblock the chat bridge grants). ``resolve_tool_visibility`` then
     emits ``final_model_tools`` byte-identical to the schema the chat lane ships.
     Display-parity only — no policy change, no parallel resolver.
+
+    G5: it also threads the TYPED account of what that scoping removed
+    (:func:`chat_lane_capability_drops`) and of this persona's repo grounding
+    (``mission_chat_workdir_for_persona``), so one preview reports what SURVIVED
+    *and* what was taken away and why. A list of survivors was never an account
+    of the removals — which is how "I have no terminal" read as an unexplained
+    absence instead of a by-design, restorable cost cut.
     """
 
     permission = permission_options_for_chat(persona, session_id=session_id)
@@ -1000,6 +1087,13 @@ def apply_chat_lane_tool_scope(
     options.chat_lane_blocked_tool_names = _blocked_tool_names_with_registry_hygiene(
         _blocked_tool_names_for_chat(persona, session_id=session_id)
     )
+    options.chat_lane_capability_drops = chat_lane_capability_drops(
+        persona, session_id=session_id
+    )
+    # Preview scope: the CONFIG rung of the workdir ladder only. A live turn also
+    # offers the workspace pointer (``--agents-file``), which is a per-turn fact
+    # this persona-level preview has no honest access to.
+    options.mission_chat_workdir = mission_chat_workdir_for_persona(persona)
     return options
 
 

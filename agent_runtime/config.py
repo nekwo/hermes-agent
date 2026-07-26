@@ -14,9 +14,17 @@ from hermes_cli.profiles import profile_exists
 from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
 
 logger = logging.getLogger(__name__)
+
+#: Bounds for ``agent_runtime.mission_chat.default_max_seconds``. Below the
+#: floor the graceful checkpoint reserve (``turn_budget``: ``max(60s, 15%)``,
+#: capped so 30 s of work survives) consumes the whole window and the turn can
+#: run no tool at all; above the ceiling one conversational turn outlives the
+#: mission wall-clock deadline (``mission_wall_clock_deadline_seconds``, 86400).
+MISSION_CHAT_MIN_MAX_SECONDS = 30.0
+MISSION_CHAT_MAX_MAX_SECONDS = 86_400.0
 
 
 @dataclass(slots=True)
@@ -107,6 +115,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     swarm = _swarm_config(raw.get("swarm") or {})
     supervision = _supervision_config(raw.get("supervision") or {})
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
+    mission_chat = _mission_chat_config(raw.get("mission_chat") or {})
     mcp_admission = _mcp_admission_config(raw.get("mcp_admission") or {})
     continuous_role_sessions = _apply_enterprise_role_session_compat(
         continuous_role_sessions,
@@ -165,6 +174,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         swarm=swarm,
         supervision=supervision,
         coordinator_permissions=coordinator_permissions,
+        mission_chat=mission_chat,
         mcp_admission=mcp_admission,
         personas=raw.get("personas", {}) or {},
         default_model_source=default_model_source,
@@ -731,6 +741,110 @@ def _persona_chat_config(raw: dict[str, Any]) -> PersonaChatConfig:
     )
 
 
+def _mission_chat_config(raw: dict[str, Any]) -> MissionChatConfig:
+    """Parse ``agent_runtime.mission_chat`` (see :class:`MissionChatConfig`).
+
+    An absent / malformed value keeps the historical 240 s CLI default, and a
+    present one is clamped to a window that can actually host a turn — the
+    checkpoint reserve eats the whole budget below ~30 s, and above a day a
+    single turn outlives the mission deadline. Clamping (rather than rejecting)
+    keeps a fat-fingered stanza from failing every turn on the lane."""
+
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = MissionChatConfig()
+    return MissionChatConfig(
+        default_max_seconds=_clamped_positive_float(
+            raw.get("default_max_seconds"),
+            defaults.default_max_seconds,
+            minimum=MISSION_CHAT_MIN_MAX_SECONDS,
+            maximum=MISSION_CHAT_MAX_MAX_SECONDS,
+        )
+    )
+
+
+def mission_chat_default_max_seconds(cfg: AgentRuntimeConfig | None = None) -> float:
+    """The wall budget a mission-chat turn gets when ``--max-seconds`` is absent.
+
+    Harness-wide operator policy, so it loads through
+    :func:`load_root_runtime_config` — a sticky-active profile's own
+    ``config.yaml`` must not be able to shorten (or extend) every other
+    profile's turns (the same shadowing bug :func:`harness_root_config_path`
+    documents for ``chat_lane_restore_toolsets``). A config fault degrades to
+    the historical default rather than failing the turn."""
+
+    if cfg is not None:
+        return float(getattr(cfg.mission_chat, "default_max_seconds", MissionChatConfig().default_max_seconds))
+    try:
+        return float(load_root_runtime_config().mission_chat.default_max_seconds)
+    except Exception:  # pragma: no cover - defensive; a config fault must not kill a turn
+        logger.debug("mission_chat default budget load failed; using the built-in default", exc_info=True)
+        return MissionChatConfig().default_max_seconds
+
+
+def resolve_mission_chat_max_seconds(
+    requested: float | None, cfg: AgentRuntimeConfig | None = None
+) -> float:
+    """The wall budget one mission-chat turn gets — the precedence chokepoint.
+
+    An explicit request (the CLI's ``--max-seconds``, a relay hop's chosen
+    window) ALWAYS wins, including a value outside the config clamp: the clamp
+    guards a deployment-wide default from a fat-fingered stanza, it is not a cap
+    on a caller who states a number. Only ``None`` — "no opinion" — falls through
+    to :func:`mission_chat_default_max_seconds`.
+
+    One function so the precedence is decided in one place; the parser default is
+    ``None`` precisely so "absent" and "explicitly 240" remain distinguishable.
+    """
+
+    if requested is None:
+        return mission_chat_default_max_seconds(cfg)
+    try:
+        value = float(requested)
+    except (TypeError, ValueError):
+        return mission_chat_default_max_seconds(cfg)
+    return value if value > 0 else mission_chat_default_max_seconds(cfg)
+
+
+def mission_chat_workdir(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> str | None:
+    """Per-persona repo grounding for the mission-chat lane.
+
+    Read from ``agent_runtime.personas.<id>.workdir`` in the ROOT
+    ``config.yaml`` (see :func:`harness_root_config_path`): an absolute
+    directory the persona's chat turns run in, so its ``terminal`` / ``file``
+    tools resolve relative paths against a real repo instead of whatever cwd the
+    serve process happens to hold (G6). ``${roots.…}`` machine tokens are
+    expanded here, exactly like ``repo_scope``, so the stanza stays portable
+    across machines; an unresolvable token is left literal and surfaces as a
+    typed ``mission_chat_workdir_unresolved`` row rather than a fabricated path.
+
+    Honors the legacy ``alice_supervisor`` ⇄ ``neko_supervisor`` alias.
+    Absent / blank → ``None`` (the lane keeps the process cwd, unchanged).
+    Resolution of the whole ladder (config → workspace pointer → repo_scope →
+    cwd) lives in :mod:`agent_runtime.mission_chat_workdir`; this only reads the
+    key."""
+
+    persona_id = str(persona_id or "").strip()
+    if not persona_id:
+        return None
+    cfg = cfg or load_agent_runtime_config(harness_root_config_path())
+    personas = cfg.personas if isinstance(getattr(cfg, "personas", None), dict) else {}
+    keys = [persona_id]
+    if persona_id == "neko_supervisor":
+        keys.append("alice_supervisor")
+    elif persona_id == "alice_supervisor":
+        keys.append("neko_supervisor")
+    for key in keys:
+        raw = personas.get(key)
+        if isinstance(raw, dict) and "workdir" in raw:
+            value = _clean_config_str(raw.get("workdir"))
+            if value is None:
+                return None
+            return _expand_machine_root_tokens(
+                value, field=f"agent_runtime.personas.{key}.workdir"
+            )
+    return None
+
+
 def _event_log_config(raw: dict[str, Any]) -> EventLogConfig:
     raw = raw if isinstance(raw, dict) else {}
     defaults = EventLogConfig()
@@ -863,6 +977,13 @@ def _positive_int(value: Any, default: int) -> int:
 def _clamped_positive_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
     number = _positive_int(value, default)
     return max(minimum, min(maximum, number))
+
+
+def _clamped_positive_float(value: Any, default: float, *, minimum: float, maximum: float) -> float:
+    number = _optional_float(value)
+    if number is None:
+        number = default
+    return max(minimum, min(maximum, float(number)))
 
 
 

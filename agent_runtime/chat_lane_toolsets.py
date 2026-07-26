@@ -47,11 +47,46 @@ already in the lane's resolved set (role gating still applies) — you cannot ha
 a PM chat the browser toolset through this knob. A restored single tool
 (``skill_manage``) is likewise only un-blocked, not injected; it reappears only
 because its toolset (``skills``) is enabled.
+
+Typed drop accounting (G5)
+--------------------------
+The exclusions above are by DESIGN. Their INVISIBILITY was the defect: a
+mission-chat agent asked to run a command finds no ``terminal`` tool, and both
+it and the operator read the plain absence as a permission problem — the exact
+failure class ``mcp_lane`` was written to retire for MCP, recurring here (see
+``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md`` §6 / G5).
+
+So every dropper below returns **what it removed**, not only what remains:
+:func:`chat_lane_toolset_drops` and :func:`chat_lane_tool_drops` produce typed
+:class:`ChatLaneDrop` values and :meth:`ChatLaneDrop.row` renders the SAME
+``requirement_failures`` row shape ``mcp_lane`` /
+``mcp_admission.McpAdmissionDenial.row()`` / ``machine_roots.PathTokenIssue.row()``
+already emit (``{code, <subject>, entry_point_lane, summary, fix_hint}``), so
+operator surfaces that already render typed issue rows need no new case.
+
+Accounting only: nothing here grants, restores or registers anything, and the
+list-returning policy functions are byte-for-byte unchanged. A RESTORED toolset
+produces no row — it was not dropped.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any, Callable
+
+
+#: ``requirement_failures[].code`` for a whole toolset this policy removed from a
+#: chat lane. Subject key: ``toolset``.
+TOOLSET_DROPPED_BY_CHAT_LANE_POLICY = "toolset_dropped_by_chat_lane_policy"
+
+#: ``requirement_failures[].code`` for a single TOOL this policy removed while
+#: keeping the rest of its toolset. Subject key: ``tool``.
+TOOL_DROPPED_BY_CHAT_LANE_POLICY = "tool_dropped_by_chat_lane_policy"
+
+#: Drop kinds — which subject key a :class:`ChatLaneDrop` renders under.
+DROP_KIND_TOOLSET = "toolset"
+DROP_KIND_TOOL = "tool"
 
 
 #: Toolsets a conversational chat lane never needs, dropped by default so their
@@ -90,6 +125,171 @@ DEFAULT_CHAT_LANE_EXCLUDED_TOOLSETS: frozenset[str] = frozenset(
 #: recall, which the chat lane does use) requires the tool-level lane. Restored
 #: per-persona through the same ``chat_lane_restore_toolsets`` knob. (T6a)
 DEFAULT_CHAT_LANE_EXCLUDED_TOOLS: frozenset[str] = frozenset({"skill_manage"})
+
+
+def chat_lane_restore_config_key(persona_id: str | None) -> str:
+    """The EXACT root-``config.yaml`` key that un-excludes a drop for a persona.
+
+    One spelling authority for the fix hint: the reader
+    (``config.chat_lane_restore_toolsets``), this module's docstring, and every
+    emitted row must name the same key, or an operator follows a hint to a
+    setting that does not exist."""
+
+    persona = str(persona_id or "").strip() or "<persona-id>"
+    return f"agent_runtime.personas.{persona}.chat_lane_restore_toolsets"
+
+
+@dataclass(frozen=True, slots=True)
+class ChatLaneDrop:
+    """One capability the chat-lane cost policy removed from a resolved lane.
+
+    ``subject`` is the toolset or tool name; ``kind`` picks the subject key the
+    row renders under (:data:`DROP_KIND_TOOLSET` ⇒ ``toolset``,
+    :data:`DROP_KIND_TOOL` ⇒ ``tool``). ``restorable_via`` is the exact root
+    config key that un-excludes it — the whole point of the row is that the
+    reader can act on it without reading source.
+
+    ``role`` and ``entry_point_lane`` are stamped at :meth:`row` time rather
+    than stored: the DROP is a property of the policy, while the role and the
+    lane are properties of the resolution that observed it (the resolver already
+    knows both). Keeping them out of the value object is what lets one drop be
+    reported honestly from more than one surface.
+    """
+
+    subject: str
+    kind: str
+    code: str
+    restorable_via: str
+    detail: str = ""
+
+    def row(self, *, role: str = "", entry_point_lane: str = "") -> dict[str, Any]:
+        lane = str(entry_point_lane or "").strip() or "unknown"
+        role_text = str(role or "").strip()
+        role_clause = f" (role '{role_text}')" if role_text else ""
+        is_toolset = self.kind == DROP_KIND_TOOLSET
+        noun = "toolset" if is_toolset else "tool"
+        outcome = (
+            "it contributes no tools there"
+            if is_toolset
+            else "it is not callable there"
+        )
+        detail = f" {self.detail}" if self.detail else ""
+        return {
+            "code": self.code,
+            self.kind: self.subject,
+            "role": role_text,
+            "entry_point_lane": lane,
+            "restorable_via": self.restorable_via,
+            "summary": (
+                f"The '{self.subject}' {noun} is resolved for this persona{role_clause}, "
+                f"but the chat-lane cost policy drops it from operator / mission-chat "
+                f"turns on the '{lane}' lane — {outcome}.{detail}"
+            ),
+            "fix_hint": (
+                "By design, not a permission problem: this is a per-turn schema-cost "
+                "cut applied AFTER role and permission resolution, so no permission "
+                "mode short of an operator-granted `unbounded` grant restores it and "
+                "chasing blocked-tool counts will not find it. Restore it for this "
+                f"persona with `{self.restorable_via}: [{self.subject}]` in the ROOT "
+                "config.yaml (un-exclusion — the role must already allow it), or run "
+                "the work on a worker lane, which never passes through this policy."
+            ),
+        }
+
+
+def chat_lane_toolset_drops(
+    toolsets: Iterable[str],
+    *,
+    restore: Iterable[str] | None = None,
+    persona_id: str | None = None,
+) -> tuple[ChatLaneDrop, ...]:
+    """What :func:`scope_chat_lane_toolsets` REMOVES from ``toolsets``, typed.
+
+    The exact inverse of the filter, over the same inputs and the same resolved
+    exclusion set, so the kept list and the drop list can never disagree.
+    Order-preserving over the input and deduped; a restored toolset, and a
+    toolset that was never in the lane's resolved set, produce nothing."""
+
+    excluded = resolve_chat_lane_excluded_toolsets(restore)
+    key = chat_lane_restore_config_key(persona_id)
+    drops: list[ChatLaneDrop] = []
+    seen: set[str] = set()
+    for name in toolsets or ():
+        text = str(name)
+        if text in excluded and text not in seen:
+            seen.add(text)
+            drops.append(
+                ChatLaneDrop(
+                    subject=text,
+                    kind=DROP_KIND_TOOLSET,
+                    code=TOOLSET_DROPPED_BY_CHAT_LANE_POLICY,
+                    restorable_via=key,
+                )
+            )
+    return tuple(drops)
+
+
+def chat_lane_tool_drops(
+    *,
+    restore: Iterable[str] | None = None,
+    persona_id: str | None = None,
+    enabled_toolsets: Iterable[str] | None = None,
+    toolset_for_tool: Callable[[str], str | None] | None = None,
+) -> tuple[ChatLaneDrop, ...]:
+    """What :func:`chat_lane_blocked_tools` REMOVES, typed.
+
+    A single-tool cut is only a real capability drop when the tool's toolset is
+    actually enabled on the lane — blocking ``skill_manage`` on a persona with
+    no ``skills`` toolset removes nothing, and claiming a drop there would be
+    the same dishonesty as hiding one. Callers that can answer "which toolset
+    owns this tool" pass ``toolset_for_tool`` (``model_tools.get_toolset_for_tool``)
+    together with the lane's ``enabled_toolsets``; the mapping is never mirrored
+    here, so it cannot drift from the registry. With either argument omitted the
+    cut is reported unconditionally."""
+
+    key = chat_lane_restore_config_key(persona_id)
+    enabled = (
+        None
+        if enabled_toolsets is None or toolset_for_tool is None
+        else {str(name) for name in enabled_toolsets}
+    )
+    drops: list[ChatLaneDrop] = []
+    for name in chat_lane_blocked_tools(restore):
+        owning = None
+        if enabled is not None:
+            try:
+                owning = toolset_for_tool(name) if toolset_for_tool else None
+            except Exception:  # pragma: no cover - a registry fault must not break accounting
+                owning = None
+            if owning is not None and str(owning) not in enabled:
+                continue
+        drops.append(
+            ChatLaneDrop(
+                subject=name,
+                kind=DROP_KIND_TOOL,
+                code=TOOL_DROPPED_BY_CHAT_LANE_POLICY,
+                restorable_via=key,
+                detail=(
+                    f"The rest of the '{owning}' toolset is unaffected."
+                    if owning
+                    else ""
+                ),
+            )
+        )
+    return tuple(drops)
+
+
+def chat_lane_drop_rows(
+    drops: Iterable[ChatLaneDrop] | None,
+    *,
+    role: str = "",
+    entry_point_lane: str = "",
+) -> list[dict[str, Any]]:
+    """Render typed drops as ``requirement_failures`` rows (see module docstring)."""
+
+    return [
+        drop.row(role=role, entry_point_lane=entry_point_lane) for drop in drops or ()
+    ]
 
 
 def resolve_chat_lane_excluded_toolsets(

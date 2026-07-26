@@ -20,7 +20,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
-from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, provision_bundled_personas
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, provision_bundled_personas, resolve_mission_chat_max_seconds
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.coordinator_permissions import (
@@ -126,8 +126,9 @@ from agent_runtime.persona_chat_continuity import (
 from agent_runtime.mcp_admission import LANE_MISSION_CHAT, resolve_mcp_admission
 from agent_runtime.mcp_lane import HARNESS_LANE
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
+from agent_runtime.mission_chat_workdir import mission_chat_workdir_for_persona
 from agent_runtime.observability import build_observability
-from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_runtime_tool_contract
+from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_lane_capability_drops, chat_runtime_tool_contract
 from agent_runtime.personas import profile_chat_toolsets, seed_personas
 from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
 from agent_runtime.queued_skills import consume_skills_for_next_turn
@@ -1323,7 +1324,12 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--client-message-id", default=None)
     mission_chat_message.add_argument("--idempotency-key", default=None)
     mission_chat_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
-    mission_chat_message.add_argument("--max-seconds", type=float, default=240.0, help="Wall budget for this turn. The agent is told how much remains, and the last max(60s, 15%%) is reserved for a final checkpoint reply; the turn then settles as budget_exhausted (terminal, no turn-resolve)")
+    # Default is resolved at RUN time (agent_runtime.mission_chat.default_max_seconds
+    # in the ROOT config.yaml, itself defaulting to 240s) rather than pinned in the
+    # parser: an argparse default cannot be told apart from an explicit flag, and
+    # "explicit --max-seconds always wins over the configured default" has to be
+    # decidable. `None` here IS "the caller expressed no opinion".
+    mission_chat_message.add_argument("--max-seconds", type=float, default=None, help="Wall budget for this turn (default: agent_runtime.mission_chat.default_max_seconds, or 240s when unset). The agent is told how much remains, and the last max(60s, 15%%) is reserved for a final checkpoint reply; the turn then settles as budget_exhausted (terminal, no turn-resolve)")
     mission_chat_message.add_argument("--compression-threshold-tokens", type=int, default=None, help="One-turn native-compression proof seam; overrides the compressor token threshold without changing profile config")
     mission_chat_message.add_argument("--compression-protect-first-n", type=int, default=None, help="One-turn native-compression proof seam; override protected head messages")
     mission_chat_message.add_argument("--compression-protect-last-n", type=int, default=None, help="One-turn native-compression proof seam; override protected tail messages")
