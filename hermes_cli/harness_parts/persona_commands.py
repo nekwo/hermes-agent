@@ -3441,7 +3441,6 @@ def _cmd_persona_instance_run_once(args) -> int:
     seed = active[-1] if active else None
     message = args.message or (seed.message if seed else "Run one bounded free-floating persona sandbox turn.")
     title = args.title or (seed.title if seed else "Free-floating persona run")
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     try:
         result = PersonaDiagnosticController(
             config=cfg,
@@ -4928,7 +4927,6 @@ def _run_free_floating_assignment_once(
     never writes stdout, so the title cannot be run post-emit from in here.
     """
 
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     session_id: str | None = None
     try:
         session_db = _default_persona_session_db()
@@ -5399,7 +5397,6 @@ def _resolve_mission_chat_persona_id(persona_id, persona_instance_id) -> str:
 
 def _cmd_persona_diagnose(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     try:
         result = PersonaDiagnosticController(
             config=cfg,

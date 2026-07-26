@@ -576,7 +576,6 @@ def _cmd_lane_control(args) -> int:
 
 def _cmd_tick(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     result = TickEngine(
         config=cfg,
         persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
@@ -587,7 +586,6 @@ def _cmd_tick(args) -> int:
 
 def _cmd_run_until_settled(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     result = TickEngine(
         config=cfg,
         persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
@@ -610,7 +608,6 @@ def _cmd_burn_in_create(args) -> int:
 
 def _cmd_burn_in_run(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     manifest = run_burn_in_case(
         args.case_id,
         burn_id=getattr(args, "burn_id", None),

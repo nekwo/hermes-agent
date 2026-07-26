@@ -4516,7 +4516,6 @@ def _cmd_doctor(args) -> int:
 
 def _cmd_goal_run(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     try:
         bindings = _parse_blueprint_bindings(list(args.bind or []))
     except Exception as exc:
