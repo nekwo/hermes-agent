@@ -45,7 +45,7 @@ capability is live today.
 | G1 | **`file` + `terminal` + `code_execution` toolsets are dropped from every mission-chat turn** by the chat-lane cost policy. No read_file / write_file / patch / search_files / terminal / process / execute_code, for **every role**. | `chat`, `acp`, `gateway`, `cron`, harness **worker** lane | ✗ dropped | DELIBERATE (cost policy, pre-ruling) | **P0** |
 | G2 | **`browser` + `vision` dropped too** → a QA persona on mission-chat has *no* way to drive a UI or look at a screenshot. | `chat`, `acp`, `gateway`, harness **worker** lane | ✗ dropped | DELIBERATE (collateral of G1) | **P0** |
 | G3 | **MCP tools never registered on the harness lane** (`discover_mcp_tools()` gated on `_AGENT_COMMANDS`). Typed as of today; admission still unbuilt. | `chat`, `acp`, `cron run\|tick`, `gateway run`, `oneshot` (backgrounded) | ✗ never registered | PENDING (typed `mcp_lane.py`; admission designed) | **P0** |
-| G4 | **Harness terminal safety envelope hard-blocks `git push`, `git restore`, `git checkout -- .`, `rm -rf`, and all non-localhost `curl`/`wget`** — with **no permission-mode escape hatch**. Even `unbounded` cannot lift it. An agent literally cannot land its own work. | `chat`, `acp`, `gateway`, `cron` (envelope inactive) | ✗ blocked | DELIBERATE, but pre-dates the ruling | **P0** |
+| G4 | **Harness terminal safety envelope hard-blocks `git push`, `git restore`, `git checkout -- .`, `rm -rf`, and all non-localhost `curl`/`wget`** — with **no permission-mode escape hatch**. Even `unbounded` cannot lift it. An agent literally cannot land its own work. | `chat`, `acp`, `gateway`, `cron` (envelope inactive) | ✗ blocked | DELIBERATE, but pre-dates the ruling | **P0** — **RESOLVED 2026-07-26 together with G5b**, see [`mission-chat-terminal-envelope-grants.md`](mission-chat-terminal-envelope-grants.md) |
 | G5 | **The tool drops are invisible.** `requirement_failures` carries the new MCP row and *nothing else*: G1/G2/G11 emit no typed row, so "I have no terminal" reads to the agent and the operator as an unexplained absence — the exact defect class the MCP row was created to retire. | n/a | ✗ silent | ACCIDENTAL (same class as the MCP invisibility bug) | **P0** |
 | G6 | **No workdir / repo grounding.** `mission_chat_reply` passes no `workdir`; `TERMINAL_CWD` is never set. The turn runs in whatever cwd the serve process happens to hold. The worker lane resolves a real repo context; `hermes chat` runs in the operator's cwd. | harness **worker** lane (repo ctx), `chat` (operator cwd) | ✗ none | ACCIDENTAL | **P0** |
 | G7 | **Role ceiling caps the lane at ≤13 toolsets.** `ALLOWED_TOOLSETS_BY_ROLE` is an intersection filter, so whole capability classes (`web_extract`, `image_gen`, `tts`, `computer_use`, `memory`, `context_engine`, `project`, `cronjob`, `delegation`) are unreachable on **any** harness lane regardless of config. `hermes chat` defaults to the full `hermes-cli` core set. | `chat` (~40 tools), `gateway`, `acp` | ✗ capped | DELIBERATE, unreviewed since the ruling | P1 |
@@ -271,6 +271,22 @@ moment the pipeline is reseeded.
 
 ### G4 — the harness terminal safety envelope has no escape hatch
 
+> **RESOLVED 2026-07-26**, together with G5b, by
+> [`mission-chat-terminal-envelope-grants.md`](mission-chat-terminal-envelope-grants.md).
+> The section below records the state as audited. Two corrections the
+> implementation established:
+>
+> * The split G5b describes is not merely "two flavors of no-human-available".
+>   The deciding variable is whether the persona binds a `hermes_profile`:
+>   `profile_context.py:82-84` early-`yield`s for a profile-less persona, so
+>   `HERMES_AGENT_RUNTIME_ROOT` is never exported and the envelope is **inert**
+>   — which is how the same lane ran `git push origin main` ungated.
+> * The fix is **not** a permission-mode escape hatch. Threading
+>   `unbounded` into the envelope would have made a blunt mode lift a specific
+>   safety floor. Enforcement is now keyed on a bound
+>   `TerminalEnvelopeScope` and lifted only by an explicit, root-config,
+>   per-role/per-lane, per-command-class operator grant.
+
 `tools/terminal_tool.py:2046-2058`:
 
 ```python
@@ -317,6 +333,16 @@ approval decision itself belongs in `agent_runtime/tool_permissions.py`, next
 to the existing modes, not in the tool.
 
 ### G5b — no operator approval channel; the dangerous-command guard fails **open**
+
+> **RESOLVED 2026-07-26** for envelope-gated commands on mission-chat —
+> [`mission-chat-terminal-envelope-grants.md`](mission-chat-terminal-envelope-grants.md).
+> The warning this section ends on ("fixing G4 without fixing this would move
+> dangerous commands from hard-blocked to silently auto-approved") was honored:
+> both were done in one change, and the ONLY new "allow" is an explicit
+> root-config operator grant bounded by a stage floor. Scope note: the
+> **general** `approval.py:2594-2601` fail-open default is upstream and
+> untouched — what changed is that envelope-gated commands on this lane no
+> longer reach it undecided.
 
 **Every other lane has an approval surface. mission-chat has none.**
 
