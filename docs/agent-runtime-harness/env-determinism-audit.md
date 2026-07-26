@@ -26,7 +26,7 @@ of them a policy statement:
   with no `hermes_profile` takes the `binding.profile_home is None`
   early-`yield`, so `persona_profile_context` exports *nothing* for that run.
 * **Process history.** The variable is `os.environ.setdefault`-ed by *some*
-  harness command handlers and not others (§4). A long-lived `hermes harness
+  harness command handlers and not others (§2 #13-19). A long-lived `hermes harness
   serve` re-dispatches every request through those same handlers in one
   process, so whether the variable is set when a turn runs depends on what ran
   in that process **before** it.
@@ -65,7 +65,7 @@ inventoried too.
 | 2 | `agent_runtime/resolution.py:104` `resolution_table` | operator report | **1** | Reports the env layer's value and whether it won. Pure projection of #1. |
 | 3 | `agent_runtime/paths.py:8-13` `store_root` | the one accessor | **1** | `resolve_runtime()` + `assert_probe_isolation`. Every store path in the repo derives from it. Not an env reader itself — which is exactly why it is safe. |
 | 4 | `agent_runtime/terminal_envelope.py:725-736` `_audit_root` | receipt root | **2** | **FIXED.** Scope → env → *nothing*. With no scope-carried root (`scope_for_persona`'s `runtime_root` argument defaults to `None`) and no exported variable, a governed refusal wrote **no receipt, silently**. K made the decision deterministic; whether anyone could later *prove* it happened was still decided by ancestry. Added the canonical resolver as rung 3, and `audit_root_source` on every row so a receipt says which rung answered. Never raises; `None` now means "genuinely nowhere to write". |
-| 5 | `agent_runtime/smoke.py:55` `run_smoke` | `--no-temp-root` root | **2** | **FIXED.** Was `os.environ.get(RUNTIME_ROOT_ENV, ".hermes-agent-runtime")` — **two** nondeterminisms in one expression: presence-keyed, and the fallback is **relative to the process cwd**, which mission-chat workdir grounding now `chdir`s per turn (§3). Replaced with `paths.store_root()`, the one definition of "the configured root". Env-set behavior byte-identical. See operator question **Q5** for the residual policy issue this exposed. |
+| 5 | `agent_runtime/smoke.py:55` `run_smoke` | `--no-temp-root` root | **2** | **FIXED.** Was `os.environ.get(RUNTIME_ROOT_ENV, ".hermes-agent-runtime")` — **two** nondeterminisms in one expression: presence-keyed, and the fallback is **relative to the process cwd**, which mission-chat workdir grounding now `chdir`s per turn (§4). Replaced with `paths.store_root()`, the one definition of "the configured root". Env-set behavior byte-identical. See operator question **Q5** for the residual policy issue this exposed. |
 | 6 | `agent_runtime/profile_context.py:110` (W) | the exporter | **3** | The `profile_home is None` early-`yield` at `:84-86` is path 1 of the split. Retiring it is live-visible on every profile-less persona. → **Q1**. |
 | 7 | `agent_runtime/profile_context.py:88-91` (W) | save/restore | **1** | Snapshots the prior value and restores it in `finally`, including the `None` case (pops rather than writing `"None"`). Correct scoping; not a gate. |
 | 8 | `agent_runtime/smoke.py:24-39` (W) `_runtime_root` | save/restore | **1** | Same correct save/restore shape as #7. |
@@ -73,7 +73,7 @@ inventoried too.
 | 10 | `agent_runtime/snapshot.py:314` `_runtime_paths_diagnostic` | diagnostic | **1** | Reports the raw value or `<unset>` alongside the resolved paths. A report of the ambient state is the correct use of a read — it is how an operator *sees* the split rather than being subject to it. |
 | 11 | `tools/terminal_tool.py:2047` `_harness_safety_block` | legacy envelope gate | **3** | The precedent instance, still live on every **ungoverned** lane. `if not os.getenv(RUNTIME_ROOT_ENV, "").strip(): return None` — the entire safety envelope is inert when the variable is unset. Governed mission-chat turns no longer reach it; worker ticks, free-chat, `hermes chat`, cron, gateway and acp all still do. → **Q2**. |
 | 12 | `tools/terminal_tool.py:2138` `_log_harness_blocked_attempt` | legacy receipt | **3** | Same silent-drop shape as #4, on the legacy path: env unset ⇒ the block happened and nothing recorded it. The fix is #4's, applied one file over — but `tools/` is outside this slice's edit boundary. → **Q3**. |
-| 13 | `hermes_cli/harness.py:4509` `_cmd_goal_run` (W) | `setdefault` | **3** | One of six handlers that seed the variable. Which handlers do and do not is the *process-history* half of the split. → **Q6**. |
+| 13 | `hermes_cli/harness.py:4509` `_cmd_goal_run` (W) | `setdefault` | **3** | One of seven handlers that seed the variable. Which handlers do and do not is the *process-history* half of the split. → **Q6**. |
 | 14 | `hermes_cli/harness_parts/persona_commands.py:3562` `_cmd_persona_instance_run_once` (W) | `setdefault` | **3** | ″ |
 | 15 | `hermes_cli/harness_parts/persona_commands.py:5049` `_run_free_floating_assignment_once` (W) | `setdefault` | **3** | ″ |
 | 16 | `hermes_cli/harness_parts/persona_commands.py:5520` `_cmd_persona_diagnose` (W) | `setdefault` | **3** | ″ |
@@ -293,7 +293,7 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
 ### Q5 — Should `harness smoke --no-temp-root` write into the LIVE store at all?
 
 * **What is weak.** Surfaced by fix #5. With the variable set — the normal case,
-  because six handlers seed it (§2) — `--no-temp-root` already writes
+  because seven handlers seed it (§2) — `--no-temp-root` already writes
   `task_smoke`, its runs and its proofs into the **live** store. The old
   cwd-relative fallback masked this on exactly one branch by scattering a stray
   `.hermes-agent-runtime/` directory instead. Making the root deterministic made
@@ -312,9 +312,9 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
   *configured* root, and `hermes harness preflight` already covers "is the real
   store reachable" without writing to it.
 
-### Q6 — Should the six `setdefault` sites be replaced by one entry-point seam?
+### Q6 — Should the seven `setdefault` sites be replaced by one entry-point seam?
 
-* **What is weak.** Six handlers seed `HERMES_AGENT_RUNTIME_ROOT` (§2 #13-19)
+* **What is weak.** Seven handlers seed `HERMES_AGENT_RUNTIME_ROOT` (§2 #13-19)
   and the rest do not — including `_cmd_mission_chat_message`, the primary work
   lane. In `serve`, one process runs all of them, so the variable's state at any
   moment is a function of request history.
