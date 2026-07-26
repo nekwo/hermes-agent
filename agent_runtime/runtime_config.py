@@ -216,6 +216,16 @@ class McpAdmissionConfig:
     ``roles`` is deny-by-default with no wildcard — a role with no entry, or a
     lane with no entry under that role, admits nothing.
 
+    ``max_tool_calls_per_run`` is the per-run MCP call budget (design §3's
+    residual-risk mitigation, §7's ``mcp_admission_budget_exhausted`` row): once
+    a run has spent it, further admitted MCP calls are refused with a typed row
+    instead of dispatched. It bounds a LOOPING admitted agent, which single-flight
+    (one admission at a time) and the wall/AS0 watchdogs (bound the turn's clock,
+    not its call count) cannot. There is deliberately no "unlimited" spelling —
+    a non-positive or unparseable value falls back to the default and the parser
+    caps it, because an unbounded admitted MCP surface is the exact failure this
+    budget exists to prevent.
+
     Root ``config.yaml`` shape (see
     ``docs/agent-runtime-harness/mission-chat-mcp-admission.md``)::
 
@@ -223,6 +233,7 @@ class McpAdmissionConfig:
           mcp_admission:
             enabled: true
             connect_timeout_seconds: 20
+            max_tool_calls_per_run: 120
             roles:
               qa:
                 mission_chat: [launcher_qa]
@@ -230,6 +241,7 @@ class McpAdmissionConfig:
 
     enabled: bool = False
     connect_timeout_seconds: float = 20.0
+    max_tool_calls_per_run: int = 120
     roles: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
 

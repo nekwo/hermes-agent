@@ -531,7 +531,17 @@ class ProfileAgentRunner:
 
         started = time.perf_counter()
         try:
-            outcome = admit_mcp_servers(admission)
+            outcome = admit_mcp_servers(
+                admission,
+                # The per-run MCP call budget trips DURING the turn, long after
+                # this function has returned, so the operator-facing half of that
+                # event rides this callback rather than the outcome. The
+                # agent-facing half is the refused tool's own typed result — the
+                # one surface a looping model cannot miss.
+                on_budget_exhausted=lambda denial, snapshot: _emit_mcp_budget_exhausted(
+                    request, denial, snapshot
+                ),
+            )
         except Exception:  # pragma: no cover - admit_mcp_servers already swallows
             timing["mcp_admission_ms"] = _emit_request_timing(
                 request, "mcp_admission", started, status="failed"
@@ -539,6 +549,7 @@ class ProfileAgentRunner:
             return None
         timing["mcp_admission_ms"] = _emit_request_timing(request, "mcp_admission", started)
         timing["mcp_admitted_servers"] = len(outcome.admitted)
+        timing["mcp_call_budget"] = int(getattr(admission, "max_tool_calls_per_run", 0) or 0)
         if request.progress_callback is not None and (outcome.admitted or outcome.denied):
             try:
                 request.progress_callback(
@@ -564,7 +575,11 @@ class ProfileAgentRunner:
         return outcome
 
     def _teardown_mcp_admission(
-        self, request: AgentRunRequest, servers: tuple[str, ...], timing: dict[str, int]
+        self,
+        request: AgentRunRequest,
+        servers: tuple[str, ...],
+        timing: dict[str, int],
+        budget: Any | None = None,
     ) -> None:
         """Remove this run's MCP registry scope. Advisory — never fails the turn.
 
@@ -573,10 +588,21 @@ class ProfileAgentRunner:
         inside ``persona_profile_context``, so no other persona's run can observe
         the scope between the last tool call and its removal. The transport stays
         warm; only the registry entries and the toolset alias go.
+
+        ``budget`` is this run's call meter, read here for its final accounting:
+        the meter dies with the scope, so end-of-run is the last moment "how many
+        admitted MCP calls did this turn actually make" is answerable.
         """
 
         if not servers:
             return
+        if budget is not None:
+            try:
+                snapshot = budget.snapshot()
+                timing["mcp_calls_spent"] = int(snapshot.get("spent") or 0)
+                timing["mcp_calls_refused"] = int(snapshot.get("refused") or 0)
+            except Exception:  # pragma: no cover - accounting must never fail a turn
+                pass
         from .mcp_admission import teardown_mcp_admission
 
         started = time.perf_counter()
@@ -685,7 +711,11 @@ class ProfileAgentRunner:
             admitted_servers = admission_outcome.admitted if admission_outcome else ()
             if admitted_servers:
                 mcp_scope.callback(
-                    self._teardown_mcp_admission, request, admitted_servers, timing
+                    self._teardown_mcp_admission,
+                    request,
+                    admitted_servers,
+                    timing,
+                    budget=getattr(admission_outcome, "call_budget", None),
                 )
             status_callback = _profile_status_callback(request, timing)
             construct_started = time.perf_counter()
@@ -932,6 +962,39 @@ def _steer_mcp_admission_notice(agent: Any, request: AgentRunRequest, outcome: A
     except Exception:  # pragma: no cover - a notice must never fail a turn
         return False
     return True
+
+
+def _emit_mcp_budget_exhausted(request: AgentRunRequest, denial: Any, snapshot: dict[str, Any]) -> None:
+    """Operator-facing half of ``mcp_admission_budget_exhausted``. Never raises.
+
+    Fires ONCE per run, on the first refused call, from whichever thread
+    dispatched the tool. It is deliberately a ``run.progress`` WARNING and not an
+    interrupt: the agent keeps its non-MCP tools and can still land a reply, and
+    a turn that lands honestly beats a turn that dies at the bound.
+    """
+
+    callback = request.progress_callback
+    if callback is None:
+        return
+    try:
+        callback(
+            {
+                "type": "run.progress",
+                "phase": "mcp_admission",
+                "severity": "warning",
+                "step": "mcp_admission_budget_exhausted",
+                "status": "warning",
+                "summary": (
+                    "MCP call budget exhausted "
+                    f"({snapshot.get('spent')}/{snapshot.get('limit')} admitted call(s)); "
+                    "further MCP calls are refused for this turn."
+                ),
+                "mcp_call_budget": dict(snapshot),
+                "mcp_admission": {"denied": [denial.row()]},
+            }
+        )
+    except Exception:  # pragma: no cover - accounting must never fail a tool call
+        return
 
 
 def _notify_agent_ready(request: AgentRunRequest, agent: Any) -> Callable[[], None] | None:

@@ -50,7 +50,16 @@ The invariants this module exists to hold
    in ``tools/mcp_tool._servers`` stays warm for the next one. Teardown never
    fails a finished turn: every fault is a typed ``mcp_admission_teardown_failed``
    row.
-6. **The agent is told when it does NOT get what it declared.** A denial or
+6. **An admitted run is bounded in CALLS, not only in time.** Single-flight
+   bounds how many admissions may be in flight; the wall budget and the AS0
+   liveness watchdog bound the turn's clock. Neither bounds how many times an
+   admitted agent may call ``kill_launcher`` inside one turn. The per-run budget
+   (:class:`McpCallBudget`, installed by :func:`admit_mcp_servers` over the
+   registered handlers) does: past ``max_tool_calls_per_run`` every further
+   admitted MCP call is REFUSED with a typed ``mcp_admission_budget_exhausted``
+   row instead of dispatched. The turn is never killed — the agent keeps its
+   non-MCP tools and can finish with what it already captured.
+7. **The agent is told when it does NOT get what it declared.** A denial or
    degradation is rendered as one compact line
    (:func:`render_mcp_admission_line`) on the same volatile envelope tail the
    wall-budget line rides, so the model reads the truth in-band instead of
@@ -95,6 +104,7 @@ is loud instead of silent.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 import logging
 import threading
 import time
@@ -126,6 +136,12 @@ MCP_READ_ONLY_SUBSET_UNKNOWN = "mcp_read_only_subset_unknown"
 #: has already produced its answer by the time teardown runs — but never silent
 #: either: leftover scope is exactly the residue R2 exists to retire.
 MCP_ADMISSION_TEARDOWN_FAILED = "mcp_admission_teardown_failed"
+#: The run spent its per-run admitted-MCP-call budget. Every FURTHER admitted MCP
+#: call is refused with this row IN PLACE OF a dispatch; the turn itself is never
+#: killed, so the agent can still finish and report with what it already has.
+#: Design §3's residual-risk mitigation ("Loop → repeated launches/kills") and
+#: the one §7 row R2 shipped without.
+MCP_ADMISSION_BUDGET_EXHAUSTED = "mcp_admission_budget_exhausted"
 
 #: The admission LANE — the runtime surface a persona turn runs on. Distinct
 #: from ``mcp_lane``'s entry-point lane (``harness`` / ``chat`` / …), which
@@ -223,6 +239,16 @@ READ_ONLY_EXCLUDED_TOOLS: Mapping[str, tuple[str, ...]] = {
 
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 20.0
 
+#: Per-run budget of ADMITTED MCP tool calls, before an operator config edit.
+#:
+#: Sized off the real drills rather than a round number: the Stage C 6-row
+#: acceptance matrix costs ~60 admitted calls end to end, and the batched
+#: ``run_actions`` lane (a 6–9 action drill in ONE call) costs far less. 120 is
+#: ~2× the heaviest honest turn we know of, which is the "generous" side of the
+#: line — the budget is a loop bound, not a work bound, and a QA turn that trips
+#: it has stopped making progress rather than merely being thorough.
+_DEFAULT_MAX_TOOL_CALLS_PER_RUN = 120
+
 #: Process-wide admission mutex. Held for the FULL duration of a registration
 #: attempt — including past a caller's timeout — because the worker thread, not
 #: the caller, releases it. A second admission that arrives while one is in
@@ -279,6 +305,11 @@ class McpAdmission:
     #: the module docstring's R2 section).
     blocked_tool_names: tuple[str, ...] = ()
     connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS
+    #: How many ADMITTED MCP tool calls this run may dispatch in total, across
+    #: every admitted server. Resolved here (policy) and enforced at execution by
+    #: :class:`McpCallBudget`, so an operator can read the bound out of
+    #: ``--explain-mcp`` before the flag is ever flipped.
+    max_tool_calls_per_run: int = _DEFAULT_MAX_TOOL_CALLS_PER_RUN
 
     @property
     def is_empty(self) -> bool:
@@ -309,6 +340,10 @@ class McpAdmission:
             },
             "blocked_tool_names": list(self.blocked_tool_names),
             "connect_timeout_seconds": self.connect_timeout_seconds,
+            # The call bound this run would enforce. Reported even when nothing
+            # is admitted: "how many MCP calls could this persona make" is a
+            # question an operator asks BEFORE deciding to admit anything.
+            "max_tool_calls_per_run": self.max_tool_calls_per_run,
         }
 
 
@@ -328,6 +363,11 @@ class McpAdmissionOutcome:
     #: the runner's in-band backstop. Reporting a policy denial twice would tell
     #: the agent the same thing in two voices.
     execution_denied: tuple[McpAdmissionDenial, ...] = ()
+    #: The live per-run call meter installed over this run's admitted tools, or
+    #: ``None`` when nothing registered. Carried on the outcome (rather than kept
+    #: module-global) because the budget IS per-run: a new admission mints a new
+    #: meter, and the old one dies with the run's registry scope.
+    call_budget: "McpCallBudget | None" = None
 
     def denial_rows(self) -> list[dict[str, Any]]:
         return [denial.row() for denial in self.denied]
@@ -361,6 +401,127 @@ class McpTeardownOutcome:
 
     def failure_rows(self) -> list[dict[str, Any]]:
         return [failure.row() for failure in self.failures]
+
+
+class McpCallBudget:
+    """The per-run bound on how many ADMITTED MCP calls a turn may dispatch.
+
+    Why a call budget exists at all
+    -------------------------------
+    Single-flight bounds how many admissions may be in flight. The wall budget
+    and the AS0 liveness watchdog bound the turn's CLOCK. None of them bounds how
+    many times an admitted agent may call ``kill_launcher`` inside one turn — a
+    model under prompt-injection or simple mechanical looping can spend a whole
+    wall budget re-driving a GUI. This is the counter that closes that gap
+    (design §3, residual risk 1; §7's owed ``mcp_admission_budget_exhausted``).
+
+    What counts
+    -----------
+    ONE dispatch of ONE admitted MCP tool = ONE call. That includes the launcher's
+    batched ``run_actions`` multiplexer, which executes an ordered list of verbs
+    in a single call: §7 says nothing else, and counting the batch as one call is
+    what keeps the budget aligned with the seam it is enforced at (a tool
+    dispatch), rather than with a payload shape hermes does not parse. It is also
+    the direction that keeps the batched lane cheap — which is the lane the QA
+    drills are supposed to prefer.
+
+    Nothing else touches the counter: a non-admitted tool (every built-in, every
+    other toolset) never passes through the meter, and a call REFUSED after
+    exhaustion is recorded as ``refused`` rather than spending budget it does not
+    have.
+
+    Scope
+    -----
+    Per RUN, and per run TOTAL across all admitted servers — deliberately the
+    tighter of the two readings the design contains (§3 says "max tool calls per
+    admitted server per run"; §7 says "the per-run call budget"). With today's
+    single admissible server they are identical; with two admitted servers a
+    per-server reading would silently authorise 2× the calls, and the conservative
+    direction is the one that cannot surprise an operator upward. Per-server
+    counts are still recorded, for the accounting an operator reads afterwards.
+
+    A new meter is minted per admission, so the budget resets per run by
+    construction — there is no reset path to forget to call.
+
+    Thread-safe: an agent may dispatch tool calls from more than one thread, and
+    a bound that can be raced is not a bound.
+    """
+
+    __slots__ = ("limit", "_lock", "_spent", "_refused", "_per_server")
+
+    def __init__(self, limit: int):
+        self.limit = max(1, int(limit))
+        self._lock = threading.Lock()
+        self._spent = 0
+        self._refused = 0
+        self._per_server: dict[str, int] = {}
+
+    @property
+    def spent(self) -> int:
+        with self._lock:
+            return self._spent
+
+    @property
+    def refused(self) -> int:
+        with self._lock:
+            return self._refused
+
+    @property
+    def remaining(self) -> int:
+        with self._lock:
+            return max(0, self.limit - self._spent)
+
+    @property
+    def exhausted(self) -> bool:
+        with self._lock:
+            return self._spent >= self.limit
+
+    def consume(self, server: str, tool: str) -> McpAdmissionDenial | None:
+        """Charge one admitted MCP call. ``None`` ⇒ dispatch; a denial ⇒ refuse.
+
+        The check and the increment are one atomic step, so N concurrent calls at
+        the boundary cannot all read "one left" and all dispatch.
+        """
+
+        with self._lock:
+            if self._spent >= self.limit:
+                self._refused += 1
+                return self._denial(server, tool)
+            self._spent += 1
+            self._per_server[server] = self._per_server.get(server, 0) + 1
+        return None
+
+    def _denial(self, server: str, tool: str) -> McpAdmissionDenial:
+        return McpAdmissionDenial(
+            server=server,
+            code=MCP_ADMISSION_BUDGET_EXHAUSTED,
+            summary=(
+                f"This run has spent its per-run MCP call budget ({self.limit} admitted "
+                f"call(s)), so '{tool}' was NOT executed. No further MCP calls will run "
+                "for this turn."
+            ),
+            fix_hint=(
+                "This is a loop bound, not a permission problem: do not retry, do not "
+                "hunt for a permission mode, and do not substitute a shell/PowerShell "
+                "workaround or a second lane. Finish the turn with what you already "
+                "have — report what you captured and what is missing. An operator can "
+                "raise agent_runtime.mcp_admission.max_tool_calls_per_run in the ROOT "
+                "config.yaml if a drill legitimately needs more."
+            ),
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        """Accounting for the operator surfaces. Never used to make a decision."""
+
+        with self._lock:
+            return {
+                "limit": self.limit,
+                "spent": self._spent,
+                "remaining": max(0, self.limit - self._spent),
+                "refused": self._refused,
+                "exhausted": self._spent >= self.limit,
+                "per_server": dict(self._per_server),
+            }
 
 
 # ── config ──────────────────────────────────────────────────────────────────
@@ -424,6 +585,11 @@ def resolve_mcp_admission(
         role = str(getattr(persona, "role", "") or "")
     requested = tuple(_requested_servers(persona, task=task, stage=stage))
     timeout = _positive_float(getattr(config, "connect_timeout_seconds", None)) or _DEFAULT_CONNECT_TIMEOUT_SECONDS
+    # No "unlimited" spelling: a missing / zero / negative / unparseable value
+    # falls back to the default rather than retiring the bound. The root parser
+    # already clamps, so this is the second half of the same rule for callers
+    # that hand in a hand-built config object (tests, --explain-mcp previews).
+    call_budget = _positive_int(getattr(config, "max_tool_calls_per_run", None)) or _DEFAULT_MAX_TOOL_CALLS_PER_RUN
 
     def _empty(denials: Sequence[McpAdmissionDenial]) -> McpAdmission:
         return McpAdmission(
@@ -434,6 +600,7 @@ def resolve_mcp_admission(
             requested=requested,
             denied=tuple(denials),
             connect_timeout_seconds=timeout,
+            max_tool_calls_per_run=call_budget,
         )
 
     if not getattr(config, "enabled", False):
@@ -574,6 +741,7 @@ def resolve_mcp_admission(
         server_configs=compiled,
         blocked_tool_names=tuple(sorted(set(blocked))),
         connect_timeout_seconds=timeout,
+        max_tool_calls_per_run=call_budget,
     )
 
 
@@ -748,6 +916,16 @@ def _positive_float(value: Any) -> float | None:
     return number if number > 0 else None
 
 
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
 # ── toolset scoping (pure) ──────────────────────────────────────────────────
 
 
@@ -884,6 +1062,7 @@ def admit_mcp_servers(
     *,
     register: Callable[[Mapping[str, Mapping[str, Any]]], Any] | None = None,
     timeout_seconds: float | None = None,
+    on_budget_exhausted: Callable[[McpAdmissionDenial, dict[str, Any]], None] | None = None,
 ) -> McpAdmissionOutcome:
     """Register the admitted servers' tools for this run. Bounded, single-flight.
 
@@ -896,6 +1075,14 @@ def admit_mcp_servers(
     ``mcp_not_registered_on_lane`` (the registrar returned but the server is not
     in the registry) — so the turn can state the truth and take the
     ``qa.request_screenshot`` fallback.
+
+    Registration is also where the run's CALL budget is armed: every tool this
+    admission puts in the registry is metered by a fresh :class:`McpCallBudget`
+    before the caller is allowed to construct the agent, so a run can never see
+    an admitted tool that is not counted. ``on_budget_exhausted`` is an optional,
+    never-raising notification for the operator surfaces (the runner turns it
+    into a ``run.progress`` row); it is called on the FIRST refusal only, from
+    whichever thread dispatched the tool.
     """
 
     if admission is None or admission.is_empty:
@@ -931,11 +1118,21 @@ def admit_mcp_servers(
 
     done = threading.Event()
     box: dict[str, Any] = {}
+    # One meter per admission ⇒ the budget resets per run by construction, with
+    # no reset path to forget to call.
+    call_budget = McpCallBudget(admission.max_tool_calls_per_run)
 
     def _work() -> None:
         try:
             registrar = register or _default_registrar
             box["tools"] = registrar(servers)
+            # Meter INSIDE the worker, still holding the admission mutex, so a
+            # registration that outran the caller's timeout and lands late is
+            # metered too. An admitted tool that is not counted would be exactly
+            # the unbounded surface this budget exists to retire.
+            _install_call_budget(
+                admission.server_names, call_budget, on_exhausted=on_budget_exhausted
+            )
         except Exception as exc:  # pragma: no cover - defensive; surfaced as a typed denial
             box["error"] = exc
             logger.warning("MCP admission registration failed: %s", exc, exc_info=True)
@@ -980,6 +1177,10 @@ def admit_mcp_servers(
             duration_ms=duration_ms,
             denied=tuple(admission.denied) + timed_out,
             execution_denied=timed_out,
+            # The meter is already armed and the worker will install it if the
+            # registration lands late, so the run stays bounded even on the path
+            # where the caller gave up on it.
+            call_budget=call_budget,
         )
 
     from .mcp_lane import registered_mcp_server_names
@@ -1010,7 +1211,176 @@ def admit_mcp_servers(
         duration_ms=duration_ms,
         denied=tuple(admission.denied) + unregistered,
         execution_denied=unregistered,
+        call_budget=call_budget,
     )
+
+
+# ── the per-run call budget's counting seam ─────────────────────────────────
+#
+# The count is taken at DISPATCH, over exactly the tools this run's admission
+# registered. That is the only place where "an admitted MCP call happened" is a
+# fact rather than an inference: the tool list is not the control surface here
+# (a model can call an advertised tool any number of times), and the runner's
+# tool-start progress hook can only OBSERVE — it has no refuse path that does
+# not also end the turn, which §7 does not ask for and §3's threat model does
+# not want (an agent that loses the launcher should still be able to write up
+# what it saw).
+#
+# Mechanically: ``registry.dispatch`` reads ``entry.handler`` per call, so
+# replacing that attribute with a metered wrapper is a complete interception —
+# no upstream edit, no parallel dispatch path, and the wrapper dies with the
+# registry scope at teardown.
+
+#: Attribute the wrapper stashes the original handler under. Also the marker
+#: that answers "is this handler already metered?", which is what keeps a
+#: re-admission after a FAILED teardown from stacking two meters on one tool.
+_UNMETERED_HANDLER_ATTR = "_mcp_admission_unmetered_handler"
+
+
+def _install_call_budget(
+    servers: Iterable[str],
+    budget: "McpCallBudget",
+    *,
+    on_exhausted: Callable[[McpAdmissionDenial, dict[str, Any]], None] | None = None,
+) -> list[str]:
+    """Meter every registered tool of the admitted servers. Fails CLOSED.
+
+    A tool that cannot be metered is DEREGISTERED rather than left callable:
+    an unbounded admitted tool is the exact exposure the budget exists to close,
+    and removing it degrades into surfaces that already exist — if that empties
+    the server's scope, the caller's registry read reports the server as
+    ``mcp_not_registered_on_lane`` and the turn takes the fallback lane.
+
+    Returns the prefixed names it could not meter (and therefore removed).
+    """
+
+    names = [str(name).strip() for name in servers or () if str(name or "").strip()]
+    if not names:
+        return []
+    try:
+        from tools.registry import registry
+    except Exception:  # pragma: no cover - registry is always importable in-process
+        logger.warning(
+            "MCP admission could not reach the tool registry to install the per-run "
+            "call budget; the admitted tools are not metered",
+            exc_info=True,
+        )
+        return []
+
+    unmetered: list[str] = []
+    for server in names:
+        toolset = f"{_MCP_TOOLSET_PREFIX}{server}"
+        try:
+            tool_names = list(registry.get_tool_names_for_toolset(toolset) or [])
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("MCP admission could not list %r for metering", toolset, exc_info=True)
+            continue
+        for tool_name in tool_names:
+            if _meter_registered_tool(
+                registry, server, tool_name, budget, on_exhausted=on_exhausted
+            ):
+                continue
+            unmetered.append(tool_name)
+            try:
+                registry.deregister(tool_name)
+            except Exception:  # pragma: no cover - defensive
+                logger.error(
+                    "MCP admission could neither meter nor remove %r; it is admitted "
+                    "WITHOUT a per-run call bound",
+                    tool_name,
+                    exc_info=True,
+                )
+    if unmetered:
+        logger.warning(
+            "MCP admission removed %d admitted tool(s) it could not meter: %s",
+            len(unmetered),
+            ", ".join(sorted(unmetered)),
+        )
+    return unmetered
+
+
+def _meter_registered_tool(
+    registry: Any,
+    server: str,
+    tool_name: str,
+    budget: "McpCallBudget",
+    *,
+    on_exhausted: Callable[[McpAdmissionDenial, dict[str, Any]], None] | None = None,
+) -> bool:
+    """Swap one registered tool's handler for a budget-metered one."""
+
+    try:
+        entry = registry.get_entry(tool_name)
+        if entry is None:  # pragma: no cover - raced against a deregister
+            return False
+        handler = getattr(entry, "handler", None)
+        if not callable(handler):
+            return False
+        if getattr(entry, "is_async", False):
+            # Upstream registers every MCP tool with ``is_async=False`` (the
+            # handler bridges to the MCP loop itself), and the refusal path
+            # returns a STRING — which an async entry's dispatch would try to
+            # await. Rather than guess at a coroutine shape we do not need, an
+            # async admitted tool is left unmetered ⇒ removed by the caller.
+            # Pinned by a drift test, so upstream changing this is loud.
+            logger.warning(
+                "MCP admission cannot meter async tool %r; it will not be admitted",
+                tool_name,
+            )
+            return False
+        # Unwrap first: a re-admission after a teardown that FAILED would
+        # otherwise meter a meter, and the outer one's budget would be the only
+        # one anybody could read.
+        base = getattr(handler, _UNMETERED_HANDLER_ATTR, handler)
+        entry.handler = _metered_handler(
+            base, server=server, tool_name=tool_name, budget=budget, on_exhausted=on_exhausted
+        )
+        return True
+    except Exception:
+        logger.warning("MCP admission could not meter %r", tool_name, exc_info=True)
+        return False
+
+
+def _metered_handler(
+    handler: Callable[..., Any],
+    *,
+    server: str,
+    tool_name: str,
+    budget: "McpCallBudget",
+    on_exhausted: Callable[[McpAdmissionDenial, dict[str, Any]], None] | None = None,
+) -> Callable[..., Any]:
+    """``handler(args, **kwargs) -> str``, charged against the run's call budget.
+
+    On exhaustion it returns the typed row INSTEAD of dispatching, in the same
+    ``{"error": ...}`` JSON envelope the MCP handlers already return for their
+    circuit breaker — so the model reads it as a normal tool refusal with a
+    reason, the turn keeps running, and the agent can still write up what it has.
+    """
+
+    def _metered(*args: Any, **kwargs: Any) -> Any:
+        denial = budget.consume(server, tool_name)
+        if denial is None:
+            return handler(*args, **kwargs)
+        snapshot = budget.snapshot()
+        if snapshot.get("refused") == 1 and on_exhausted is not None:
+            try:
+                on_exhausted(denial, snapshot)
+            except Exception:  # pragma: no cover - a notification must never fail a tool
+                logger.debug("MCP admission budget notification failed", exc_info=True)
+        logger.warning(
+            "MCP admission budget exhausted (%d/%d): refused %r",
+            snapshot.get("spent"),
+            snapshot.get("limit"),
+            tool_name,
+        )
+        payload = dict(denial.row())
+        payload["error"] = denial.summary
+        payload["tool"] = tool_name
+        payload["budget"] = snapshot
+        return json.dumps(payload, ensure_ascii=False)
+
+    setattr(_metered, _UNMETERED_HANDLER_ATTR, handler)
+    return _metered
 
 
 def _default_registrar(servers: Mapping[str, Mapping[str, Any]]) -> list[str]:

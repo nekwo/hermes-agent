@@ -515,9 +515,16 @@ system, not a call-time approval system. That produces two requirements:
 
 **Residual risks, accepted with mitigations:**
 
-- *Loop → repeated launches/kills.* Per-run admission budget (max tool calls
-  per admitted server per run), surfaced as typed
+- *Loop → repeated launches/kills.* Per-run admission budget, surfaced as typed
   `mcp_admission_budget_exhausted`; plus the existing AS0 liveness watchdog.
+  — **IMPLEMENTED (2026-07-26, R2b)** with one deliberate narrowing: the budget
+  is a per-RUN TOTAL across all admitted servers rather than "max tool calls per
+  admitted server per run". With today's single admissible server the two are
+  identical; with two, the per-server reading silently authorises 2× the calls,
+  and a bound may only ever surprise an operator downward. Config key
+  `agent_runtime.mcp_admission.max_tool_calls_per_run`, default **120**, hard
+  ceiling 1000 so "effectively unlimited" is not spellable in config. See the
+  Log entry for the counting seam and the other choices.
 - *Compromised MCP server binary.* Out of scope — same trust boundary as the
   repo checkout the agent already edits. Note `smoke_launcher_qa_mcp`
   (`stagec_mcp_visual_provider.py:386`) verifies the surface *advertises*
@@ -588,7 +595,7 @@ Design consequences:
 | `agent_runtime/persona_runtime.py` | `_enabled_toolsets_for_chat` (`:881`) intersects the admitted set **after** permission-mode resolution (the `unbounded` rule) |
 | `agent_runtime/tool_visibility.py` | `requirement_failures` (`:173`) becomes real |
 | `agent_runtime/profile_readiness.py` | `_effective_required_mcp_servers` (`:379-384`) promoted to the request path; no logic change |
-| `agent_runtime/config.py` | `agent_runtime.mcp_admission` root config block |
+| `agent_runtime/config.py` | `agent_runtime.mcp_admission` root config block, including the per-run call budget (`max_tool_calls_per_run`, clamped) |
 | `hermes_cli/harness.py` + `harness_parts/` | `persona tool-diff --explain-mcp` prints the resolved admission without registering |
 | `docs/agent-runtime-harness/00-index.md` | link this doc under Operator forensics *(follow-up; not in this commit)* |
 
@@ -610,6 +617,16 @@ coupling with three mitigations: it is the ONLY such call site, it fails closed
 `tests/agent_runtime/test_mcp_admission_r2.py::test_the_upstream_warm_registration_seam_exists`
 pins the symbols, the signature, and the short-circuit the design depends on, so
 upstream drift fails a test rather than the QA lane.
+
+**R2b addendum — one more upstream surface, same treatment.** The per-run call
+budget replaces each admitted tool's `registry` entry handler with a metered
+wrapper. `ToolEntry.handler` and `registry.get_entry` are public, and
+`registry.dispatch` reads the handler per call, so no upstream edit is needed and
+no second dispatch path exists. It fails closed (a tool that cannot be metered is
+deregistered, not left unbounded) and
+`tests/agent_runtime/test_mcp_admission_budget.py` pins both halves of the
+contract it leans on: `dispatch` reading `entry.handler`, and
+`_register_server_tools` registering MCP tools `is_async=False`.
 
 **Contracts:** `requirement_failures` gains real rows (was always `[]`, so
 any consumer already tolerates a list — additive). Root runtime config gains
@@ -766,10 +783,18 @@ exercised through the real `_register_server_tools`; teardown failure and a
 teardown that cannot take the admission mutex are typed and non-fatal; the
 runner tears down on the RAISED path as well as the returned one; the upstream
 warm-registration seam exists and fails closed when it does not; and the §D3
-line is present per denial code, absent on a clean admission, and volatile.
-**Not implemented: the per-run call budget** (`mcp_admission_budget_exhausted`)
-— still owed, and the AS0 liveness watchdog plus single-flight are what bound a
-looping agent until it lands.*
+line is present per denial code, absent on a clean admission, and volatile.*
+
+*The per-run call budget (`mcp_admission_budget_exhausted`) shipped after R2 as
+`tests/agent_runtime/test_mcp_admission_budget.py` (37 tests): the meter
+decrements per admitted dispatch and cannot be raced past its limit; the call
+past the bound returns the typed row and the underlying handler is never
+reached; a non-admitted tool never touches the counter; a new admission mints a
+new meter (per-run reset by construction); a tool that cannot be metered is
+DEREGISTERED rather than left unbounded; the default fits the whole 6-row
+acceptance matrix ~2× over and no config value can retire it; and two drift
+guards pin the upstream contract the seam depends on (`registry.dispatch` reads
+`entry.handler` per call; `_register_server_tools` registers `is_async=False`).*
 
 **R3 — permission composition**
 - `read_only` QA ⇒ `tools.include` is the reviewer subset;
@@ -911,6 +936,63 @@ of R2 rather than a nice-to-have.
 ---
 
 ## Log
+
+- **2026-07-26 (R2b — the per-run call budget)** — the one §7 row R2 shipped
+  without. Flag still OFF; this changes nothing until admission is enabled.
+
+  **What it bounds, and why the existing controls did not.** Single-flight bounds
+  how many admissions may be in flight. The wall budget and the AS0 liveness
+  watchdog bound the turn's CLOCK. None of them bounds how many times an admitted
+  agent may call `kill_launcher` inside one turn — §3's residual risk 1, and the
+  capability class behind the 2026-07-25 reap incident.
+
+  **Config:** `agent_runtime.mcp_admission.max_tool_calls_per_run`, root config
+  only (same authority as the rest of admission — a profile cannot self-grant).
+  Default **120**, clamped to `[1, 1000]`. The default is sized off the real
+  drills, not a round number: a 6–9 action Stage C drill plus one batched
+  `run_actions` call is ~10 admitted calls, and the whole 6-row acceptance matrix
+  is ~60 — 120 is ~2× the heaviest honest turn we know of. There is deliberately
+  **no "unlimited" spelling**: 0 / negative / unparseable falls back to the
+  default and the ceiling refuses a fat-fingered `1000000`, because an unbounded
+  admitted MCP surface is the exact failure the budget exists to prevent.
+
+  **The counting seam is the DISPATCH of an admitted tool**, installed by
+  `admit_mcp_servers` (inside the worker, still holding the admission mutex, so a
+  registration that outran the caller's timeout and lands late is metered too) by
+  swapping each registered `mcp-<server>` tool's `registry` entry handler for a
+  metered wrapper. `registry.dispatch` reads `entry.handler` per call, so this is
+  a complete interception with **no upstream edit and no parallel dispatch
+  path**, and the wrapper dies with the registry scope at teardown. The tool list
+  could not be the control surface here: a model may call an advertised tool any
+  number of times, and the runner's tool-start progress hook can only OBSERVE —
+  its only refuse path ends the turn.
+
+  **Choices made where §7 left one, all in the conservative direction:**
+  - **Per-run TOTAL, not per admitted server** (§3's parenthetical said the
+    latter). Identical today; strictly tighter with more than one server.
+  - **A batched `run_actions` call costs ONE call**, as the task framing says and
+    §7 does not contradict: the seam counts dispatches, charging per inner action
+    would mean parsing a payload hermes does not own, and taxing the batched lane
+    would push agents back to the chatty one.
+  - **Exhaustion refuses the CALL, never the turn.** The refused tool returns the
+    typed row in the same `{"error": …}` JSON envelope the MCP handlers already
+    use for their circuit breaker, so the model reads a normal tool refusal with
+    a reason and can still land a reply with what it captured. A turn that dies
+    at the bound is strictly worse than one that reports honestly.
+  - **A tool that cannot be metered is DEREGISTERED** rather than left callable
+    (the concrete case is an `is_async` entry, whose dispatch would try to await
+    the string refusal). Fail-closed with no new code: if that empties the
+    server's scope, the caller's registry read reports the existing
+    `mcp_not_registered_on_lane` row and the turn takes the fallback lane.
+
+  **Surfaces:** the agent sees the refusal as its tool result (with a `fix_hint`
+  that forbids retrying, permission-hunting, PowerShell workarounds and second
+  lanes); the operator sees one `run.progress` `mcp_admission_budget_exhausted`
+  warning on the FIRST refusal plus `mcp_calls_spent` / `mcp_calls_refused` in
+  the run's `profile_timing`; `--explain-mcp --json` carries
+  `max_tool_calls_per_run` so the bound is readable **before** the flag is
+  flipped. The `--explain-mcp` TEXT rendering was deliberately left alone to keep
+  this diff inside `agent_runtime/`.
 
 - **2026-07-26 (R2)** — teardown, warm-aware registration, the compiled positive
   `tools.include` with a parity fixture, and the §D3 agent line. Flag still OFF;

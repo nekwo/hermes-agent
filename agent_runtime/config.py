@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 MISSION_CHAT_MIN_MAX_SECONDS = 30.0
 MISSION_CHAT_MAX_MAX_SECONDS = 86_400.0
 
+#: Hard ceiling for ``agent_runtime.mcp_admission.max_tool_calls_per_run``.
+#: A per-run MCP call budget only bounds a looping agent while it is actually
+#: reachable, so "effectively unlimited" must not be spellable in config — a
+#: mistyped ``1000000`` clamps here instead of silently retiring the bound. The
+#: value is far above any honest QA drill (the 6-row Stage C acceptance matrix
+#: costs ~60 admitted calls) and far below a loop worth paying for.
+MCP_ADMISSION_MAX_TOOL_CALLS_CEILING = 1_000
+
 
 @dataclass(slots=True)
 class AgentRuntimeConfig(RuntimeConfig):
@@ -906,6 +914,13 @@ def _mcp_admission_config(raw: dict[str, Any]) -> McpAdmissionConfig:
     allowlist, and any parse fault leaves ``enabled`` False. The connect budget
     is clamped so a config typo cannot park a chat turn behind a capability
     probe (or make the probe useless by rounding to zero).
+
+    ``max_tool_calls_per_run`` is clamped the same way and for the same reason,
+    with one extra property: there is no way to spell "unlimited". A missing,
+    zero, negative or unparseable value falls back to the default, and the upper
+    clamp refuses a fat-fingered ``1000000`` — an admitted MCP surface with no
+    call bound is precisely the failure the budget exists to prevent, so it must
+    not be reachable by a config typo either.
     """
 
     raw = raw if isinstance(raw, dict) else {}
@@ -929,6 +944,12 @@ def _mcp_admission_config(raw: dict[str, Any]) -> McpAdmissionConfig:
     return McpAdmissionConfig(
         enabled=bool(raw.get("enabled", defaults.enabled)),
         connect_timeout_seconds=min(120.0, max(1.0, float(timeout))),
+        max_tool_calls_per_run=_clamped_positive_int(
+            raw.get("max_tool_calls_per_run"),
+            defaults.max_tool_calls_per_run,
+            minimum=1,
+            maximum=MCP_ADMISSION_MAX_TOOL_CALLS_CEILING,
+        ),
         roles=roles,
     )
 

@@ -364,6 +364,7 @@ def test_explain_is_stable_and_machine_readable(qa_profile):
         "tool_include",
         "blocked_tool_names",
         "connect_timeout_seconds",
+        "max_tool_calls_per_run",
     }
     assert explained["admitted"] == ["launcher_qa"]
     assert explained["role"] == "qa"
