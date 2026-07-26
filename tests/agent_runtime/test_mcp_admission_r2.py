@@ -67,8 +67,12 @@ _QA_ALLOW = {"qa": {LANE_MISSION_CHAT: ["launcher_qa"]}}
 #: changing this constant without re-checking the parity assertions below is
 #: exactly the silent drift the fixture exists to prevent.
 _LAUNCHER_ALLOWLIST_SHA256 = (
-    "58976ba37df70e5c79fba06735252d077355d21f69c608d9faa9c5ce1a01586a"
+    "4aad31d0467eaa807b2cf6295c25ec4645923d8495b88120dc4ecc63389591aa"
 )
+#: Tool count of the launcher's Stage C QA surface at the snapshot above
+#: (`kStageCQaMcpTools`). The reviewer row must partition it exactly — that is
+#: the hermes-side half of the launcher's own Stage 22 drift test.
+_LAUNCHER_QA_TOOL_COUNT = 26
 _LAUNCHER_ALLOWLIST_FIXTURE = (
     Path(__file__).parent / "fixtures" / "launcher_qa_profile_allowlists.yaml"
 )
@@ -571,6 +575,24 @@ def test_read_only_exclude_equals_the_launcher_reviewer_denied_set(launcher_allo
     assert set(row["denied"]) == set(READ_ONLY_EXCLUDED_TOOLS["launcher_qa"])
 
 
+def test_run_actions_the_capability_multiplexer_is_denied(launcher_allowlist):
+    """The tool that proves a positive include is the right shape.
+
+    ``run_actions`` executes an ordered list of OTHER verbs in one call, and this
+    allowlist resolves per tool NAME — so admitting it to a restricted profile
+    hands over every batchable verb that profile is otherwise denied. Under an
+    include list it is denied by construction (it is simply not on the list);
+    under R1's exclude list it would have been admitted silently the moment the
+    launcher shipped it.
+    """
+
+    row = launcher_allowlist[READ_ONLY_ALLOWLIST_PROFILE]
+
+    assert "mcp_launcher_qa_run_actions" in row["denied"]
+    assert "mcp_launcher_qa_run_actions" not in READ_ONLY_INCLUDED_TOOLS["launcher_qa"]
+    assert "mcp_launcher_qa_run_actions" in READ_ONLY_EXCLUDED_TOOLS["launcher_qa"]
+
+
 def test_the_two_lists_partition_the_known_surface(launcher_allowlist):
     """No tool may be unclassified, and none may be in both halves.
 
@@ -585,7 +607,7 @@ def test_the_two_lists_partition_the_known_surface(launcher_allowlist):
 
     assert included & excluded == set()
     assert included | excluded == set(row["allowed"]) | set(row["denied"])
-    assert len(included | excluded) == 25
+    assert len(included | excluded) == _LAUNCHER_QA_TOOL_COUNT
 
 
 def test_read_only_registers_the_reviewer_row_and_nothing_else(qa_profile):

@@ -193,6 +193,14 @@ READ_ONLY_INCLUDED_TOOLS: Mapping[str, tuple[str, ...]] = {
 #: a live launcher window (restore + foreground + PrintWindow; a polling loop
 #: against the fixture mutex) and the launcher denies them to ``reviewer`` for
 #: that reason. R2 adopts the row verbatim, which NARROWS ``read_only``.
+#:
+#: ``run_actions`` is the reason a POSITIVE include is the right shape. It is a
+#: capability MULTIPLEXER — one call executing an ordered list of other verbs —
+#: so a name-matching allowlist that admits it hands over every batchable verb
+#: the profile is otherwise denied. Under an include list it is denied by
+#: construction, because it simply is not on the list; under an exclude list it
+#: would have been admitted the moment the launcher shipped it, silently, and
+#: nobody would have noticed until an agent batched a ``click_button``.
 READ_ONLY_EXCLUDED_TOOLS: Mapping[str, tuple[str, ...]] = {
     "launcher_qa": (
         "mcp_launcher_qa_begin_pkce_login",
@@ -202,6 +210,7 @@ READ_ONLY_EXCLUDED_TOOLS: Mapping[str, tuple[str, ...]] = {
         "mcp_launcher_qa_kill_launcher",
         "mcp_launcher_qa_launch_or_attach",
         "mcp_launcher_qa_open_app_tab",
+        "mcp_launcher_qa_run_actions",
         "mcp_launcher_qa_screenshot_window",
         "mcp_launcher_qa_scroll",
         "mcp_launcher_qa_scroll_to",

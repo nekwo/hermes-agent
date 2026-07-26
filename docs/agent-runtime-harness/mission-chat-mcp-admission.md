@@ -947,7 +947,21 @@ of R2 rather than a nice-to-have.
   because the launcher's full-capability rows are the glob `mcp_launcher_qa_*` —
   compiling that as a 25-name list would silently deny the next tool the launcher
   ships. No other divergence: include == the row's resolved allow-set, exclude ==
-  the row's `denied`, and the two partition the 25-tool surface exactly.
+  the row's `denied`, and the two partition the launcher's tool surface exactly.
+
+  **The parity fixture caught real drift before R2 even landed, which is the
+  strongest argument for its shape.** The first snapshot taken during this work
+  (launcher `a856f2b0`, 25 tools) was stale within the hour: the launcher shipped
+  `mcp_launcher_qa_run_actions` (`3e3feff0`) — a capability **multiplexer** that
+  executes an ordered list of other verbs in ONE call — and denied it to every
+  restricted profile, precisely because a name-matching allowlist cannot see
+  inside a batch. Hermes adopted the denial; the snapshot is now launcher
+  `3e3feff0`, 26 tools. Note which direction the two shapes fail in, because it
+  settles the R1-vs-R2 question on its own: under a **positive include** the new
+  tool was denied by construction and the pin only had to make us *record* it;
+  under R1's **exclude list** it would have been silently admitted to `read_only`
+  the day it shipped, and nobody would have noticed until an agent batched a
+  `click_button`.
 
   **§D3 line format** (one line, on the runtime-context envelope's volatile tail,
   beside the wall-budget line; empty on a clean admission):

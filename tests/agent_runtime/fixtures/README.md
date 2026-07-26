@@ -11,14 +11,24 @@ reviewable act rather than something a `cp` can do silently.
 | --- | --- |
 | Source repo | `EterniaLauncher` |
 | Source path | `docs/stages/qa-reboot/launcher_qa_profile_allowlists.yaml` |
-| Snapshot sha256 | `58976ba37df70e5c79fba06735252d077355d21f69c608d9faa9c5ce1a01586a` |
-| Snapshot taken | 2026-07-26, launcher `a856f2b0` (`feat(voice-qa): expose voice state + semantic controls on Stage C MCP`) |
+| Snapshot sha256 | `4aad31d0467eaa807b2cf6295c25ec4645923d8495b88120dc4ecc63389591aa` |
+| Snapshot taken | 2026-07-26, launcher `3e3feff0` (`feat(stagec-qa): run_actions — one MCP call, an ordered action list`); 26-tool surface |
 | Consumed by | `tests/agent_runtime/test_mcp_admission_r2.py` (parity of `agent_runtime.mcp_admission.READ_ONLY_INCLUDED_TOOLS` / `READ_ONLY_EXCLUDED_TOOLS` against the YAML's `reviewer` row) |
 
 Hermes **owns** the admission policy — design open question 6. This YAML is
 documentation plus a CI parity fixture; it is never read at admission time, so a
 missing launcher checkout or a deploy skew can never change what an agent may
 call.
+
+**This pin earned its keep within the hour.** The first snapshot taken (launcher
+`a856f2b0`, 25 tools) was stale before R2 landed: the launcher shipped
+`mcp_launcher_qa_run_actions` — a capability *multiplexer* that executes an
+ordered list of other verbs in ONE call — and denied it to every restricted
+profile precisely because a name-matching allowlist cannot see inside a batch.
+Hermes adopted the denial. Note which direction the two shapes fail in: under a
+positive include the new tool was denied by construction, and the pin only had to
+tell us to *record* that; under an exclude list it would have been silently
+admitted the day it shipped.
 
 ### Refreshing it
 

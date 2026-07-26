@@ -103,6 +103,13 @@ profiles:
       # against the live shell). PM driver verifies state, doesn't
       # drive the UI; get_buttons stays in the allowed read-only set.
       - mcp_launcher_qa_click_button
+      # Stage C batched-drill addendum (2026-07-26): run_actions is a
+      # capability MULTIPLEXER — the allowlist matches tool NAMES, so a
+      # batch would let this profile execute verbs it is denied
+      # individually (set_tab / click_button / scroll ...). Denied here
+      # by construction; the restricted profiles keep calling the
+      # single read-only tools they are allowed.
+      - mcp_launcher_qa_run_actions
 
   pm:
     description: PM hat; same convention as alice.
@@ -131,6 +138,13 @@ profiles:
       # Stage 19 (t_c07ef450, 2026-05-17): same rationale as alice —
       # click_button mutates the live shell.
       - mcp_launcher_qa_click_button
+      # Stage C batched-drill addendum (2026-07-26): run_actions is a
+      # capability MULTIPLEXER — the allowlist matches tool NAMES, so a
+      # batch would let this profile execute verbs it is denied
+      # individually (set_tab / click_button / scroll ...). Denied here
+      # by construction; the restricted profiles keep calling the
+      # single read-only tools they are allowed.
+      - mcp_launcher_qa_run_actions
 
   # ---------------------------------------------------------------------
   # Reviewer — post-hoc evidence review against captured artifacts.
@@ -180,6 +194,13 @@ profiles:
       - mcp_launcher_qa_kill_launcher
       # Stage 19 (t_c07ef450, 2026-05-17): click_button mutates state.
       - mcp_launcher_qa_click_button
+      # Stage C batched-drill addendum (2026-07-26): run_actions is a
+      # capability MULTIPLEXER — the allowlist matches tool NAMES, so a
+      # batch would let this profile execute verbs it is denied
+      # individually (set_tab / click_button / scroll ...). Denied here
+      # by construction; the restricted profiles keep calling the
+      # single read-only tools they are allowed.
+      - mcp_launcher_qa_run_actions
 
 # Notes:
 #
@@ -215,3 +236,13 @@ profiles:
 #      * click_button mutates app state — added to the denied set of
 #        every restricted profile. Full-access profiles continue to
 #        get it via the `mcp_launcher_qa_*` glob.
+#
+# 6. Batched-drill addendum (2026-07-26 — mcp_launcher_qa_run_actions):
+#    the batch tool executes an ordered list of other verbs in one
+#    call. Because this allowlist resolves per tool NAME, allowing
+#    run_actions in a restricted profile would hand that profile every
+#    batchable verb it is otherwise denied. It is therefore DENIED in
+#    alice / pm / reviewer and reaches full-access profiles through the
+#    `mcp_launcher_qa_*` glob. Destructive / confirmation-contract
+#    verbs (kill_launcher) and the process-spawning composers are not
+#    batchable at all — the server refuses the whole batch.
