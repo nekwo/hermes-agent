@@ -924,6 +924,20 @@ def explain_terminal_envelope(
     }
 
 
+def hard_floor_command_classes() -> frozenset[str]:
+    """The classes NO configuration can grant — the R1 stage floor's complement.
+
+    Read-only accessor over the two canonical sets above, added so operator
+    surfaces (``harness persona tool-diff --explain-envelope``) can name the hard
+    floor without re-deriving it from a hand-listed set of their own. The
+    grantable/hard-floor split is exactly the distinction
+    :data:`ENVELOPE_COMMAND_NOT_GRANTABLE` exists for: telling an agent — or an
+    operator — to ask for a grant that cannot exist would be a new lie.
+    """
+
+    return frozenset(COMMAND_CLASSES - GRANTABLE_COMMAND_CLASSES)
+
+
 __all__ = [
     "AUDIT_ROOT_SOURCE_ENV",
     "AUDIT_ROOT_SOURCE_RESOLVER",
@@ -964,6 +978,7 @@ __all__ = [
     "envelope_decision",
     "explain_terminal_envelope",
     "grant_config_key",
+    "hard_floor_command_classes",
     "legacy_reason_for_class",
     "record_envelope_decision",
     "refusal_text",

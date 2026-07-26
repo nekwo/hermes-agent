@@ -145,38 +145,33 @@ def test_budget_settle_uses_the_typed_terminal_state_not_outcome_unknown():
     assert "outcome_unknown" in states
 
 
-def test_chat_turn_feeds_the_wall_budget_into_the_agent_visible_hud():
-    """Budget visibility rides the SAME lane as roster/board/lane state.
+# Budget VISIBILITY (``turn_budget`` on the HUD dict for the operator's CONTEXT
+# peek, and the budget line on the always-emitted volatile tail for the agent)
+# moved into ``agent_runtime.mission_chat_turn_context`` and is asserted on the
+# composed OUTPUT in tests/agent_runtime/test_mission_chat_turn_context.py —
+# ``test_wall_budget_and_capability_ride_the_tail_and_the_hud_but_never_the_body``
+# and ``test_the_tail_is_emitted_on_every_delivery``. The AST guards that used
+# to stand in for those assertions here are retired: they pinned kwarg names,
+# not the bytes the agent reads.
+#
+# What CANNOT move is the wiring below: the enforcer's window is computed in
+# this body, so "the runner enforces the same object the agent was told about"
+# is a property of THIS source.
 
-    ``turn_budget=`` puts it on the resolved HUD dict (operator CONTEXT peek +
-    observability parity); ``volatile_content=`` puts it on the envelope tail
-    that is emitted even on an ``unchanged`` delivery, so the agent can never be
-    shown a cached, stale countdown.
+
+def test_the_enforced_window_comes_from_the_turn_context_budget():
+    """One authority, across the extraction boundary.
+
+    The agent's budget line is rendered from ``turn_context.wall_budget``; the
+    runner's clamp must be armed from that SAME object, never from a second
+    resolve in this body. The pre-fix code recomputed the relay clamp inline and
+    the two numbers drifted.
     """
 
     func = _mission_chat_message_func()
-    hud_kwargs: set[str] = set()
-    envelope_kwargs: set[str] = set()
-    for node in ast.walk(func):
-        if not isinstance(node, ast.Call):
-            continue
-        callee = node.func
-        name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
-        if name == "situational_hud_for_instance":
-            hud_kwargs.update(kw.arg for kw in node.keywords if kw.arg)
-        elif name == "render_runtime_context_envelope":
-            envelope_kwargs.update(kw.arg for kw in node.keywords if kw.arg)
-    assert "turn_budget" in hud_kwargs
-    assert "volatile_content" in envelope_kwargs
 
-
-def test_wall_budget_is_resolved_once_for_both_the_hud_and_the_enforcer():
-    """One authority: the number the agent is told and the number the runner
-    enforces come from the same ``resolve_turn_wall_budget`` object, so they can
-    never drift (the pre-fix code recomputed the relay clamp inline)."""
-
-    func = _mission_chat_message_func()
-    resolve_calls = [
+    # No second resolve in the CLI body...
+    assert not [
         node
         for node in ast.walk(func)
         if isinstance(node, ast.Call)
@@ -187,4 +182,32 @@ def test_wall_budget_is_resolved_once_for_both_the_hud_and_the_enforcer():
         )
         == "resolve_turn_wall_budget"
     ]
-    assert len(resolve_calls) == 1
+
+    # ...and `wall_budget` is bound to the built context, once.
+    bindings = [
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "wall_budget"
+            for target in node.targets
+        )
+    ]
+    assert len(bindings) == 1
+    value = bindings[0].value
+    assert isinstance(value, ast.Attribute)
+    assert isinstance(value.value, ast.Name) and value.value.id == "turn_context"
+    assert value.attr == "wall_budget"
+
+    # The relative window handed to the runner is derived from that object.
+    relay_wall = [
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "relay_wall_seconds"
+            for target in node.targets
+        )
+    ]
+    assert relay_wall, "the runner's wall window is no longer computed here"
+    assert "wall_budget" in ast.dump(relay_wall[0])

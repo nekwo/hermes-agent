@@ -113,10 +113,29 @@ def _cmd_persona_tool_diff(args) -> int:
             lane=LANE_MISSION_CHAT,
             permission_mode=permission_mode,
         ).explain()
+    # Same shape, same guarantee, the other gate: what the TERMINAL safety
+    # envelope will do to this persona's mission-chat lane. Rendered entirely
+    # from the canonical envelope authorities (``explain_terminal_envelope`` +
+    # ``hard_floor_command_classes``) — no parallel derivation of the taxonomy,
+    # the stage floor, or the grant table lives here.
+    if getattr(args, "explain_envelope", False):
+        from agent_runtime.terminal_envelope_explain import (
+            explain_persona_terminal_envelope,
+        )
+
+        data["terminal_envelope"] = explain_persona_terminal_envelope(persona)
     if args.json:
         print(emit_json(data))
     else:
         print(f"{visibility['persona_id']}: {visibility['final_tool_count']} tools")
+        envelope = data.get("terminal_envelope")
+        if envelope is not None:
+            from agent_runtime.terminal_envelope_explain import (
+                render_terminal_envelope_explanation,
+            )
+
+            for line in render_terminal_envelope_explanation(envelope):
+                print(line)
         admission = data.get("mcp_admission")
         if admission is not None:
             print(
@@ -1924,177 +1943,49 @@ def _cmd_mission_chat_message(args) -> int:
     native_revision_before = _persona_chat_native_revision(session_db, session_id)
     runtime_registry = persona_chat_runtime_registry()
     chat_message = message
-    queued_skills = consume_skills_for_next_turn(
-        persona_id=normalized_persona,
-        session_id=session_id,
-    )
-    from agent.skill_utils import required_preload_skill_ids
-
-    required_preload_skills = required_preload_skill_ids(
-        list(getattr(persona, "skills", []) or []),
-        surface="mission_chat",
-        root_node_mode=False,
-    )
-    skills_to_preload = list(
-        dict.fromkeys([*required_preload_skills, *queued_skills])
-    )
-    preloaded_skill_prompt = ""
-    preloaded_skills_loaded: list[str] = []
-    preloaded_skills_missing: list[str] = []
-    if skills_to_preload:
-        try:
-            from agent.skill_commands import build_preloaded_skills_prompt
-
-            preload_kwargs = (
-                {"required_skill_names": set(required_preload_skills)}
-                if required_preload_skills
-                else {}
-            )
-            preloaded_skill_prompt, preloaded_skills_loaded, preloaded_skills_missing = (
-                build_preloaded_skills_prompt(
-                    skills_to_preload,
-                    task_id=session_id,
-                    **preload_kwargs,
-                )
-            )
-        except Exception:
-            preloaded_skill_prompt = ""
-            preloaded_skills_loaded = []
-            preloaded_skills_missing = list(skills_to_preload)
-    # The preload rides the operator's user turn (cache-stable system prompt),
-    # so it must travel inside its structural envelope — the transcript
-    # projection strips the envelope from the displayed operator text the same
-    # way it strips the runtime-context envelope. Wrapped HERE, at the one
-    # producer of this lane's preload, so the persisted native row is
-    # projection-safe by construction. Delivery mirrors the HUD contract:
-    # required-preload skills recur every turn, so the full body is sent only
-    # when no matching snapshot survives in the effective native lineage
-    # (cold resume / compression re-anchor), and a compact ``unchanged`` stub
-    # otherwise — the model keeps the snapshot row in its history either way.
-    from agent_runtime.runtime_hud import (
-        render_skill_preload_envelope,
-        skill_preload_delivery,
-        skill_preload_revision,
-    )
-
-    skill_preload_revision_value = skill_preload_revision(preloaded_skill_prompt)
-    preloaded_skill_prompt = render_skill_preload_envelope(
-        skill_names=preloaded_skills_loaded,
-        skill_preload_content=preloaded_skill_prompt,
-        revision=skill_preload_revision_value,
-        delivery=skill_preload_delivery(native_history, skill_preload_revision_value),
-    )
-    workspace_agents = load_workspace_agents_context(
-        getattr(args, "agents_file", None)
-    )
-    workspace_agents_receipt = (
-        dict(workspace_agents.receipt) if workspace_agents is not None else None
-    )
-    if workspace_agents_receipt is not None:
-        workspace_agents_receipt.pop("preview", None)
-    # A resident actor is reusable only while every prompt/provider/tool input
-    # remains identical.  Hash config objects before including them so the
-    # signature never becomes an observability channel for prompt/config text.
-    runtime_signature = hashlib.sha256(
-        emit_json(
-            {
-                "persona_revision": hashlib.sha256(
-                    emit_json(asdict(persona)).encode("utf-8")
-                ).hexdigest(),
-                "instance_revision": hashlib.sha256(
-                    emit_json(asdict(instance)).encode("utf-8")
-                ).hexdigest(),
-                "root": session_id,
-                "root_model_config_revision": hashlib.sha256(
-                    emit_json(_session_model_config(session_db, session_id)).encode(
-                        "utf-8"
-                    )
-                ).hexdigest(),
-                "provider": model_selection.get("effective_provider"),
-                "model": model_selection.get("effective_model"),
-                "api_mode": model_selection.get("effective_api_mode")
-                or getattr(persona, "api_mode", None),
-                "reasoning_effort": model_selection.get(
-                    "effective_reasoning_effort"
-                ),
-                "profile": getattr(persona, "hermes_profile", None),
-                "tool_contract": chat_runtime_tool_contract(
-                    persona, session_id=session_id
-                ),
-                "permissions": permission_state_for_chat(
-                    persona, session_id=session_id
-                ),
-                "relevant_config_revision": hashlib.sha256(
-                    emit_json(asdict(cfg)).encode("utf-8")
-                ).hexdigest(),
-                "workspace_agents": workspace_agents_receipt,
-                "surface_prompt_sha256": hashlib.sha256(
-                    (getattr(args, "surface_prompt", "") or "").encode("utf-8")
-                ).hexdigest(),
-                "runtime_root": str(paths.store_root()),
-                "prompt_contract_revision": "mc-chat-continuity-v1",
-            }
-        ).encode("utf-8")
-    ).hexdigest()
-    workspace_id = safe_assignment_token(getattr(args, "workspace_id", None))
-    workspace_name = safe_assignment_text(
-        getattr(args, "workspace_name", None), limit=120
-    )
-    # Runtime situational HUD for this lane — the same projection the
-    # operator's Mission Control runtime HUD strip renders, fed into the chat
-    # turn so the operator and the agent share one view. Resolved ONCE here so
-    # the fed block and every observability row this turn persists (the
-    # write-ahead row below and the post-turn row) record the same object —
-    # record-at-injection, never a later re-derivation. Best-effort ({} / ''
-    # when unavailable); never blocks the turn.
-    from agent_runtime.runtime_hud import (
-        capability_block_for_persona,
-        render_capability_block,
-        render_runtime_context_envelope,
-        render_situational_hud_block,
-        runtime_context_delivery,
-        situational_hud_revision,
-        situational_hud_for_instance,
-    )
     from agent_runtime import turn_budget as _turn_budget
+    from agent_runtime.mission_chat_turn_context import build_mission_chat_turn_context
     from agent_runtime.profile_runner import RunBudgetExceeded
 
-    # Wall budget for this turn, resolved ONCE (single authority: the same
-    # object arms the runner's checkpoint clamp below and renders the agent's
-    # budget line here). A relayed hop inherits the chain deadline, so the
-    # TARGET's HUD shows the SHARED remaining budget — that is how a supervisor
-    # learns what window a dispatch actually has instead of briefing 50 minutes
-    # of work into a 9-minute hop (live incident 2026-07-26).
+    # The WHOLE per-turn context — wall budget, capability account, situational
+    # HUD + delivery, skill preload envelope, workspace AGENTS.md, runtime
+    # signature, volatile tail — is assembled by one unit-testable builder
+    # (`agent_runtime.mission_chat_turn_context`). This command part is exec'd
+    # into harness.py's globals rather than imported, so anything assembled HERE
+    # can only ever be guarded by AST source-shape assertions; assembled there it
+    # is guarded by tests that assert the composed bytes. What remains here is
+    # composition: gather the turn's inputs, call the builder, send.
     #
     # G10: an explicit --max-seconds ALWAYS wins; only its absence (None) falls
     # through to the operator's configured lane default
     # (agent_runtime.mission_chat.default_max_seconds, itself 240s when unset),
     # so the deployment sets the work-shaped window once instead of every caller
     # remembering a flag.
-    wall_budget = _turn_budget.resolve_turn_wall_budget(
+    turn_context = build_mission_chat_turn_context(
+        persona=persona,
+        instance=instance,
+        config=cfg,
+        session_id=session_id,
+        native_history=native_history,
+        model_selection=model_selection,
+        session_model_config=_session_model_config(session_db, session_id),
         max_seconds=resolve_mission_chat_max_seconds(getattr(args, "max_seconds", None)),
         relay_deadline_epoch=relay_deadline,
         relay_chain=turn_relay_chain,
         min_relay_seconds=relay_policy.MIN_RELAY_BUDGET_SECONDS,
+        agents_file=getattr(args, "agents_file", None),
+        surface_prompt=getattr(args, "surface_prompt", "") or "",
     )
-
-    # This lane's capability account, resolved ONCE (G5): the typed chat-lane
-    # drops plus the terminal envelope's grant/refusal posture for this role.
-    # Both were already computed and already typed by wave-2, and the agent
-    # still could not SEE either — so a missing `terminal` read to the model as
-    # an unexplained absence and it improvised. It rides the HUD dict for
-    # operator parity (the CONTEXT peek shows exactly what the agent was told)
-    # and the envelope's volatile tail for the agent, never the hashed body.
-    capability = capability_block_for_persona(persona, session_id=session_id)
-
-    situational_hud = situational_hud_for_instance(
-        instance, turn_budget=wall_budget.hud_block(), capability=capability
+    # The same object the runner's checkpoint clamp is armed from below, so the
+    # number the agent was told and the number the runtime enforces cannot drift.
+    wall_budget = turn_context.wall_budget
+    workspace_id = safe_assignment_token(getattr(args, "workspace_id", None))
+    workspace_name = safe_assignment_text(
+        getattr(args, "workspace_name", None), limit=120
     )
-    situational_hud_revision_value = situational_hud_revision(situational_hud)
-    situational_hud_delivery = runtime_context_delivery(
-        native_history,
-        situational_hud_revision_value,
-    )
+    # Record-at-injection: the observability row carries the very HUD dict that
+    # was rendered into the fed block, so the operator's CONTEXT peek shows
+    # exactly what the agent was told — never a later re-derivation.
     prompt_context = mission_chat_prompt_observability(
         persona=persona,
         persona_instance_id=instance.id,
@@ -2109,45 +2000,24 @@ def _cmd_mission_chat_message(args) -> int:
         model_selection=model_selection,
         workspace_id=workspace_id,
         workspace_name=workspace_name,
-        workspace_agents=workspace_agents,
-        situational_hud=situational_hud,
-        situational_hud_revision=situational_hud_revision_value,
-        situational_hud_delivery=situational_hud_delivery,
-        queued_skills=queued_skills,
-        required_preload_skills=required_preload_skills,
-        preloaded_skills_loaded=preloaded_skills_loaded,
-        preloaded_skills_missing=preloaded_skills_missing,
+        workspace_agents=turn_context.workspace_agents,
+        situational_hud=turn_context.situational_hud,
+        situational_hud_revision=turn_context.situational_hud_revision,
+        situational_hud_delivery=turn_context.situational_hud_delivery,
+        queued_skills=list(turn_context.skills.queued),
+        required_preload_skills=list(turn_context.skills.required),
+        preloaded_skills_loaded=list(turn_context.skills.loaded),
+        preloaded_skills_missing=list(turn_context.skills.missing),
         instance_skill_overrides=(
             list(instance.skill_overrides)
             if instance.skill_overrides is not None
             else None
         ),
     )
-    # Volatile tail, in one place. Every line describes a fact that must be true
-    # for THIS turn — how much wall clock is left, what this lane's policy took
-    # away and what its envelope will refuse, and which declared MCP servers this
-    # turn did not get — so all of them ride the tail rather than the hashed HUD
-    # body: a cached `unchanged` delivery (and an `unavailable` one, which drops
-    # the body entirely) must never show the agent a stale countdown or a stale
-    # capability claim. Each renderer returns "" when it has nothing to report,
-    # so a lane with no drops and no denials pays no line.
-    #
-    # The MCP line stays SEPARATE from the capability block on purpose. Its
-    # denials are resolved at a different lifecycle point (execution-time
-    # degradations reach the agent through `agent.steer`, after this envelope is
-    # sealed) and it is gated on the admission kill switch; folding it in would
-    # give one fact two voices, which is how an agent learns to discount both.
-    volatile_lines = [
-        _turn_budget.render_turn_budget_line(wall_budget),
-        render_capability_block(capability),
-        mission_chat_admission_line(persona, session_id=session_id),
-    ]
-    situational_hud_content = render_runtime_context_envelope(
-        context_id=str(prompt_context["context_id"]),
-        revision=situational_hud_revision_value,
-        delivery=situational_hud_delivery,
-        situational_hud_content=render_situational_hud_block(situational_hud),
-        volatile_content="\n".join(line for line in volatile_lines if line),
+    # The envelope is rendered last because it needs the observability row's
+    # context_id; body and volatile tail both come from the one built context.
+    situational_hud_content = turn_context.runtime_context_envelope(
+        context_id=str(prompt_context["context_id"])
     )
     instance.skill_manifest_hash = safe_assignment_token(
         prompt_context.get("skill_manifest_hash")
@@ -2283,7 +2153,7 @@ def _cmd_mission_chat_message(args) -> int:
                 root_chat_session_id=session_id,
                 client_message_id=client_message_id,
                 runtime_registry=runtime_registry,
-                runtime_signature=runtime_signature,
+                runtime_signature=turn_context.runtime_signature,
                 native_revision=native_revision_before,
                 compression_threshold_tokens_override=getattr(
                     args, "compression_threshold_tokens", None
@@ -2309,20 +2179,13 @@ def _cmd_mission_chat_message(args) -> int:
                 pre_trace_callback=stream_emitter.ack,
                 trace_callback=_stream_progress,
                 agent_ready_callback=_agent_ready_for_steer,
-                preloaded_skill_prompt=preloaded_skill_prompt,
-                workspace_agents_content=(
-                    workspace_agents.content if workspace_agents is not None else None
-                ),
+                preloaded_skill_prompt=turn_context.skill_preload_prompt,
+                workspace_agents_content=turn_context.workspace_agents_content,
                 # The workspace POINTER (G6): the loaded AGENTS.md's own path, from
                 # the receipt the loader already produced. Only a file that actually
                 # LOADED points at a real workspace root — an invalid/missing/too
                 # large selection must not ground the turn somewhere it never read.
-                workspace_agents_path=(
-                    str(workspace_agents.receipt.get("path") or "")
-                    if workspace_agents is not None
-                    and workspace_agents.receipt.get("included")
-                    else None
-                ),
+                workspace_agents_path=turn_context.workspace_agents_path,
                 situational_hud_content=situational_hud_content,
                 turn_id=safe_assignment_token(client_message_id),
             )
@@ -2344,14 +2207,14 @@ def _cmd_mission_chat_message(args) -> int:
             turn_usage=turn_usage_from_result(chat_result),
             trace_events=trace_payloads,
         )
-        if preloaded_skills_missing:
+        if turn_context.skills.missing:
             prompt_context["queued_skill_load_errors"] = [
                 {
                     "name": safe_assignment_token(skill) or str(skill),
                     "status": "missing",
                     "source": "queued_next_turn_skill",
                 }
-                for skill in preloaded_skills_missing
+                for skill in turn_context.skills.missing
             ]
         persist_tool_turn_actual(
             persona_id=normalized_persona,
@@ -2625,8 +2488,8 @@ def _cmd_mission_chat_message(args) -> int:
             # off the live frame; the complete row stays on disk (persisted +
             # archived). Same slim shape on stream and non-stream (one dict).
             "prompt_observability": slim_chat_final_observability(prompt_context),
-            "queued_skills_loaded": preloaded_skills_loaded,
-            "queued_skills_missing": preloaded_skills_missing,
+            "queued_skills_loaded": list(turn_context.skills.loaded),
+            "queued_skills_missing": list(turn_context.skills.missing),
             "model_selection": model_selection,
             "next_expected": (
                 "wall budget ran out: this is the agent's final checkpoint reply, "

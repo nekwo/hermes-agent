@@ -53,10 +53,13 @@ enforces, so the two can never drift.
   (`render_runtime_context_envelope(volatile_content=…)`), which is emitted on
   *every* delivery — `snapshot`, `unchanged`, and `unavailable`. A cached
   `unchanged` body would otherwise show the agent a stale countdown.
-- `turn_budget` is excluded from `situational_hud_revision` (see
-  `_VOLATILE_HUD_KEYS`), so a per-turn countdown never re-snapshots the whole
-  stable HUD block. It still rides the resolved HUD dict, so the operator's
-  CONTEXT peek and the observability row show the same number the agent saw.
+- `turn_budget` is declared `volatile` on its `runtime_hud.HUD_FIELDS` row,
+  which is the ONE declaration both `situational_hud_revision` and
+  `render_situational_hud_block` derive from (`stable_hud_fields`), so a
+  per-turn countdown never re-snapshots the whole stable HUD block *and* cannot
+  be rendered into the hashed body by a later edit. It still rides the resolved
+  HUD dict, so the operator's CONTEXT peek and the observability row show the
+  same number the agent saw.
 - A relayed hop inherits the chain deadline, so the **target's** HUD shows the
   shared remaining budget: a supervisor can see what window a dispatch has
   instead of briefing 50 minutes of work into a 9-minute hop.

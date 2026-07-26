@@ -33,10 +33,16 @@ contract, not a style choice:
   be true THIS turn: the wall budget (`turn_budget.render_turn_budget_line`),
   the MCP admission denials (`mcp_admission.render_mcp_admission_line`), and
   this lane's capability account (`render_capability_block` — what the chat-lane
-  cost policy dropped and what the terminal envelope will refuse). Everything on
-  the tail is listed in ``_VOLATILE_HUD_KEYS`` and therefore excluded from the
-  revision hash: a cached body must never show a stale countdown or a stale
-  capability claim.
+  cost policy dropped and what the terminal envelope will refuse). Which lane a
+  fact rides is declared ONCE, as ``volatile`` on its :class:`HudField` row in
+  ``HUD_FIELDS``; the revision hash and the body renderer both derive from that
+  one declaration (:func:`stable_hud_fields`), so a cached body cannot show a
+  stale countdown or a stale capability claim.
+
+The tail itself is composed by ``agent_runtime.volatile_tail``: contributors
+register by name with a byte budget, and an over-budget contribution is
+truncated or dropped WITH an in-band note plus a typed accounting row — never
+silently.
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .chat_lane_toolsets import DROP_KIND_TOOL, DROP_KIND_TOOLSET
@@ -101,37 +108,112 @@ _SKILL_PRELOAD_NAME_RE = re.compile(r"^[a-zA-Z0-9_.:+-]+$")
 # removed from this turn, and what the terminal safety envelope will refuse.
 CAPABILITY_HUD_KEY = "capability"
 
-# HUD keys deliberately EXCLUDED from the revision hash, and therefore carried
-# on the envelope's always-emitted volatile tail rather than in the hashed body
-# (see ``render_runtime_context_envelope``). Two independent reasons, both of
-# which end at the same contract:
-#
-# * ``turn_budget`` changes on every single turn by construction (a wall-clock
-#   countdown), so hashing it would force a full re-snapshot of the whole stable
-#   HUD block every turn and defeat the snapshot/unchanged delivery contract.
-# * ``capability`` is mostly stable but must be true on EVERY turn regardless of
-#   delivery. A cached ``unchanged`` stub — and, worse, an ``unavailable``
-#   delivery, which drops the body entirely — would leave an agent believing it
-#   still has a capability this turn dropped, or leave a refusal unexplained.
-#   Same reasoning, and the same lane, as the MCP admission line
-#   (``mcp_admission.render_mcp_admission_line``): a capability claim that can go
-#   stale in a cache is worse than no claim at all.
-#
-# Anything added here MUST also stay out of ``render_situational_hud_block``,
-# which renders the hashed body.
-_VOLATILE_HUD_KEYS = frozenset({"turn_budget", CAPABILITY_HUD_KEY})
+
+@dataclass(frozen=True, slots=True)
+class HudField:
+    """One HUD key, and the ONE declaration of which delivery lane it rides.
+
+    ``volatile`` is stated here and nowhere else. Both consumers of the
+    body/tail split derive from it — :func:`situational_hud_revision` excludes
+    volatile fields from the hash, and :func:`render_situational_hud_block`
+    renders from :func:`stable_hud_fields` — so a volatile fact CANNOT reach the
+    hashed body even if a later edit tries to render it there. The predecessor
+    convention (a ``_VOLATILE_HUD_KEYS`` frozenset, plus a hand-written promise
+    in the body renderer's docstring that it would never touch those keys) put
+    the declaration in one place and the enforcement in none.
+    """
+
+    key: str
+    volatile: bool
+    summary: str = ""
+
+
+#: The declared HUD field roster. Adding a key to the HUD means adding a row
+#: here; ``tests/agent_runtime/test_runtime_hud_field_contract.py`` fails a HUD
+#: that emits an undeclared key, so the roster cannot silently fall behind.
+#:
+#: The two volatile rows are volatile for two INDEPENDENT reasons that end at
+#: the same contract:
+#:
+#: * ``turn_budget`` changes on every single turn by construction (a wall-clock
+#:   countdown), so hashing it would force a full re-snapshot of the whole stable
+#:   HUD block every turn and defeat the snapshot/unchanged delivery contract.
+#: * ``capability`` is mostly stable but must be true on EVERY turn regardless of
+#:   delivery. A cached ``unchanged`` stub — and, worse, an ``unavailable``
+#:   delivery, which drops the body entirely — would leave an agent believing it
+#:   still has a capability this turn dropped, or leave a refusal unexplained.
+#:   Same reasoning, and the same lane, as the MCP admission line
+#:   (``mcp_admission.render_mcp_admission_line``): a capability claim that can go
+#:   stale in a cache is worse than no claim at all.
+HUD_FIELDS: tuple[HudField, ...] = (
+    HudField("preview", volatile=False, summary="marks the dict as the fed HUD projection"),
+    HudField("scope", volatile=False, summary="realm · workspace"),
+    HudField("lane", volatile=False, summary="this agent's identity/role/mode"),
+    HudField("mission", volatile=False, summary="bound goal, state, thread count"),
+    HudField("roster", volatile=False, summary="addressable on-level agents"),
+    HudField("steering", volatile=False, summary="who steers this lane, and whom it steers"),
+    HudField("board", volatile=False, summary="advisory Mission Board digest"),
+    HudField("mission_hud", volatile=False, summary="stage / QA-gate preview"),
+    HudField("turn_budget", volatile=True, summary="wall-clock window left on THIS turn"),
+    HudField(
+        CAPABILITY_HUD_KEY,
+        volatile=True,
+        summary="capability drops + terminal-envelope grants/refusals for THIS turn",
+    ),
+)
+
+_HUD_FIELD_BY_KEY: dict[str, HudField] = {field.key: field for field in HUD_FIELDS}
+
+
+def hud_field(key: str) -> HudField | None:
+    """The declaration for one HUD key, or ``None`` when it is undeclared."""
+
+    return _HUD_FIELD_BY_KEY.get(str(key))
+
+
+def is_volatile_hud_key(key: str) -> bool:
+    """Whether a key rides the always-emitted tail instead of the hashed body.
+
+    An UNDECLARED key is treated as stable. That direction is the safe one: an
+    undeclared key stays in the hash, so the worst case is an extra re-snapshot.
+    Defaulting the other way would silently drop a new fact out of the revision
+    and let a cached body go stale — the exact failure the split exists to
+    prevent.
+    """
+
+    field = _HUD_FIELD_BY_KEY.get(str(key))
+    return bool(field and field.volatile)
+
+
+def volatile_hud_keys() -> frozenset[str]:
+    """The declared volatile key set (derived, never a second hand-kept list)."""
+
+    return frozenset(field.key for field in HUD_FIELDS if field.volatile)
+
+
+def stable_hud_fields(hud: dict[str, Any] | None) -> dict[str, Any]:
+    """``hud`` with every declared-volatile field removed.
+
+    THE single derivation point of the body/tail split. Both the revision hash
+    and the body renderer read this, so "volatile" is decided once, in
+    :data:`HUD_FIELDS`, and enforced structurally in both places.
+    """
+
+    if not isinstance(hud, dict):
+        return {}
+    return {key: value for key, value in hud.items() if not is_volatile_hud_key(key)}
 
 
 def situational_hud_revision(hud: dict[str, Any] | None) -> str:
     """Return a stable revision for the exact runtime snapshot fed this turn.
 
-    Volatile keys (:data:`_VOLATILE_HUD_KEYS`) are excluded: the revision
+    Fields declared ``volatile`` in :data:`HUD_FIELDS` are excluded: the revision
     describes the STABLE picture, so a per-turn countdown never invalidates it.
     """
 
     if not isinstance(hud, dict) or not hud:
         return "hud_unavailable"
-    stable = {key: value for key, value in hud.items() if key not in _VOLATILE_HUD_KEYS}
+    stable = stable_hud_fields(hud)
     if not stable:
         return "hud_unavailable"
     canonical = json.dumps(
@@ -578,7 +660,7 @@ def resolve_situational_hud(
         hud["turn_budget"] = turn_budget
 
     # This lane's capability account (``resolve_capability_block``). Volatile by
-    # contract for the reasons recorded at ``_VOLATILE_HUD_KEYS``, so — exactly
+    # contract for the reasons recorded on its ``HUD_FIELDS`` row, so — exactly
     # like ``turn_budget`` — it is excluded from the revision hash and fed to the
     # agent through the envelope's always-emitted tail rather than the cached
     # body. It lives on the dict so the operator's CONTEXT peek and the
@@ -611,13 +693,19 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
     awareness the operator also sees, not an instruction to act. Returns an empty
     string when there is nothing to say.
 
-    This is the HASHED body: it renders only the stable keys. Every key in
-    ``_VOLATILE_HUD_KEYS`` is deliberately absent here and rides the envelope's
-    always-emitted tail instead — rendering one of them into this block would
-    put volatile content behind the revision hash and re-snapshot the whole HUD
-    every turn."""
+    This is the HASHED body, and it renders from :func:`stable_hud_fields` — the
+    same derivation :func:`situational_hud_revision` hashes. A field declared
+    ``volatile`` in :data:`HUD_FIELDS` is therefore not merely "not rendered
+    here by convention": it is not present in the dict this function reads, so
+    it CANNOT be rendered here. Volatile facts ride the envelope's
+    always-emitted tail instead; putting one behind the revision hash would
+    re-snapshot the whole HUD every turn (``turn_budget``) or let a cached body
+    show a stale claim (``capability``)."""
 
     if not isinstance(hud, dict) or not hud:
+        return ""
+    hud = stable_hud_fields(hud)
+    if not hud:
         return ""
 
     lines: list[str] = [

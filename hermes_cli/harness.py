@@ -128,10 +128,9 @@ from agent_runtime.mcp_lane import HARNESS_LANE
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.mission_chat_workdir import mission_chat_workdir_for_persona
 from agent_runtime.observability import build_observability
-from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_lane_capability_drops, chat_runtime_tool_contract, mission_chat_admission_line
+from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_lane_capability_drops
 from agent_runtime.personas import profile_chat_toolsets, seed_personas
-from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
-from agent_runtime.queued_skills import consume_skills_for_next_turn
+from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
@@ -1078,6 +1077,17 @@ def build_parser(parent_subparsers) -> None:
             "Explain MCP admission for this persona (requested / admitted / denied, "
             "with typed reasons). Inspection only — resolves policy without "
             "connecting to or registering any MCP server."
+        ),
+    )
+    persona_tool_diff.add_argument(
+        "--explain-envelope",
+        action="store_true",
+        help=(
+            "Explain the terminal safety envelope for this persona's mission-chat "
+            "lane: whether the lane binds an envelope scope, which command classes "
+            "are operator-grantable vs a hard floor no config lifts, which grants "
+            "are active from the ROOT config, and any typed grant-config issues. "
+            "Inspection only — resolves policy without running a command."
         ),
     )
     persona_tool_diff.add_argument("--json", action="store_true")

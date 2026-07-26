@@ -53,17 +53,45 @@ def test_chat_turn_records_situational_hud_on_its_observability_row():
 
 
 def test_chat_turn_renders_the_same_dict_it_records():
-    # The fed block and the recorded row must come from ONE resolved dict:
-    # `situational_hud_for_instance(...)` then `render_situational_hud_block(...)`
-    # over the same object. Guarding the import keeps a refactor from quietly
-    # reintroducing a second authority (e.g. re-deriving at record time).
+    # The fed block and the recorded row must come from ONE resolved object.
+    # Since the assembly moved into `agent_runtime.mission_chat_turn_context`,
+    # that object is `turn_context`: the observability row records
+    # `turn_context.situational_hud`, and the fed envelope is rendered by
+    # `turn_context.runtime_context_envelope(...)` off the SAME instance. This
+    # guard keeps a refactor from re-deriving either half at record time.
+    #
+    # (That the rendered body really IS the recorded dict is asserted on the
+    # output in tests/agent_runtime/test_mission_chat_turn_context.py ::
+    # test_the_body_the_envelope_carries_is_the_rendered_stable_hud — an
+    # assertion the exec'd CLI body could never support.)
     func = _mission_chat_message_func()
-    called = set()
-    for node in ast.walk(func):
-        if isinstance(node, ast.Call):
-            callee = node.func
-            name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
-            if name:
-                called.add(name)
-    assert "situational_hud_for_instance" in called
-    assert "render_situational_hud_block" in called
+
+    recorded = set()
+    for call in _observability_calls(func):
+        for keyword in call.keywords:
+            if keyword.arg in {
+                "situational_hud",
+                "situational_hud_revision",
+                "situational_hud_delivery",
+            }:
+                value = keyword.value
+                assert isinstance(value, ast.Attribute), keyword.arg
+                assert isinstance(value.value, ast.Name)
+                assert value.value.id == "turn_context"
+                recorded.add(keyword.arg)
+    assert recorded == {
+        "situational_hud",
+        "situational_hud_revision",
+        "situational_hud_delivery",
+    }
+
+    envelope_calls = [
+        node
+        for node in ast.walk(func)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "runtime_context_envelope"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "turn_context"
+    ]
+    assert envelope_calls, "the fed envelope no longer comes from the built context"

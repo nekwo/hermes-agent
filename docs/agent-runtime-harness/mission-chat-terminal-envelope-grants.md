@@ -236,11 +236,23 @@ now produces them.
    (`granted`), what an operator could grant it and with which exact config key
    (`refused_grantable`), and what no config lifts (`refused_hard_floor`) — so
    it plans around the gate instead of discovering it by running the command.
-   The block is volatile by contract (`runtime_hud._VOLATILE_HUD_KEYS`, the
-   `turn_budget` precedent): never hashed into the HUD revision, always emitted,
-   and silent when there is nothing to report. Tests:
+   The block is volatile by contract (its `runtime_hud.HUD_FIELDS` row carries
+   `volatile=True`, the `turn_budget` precedent): never hashed into the HUD
+   revision, always emitted, and silent when there is nothing to report. It
+   rides the tail as a registered `volatile_tail` contributor with its own byte
+   budget, so a widened policy is truncated with an in-band note plus a typed
+   accounting row rather than silently. Tests:
    `tests/agent_runtime/test_runtime_hud_capability_visibility.py`,
-   `tests/hermes_cli/test_mission_chat_capability_visibility.py`.
+   `tests/agent_runtime/test_runtime_hud_field_contract.py`,
+   `tests/agent_runtime/test_mission_chat_turn_context.py`,
+   `tests/agent_runtime/test_volatile_tail.py`.
+
+   The operator half of the same posture is
+   `hermes harness persona tool-diff <persona> --explain-envelope`
+   (`agent_runtime/terminal_envelope_explain.py`): scope bound or not, the
+   grantable/hard-floor split, the live grants and the exact ROOT-config key,
+   rendered from `explain_terminal_envelope` + `hard_floor_command_classes`
+   with no parallel derivation.
 3. **`profile_context` early-yield.** The `binding.profile_home is None`
    branch that produced the fail-open case still skips every environment export
    for profile-less personas. The envelope no longer depends on it, but
