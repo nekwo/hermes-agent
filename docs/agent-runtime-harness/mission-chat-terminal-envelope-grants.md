@@ -246,3 +246,14 @@ now produces them.
    for profile-less personas. The envelope no longer depends on it, but
    anything else keyed on `HERMES_AGENT_RUNTIME_ROOT` inherits the same
    nondeterminism. Worth an explicit audit of that variable's other readers.
+
+   **The audit is DONE** —
+   [`env-determinism-audit.md`](env-determinism-audit.md). All 19 readers of
+   that variable plus every ambient env read in `agent_runtime/` are classified
+   there. Three were nondeterministic and safely fixable and are fixed —
+   including **this module's own `_audit_root`**, where scope → env → *nothing*
+   silently dropped the receipt for a decision this module had already made
+   deterministically. The early-yield itself is **Q1**, one of six operator
+   questions written up decision-ready; it is coupled to **Q2** (the legacy
+   `_harness_safety_block` presence gate, still live on every ungoverned lane)
+   and must be decided with it.
