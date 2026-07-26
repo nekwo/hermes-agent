@@ -31,10 +31,25 @@ lane**, and both were observed live on mission-chat Dev turns on 2026-07-26:
 | fail-**CLOSED** | persona binds a `hermes_profile` ⇒ `persona_profile_context` exports `HERMES_AGENT_RUNTIME_ROOT` | `_harness_safety_block` fires ⇒ `git_push_requires_operator_approval`, and there is **no approval channel on this lane** to satisfy it |
 | fail-**OPEN** | persona binds **no** profile ⇒ `profile_context.py:82-84` early-`yield`, the variable is never exported | envelope inert ⇒ `tools/approval.py` non-interactive default auto-approves ⇒ `git push origin main` **runs, ungated and unrecorded** |
 
-The deciding variable was whether a persona happened to carry a
-`hermes_profile`. That is not a policy; it is a coin flip. It also means the
-envelope's *own* activation signal was never a policy statement — it was a
-side effect of profile binding.
+The deciding variable was never a policy statement. The envelope activated on
+ambient process-environment state that nothing in the policy layer controls,
+and there are at least two independent paths to "unset":
+
+* **Profile binding** — a persona with no `hermes_profile` takes the
+  `profile_context.py:82-84` early-`yield`, so nothing exports the variable for
+  that run. This is the clearest path and the one the table above names.
+* **Process history** — `HERMES_AGENT_RUNTIME_ROOT` is
+  `os.environ.setdefault`-ed by *some* harness command handlers
+  (`_cmd_persona_instance_run_once`, `_run_free_floating_assignment_once`,
+  `_cmd_persona_diagnose`, `_cmd_goal_run`) and **not** by
+  `_cmd_mission_chat_message`. A long-lived `hermes harness serve` process
+  re-dispatches every request through those same handlers, so whether the
+  variable happens to be set when a mission-chat turn runs also depends on what
+  ran in that process *before* it.
+
+Either way: same lane, same role, same command, outcome decided by ambient
+state. That is not a policy, it is a coin flip — and the fail-open side of it
+executed a real `git push origin main` with no receipt anywhere.
 
 Compounding it, the lane's operative rules told the model:
 

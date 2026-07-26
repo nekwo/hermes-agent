@@ -25,8 +25,13 @@ BOTH were observed live on 2026-07-26 on the mission-chat Dev lane:
   false and no cron marker is set — the historical non-interactive fail-open
   default — and ``git push origin main`` executes ungated and unrecorded.
 
-Same lane, same role, opposite outcomes, decided by whether a persona happens
-to carry a ``hermes_profile``. That is not a policy; that is a coin flip.
+Same lane, same role, opposite outcomes — decided by ambient process
+environment state that nothing in the policy layer controls. Profile binding is
+the clearest path to "unset" (above), and process history is a second: some
+harness command handlers ``os.environ.setdefault`` the variable and
+``_cmd_mission_chat_message`` does not, so in a long-lived ``harness serve``
+process the answer also depends on what ran before this turn. Either way it is
+not a policy; it is a coin flip.
 
 What this module does
 ---------------------
