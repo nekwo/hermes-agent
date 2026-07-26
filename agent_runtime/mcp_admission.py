@@ -617,7 +617,15 @@ def scope_toolsets_to_admission(
 
     admitted = [str(name).strip() for name in admitted_servers or [] if str(name or "").strip()]
     keep = {f"{_MCP_TOOLSET_PREFIX}{name}" for name in admitted} | set(admitted)
-    scoped = [name for name in (toolsets or []) if not _is_mcp_toolset(name) or str(name) in keep]
+    # ONE registry read per call, not one per toolset name. On every lane that
+    # registers no MCP at all — which is every lane until an operator flips the
+    # flag — the alias map is empty and the prefix test is the whole check.
+    aliases = _mcp_toolset_aliases()
+    scoped = [
+        name
+        for name in (toolsets or [])
+        if not _is_mcp_toolset(name, aliases) or str(name) in keep
+    ]
     for name in admitted:
         toolset = f"{_MCP_TOOLSET_PREFIX}{name}"
         if toolset not in scoped:
@@ -625,7 +633,23 @@ def scope_toolsets_to_admission(
     return scoped
 
 
-def _is_mcp_toolset(name: Any) -> bool:
+def _mcp_toolset_aliases() -> frozenset[str]:
+    """Alias names that point at an ``mcp-*`` toolset in this process."""
+
+    try:
+        from tools.registry import registry
+
+        aliases = registry.get_registered_toolset_aliases()
+    except Exception:  # pragma: no cover - registry is always importable in-process
+        return frozenset()
+    return frozenset(
+        str(alias)
+        for alias, target in (aliases or {}).items()
+        if str(target).startswith(_MCP_TOOLSET_PREFIX)
+    )
+
+
+def _is_mcp_toolset(name: Any, aliases: frozenset[str]) -> bool:
     """Is this toolset name an MCP toolset — canonical ``mcp-x`` or an alias?
 
     The registry registers ``mcp-<server>`` and an alias ``<server>`` pointing at
@@ -636,15 +660,7 @@ def _is_mcp_toolset(name: Any) -> bool:
     text = str(name or "").strip()
     if not text:
         return False
-    if text.startswith(_MCP_TOOLSET_PREFIX):
-        return True
-    try:
-        from tools.registry import registry
-
-        target = registry.get_toolset_alias_target(text)
-    except Exception:  # pragma: no cover - registry is always importable in-process
-        return False
-    return bool(target and str(target).startswith(_MCP_TOOLSET_PREFIX))
+    return text.startswith(_MCP_TOOLSET_PREFIX) or text in aliases
 
 
 # ── requirement-failure composition ─────────────────────────────────────────
@@ -781,7 +797,12 @@ def admit_mcp_servers(
             done.set()
 
     worker = threading.Thread(target=_work, name="mcp-admission", daemon=True)
-    worker.start()
+    try:
+        worker.start()
+    except Exception:  # pragma: no cover - thread exhaustion; never strand the mutex
+        _ADMISSION_LOCK.release()
+        logger.warning("MCP admission could not start its registration thread", exc_info=True)
+        return McpAdmissionOutcome(attempted=True, denied=tuple(admission.denied))
     finished = done.wait(budget)
     duration_ms = int((time.perf_counter() - started) * 1000)
 

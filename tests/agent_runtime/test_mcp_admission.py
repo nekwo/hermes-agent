@@ -954,6 +954,77 @@ def test_registry_hygiene_still_applies_alongside_admission(qa_profile, monkeypa
     assert REGISTRY_HYGIENE_BLOCKED_TOOLS.issubset(set(kwargs["blocked_tool_names"]))
 
 
+def test_explain_mcp_is_stable_machine_readable_and_registers_nothing(
+    qa_profile, monkeypatch, capsys
+):
+    # The operator's pre-flip inspection surface. It must answer without
+    # connecting to anything — a preview that spawns is not a preview.
+    import argparse
+    import json
+
+    import tools.mcp_tool as mcp_tool
+    from hermes_cli.harness import build_parser
+
+    monkeypatch.setattr(
+        mcp_tool,
+        "register_mcp_servers",
+        lambda *_a, **_k: pytest.fail("--explain-mcp must not register anything"),
+    )
+    _enable_root_admission(monkeypatch)
+
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(
+        ["harness", "persona", "tool-diff", "qa", "--explain-mcp", "--json"]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["mcp_admission"]["enabled"] is True
+    assert payload["mcp_admission"]["requested"] == ["launcher_qa"]
+    assert payload["mcp_admission"]["admitted"] == ["launcher_qa"]
+    assert payload["mcp_admission"]["lane"] == LANE_MISSION_CHAT
+
+
+def test_tool_diff_without_the_flag_explains_the_disabled_state(qa_profile, capsys):
+    import argparse
+    import json
+
+    from hermes_cli.harness import build_parser
+
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(
+        ["harness", "persona", "tool-diff", "qa", "--explain-mcp", "--json"]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["mcp_admission"]["enabled"] is False
+    assert payload["mcp_admission"]["admitted"] == []
+    assert [row["code"] for row in payload["mcp_admission"]["denied"]] == [
+        MCP_ADMISSION_DISABLED
+    ]
+
+
+def test_tool_diff_stays_silent_about_mcp_without_the_flag(qa_profile, capsys):
+    # No --explain-mcp: the payload is unchanged from before this feature.
+    import argparse
+    import json
+
+    from hermes_cli.harness import build_parser
+
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["harness", "persona", "tool-diff", "qa", "--json"])
+
+    assert args.func(args) == 0
+
+    assert "mcp_admission" not in json.loads(capsys.readouterr().out)
+
+
 def test_enabled_toolsets_none_is_passed_through_untouched():
     # `None` means "everything the agent resolves by default"; narrowing it here
     # would change what an unscoped run gets.

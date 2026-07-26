@@ -25,7 +25,12 @@ from .decision_schema import (
     validate_decision_for_role,
 )
 from .decision_contracts import validate_planning_decision
-from .mcp_admission import LANE_MISSION_CHAT, resolve_mcp_admission, scope_toolsets_to_admission
+from .mcp_admission import (
+    LANE_MISSION_CHAT,
+    admission_enabled,
+    resolve_mcp_admission,
+    scope_toolsets_to_admission,
+)
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_plan import current_plan_stage
@@ -931,11 +936,16 @@ def _enabled_toolsets_for_chat(
         )
     if persona.id == DEFAULT_SUPERVISOR_PERSONA_ID:
         resolved = [toolset for toolset in resolved if toolset != "mission_goal"]
-    if admission is None:
-        admission = resolve_mcp_admission(
+    admitted = admission.server_names if admission is not None else ()
+    if admission is None and admission_enabled():
+        # Only pay the policy resolve when the kill switch is on. With it off the
+        # answer is always "nothing admitted" — and the scope below still strips
+        # any MCP toolset that reached the resolved set, which is what keeps the
+        # isolation property independent of the flag.
+        admitted = resolve_mcp_admission(
             persona, lane=LANE_MISSION_CHAT, permission_mode=options.permission_mode
-        )
-    return scope_toolsets_to_admission(resolved, admitted_servers=admission.server_names)
+        ).server_names
+    return scope_toolsets_to_admission(resolved, admitted_servers=admitted)
 
 
 def chat_runtime_tool_contract(
