@@ -101,7 +101,6 @@ def _payload(command, *, scope, cfg=None, monkeypatch=None):
         # Pin the config the decision reads without touching any real config
         # file. The production reader is exercised separately by the
         # root-config-only tests below.
-        real = terminal_tool_module  # noqa: F841 - readability
         import agent_runtime.terminal_envelope as te
 
         monkeypatch.setattr(
