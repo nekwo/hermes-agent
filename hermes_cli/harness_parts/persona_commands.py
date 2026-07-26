@@ -85,6 +85,9 @@ def _cmd_persona_tool_diff(args) -> int:
             session_id=args.session_id,
             task_id=args.task_id,
             goal_id=args.goal_id,
+            # This command IS the harness lane; say so rather than letting the
+            # lane be inferred from argv.
+            entry_point_lane=HARNESS_LANE,
         ),
     )
     data = {"ok": True, "tool_visibility": visibility}
@@ -96,6 +99,14 @@ def _cmd_persona_tool_diff(args) -> int:
             print("blocked:")
             for item in visibility["blocked_tools"]:
                 print(f"  {item['name']} ({item['reason']})")
+        # A declared-but-unregistered capability is a real gap in what this
+        # persona can do here. Printing it beside the tool count is what stops
+        # the count from being read as the whole story.
+        for failure in visibility.get("requirement_failures") or []:
+            print(f"requirement failure: {failure.get('code')}")
+            print(f"  {failure.get('summary')}")
+            if failure.get("fix_hint"):
+                print(f"  fix: {failure['fix_hint']}")
     return 0
 
 

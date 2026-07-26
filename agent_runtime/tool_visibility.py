@@ -11,6 +11,7 @@ from typing import Any
 from model_tools import get_toolset_for_tool
 from tools.registry import registry
 
+from .mcp_lane import current_entry_point_lane, mcp_lane_requirement_failures
 from .models import AgentPersona
 from .personas import (
     ALLOWED_TOOLSETS_BY_ROLE,
@@ -22,7 +23,7 @@ from .personas import (
     effective_toolsets,
     role_from_persona,
 )
-from .profile_readiness import profile_readiness_for_persona
+from .profile_readiness import declared_mcp_server_names, profile_readiness_for_persona
 from .tool_turn_history import load_tool_turn_history
 
 TOOL_VISIBILITY_SCHEMA_VERSION = 2
@@ -67,6 +68,12 @@ class ToolVisibilityOptions:
     #: schema the chat lane actually ships. Callers that don't model a chat lane
     #: leave it ``None`` (unchanged behaviour).
     chat_lane_blocked_tool_names: list[str] | None = None
+    #: Which CLI entry point is resolving this visibility ("harness", "chat",
+    #: "acp", …). Only MCP-registering lanes hand a persona its declared MCP
+    #: tools (see ``mcp_lane``), so the lane is what turns "no MCP tools here"
+    #: from a silent absence into a typed ``requirement_failures`` row. Left
+    #: ``None``, the lane is inferred from the running process.
+    entry_point_lane: str | None = None
     expires_at: str | None = None
     turns_remaining: int | None = None
 
@@ -112,6 +119,11 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
         if name not in set(resolved_toolsets)
     ]
     readiness = _profile_readiness_for_visibility(persona)
+    entry_point_lane = str(opts.entry_point_lane or "").strip() or current_entry_point_lane()
+    requirement_failures = mcp_lane_requirement_failures(
+        declared_servers=declared_mcp_server_names(persona),
+        lane=entry_point_lane,
+    )
     resolved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     resolution_id = _tool_resolution_id(
         persona_id=persona.id,
@@ -170,7 +182,11 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
             "policy": len(policy_tools),
             "excluded_toolsets": len(excluded_toolsets),
         },
-        "requirement_failures": [],
+        "entry_point_lane": entry_point_lane,
+        # Typed capability accounting. Historically hardcoded ``[]``, which made
+        # the by-design "MCP never registers on the harness lane" drop read as
+        # "nothing is wrong" — see ``mcp_lane``.
+        "requirement_failures": requirement_failures,
         "mutation_boundary": _mutation_boundary(final_tools),
         "expires_at": opts.expires_at,
         "turns_remaining": opts.turns_remaining,

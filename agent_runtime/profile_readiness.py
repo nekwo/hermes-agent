@@ -251,6 +251,38 @@ def _configured_mcp_server_names(raw: dict[str, Any]) -> set[str]:
     return set(_configured_mcp_servers(raw))
 
 
+def declared_mcp_server_names(persona) -> list[str]:
+    """Every MCP server this persona DECLARES — required plus profile-configured.
+
+    ``required_mcp_servers`` is the persona's explicit dependency; the profile's
+    ``mcp_servers`` config block is the surface it would actually be handed on a
+    lane that runs discovery. Both are declarations, and a lane that registers
+    neither drops both, so the capability accounting in ``mcp_lane`` reads the
+    union.
+
+    A persona with no bound profile contributes only its ``required_mcp_servers``:
+    it inherits whatever profile the process happens to be running under, and
+    attributing the ambient operator config to it would make this probe answer
+    differently depending on ``HERMES_HOME`` — the exact class of lie this
+    module exists to retire.
+
+    Cheap by construction: the profile binding is path arithmetic and the config
+    read is the same mtime-cached parse ``profile_readiness_for_persona`` already
+    performs. Never raises — a declaration probe must not be able to break a
+    visibility resolve.
+    """
+
+    names = set(_effective_required_mcp_servers(persona))
+    try:
+        binding = resolve_persona_profile(persona)
+        if binding.profile_home is not None:
+            raw = cached_yaml_file(binding.profile_home / "config.yaml", default={}) or {}
+            names.update(_configured_mcp_server_names(raw))
+    except Exception:  # pragma: no cover - defensive; declaration probe is best-effort
+        pass
+    return sorted(names)
+
+
 def _persona_path_token_issues(persona) -> list[dict[str, Any]]:
     """Typed issues for persona path fields whose tokens never expanded.
 
