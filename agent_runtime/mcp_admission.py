@@ -150,7 +150,8 @@ READ_ONLY_ALLOWLIST_PROFILE = "reviewer"
 #: **Positive** per-server tool allowlist for a ``read_only`` admission — the
 #: resolved ALLOW set of the ``reviewer`` row of the launcher's own per-profile
 #: allowlist, ``EterniaLauncher docs/stages/qa-reboot/launcher_qa_profile_allowlists.yaml``
-#: (v1, 2026-05-17, + the Stage 19 / VOICE_QA §5.E amendments).
+#: (v1, 2026-05-17, + the Stage 19 / VOICE_QA §5.E / batched-drill amendments —
+#: snapshot pinned at launcher ``3e3feff0``, a 26-tool surface).
 #:
 #: Positive, not negative, deliberately: a tool the launcher's QA server grows
 #: LATER is denied to ``read_only`` by default instead of silently inheriting it.
