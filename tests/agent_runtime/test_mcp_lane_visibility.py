@@ -75,13 +75,12 @@ def test_harness_lane_reports_declared_mcp_servers_as_a_typed_drop():
     failures = _mcp_failures(visibility)
     assert len(failures) == 1
     failure = failures[0]
+    assert failure["server"] == "launcher_qa"
     assert failure["entry_point_lane"] == HARNESS_LANE
-    assert failure["lane_registers_mcp"] is False
-    assert failure["declared_mcp_servers"] == ["launcher_qa"]
-    assert failure["unregistered_mcp_servers"] == ["launcher_qa"]
-    # The operator/agent-facing text has to name the servers, or the row is
-    # just a different flavour of silence.
+    # The operator/agent-facing text has to name the server AND the lane, or the
+    # row is just a different flavour of silence.
     assert "launcher_qa" in failure["summary"]
+    assert HARNESS_LANE in failure["summary"]
     assert failure["fix_hint"]
 
 
@@ -91,9 +90,22 @@ def test_harness_lane_names_every_declared_server():
         ToolVisibilityOptions(entry_point_lane=HARNESS_LANE),
     )
 
-    failure = _mcp_failures(visibility)[0]
-    assert failure["declared_mcp_servers"] == ["launcher_qa", "playwright"]
-    assert failure["unregistered_mcp_servers"] == ["launcher_qa", "playwright"]
+    assert [row["server"] for row in _mcp_failures(visibility)] == [
+        "launcher_qa",
+        "playwright",
+    ]
+
+
+def test_row_shape_matches_the_typed_issue_contract():
+    # Same key contract as machine_roots.PathTokenIssue.row(), so the operator
+    # surfaces that already render typed issue rows need no new case
+    # (mission-chat-mcp-admission.md section D).
+    visibility = resolve_tool_visibility(
+        _mcp_declaring_persona("launcher_qa"),
+        ToolVisibilityOptions(entry_point_lane=HARNESS_LANE),
+    )
+
+    assert {"code", "server", "summary", "fix_hint"} <= set(_mcp_failures(visibility)[0])
 
 
 def test_chat_lane_carries_no_mcp_drop():
@@ -215,9 +227,7 @@ def test_only_the_unregistered_subset_is_reported():
         registered_servers=["playwright"],
     )
 
-    assert len(rows) == 1
-    assert rows[0]["declared_mcp_servers"] == ["launcher_qa", "playwright"]
-    assert rows[0]["unregistered_mcp_servers"] == ["launcher_qa"]
+    assert [row["server"] for row in rows] == ["launcher_qa"]
 
 
 def test_blank_and_duplicate_server_names_are_normalized():
@@ -227,7 +237,7 @@ def test_blank_and_duplicate_server_names_are_normalized():
         registered_servers=[],
     )
 
-    assert rows[0]["declared_mcp_servers"] == ["launcher_qa"]
+    assert [row["server"] for row in rows] == ["launcher_qa"]
 
 
 def test_unknown_lane_still_reports_the_drop():

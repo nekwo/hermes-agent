@@ -165,11 +165,18 @@ def mcp_lane_requirement_failures(
     * ``lane`` — which entry point resolved this visibility.
     * ``registered_servers`` — what actually registered in this process.
 
-    Emits at most ONE row, and only when the lane is not an MCP registrar AND
-    at least one declared server is genuinely absent from the registry. A lane
-    that DOES register but whose server failed to connect is a different
+    Emits ONE row per dropped server, and only when the lane is not an MCP
+    registrar AND that declared server is genuinely absent from the registry. A
+    lane that DOES register but whose server failed to connect is a different
     failure class (a connect/config fault, already surfaced as
     ``mcp_attention`` profile readiness) and is deliberately not claimed here.
+
+    Row shape is ``{code, server, summary, fix_hint}`` — deliberately the same
+    shape as ``machine_roots.PathTokenIssue.row()``, per
+    ``docs/agent-runtime-harness/mission-chat-mcp-admission.md`` §D, so operator
+    surfaces that already render typed issue rows need no new case.
+    ``entry_point_lane`` rides along because "not registered" is only actionable
+    once you know WHERE it was not registered.
     """
 
     declared = _clean(declared_servers)
@@ -183,30 +190,27 @@ def mcp_lane_requirement_failures(
         if registered_servers is None
         else frozenset(_clean(registered_servers))
     )
-    unregistered = [name for name in declared if name not in registered]
-    if not unregistered:
-        return []
     return [
         {
             "code": MCP_NOT_REGISTERED_ON_LANE,
+            "server": name,
             "entry_point_lane": resolved_lane,
-            "lane_registers_mcp": False,
-            "declared_mcp_servers": declared,
-            "unregistered_mcp_servers": unregistered,
             "summary": (
-                f"MCP tools are not registered on the '{resolved_lane}' lane, so "
-                f"{len(unregistered)} declared MCP server(s) contribute no tools here: "
-                + ", ".join(unregistered)
+                f"'{name}' is declared for this persona, but MCP tools are not "
+                f"registered on the '{resolved_lane}' lane — it contributes no tools here."
             ),
             "fix_hint": (
-                "This is by design, not a permission problem — do not chase permission "
-                "modes or blocked-tool counts. Only the agent entry points "
-                "(chat/acp/rl, cron run|tick, gateway run, mcp serve) run MCP discovery; "
-                "the harness lane never calls discover_mcp_tools(). Run the persona on "
-                "an MCP-registering lane (e.g. `hermes -p <profile> chat`) or use that "
-                "server's own harness-side contract."
+                "By design, not a permission problem: no permission mode can expose a "
+                "tool that was never registered, so do not chase permission modes or "
+                "blocked-tool counts. Only the agent entry points (chat/acp/rl, "
+                "cron run|tick, gateway run, mcp serve) run MCP discovery; the harness "
+                "lane never calls discover_mcp_tools(). Run the persona on an "
+                f"MCP-registering lane (e.g. `hermes -p <profile> chat`), or use {name}'s "
+                "own harness-side contract."
             ),
         }
+        for name in declared
+        if name not in registered
     ]
 
 
