@@ -46,7 +46,11 @@ from .mission_plan import current_plan_stage
 from .personas import ALLOWED_TOOLSETS_BY_ROLE, DEFAULT_SUPERVISOR_PERSONA_ID, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
-from .terminal_envelope import scope_for_persona as terminal_envelope_scope_for_persona
+from .terminal_envelope import (
+    LANE_MISSION_WORKER as TERMINAL_ENVELOPE_LANE_MISSION_WORKER,
+    LANE_PERSONA_CHAT as TERMINAL_ENVELOPE_LANE_PERSONA_CHAT,
+    scope_for_persona as terminal_envelope_scope_for_persona,
+)
 from .profile_runner import (
     AgentRunRequest,
     AgentRunResult,
@@ -165,6 +169,19 @@ class GPTPersonaRuntime:
                 "timing_key": "provider_call_ms",
             },
         )
+        # Audit Q2: a worker tick is a HARNESS-CONSTRUCTED run, so it binds a
+        # scope. Before this, the worker lane fell through to the legacy
+        # pattern table in ``tools/terminal_tool.py``, whose gate is the mere
+        # presence of ``HERMES_AGENT_RUNTIME_ROOT`` — so whether ``rm -rf`` was
+        # blocked on a tick depended on process ancestry. The lane is not in
+        # GOVERNED_LANES (no grant table applies), so every gated class here is
+        # the legacy HARD BLOCK — the same answer, now reached deterministically.
+        envelope_scope = terminal_envelope_scope_for_persona(
+            persona,
+            lane=TERMINAL_ENVELOPE_LANE_MISSION_WORKER,
+            session_id=run.session_id,
+            runtime_root=paths.store_root(),
+        )
         try:
             result = self._runner.run(
                 AgentRunRequest(
@@ -172,6 +189,7 @@ class GPTPersonaRuntime:
                     provider=persona.provider or self._default_provider,
                     model=persona.model or self._default_model or "",
                     api_mode=persona.api_mode,
+                    terminal_envelope_scope=envelope_scope,
                     enabled_toolsets=effective_toolsets(persona),
                     blocked_tool_names=_blocked_tool_names_for_run(persona, ctx),
                     quiet_mode=True,
@@ -256,12 +274,27 @@ class GPTPersonaRuntime:
             raise ValueError(binding.summary)
         assert_provider_health_for_persona(persona)
         clarify_capture = MissionChatClarifyCapture()
+        # Audit Q2: free-chat is harness-constructed, so it binds a scope and
+        # stops being decided by whether HERMES_AGENT_RUNTIME_ROOT happens to be
+        # exported. Its lane is NOT governed by the grant table — free-chat is a
+        # conversational surface, not the primary work lane — so gated classes
+        # keep the legacy hard block, now reached by construction.
+        #
+        # This is NOT ``hermes chat``: that is the operator's own shell, never
+        # reaches AgentRunRequest, and must never carry an envelope.
+        envelope_scope = terminal_envelope_scope_for_persona(
+            persona,
+            lane=TERMINAL_ENVELOPE_LANE_PERSONA_CHAT,
+            session_id=session_id,
+            runtime_root=paths.store_root(),
+        )
         result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
                 provider=persona.provider or self._default_provider,
                 model=persona.model or self._default_model or "",
                 api_mode=persona.api_mode,
+                terminal_envelope_scope=envelope_scope,
                 enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=session_id),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
                 quiet_mode=True,

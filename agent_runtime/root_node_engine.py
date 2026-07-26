@@ -17,6 +17,10 @@ from .profile_runner import AgentRunRequest, ProfileAgentRunner, RunBudgetExceed
 from .progress import RunProgressSink
 from .states import RunState, TaskState
 from .store import ProofStore, RunStore, TaskStore
+from .terminal_envelope import (
+    LANE_MISSION_ROOT_NODE as TERMINAL_ENVELOPE_LANE_MISSION_ROOT_NODE,
+    scope_for_persona as terminal_envelope_scope_for_persona,
+)
 from .worker_sessions import WorkerSessionStore
 
 
@@ -145,12 +149,22 @@ class RootNodeEngine:
         if binding.readiness == "missing_profile":
             raise ValueError(binding.summary)
         progress_sink = RunProgressSink(run_store=self.run_store, event_log=self.event_log, run_id=run.id)
+        # Audit Q2: the root node is harness-constructed, so it binds a scope
+        # rather than inheriting the envelope's activation from whatever
+        # exported HERMES_AGENT_RUNTIME_ROOT in this process. Outside
+        # GOVERNED_LANES, so gated classes keep the legacy hard block.
         return self.runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
                 provider=persona.provider or getattr(self.config, "default_provider", None),
                 model=persona.model or getattr(self.config, "default_model", None) or "",
                 api_mode=persona.api_mode or getattr(self.config, "default_api_mode", "codex_responses"),
+                terminal_envelope_scope=terminal_envelope_scope_for_persona(
+                    persona,
+                    lane=TERMINAL_ENVELOPE_LANE_MISSION_ROOT_NODE,
+                    session_id=run.session_id,
+                    runtime_root=paths.store_root(),
+                ),
                 enabled_toolsets=_root_toolsets(persona),
                 blocked_tool_names=[],
                 quiet_mode=True,

@@ -41,13 +41,20 @@ from agent_runtime.terminal_envelope import (
     ENVELOPE_COMMAND_NOT_GRANTABLE,
     ENVELOPE_COMMAND_REQUIRES_GRANT,
     ENVELOPE_DECISION_LOG,
+    ENVELOPE_LANE_NOT_GOVERNED,
     GIT_PUSH,
     GRANT_CLASS_NOT_GRANTABLE,
     GRANT_MALFORMED,
     GRANT_UNKNOWN_COMMAND_CLASS,
     GRANTABLE_COMMAND_CLASSES,
     COMMAND_CLASSES,
+    GOVERNED_LANES,
+    HARNESS_LANES,
     LANE_MISSION_CHAT,
+    LANE_MISSION_NODE,
+    LANE_MISSION_ROOT_NODE,
+    LANE_MISSION_WORKER,
+    LANE_PERSONA_CHAT,
     LEGACY_REASON_BY_CLASS,
     NETWORK_EGRESS,
     OUTCOME_ALLOW,
@@ -61,6 +68,7 @@ from agent_runtime.terminal_envelope import (
     envelope_decision,
     explain_terminal_envelope,
     record_envelope_decision,
+    record_legacy_block,
     resolve_terminal_envelope_grants,
     terminal_envelope_scope,
 )
@@ -645,11 +653,25 @@ def test_chat_lane_keeps_no_envelope_at_all(monkeypatch):
 
 
 def test_a_grant_does_not_leak_off_the_governed_lane(tmp_path):
-    """An ungoverned lane is not consulted against the grant table at all."""
+    """A grant on the governed lane refuses — never grants — on another lane.
+
+    The assertion moved (audit Q2): a harness lane outside ``GOVERNED_LANES``
+    used to get ``None`` ("no opinion, fall through to the env-keyed legacy
+    table"). It now gets a typed REFUSAL. The property under test is unchanged
+    and strictly stronger — the mission-chat grant does not reach the worker
+    lane — and it no longer depends on the ambient environment to hold.
+    """
 
     cfg = _cfg(**{"dev": {LANE_MISSION_CHAT: [GIT_PUSH]}})
-    worker = TerminalEnvelopeScope(lane="mission_worker", role="dev", runtime_root=str(tmp_path))
-    assert envelope_decision("git push origin main", scope=worker, cfg=cfg) is None
+    worker = TerminalEnvelopeScope(lane=LANE_MISSION_WORKER, role="dev", runtime_root=str(tmp_path))
+    decision = envelope_decision("git push origin main", scope=worker, cfg=cfg)
+    assert decision is not None
+    assert decision.outcome == OUTCOME_REFUSE
+    assert decision.granted is False
+    assert decision.failure_class == ENVELOPE_LANE_NOT_GOVERNED
+    # No config key is named, because none exists for this lane. Naming one
+    # would be the same lie the governed-lane fix hint was written to retire.
+    assert decision.config_key is None
 
 
 def test_policy_import_failure_falls_back_to_the_hard_block(tmp_path, monkeypatch):
@@ -671,6 +693,210 @@ def test_policy_import_failure_falls_back_to_the_hard_block(tmp_path, monkeypatc
     payload = terminal_tool_module._harness_envelope_block("git push origin main")
     assert payload is not None
     assert payload["block_reason"] == "git_push_requires_operator_approval"
+
+
+# ── audit Q2: the per-lane {env set, env unset} matrix ──────────────────────
+#
+# The direct executable statement of the audit for the envelope: for EVERY lane,
+# the answer is the same with HERMES_AGENT_RUNTIME_ROOT present and absent. What
+# differs between lanes is the answer itself, and that difference is policy
+# (GOVERNED_LANES), not ancestry.
+
+_UNGOVERNED_HARNESS_LANES = (
+    LANE_MISSION_WORKER,
+    LANE_MISSION_NODE,
+    LANE_MISSION_ROOT_NODE,
+    LANE_PERSONA_CHAT,
+)
+
+
+def _outcome_signature(payload) -> tuple:
+    """The observable outcome of the gate, reduced to what a caller can see."""
+
+    if payload is None:
+        return ("proceed",)
+    return (
+        "blocked",
+        payload.get("status"),
+        payload.get("blocked_by"),
+        payload.get("block_reason"),
+        payload.get("failure_class"),
+        payload.get("command_class"),
+        payload.get("lane"),
+        payload.get("config_key"),
+    )
+
+
+@pytest.mark.parametrize("lane", sorted(HARNESS_LANES))
+@pytest.mark.parametrize("command", ["git push origin main", "echo hello"])
+def test_every_harness_lane_answers_identically_with_and_without_the_env_var(
+    lane, command, tmp_path, monkeypatch
+):
+    scope = TerminalEnvelopeScope(lane=lane, role="dev", persona_id="dev", session_id="s1")
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "present"))
+    with_env = _outcome_signature(_payload(command, scope=scope, cfg=_cfg(), monkeypatch=monkeypatch))
+
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    without_env = _outcome_signature(_payload(command, scope=scope, cfg=_cfg(), monkeypatch=monkeypatch))
+
+    assert with_env == without_env
+
+
+@pytest.mark.parametrize("lane", _UNGOVERNED_HARNESS_LANES)
+def test_an_ungoverned_harness_lane_hard_blocks_a_gated_class(lane, monkeypatch, tmp_path):
+    """A bound scope IS the activation signal — no env var involved.
+
+    Before this, these lanes fell through to
+    ``tools/terminal_tool.py::_harness_safety_block``, whose gate is
+    ``if not os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip(): return None``.
+    A worker tick therefore blocked ``rm -rf`` or not depending on what had run
+    earlier in the same ``harness serve`` process.
+    """
+
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    scope = TerminalEnvelopeScope(lane=lane, role="dev", runtime_root=str(tmp_path))
+    payload = _payload("rm -rf /tmp/x", scope=scope, cfg=_cfg(), monkeypatch=monkeypatch)
+    assert payload is not None
+    assert payload["blocked_by"] == "harness_execution_safety"
+    assert payload["block_reason"] == LEGACY_REASON_BY_CLASS[RECURSIVE_DELETE]
+    assert payload["failure_class"] == ENVELOPE_LANE_NOT_GOVERNED
+    assert payload["config_key"] is None
+
+
+@pytest.mark.parametrize("lane", _UNGOVERNED_HARNESS_LANES)
+def test_an_ungoverned_harness_lane_still_runs_ungated_commands(lane, monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    scope = TerminalEnvelopeScope(lane=lane, role="dev", runtime_root=str(tmp_path))
+    assert _payload("git status", scope=scope, cfg=_cfg(), monkeypatch=monkeypatch) is None
+
+
+def test_an_ungoverned_lane_refusal_names_no_config_key_to_chase(tmp_path):
+    """The refusal must not send an operator after a stanza that grants nothing."""
+
+    scope = TerminalEnvelopeScope(lane=LANE_MISSION_WORKER, role="dev", runtime_root=str(tmp_path))
+    decision = envelope_decision("git push origin main", scope=scope, cfg=_cfg())
+    assert "agent_runtime.terminal_envelope.grants" not in decision.fix_hint
+    assert LANE_MISSION_CHAT in decision.fix_hint  # says WHERE grants do apply
+    assert "Do NOT retry" in decision.fix_hint
+
+
+def test_hermes_chat_is_not_a_harness_lane():
+    """The operator's own shell must never carry an envelope.
+
+    Structural, not conventional: ``hermes chat`` never constructs an
+    ``AgentRunRequest``, so there is no site that could bind a scope for it, and
+    no lane spelling for it exists here to bind.
+    """
+
+    assert not {lane for lane in HARNESS_LANES if "hermes" in lane or lane == "chat"}
+    assert LANE_PERSONA_CHAT != "chat"
+
+
+def test_only_mission_chat_is_grant_governed():
+    """Widening the grant table is a product decision; pin today's answer."""
+
+    assert GOVERNED_LANES == frozenset({LANE_MISSION_CHAT})
+    assert GOVERNED_LANES < HARNESS_LANES
+
+
+# ── audit Q3: the legacy receipt writer's fork-owned replacement ─────────────
+
+
+def test_legacy_block_receipt_is_written_when_the_env_var_is_present(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path))
+    assert record_legacy_block("rm -rf /", "tree_wipe_blocked") is True
+    row = json.loads(
+        (tmp_path / "blocked_tool_attempts.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert row["reason"] == "tree_wipe_blocked"
+    assert row["tool"] == "terminal"
+    assert row["command_preview"] == "rm -rf /"
+    assert row["audit_root_source"] == "env"
+
+
+def test_legacy_block_receipt_is_written_when_the_env_var_is_absent(tmp_path, monkeypatch):
+    """THE Q3 bug: ``tools/`` returns early here and records nothing at all."""
+
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    import agent_runtime.paths as paths_module
+
+    monkeypatch.setattr(paths_module, "store_root", lambda: tmp_path)
+    assert record_legacy_block("rm -rf /", "tree_wipe_blocked") is True
+    row = json.loads(
+        (tmp_path / "blocked_tool_attempts.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+    )
+    assert row["reason"] == "tree_wipe_blocked"
+    assert row["audit_root_source"] == "resolver"
+
+
+def test_legacy_block_receipt_row_is_identical_either_way(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "via-env"))
+    record_legacy_block("rm -rf /", "tree_wipe_blocked")
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    import agent_runtime.paths as paths_module
+
+    monkeypatch.setattr(paths_module, "store_root", lambda: tmp_path / "via-resolver")
+    record_legacy_block("rm -rf /", "tree_wipe_blocked")
+
+    def _row(where):
+        raw = (where / "blocked_tool_attempts.jsonl").read_text(encoding="utf-8").splitlines()[-1]
+        row = json.loads(raw)
+        row.pop("ts")
+        row.pop("audit_root_source")
+        return row
+
+    assert _row(tmp_path / "via-env") == _row(tmp_path / "via-resolver")
+
+
+def test_legacy_block_receipt_reports_when_nothing_can_be_resolved(monkeypatch):
+    """``False`` means "genuinely nowhere to write", not "nobody exported a var"."""
+
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    import agent_runtime.paths as paths_module
+
+    def _refuse():
+        raise RuntimeError("probe isolation")
+
+    monkeypatch.setattr(paths_module, "store_root", _refuse)
+    assert record_legacy_block("rm -rf /", "tree_wipe_blocked") is False
+
+
+def test_legacy_block_receipt_keeps_the_row_keys_the_upstream_writer_emits():
+    """The fork-owned replacement must be drop-in for existing log readers."""
+
+    import inspect
+
+    from tools import terminal_tool as terminal_tool_module
+
+    source = inspect.getsource(terminal_tool_module._log_harness_blocked_attempt)
+    # Every key the upstream writer puts on the row must still be produced by
+    # the replacement. If upstream adds one, this fails and routes the reader to
+    # docs/agent-runtime-harness/env-determinism-audit.md before the delegation
+    # diff is applied.
+    for key in ("ts", "tool", "reason", "command_preview"):
+        assert f'"{key}"' in source
+    assert '"failure_class"' not in source
+
+
+def test_the_upstream_receipt_writer_still_has_the_shape_the_doc_s_diff_targets():
+    """Drift guard for the operator-owed one-line delegation (audit Q3).
+
+    ``tools/`` is outside this fork's edit boundary, so the Q3 fix ships as a
+    fork-owned :func:`record_legacy_block` plus a documented one-line upstream
+    change. If ``_log_harness_blocked_attempt`` changes shape, that documented
+    diff no longer applies and this test says so out loud rather than letting
+    the doc rot into a lie.
+    """
+
+    import inspect
+
+    from tools import terminal_tool as terminal_tool_module
+
+    source = inspect.getsource(terminal_tool_module._log_harness_blocked_attempt)
+    assert 'os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()' in source
+    assert "if not root:" in source
+    assert "        return" in source
 
 
 # ── operator view ───────────────────────────────────────────────────────────

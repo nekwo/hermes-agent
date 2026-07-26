@@ -26,6 +26,10 @@ from .repo_context import (
 )
 from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
+from .terminal_envelope import (
+    LANE_MISSION_NODE as TERMINAL_ENVELOPE_LANE_MISSION_NODE,
+    scope_for_persona as terminal_envelope_scope_for_persona,
+)
 from .store import ProofStore, RunStore, TaskStore
 from .worker_sessions import WorkerSessionStore
 
@@ -286,12 +290,23 @@ class NodeToolService:
             isolated = isolated_repo_context_for_run(repo_ctx, task_id=task.id, run_id=run.id)
             run.progress = {**(run.progress or {}), "repo_execution": {"repo_label": repo_ctx.repo_label}}
             self.run_store.update(run)
+        # Audit Q2: a child-node run is harness-constructed, so it binds a scope
+        # and the terminal envelope stops being keyed on whether
+        # HERMES_AGENT_RUNTIME_ROOT happens to be exported in this process. The
+        # lane is outside GOVERNED_LANES, so gated classes keep the legacy hard
+        # block — the same answer, reached by construction instead of ancestry.
         return self.runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
                 provider=persona.provider or getattr(self.config, "default_provider", None),
                 model=persona.model or getattr(self.config, "default_model", None) or "",
                 api_mode=persona.api_mode or getattr(self.config, "default_api_mode", "codex_responses"),
+                terminal_envelope_scope=terminal_envelope_scope_for_persona(
+                    persona,
+                    lane=TERMINAL_ENVELOPE_LANE_MISSION_NODE,
+                    session_id=run.session_id,
+                    runtime_root=paths.store_root(),
+                ),
                 enabled_toolsets=_child_enabled_toolsets(persona),
                 blocked_tool_names=[],
                 quiet_mode=True,

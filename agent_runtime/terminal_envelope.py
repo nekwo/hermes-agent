@@ -108,10 +108,45 @@ logger = logging.getLogger(__name__)
 
 LANE_MISSION_CHAT = "mission_chat"
 
-#: Lanes whose runs are governed by this decision point. Deliberately ONE lane:
-#: the operator ruling makes mission-chat the primary work lane, and every
-#: other lane keeps the behavior it has today. Widening this is a product
-#: decision, not a config edit.
+#: The other harness-constructed lanes. Each is a run the harness itself builds
+#: an ``AgentRunRequest`` for, so a scope is free to bind — and binding it is
+#: what makes "is this a harness run?" a fact the POLICY layer owns rather than
+#: a guess read off ``HERMES_AGENT_RUNTIME_ROOT`` (audit Q2).
+LANE_MISSION_WORKER = "mission_worker"
+LANE_MISSION_NODE = "mission_node"
+LANE_MISSION_ROOT_NODE = "mission_root_node"
+LANE_PERSONA_CHAT = "persona_chat"
+
+#: Every lane the harness constructs a run for. NOT a permission list — see
+#: :data:`GOVERNED_LANES` for that. This set exists so "no scope bound" can mean
+#: "not a harness run" **by construction**: anything outside it (``hermes
+#: chat``, cron, gateway, acp, plain CLI) binds no scope, and this module keeps
+#: returning ``None`` for it.
+#:
+#: ``hermes chat`` is absent on purpose and must STAY absent: it is the
+#: operator's own shell, and an envelope there is wrong. The exclusion is
+#: structural rather than a convention someone has to remember — that lane never
+#: reaches ``AgentRunRequest`` at all, so there is no site that could bind it.
+HARNESS_LANES: frozenset[str] = frozenset(
+    {
+        LANE_MISSION_CHAT,
+        LANE_MISSION_WORKER,
+        LANE_MISSION_NODE,
+        LANE_MISSION_ROOT_NODE,
+        LANE_PERSONA_CHAT,
+    }
+)
+
+#: Lanes whose gated classes an operator GRANT table can lift. Deliberately ONE
+#: lane: the operator ruling makes mission-chat the primary work lane, and it is
+#: the only lane where a config edit can allow a gated class. Widening this is a
+#: product decision, not a config edit.
+#:
+#: A harness lane outside this set is NOT ungoverned. It binds a scope, so this
+#: module still answers for it — with the legacy HARD BLOCK for every gated
+#: class and no config key that could lift it
+#: (:data:`ENVELOPE_LANE_NOT_GOVERNED`). That is the audit's Q2 shape: the
+#: envelope's activation is a bound scope, never an ambient variable.
 GOVERNED_LANES = frozenset({LANE_MISSION_CHAT})
 
 
@@ -326,6 +361,12 @@ ENVELOPE_COMMAND_REQUIRES_GRANT = "envelope_command_requires_grant"
 #: no config can lift. Distinct from the above on purpose: telling an agent to
 #: "ask the operator for a grant" that cannot exist would be a new lie.
 ENVELOPE_COMMAND_NOT_GRANTABLE = "envelope_command_not_grantable"
+#: The run IS a harness run (a scope is bound) but its lane is outside
+#: :data:`GOVERNED_LANES`, so no grant table applies and every gated class is
+#: hard-blocked. Distinct from both codes above: the class may well be grantable
+#: — just not HERE — so the honest fix hint names the lane, not a config key
+#: that does not exist for it.
+ENVELOPE_LANE_NOT_GOVERNED = "envelope_lane_not_governed"
 
 #: ``grants`` config issue codes (never widen; always reported).
 GRANT_UNKNOWN_COMMAND_CLASS = "envelope_grant_unknown_command_class"
@@ -581,12 +622,22 @@ def envelope_decision(
     """Decide one command, or return ``None`` when this lane is not governed.
 
     ``None`` is load-bearing: it means "this module has no opinion, keep the
-    legacy behavior" and is what every non-mission-chat lane gets. Callers must
-    treat ``None`` as "fall through", never as "allow".
+    legacy behavior" and is what every run that binds NO scope gets — i.e.
+    everything that is not a harness-constructed run (``hermes chat``, cron,
+    gateway, acp, plain CLI). Callers must treat ``None`` as "fall through",
+    never as "allow".
+
+    Audit Q2: the answer is keyed on the bound scope alone. A harness lane
+    outside :data:`GOVERNED_LANES` still gets a typed answer here (the legacy
+    hard block, as :data:`ENVELOPE_LANE_NOT_GOVERNED`) rather than falling
+    through to ``tools/terminal_tool.py::_harness_safety_block``, whose gate is
+    the mere PRESENCE of ``HERMES_AGENT_RUNTIME_ROOT``. Answering here is what
+    makes those lanes deterministic without editing ``tools/``: the fall-through
+    never happens for a harness run, so the env-keyed gate cannot decide it.
     """
 
     resolved = scope if scope is not None else current_terminal_envelope_scope()
-    if resolved is None or not resolved.governed:
+    if resolved is None:
         return None
 
     command_class = classify_command(command)
@@ -600,6 +651,25 @@ def envelope_decision(
         )
 
     reason = legacy_reason_for_class(command_class)
+    if not resolved.governed:
+        return TerminalEnvelopeDecision(
+            outcome=OUTCOME_REFUSE,
+            lane=resolved.lane,
+            role=resolved.role,
+            command_class=command_class,
+            reason=reason,
+            failure_class=ENVELOPE_LANE_NOT_GOVERNED,
+            config_key=None,
+            summary=(
+                f"This command {CLASS_SUMMARY.get(command_class, 'is envelope-gated')} "
+                f"('{command_class}'), and the '{resolved.lane}' lane is not governed by "
+                "the terminal-envelope grant table, so nothing can lift it here."
+            ),
+            fix_hint=_ungoverned_lane_fix_hint(lane=resolved.lane, command_class=command_class),
+            persona_id=resolved.persona_id,
+            session_id=resolved.session_id,
+        )
+
     grants = resolve_terminal_envelope_grants(role=resolved.role, lane=resolved.lane, cfg=cfg)
     config_key = grants.config_key
 
@@ -663,6 +733,30 @@ def envelope_decision(
         persona_id=resolved.persona_id,
         session_id=resolved.session_id,
         grant_issues=grants.issues,
+    )
+
+
+def _ungoverned_lane_fix_hint(*, lane: str, command_class: str) -> str:
+    """The refusal an agent reads on a harness lane with no grant table.
+
+    Deliberately does NOT name a config key. ``grants.<role>.<lane>`` is
+    resolved per lane and only :data:`GOVERNED_LANES` is consulted, so pointing
+    an agent (or an operator) at a stanza for this lane would be a key that
+    grants nothing — the same class of lie the governed-lane fix hint was
+    written to retire.
+    """
+
+    return "\n".join(
+        [
+            f"The '{lane}' lane runs under the Harness execution safety envelope's hard "
+            f"block: '{command_class}' is refused here and NO configuration lifts it.",
+            f"Grants are resolved per lane and only the "
+            f"'{', '.join(sorted(GOVERNED_LANES))}' lane has a grant table today; widening "
+            "that set is a product decision, not a config edit.",
+            "Do NOT retry, reword, or split this command — every form of it resolves to the "
+            f"same '{command_class}' class and will be refused identically. Report the "
+            "refusal to the operator and continue with the work you can do.",
+        ]
     )
 
 
@@ -857,6 +951,68 @@ def record_envelope_decision(
         )
 
 
+def record_legacy_block(
+    command: str,
+    reason: str,
+    *,
+    scope: TerminalEnvelopeScope | None = None,
+) -> bool:
+    """Write the receipt for a LEGACY (pattern-table) block. Audit Q3.
+
+    ``tools/terminal_tool.py::_log_harness_blocked_attempt`` writes the same row
+    but resolves its root as ``os.getenv("HERMES_AGENT_RUNTIME_ROOT")`` and
+    **returns early when that is unset** — the command was blocked and nothing
+    recorded it, silently. That is reader #4's bug one file over, and reader #4
+    is the reason this module already owns a three-rung ladder (:func:`_audit_root`).
+
+    This is the fork-owned replacement for that body. It exists on this side of
+    the ``tools/`` boundary so the upstream change is a ONE-LINE delegation
+    rather than a re-derivation:
+
+    .. code-block:: diff
+
+        -def _log_harness_blocked_attempt(command: str, reason: str) -> None:
+        -    root = os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()
+        -    if not root:
+        -        return
+        -    try:
+        -        path = Path(root).expanduser() / "blocked_tool_attempts.jsonl"
+        -        ...
+        +def _log_harness_blocked_attempt(command: str, reason: str) -> None:
+        +    from agent_runtime.terminal_envelope import record_legacy_block
+        +
+        +    record_legacy_block(command, reason)
+
+    Until that lands, the legacy writer keeps its silent-drop branch on runs
+    that bind NO envelope scope. Runs that DO bind one never reach it at all:
+    :func:`envelope_decision` answers for every harness lane (Q2), so
+    ``_harness_envelope_block`` returns before the legacy table is consulted and
+    :func:`record_envelope_decision` writes the receipt through the same ladder.
+
+    Row shape is the legacy one verbatim (``ts``/``tool``/``reason``/
+    ``command_preview``) so existing ``blocked_tool_attempts.jsonl`` readers
+    need no change, plus ``audit_root_source`` so a receipt says which rung
+    resolved its root. Returns whether a row was written; never raises.
+    """
+
+    resolved = scope if scope is not None else current_terminal_envelope_scope()
+    root = _audit_root(resolved)
+    if root is None:
+        return False
+    _append_jsonl(
+        root,
+        BLOCKED_ATTEMPT_LOG,
+        {
+            "ts": time.time(),
+            "tool": "terminal",
+            "reason": str(reason or ""),
+            "command_preview": str(command or "")[:500],
+            "audit_root_source": audit_root_source(resolved),
+        },
+    )
+    return True
+
+
 def blocked_result(decision: TerminalEnvelopeDecision) -> dict[str, Any]:
     """The terminal-tool JSON payload for a refusal.
 
@@ -951,13 +1107,19 @@ __all__ = [
     "ENVELOPE_COMMAND_NOT_GRANTABLE",
     "ENVELOPE_COMMAND_REQUIRES_GRANT",
     "ENVELOPE_DECISION_LOG",
+    "ENVELOPE_LANE_NOT_GOVERNED",
     "GIT_PUSH",
     "GOVERNED_LANES",
     "GRANTABLE_COMMAND_CLASSES",
     "GRANT_CLASS_NOT_GRANTABLE",
     "GRANT_MALFORMED",
     "GRANT_UNKNOWN_COMMAND_CLASS",
+    "HARNESS_LANES",
     "LANE_MISSION_CHAT",
+    "LANE_MISSION_NODE",
+    "LANE_MISSION_ROOT_NODE",
+    "LANE_MISSION_WORKER",
+    "LANE_PERSONA_CHAT",
     "LEGACY_REASON_BY_CLASS",
     "NETWORK_EGRESS",
     "OUTCOME_ALLOW",
@@ -981,6 +1143,7 @@ __all__ = [
     "hard_floor_command_classes",
     "legacy_reason_for_class",
     "record_envelope_decision",
+    "record_legacy_block",
     "refusal_text",
     "resolve_terminal_envelope_grants",
     "scope_for_persona",
