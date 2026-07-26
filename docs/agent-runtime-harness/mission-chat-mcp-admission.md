@@ -1,15 +1,20 @@
 # Selective MCP admission for mission-chat agents — design (2026-07-26)
 
-Status: **R0 + R1 shipped, flag OFF; R2 (teardown + live proof) open.** Owner:
-fork (`agent_runtime/`, plus one config key). R0 — the typed
+Status: **R0 + R1 + R2 code shipped, flag OFF; R2's LIVE PROOF still open.**
+Owner: fork (`agent_runtime/`, plus one config key). R0 — the typed
 `mcp_not_registered_on_lane` failure this document is the **producer** of —
 landed first and stands alone (`agent_runtime/mcp_lane.py`, commit `b6277e023`).
 R1 landed the admission module, the role/lane policy, the per-run registration
 at the `profile_runner` seam, and the `--explain-mcp` operator verb
 (`agent_runtime/mcp_admission.py`) with
 `agent_runtime.mcp_admission.enabled` defaulting to **false**, so no deployment
-changes behavior until an operator turns it on. See §6 for what each stage
-actually contains.
+changes behavior until an operator turns it on. R2 landed the per-run registry
+**teardown** (transport stays warm), the compiled positive `tools.include` with
+a hash-pinned parity fixture against the launcher's own allowlist — which pulls
+most of R3 forward — and the §D3 agent-visible denial line. **R2's remaining
+obligation is the live 6-row acceptance-matrix proof from the harness lane**;
+until that runs the flag stays off. See §6 for what each stage actually
+contains.
 
 Sibling docs: `harness-serve-design.md` (the warm-process lane this design
 depends on), `04-decision-hud-simplification-map.md` (the "agents work
@@ -565,7 +570,12 @@ Design consequences:
    If it does not, R2 must either tear down the connection (accepting the
    re-spawn cost per QA turn) or rely on single-flight alone as the isolation
    boundary — which is weaker and should be stated plainly rather than
-   assumed.
+   assumed. — **IMPLEMENTED as proposed (R2).** Measured alternative: ~489 ms
+   for an admission that spawns, observed live on this host. The warm path pays
+   a registry re-register only. The cost that actually decided it is not the
+   milliseconds but the *side effect*: re-spawning `launcher_qa` per turn means
+   re-attaching a Flutter window per turn, which is the capability class behind
+   the 2026-07-25 reap incident.
 
 ---
 
@@ -589,6 +599,17 @@ the launcher_qa server, `qa.request_screenshot` / `VisualProofRunner`,
 the fork boundary (`agent_runtime/` + `hermes_cli/harness.py`) holds, which
 is deliberate: this is the reason admission goes in `profile_runner` rather
 than in the upstream `tools/mcp_tool.py` registration path.
+
+**R2 addendum — the upstream surface this fork now CALLS (still no upstream
+edit).** `registry.deregister` / `get_tool_names_for_toolset` /
+`get_toolset_alias_target` are public. `tools/mcp_tool._servers` and
+`_register_server_tools` are private, called only from
+`mcp_admission._default_registrar`'s warm path. That is a deliberate, documented
+coupling with three mitigations: it is the ONLY such call site, it fails closed
+(no seam ⇒ no tools ⇒ typed row), and
+`tests/agent_runtime/test_mcp_admission_r2.py::test_the_upstream_warm_registration_seam_exists`
+pins the symbols, the signature, and the short-circuit the design depends on, so
+upstream drift fails a test rather than the QA lane.
 
 **Contracts:** `requirement_failures` gains real rows (was always `[]`, so
 any consumer already tolerates a list — additive). Root runtime config gains
@@ -641,23 +662,51 @@ the compiled positive `tools.include` with launcher-YAML parity (R3). R1's
 mutating tools compiled into the existing per-server filter, plus the same names
 in `blocked_tool_names` as the warm-process backstop.
 
-### R2 — Teardown + live proof, flag on for one profile
-Turn the flag on with
-`agent_runtime.mcp_admission.roles.qa.mission_chat: [launcher_qa]`, on the serve
-lane only, **and** add the per-run registry-scope teardown that open question 2
-now has an answer for. **Live proof required** (this is a harness project —
-code inspection is not proof): a mission-chat QA agent drives the 6-row
-acceptance matrix from `STAGEC_AGENT_MCP_RECIPES_2026-05-17.md` **from the
-harness lane**, against the persistent QA window (`48cfed89`), with the
-user's own launcher session verifiably untouched. Attach the screenshots to
-the goal's proof record — which is the whole point of doing this on the
-mission lane rather than in a side CLI.
+### R2 — Teardown + positive include + §D3, flag still OFF *(CODE SHIPPED; live proof owed)*
 
-### R3 — Permission-mode-aware tool include
-`read_only` compiles the reviewer-shaped subset; `profile_default` compiles
-the role's row. The launcher's `launcher_qa_profile_allowlists.yaml` becomes
-the **compiled** source rather than advisory (or its CI parity check — see
-open question 6), retiring the "not enforced" caveat in its own header.
+What R2 contains:
+
+- **Scoped teardown** (`teardown_mcp_admission`) at the end of every admitted
+  run, wired into `profile_runner._execute_agent_run` through an `ExitStack`
+  entered LAST — so it unwinds FIRST, on the raised path as well as the returned
+  one, while the run still holds `_WORKDIR_LOCK` and is still inside
+  `persona_profile_context`. It deregisters the `mcp-<server>` tools; the
+  registry drops the toolset check **and the bare-server-name alias** with the
+  last tool. **Registry only — the transport stays warm.**
+- **Warm-aware registration.** Teardown made the R1 registrar insufficient:
+  `register_mcp_servers` short-circuits on a connected server, so a torn-down
+  warm server could never get its tools back. `_default_registrar` now splits
+  the admitted set — warm servers re-register off their live session through the
+  upstream `_register_server_tools` seam (no spawn, no handshake), cold ones go
+  through `register_mcp_servers`. Both apply the per-run tool filter.
+- **The `profile_default` → `read_only` sequence therefore subtracts for real,
+  at registration time** — the R1 consequence recorded in open question 2 is
+  retired. `blocked_tool_names` stays as the resident-actor backstop.
+- **Positive `tools.include` + parity fixture** (most of R3, pulled forward
+  because teardown is what made a positive include meaningful):
+  `READ_ONLY_INCLUDED_TOOLS` is the launcher YAML's `reviewer` row, pinned by a
+  vendored, hash-recorded snapshot at
+  `tests/agent_runtime/fixtures/launcher_qa_profile_allowlists.yaml`. Hermes owns
+  the policy (open question 6) — the launcher file is never read at admission
+  time.
+- **§D3 agent-visible line** (`render_mcp_admission_line`) on the runtime-context
+  envelope's volatile tail, beside the wall-budget line.
+
+**Live proof still required** (this is a harness project — code inspection is
+not proof): a mission-chat QA agent drives the 6-row acceptance matrix from
+`STAGEC_AGENT_MCP_RECIPES_2026-05-17.md` **from the harness lane**, against the
+persistent QA window (`48cfed89`), with the user's own launcher session
+verifiably untouched. Attach the screenshots to the goal's proof record — which
+is the whole point of doing this on the mission lane rather than in a side CLI.
+Until then the flag stays **off**; turning it on is the config edit in the Log
+below.
+
+### R3 — Remaining permission-mode work
+The `read_only` half shipped in R2. What is left: a `pm` / `alice`-shaped row
+(those launcher profiles allow `capture_screenshot` / `screenshot_window` /
+`wait_for_state`, which `reviewer` denies) if a non-reviewer restricted shape is
+ever wanted on this lane, and retiring the "not enforced" caveat in the launcher
+YAML's own header now that hermes compiles an equivalent policy.
 
 ### R4 — Additional roles/servers *(only on request)*
 Each new `(role, lane, server)` triple is a deliberate **config** edit plus a
@@ -708,6 +757,20 @@ touching `mcp_admission.py`, the policy shape is wrong.
 - Budget: exceeding the per-run call budget yields
   `mcp_admission_budget_exhausted` and no further dispatch.
 
+*Shipped as `tests/agent_runtime/test_mcp_admission_r2.py` (38 tests). Beyond
+the list above it also pins: teardown removes the toolset AND the
+bare-server-name alias while the transport stays warm; a following admission
+re-registers cleanly (the lifecycle is a cycle, not a one-way door); the
+`profile_default` → `read_only` sequence subtracts at REGISTRATION time,
+exercised through the real `_register_server_tools`; teardown failure and a
+teardown that cannot take the admission mutex are typed and non-fatal; the
+runner tears down on the RAISED path as well as the returned one; the upstream
+warm-registration seam exists and fails closed when it does not; and the §D3
+line is present per denial code, absent on a clean admission, and volatile.
+**Not implemented: the per-run call budget** (`mcp_admission_budget_exhausted`)
+— still owed, and the AS0 liveness watchdog plus single-flight are what bound a
+looping agent until it lands.*
+
 **R3 — permission composition**
 - `read_only` QA ⇒ `tools.include` is the reviewer subset;
   `mcp_launcher_qa_kill_launcher` is **absent from the model's tool list**
@@ -717,6 +780,12 @@ touching `mcp_admission.py`, the policy shape is wrong.
   YAML's resolved allow-set for that profile (denied wins over allowed;
   trailing-`*` glob only) — a fixture-based drift test mirroring the
   launcher's own Stage 22 drift test.
+
+*The `read_only` / `profile_default` / parity rows shipped early, in R2 — a
+positive include only becomes meaningful once teardown makes re-registration
+real, so splitting them across two stages would have shipped an include list
+that could not take effect. The fixture is hash-pinned and vendored, so the test
+never depends on the launcher checkout existing.*
 
 **Gates.** Full `tests/agent_runtime` + `tests/hermes_cli/test_harness_cli.py`
 green at every stage. Do not adopt or mask pre-existing failures. **Commit
@@ -775,21 +844,26 @@ of R2 rather than a nice-to-have.
    connection warm in `_servers`, tear down only the registry scope. **R2 owns
    that teardown.**
 
-   **R1 shipped without it, deliberately, and the consequence is load-bearing:**
-   once a server is admitted in a warm serve process, its tools stay in the
-   process registry until the process recycles. Isolation in R1 therefore rests
-   on the per-run toolset scope (`scope_toolsets_to_admission`, applied at both
-   the chat chokepoint and agent construction, so no permission mode — including
-   `unbounded` — can widen it) plus single-flight, **not** on an empty registry.
-   Two specific follow-ups R2 must close: (a) a `read_only` admission that
-   follows a `profile_default` admission of the same server in the same process
-   re-uses the already-registered full surface (`register_mcp_servers`
-   short-circuits on connected servers), so the registration-time
-   `tools.exclude` cannot subtract — R1 covers this with `blocked_tool_names`,
-   which removes the tools from the model's list but leaves them registered;
-   and (b) a lane that resolves toolsets **outside** `ProfileAgentRunner` would
-   not pass through the scope at all (none does today — every
-   `AgentRunRequest` is built in `agent_runtime/`).
+   **CLOSED (R2, 2026-07-26).** `teardown_mcp_admission` removes the scope at
+   the end of every admitted run and the transport stays warm, exactly as
+   proposed. R1's two recorded follow-ups: (a) the `profile_default` →
+   `read_only` sequence now subtracts at registration time — closed, with the
+   sequence itself as a test; (b) a lane resolving toolsets **outside**
+   `ProfileAgentRunner` would still bypass the scope — none does today (every
+   `AgentRunRequest` is built in `agent_runtime/`), so this stays a standing
+   invariant rather than a bug.
+
+   **What R2 discovered, and it is the load-bearing part:** teardown alone would
+   have broken admission outright. `register_mcp_servers` returns
+   `_existing_tool_names()` for any server already in `_servers`, so a warm
+   server whose registry scope has been removed can never get it back through
+   that entry point — the second admitted turn would have registered *nothing*.
+   The warm/cold split in `_default_registrar` (re-register off the live session
+   via the upstream `_register_server_tools`, spawn only when cold) is what makes
+   "keep the transport, drop the scope" actually work, and it is also what makes
+   the per-run tool filter real rather than advisory. It is the single upstream
+   private this design depends on; it fails **closed** and is pinned by a drift
+   test (`test_the_upstream_warm_registration_seam_exists`).
 
 3. **Single-flight, or per-worker registries under serve's pool of 4?**
    Single-flight is proposed as the safe default. A per-thread registry is
@@ -819,7 +893,12 @@ of R2 rather than a nice-to-have.
    time is fragile (path resolution, deploy skew, a missing checkout).
    *Recommendation: hermes owns the policy; the launcher YAML becomes
    documentation plus a CI parity fixture, so the two can never silently
-   diverge.*
+   diverge.* — **ANSWERED / IMPLEMENTED (R2, 2026-07-26): hermes owns it.**
+   `READ_ONLY_INCLUDED_TOOLS` / `READ_ONLY_EXCLUDED_TOOLS` live in
+   `mcp_admission.py`; the YAML is vendored as a hash-pinned fixture at
+   `tests/agent_runtime/fixtures/launcher_qa_profile_allowlists.yaml` and read
+   only by the parity test, never at admission time. Refresh procedure:
+   `tests/agent_runtime/fixtures/README.md`.
 
 7. **Should `stagec_mcp_visual_provider.py`'s hand-rolled MCP client be
    retired onto `tools/mcp_tool.py` once admission exists?** It would remove
@@ -832,6 +911,72 @@ of R2 rather than a nice-to-have.
 ---
 
 ## Log
+
+- **2026-07-26 (R2)** — teardown, warm-aware registration, the compiled positive
+  `tools.include` with a parity fixture, and the §D3 agent line. Flag still OFF;
+  **the live 6-row acceptance-matrix proof from the harness lane is still owed**
+  and is what R2 is not finished without.
+
+  **Teardown shape chosen: warm transport, run-scoped registry.**
+  `teardown_mcp_admission` deregisters the admitted `mcp-<server>` tools and
+  nothing else; `tools/mcp_tool._servers` keeps the connection. Cost of the
+  alternative (full transport teardown + respawn each turn) is the measured
+  ~489 ms admission-with-spawn observed live on this host; the warm path pays a
+  registry re-register only (no process spawn, no `initialize`, no `list_tools`).
+  Since a QA turn is minutes and the serve process is long-lived, the warm path
+  is not chosen for speed alone — it is chosen because it is the only shape that
+  keeps a launcher window attached across turns.
+
+  **The consequence that made this non-trivial:** teardown breaks
+  `register_mcp_servers`. It short-circuits on connected servers
+  (`if not new_servers: return _existing_tool_names()`), so a warm server with a
+  torn-down scope would never re-register. `_default_registrar` therefore splits
+  warm from cold and re-registers warm servers via the upstream
+  `_register_server_tools`. That is the one upstream private this design uses; it
+  fails **closed** (an unavailable seam registers nothing ⇒ typed
+  `mcp_not_registered_on_lane`) and a drift test pins it.
+
+  **Divergence adopted deliberately (narrowing):** R1's `read_only` exclude list
+  was three names short of the launcher's `reviewer` row —
+  `mcp_launcher_qa_capture_screenshot`, `..._screenshot_window`,
+  `..._wait_for_state`. All three drive a LIVE launcher window (restore +
+  foreground + PrintWindow; a polling loop that counts against the fixture
+  mutex's queue depth), which is why the launcher denies them to `reviewer`. R2
+  adopts the row verbatim, so `read_only` on this lane is strictly narrower than
+  it was in R1. `profile_default` is unchanged and compiles **no** include filter,
+  because the launcher's full-capability rows are the glob `mcp_launcher_qa_*` —
+  compiling that as a 25-name list would silently deny the next tool the launcher
+  ships. No other divergence: include == the row's resolved allow-set, exclude ==
+  the row's `denied`, and the two partition the 25-tool surface exactly.
+
+  **§D3 line format** (one line, on the runtime-context envelope's volatile tail,
+  beside the wall-budget line; empty on a clean admission):
+
+  ```
+  - MCP tools: launcher_qa (mcp_admission_timeout) — declared for this persona but
+    NOT available on this turn, so no mcp__<server>__* tools for it are in your
+    tool list. This is a capability fact, not a permission problem: do not retry,
+    do not hunt for a permission mode, and do not substitute a shell/PowerShell
+    workaround or a second lane. Use the server's harness-side contract instead
+    (for launcher_qa: the qa.request_screenshot decision contract), and say plainly
+    in your reply that the tools were unavailable.
+  ```
+
+  Two delivery lanes, mirroring `turn_budget` exactly. **Resolution-time**
+  denials (`mcp_not_admitted_for_role`, `mcp_server_not_configured`,
+  `mcp_admission_disabled`, the `machine_roots` codes) ride the volatile envelope
+  tail, rendered by `persona_runtime.mission_chat_admission_line` at the
+  mission-chat command — the same place `render_turn_budget_line` is rendered.
+  **Execution-time** degradations (`mcp_admission_timeout`,
+  `mcp_admission_lane_busy`, admitted-but-did-not-register) are only known after
+  that envelope is sealed, so they ride `agent.steer` from the runner — the same
+  in-band lane the wall-budget checkpoint nudge uses. Known limit, stated rather
+  than hidden: a steer only lands on the next tool result, so an agent that calls
+  no tool at all never sees it; an agent that starts reaching for tools does.
+  Known limit 2: with the flag OFF the line is not rendered at all (the flag-off
+  path stays byte-identical and pays no profile read), so a declared-but-dropped
+  server is reported to the OPERATOR via R0 `requirement_failures` but not to the
+  agent. Turning the flag on is what makes the agent-facing half live.
 
 - **2026-07-26 (R1)** — admission implemented and landed with the flag OFF.
   `agent_runtime/mcp_admission.py` + the `profile_runner` seam + the

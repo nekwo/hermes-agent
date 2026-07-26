@@ -34,6 +34,7 @@ from .decision_contracts import validate_planning_decision
 from .mcp_admission import (
     LANE_MISSION_CHAT,
     admission_enabled,
+    render_mcp_admission_line,
     resolve_mcp_admission,
     scope_toolsets_to_admission,
 )
@@ -1026,6 +1027,40 @@ def chat_lane_capability_drops(
         enabled_toolsets=kept,
         toolset_for_tool=get_toolset_for_tool,
     )
+
+
+def mission_chat_admission_line(
+    persona: AgentPersona, *, session_id: str | None
+) -> str:
+    """The agent-visible MCP admission line for this turn's volatile envelope tail.
+
+    Design §D3. Resolves the SAME pure policy the turn itself resolves — same
+    function, same inputs, so the line and the turn's admission can never
+    disagree — and renders the compact denial line. Returns ``""`` when there is
+    nothing to say.
+
+    Gated on the kill switch exactly like ``_enabled_toolsets_for_chat``: with
+    admission off, the flag-off hot path pays neither a root-config load nor a
+    persona-profile read, and the envelope is byte-identical to what it was
+    before admission existed. The consequence is deliberate and recorded: with
+    the flag OFF a declared-but-unregistered server is reported to the OPERATOR
+    (R0 ``requirement_failures``) but not in the agent's own context. Turning the
+    flag on is what makes the agent-facing half live.
+    """
+
+    if not admission_enabled():
+        return ""
+    try:
+        admission = resolve_mcp_admission(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            permission_mode=permission_options_for_chat(
+                persona, session_id=session_id
+            ).permission_mode,
+        )
+    except Exception:  # pragma: no cover - a context line must never fail a turn
+        return ""
+    return render_mcp_admission_line(admission)
 
 
 def chat_runtime_tool_contract(

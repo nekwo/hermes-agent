@@ -33,6 +33,7 @@ import pytest
 
 from agent_runtime.mcp_admission import (
     LANE_MISSION_CHAT,
+    McpAdmissionOutcome,
     MCP_ADMISSION_DISABLED,
     MCP_ADMISSION_LANE_BUSY,
     MCP_ADMISSION_TIMEOUT,
@@ -391,6 +392,10 @@ def test_read_only_subtracts_the_mutating_tools(qa_profile):
 
 
 def test_read_only_keeps_the_read_only_tools(qa_profile):
+    # R2 narrowed this to the launcher YAML's `reviewer` row verbatim, so
+    # screenshot_window / capture_screenshot / wait_for_state — all of which
+    # drive a LIVE launcher window — are no longer kept. See
+    # tests/agent_runtime/test_mcp_admission_r2.py for the parity fixture.
     admission = resolve_mcp_admission(
         _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
     )
@@ -398,11 +403,9 @@ def test_read_only_keeps_the_read_only_tools(qa_profile):
     excluded = set(admission.server_configs["launcher_qa"]["tools"]["exclude"])
     for kept in (
         "mcp_launcher_qa_get_runtime_state",
-        "mcp_launcher_qa_screenshot_window",
         "mcp_launcher_qa_read_trace",
         "mcp_launcher_qa_run_redaction_scan",
         "mcp_launcher_qa_read_artifact_index",
-        "mcp_launcher_qa_wait_for_state",
     ):
         assert kept not in excluded
 
@@ -906,7 +909,9 @@ def test_an_admitted_run_carries_its_toolset_and_blocks(qa_profile, monkeypatch)
     monkeypatch.setattr(
         profile_runner.ProfileAgentRunner,
         "_admit_mcp_servers",
-        lambda self, request, timing: tuple(request.mcp_admission.server_names),
+        lambda self, request, timing: McpAdmissionOutcome(
+            attempted=True, admitted=tuple(request.mcp_admission.server_names)
+        ),
     )
 
     kwargs = _run_capturing(enabled_toolsets=["file"], mcp_admission=admission)
@@ -928,7 +933,7 @@ def test_a_failed_admission_does_not_leave_the_toolset_on_the_run(qa_profile, mo
     monkeypatch.setattr(
         profile_runner.ProfileAgentRunner,
         "_admit_mcp_servers",
-        lambda self, request, timing: (),
+        lambda self, request, timing: McpAdmissionOutcome(attempted=True),
     )
 
     kwargs = _run_capturing(enabled_toolsets=["file"], mcp_admission=admission)
@@ -946,7 +951,9 @@ def test_registry_hygiene_still_applies_alongside_admission(qa_profile, monkeypa
     monkeypatch.setattr(
         profile_runner.ProfileAgentRunner,
         "_admit_mcp_servers",
-        lambda self, request, timing: tuple(request.mcp_admission.server_names),
+        lambda self, request, timing: McpAdmissionOutcome(
+            attempted=True, admitted=tuple(request.mcp_admission.server_names)
+        ),
     )
 
     kwargs = _run_capturing(blocked_tool_names=[], mcp_admission=admission)

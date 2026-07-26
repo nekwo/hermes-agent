@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -509,17 +509,17 @@ class ProfileAgentRunner:
             raise ProfileRunnerError(str(result.raw.get("error")))
         return result
 
-    def _admit_mcp_servers(self, request: AgentRunRequest, timing: dict[str, int]) -> tuple[str, ...]:
-        """Register this run's admitted MCP servers; return what actually landed.
+    def _admit_mcp_servers(self, request: AgentRunRequest, timing: dict[str, int]):
+        """Register this run's admitted MCP servers; return the typed outcome.
 
         Never raises and never blocks past the admission budget — the outcome is
-        typed either way, and an empty tuple simply means "this run gets no MCP
-        tools", which is the state every run is in today.
+        typed either way, and an empty ``admitted`` simply means "this run gets
+        no MCP tools", which is the state every run is in today.
         """
 
         admission = request.mcp_admission
         if admission is None or getattr(admission, "is_empty", True):
-            return ()
+            return None
         from .mcp_admission import admit_mcp_servers
 
         started = time.perf_counter()
@@ -529,7 +529,7 @@ class ProfileAgentRunner:
             timing["mcp_admission_ms"] = _emit_request_timing(
                 request, "mcp_admission", started, status="failed"
             )
-            return ()
+            return None
         timing["mcp_admission_ms"] = _emit_request_timing(request, "mcp_admission", started)
         timing["mcp_admitted_servers"] = len(outcome.admitted)
         if request.progress_callback is not None and (outcome.admitted or outcome.denied):
@@ -554,7 +554,61 @@ class ProfileAgentRunner:
                 )
             except Exception:
                 pass
-        return outcome.admitted
+        return outcome
+
+    def _teardown_mcp_admission(
+        self, request: AgentRunRequest, servers: tuple[str, ...], timing: dict[str, int]
+    ) -> None:
+        """Remove this run's MCP registry scope. Advisory — never fails the turn.
+
+        Runs on the way out of ``_execute_agent_run`` for BOTH the completed and
+        the raised path, while the run still holds ``_WORKDIR_LOCK`` and is still
+        inside ``persona_profile_context``, so no other persona's run can observe
+        the scope between the last tool call and its removal. The transport stays
+        warm; only the registry entries and the toolset alias go.
+        """
+
+        if not servers:
+            return
+        from .mcp_admission import teardown_mcp_admission
+
+        started = time.perf_counter()
+        try:
+            outcome = teardown_mcp_admission(servers)
+        except Exception:  # pragma: no cover - teardown_mcp_admission already swallows
+            timing["mcp_teardown_ms"] = _emit_request_timing(
+                request, "mcp_teardown", started, status="failed"
+            )
+            return
+        timing["mcp_teardown_ms"] = _emit_request_timing(
+            request, "mcp_teardown", started, status="ok" if outcome.ok else "warning"
+        )
+        timing["mcp_teardown_tools"] = len(outcome.removed_tool_names)
+        if request.progress_callback is None:
+            return
+        try:
+            request.progress_callback(
+                {
+                    "type": "run.progress",
+                    "phase": "mcp_admission",
+                    "severity": "info" if outcome.ok else "warning",
+                    "step": "mcp_admission_torn_down",
+                    "status": "ok" if outcome.ok else "warning",
+                    "summary": (
+                        "MCP admission scope removed: "
+                        + ", ".join(outcome.servers)
+                        + f" ({len(outcome.removed_tool_names)} tool(s))"
+                    ),
+                    "mcp_teardown": {
+                        "servers": list(outcome.servers),
+                        "removed_tool_names": list(outcome.removed_tool_names),
+                        "failures": outcome.failure_rows(),
+                        "duration_ms": outcome.duration_ms,
+                    },
+                }
+            )
+        except Exception:
+            pass
 
     def _execute_agent_run(self, binding: PersonaProfileBinding, request: AgentRunRequest) -> tuple[Any, Any, dict[str, int]]:
         timing: dict[str, int] = {}
@@ -570,6 +624,12 @@ class ProfileAgentRunner:
                 surface=request.skill_surface,
                 root_node_mode=request.skill_root_node_mode,
             ),
+            # The admitted MCP registry scope belongs to THIS run. Entered last
+            # so it unwinds FIRST — teardown therefore runs while the run still
+            # holds _WORKDIR_LOCK and is still inside persona_profile_context,
+            # on the raised path as well as the returned one. Using a stack
+            # rather than a try/finally keeps the (large) run body unindented.
+            ExitStack() as mcp_scope,
         ):
             try:
                 runtime_started = time.perf_counter()
@@ -606,7 +666,12 @@ class ProfileAgentRunner:
             # non-raising: a capability probe must never be able to fail a turn,
             # so every degradation comes back as a typed row and the turn
             # continues on the fallback lane.
-            admitted_servers = self._admit_mcp_servers(request, timing)
+            admission_outcome = self._admit_mcp_servers(request, timing)
+            admitted_servers = admission_outcome.admitted if admission_outcome else ()
+            if admitted_servers:
+                mcp_scope.callback(
+                    self._teardown_mcp_admission, request, admitted_servers, timing
+                )
             status_callback = _profile_status_callback(request, timing)
             construct_started = time.perf_counter()
             # Per-run reasoning override → agent reasoning_config. Only passed
@@ -691,6 +756,7 @@ class ProfileAgentRunner:
                             0, int(request.compression_protect_last_n_override)
                         )
             timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
+            _steer_mcp_admission_notice(agent, request, admission_outcome)
             budget_guard.set_interrupt_callback(lambda reason: _interrupt_agent_for_budget(agent, reason))
             agent_ready_cleanup = _notify_agent_ready(request, agent)
             max_wall_seconds = _positive_float(request.max_wall_seconds)
@@ -813,6 +879,44 @@ def _enforce_result_budgets(result: AgentRunResult, request: AgentRunRequest) ->
         total_tokens = _positive_int(result.total_tokens)
         if total_tokens is not None and total_tokens > max_total_tokens:
             raise RunBudgetExceeded(f"live run budget exceeded: total_tokens={total_tokens}/{max_total_tokens}", session_id=result.session_id)
+
+
+def _steer_mcp_admission_notice(agent: Any, request: AgentRunRequest, outcome: Any) -> bool:
+    """In-band backstop for admission failures the turn's ENVELOPE could not carry.
+
+    Design §D3 says the agent's own turn context must state a denial, and the
+    guaranteed lane for that is the runtime-context envelope's volatile tail —
+    rendered before the turn by the mission-chat command, which is why it can
+    only carry RESOLUTION-time denials (``mcp_not_admitted_for_role``,
+    ``mcp_server_not_configured``, the machine-roots codes).
+
+    EXECUTION-time degradations (``mcp_admission_timeout``,
+    ``mcp_admission_lane_busy``, and "admitted but did not register") are only
+    known here, after that envelope was sealed. They ride ``agent.steer`` — the
+    same in-band lane ``turn_budget``'s checkpoint nudge uses, appended to the
+    next tool result — so an agent that starts reaching for tools it does not
+    have is told why on its next iteration instead of improvising. An agent that
+    calls no tool never needed them.
+    """
+
+    if outcome is None or not getattr(outcome, "degraded", False):
+        return False
+    steer = getattr(agent, "steer", None)
+    if not callable(steer):
+        return False
+    from .mcp_admission import render_mcp_admission_line
+
+    # ``admission=None`` on purpose: only the EXECUTION half belongs here. The
+    # policy half is already on this turn's envelope, and repeating it in a
+    # second voice teaches the model to discount both.
+    line = render_mcp_admission_line(None, outcome=outcome)
+    if not line:
+        return False
+    try:
+        steer(f"[harness] {line.removeprefix('- ')}")
+    except Exception:  # pragma: no cover - a notice must never fail a turn
+        return False
+    return True
 
 
 def _notify_agent_ready(request: AgentRunRequest, agent: Any) -> Callable[[], None] | None:

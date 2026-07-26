@@ -2102,14 +2102,23 @@ def _cmd_mission_chat_message(args) -> int:
             else None
         ),
     )
+    # Volatile tail, in one place. Both lines describe facts that are true for
+    # THIS turn only — how much wall clock is left, and which declared MCP
+    # servers this turn did not get — so both ride the tail rather than the
+    # hashed HUD body: a cached `unchanged` delivery must never show the agent a
+    # stale countdown or a stale capability claim. The MCP line is empty on every
+    # turn that has nothing to report (which is every turn until an operator
+    # enables admission), so the envelope is unchanged by default.
+    volatile_lines = [
+        _turn_budget.render_turn_budget_line(wall_budget),
+        mission_chat_admission_line(persona, session_id=session_id),
+    ]
     situational_hud_content = render_runtime_context_envelope(
         context_id=str(prompt_context["context_id"]),
         revision=situational_hud_revision_value,
         delivery=situational_hud_delivery,
         situational_hud_content=render_situational_hud_block(situational_hud),
-        # Volatile tail: emitted on EVERY delivery (including `unchanged`), so a
-        # cached HUD body can never show the agent a stale countdown.
-        volatile_content=_turn_budget.render_turn_budget_line(wall_budget),
+        volatile_content="\n".join(line for line in volatile_lines if line),
     )
     instance.skill_manifest_hash = safe_assignment_token(
         prompt_context.get("skill_manifest_hash")

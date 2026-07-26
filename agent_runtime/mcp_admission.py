@@ -33,8 +33,9 @@ The invariants this module exists to hold
    long-lived multi-persona harness process, would include another persona's
    admitted MCP toolsets. ``scope_toolsets_to_admission`` is applied AFTER
    permission-mode resolution and strips every ``mcp-*`` toolset (and alias)
-   this run was not admitted. That is the cross-persona isolation boundary in
-   R1 — see "R2 consequence" below.
+   this run was not admitted. Since R2 the registry is ALSO empty between
+   admitted runs (see below), so this is now the second line of defence rather
+   than the only one.
 4. **Registration is single-flight and bounded.** ``tools.registry`` and
    ``tools/mcp_tool._servers`` are process-global and a serve process is
    multi-persona (``ThreadPoolExecutor(4)``), so two interleaved admissions
@@ -42,24 +43,53 @@ The invariants this module exists to hold
    than raced. A registration that outruns its budget degrades to
    ``mcp_admission_timeout`` and the turn continues without those tools.
 
-R2 consequence (recorded deliberately, not an oversight)
---------------------------------------------------------
-R1 does NOT tear anything down. Once a server is admitted in a warm serve
-process its tools stay in the process registry until the process recycles, and
-isolation rests entirely on invariant 3 (the per-run toolset scope) plus
-single-flight. Open question 2 of the design asked whether ``tools/registry.py``
-supports scoped removal: it does — ``registry.deregister`` exempts ``mcp-*``
-toolsets from the plugin-ownership gate and drops the toolset check + aliases
-once the last tool of a toolset is removed — so R2 can keep the connection warm
-and tear down only the registry scope, which is the design's preferred shape.
-Until R2 lands, one consequence is load-bearing and stated plainly: a
-``read_only`` admission that follows a ``profile_default`` admission of the same
-server in the SAME process re-uses the already-registered full tool surface
-(``register_mcp_servers`` short-circuits on connected servers), so the
-registration-time ``tools.exclude`` filter cannot subtract. That is why
-``McpAdmission`` also carries ``blocked_tool_names`` — the mutating tools are
-removed from the model's tool list at ``get_tool_definitions`` regardless of
-what is registered.
+5. **The registry scope belongs to the RUN, the transport belongs to the
+   process.** :func:`teardown_mcp_admission` removes the admitted
+   ``mcp-<server>`` tools (and, with the last tool, the toolset check and every
+   alias pointing at it) at the end of every admitted run, while the connection
+   in ``tools/mcp_tool._servers`` stays warm for the next one. Teardown never
+   fails a finished turn: every fault is a typed ``mcp_admission_teardown_failed``
+   row.
+6. **The agent is told when it does NOT get what it declared.** A denial or
+   degradation is rendered as one compact line
+   (:func:`render_mcp_admission_line`) on the same volatile envelope tail the
+   wall-budget line rides, so the model reads the truth in-band instead of
+   improvising a workaround. Volatile on purpose — never hashed into the HUD
+   revision.
+
+R2: why teardown forced the registrar to change
+-----------------------------------------------
+R1 shipped no teardown, and the consequence was load-bearing: once a server was
+admitted in a warm serve process its tools stayed in the process registry until
+the process recycled, and a ``read_only`` admission FOLLOWING a
+``profile_default`` one re-used the already-registered full surface, because
+``register_mcp_servers`` short-circuits on connected servers
+(``tools/mcp_tool.py`` — ``if not new_servers: return _existing_tool_names()``).
+The registration-time tool filter therefore could not subtract; only
+``blocked_tool_names`` kept the mutators out of the model's list.
+
+Open question 2 of the design asked whether ``tools/registry.py`` supports
+scoped removal. It does, so R2 takes the design's preferred shape — **tear down
+the registry scope, keep the transport warm**. But that same short-circuit means
+``register_mcp_servers`` alone can no longer re-register a torn-down warm server:
+it would return ``_existing_tool_names()`` forever and the server would stay
+tool-less. :func:`_default_registrar` therefore splits the admitted set:
+
+* **warm** (already in ``_servers`` with a live session) ⇒ re-register straight
+  off that session through the upstream ``_register_server_tools`` seam — no
+  spawn, no handshake, and the per-run ``tools.include`` / ``tools.exclude``
+  filter is applied to the already-listed tools;
+* **cold** ⇒ ``register_mcp_servers({name: cfg})``, exactly as in R1.
+
+Both paths run the filter, so ``read_only`` after ``profile_default`` now
+subtracts AT REGISTRATION TIME rather than relying on ``blocked_tool_names``
+(which stays, as defence in depth for a resident actor's cached tool list).
+
+The warm path is the one place this module reaches for an upstream private. It
+fails CLOSED — an unavailable seam registers nothing, which surfaces as a typed
+``mcp_not_registered_on_lane`` denial rather than a silently full surface — and
+``tests/agent_runtime/test_mcp_admission_r2.py`` pins the seam so upstream drift
+is loud instead of silent.
 """
 
 from __future__ import annotations
@@ -92,6 +122,10 @@ MCP_SERVER_NOT_CONFIGURED = "mcp_server_not_configured"
 #: unknown server has no reviewer-shaped subset, so read_only admits nothing
 #: rather than admitting a surface it cannot subtract.
 MCP_READ_ONLY_SUBSET_UNKNOWN = "mcp_read_only_subset_unknown"
+#: A finished run's registry scope could not be removed. Never fatal — the turn
+#: has already produced its answer by the time teardown runs — but never silent
+#: either: leftover scope is exactly the residue R2 exists to retire.
+MCP_ADMISSION_TEARDOWN_FAILED = "mcp_admission_teardown_failed"
 
 #: The admission LANE — the runtime surface a persona turn runs on. Distinct
 #: from ``mcp_lane``'s entry-point lane (``harness`` / ``chat`` / …), which
@@ -108,25 +142,72 @@ R1_ADMISSIBLE_ROLES = frozenset({"qa"})
 #: Toolset-name prefix ``tools/mcp_tool.py`` registers every MCP server under.
 _MCP_TOOLSET_PREFIX = "mcp-"
 
-#: Raw (server-advertised) tool names that MUTATE the target a server drives.
-#: Sourced from the launcher's own per-profile allowlist —
-#: ``EterniaLauncher docs/stages/qa-reboot/launcher_qa_profile_allowlists.yaml``,
-#: the ``denied`` rows of its reviewer / pm / alice profiles. R3 owes the
-#: compiled positive ``tools.include`` plus a fixture parity test against that
-#: file; R1 only needs the SUBTRACTION to be real, which is what ``read_only``
-#: promises.
+#: The launcher-allowlist PROFILE ROW a ``read_only`` admission compiles from.
+#: ``read_only`` is "inspect what others captured", which is exactly what that
+#: row was written to express — see the parity fixture below.
+READ_ONLY_ALLOWLIST_PROFILE = "reviewer"
+
+#: **Positive** per-server tool allowlist for a ``read_only`` admission — the
+#: resolved ALLOW set of the ``reviewer`` row of the launcher's own per-profile
+#: allowlist, ``EterniaLauncher docs/stages/qa-reboot/launcher_qa_profile_allowlists.yaml``
+#: (v1, 2026-05-17, + the Stage 19 / VOICE_QA §5.E amendments).
+#:
+#: Positive, not negative, deliberately: a tool the launcher's QA server grows
+#: LATER is denied to ``read_only`` by default instead of silently inheriting it.
+#: That is the same default-deny the launcher YAML chose for its restricted
+#: profiles ("so a future tool added under Stage 19+ does not silently fall into
+#: the restricted profiles via a missing entry"), and it is the reason this is
+#: the R2 shape rather than R1's exclude list.
+#:
+#: Hermes OWNS this policy (design open question 6): the launcher file is
+#: documentation plus a CI parity fixture, never read at admission time, so a
+#: missing checkout or a deploy skew can never change what an agent may call.
+#: ``tests/agent_runtime/test_mcp_admission_r2.py`` pins it against a vendored,
+#: hash-recorded snapshot of that YAML — see the fixture's refresh instructions.
+READ_ONLY_INCLUDED_TOOLS: Mapping[str, tuple[str, ...]] = {
+    "launcher_qa": (
+        "mcp_launcher_qa_get_auth_state",
+        "mcp_launcher_qa_get_buttons",
+        "mcp_launcher_qa_get_feed_fixture_state",
+        "mcp_launcher_qa_get_media_playback_state",
+        "mcp_launcher_qa_get_navigation_state",
+        "mcp_launcher_qa_get_runtime_state",
+        "mcp_launcher_qa_get_voice_state",
+        "mcp_launcher_qa_get_widget_state",
+        "mcp_launcher_qa_get_window_metrics",
+        "mcp_launcher_qa_read_artifact_index",
+        "mcp_launcher_qa_read_trace",
+        "mcp_launcher_qa_run_redaction_scan",
+    ),
+}
+
+#: The complement of :data:`READ_ONLY_INCLUDED_TOOLS` over the server's known
+#: surface — the ``denied`` rows of the same ``reviewer`` profile. The include
+#: list above is what actually gets REGISTERED; this list is the warm-process
+#: backstop, threaded into ``blocked_tool_names`` so a resident actor's cached
+#: tool definitions cannot resurrect a mutator that the current run's
+#: registration already filtered out.
+#:
+#: R1 carried only this half, and it was three names SHORT of the reviewer row:
+#: ``capture_screenshot`` / ``screenshot_window`` / ``wait_for_state`` all drive
+#: a live launcher window (restore + foreground + PrintWindow; a polling loop
+#: against the fixture mutex) and the launcher denies them to ``reviewer`` for
+#: that reason. R2 adopts the row verbatim, which NARROWS ``read_only``.
 READ_ONLY_EXCLUDED_TOOLS: Mapping[str, tuple[str, ...]] = {
     "launcher_qa": (
         "mcp_launcher_qa_begin_pkce_login",
+        "mcp_launcher_qa_capture_screenshot",
         "mcp_launcher_qa_click_button",
         "mcp_launcher_qa_dismiss_hashtag_onboarding",
         "mcp_launcher_qa_kill_launcher",
         "mcp_launcher_qa_launch_or_attach",
         "mcp_launcher_qa_open_app_tab",
+        "mcp_launcher_qa_screenshot_window",
         "mcp_launcher_qa_scroll",
         "mcp_launcher_qa_scroll_to",
         "mcp_launcher_qa_scroll_to_fixture",
         "mcp_launcher_qa_set_tab",
+        "mcp_launcher_qa_wait_for_state",
     ),
 }
 
@@ -184,8 +265,8 @@ class McpAdmission:
     denied: tuple[McpAdmissionDenial, ...] = ()
     server_configs: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     #: Prefixed registry names removed from the model's tool list for this run
-    #: (the warm-process backstop for the ``read_only`` subtraction; see the
-    #: module docstring's R2 consequence).
+    #: (the resident-actor backstop behind the ``read_only`` include list; see
+    #: the module docstring's R2 section).
     blocked_tool_names: tuple[str, ...] = ()
     connect_timeout_seconds: float = _DEFAULT_CONNECT_TIMEOUT_SECONDS
 
@@ -221,9 +302,46 @@ class McpAdmissionOutcome:
     registered_tool_names: tuple[str, ...] = ()
     duration_ms: int = 0
     attempted: bool = False
+    #: The subset of ``denied`` that EXECUTION minted — busy / timeout /
+    #: admitted-but-did-not-register. Kept separate from the policy denials
+    #: ``denied`` also carries, because only these were unknowable when the
+    #: turn's runtime-context envelope was sealed, and therefore only these need
+    #: the runner's in-band backstop. Reporting a policy denial twice would tell
+    #: the agent the same thing in two voices.
+    execution_denied: tuple[McpAdmissionDenial, ...] = ()
 
     def denial_rows(self) -> list[dict[str, Any]]:
         return [denial.row() for denial in self.denied]
+
+    @property
+    def degraded(self) -> bool:
+        """Did EXECUTION fail to deliver something the policy already admitted?"""
+
+        return bool(self.attempted and self.execution_denied)
+
+
+@dataclass(frozen=True, slots=True)
+class McpTeardownOutcome:
+    """What the end-of-run registry-scope removal actually removed.
+
+    Advisory, never fatal: by the time teardown runs the turn has already
+    produced its answer, so a fault here is reported as a typed row and the run
+    still completes. ``failures`` being non-empty is the signal that a scope
+    outlived its run and the next run's toolset scope
+    (:func:`scope_toolsets_to_admission`) is carrying isolation alone.
+    """
+
+    servers: tuple[str, ...] = ()
+    removed_tool_names: tuple[str, ...] = ()
+    failures: tuple[McpAdmissionDenial, ...] = ()
+    duration_ms: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return not self.failures
+
+    def failure_rows(self) -> list[dict[str, Any]]:
+        return [failure.row() for failure in self.failures]
 
 
 # ── config ──────────────────────────────────────────────────────────────────
@@ -501,11 +619,15 @@ def _apply_permission_mode(
 ) -> tuple[dict[str, Any], tuple[str, ...], McpAdmissionDenial | None]:
     """Compose the permission mode onto the EXISTING per-server tool filter.
 
-    ``read_only`` subtracts the mutating tools through
-    ``mcp_servers.<name>.tools.exclude`` — the allowlist mechanism
-    ``tools/mcp_tool.py`` already implements — so a denied tool is never
+    ``read_only`` compiles the reviewer-shaped **positive** allowlist into
+    ``mcp_servers.<name>.tools.include`` — the filter ``tools/mcp_tool.py``
+    already implements (include wins over exclude) — so a denied tool is never
     registered, rather than registered and then blocked. No new filtering code
     path, per the design's §A step 4.
+
+    Returns ``(config, blocked_raw_tool_names, denial)``. The blocked names are
+    the reviewer row's ``denied`` set, threaded into ``blocked_tool_names`` as
+    the resident-actor backstop; the *registration* boundary is the include list.
     """
 
     from .tool_permissions import PERMISSION_MODE_READ_ONLY
@@ -513,8 +635,8 @@ def _apply_permission_mode(
     if permission_mode != PERMISSION_MODE_READ_ONLY:
         return config, (), None
 
-    excluded = READ_ONLY_EXCLUDED_TOOLS.get(server)
-    if excluded is None:
+    included = READ_ONLY_INCLUDED_TOOLS.get(server)
+    if included is None:
         return (
             config,
             (),
@@ -526,22 +648,31 @@ def _apply_permission_mode(
                     "so nothing is admitted rather than admitting a surface it cannot subtract."
                 ),
                 fix_hint=(
-                    f"Add '{server}' to agent_runtime.mcp_admission.READ_ONLY_EXCLUDED_TOOLS "
+                    f"Add '{server}' to agent_runtime.mcp_admission.READ_ONLY_INCLUDED_TOOLS "
                     "with a written security note, or run this persona in profile_default."
                 ),
             ),
         )
 
     tools_filter = dict(config.get("tools") or {})
-    include = _name_list(tools_filter.get("include"))
-    if include:
+    authored = _name_list(tools_filter.get("include"))
+    if authored:
         # A profile-authored include list is already narrower than the server's
-        # full surface; read_only can only narrow it further.
-        tools_filter["include"] = [name for name in include if name not in set(excluded)]
+        # full surface; read_only can only narrow it further, never resurrect a
+        # tool the reviewer row does not allow.
+        allowed = [name for name in authored if name in set(included)]
     else:
-        tools_filter["exclude"] = sorted(set(_name_list(tools_filter.get("exclude"))) | set(excluded))
+        allowed = list(included)
+    tools_filter["include"] = allowed
+    # An explicit include wins over exclude upstream, so the exclude entry is
+    # redundant for registration. It is still written so an operator reading the
+    # compiled config sees BOTH halves of the decision, and so a future upstream
+    # that honours both stays correct.
+    tools_filter["exclude"] = sorted(
+        set(_name_list(tools_filter.get("exclude"))) | set(READ_ONLY_EXCLUDED_TOOLS.get(server, ()))
+    )
     config["tools"] = tools_filter
-    return config, tuple(excluded), None
+    return config, tuple(READ_ONLY_EXCLUDED_TOOLS.get(server, ())), None
 
 
 def _name_list(value: Any) -> list[str]:
@@ -756,26 +887,27 @@ def admit_mcp_servers(
     started = time.perf_counter()
 
     if not _ADMISSION_LOCK.acquire(blocking=False):
+        busy = tuple(
+            McpAdmissionDenial(
+                server=name,
+                code=MCP_ADMISSION_LANE_BUSY,
+                summary=(
+                    f"Another MCP admission is in flight in this process, so '{name}' "
+                    "was not registered for this turn."
+                ),
+                fix_hint=(
+                    "MCP registration is process-global; admissions are serialized on "
+                    "purpose. Retry the turn, or use the server's harness-side contract "
+                    "(e.g. qa.request_screenshot) for this one."
+                ),
+            )
+            for name in admission.server_names
+        )
         return McpAdmissionOutcome(
             attempted=True,
             duration_ms=int((time.perf_counter() - started) * 1000),
-            denied=tuple(admission.denied)
-            + tuple(
-                McpAdmissionDenial(
-                    server=name,
-                    code=MCP_ADMISSION_LANE_BUSY,
-                    summary=(
-                        f"Another MCP admission is in flight in this process, so '{name}' "
-                        "was not registered for this turn."
-                    ),
-                    fix_hint=(
-                        "MCP registration is process-global; admissions are serialized on "
-                        "purpose. Retry the turn, or use the server's harness-side contract "
-                        "(e.g. qa.request_screenshot) for this one."
-                    ),
-                )
-                for name in admission.server_names
-            ),
+            denied=tuple(admission.denied) + busy,
+            execution_denied=busy,
         )
 
     done = threading.Event()
@@ -807,27 +939,28 @@ def admit_mcp_servers(
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     if not finished:
+        timed_out = tuple(
+            McpAdmissionDenial(
+                server=name,
+                code=MCP_ADMISSION_TIMEOUT,
+                summary=(
+                    f"'{name}' did not finish registering within {budget:.0f}s, so it is "
+                    "not available for this turn."
+                ),
+                fix_hint=(
+                    "The turn continues without it — report that plainly and use the "
+                    "server's harness-side contract (e.g. qa.request_screenshot). If the "
+                    "server is slow to start, start it before the turn rather than raising "
+                    "agent_runtime.mcp_admission.connect_timeout_seconds into the turn budget."
+                ),
+            )
+            for name in admission.server_names
+        )
         return McpAdmissionOutcome(
             attempted=True,
             duration_ms=duration_ms,
-            denied=tuple(admission.denied)
-            + tuple(
-                McpAdmissionDenial(
-                    server=name,
-                    code=MCP_ADMISSION_TIMEOUT,
-                    summary=(
-                        f"'{name}' did not finish registering within {budget:.0f}s, so it is "
-                        "not available for this turn."
-                    ),
-                    fix_hint=(
-                        "The turn continues without it — report that plainly and use the "
-                        "server's harness-side contract (e.g. qa.request_screenshot). If the "
-                        "server is slow to start, start it before the turn rather than raising "
-                        "agent_runtime.mcp_admission.connect_timeout_seconds into the turn budget."
-                    ),
-                )
-                for name in admission.server_names
-            ),
+            denied=tuple(admission.denied) + timed_out,
+            execution_denied=timed_out,
         )
 
     from .mcp_lane import registered_mcp_server_names
@@ -836,37 +969,302 @@ def admit_mcp_servers(
     admitted = tuple(name for name in admission.server_names if name in registered)
     missed = tuple(name for name in admission.server_names if name not in registered)
     tool_names = tuple(str(name) for name in (box.get("tools") or []))
+    unregistered = tuple(
+        McpAdmissionDenial(
+            server=name,
+            code=MCP_NOT_REGISTERED_ON_LANE,
+            summary=(
+                f"'{name}' was admitted for this run but did not register — the server "
+                "did not connect or advertised no tools."
+            ),
+            fix_hint=(
+                "Check the server is running and its command resolves on this machine "
+                "(hermes harness persona tool-diff <persona> --explain-mcp), then retry."
+            ),
+        )
+        for name in missed
+    )
     return McpAdmissionOutcome(
         attempted=True,
         admitted=admitted,
         registered_tool_names=tool_names,
         duration_ms=duration_ms,
-        denied=tuple(admission.denied)
-        + tuple(
-            McpAdmissionDenial(
-                server=name,
-                code=MCP_NOT_REGISTERED_ON_LANE,
-                summary=(
-                    f"'{name}' was admitted for this run but did not register — the server "
-                    "did not connect or advertised no tools."
-                ),
-                fix_hint=(
-                    "Check the server is running and its command resolves on this machine "
-                    "(hermes harness persona tool-diff <persona> --explain-mcp), then retry."
-                ),
-            )
-            for name in missed
-        ),
+        denied=tuple(admission.denied) + unregistered,
+        execution_denied=unregistered,
     )
 
 
 def _default_registrar(servers: Mapping[str, Mapping[str, Any]]) -> list[str]:
-    """``register_mcp_servers`` for the admitted subset ONLY.
+    """Register the admitted subset ONLY, warm-aware.
 
     ``discover_mcp_tools()`` is never called: it would register everything in the
     profile's config, which is precisely the blast radius admission refuses.
+
+    Since R2 tears the registry scope down after every run while leaving the
+    transport warm, a server can be CONNECTED and yet have no registered tools —
+    a state ``register_mcp_servers`` cannot repair, because it short-circuits on
+    connected servers (``if not new_servers: return _existing_tool_names()``).
+    So the admitted set is split: warm servers are re-registered off their live
+    session (no spawn, no handshake, and this run's ``tools`` filter applied to
+    the already-listed tools), cold ones go through ``register_mcp_servers``.
     """
 
-    from tools.mcp_tool import register_mcp_servers
+    warm: dict[str, Mapping[str, Any]] = {}
+    cold: dict[str, Any] = {}
+    live = _live_mcp_sessions()
+    for name, cfg in servers.items():
+        (warm if name in live else cold)[name] = cfg
 
-    return list(register_mcp_servers({name: dict(cfg) for name, cfg in servers.items()}) or [])
+    names: list[str] = []
+    for name, cfg in warm.items():
+        names.extend(_reregister_warm_server(name, dict(cfg)))
+    if cold:
+        from tools.mcp_tool import register_mcp_servers
+
+        names.extend(register_mcp_servers({name: dict(cfg) for name, cfg in cold.items()}) or [])
+    return names
+
+
+def _live_mcp_sessions() -> frozenset[str]:
+    """Admitted-server names already connected WITH a live session.
+
+    A cached entry whose ``session`` is ``None`` is parked or mid-reconnect;
+    ``register_mcp_servers`` has dedicated wake handling for exactly that case,
+    so those are deliberately treated as COLD and left to it.
+    """
+
+    try:
+        from tools.mcp_tool import _servers
+    except Exception:  # pragma: no cover - MCP SDK absent ⇒ nothing is warm
+        return frozenset()
+    try:
+        return frozenset(
+            str(name)
+            for name, server in dict(_servers).items()
+            if getattr(server, "session", None) is not None
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("MCP admission could not read the warm-server map", exc_info=True)
+        return frozenset()
+
+
+def _reregister_warm_server(name: str, config: dict[str, Any]) -> list[str]:
+    """Re-register a connected server's tools under THIS run's tool filter.
+
+    The upstream seam (``tools.mcp_tool._register_server_tools``) is the same one
+    dynamic ``notifications/tools/list_changed`` refresh uses to nuke-and-repave
+    an MCP server's registry scope, which is exactly the operation R2 needs — it
+    honours ``tools.include`` / ``tools.exclude``, re-registers the toolset alias,
+    and touches no transport.
+
+    Fails CLOSED. If the seam is gone (upstream drift) or the re-registration
+    raises, this returns ``[]`` and the caller's registry read then reports the
+    server as ``mcp_not_registered_on_lane`` — an honest "you have no tools this
+    turn" rather than a silent fallback to whatever was registered before.
+    """
+
+    try:
+        from tools.mcp_tool import _register_server_tools, _servers
+
+        server = dict(_servers).get(name)
+        if server is None:  # pragma: no cover - raced against a disconnect
+            return []
+        registered = list(_register_server_tools(name, server, config) or [])
+        # Keep ``_existing_tool_names()`` consistent with what is really in the
+        # registry, so a later cold registration of a DIFFERENT server does not
+        # report this one's stale pre-teardown surface.
+        try:
+            server._registered_tool_names = list(registered)
+        except Exception:  # pragma: no cover - exotic server stub
+            pass
+        return registered
+    except Exception:
+        logger.warning(
+            "MCP admission could not re-register warm server %r; it will report as "
+            "not registered for this run",
+            name,
+            exc_info=True,
+        )
+        return []
+
+
+# ── teardown (the run-scoped half of the lifecycle) ─────────────────────────
+
+
+def teardown_mcp_admission(
+    servers: Iterable[str] | None,
+    *,
+    lock_timeout_seconds: float = 5.0,
+) -> McpTeardownOutcome:
+    """Remove an admitted run's registry scope. Keeps the transport warm.
+
+    Deregisters every tool in each admitted ``mcp-<server>`` toolset.
+    ``registry.deregister`` exempts ``mcp-*`` from the plugin-ownership gate, and
+    dropping the LAST tool of a toolset also drops its toolset check and every
+    alias pointing at it — so both spellings a run could have resolved
+    (``mcp-launcher_qa`` and the bare ``launcher_qa`` alias) go with it.
+
+    The transport is deliberately untouched: ``tools/mcp_tool._servers`` keeps the
+    connection, so the next admitted run re-registers off the live session
+    instead of paying a fresh spawn + handshake. Process exit still owns the
+    connections (``tools.mcp_tool.shutdown_mcp_servers``).
+
+    Only ever called with servers THIS run admitted, and admission only ever runs
+    on the harness lane (``persona_runtime.mission_chat_reply`` is the sole
+    producer of ``AgentRunRequest.mcp_admission``), so this can never remove a
+    scope that an MCP-registering entry point's ``discover_mcp_tools()`` created.
+
+    Never raises. Every fault becomes a typed ``mcp_admission_teardown_failed``
+    row: a finished turn must never be failed by its own cleanup.
+    """
+
+    names = [str(name).strip() for name in servers or () if str(name or "").strip()]
+    started = time.perf_counter()
+    if not names:
+        return McpTeardownOutcome()
+
+    failures: list[McpAdmissionDenial] = []
+    # A registration whose CALLER timed out keeps running on its worker thread
+    # (that is why the worker, not the caller, releases the mutex). Waiting for
+    # it here is what stops teardown from racing a late registration and leaving
+    # exactly the residue it exists to remove.
+    held = _ADMISSION_LOCK.acquire(timeout=max(0.0, float(lock_timeout_seconds)))
+    if not held:
+        failures.append(
+            McpAdmissionDenial(
+                server=", ".join(names),
+                code=MCP_ADMISSION_TEARDOWN_FAILED,
+                summary=(
+                    "An MCP admission was still in flight when this run's scope was torn "
+                    "down; the scope was removed anyway and a late registration may have "
+                    "re-added tools."
+                ),
+                fix_hint=(
+                    "Bounded by agent_runtime.mcp_admission.connect_timeout_seconds. The "
+                    "next run's toolset scope still refuses any MCP toolset it was not "
+                    "admitted, so this is residue, not exposure."
+                ),
+            )
+        )
+    try:
+        removed = _deregister_toolset_scopes(names, failures)
+    finally:
+        if held:
+            _ADMISSION_LOCK.release()
+
+    return McpTeardownOutcome(
+        servers=tuple(names),
+        removed_tool_names=tuple(removed),
+        failures=tuple(failures),
+        duration_ms=int((time.perf_counter() - started) * 1000),
+    )
+
+
+def _deregister_toolset_scopes(
+    names: Sequence[str], failures: list[McpAdmissionDenial]
+) -> list[str]:
+    """Registry-only scope removal. Never imports ``tools.mcp_tool`` (SDK)."""
+
+    try:
+        from tools.registry import registry
+    except Exception:  # pragma: no cover - registry is always importable in-process
+        failures.append(
+            McpAdmissionDenial(
+                server=", ".join(names),
+                code=MCP_ADMISSION_TEARDOWN_FAILED,
+                summary="The tool registry was unavailable, so no admitted MCP scope was removed.",
+                fix_hint="The next run's toolset scope still refuses un-admitted MCP toolsets.",
+            )
+        )
+        return []
+
+    removed: list[str] = []
+    for name in names:
+        toolset = f"{_MCP_TOOLSET_PREFIX}{name}"
+        try:
+            for tool_name in list(registry.get_tool_names_for_toolset(toolset) or []):
+                registry.deregister(tool_name)
+                removed.append(tool_name)
+        except Exception as exc:
+            logger.warning("MCP admission teardown failed for %r: %s", name, exc, exc_info=True)
+            failures.append(
+                McpAdmissionDenial(
+                    server=name,
+                    code=MCP_ADMISSION_TEARDOWN_FAILED,
+                    summary=(
+                        f"'{name}' tools could not be deregistered after the run "
+                        f"({type(exc).__name__}), so its registry scope outlived it."
+                    ),
+                    fix_hint=(
+                        "Isolation falls back to the per-run toolset scope until the process "
+                        "recycles. Check tools/registry.py deregister for this toolset."
+                    ),
+                )
+            )
+    return removed
+
+
+# ── the agent-visible denial line (design §D3) ──────────────────────────────
+
+#: Bullet prefix, so the line sits in the same list the wall-budget line renders
+#: into on the runtime-context envelope's volatile tail.
+_ADMISSION_LINE_PREFIX = "- MCP tools:"
+
+
+def render_mcp_admission_line(
+    admission: "McpAdmission | None",
+    *,
+    outcome: "McpAdmissionOutcome | None" = None,
+) -> str:
+    """One compact, agent-visible line naming what this turn did NOT get.
+
+    Design §D3. The third visibility surface, and the one that retires W3: a QA
+    agent that sees no ``mcp__launcher_qa__*`` tools and no explanation invents
+    alternatives (which is how ``pwsh -File`` calls end up in agent output and
+    why the launcher repo needs a grep gate for them). Telling it the truth in
+    band is cheaper than fencing every workaround it can invent.
+
+    Returns ``""`` when there is nothing to say — no admission, nothing declared,
+    or a clean admission where everything declared was admitted. A clean turn
+    must not pay a line, and an agent that HAS the tools does not need to be told
+    about a mechanism.
+
+    ``outcome`` contributes only its ``execution_denied`` rows (busy / timeout /
+    admitted-but-did-not-register). The policy denials it also carries are
+    already on the turn's envelope, and saying the same thing twice in two
+    voices is how an agent learns to discount both. Pass ``admission=None`` with
+    an ``outcome`` to render the execution half alone — that is what the runner's
+    in-band backstop does.
+
+    Pure and volatile: rendered per turn onto the runtime-context envelope's
+    volatile tail (exactly like ``turn_budget.render_turn_budget_line``) and
+    never folded into the hashed HUD body, so a cached ``unchanged`` delivery can
+    never show the agent a stale capability claim.
+    """
+
+    denials = list(admission.denied) if admission is not None else []
+    if outcome is not None:
+        seen = {(denial.server, denial.code) for denial in denials}
+        denials.extend(
+            denial
+            for denial in outcome.execution_denied
+            if (denial.server, denial.code) not in seen
+        )
+    if not denials:
+        return ""
+
+    # One entry per server, first (most specific) code wins — resolution denials
+    # are ordered narrowest-first and execution rows are appended after them.
+    ordered: dict[str, str] = {}
+    for denial in denials:
+        ordered.setdefault(str(denial.server), str(denial.code))
+    detail = ", ".join(f"{server} ({code})" for server, code in ordered.items())
+    return (
+        f"{_ADMISSION_LINE_PREFIX} {detail} — declared for this persona but NOT available "
+        "on this turn, so no mcp__<server>__* tools for it are in your tool list. This is a "
+        "capability fact, not a permission problem: do not retry, do not hunt for a "
+        "permission mode, and do not substitute a shell/PowerShell workaround or a second "
+        "lane. Use the server's harness-side contract instead (for launcher_qa: the "
+        "qa.request_screenshot decision contract), and say plainly in your reply that the "
+        "tools were unavailable."
+    )
