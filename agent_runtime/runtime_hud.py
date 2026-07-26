@@ -19,6 +19,24 @@ each per-instance prompt context so the launcher renders exactly what is fed.
 The Mission HUD slice reuses ``context_builder.mission_hud_preview`` verbatim — no
 parallel HUD math. Empty when the lane has no bound task (honest: a standing-by
 lane still carries runtime/scope/identity/roster, just no mission).
+
+Two delivery lanes, one authority
+---------------------------------
+The HUD has a HASHED BODY and a VOLATILE TAIL, and which one a fact rides is a
+contract, not a style choice:
+
+* **Body** — `render_situational_hud_block`. Stable facts (scope, mission, lane,
+  steering, roster). Hashed into `situational_hud_revision`, so an unchanged
+  picture is delivered as a compact ``unchanged`` stub instead of a re-snapshot.
+* **Tail** — `render_runtime_context_envelope(volatile_content=…)`, emitted on
+  EVERY delivery (snapshot, unchanged, and unavailable alike). Facts that must
+  be true THIS turn: the wall budget (`turn_budget.render_turn_budget_line`),
+  the MCP admission denials (`mcp_admission.render_mcp_admission_line`), and
+  this lane's capability account (`render_capability_block` — what the chat-lane
+  cost policy dropped and what the terminal envelope will refuse). Everything on
+  the tail is listed in ``_VOLATILE_HUD_KEYS`` and therefore excluded from the
+  revision hash: a cached body must never show a stale countdown or a stale
+  capability claim.
 """
 
 from __future__ import annotations
@@ -28,11 +46,19 @@ import json
 import re
 from typing import Any, Iterable
 
+from .chat_lane_toolsets import DROP_KIND_TOOL, DROP_KIND_TOOLSET
 from .models import looks_like_persona_instance_id
 
 # Bound the roster so a large level cannot bloat every chat turn. The operator's
 # widget wraps chips; the fed block lists names and notes the overflow count.
 SITUATIONAL_HUD_ROSTER_CAP = 16
+
+# Bound each capability list for the same reason the roster is bounded: the
+# capability block rides EVERY turn, so a policy that later widens the excluded
+# toolset set — or a command-class taxonomy that grows past seven — must not
+# silently turn two lines into a wall. Overflow is counted, never dropped
+# without saying so.
+SITUATIONAL_HUD_CAPABILITY_CAP = 8
 
 RUNTIME_CONTEXT_DELIVERY_SNAPSHOT = "snapshot"
 RUNTIME_CONTEXT_DELIVERY_UNCHANGED = "unchanged"
@@ -71,12 +97,29 @@ _SKILL_PRELOAD_ENVELOPE_RE = re.compile(
 _SKILL_PRELOAD_NAME_RE = re.compile(r"^[a-zA-Z0-9_.:+-]+$")
 
 
-# HUD keys deliberately EXCLUDED from the revision hash. These change on every
-# single turn by construction (a wall-clock countdown), so hashing them would
-# force a full re-snapshot of the whole stable HUD block every turn and defeat
-# the snapshot/unchanged delivery contract entirely. They ride the envelope's
-# always-emitted volatile tail instead (see ``render_runtime_context_envelope``).
-_VOLATILE_HUD_KEYS = frozenset({"turn_budget"})
+# HUD key for this lane's capability account — what the chat-lane cost policy
+# removed from this turn, and what the terminal safety envelope will refuse.
+CAPABILITY_HUD_KEY = "capability"
+
+# HUD keys deliberately EXCLUDED from the revision hash, and therefore carried
+# on the envelope's always-emitted volatile tail rather than in the hashed body
+# (see ``render_runtime_context_envelope``). Two independent reasons, both of
+# which end at the same contract:
+#
+# * ``turn_budget`` changes on every single turn by construction (a wall-clock
+#   countdown), so hashing it would force a full re-snapshot of the whole stable
+#   HUD block every turn and defeat the snapshot/unchanged delivery contract.
+# * ``capability`` is mostly stable but must be true on EVERY turn regardless of
+#   delivery. A cached ``unchanged`` stub — and, worse, an ``unavailable``
+#   delivery, which drops the body entirely — would leave an agent believing it
+#   still has a capability this turn dropped, or leave a refusal unexplained.
+#   Same reasoning, and the same lane, as the MCP admission line
+#   (``mcp_admission.render_mcp_admission_line``): a capability claim that can go
+#   stale in a cache is worse than no claim at all.
+#
+# Anything added here MUST also stay out of ``render_situational_hud_block``,
+# which renders the hashed body.
+_VOLATILE_HUD_KEYS = frozenset({"turn_budget", CAPABILITY_HUD_KEY})
 
 
 def situational_hud_revision(hud: dict[str, Any] | None) -> str:
@@ -467,6 +510,7 @@ def resolve_situational_hud(
     proof_store: Any = None,
     board: dict[str, Any] | None = None,
     turn_budget: dict[str, Any] | None = None,
+    capability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the typed situational snapshot for one lane.
 
@@ -533,6 +577,15 @@ def resolve_situational_hud(
     if isinstance(turn_budget, dict) and turn_budget:
         hud["turn_budget"] = turn_budget
 
+    # This lane's capability account (``resolve_capability_block``). Volatile by
+    # contract for the reasons recorded at ``_VOLATILE_HUD_KEYS``, so — exactly
+    # like ``turn_budget`` — it is excluded from the revision hash and fed to the
+    # agent through the envelope's always-emitted tail rather than the cached
+    # body. It lives on the dict so the operator's CONTEXT peek and the
+    # observability row see the SAME account the agent was told.
+    if isinstance(capability, dict) and capability:
+        hud[CAPABILITY_HUD_KEY] = capability
+
     if task is not None:
         # Deferred import: context_builder pulls a large dependency graph and is
         # imported late elsewhere for the same reason. Reuse the exact preview
@@ -556,7 +609,13 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
 
     Kept deliberately compact and read-only in tone: the block is situational
     awareness the operator also sees, not an instruction to act. Returns an empty
-    string when there is nothing to say."""
+    string when there is nothing to say.
+
+    This is the HASHED body: it renders only the stable keys. Every key in
+    ``_VOLATILE_HUD_KEYS`` is deliberately absent here and rides the envelope's
+    always-emitted tail instead — rendering one of them into this block would
+    put volatile content behind the revision hash and re-snapshot the whole HUD
+    every turn."""
 
     if not isinstance(hud, dict) or not hud:
         return ""
@@ -660,6 +719,252 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _capped(names: Iterable[Any]) -> tuple[list[str], int]:
+    """Order-preserving dedupe, capped; returns the kept names and the overflow."""
+
+    kept: list[str] = []
+    seen: set[str] = set()
+    for item in names or ():
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        kept.append(text)
+    if len(kept) <= SITUATIONAL_HUD_CAPABILITY_CAP:
+        return kept, 0
+    return kept[:SITUATIONAL_HUD_CAPABILITY_CAP], len(kept) - SITUATIONAL_HUD_CAPABILITY_CAP
+
+
+def _names(names: Iterable[Any]) -> str:
+    kept, overflow = _capped(names)
+    text = ", ".join(kept)
+    return f"{text} (+{overflow} more)" if overflow else text
+
+
+def resolve_capability_block(
+    *,
+    drops: Iterable[Any] = (),
+    envelope: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble this lane's capability account: what was DROPPED, what is REFUSED.
+
+    Pure, like :func:`resolve_situational_hud`: both inputs are already-resolved
+    facts produced by their own authorities, and this module renders them — it
+    resolves no policy of its own.
+
+    * ``drops`` — :class:`agent_runtime.chat_lane_toolsets.ChatLaneDrop` values
+      from ``persona_runtime.chat_lane_capability_drops`` (G5). Each carries the
+      exact root-config key that un-excludes it, which is the whole point of the
+      row: the reader can act without reading source.
+    * ``envelope`` — the side-effect-free
+      ``terminal_envelope.explain_terminal_envelope`` view. Its ``refused`` set
+      is split into the operator-grantable classes and the hard floor, because
+      telling an agent to ask for a grant that cannot exist would be a new lie
+      (the same reasoning that made ``envelope_command_not_grantable`` a
+      distinct refusal code).
+
+    Returns ``{}`` when there is genuinely nothing to account for — an
+    ``unbounded`` turn drops nothing, and an ungoverned lane refuses nothing, so
+    neither pays a line. Honest silence, not a noise block.
+    """
+
+    block: dict[str, Any] = {}
+
+    toolsets: list[str] = []
+    tools: list[str] = []
+    restorable: list[str] = []
+    for drop in drops or ():
+        subject = str(getattr(drop, "subject", "") or "").strip()
+        if not subject:
+            continue
+        kind = getattr(drop, "kind", None)
+        if kind == DROP_KIND_TOOLSET:
+            toolsets.append(subject)
+        elif kind == DROP_KIND_TOOL:
+            tools.append(subject)
+        else:
+            continue
+        key = str(getattr(drop, "restorable_via", "") or "").strip()
+        if key and key not in restorable:
+            restorable.append(key)
+    if toolsets:
+        block["toolsets_dropped"] = toolsets
+    if tools:
+        block["tools_dropped"] = tools
+    if restorable:
+        # One persona ⇒ one key in practice; the list shape keeps the block
+        # honest if a future dropper ever restores through a different setting.
+        block["restorable_via"] = restorable
+
+    if isinstance(envelope, dict) and envelope.get("governed"):
+        grantable = {
+            str(name) for name in (envelope.get("grantable_command_classes") or ())
+        }
+        refused = [str(name) for name in (envelope.get("refused") or ())]
+        granted = [str(name) for name in (envelope.get("granted") or ())]
+        issues = [row for row in (envelope.get("grant_issues") or ()) if isinstance(row, dict)]
+        refused_grantable = [name for name in refused if name in grantable]
+        refused_hard_floor = [name for name in refused if name not in grantable]
+        if granted or refused or issues:
+            envelope_block: dict[str, Any] = {
+                "lane": str(envelope.get("lane") or "").strip(),
+                "role": str(envelope.get("role") or "").strip(),
+                "config_key": str(envelope.get("config_key") or "").strip(),
+            }
+            if granted:
+                envelope_block["granted"] = granted
+            if refused_grantable:
+                envelope_block["refused_grantable"] = refused_grantable
+            if refused_hard_floor:
+                envelope_block["refused_hard_floor"] = refused_hard_floor
+            if issues:
+                envelope_block["grant_issues"] = issues
+            block["envelope"] = envelope_block
+
+    return block
+
+
+def render_capability_block(capability: dict[str, Any] | None) -> str:
+    """Render the agent-visible capability lines for the volatile envelope tail.
+
+    Two bullets at most, in the same list grammar as
+    ``turn_budget.render_turn_budget_line`` and
+    ``mcp_admission.render_mcp_admission_line``, because they ride the same tail.
+
+    This is the whole point of the slice: the drops and the envelope refusals
+    were already computed and already typed, and the agent still could not SEE
+    them — so "I have no terminal" read to the model as an unexplained absence
+    and it improvised (the failure class the MCP row was written to retire,
+    recurring; see the lane gap audit §6 / G5). Each line therefore states the
+    fact, names the ONE authority that could change it, and closes the
+    improvisation door explicitly.
+
+    Returns ``""`` for an empty account, so a lane with nothing to report pays
+    nothing.
+    """
+
+    if not isinstance(capability, dict) or not capability:
+        return ""
+
+    lines: list[str] = []
+
+    toolsets = capability.get("toolsets_dropped") or []
+    tools = capability.get("tools_dropped") or []
+    if toolsets or tools:
+        parts: list[str] = []
+        if toolsets:
+            parts.append(f"toolset{'' if len(toolsets) == 1 else 's'} {_names(toolsets)}")
+        if tools:
+            parts.append(f"tool{'' if len(tools) == 1 else 's'} {_names(tools)}")
+        keys = capability.get("restorable_via") or []
+        restore = (
+            f" Only an OPERATOR can restore one, with `{_names(keys)}` in the ROOT "
+            "config.yaml."
+            if keys
+            else ""
+        )
+        lines.append(
+            f"- Dropped on this lane: {' · '.join(parts)}. By design — a per-turn "
+            "schema-cost cut applied AFTER role and permission resolution, so it is "
+            "NOT a permission problem and no permission mode you can reach restores "
+            f"it.{restore} Report the absence plainly; do not hunt for a mode and do "
+            "not improvise a workaround."
+        )
+
+    envelope = capability.get("envelope") if isinstance(capability.get("envelope"), dict) else {}
+    if envelope:
+        who = ", ".join(
+            part
+            for part in (
+                f"role {envelope['role']}" if envelope.get("role") else "",
+                f"lane {envelope['lane']}" if envelope.get("lane") else "",
+            )
+            if part
+        )
+        bits: list[str] = []
+        granted = envelope.get("granted") or []
+        bits.append(f"granted {_names(granted)}" if granted else "no class granted")
+        refused_grantable = envelope.get("refused_grantable") or []
+        if refused_grantable:
+            key = envelope.get("config_key") or ""
+            via = f" — operator-grantable via `{key}`" if key else " — operator-grantable"
+            bits.append(f"refused {_names(refused_grantable)}{via}")
+        refused_hard_floor = envelope.get("refused_hard_floor") or []
+        if refused_hard_floor:
+            bits.append(
+                f"hard floor no config lifts: {_names(refused_hard_floor)}"
+            )
+        issues = envelope.get("grant_issues") or []
+        if issues:
+            bits.append(
+                f"{len(issues)} grant-config issue"
+                f"{'' if len(issues) == 1 else 's'} — the stanza grants less than it reads"
+            )
+        lines.append(
+            f"- Terminal envelope ({who}): " + "; ".join(bits) + ". A refusal is "
+            "final for this turn — relay it to the operator, never retry, reword or "
+            "split the command."
+        )
+
+    return "\n".join(lines)
+
+
+def capability_block_for_persona(
+    persona: Any,
+    *,
+    session_id: str | None = None,
+    permission_mode: str | None = None,
+    lane: str | None = None,
+) -> dict[str, Any]:
+    """Chat-side convenience: resolve both capability accounts for one persona.
+
+    The wrapper twin of :func:`situational_hud_for_instance` — it does the
+    lookups a single mission-chat turn needs, then calls the same pure
+    :func:`resolve_capability_block` (one authority). Both halves resolve the
+    SAME functions the turn itself resolves (``chat_lane_capability_drops`` is
+    the accounting twin of ``_enabled_toolsets_for_chat``;
+    ``explain_terminal_envelope`` reads the same grants
+    ``envelope_decision`` will), so what the agent is told and what the runtime
+    then does cannot disagree.
+
+    The two halves degrade INDEPENDENTLY: a fault resolving the drops must not
+    blank the envelope posture, and vice versa. Best-effort overall — the
+    capability account decorates a turn, it never blocks one.
+    """
+
+    if persona is None:
+        return {}
+
+    drops: tuple[Any, ...] = ()
+    try:
+        # Deferred: ``persona_runtime`` pulls the runtime graph (and imports this
+        # module's siblings), so a module-level import here would be circular.
+        from .persona_runtime import chat_lane_capability_drops
+
+        drops = chat_lane_capability_drops(
+            persona, session_id=session_id, permission_mode=permission_mode
+        )
+    except Exception:
+        drops = ()
+
+    envelope: dict[str, Any] | None = None
+    try:
+        from .personas import role_from_persona
+        from .terminal_envelope import LANE_MISSION_CHAT, explain_terminal_envelope
+
+        try:
+            role = str(role_from_persona(persona).value)
+        except Exception:
+            role = str(getattr(persona, "role", "") or "")
+        envelope = explain_terminal_envelope(
+            role=role, lane=str(lane or "").strip() or LANE_MISSION_CHAT
+        )
+    except Exception:
+        envelope = None
+
+    return resolve_capability_block(drops=drops, envelope=envelope)
+
+
 def _board_digest_for_workspace(workspace_id: str | None) -> dict[str, Any] | None:
     """Count open (non-done) cards on the active workspace's default board, by
     typed column kind. Returns ``None`` when there is no board or no open cards,
@@ -693,6 +998,7 @@ def situational_hud_for_instance(
     *,
     proof_store: Any = None,
     turn_budget: dict[str, Any] | None = None,
+    capability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Chat-side convenience: load the ambient runtime facts for one lane and
     resolve the situational HUD dict.
@@ -776,6 +1082,7 @@ def situational_hud_for_instance(
             proof_store=proof_store,
             board=_board_digest_for_workspace(scope_workspace_id),
             turn_budget=turn_budget,
+            capability=capability,
         )
     except Exception:
         return {}

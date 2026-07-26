@@ -226,12 +226,21 @@ now produces them.
    `lane_capability_drops(...)` producer the audit proposes is still owed;
    `TerminalEnvelopeDecision.row()` is deliberately in that row shape so it
    drops straight in.
-2. **Turn-start visibility.** `requirement_failures` is resolved before any
-   command runs, so an envelope refusal cannot appear there. Surfacing "here is
-   what this role may run on this lane" up front —
-   `explain_terminal_envelope(role=…, lane=…)` already returns exactly that,
-   side-effect free — would let an agent plan around the gate instead of
-   discovering it mid-turn.
+2. **Turn-start visibility.** — **CLOSED 2026-07-26.** `requirement_failures`
+   is resolved before any command runs, so an envelope refusal cannot appear
+   there. `explain_terminal_envelope(role=…, lane=…)` — side-effect free — is
+   now read once per mission-chat turn by
+   `runtime_hud.capability_block_for_persona` and rendered into the situational
+   HUD's **capability block** on the runtime-context envelope's volatile tail,
+   beside the typed chat-lane drops. The agent is told up front what it holds
+   (`granted`), what an operator could grant it and with which exact config key
+   (`refused_grantable`), and what no config lifts (`refused_hard_floor`) — so
+   it plans around the gate instead of discovering it by running the command.
+   The block is volatile by contract (`runtime_hud._VOLATILE_HUD_KEYS`, the
+   `turn_budget` precedent): never hashed into the HUD revision, always emitted,
+   and silent when there is nothing to report. Tests:
+   `tests/agent_runtime/test_runtime_hud_capability_visibility.py`,
+   `tests/hermes_cli/test_mission_chat_capability_visibility.py`.
 3. **`profile_context` early-yield.** The `binding.profile_home is None`
    branch that produced the fail-open case still skips every environment export
    for profile-less personas. The envelope no longer depends on it, but

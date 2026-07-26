@@ -2048,6 +2048,8 @@ def _cmd_mission_chat_message(args) -> int:
     # record-at-injection, never a later re-derivation. Best-effort ({} / ''
     # when unavailable); never blocks the turn.
     from agent_runtime.runtime_hud import (
+        capability_block_for_persona,
+        render_capability_block,
         render_runtime_context_envelope,
         render_situational_hud_block,
         runtime_context_delivery,
@@ -2076,8 +2078,17 @@ def _cmd_mission_chat_message(args) -> int:
         min_relay_seconds=relay_policy.MIN_RELAY_BUDGET_SECONDS,
     )
 
+    # This lane's capability account, resolved ONCE (G5): the typed chat-lane
+    # drops plus the terminal envelope's grant/refusal posture for this role.
+    # Both were already computed and already typed by wave-2, and the agent
+    # still could not SEE either — so a missing `terminal` read to the model as
+    # an unexplained absence and it improvised. It rides the HUD dict for
+    # operator parity (the CONTEXT peek shows exactly what the agent was told)
+    # and the envelope's volatile tail for the agent, never the hashed body.
+    capability = capability_block_for_persona(persona, session_id=session_id)
+
     situational_hud = situational_hud_for_instance(
-        instance, turn_budget=wall_budget.hud_block()
+        instance, turn_budget=wall_budget.hud_block(), capability=capability
     )
     situational_hud_revision_value = situational_hud_revision(situational_hud)
     situational_hud_delivery = runtime_context_delivery(
@@ -2112,15 +2123,23 @@ def _cmd_mission_chat_message(args) -> int:
             else None
         ),
     )
-    # Volatile tail, in one place. Both lines describe facts that are true for
-    # THIS turn only — how much wall clock is left, and which declared MCP
-    # servers this turn did not get — so both ride the tail rather than the
-    # hashed HUD body: a cached `unchanged` delivery must never show the agent a
-    # stale countdown or a stale capability claim. The MCP line is empty on every
-    # turn that has nothing to report (which is every turn until an operator
-    # enables admission), so the envelope is unchanged by default.
+    # Volatile tail, in one place. Every line describes a fact that must be true
+    # for THIS turn — how much wall clock is left, what this lane's policy took
+    # away and what its envelope will refuse, and which declared MCP servers this
+    # turn did not get — so all of them ride the tail rather than the hashed HUD
+    # body: a cached `unchanged` delivery (and an `unavailable` one, which drops
+    # the body entirely) must never show the agent a stale countdown or a stale
+    # capability claim. Each renderer returns "" when it has nothing to report,
+    # so a lane with no drops and no denials pays no line.
+    #
+    # The MCP line stays SEPARATE from the capability block on purpose. Its
+    # denials are resolved at a different lifecycle point (execution-time
+    # degradations reach the agent through `agent.steer`, after this envelope is
+    # sealed) and it is gated on the admission kill switch; folding it in would
+    # give one fact two voices, which is how an agent learns to discount both.
     volatile_lines = [
         _turn_budget.render_turn_budget_line(wall_budget),
+        render_capability_block(capability),
         mission_chat_admission_line(persona, session_id=session_id),
     ]
     situational_hud_content = render_runtime_context_envelope(
