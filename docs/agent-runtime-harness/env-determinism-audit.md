@@ -22,7 +22,7 @@ declared resolution ladder over validated content.
 Two independent paths put `HERMES_AGENT_RUNTIME_ROOT` in either state, neither
 of them a policy statement:
 
-* **Profile binding.** `agent_runtime/profile_context.py:82-84` — a persona
+* **Profile binding.** `agent_runtime/profile_context.py:84-86` — a persona
   with no `hermes_profile` takes the `binding.profile_home is None`
   early-`yield`, so `persona_profile_context` exports *nothing* for that run.
 * **Process history.** The variable is `os.environ.setdefault`-ed by *some*
@@ -66,7 +66,7 @@ inventoried too.
 | 3 | `agent_runtime/paths.py:8-13` `store_root` | the one accessor | **1** | `resolve_runtime()` + `assert_probe_isolation`. Every store path in the repo derives from it. Not an env reader itself — which is exactly why it is safe. |
 | 4 | `agent_runtime/terminal_envelope.py:725-736` `_audit_root` | receipt root | **2** | **FIXED.** Scope → env → *nothing*. With no scope-carried root (`scope_for_persona`'s `runtime_root` argument defaults to `None`) and no exported variable, a governed refusal wrote **no receipt, silently**. K made the decision deterministic; whether anyone could later *prove* it happened was still decided by ancestry. Added the canonical resolver as rung 3, and `audit_root_source` on every row so a receipt says which rung answered. Never raises; `None` now means "genuinely nowhere to write". |
 | 5 | `agent_runtime/smoke.py:55` `run_smoke` | `--no-temp-root` root | **2** | **FIXED.** Was `os.environ.get(RUNTIME_ROOT_ENV, ".hermes-agent-runtime")` — **two** nondeterminisms in one expression: presence-keyed, and the fallback is **relative to the process cwd**, which mission-chat workdir grounding now `chdir`s per turn (§3). Replaced with `paths.store_root()`, the one definition of "the configured root". Env-set behavior byte-identical. See operator question **Q5** for the residual policy issue this exposed. |
-| 6 | `agent_runtime/profile_context.py:110` (W) | the exporter | **3** | The `profile_home is None` early-`yield` at `:82-84` is path 1 of the split. Retiring it is live-visible on every profile-less persona. → **Q1**. |
+| 6 | `agent_runtime/profile_context.py:110` (W) | the exporter | **3** | The `profile_home is None` early-`yield` at `:84-86` is path 1 of the split. Retiring it is live-visible on every profile-less persona. → **Q1**. |
 | 7 | `agent_runtime/profile_context.py:88-91` (W) | save/restore | **1** | Snapshots the prior value and restores it in `finally`, including the `None` case (pops rather than writing `"None"`). Correct scoping; not a gate. |
 | 8 | `agent_runtime/smoke.py:24-39` (W) `_runtime_root` | save/restore | **1** | Same correct save/restore shape as #7. |
 | 9 | `agent_runtime/preflight.py:389` `_runtime_root_check` | preflight check | **1** (weak) | Deterministic — it calls `store_root()`, which reads the value through #1. But the assertion is **vacuous**: the resolver always returns a non-empty path (the default rung), so `ok = bool(str(root).strip())` can only be false if `store_root()` *raises*. It reports `runtime_root=present` for a root that does not exist, and its fix hint names a variable it never actually checked. → **Q4**. |
@@ -92,7 +92,7 @@ classified. Only one gated on presence.
 
 | Site | Key(s) | Class | Why |
 |---|---|---|---|
-| `stagec_mcp_visual_provider.py:435` `_marionette_preflight_enabled_for_config` | `HERMES_STAGEC_LAUNCHER_REPO`, `HERMES_LAUNCHER_REPO`, `ETERNIA_LAUNCHER_ROOT` | **2** | **FIXED.** `any(os.getenv(key, "").strip() for key in …)` — bare presence, no validation — while the *consumer* of the same three keys (`_launcher_repo_from_metadata:552`) required `path.is_dir()`. Two readers, one question, different answers: a stale value inherited from process ancestry switched on a preflight that then rebuilt a **different** repo than the variable named, or none at all. The enabled path runs `flutter build`. Both readers now share one helper, `_env_launcher_repo()`, which validates content. |
+| `stagec_mcp_visual_provider.py:435` `_marionette_preflight_enabled_for_config` | `HERMES_STAGEC_LAUNCHER_REPO`, `HERMES_LAUNCHER_REPO`, `ETERNIA_LAUNCHER_ROOT` | **2** | **FIXED.** `any(os.getenv(key, "").strip() for key in …)` — bare presence, no validation — while the *consumer* of the same three keys (`_launcher_repo_from_metadata:544`) required `path.is_dir()`. Two readers, one question, different answers: a stale value inherited from process ancestry switched on a preflight that then rebuilt a **different** repo than the variable named, or none at all. The enabled path runs `flutter build`. Both readers now share one helper, `_env_launcher_repo()`, which validates content. |
 | `mcp_lane.py:96` `current_entry_point_lane` | `HERMES_ENTRY_POINT_LANE` | **1** | Explicit precedence (pin > env > argv inference > `"unknown"`), value-keyed, never raises. |
 | `relay_policy.py:48` `max_relay_depth` | `HERMES_AGENT_CHAT_MAX_DEPTH` | **1** | Value parsed, clamped to `[floor, ceiling]`, typed default on garbage. |
 | `events.py:34` `_rotation_cap_bytes` | rotation cap | **1** | Value parsed with an explicit env > config > default ladder. |
@@ -156,7 +156,7 @@ preference order):
 1. **Per-run resolved absolute paths.** Stop `chdir`-ing. Resolve the workdir
    once per run and thread it to the tools as an explicit parameter — the
    `terminal` tool already accepts an explicit `workdir=` that overrides
-   everything (`tools/terminal_tool.py:2037`), and `TERMINAL_CWD` would become
+   everything (`tools/terminal_tool.py:2036`), and `TERMINAL_CWD` would become
    a per-run value carried on the run context rather than in `os.environ`.
    This retires the shared mutable entirely and is the target shape.
 2. **Per-turn subprocess/interpreter isolation.** Each turn gets its own
@@ -193,7 +193,7 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
 
 ### Q1 — Should `persona_profile_context` export the runtime root for profile-less personas?
 
-* **What is weak.** `profile_context.py:82-84` early-`yield`s when
+* **What is weak.** `profile_context.py:84-86` early-`yield`s when
   `binding.profile_home is None`, skipping **every** environment export for a
   persona that binds no Hermes profile. That is path 1 of the split (§1) and the
   direct cause of the live fail-open `git push`.
