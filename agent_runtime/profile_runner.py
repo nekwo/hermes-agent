@@ -41,6 +41,50 @@ def _blocked_tool_names_with_registry_hygiene(requested: list[str] | None) -> li
     return names
 
 
+def _blocked_tool_names_for_run(request: "AgentRunRequest") -> list[str]:
+    """Registry hygiene plus this run's admission-scoped MCP tool block."""
+
+    names = _blocked_tool_names_with_registry_hygiene(request.blocked_tool_names)
+    admission = request.mcp_admission
+    if admission is None:
+        return names
+    seen = set(names)
+    for name in admission.blocked_tool_names:
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
+
+
+def _enabled_toolsets_for_run(
+    request: "AgentRunRequest", admitted_servers: tuple[str, ...] = ()
+) -> list[str] | None:
+    """Scope this run's toolsets to the MCP servers it was ADMITTED.
+
+    The second fork-owned chokepoint at agent construction, and the one that
+    makes the cross-persona isolation property hold on every lane rather than
+    only on the chat lane: MCP registration is process-global, so in a warm
+    multi-persona harness process any run whose toolsets were resolved from the
+    live registry (``unbounded`` resolves ``all_registered_toolsets()``) would
+    otherwise inherit another persona's admitted ``mcp-*`` toolsets. Applied
+    here, no call site can opt out.
+
+    With no admission on the request — every lane today except an admitted
+    mission-chat turn — this strips any MCP toolset the run did not earn, which
+    is a no-op while the harness lane registers nothing at all.
+    ``enabled_toolsets=None`` (the "everything" sentinel) is passed through
+    untouched: narrowing it would change what a default run resolves.
+    """
+
+    from .mcp_admission import scope_toolsets_to_admission
+
+    if request.enabled_toolsets is None:
+        return None
+    return scope_toolsets_to_admission(
+        request.enabled_toolsets, admitted_servers=admitted_servers
+    )
+
+
 class ProfileRunnerError(RuntimeError):
     """Raised before agent construction when a profile-bound run cannot start."""
 
@@ -142,6 +186,13 @@ class AgentRunRequest:
     workdir: Path | None = None
     stop_on_repeated_read_search: bool = False
     tool_budget_limits: dict[str, Any] | None = None
+    # Resolved, side-effect-free MCP admission for this run (agent_runtime.
+    # mcp_admission.resolve_mcp_admission). Unset on every lane that declares no
+    # MCP servers or runs with the admission flag off — which is all of them
+    # until an operator enables it. The RUNNER performs the registration, inside
+    # the persona profile context and before agent construction, so the decision
+    # (policy) and the side effect (spawn) stay separable and separately tested.
+    mcp_admission: Any | None = None
 
 
 @dataclass(slots=True)
@@ -457,6 +508,54 @@ class ProfileAgentRunner:
         if result.raw.get("failed") and result.raw.get("error"):
             raise ProfileRunnerError(str(result.raw.get("error")))
         return result
+
+    def _admit_mcp_servers(self, request: AgentRunRequest, timing: dict[str, int]) -> tuple[str, ...]:
+        """Register this run's admitted MCP servers; return what actually landed.
+
+        Never raises and never blocks past the admission budget — the outcome is
+        typed either way, and an empty tuple simply means "this run gets no MCP
+        tools", which is the state every run is in today.
+        """
+
+        admission = request.mcp_admission
+        if admission is None or getattr(admission, "is_empty", True):
+            return ()
+        from .mcp_admission import admit_mcp_servers
+
+        started = time.perf_counter()
+        try:
+            outcome = admit_mcp_servers(admission)
+        except Exception:  # pragma: no cover - admit_mcp_servers already swallows
+            timing["mcp_admission_ms"] = _emit_request_timing(
+                request, "mcp_admission", started, status="failed"
+            )
+            return ()
+        timing["mcp_admission_ms"] = _emit_request_timing(request, "mcp_admission", started)
+        timing["mcp_admitted_servers"] = len(outcome.admitted)
+        if request.progress_callback is not None and (outcome.admitted or outcome.denied):
+            try:
+                request.progress_callback(
+                    {
+                        "type": "run.progress",
+                        "phase": "mcp_admission",
+                        "severity": "info" if outcome.admitted else "warning",
+                        "step": "mcp_admission_resolved",
+                        "status": "ok" if outcome.admitted else "warning",
+                        "summary": (
+                            "MCP admission: "
+                            + (", ".join(outcome.admitted) if outcome.admitted else "nothing admitted")
+                        ),
+                        "mcp_admission": {
+                            "admitted": list(outcome.admitted),
+                            "denied": outcome.denial_rows(),
+                            "duration_ms": outcome.duration_ms,
+                        },
+                    }
+                )
+            except Exception:
+                pass
+        return outcome.admitted
+
     def _execute_agent_run(self, binding: PersonaProfileBinding, request: AgentRunRequest) -> tuple[Any, Any, dict[str, int]]:
         timing: dict[str, int] = {}
         from .persona_chat_continuity import tool_execution_scope
@@ -500,6 +599,14 @@ class ProfileAgentRunner:
                 progress_callback=request.progress_callback,
             )
             budget_guard.wall_checkpoint = wall_checkpoint
+            # MCP admission. Inside persona_profile_context (so HERMES_HOME
+            # already points at the persona's own profile) and before agent
+            # construction (so the admitted tools exist in the registry by the
+            # time the factory resolves tool definitions). Bounded and
+            # non-raising: a capability probe must never be able to fail a turn,
+            # so every degradation comes back as a typed row and the turn
+            # continues on the fallback lane.
+            admitted_servers = self._admit_mcp_servers(request, timing)
             status_callback = _profile_status_callback(request, timing)
             construct_started = time.perf_counter()
             # Per-run reasoning override → agent reasoning_config. Only passed
@@ -520,9 +627,9 @@ class ProfileAgentRunner:
                 base_url=runtime.get("base_url"),
                 api_key=runtime.get("api_key"),
                 **reasoning_kwargs,
-                enabled_toolsets=request.enabled_toolsets,
+                enabled_toolsets=_enabled_toolsets_for_run(request, admitted_servers),
                 disabled_toolsets=request.disabled_toolsets,
-                blocked_tool_names=_blocked_tool_names_with_registry_hygiene(request.blocked_tool_names),
+                blocked_tool_names=_blocked_tool_names_for_run(request),
                 quiet_mode=request.quiet_mode,
                 skip_context_files=request.skip_context_files,
                 skip_memory=request.skip_memory,

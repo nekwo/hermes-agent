@@ -14,7 +14,7 @@ from hermes_cli.profiles import profile_exists
 from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     swarm = _swarm_config(raw.get("swarm") or {})
     supervision = _supervision_config(raw.get("supervision") or {})
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
+    mcp_admission = _mcp_admission_config(raw.get("mcp_admission") or {})
     continuous_role_sessions = _apply_enterprise_role_session_compat(
         continuous_role_sessions,
         enterprise_worker_sessions=enterprise_worker_sessions,
@@ -164,6 +165,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         swarm=swarm,
         supervision=supervision,
         coordinator_permissions=coordinator_permissions,
+        mcp_admission=mcp_admission,
         personas=raw.get("personas", {}) or {},
         default_model_source=default_model_source,
         default_provider_source=default_provider_source,
@@ -777,6 +779,41 @@ def _coordinator_permission_config(raw: dict[str, Any]) -> CoordinatorPermission
         max_spawns=max(0, int(raw.get("max_spawns", 0))),
         may_kill_own=bool(raw.get("may_kill_own", True)),
         may_kill_others=bool(raw.get("may_kill_others", False)),
+    )
+
+
+def _mcp_admission_config(raw: dict[str, Any]) -> McpAdmissionConfig:
+    """Parse ``agent_runtime.mcp_admission`` — deny-by-default at every step.
+
+    A malformed block must never read as "allow": a non-mapping ``roles``, a
+    non-mapping lane map, or a non-list server list all collapse to the empty
+    allowlist, and any parse fault leaves ``enabled`` False. The connect budget
+    is clamped so a config typo cannot park a chat turn behind a capability
+    probe (or make the probe useless by rounding to zero).
+    """
+
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = McpAdmissionConfig()
+    roles: dict[str, dict[str, list[str]]] = {}
+    raw_roles = raw.get("roles")
+    if isinstance(raw_roles, dict):
+        for role, lanes in raw_roles.items():
+            if not isinstance(lanes, dict):
+                continue
+            parsed_lanes = {
+                str(lane): _string_list(servers)
+                for lane, servers in lanes.items()
+                if _string_list(servers)
+            }
+            if parsed_lanes:
+                roles[str(role)] = parsed_lanes
+    timeout = _optional_float(raw.get("connect_timeout_seconds"))
+    if timeout is None or timeout <= 0:
+        timeout = defaults.connect_timeout_seconds
+    return McpAdmissionConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        connect_timeout_seconds=min(120.0, max(1.0, float(timeout))),
+        roles=roles,
     )
 
 

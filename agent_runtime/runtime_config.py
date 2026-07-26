@@ -170,6 +170,33 @@ class CoordinatorPermissionConfig:
 
 
 @dataclass(slots=True)
+class McpAdmissionConfig:
+    """Which personas may have their declared MCP servers registered for a run.
+
+    ``enabled`` is the single kill switch and defaults to **False**: admission is
+    the first path on which an autonomous mission-chat agent can spawn a local
+    executable, so it stays off until an operator turns it on deliberately.
+    ``roles`` is deny-by-default with no wildcard — a role with no entry, or a
+    lane with no entry under that role, admits nothing.
+
+    Root ``config.yaml`` shape (see
+    ``docs/agent-runtime-harness/mission-chat-mcp-admission.md``)::
+
+        agent_runtime:
+          mcp_admission:
+            enabled: true
+            connect_timeout_seconds: 20
+            roles:
+              qa:
+                mission_chat: [launcher_qa]
+    """
+
+    enabled: bool = False
+    connect_timeout_seconds: float = 20.0
+    roles: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class RuntimeConfig:
     schema_version: int = 1
     heartbeat_ttl_seconds: int = 900
@@ -220,3 +247,4 @@ class RuntimeConfig:
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
     supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
+    mcp_admission: McpAdmissionConfig = field(default_factory=McpAdmissionConfig)

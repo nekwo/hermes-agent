@@ -11,6 +11,12 @@ from typing import Any
 from model_tools import get_toolset_for_tool
 from tools.registry import registry
 
+from .mcp_admission import (
+    LANE_MISSION_CHAT,
+    admission_enabled,
+    admission_requirement_failures,
+    resolve_mcp_admission,
+)
 from .mcp_lane import current_entry_point_lane, mcp_lane_requirement_failures
 from .models import AgentPersona
 from .personas import (
@@ -120,10 +126,7 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
     ]
     readiness = _profile_readiness_for_visibility(persona)
     entry_point_lane = str(opts.entry_point_lane or "").strip() or current_entry_point_lane()
-    requirement_failures = mcp_lane_requirement_failures(
-        declared_servers=declared_mcp_server_names(persona),
-        lane=entry_point_lane,
-    )
+    requirement_failures = _requirement_failures(persona, opts, lane=entry_point_lane)
     resolved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     resolution_id = _tool_resolution_id(
         persona_id=persona.id,
@@ -193,6 +196,34 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
         "resolved_at": resolved_at,
         "resolution_id": resolution_id,
     }
+
+
+def _requirement_failures(
+    persona: AgentPersona, opts: ToolVisibilityOptions, *, lane: str
+) -> list[dict[str, Any]]:
+    """Typed capability accounting for this persona on this entry-point lane.
+
+    With MCP admission disabled — the default, and every deployment until an
+    operator flips the flag — this is exactly the R0 answer: one
+    ``mcp_not_registered_on_lane`` row per declared server the lane never
+    registers. With admission enabled it becomes truthful in BOTH directions: a
+    server this persona was admitted and that actually registered stops
+    producing a drop row, and a server denied for a typed reason reports THAT
+    reason instead of the generic lane row.
+
+    The admission resolve is skipped entirely when the flag is off, so the
+    default path costs nothing beyond the R0 read it already performed.
+    """
+
+    declared = declared_mcp_server_names(persona)
+    if not declared or not admission_enabled():
+        return mcp_lane_requirement_failures(declared_servers=declared, lane=lane)
+    admission = resolve_mcp_admission(
+        persona, lane=LANE_MISSION_CHAT, permission_mode=opts.permission_mode
+    )
+    return admission_requirement_failures(
+        admission, declared_servers=declared, lane=lane
+    )
 
 
 def turn_tool_context_for_persona(

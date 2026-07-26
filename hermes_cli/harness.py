@@ -123,6 +123,7 @@ from agent_runtime.persona_chat_continuity import (
     persona_chat_runtime_registry,
     safe_native_history,
 )
+from agent_runtime.mcp_admission import LANE_MISSION_CHAT, resolve_mcp_admission
 from agent_runtime.mcp_lane import HARNESS_LANE
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
 from agent_runtime.observability import build_observability
@@ -1069,6 +1070,15 @@ def build_parser(parent_subparsers) -> None:
     persona_tool_diff.add_argument("--permission-mode", default="profile_default")
     persona_tool_diff.add_argument("--repo-scope", default=None)
     persona_tool_diff.add_argument("--workdir", default=None)
+    persona_tool_diff.add_argument(
+        "--explain-mcp",
+        action="store_true",
+        help=(
+            "Explain MCP admission for this persona (requested / admitted / denied, "
+            "with typed reasons). Inspection only — resolves policy without "
+            "connecting to or registering any MCP server."
+        ),
+    )
     persona_tool_diff.add_argument("--json", action="store_true")
     persona_tool_diff.set_defaults(func=_cmd_persona_tool_diff)
     persona_permission = persona_subs.add_parser("permission", help="Preview or set chat-scoped persona tool permissions")

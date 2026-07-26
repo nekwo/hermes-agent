@@ -25,6 +25,7 @@ from .decision_schema import (
     validate_decision_for_role,
 )
 from .decision_contracts import validate_planning_decision
+from .mcp_admission import LANE_MISSION_CHAT, resolve_mcp_admission, scope_toolsets_to_admission
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_plan import current_plan_stage
@@ -362,6 +363,19 @@ class GPTPersonaRuntime:
         # spawn does not have. Read back after the run and threaded to the
         # caller as a structured clarify_request.
         clarify_capture = MissionChatClarifyCapture()
+        # Resolve MCP admission ONCE per turn (pure policy — no spawn, no
+        # registration) and thread the same answer through the toolset scope and
+        # the runner, so the tools the turn asks for and the servers the runner
+        # registers can never disagree. Disabled by default: with the flag off
+        # this resolves to "nothing admitted" and the request is byte-identical
+        # to what it was before admission existed.
+        admission = resolve_mcp_admission(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            permission_mode=permission_options_for_chat(
+                persona, session_id=perm_session_id
+            ).permission_mode,
+        )
         result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
@@ -369,7 +383,10 @@ class GPTPersonaRuntime:
                 model=runtime_model,
                 api_mode=persona.api_mode,
                 reasoning_effort=reasoning_effort,
-                enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=perm_session_id),
+                mcp_admission=admission,
+                enabled_toolsets=_enabled_toolsets_for_chat(
+                    persona, session_id=perm_session_id, admission=admission
+                ),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=perm_session_id),
                 quiet_mode=True,
                 # Operator chat honors the persona's core-context-file opt-in like
@@ -878,20 +895,31 @@ def _chat_trace_callback(
     return sink.callback()
 
 
-def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
+def _enabled_toolsets_for_chat(
+    persona: AgentPersona, *, session_id: str | None, admission=None
+) -> list[str]:
     """The single chat-lane toolset chokepoint (both the free-chat and operator/
     mission chat call sites funnel through here).
 
     Resolution order: permission mode → role/persona toolset resolution → chat
     capability augmentation → the chat-lane cost policy
     (``scope_chat_lane_toolsets``) that drops browser / vision / heavy-dev from a
-    conversational lane. ``unbounded`` permission mode bypasses that cost policy,
-    but does not resurrect product-disabled chat capabilities such as unfinished
-    Neko goal creation. A persona that wants a specific cost-excluded toolset back
-    on its *bounded* chat lane restores it via
+    conversational lane → the MCP admission scope. ``unbounded`` permission mode
+    bypasses that cost policy, but does not resurrect product-disabled chat
+    capabilities such as unfinished Neko goal creation. A persona that wants a
+    specific cost-excluded toolset back on its *bounded* chat lane restores it via
     ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` (see
     ``config.chat_lane_restore_toolsets``). Worker/dev task lanes never call this
-    — they resolve toolsets via ``effective_toolsets`` directly."""
+    — they resolve toolsets via ``effective_toolsets`` directly.
+
+    The MCP admission scope is applied LAST, after permission-mode resolution, on
+    purpose: ``unbounded`` resolves ``all_registered_toolsets()``, which in a warm
+    multi-persona process can contain another persona's admitted ``mcp-*``
+    toolsets. Scoping after the mode is what makes "no permission mode can widen
+    the admitted MCP set" true rather than aspirational. The same pure helper
+    runs again at agent construction (``profile_runner._enabled_toolsets_for_run``)
+    so no lane can bypass it; running it here keeps the operator-facing preview
+    honest about the same boundary."""
 
     options = permission_options_for_chat(persona, session_id=session_id)
     if permission_mode_is_unbounded(options.permission_mode):
@@ -903,7 +931,11 @@ def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None)
         )
     if persona.id == DEFAULT_SUPERVISOR_PERSONA_ID:
         resolved = [toolset for toolset in resolved if toolset != "mission_goal"]
-    return resolved
+    if admission is None:
+        admission = resolve_mcp_admission(
+            persona, lane=LANE_MISSION_CHAT, permission_mode=options.permission_mode
+        )
+    return scope_toolsets_to_admission(resolved, admitted_servers=admission.server_names)
 
 
 def chat_runtime_tool_contract(

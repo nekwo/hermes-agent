@@ -91,10 +91,30 @@ def _cmd_persona_tool_diff(args) -> int:
         ),
     )
     data = {"ok": True, "tool_visibility": visibility}
+    # Inspection only: resolve_mcp_admission is pure policy — it never connects
+    # to or registers an MCP server — so an operator can read exactly what a
+    # persona WOULD be admitted before the kill switch is ever flipped.
+    if getattr(args, "explain_mcp", False):
+        data["mcp_admission"] = resolve_mcp_admission(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            permission_mode=str(args.permission_mode or "profile_default"),
+        ).explain()
     if args.json:
         print(emit_json(data))
     else:
         print(f"{visibility['persona_id']}: {visibility['final_tool_count']} tools")
+        admission = data.get("mcp_admission")
+        if admission is not None:
+            print(
+                f"mcp admission ({admission['lane']}, role={admission['role']}, "
+                f"mode={admission['permission_mode']}): "
+                f"{'enabled' if admission['enabled'] else 'DISABLED'}"
+            )
+            print(f"  requested: {', '.join(admission['requested']) or '-'}")
+            print(f"  admitted:  {', '.join(admission['admitted']) or '-'}")
+            for row in admission["denied"]:
+                print(f"  denied {row['server']} ({row['code']}): {row['summary']}")
         if visibility["blocked_tools"]:
             print("blocked:")
             for item in visibility["blocked_tools"]:

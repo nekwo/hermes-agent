@@ -1,10 +1,15 @@
 # Selective MCP admission for mission-chat agents — design (2026-07-26)
 
-Status: **decision-ready, not implemented.** Owner: fork
-(`agent_runtime/`, plus one config key). Companion work being implemented in
-parallel: the typed `mcp_not_registered_on_lane` failure — this document is
-its **producer** and is written so the typed failure ships and stands alone
-even if admission is deferred indefinitely.
+Status: **R0 + R1 shipped, flag OFF; R2 (teardown + live proof) open.** Owner:
+fork (`agent_runtime/`, plus one config key). R0 — the typed
+`mcp_not_registered_on_lane` failure this document is the **producer** of —
+landed first and stands alone (`agent_runtime/mcp_lane.py`, commit `b6277e023`).
+R1 landed the admission module, the role/lane policy, the per-run registration
+at the `profile_runner` seam, and the `--explain-mcp` operator verb
+(`agent_runtime/mcp_admission.py`) with
+`agent_runtime.mcp_admission.enabled` defaulting to **false**, so no deployment
+changes behavior until an operator turns it on. See §6 for what each stage
+actually contains.
 
 Sibling docs: `harness-serve-design.md` (the warm-process lane this design
 depends on), `04-decision-hud-simplification-map.md` (the "agents work
@@ -600,15 +605,47 @@ snapshot/stream envelope version bump. **No launcher change is required.**
 change, strictly more honest. **Independently valuable; do not couple it to
 the rest.**
 
-### R1 — Admission module + policy, still disabled
-Full resolution, typed denials, and the `--explain-mcp` operator verb, with
-**no registration side effect**. An operator can inspect exactly what a given
-persona would be admitted (requested / admitted / denied, with reasons)
-before anything is live.
+### R1 — Admission module + policy + per-run registration, flag OFF *(SHIPPED)*
+Full resolution, typed denials, the `--explain-mcp` operator verb, **and** the
+registration side effect at the `profile_runner` seam — single-flight, bounded,
+degrading to typed rows. Scoped by the operator to include registration (rather
+than the originally-drafted inspect-only R1) because a policy nobody can execute
+cannot be live-proven, and the kill switch makes shipping it dark equivalent to
+shipping it inert. `agent_runtime.mcp_admission.enabled` defaults to `false`, so
+with no config edit the behavior is byte-identical to R0.
 
-### R2 — QA role, serve lane, single-flight, flag on for one profile
-`agent_runtime.mcp_admission.roles.qa.mission_chat: [launcher_qa]`, enabled
-on the serve lane only. **Live proof required** (this is a harness project —
+What R1 contains:
+
+- `agent_runtime/mcp_admission.py` — `resolve_mcp_admission` (pure; zero
+  spawns, test-pinned), `admit_mcp_servers` (the only side-effecting entry
+  point), `scope_toolsets_to_admission` (the `unbounded` rule),
+  `admission_requirement_failures` (R0 rows + typed denials, one row per
+  declared server).
+- `agent_runtime/profile_runner.py` — admission runs inside
+  `persona_profile_context` and before `_agent_factory`; two fork-owned
+  chokepoints at agent construction (`_enabled_toolsets_for_run`,
+  `_blocked_tool_names_for_run`) that no call site can opt out of.
+- `agent_runtime/persona_runtime.py` — one admission resolved per mission-chat
+  turn, threaded into both the toolset scope and the run request so they can
+  never disagree; `_enabled_toolsets_for_chat` applies the scope AFTER
+  permission-mode resolution.
+- `agent_runtime/config.py` + `runtime_config.py` — the
+  `agent_runtime.mcp_admission` root block, deny-by-default at every parse step.
+- An **R1 stage floor** (`R1_ADMISSIBLE_ROLES = {"qa"}`) that refuses any role
+  outside it even when the config names one. R4 retires the floor; until then a
+  config edit alone cannot widen the role set.
+
+**Not in R1:** teardown (see open question 2, now answered — R2 owns it), and
+the compiled positive `tools.include` with launcher-YAML parity (R3). R1's
+`read_only` composition is the SUBTRACTION half: a `tools.exclude` of the
+mutating tools compiled into the existing per-server filter, plus the same names
+in `blocked_tool_names` as the warm-process backstop.
+
+### R2 — Teardown + live proof, flag on for one profile
+Turn the flag on with
+`agent_runtime.mcp_admission.roles.qa.mission_chat: [launcher_qa]`, on the serve
+lane only, **and** add the per-run registry-scope teardown that open question 2
+now has an answer for. **Live proof required** (this is a harness project —
 code inspection is not proof): a mission-chat QA agent drives the 6-row
 acceptance matrix from `STAGEC_AGENT_MCP_RECIPES_2026-05-17.md` **from the
 harness lane**, against the persistent QA window (`48cfed89`), with the
@@ -728,15 +765,31 @@ of R2 rather than a nice-to-have.
    *Recommendation: keep it general; the config is three lines either way.*
 
 2. **Does `tools/registry.py` support scoped removal of one server's tools +
-   toolset alias without disturbing others?** Registration happens at
-   `mcp_tool.py:4831` `_register_server_tools` + `:4936`
-   `register_toolset_alias` (`registry.py:281`); the teardown counterpart was
-   not located. **This decides the R2 shape and is the most important unknown
-   in this design.** If scoped removal exists → keep the server warm, tear
-   down the scope (best of both). If it does not → either tear down the
-   connection each run (re-pay spawn + possible launcher re-attach per QA
-   turn) or rely on single-flight alone as the isolation boundary — which is
-   *weaker*, and must be a conscious decision, not a default.
+   toolset alias without disturbing others?** — **ANSWERED (R1 audit,
+   2026-07-26): yes.** `registry.deregister(name)` (`registry.py:450`) removes a
+   single tool, **exempts `mcp-*` toolsets from the plugin-ownership gate**
+   (`:469`, "MCP toolsets are exempt: dynamic tool discovery legitimately
+   nukes-and-repaves its own tools"), and when the removed tool was the last of
+   its toolset it drops the toolset check **and every alias pointing at that
+   toolset** (`:505-514`). So the design's preferred shape is available: keep the
+   connection warm in `_servers`, tear down only the registry scope. **R2 owns
+   that teardown.**
+
+   **R1 shipped without it, deliberately, and the consequence is load-bearing:**
+   once a server is admitted in a warm serve process, its tools stay in the
+   process registry until the process recycles. Isolation in R1 therefore rests
+   on the per-run toolset scope (`scope_toolsets_to_admission`, applied at both
+   the chat chokepoint and agent construction, so no permission mode — including
+   `unbounded` — can widen it) plus single-flight, **not** on an empty registry.
+   Two specific follow-ups R2 must close: (a) a `read_only` admission that
+   follows a `profile_default` admission of the same server in the same process
+   re-uses the already-registered full surface (`register_mcp_servers`
+   short-circuits on connected servers), so the registration-time
+   `tools.exclude` cannot subtract — R1 covers this with `blocked_tool_names`,
+   which removes the tools from the model's list but leaves them registered;
+   and (b) a lane that resolves toolsets **outside** `ProfileAgentRunner` would
+   not pass through the scope at all (none does today — every
+   `AgentRunRequest` is built in `agent_runtime/`).
 
 3. **Single-flight, or per-worker registries under serve's pool of 4?**
    Single-flight is proposed as the safe default. A per-thread registry is
@@ -780,8 +833,32 @@ of R2 rather than a nice-to-have.
 
 ## Log
 
+- **2026-07-26 (R1)** — admission implemented and landed with the flag OFF.
+  `agent_runtime/mcp_admission.py` + the `profile_runner` seam + the
+  `agent_runtime.mcp_admission` root-config block + `--explain-mcp`.
+  Enable on the live runtime with, in the ROOT `config.yaml` (the one under the
+  Hermes root the harness/serve process runs with — `X:\Eternia\.hermes\config.yaml`
+  on the Launcher's runtime host; `%LOCALAPPDATA%\hermes\config.yaml` when
+  `HERMES_HOME` is unset — **not** a profile's `config.yaml`, which
+  `load_root_runtime_config` deliberately refuses to read for this policy):
+
+  ```yaml
+  agent_runtime:
+    mcp_admission:
+      enabled: true
+      connect_timeout_seconds: 20
+      roles:
+        qa:
+          mission_chat: [launcher_qa]
+  ```
+
+  Inspect before flipping — this resolves policy only and never connects:
+  `hermes harness persona tool-diff qa --explain-mcp --json`.
+  Open question 2 answered in place (scoped removal EXISTS; R2 owns teardown,
+  and the R1 no-teardown consequence is written up there rather than left
+  implicit). Tests: `tests/agent_runtime/test_mcp_admission.py`.
 - **2026-07-26** — design written against `main @ f58d1be81`. Not
-  implemented. Key finding during the audit: the role→server admission policy
+  implemented at the time of writing. Key finding during the audit: the role→server admission policy
   **already exists** (`profile_readiness.py:379-384`), the persona
   declaration **already exists** (`models.py:397`), and QA nodes **already
   request** the `launcher_qa` toolset (`node_tools.py:360-373`) — the missing
