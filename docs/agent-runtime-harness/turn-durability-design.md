@@ -144,6 +144,61 @@ Tests: `tests/agent_runtime/test_turn_budget_checkpoint.py` (threshold math,
 relay clamp, loop gate, state machine, HUD lane) and
 `tests/hermes_cli/test_mission_chat_budget_payload.py` (CLI payload contract).
 
+### Terminal marker rows + tool settlement (2026-07-26)
+
+A terminal state has a second obligation the state machine above does not
+express: **it must say so in the transcript**, because the marker row is what
+settles the turn's still-running tool rows.
+
+The chain, and where it broke. `persona_chat_history._terminal_turn_marker_rows`
+synthesizes a typed system row for a turn that settled terminally **without a
+recorded reply**; `operator_channels._settle_terminal_tool_calls` reads those
+marker rows and flips every still-`running` `tool_call` of the same turn to a
+settled status. Both halves keyed on the legacy `interrupted` state alone. So
+the hard-wall case above — which lands `budget_exhausted` and never writes an
+assistant row — emitted **no marker**, settled **nothing**, and left any
+`tool_started`-without-`tool_finished` row spinning in the Mission Control
+cockpit forever, for a turn that had been over for minutes.
+
+Both halves are now **table-driven**, so a third terminal state settles its
+tools by construction rather than by remembering to update two string
+comparisons in two modules:
+
+| turn state | marker `kind` | row id slug | conversation `status` / title |
+| --- | --- | --- | --- |
+| `interrupted` | `turn_interrupted` | `turn-interrupted` | `interrupted` / "Turn interrupted" |
+| `budget_exhausted` | `budget_exhausted` | `turn-budget-exhausted` | `budget_exhausted` / "Wall budget reached" |
+
+Producer: `persona_chat_history.TERMINAL_TURN_MARKERS`, guarded at import
+against declaring a state the turn store does not call terminal (a marker on an
+in-flight state would announce a LIVE turn as over — the worse failure).
+Presenter: `operator_channels._TERMINAL_TURN_MARKER_PRESENTATION`, whose keys
+are pinned equal to the producer's kinds.
+
+Three deliberate choices:
+
+- **No new marker vocabulary.** The Launcher already consumes both kinds
+  (`mission_agent_chat_adapter.dart`: `_turnInterruptedFlowMessage` → retry
+  affordance, `_budgetExhaustedFlowMessage` → graceful-checkpoint marker).
+  **No launcher change is required** for either half of this fix.
+- **The prose distinguishes the two.** The budget marker must not say "Retry the
+  message" — the turn settled gracefully and its work may be committed, so
+  telling the operator to re-run is a lie that costs a full re-run.
+- **The settled tool status stays `interrupted`; the reason rides beside it.**
+  `interrupted` describes the CALL (cut off, will never finish) and is the only
+  settled-tool vocabulary the Launcher's trace renderer already recognises
+  (`mission_trace_content_renderer.dart`:
+  `interrupted|cancelled|canceled|aborted` → stop glyph). Inventing a
+  `budget_exhausted` tool status would stop the spinner but render as an unknown
+  state. The turn-level reason travels as the additive typed `settled_reason`
+  (and `settled_state` on the marker), carrying the turn store's own state name
+  — so a settled call never has to lie about **why** in order to stop spinning.
+
+Tests: `tests/agent_runtime/test_terminal_turn_settlement.py` (both layers, both
+states, the table guards, the graceful-reply case that must synthesize nothing,
+the in-flight turn that must never be marked over, the pre-`settled_state`
+archive row, and the finished call that must keep its real outcome).
+
 ## Problem
 
 Mission-chat recording is write-ahead for the operator message and

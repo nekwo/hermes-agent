@@ -28,7 +28,7 @@ from agent_runtime.mission_chat_turns import (
 )
 from agent_runtime.operator_channels import _conversation_contract
 from agent_runtime.persona_chat_history import (
-    _interrupted_turn_rows,
+    _terminal_turn_marker_rows,
     _ordered_message_rows,
     _safe_recent_messages,
 )
@@ -321,7 +321,7 @@ def test_interrupted_marker_is_the_turns_terminal_row(isolate_agent_runtime_root
         elements=[],
         state="interrupted",
     )
-    rows = _interrupted_turn_rows(
+    rows = _terminal_turn_marker_rows(
         session_id="s-int", assistant_client_message_ids=set()
     )
     assert len(rows) == 1

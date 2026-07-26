@@ -13,6 +13,8 @@ from .persona_chat_history import (
     logical_persona_chat_client_message_id,
     PERSONA_PRE_TRACE_ACK_KIND,
     PERSONA_RELAYED_MESSAGE_KIND,
+    PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
+    PERSONA_TURN_INTERRUPTED_KIND,
 )
 from .simplified_contract import public_decision_type_value
 from .transcript_order import TURN_SEQ_CONTENT, order_transcript_rows
@@ -32,6 +34,34 @@ _TOOL_OK_STATUSES = {"passed", "ok", "completed", "success", "succeeded", "done"
 _TOOL_FAILED_STATUSES = {"failed", "error", "blocked", "crashed", "timeout"}
 
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
+
+# ── terminal turn markers, as the conversation contract renders them ─────────
+#
+# Keyed on the marker kind ``persona_chat_history`` synthesizes (see
+# ``TERMINAL_TURN_MARKERS`` there — that table is the producer, this one the
+# presenter). ``status`` and ``display_title`` are the wire values the Launcher
+# adapter already reads (``mission_agent_chat_adapter.dart``:
+# ``_turnInterruptedFlowMessage`` / ``_budgetExhaustedFlowMessage``), so no
+# launcher change is required to render either marker.
+_TERMINAL_TURN_MARKER_PRESENTATION = {
+    PERSONA_TURN_INTERRUPTED_KIND: {
+        "status": "interrupted",
+        "display_title": "Turn interrupted",
+    },
+    PERSONA_TURN_BUDGET_EXHAUSTED_KIND: {
+        "status": "budget_exhausted",
+        "display_title": "Wall budget reached",
+    },
+}
+# The status a still-``running`` tool_call is settled to when its turn ended.
+# ``interrupted`` describes the CALL — it was cut off and will never finish —
+# and is the only settled-tool vocabulary the Launcher's trace renderer already
+# knows (``mission_trace_content_renderer.dart``: interrupted|cancelled|
+# canceled|aborted → stop glyph). The turn-level reason (graceful wall-budget
+# checkpoint vs. a killed turn) is carried separately as ``settled_reason``, so
+# a settled call never has to lie about WHY to stop spinning.
+_SETTLED_TOOL_CALL_STATUS = "interrupted"
+
 # Single-homed in ``agent_runtime.redaction`` — see the header there for the
 # JSON blind spot every local spelling shared. Detection only here (a matching
 # line is dropped whole), so the shared pattern's group(2) is inert.
@@ -655,7 +685,7 @@ def _conversation_contract(
         )
     )
 
-    _settle_interrupted_tool_calls(messages, history=history)
+    _settle_terminal_tool_calls(messages, history=history)
 
     messages = _order_conversation_messages(messages)
     messages = _dedupe_conversation_messages(messages)
@@ -700,44 +730,66 @@ def _conversation_contract(
     }
 
 
-def _settle_interrupted_tool_calls(
+def _settle_terminal_tool_calls(
     messages: list[dict[str, Any]],
     *,
     history: dict[str, Any] | None,
 ) -> None:
-    """Flip still-``running`` tool_call rows of interrupted turns to ``interrupted``.
+    """Settle still-``running`` tool_call rows of TERMINALLY-ended turns.
 
-    A turn killed mid-flight leaves ``tool_started`` trace entries with no
-    finish row, so the paired tool_call projects ``running`` forever. The
-    turn store's terminal marker (surfaced as ``turn_interrupted`` history
-    rows) is the truth that those calls will never finish; settle them at the
-    contract source so every consumer stops rendering a live spinner.
-    Interrupted turn ids come from the history SOURCE rows, not the projected
-    messages, so a capped/deduped marker still settles its tools.
+    A turn that ends mid-flight — killed (``turn_interrupted``) or landed at the
+    wall-budget checkpoint (``budget_exhausted``) — leaves ``tool_started``
+    trace entries with no finish row, so the paired tool_call projects
+    ``running`` forever. The turn store's terminal marker is the truth that
+    those calls will never finish; settle them at the contract source so every
+    consumer stops rendering a live spinner.
+
+    This keyed on ``turn_interrupted`` ALONE until 2026-07-26, which is exactly
+    why a wall-budget turn spun in the cockpit after it was over: a second
+    terminal state existed and only one marker was consumed. The recognised set
+    is now driven by ``_TERMINAL_TURN_MARKER_PRESENTATION``, so a new terminal
+    marker settles its tools by construction.
+
+    Terminal turn ids come from the history SOURCE rows, not the projected
+    messages, so a capped/deduped marker still settles its tools. The settled
+    status is uniform (``interrupted`` — the call was cut off); ``settled_reason``
+    carries WHICH terminal state ended the turn, typed, on both the message and
+    its tool payload.
     """
 
-    interrupted_turn_ids: set[str] = set()
+    settled_reason_by_turn: dict[str, str] = {}
     for row in (history or {}).get("messages") or []:
         if not isinstance(row, dict):
             continue
-        if safe_assignment_token(row.get("kind")) != "turn_interrupted":
+        kind = safe_assignment_token(row.get("kind"))
+        if kind not in _TERMINAL_TURN_MARKER_PRESENTATION:
             continue
         turn_id = safe_assignment_token(row.get("turn_id")) or safe_assignment_token(
             row.get("client_message_id")
         )
-        if turn_id:
-            interrupted_turn_ids.add(turn_id)
-    if not interrupted_turn_ids:
+        if not turn_id:
+            continue
+        # The turn-store state the marker settled at, with the marker kind as
+        # the fallback for a pre-``settled_state`` row (archive-never-delete).
+        settled_reason_by_turn[turn_id] = (
+            safe_assignment_token(row.get("settled_state")) or kind
+        )
+    if not settled_reason_by_turn:
         return
     for message in messages:
         if message.get("kind") != "tool_call" or message.get("status") != "running":
             continue
-        if safe_assignment_token(message.get("turn_id")) not in interrupted_turn_ids:
+        reason = settled_reason_by_turn.get(
+            safe_assignment_token(message.get("turn_id")) or ""
+        )
+        if reason is None:
             continue
-        message["status"] = "interrupted"
+        message["status"] = _SETTLED_TOOL_CALL_STATUS
+        message["settled_reason"] = reason
         tool = message.get("tool")
         if isinstance(tool, dict):
-            tool["status"] = "interrupted"
+            tool["status"] = _SETTLED_TOOL_CALL_STATUS
+            tool["settled_reason"] = reason
 
 
 def _conversation_goal_input(
@@ -804,11 +856,15 @@ def _conversation_history_message(
     if redaction_status in {"redacted", "unsafe"}:
         text = "Message hidden by redaction boundary."
     client_message_id = safe_assignment_text(row.get("client_message_id"), limit=240)
-    if safe_assignment_token(row.get("kind")) == "turn_interrupted":
+    marker_kind = safe_assignment_token(row.get("kind")) or ""
+    presentation = _TERMINAL_TURN_MARKER_PRESENTATION.get(marker_kind)
+    if presentation is not None:
         # Terminal turn-status marker synthesized by persona_chat_history for a
-        # turn that died without a recorded reply. Keep the typed kind + turn
-        # identity so the Launcher can render a retry affordance and settle any
-        # still-"running" tool rows of the same turn.
+        # turn that ended without a recorded reply — killed
+        # (``turn_interrupted``) or landed at the wall-budget checkpoint
+        # (``budget_exhausted``). Keep the typed kind + turn identity so the
+        # Launcher renders the right affordance (retry vs. graceful checkpoint)
+        # and so the still-"running" tool rows of the same turn get settled.
         turn_id = canonical_persona_chat_turn_id(
             client_message_id
         ) or safe_assignment_token(row.get("turn_id"))
@@ -819,13 +875,16 @@ def _conversation_history_message(
             "actor_persona_id": persona_id,
             "actor_instance_id": persona_instance_id,
             "role": "system",
-            "kind": "turn_interrupted",
-            "status": "interrupted",
-            "display_title": "Turn interrupted",
+            "kind": marker_kind,
+            "status": presentation["status"],
+            "display_title": presentation["display_title"],
             "display_text": text,
             "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
             "refs": {"source": "persona_chat_history"},
         }
+        settled_state = safe_assignment_token(row.get("settled_state"))
+        if settled_state:
+            message["settled_state"] = settled_state
         if client_message_id:
             message["client_message_id"] = client_message_id
         if turn_id:

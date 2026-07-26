@@ -4,10 +4,15 @@ import base64
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .models import PersonaInstance
-from .mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_records
+from .mission_chat_turns import (
+    TERMINAL_TURN_STATES,
+    mission_chat_turn_elements,
+    mission_chat_turn_records,
+)
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction import TEXT_SECRET_ASSIGNMENT_RE
@@ -39,6 +44,71 @@ PERSONA_PRE_TRACE_ACK_KIND = "pre_trace_ack"
 # conversation projection keys on this to attribute the message to the sending
 # AGENT instead of the operator. See agent_runtime/relay_policy.py.
 PERSONA_RELAYED_MESSAGE_KIND = "relayed_message"
+
+# ── terminal-turn marker vocabulary (ONE table, keyed on the turn state) ─────
+#
+# A turn that settles TERMINALLY without a recorded reply synthesizes a typed
+# system marker row. The marker is what tells every downstream projection the
+# turn is over — most concretely, it is the input
+# ``operator_channels._settle_terminal_tool_calls`` reads to stop a
+# ``tool_started``-without-``tool_finished`` row rendering a live spinner
+# forever.
+#
+# The table exists because the filter used to be ``state != "interrupted"``: one
+# hardcoded legacy state. When the wall-budget work (2026-07-26) added the
+# ``budget_exhausted`` terminal state, that single-state filter silently
+# excluded it — no marker, no settlement, and the launcher cockpit spun a tool
+# row for a turn that had been over for minutes. Adding a terminal state must
+# extend a TABLE, not require finding every string comparison.
+#
+# ``kind`` values are the wire vocabulary the Launcher already consumes
+# (``mission_agent_chat_adapter.dart``: ``turn_interrupted`` →
+# retry affordance, ``budget_exhausted`` → graceful-checkpoint marker). Do not
+# mint a new kind for a state the Launcher already renders.
+PERSONA_TURN_INTERRUPTED_KIND = "turn_interrupted"
+PERSONA_TURN_BUDGET_EXHAUSTED_KIND = "budget_exhausted"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalTurnMarker:
+    """How one terminal turn state presents when it recorded no reply."""
+
+    kind: str
+    id_slug: str
+    text: str
+
+
+TERMINAL_TURN_MARKERS: dict[str, TerminalTurnMarker] = {
+    "interrupted": TerminalTurnMarker(
+        kind=PERSONA_TURN_INTERRUPTED_KIND,
+        id_slug="turn-interrupted",
+        text=(
+            "Agent turn interrupted before a reply was recorded. Retry the message "
+            "to run a fresh turn."
+        ),
+    ),
+    "budget_exhausted": TerminalTurnMarker(
+        kind=PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
+        id_slug="turn-budget-exhausted",
+        text=(
+            "Agent turn reached its wall budget and settled at a graceful checkpoint "
+            "before a reply was recorded. Any work it committed stands; send a new "
+            "message to continue from there."
+        ),
+    ),
+}
+# Guard, not decoration: a marker may only be declared for a state the turn
+# store itself calls terminal. A typo, or a state that is still in flight, would
+# otherwise mark a LIVE turn as over — the opposite failure of the one this
+# table fixes, and a worse one. Raised (not asserted) so ``python -O`` cannot
+# strip the contract.
+_UNKNOWN_MARKER_STATES = sorted(set(TERMINAL_TURN_MARKERS) - TERMINAL_TURN_STATES)
+if _UNKNOWN_MARKER_STATES:  # pragma: no cover - import-time contract guard
+    raise RuntimeError(
+        "TERMINAL_TURN_MARKERS declares non-terminal turn state(s): "
+        f"{_UNKNOWN_MARKER_STATES}"
+    )
+
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
 DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
 MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
@@ -1173,7 +1243,7 @@ def _safe_curated_messages(
                 row["turn_elements"] = elements
         rows.append(row)
     rows.extend(
-        _interrupted_turn_rows(
+        _terminal_turn_marker_rows(
             session_id=session_id,
             assistant_client_message_ids=assistant_client_message_ids,
         )
@@ -1225,14 +1295,29 @@ def _decode_history_cursor(value: str) -> dict[str, Any] | None:
         return None
 
 
-def _interrupted_turn_rows(
+def _terminal_turn_marker_rows(
     *,
     session_id: str,
     assistant_client_message_ids: set[str],
 ) -> list[dict[str, Any]]:
+    """Synthesize the typed marker row for every terminally-settled, reply-less turn.
+
+    Driven by ``TERMINAL_TURN_MARKERS`` — one table, one row shape, one code
+    path per terminal state. This used to test ``state != "interrupted"``, which
+    made ``budget_exhausted`` (the wall-budget terminal state, 2026-07-26) a
+    turn that ended and never said so: no marker, so
+    ``operator_channels._settle_terminal_tool_calls`` never fired and a
+    ``tool_started`` row with no finish spun in the cockpit forever.
+
+    ``settled_state`` rides along so downstream projections carry the REASON the
+    turn is over without re-deriving it from the marker kind or the prose.
+    """
+
     rows: list[dict[str, Any]] = []
     for record in mission_chat_turn_records(session_id=session_id):
-        if safe_assignment_token(record.get("state")) != "interrupted":
+        state = safe_assignment_token(record.get("state"))
+        marker = TERMINAL_TURN_MARKERS.get(state or "")
+        if marker is None:
             continue
         client_message_id = safe_assignment_text(record.get("client_message_id"), limit=240)
         if not client_message_id or client_message_id in assistant_client_message_ids:
@@ -1242,18 +1327,20 @@ def _interrupted_turn_rows(
             continue
         rows.append(
             {
-                "id": f"{session_id}:turn-interrupted:{client_message_id}",
+                "id": f"{session_id}:{marker.id_slug}:{client_message_id}",
                 "role": "system",
                 # Typed marker: downstream projections (operator conversation,
                 # Mission Control tiles) key on this instead of matching text.
-                "kind": "turn_interrupted",
-                "text": "Agent turn interrupted before a reply was recorded. Retry the message to run a fresh turn.",
+                "kind": marker.kind,
+                "text": marker.text,
                 "timestamp": _iso_timestamp(record.get("updated_at")),
                 "redaction_status": "safe",
                 "client_message_id": client_message_id,
                 "turn_id": turn_id,
-                # C8 ordering key: the interrupt marker is the turn's terminal
-                # row (a turn has a reply or an interrupt, never both).
+                # The canonical turn-store state, not a second vocabulary.
+                "settled_state": state,
+                # C8 ordering key: the terminal marker IS the turn's terminal
+                # row (a turn has a reply or a marker, never both).
                 "turn_seq": TURN_SEQ_TERMINAL,
             }
         )
