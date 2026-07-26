@@ -39,8 +39,14 @@ def test_ready_line_and_exit_frames():
 
     frames = _run([_request("r1", ["harness", "status", "--json"]), SHUTDOWN], dispatch=dispatch)
 
-    assert frames[0]["event"] == "ready"
+    # ``booting`` is the FIRST frame, before any heavy boot work — the
+    # launcher's supervisor tells a live cold boot from a wedged child by it
+    # (2026-07-26 kill-loop incident). ``ready`` still follows once boot
+    # completes; consumers that predate ``booting`` ignore unknown events.
+    assert frames[0]["event"] == "booting"
     assert frames[0]["schema_version"] == 1
+    assert frames[1]["event"] == "ready"
+    assert frames[1]["schema_version"] == 1
     lines = [f for f in frames if f.get("event") == "line" and f.get("id") == "r1"]
     assert [f["line"] for f in lines] == ["hello --json", "tail without newline"]
     exits = [f for f in frames if f.get("event") == "exit"]

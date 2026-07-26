@@ -446,6 +446,21 @@ def serve_loop(
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; a
     future remote lane feeds the same loop (design doc §Future)."""
+    frames = _FrameWriter(writer)
+    # Emitted before ANY heavy boot work (the agent_runtime import, root
+    # config load, registry init, and the pre-ready orphan sweep below): a
+    # supervising launcher can tell a live cold boot from a wedged child by
+    # this frame alone. A cold-cache boot can run past any short watchdog
+    # before ``ready``; killing it mid-boot respawns into another cold boot
+    # forever (2026-07-26 launcher kill-loop incident). Consumers that
+    # predate this frame ignore unknown events, so it is purely additive.
+    frames.emit(
+        {
+            "event": "booting",
+            "pid": os.getpid(),
+            "schema_version": SERVE_SCHEMA_VERSION,
+        }
+    )
     from agent_runtime.persona_chat_continuity import (
         initialize_persona_chat_runtime_registry,
     )
@@ -457,7 +472,6 @@ def serve_loop(
         max_entries=persona_chat_cfg.max_hot_sessions,
         ttl_seconds=persona_chat_cfg.idle_ttl_seconds,
     )
-    frames = _FrameWriter(writer)
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")
     read_cache = _ReadModelCache(read_cache_max_age)
