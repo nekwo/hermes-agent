@@ -379,14 +379,70 @@ def _latest_handoff_visual_required(task: Task, *, stage: TaskStage | None = Non
 
 
 def _runtime_root_check() -> PreflightCheck:
+    """Is the resolved runtime root actually USABLE? (audit Q4)
+
+    This check used to be vacuous. It asked "did the resolver answer?" —
+    ``ok = bool(str(store_root()).strip())`` — and ``resolve_runtime`` always
+    answers, because its last rung is an unconditional platform default. So the
+    only way to fail was for ``store_root()`` to RAISE, and the check happily
+    reported ``runtime_root=present`` for a path that does not exist on this
+    machine, then told the operator to configure a variable it never read. A
+    vacuous check is worse than an absent one: it spends operator trust and pays
+    nothing back.
+
+    It now reports the resolution honestly — which layer won, the resolved path,
+    whether it exists, and whether it looks like a store — and fails on exactly
+    one condition: **resolved via the DEFAULT layer and it does not look like a
+    store**. ``resolution.suspect_default_root`` already computes precisely that
+    predicate; this is its first consumer that can act on it.
+
+    Why that one condition. An env- or config-resolved root is an explicit
+    operator statement — honor it even if it is not populated yet, since a first
+    run legitimately creates it. The default rung is not a statement; it is what
+    the resolver falls back to when nobody said anything. A default root with no
+    ``tasks/`` in it means no store was ever initialized here, which is the real
+    failure this check was always supposed to catch.
+    """
+
     try:
         from .paths import store_root
+        from .resolution import resolve_runtime, suspect_default_root
 
-        root = store_root()
-        ok = bool(str(root).strip())
-    except Exception:
-        ok = False
-    return PreflightCheck("runtime_root", ok, "runtime_root=present" if ok else "runtime_root=missing", "runtime root is configured", "Configure HERMES_AGENT_RUNTIME_ROOT or agent_runtime.store_root.")
+        resolution = resolve_runtime()
+        # Keep the fail-fast behavior of the accessor (probe isolation refuses
+        # here rather than let a probe run resolve the live store).
+        store_root()
+    except Exception as exc:
+        return PreflightCheck(
+            "runtime_root",
+            False,
+            "runtime_root=unresolvable",
+            f"The runtime root could not be resolved ({type(exc).__name__}).",
+            "Check agent_runtime.store_root in the root config.yaml, and HERMES_REQUIRE_ISOLATED_ROOT if this is a probe run.",
+        )
+
+    root = Path(resolution.store_root)
+    exists = root.exists()
+    looks_like_store = (root / "tasks").is_dir()
+    ok = not suspect_default_root(resolution)
+    token = (
+        f"runtime_root={'ok' if ok else 'uninitialized'} layer={resolution.layer} "
+        f"path={root} exists={str(exists).lower()} store={str(looks_like_store).lower()}"
+    )
+    if ok:
+        detail = f"Runtime root resolved via the '{resolution.layer}' layer: {root}"
+        actionable_fix = "No action needed."
+    else:
+        detail = (
+            f"No runtime root is configured, so the resolver fell back to the platform "
+            f"default ({root}), and no store has been initialized there."
+        )
+        actionable_fix = (
+            "Set agent_runtime.store_root in the root config.yaml (or export "
+            "HERMES_AGENT_RUNTIME_ROOT) to name the store this machine should use, or "
+            "run the harness once to initialize a store at the default location."
+        )
+    return PreflightCheck("runtime_root", ok, token, detail, actionable_fix)
 
 
 def _docker_check() -> PreflightCheck:

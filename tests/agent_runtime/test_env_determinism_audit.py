@@ -298,3 +298,281 @@ def test_explicit_metadata_still_outranks_the_environment(
         )
         is True
     )
+
+
+# ── audit Q4: the preflight runtime_root check asserts something real ────────
+#
+# ``ok = bool(str(store_root()).strip())`` could essentially never fail: the
+# resolver's last rung is an unconditional platform default, so the check
+# reported ``runtime_root=present`` for a root that does not exist and told the
+# operator to configure a variable it never read. It now fails on exactly one
+# condition — resolved via the DEFAULT layer and not a store — and reports the
+# winning layer, the path, existence and store-shape either way.
+
+
+@pytest.fixture
+def default_layer_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """No env root, no configured root ⇒ the resolver's DEFAULT rung wins."""
+
+    home = tmp_path / "hermes-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.delenv(RUNTIME_ROOT_ENV, raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    return home / "agent-runtime"
+
+
+def _runtime_root_check():
+    from agent_runtime.preflight import _runtime_root_check
+
+    return _runtime_root_check()
+
+
+def test_preflight_passes_when_the_env_layer_names_an_existing_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "env-runtime"
+    (root / "tasks").mkdir(parents=True)
+    monkeypatch.setenv(RUNTIME_ROOT_ENV, str(root))
+
+    check = _runtime_root_check()
+
+    assert check.ok is True
+    assert "layer=env" in check.token
+    assert str(root) in check.token
+    assert "exists=true" in check.token
+    assert "store=true" in check.token
+
+
+def test_preflight_passes_when_the_config_layer_names_an_existing_root(
+    configured_root: Path,
+) -> None:
+    (configured_root / "tasks").mkdir(parents=True, exist_ok=True)
+
+    check = _runtime_root_check()
+
+    assert check.ok is True
+    assert "layer=config" in check.token
+    assert str(configured_root) in check.token
+
+
+def test_preflight_now_fails_on_an_uninitialized_default_root(
+    default_layer_home: Path,
+) -> None:
+    """THE new failure. It used to report ``runtime_root=present`` here."""
+
+    check = _runtime_root_check()
+
+    assert check.ok is False
+    assert "layer=default" in check.token
+    assert "exists=false" in check.token
+    assert "store=false" in check.token
+    # The fix hint must name what the check actually read.
+    assert "agent_runtime.store_root" in check.actionable_fix
+    assert str(default_layer_home) in check.detail
+
+
+def test_preflight_still_passes_on_a_populated_default_root(
+    default_layer_home: Path,
+) -> None:
+    """A machine that never configured a root but HAS a store is fine."""
+
+    (default_layer_home / "tasks").mkdir(parents=True)
+
+    check = _runtime_root_check()
+
+    assert check.ok is True
+    assert "layer=default" in check.token
+    assert "store=true" in check.token
+
+
+def test_preflight_reports_an_explicit_root_that_does_not_exist_yet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit operator statement is honored; a first run creates it.
+
+    The check reports the truth (``exists=false``) without failing — the failure
+    is reserved for "nobody said anything AND nothing is there".
+    """
+
+    root = tmp_path / "declared-but-absent"
+    monkeypatch.setenv(RUNTIME_ROOT_ENV, str(root))
+
+    check = _runtime_root_check()
+
+    assert check.ok is True
+    assert "exists=false" in check.token
+
+
+# ── audit Q5: a smoke run is synthetic, always ───────────────────────────────
+
+
+def test_smoke_never_writes_into_the_configured_store(
+    configured_root: Path,
+) -> None:
+    """Ruling (a). ``--temp-root=False`` no longer means "pollute the live store"."""
+
+    result = smoke_module.run_smoke(temp_root=False, no_model=True)
+
+    assert result["ok"] is True
+    assert result["runtime_root_kind"] == "temp"
+    assert Path(result["runtime_root"]) != configured_root
+    assert not (configured_root / "tasks").exists()
+
+
+def test_smoke_reports_the_configured_root_it_left_alone(
+    configured_root: Path,
+) -> None:
+    assert (
+        smoke_module.run_smoke(temp_root=True, no_model=True)["configured_runtime_root"]
+        == str(configured_root)
+    )
+
+
+def test_smoke_says_out_loud_that_it_ignored_the_flag(configured_root: Path) -> None:
+    """Ignoring a flag SILENTLY would be its own small lie."""
+
+    result = smoke_module.run_smoke(temp_root=False, no_model=True)
+    rows = result["deprecations"]
+
+    assert [row["code"] for row in rows] == [smoke_module.SMOKE_RUNTIME_ROOT_ALWAYS_TEMP]
+    assert rows[0]["subject"] == "--temp-root"
+    assert rows[0]["fix_hint"]
+    assert "deprecations" not in smoke_module.run_smoke(temp_root=True, no_model=True)
+
+
+@pytest.mark.parametrize("env_present", [True, False])
+def test_smoke_outcome_is_identical_with_and_without_the_env_var(
+    env_present: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if env_present:
+        monkeypatch.setenv(RUNTIME_ROOT_ENV, str(tmp_path / "env-runtime"))
+    else:
+        monkeypatch.delenv(RUNTIME_ROOT_ENV, raising=False)
+
+    result = smoke_module.run_smoke(temp_root=False, no_model=True)
+
+    assert result["ok"] is True
+    assert result["runtime_root_kind"] == "temp"
+    assert result["final_state"] == "done"
+
+
+def test_smoke_restores_the_ambient_variable_it_borrowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(RUNTIME_ROOT_ENV, str(tmp_path / "outer"))
+
+    smoke_module.run_smoke(temp_root=True, no_model=True)
+
+    assert os.environ[RUNTIME_ROOT_ENV] == str(tmp_path / "outer")
+
+
+# ── audit §3: the import-time HERMES_HOME freeze in tools/ ───────────────────
+#
+# Same ancestry dependence in a different shape. ``tools/skills_sync.py``,
+# ``tools/skills_tool.py`` and ``tools/skill_manager_tool.py`` capture
+# ``HERMES_HOME`` at IMPORT time into module-level constants, so in a long-lived
+# ``hermes harness serve`` the frozen value is whichever home the FIRST import
+# saw and every later profile switch is invisible to it.
+#
+# Two of the three already carry the mitigation (a call-time ``_skills_dir()``
+# that honors an explicitly patched constant and otherwise re-resolves from the
+# live home). ``skills_sync`` does not, and uses the frozen constants directly
+# throughout. ``tools/`` is outside this fork's edit boundary, so the fix ships
+# as a documented operator-owed diff — and these tests are what keep that doc
+# from rotting into a lie: they pin the shape the diff targets and reproduce the
+# staleness live, so a reader can see the bug rather than take the doc's word.
+
+
+def _tools_source(name: str) -> str:
+    import importlib
+
+    module = importlib.import_module(f"tools.{name}")
+    return Path(module.__file__).read_text(encoding="utf-8")
+
+
+def test_skills_sync_still_freezes_hermes_home_at_import_time() -> None:
+    """The shape the operator-owed diff targets (audit §3)."""
+
+    source = _tools_source("skills_sync")
+    assert "HERMES_HOME = get_hermes_home()" in source
+    assert 'SKILLS_DIR = HERMES_HOME / "skills"' in source
+    assert 'MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"' in source
+    # No call-time accessor yet — which is exactly why it is the one that bites.
+    assert "def _skills_dir(" not in source
+
+
+def test_the_frozen_constant_does_not_follow_a_profile_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reproduce the staleness rather than assert it from the source alone."""
+
+    import tools.skills_sync as skills_sync
+
+    frozen = skills_sync.SKILLS_DIR
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "another-profile"))
+
+    assert skills_sync.SKILLS_DIR == frozen
+    assert skills_sync.MANIFEST_FILE == frozen / ".bundled_manifest"
+    # The live home HAS moved; only this module cannot see it.
+    from hermes_constants import get_hermes_home
+
+    assert get_hermes_home() == tmp_path / "another-profile"
+
+
+@pytest.mark.parametrize("name", ["skills_tool", "skill_manager_tool"])
+def test_the_other_two_modules_already_resolve_at_call_time(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mitigation exists here; the doc must keep saying so accurately.
+
+    If one of these LOSES its accessor, this fails — and the operator-owed diff
+    in the audit doc grows a second file that nobody would otherwise notice.
+    """
+
+    import importlib
+
+    module = importlib.import_module(f"tools.{name}")
+    source = _tools_source(name)
+    assert "def _skills_dir(" in source
+    assert "_SKILLS_DIR_AT_IMPORT" in source
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "another-profile"))
+    assert module._skills_dir() == tmp_path / "another-profile" / "skills"
+
+
+def test_the_fork_side_never_reads_the_frozen_constants() -> None:
+    """``agent_runtime`` is immune by construction — keep it that way.
+
+    ``skill_publishability`` imports only ``_dir_hash`` / ``_read_skill_name``
+    (pure helpers) and derives every skills root itself, which is why no
+    fork-owned call-time accessor is warranted: there is no fork-side reader for
+    it to fix. A new import of the frozen names would change that silently.
+    """
+
+    import ast
+
+    repo_root = Path(__file__).resolve().parents[2]
+    offenders: list[str] = []
+    for path in sorted((repo_root / "agent_runtime").rglob("*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):  # pragma: no cover - unreadable source
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            if not node.module.startswith("tools.skill"):
+                continue
+            for alias in node.names:
+                if alias.name in {"HERMES_HOME", "SKILLS_DIR", "MANIFEST_FILE"}:
+                    offenders.append(
+                        f"{path.relative_to(repo_root).as_posix()}:{node.lineno} "
+                        f"imports {alias.name}"
+                    )
+
+    assert offenders == [], (
+        "agent_runtime imported an import-time-frozen HERMES_HOME constant from "
+        "tools/. Resolve the home at call time instead. See "
+        "docs/agent-runtime-harness/env-determinism-audit.md §3. Offenders: "
+        + ", ".join(offenders)
+    )

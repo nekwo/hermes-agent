@@ -19,19 +19,31 @@ from .states import RunState, TaskState
 from .store import ProofStore, RunStore, TaskStore
 
 
+#: A smoke run is SYNTHETIC — it fabricates ``task_smoke``, drives it through
+#: the state machine and asserts the transitions. It has no business writing
+#: that fixture into an operator's real store, so it never does (audit Q5).
+#: ``hermes harness preflight`` already answers "is the configured store
+#: reachable?" without writing to it.
+SMOKE_RUNTIME_ROOT_ALWAYS_TEMP = "smoke_runtime_root_always_temp"
+
+
 @contextmanager
-def _runtime_root(root: Path | None) -> Iterator[Path]:
+def _runtime_root() -> Iterator[Path]:
+    """Always a fresh temp root. Never the configured/live store.
+
+    The former ``root is not None`` branch implemented ``--no-temp-root`` by
+    writing ``task_smoke``, its runs and its proofs into whichever store the
+    variable named. Fix #5 of this audit made that root deterministic, which
+    made the policy question unavoidable rather than masked by a stray
+    cwd-relative directory — and the ruling is (a): a smoke run is synthetic,
+    always.
+    """
+
     previous = os.environ.get("HERMES_AGENT_RUNTIME_ROOT")
-    tmp: str | None = None
     try:
-        if root is None:
-            tmp = tempfile.mkdtemp(prefix="hermes-harness-smoke-")
-            os.environ["HERMES_AGENT_RUNTIME_ROOT"] = tmp
-            yield Path(tmp)
-        else:
-            os.environ["HERMES_AGENT_RUNTIME_ROOT"] = str(root)
-            root.mkdir(parents=True, exist_ok=True)
-            yield root
+        tmp = tempfile.mkdtemp(prefix="hermes-harness-smoke-")
+        os.environ["HERMES_AGENT_RUNTIME_ROOT"] = tmp
+        yield Path(tmp)
     finally:
         if previous is None:
             os.environ.pop("HERMES_AGENT_RUNTIME_ROOT", None)
@@ -40,7 +52,12 @@ def _runtime_root(root: Path | None) -> Iterator[Path]:
 
 
 def _configured_smoke_root() -> Path:
-    """The root ``--no-temp-root`` means: the CONFIGURED one, resolved once.
+    """The configured runtime root — REPORTED by a smoke run, never written to.
+
+    Since the Q5 ruling this is no longer where a smoke run writes; it is what a
+    smoke run *tells* the operator about, so the report names the store the run
+    deliberately did not touch. The resolution below is why that report is worth
+    reading at all.
 
     This used to be ``os.environ.get("HERMES_AGENT_RUNTIME_ROOT",
     ".hermes-agent-runtime")`` — two independent nondeterminisms in one
@@ -69,12 +86,49 @@ def _configured_smoke_root() -> Path:
     return Path(store_root())
 
 
+def _configured_root_report() -> str:
+    """The configured root as a report string. Never raises (probe isolation)."""
+
+    try:
+        return str(_configured_smoke_root())
+    except Exception:
+        return ""
+
+
+def _temp_root_deprecation(temp_root: bool) -> dict | None:
+    """A typed note when a caller asked for the pre-Q5 configured-root mode.
+
+    The CLI still parses ``--temp-root`` (its registration lives outside this
+    fork's edit boundary — see
+    ``docs/agent-runtime-harness/env-determinism-audit.md`` Q5), so the handler
+    is where the ruling is enforced. Ignoring a flag SILENTLY would be its own
+    small lie, so the payload says what happened.
+    """
+
+    if temp_root:
+        return None
+    return {
+        "code": SMOKE_RUNTIME_ROOT_ALWAYS_TEMP,
+        "subject": "--temp-root",
+        "summary": (
+            "A smoke run is synthetic and always uses a temp runtime root; the request "
+            "for the configured root was ignored."
+        ),
+        "fix_hint": (
+            "Drop the flag. Use `hermes harness preflight` to check the configured store "
+            "without writing to it."
+        ),
+    }
+
+
 def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
+    deprecation = _temp_root_deprecation(temp_root)
     if not no_model:
-        return {
+        payload = {
             "ok": False,
             "mode": "live_model",
-            "runtime_root_kind": "temp" if temp_root else "configured",
+            "runtime_root_kind": "temp",
+            "configured_runtime_root": _configured_root_report(),
             "failure_class": "live_model_smoke_not_implemented",
             "intervention": {
                 "severity": "medium",
@@ -82,8 +136,11 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
                 "safe_default": "Use --no-model for deterministic CI/local smoke until live provider credentials are intentionally exercised.",
             },
         }
-    root_arg = None if temp_root else _configured_smoke_root()
-    with _runtime_root(root_arg) as root:
+        if deprecation is not None:
+            payload["deprecations"] = [deprecation]
+        return payload
+    configured_root = _configured_root_report()
+    with _runtime_root() as root:
         task_store = TaskStore(); run_store = RunStore(); proof_store = ProofStore()
         ts = now()
         task = Task(
@@ -159,10 +216,14 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
         task.state = TaskState.DONE
         task.updated_at = now()
         task_store.update(task, actor="smoke", reason=close_action.reason)
-        return {
+        payload = {
             "ok": True,
             "mode": "no_model",
-            "runtime_root_kind": "temp" if temp_root else "configured",
+            "runtime_root_kind": "temp",
+            "runtime_root": str(root),
+            # The store this run deliberately did NOT write into, so the
+            # operator can see it was left alone rather than infer it.
+            "configured_runtime_root": configured_root,
             "task_id": task.id,
             "first_action": first_action.type.value,
             "final_action": close_action.type.value,
@@ -170,3 +231,6 @@ def run_smoke(*, temp_root: bool = True, no_model: bool = True) -> dict:
             "transitions": transitions,
             "proof_ids": list(task.proof_ids),
         }
+        if deprecation is not None:
+            payload["deprecations"] = [deprecation]
+        return payload
