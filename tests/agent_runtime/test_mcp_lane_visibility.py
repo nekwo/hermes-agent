@@ -240,6 +240,79 @@ def test_unknown_lane_still_reports_the_drop():
     assert rows[0]["entry_point_lane"] == UNKNOWN_LANE
 
 
+# ── what counts as "declared" ───────────────────────────────────────────────
+
+
+def _bind_profile(monkeypatch, profile_home):
+    from agent_runtime import profile_readiness
+    from agent_runtime.profile_context import PersonaProfileBinding
+
+    monkeypatch.setattr(
+        profile_readiness,
+        "resolve_persona_profile",
+        lambda persona: PersonaProfileBinding(
+            persona_id=persona.id,
+            hermes_profile="launcher-qa",
+            profile_home=profile_home,
+            readiness="ready",
+            summary="profile exists",
+        ),
+    )
+    return profile_readiness
+
+
+def test_profile_configured_mcp_servers_count_as_declared(tmp_path, monkeypatch):
+    # The drop is not limited to `required_mcp_servers`: a profile that
+    # CONFIGURES servers would have been handed those tools on a registering
+    # lane, so the harness lane drops them too.
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "mcp_servers:\n  launcher_qa:\n    command: noop\n", encoding="utf-8"
+    )
+    profile_readiness = _bind_profile(monkeypatch, home)
+
+    assert profile_readiness.declared_mcp_server_names(_persona("qa")) == ["launcher_qa"]
+
+
+def test_declared_servers_union_required_and_configured(tmp_path, monkeypatch):
+    home = tmp_path / "profile"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "mcp_servers:\n  playwright:\n    command: noop\n", encoding="utf-8"
+    )
+    profile_readiness = _bind_profile(monkeypatch, home)
+
+    assert profile_readiness.declared_mcp_server_names(
+        _mcp_declaring_persona("launcher_qa")
+    ) == ["launcher_qa", "playwright"]
+
+
+def test_unbound_persona_does_not_inherit_the_ambient_config(tmp_path, monkeypatch):
+    # A persona with no bound profile must answer the same regardless of which
+    # HERMES_HOME the probe happens to run under — an ambient-config read is the
+    # exact class of lie this feature retires.
+    profile_readiness = _bind_profile(monkeypatch, None)
+
+    assert profile_readiness.declared_mcp_server_names(_persona("qa")) == []
+    assert profile_readiness.declared_mcp_server_names(
+        _mcp_declaring_persona("launcher_qa")
+    ) == ["launcher_qa"]
+
+
+def test_declaration_probe_never_raises(monkeypatch):
+    from agent_runtime import profile_readiness
+
+    def _boom(_persona):
+        raise RuntimeError("profile resolution exploded")
+
+    monkeypatch.setattr(profile_readiness, "resolve_persona_profile", _boom)
+
+    assert profile_readiness.declared_mcp_server_names(
+        _mcp_declaring_persona("launcher_qa")
+    ) == ["launcher_qa"]
+
+
 # ── mirror guard ────────────────────────────────────────────────────────────
 
 
