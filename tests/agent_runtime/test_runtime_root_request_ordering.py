@@ -144,9 +144,22 @@ def test_a_seeding_handler_no_longer_changes_a_later_requests_outcome(
     assert RUNTIME_ROOT_ENV not in os.environ
 
 
-def test_the_former_seeder_still_reaches_the_point_it_used_to_seed_at(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _function_def(path: Path, name: str) -> ast.FunctionDef:
+    """The definition of ``name`` as written ON DISK.
+
+    Deliberately NOT ``inspect.getsource(module.attr)``: in a full-suite run
+    some other test may have wrapped or replaced the attribute, and this test
+    would then be inspecting the wrapper. The file is the source of truth.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"{name} not found in {path}")
+
+
+def test_the_former_seeder_still_reaches_the_point_it_used_to_seed_at() -> None:
     """Guard the guard: an ordering test that never runs the seeder proves nothing.
 
     ``_cmd_goal_run`` must still execute ``load_agent_runtime_config()`` — the
@@ -155,12 +168,8 @@ def test_the_former_seeder_still_reaches_the_point_it_used_to_seed_at(
     routes the reader here instead of silently hollowing out the test above.
     """
 
-    import hermes_cli.harness as harness
-
-    source = inspect.getsource(harness._cmd_goal_run)
-    body = ast.parse(textwrap.dedent(source)).body[0].body
-    first = ast.dump(body[0])
-    assert "load_agent_runtime_config" in first
+    body = _function_def(REPO_ROOT / "hermes_cli" / "harness.py", "_cmd_goal_run").body
+    assert "load_agent_runtime_config" in ast.dump(body[0])
     assert isinstance(body[1], ast.Try)
 
 

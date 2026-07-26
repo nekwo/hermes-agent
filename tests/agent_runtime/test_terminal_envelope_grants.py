@@ -862,14 +862,31 @@ def test_legacy_block_receipt_reports_when_nothing_can_be_resolved(monkeypatch):
     assert record_legacy_block("rm -rf /", "tree_wipe_blocked") is False
 
 
-def test_legacy_block_receipt_keeps_the_row_keys_the_upstream_writer_emits():
-    """The fork-owned replacement must be drop-in for existing log readers."""
+def _upstream_receipt_writer_source() -> str:
+    """``_log_harness_blocked_attempt`` as written ON DISK.
 
-    import inspect
+    Deliberately not ``inspect.getsource(module.attr)``: in a full-suite run
+    another test may have wrapped or replaced that attribute, and these drift
+    guards would then be inspecting the wrapper instead of upstream's code.
+    """
+
+    import ast
+    from pathlib import Path
 
     from tools import terminal_tool as terminal_tool_module
 
-    source = inspect.getsource(terminal_tool_module._log_harness_blocked_attempt)
+    path = Path(terminal_tool_module.__file__)
+    text = path.read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.FunctionDef) and node.name == "_log_harness_blocked_attempt":
+            return ast.get_source_segment(text, node) or ""
+    raise AssertionError("_log_harness_blocked_attempt not found in tools/terminal_tool.py")
+
+
+def test_legacy_block_receipt_keeps_the_row_keys_the_upstream_writer_emits():
+    """The fork-owned replacement must be drop-in for existing log readers."""
+
+    source = _upstream_receipt_writer_source()
     # Every key the upstream writer puts on the row must still be produced by
     # the replacement. If upstream adds one, this fails and routes the reader to
     # docs/agent-runtime-harness/env-determinism-audit.md before the delegation
@@ -889,11 +906,7 @@ def test_the_upstream_receipt_writer_still_has_the_shape_the_doc_s_diff_targets(
     the doc rot into a lie.
     """
 
-    import inspect
-
-    from tools import terminal_tool as terminal_tool_module
-
-    source = inspect.getsource(terminal_tool_module._log_harness_blocked_attempt)
+    source = _upstream_receipt_writer_source()
     assert 'os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()' in source
     assert "if not root:" in source
     assert "        return" in source
