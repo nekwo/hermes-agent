@@ -1362,15 +1362,20 @@ def _metered_handler(
         if denial is None:
             return handler(*args, **kwargs)
         snapshot = budget.snapshot()
-        if snapshot.get("refused") == 1 and on_exhausted is not None:
+        first = snapshot.get("refused") == 1
+        if first and on_exhausted is not None:
             try:
                 on_exhausted(denial, snapshot)
             except Exception:  # pragma: no cover - a notification must never fail a tool
                 logger.debug("MCP admission budget notification failed", exc_info=True)
-        logger.warning(
-            "MCP admission budget exhausted (%d/%d): refused %r",
+        # The first refusal is the event; the rest are the loop it exists to
+        # bound, and a looping agent must not be able to flood agent.log.
+        logger.log(
+            logging.WARNING if first else logging.DEBUG,
+            "MCP admission budget exhausted (%d/%d, %d refused): refused %r",
             snapshot.get("spent"),
             snapshot.get("limit"),
+            snapshot.get("refused"),
             tool_name,
         )
         payload = dict(denial.row())
