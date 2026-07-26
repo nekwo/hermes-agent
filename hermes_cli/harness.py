@@ -1312,7 +1312,7 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--client-message-id", default=None)
     mission_chat_message.add_argument("--idempotency-key", default=None)
     mission_chat_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
-    mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
+    mission_chat_message.add_argument("--max-seconds", type=float, default=240.0, help="Wall budget for this turn. The agent is told how much remains, and the last max(60s, 15%%) is reserved for a final checkpoint reply; the turn then settles as budget_exhausted (terminal, no turn-resolve)")
     mission_chat_message.add_argument("--compression-threshold-tokens", type=int, default=None, help="One-turn native-compression proof seam; overrides the compressor token threshold without changing profile config")
     mission_chat_message.add_argument("--compression-protect-first-n", type=int, default=None, help="One-turn native-compression proof seam; override protected head messages")
     mission_chat_message.add_argument("--compression-protect-last-n", type=int, default=None, help="One-turn native-compression proof seam; override protected tail messages")

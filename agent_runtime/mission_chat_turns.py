@@ -70,6 +70,12 @@ JOURNAL_TURN_STATES = {
     "native_committed",
     "projected",
     "abandoned",
+    # Wall-budget terminal (2026-07-26). A turn that ran out of wall clock is
+    # NOT an ambiguous provider outcome — the harness knows exactly why it
+    # stopped — so it settles here instead of freezing at ``outcome_unknown``
+    # and demanding an operator ``turn-resolve --action abandon``. Terminal,
+    # needs no resolution, and never blocks the next send.
+    "budget_exhausted",
 }
 _LEGACY_TURN_STATES = {"running", "completed", "failed", "interrupted"}
 _VALID_TURN_STATES = JOURNAL_TURN_STATES | _LEGACY_TURN_STATES
@@ -77,12 +83,26 @@ _VALID_TURN_STATES = JOURNAL_TURN_STATES | _LEGACY_TURN_STATES
 # legacy streaming state plus every non-terminal journal state. Retention never
 # evicts them, GC never archives their session file, and the stale-turn repairs
 # (next-send + serve-boot orphan sweep) flip exactly this set.
+# ``budget_exhausted`` is deliberately ABSENT: it is settled, so no repair may
+# reopen it and no sweep may flip it to ``interrupted``.
 INFLIGHT_TURN_STATES = frozenset({"running", "pending", "executing", "outcome_unknown"})
+# States that are settled and require NO operator resolution. ``turn-resolve``
+# still accepts only ``outcome_unknown`` (the genuinely ambiguous case).
+TERMINAL_TURN_STATES = frozenset(
+    {"projected", "abandoned", "budget_exhausted", "completed", "failed", "interrupted"}
+)
 _JOURNAL_TRANSITIONS = {
     None: {"pending"},
-    "pending": {"pending", "executing", "abandoned"},
-    "executing": {"native_committed", "outcome_unknown"},
-    "outcome_unknown": {"abandoned", "native_committed"},
+    "pending": {"pending", "executing", "abandoned", "budget_exhausted"},
+    "executing": {"native_committed", "outcome_unknown", "budget_exhausted"},
+    "outcome_unknown": {"abandoned", "native_committed", "budget_exhausted"},
+    # A durable reply proven AFTER the budget settled the turn still wins — the
+    # same legacy-interrupted convention that lets ``outcome_unknown`` promote
+    # to ``native_committed`` (a recorded reply must never be lost to a repair
+    # flip). Nothing else may leave this state: it does not resurrect to
+    # ``pending``, so a retry uses a NEW client_message_id like any other
+    # settled turn.
+    "budget_exhausted": {"budget_exhausted", "native_committed"},
     "native_committed": {"native_committed", "projected"},
     "projected": {"projected"},
     "abandoned": {"abandoned"},
@@ -872,6 +892,12 @@ _JOURNAL_TEXT_FIELDS = {
     "resolution_reason": 320,
     "resolved_at": 80,
     "pending_user_message": 12000,
+    # Wall-budget provenance. ``budget_trigger`` is the typed reason the
+    # graceful checkpoint (or the last-resort hard wall) ended the turn;
+    # ``budget_summary`` is the one-line window description an operator reads
+    # without re-deriving the arithmetic.
+    "budget_trigger": 80,
+    "budget_summary": 400,
 }
 
 
@@ -888,6 +914,10 @@ def _safe_journal_metadata(value: Any) -> dict[str, Any]:
         "native_committed",
         "projection_committed",
         "projection_event_emitted",
+        # True on any turn the wall budget ended — including the graceful case
+        # that still projected a real reply, so "why is this reply short?" is
+        # answerable from the record instead of from the operator's memory.
+        "budget_exhausted",
     ):
         if key in value:
             result[key] = bool(value.get(key))

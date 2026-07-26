@@ -3,10 +3,12 @@
 Status: **shipped and superseded by MC-CHAT-CONTINUITY (2026-07-20).** This
 document retains the original incremental durability design and its hardening
 history. The production state machine is now `pending | executing |
-outcome_unknown | native_committed | projected | abandoned`; native structured
-SessionDB history is the sole continuation authority. Sibling design:
-`harness-serve-design.md` (§Follow-up slices item 2 is this document,
-expanded).
+outcome_unknown | native_committed | projected | abandoned | budget_exhausted`;
+native structured SessionDB history is the sole continuation authority. Sibling
+design: `harness-serve-design.md` (§Follow-up slices item 2 is this document,
+expanded). The `budget_exhausted` terminal and the graceful wall-budget
+checkpoint that produces it are specified in **Wall-budget checkpoint
+(2026-07-26)** below.
 
 The current recovery contract is stricter than the original
 `running/completed/failed/interrupted` design below:
@@ -15,6 +17,8 @@ The current recovery contract is stricter than the original
 - the provider boundary is recorded immediately before submission;
 - an unprovable in-flight result becomes `outcome_unknown` and is never
   automatically resubmitted;
+- a turn that ran out of WALL CLOCK is not unprovable — it becomes
+  `budget_exhausted`, which is terminal and needs no operator resolution;
 - `native_committed` retries repair projections without calling the provider;
 - explicit abandon requires an exact tuple match, after which resend uses a
   fresh client message ID;
@@ -23,6 +27,122 @@ The current recovery contract is stricter than the original
 
 Use the persona-chat commands in
 `harness-skills/harness-runtime-model/SKILL.md` for the current operator path.
+
+## Wall-budget checkpoint (2026-07-26)
+
+**Incident.** An operator sent a Neko mission-chat turn with `--max-seconds
+540`. Neko relayed to Dev via `agent_chat_send`; the whole chain runs in ONE
+process sharing one wall. At exhaustion the harness killed mid-API-call (`⚡
+Interrupted during API call`, blocker `live run budget exceeded:
+wall_seconds=540`, `error_kind=chat_turn_outcome_unknown`) and **both** turns
+froze as `outcome_unknown`, each needing a manual `turn-resolve --action
+abandon` plus a full re-brief — the native context was gone.
+
+Two structural gaps, fixed as one slice:
+
+### 1. Budget visibility
+
+`agent_runtime/turn_budget.py` is the single authority for a turn's wall
+window (`TurnWallBudget`: `total_seconds`, absolute `deadline_epoch`, `shared`).
+`resolve_turn_wall_budget` folds `--max-seconds` and the shared
+`--relay-deadline-epoch` into ONE object; the mission-chat command resolves it
+once and uses it for **both** the agent-visible HUD line and the wall the runner
+enforces, so the two can never drift.
+
+- The line rides the runtime-context envelope's **volatile tail**
+  (`render_runtime_context_envelope(volatile_content=…)`), which is emitted on
+  *every* delivery — `snapshot`, `unchanged`, and `unavailable`. A cached
+  `unchanged` body would otherwise show the agent a stale countdown.
+- `turn_budget` is excluded from `situational_hud_revision` (see
+  `_VOLATILE_HUD_KEYS`), so a per-turn countdown never re-snapshots the whole
+  stable HUD block. It still rides the resolved HUD dict, so the operator's
+  CONTEXT peek and the observability row show the same number the agent saw.
+- A relayed hop inherits the chain deadline, so the **target's** HUD shows the
+  shared remaining budget: a supervisor can see what window a dispatch has
+  instead of briefing 50 minutes of work into a 9-minute hop.
+
+### 2. Graceful checkpoint
+
+Reserve at the end of a turn: `max(60s, 15% of the original budget)`, capped so
+at least `CHECKPOINT_MIN_WORKING_SECONDS` (30s) of working window survives. A
+budget too small to reserve anything has **no** graceful phase (`supports_
+checkpoint == False`) and keeps only the hard wall — honest, not silently
+degraded.
+
+`profile_runner.WallBudgetCheckpoint` engages once, from whichever fires first:
+
+- the **tool gate** — checked before each tool execution via the existing
+  tool-start progress seam (deterministic, unit-testable without sleeping);
+- a **timer** armed at `deadline - reserve` (backstop for a turn stuck in a long
+  provider call with no tool events).
+
+Engaging does three things and never interrupts:
+
+1. `agent.steer(nudge)` injects a system-side "produce your final checkpoint
+   reply now; report state honestly" into the next tool result — in-band, so the
+   model actually sees it;
+2. `turn_budget.drain_iteration_budget(agent)` consumes the agent's remaining
+   loop iterations through the documented `IterationBudget.consume()` API. The
+   upstream loop therefore launches **no new tool executions** and exits at its
+   next iteration boundary, and its finalizer takes exactly ONE toolless
+   "summarise" call — the final checkpoint reply — reusing the mechanism upstream
+   already has for iteration exhaustion. **No upstream file is modified.** The
+   in-flight tool batch is deliberately allowed to finish: aborting a running
+   tool is precisely the mid-kill this replaces;
+3. emits a typed `run.progress` event (`phase=wall_budget_checkpoint`,
+   `step=wall_budget_checkpoint_opened`).
+
+The old hard wall stays armed at the real deadline as the **last resort** — it is
+no longer the first thing that happens when a turn runs long. When it fires,
+`RunBudgetExceeded` now carries a typed `wall_budget` block so the caller can
+still settle the turn as `budget_exhausted`.
+
+Granularity note: the stop lands at a loop-iteration boundary, which is the
+honest boundary — "before starting each provider call or tool execution" means
+before the next batch, not mid-tool.
+
+### Terminal state + CLI contract
+
+`budget_exhausted` transitions:
+
+| from | to |
+| --- | --- |
+| `pending` / `executing` / `outcome_unknown` | `budget_exhausted` |
+| `budget_exhausted` | `budget_exhausted`, `native_committed` |
+
+- It is **not** in `INFLIGHT_TURN_STATES`: no repair sweep reopens it, no
+  next-send flip turns it into `interrupted`.
+- It does **not** resurrect to `pending`; a retry uses a new
+  `client_message_id`, like any settled turn.
+- `budget_exhausted → native_committed` preserves the legacy-interrupted
+  convention: a reply proven durable *after* the settle still wins, and can then
+  project.
+- `turn-resolve` still accepts **only** `outcome_unknown`. A budget-settled turn
+  is not resolvable and does not need to be.
+
+CLI JSON (`harness mission-chat message`), documented shape:
+
+- **Graceful checkpoint that produced a reply** — `ok: true`, exit `0`,
+  `execution_state: "budget_exhausted"`, `budget_exhausted: true`,
+  `turn_resolution_required: false`, `wall_budget: {…}`. `ok` stays true because
+  a real reply was produced and committed; a relay caller must not treat it as an
+  error. The journal keeps its normal `native_committed → projected` walk (the
+  reply must project like any other) and carries `budget_exhausted` /
+  `budget_trigger` / `budget_summary` metadata for provenance.
+- **Hard wall — not even the final call fit** — `ok: false`, exit `2`,
+  `execution_state: "budget_exhausted"`, `error_kind:
+  "chat_turn_budget_exhausted"`, `turn_resolution_required: false`,
+  `checkpoint_summary` naming the tool calls that DID complete. The record
+  settles at `budget_exhausted`.
+- **Resend of an already-budget-settled `client_message_id`** — `ok: false`,
+  exit `2`, same typed kind, `error: "…settled and needs no resolution"`.
+
+In every case `next_expected` points at a **new `client_message_id`** and never
+at `turn-resolve` (guarded by `tests/hermes_cli/test_mission_chat_budget_payload.py`).
+
+Tests: `tests/agent_runtime/test_turn_budget_checkpoint.py` (threshold math,
+relay clamp, loop gate, state machine, HUD lane) and
+`tests/hermes_cli/test_mission_chat_budget_payload.py` (CLI payload contract).
 
 ## Problem
 

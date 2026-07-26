@@ -14,9 +14,11 @@ import re
 from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
+from . import turn_budget
 from .personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
 from .profile_context import PersonaProfileBinding, persona_profile_context
 from .redaction import TEXT_SECRET_VALUE_ASSIGNMENT_RE
+from .turn_budget import TurnWallBudget
 
 
 def _blocked_tool_names_with_registry_hygiene(requested: list[str] | None) -> list[str]:
@@ -44,12 +46,30 @@ class ProfileRunnerError(RuntimeError):
 
 
 class RunBudgetExceeded(ProfileRunnerError):
-    """Raised when a live persona run exceeds its configured budget."""
+    """Raised when a live persona run exceeds its configured budget.
 
-    def __init__(self, message: str, *, session_id: str | None = None):
+    ``wall_budget`` carries the typed budget projection when the WALL budget
+    (not the api-call / token / read-search budgets) is what tripped, so the
+    caller can settle the turn as ``budget_exhausted`` — a known, terminal
+    outcome — instead of the ambiguous ``outcome_unknown``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        session_id: str | None = None,
+        wall_budget: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.session_id = session_id
+        self.wall_budget = wall_budget
 
+
+# Stand-in "budget" for runs that carry no wall budget at all. The checkpoint is
+# still constructed (one unconditional shape for the tool-start gate) but with a
+# deadline it can never reach, so it never engages and never arms a timer.
+_NO_WALL_BUDGET_SECONDS = 3650.0 * 24 * 3600
 
 READ_SEARCH_TOOLS = frozenset({"read_file", "search_files", "session_search", "browser_snapshot"})
 PATCH_TOOLS = frozenset({"patch", "apply_patch", "write_file", "edit_file", "file.write", "file.edit"})
@@ -156,6 +176,141 @@ class AgentRunResult:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+class WallBudgetCheckpoint:
+    """Graceful end-of-turn checkpoint for a run's wall-clock budget.
+
+    Retires the mid-API-call kill as the FIRST thing that happens when a turn
+    runs out of wall clock (live incident 2026-07-26). When the reserved window
+    opens — see ``turn_budget.checkpoint_reserve_seconds`` — this:
+
+    1. steers a system-side nudge into the agent's next tool result, so the
+       model is told, in-band, to produce its final checkpoint reply;
+    2. drains the agent's iteration budget, so the tool-calling loop launches NO
+       further tool executions and exits at its next iteration boundary. The
+       upstream finalizer then takes exactly ONE toolless provider call — the
+       final reply — using the mechanism it already has for iteration
+       exhaustion. No upstream edit, no private attribute, no mid-flight abort
+       of an already-running tool (aborting that is the very kill we replace).
+
+    The old hard wall stays armed at the real deadline as the last resort: if
+    even the final call cannot fit, the run still dies — but it dies with a
+    typed ``wall_budget`` on the exception, so the turn settles as
+    ``budget_exhausted`` instead of ``outcome_unknown``.
+
+    Thread-safe and idempotent: the timer thread and the tool-start gate race
+    freely; exactly one of them engages.
+    """
+
+    def __init__(
+        self,
+        budget: TurnWallBudget,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        clock: Callable[[], float] | None = None,
+    ):
+        self.budget = budget
+        self._progress_callback = progress_callback
+        self._clock = clock or time.time
+        self._lock = RLock()
+        self._agent: Any | None = None
+        self._engaged = False
+        self._trigger: str | None = None
+        self._remaining_at_engage: float | None = None
+        self._iterations_drained = 0
+
+    # -- wiring ---------------------------------------------------------
+    def bind(self, agent: Any) -> None:
+        """Bind the agent AFTER any resident-registry swap, so the nudge and the
+        iteration drain land on the object that actually runs the turn."""
+        with self._lock:
+            self._agent = agent
+
+    @property
+    def engaged(self) -> bool:
+        with self._lock:
+            return self._engaged
+
+    # -- decision -------------------------------------------------------
+    def gate(self) -> bool:
+        """Pre-work check: engage when the reserved window has opened.
+
+        Called before each tool execution (via the tool-start progress seam) so
+        the stop lands deterministically at a tool boundary rather than waiting
+        on the timer thread. Returns True when new work may still start.
+        """
+
+        if self.engaged:
+            return False
+        if not self.budget.supports_checkpoint:
+            return True
+        if self.budget.may_start_new_work(now=self._clock()):
+            return True
+        self.engage(trigger=turn_budget.CHECKPOINT_TRIGGER_TOOL_GATE)
+        return False
+
+    def engage(self, *, trigger: str) -> bool:
+        """Open the checkpoint exactly once. Returns True if this call did it."""
+
+        with self._lock:
+            if self._engaged or self._agent is None:
+                return False
+            self._engaged = True
+            self._trigger = trigger
+            self._remaining_at_engage = self.budget.remaining_seconds(now=self._clock())
+            agent = self._agent
+        nudge = turn_budget.checkpoint_nudge_text(self.budget, now=self._clock())
+        steer = getattr(agent, "steer", None)
+        if callable(steer):
+            try:
+                steer(nudge)
+            except Exception:
+                pass
+        drained = turn_budget.drain_iteration_budget(agent)
+        with self._lock:
+            self._iterations_drained = drained
+        self._emit_progress()
+        return True
+
+    def summary(self) -> dict[str, Any]:
+        with self._lock:
+            block = self.budget.hud_block(now=self._clock())
+            block.update(
+                {
+                    "engaged": self._engaged,
+                    "trigger": self._trigger,
+                    "iterations_reclaimed": self._iterations_drained,
+                }
+            )
+            if self._remaining_at_engage is not None:
+                block["remaining_at_checkpoint_seconds"] = round(
+                    max(0.0, self._remaining_at_engage), 1
+                )
+            return block
+
+    def _emit_progress(self) -> None:
+        callback = self._progress_callback
+        if callback is None:
+            return
+        try:
+            callback(
+                {
+                    "type": "run.progress",
+                    "phase": "wall_budget_checkpoint",
+                    "severity": "warning",
+                    "step": "wall_budget_checkpoint_opened",
+                    "status": "warning",
+                    "summary": (
+                        "Wall budget nearly exhausted — no further tool calls will run; "
+                        "asking the agent for a final checkpoint reply "
+                        f"({self.budget.summary(now=self._clock())})."
+                    ),
+                    "wall_budget": self.summary(),
+                }
+            )
+        except Exception:
+            return
+
+
 @dataclass(slots=True)
 class _ToolBudgetGuard:
     stop_on_repeated_read_search: bool = False
@@ -167,6 +322,9 @@ class _ToolBudgetGuard:
     has_patch_progress: bool = False
     tripped_reason: str | None = None
     interrupt_callback: Callable[[str], None] | None = None
+    # Wall-clock checkpoint consulted before each tool execution. Distinct from
+    # the tool-count budgets above: those TRIP the run, this one lands it.
+    wall_checkpoint: WallBudgetCheckpoint | None = None
 
     @classmethod
     def from_limits(cls, *, stop_on_repeated_read_search: bool, tool_budget_limits: dict[str, Any] | None):
@@ -327,6 +485,21 @@ class ProfileAgentRunner:
                 stop_on_repeated_read_search=request.stop_on_repeated_read_search,
                 tool_budget_limits=request.tool_budget_limits,
             )
+            # Wall-clock checkpoint. Built even when the run carries no wall
+            # budget (deadline in the far future ⇒ it never engages) so the
+            # tool-start gate below has one unconditional shape. The clock
+            # starts HERE — agent construction and the resident-registry probe
+            # are on the turn's wall, so the countdown the agent sees must
+            # include them.
+            wall_checkpoint = WallBudgetCheckpoint(
+                turn_budget.TurnWallBudget(
+                    total_seconds=_positive_float(request.max_wall_seconds) or _NO_WALL_BUDGET_SECONDS,
+                    deadline_epoch=time.time()
+                    + (_positive_float(request.max_wall_seconds) or _NO_WALL_BUDGET_SECONDS),
+                ),
+                progress_callback=request.progress_callback,
+            )
+            budget_guard.wall_checkpoint = wall_checkpoint
             status_callback = _profile_status_callback(request, timing)
             construct_started = time.perf_counter()
             # Per-run reasoning override → agent reasoning_config. Only passed
@@ -438,6 +611,7 @@ class ProfileAgentRunner:
                     _cleanup_agent_ready(agent_ready_cleanup, request)
 
             expired = Event()
+            wall_checkpoint.bind(agent)
 
             def interrupt_for_budget() -> None:
                 expired.set()
@@ -458,6 +632,20 @@ class ProfileAgentRunner:
                         }
                     )
 
+            # The graceful checkpoint opens BEFORE the hard wall (by the
+            # reserved window). The hard wall below stays armed at the real
+            # deadline as the last resort — it is no longer the first thing that
+            # happens when a turn runs long.
+            checkpoint_timer: Timer | None = None
+            if wall_checkpoint.budget.supports_checkpoint:
+                checkpoint_timer = Timer(
+                    wall_checkpoint.budget.seconds_until_checkpoint(),
+                    lambda: wall_checkpoint.engage(
+                        trigger=turn_budget.CHECKPOINT_TRIGGER_TIMER
+                    ),
+                )
+                checkpoint_timer.daemon = True
+                checkpoint_timer.start()
             timer = Timer(max_wall_seconds, interrupt_for_budget)
             timer.daemon = True
             timer.start()
@@ -480,15 +668,30 @@ class ProfileAgentRunner:
             except BaseException:
                 timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started, status="failed")
                 if expired.is_set():
-                    raise RunBudgetExceeded(f"live run budget exceeded: wall_seconds={max_wall_seconds:g}", session_id=getattr(agent, "session_id", None))
+                    raise RunBudgetExceeded(
+                        f"live run budget exceeded: wall_seconds={max_wall_seconds:g}",
+                        session_id=getattr(agent, "session_id", None),
+                        wall_budget=wall_checkpoint.summary(),
+                    )
                 raise
             finally:
+                if checkpoint_timer is not None:
+                    checkpoint_timer.cancel()
                 timer.cancel()
                 _cleanup_agent_ready(agent_ready_cleanup, request)
             if expired.is_set():
-                raise RunBudgetExceeded(f"live run budget exceeded: wall_seconds={max_wall_seconds:g}", session_id=getattr(agent, "session_id", None))
+                raise RunBudgetExceeded(
+                    f"live run budget exceeded: wall_seconds={max_wall_seconds:g}",
+                    session_id=getattr(agent, "session_id", None),
+                    wall_budget=wall_checkpoint.summary(),
+                )
             if budget_guard.tripped_reason:
                 raise RunBudgetExceeded(budget_guard.tripped_reason, session_id=getattr(agent, "session_id", None))
+            # The checkpoint fired and the turn still landed a reply: hand the
+            # caller the typed provenance so it settles the turn as a
+            # budget-ended turn instead of a plain completion.
+            if wall_checkpoint.engaged and isinstance(raw_result, dict):
+                raw_result["wall_budget_checkpoint"] = wall_checkpoint.summary()
             return raw_result, agent, timing
 
 
@@ -766,6 +969,13 @@ def _progress_adapter(
             tool_name = str(payload.get("tool_name") or "")
             step = str(payload.get("step") or payload.get("type") or "")
             key = (step, tool_name)
+            # Wall-budget gate, evaluated BEFORE a tool execution starts. Unlike
+            # every other guard here it does not raise: engaging the checkpoint
+            # lands the turn (final reply, typed terminal state) rather than
+            # tripping it. The already-signalled tool still runs — this stops
+            # the NEXT loop iteration from launching more.
+            if guard.wall_checkpoint is not None and step == "tool_started":
+                guard.wall_checkpoint.gate()
             _update_guard_progress(guard, payload)
             _enforce_aggregate_read_search_budget(guard, callback, tool_name=tool_name)
             if event_type == "run.progress" and tool_name and step in {"tool_started", "tool_finished"}:

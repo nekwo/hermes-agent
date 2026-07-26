@@ -71,13 +71,28 @@ _SKILL_PRELOAD_ENVELOPE_RE = re.compile(
 _SKILL_PRELOAD_NAME_RE = re.compile(r"^[a-zA-Z0-9_.:+-]+$")
 
 
+# HUD keys deliberately EXCLUDED from the revision hash. These change on every
+# single turn by construction (a wall-clock countdown), so hashing them would
+# force a full re-snapshot of the whole stable HUD block every turn and defeat
+# the snapshot/unchanged delivery contract entirely. They ride the envelope's
+# always-emitted volatile tail instead (see ``render_runtime_context_envelope``).
+_VOLATILE_HUD_KEYS = frozenset({"turn_budget"})
+
+
 def situational_hud_revision(hud: dict[str, Any] | None) -> str:
-    """Return a stable revision for the exact runtime snapshot fed this turn."""
+    """Return a stable revision for the exact runtime snapshot fed this turn.
+
+    Volatile keys (:data:`_VOLATILE_HUD_KEYS`) are excluded: the revision
+    describes the STABLE picture, so a per-turn countdown never invalidates it.
+    """
 
     if not isinstance(hud, dict) or not hud:
         return "hud_unavailable"
+    stable = {key: value for key, value in hud.items() if key not in _VOLATILE_HUD_KEYS}
+    if not stable:
+        return "hud_unavailable"
     canonical = json.dumps(
-        hud,
+        stable,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
@@ -136,8 +151,17 @@ def render_runtime_context_envelope(
     revision: str,
     delivery: str,
     situational_hud_content: str | None,
+    volatile_content: str | None = None,
 ) -> str:
-    """Render the compact per-turn envelope appended to the operator message."""
+    """Render the compact per-turn envelope appended to the operator message.
+
+    ``volatile_content`` (today: the remaining wall-budget line) is emitted on
+    EVERY delivery — snapshot, unchanged, and unavailable alike. That is the
+    whole point of separating it from the hashed body: a cached "unchanged"
+    stub would otherwise show the agent a stale countdown, which is worse than
+    showing none, and folding it into the body would re-snapshot the entire HUD
+    every turn.
+    """
 
     if delivery == RUNTIME_CONTEXT_DELIVERY_SNAPSHOT:
         body = (situational_hud_content or "").strip()
@@ -153,6 +177,9 @@ def render_runtime_context_envelope(
         delivery = RUNTIME_CONTEXT_DELIVERY_UNAVAILABLE
         revision = "hud_unavailable"
         body = "Runtime Situation unavailable for this turn."
+    volatile = (volatile_content or "").strip()
+    if volatile:
+        body = f"{body}\n{volatile}" if body else volatile
     return (
         f'<runtime_context context_id="{context_id}" revision="{revision}" '
         f'delivery="{delivery}">\n{body}\n</runtime_context>'
@@ -439,6 +466,7 @@ def resolve_situational_hud(
     goal_task: Any = None,
     proof_store: Any = None,
     board: dict[str, Any] | None = None,
+    turn_budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the typed situational snapshot for one lane.
 
@@ -496,6 +524,14 @@ def resolve_situational_hud(
     # workspace with no board contributes NO line (nudged-never-forced).
     if isinstance(board, dict) and board:
         hud["board"] = board
+
+    # Wall budget for THIS turn (``turn_budget.TurnWallBudget.hud_block``).
+    # Volatile by construction, so it is excluded from the revision hash and
+    # fed to the agent through the envelope's always-emitted tail rather than
+    # the cached body — it lives on the dict purely so the operator's CONTEXT
+    # peek and the observability row see the same number the agent was told.
+    if isinstance(turn_budget, dict) and turn_budget:
+        hud["turn_budget"] = turn_budget
 
     if task is not None:
         # Deferred import: context_builder pulls a large dependency graph and is
@@ -652,7 +688,12 @@ def _board_digest_for_workspace(workspace_id: str | None) -> dict[str, Any] | No
         return None
 
 
-def situational_hud_for_instance(instance: Any, *, proof_store: Any = None) -> dict[str, Any]:
+def situational_hud_for_instance(
+    instance: Any,
+    *,
+    proof_store: Any = None,
+    turn_budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Chat-side convenience: load the ambient runtime facts for one lane and
     resolve the situational HUD dict.
 
@@ -734,6 +775,7 @@ def situational_hud_for_instance(instance: Any, *, proof_store: Any = None) -> d
             goal_task=_safe_get(getattr(instance, "goal_id", None)),
             proof_store=proof_store,
             board=_board_digest_for_workspace(scope_workspace_id),
+            turn_budget=turn_budget,
         )
     except Exception:
         return {}

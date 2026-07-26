@@ -1627,7 +1627,7 @@ def _cmd_mission_chat_message(args) -> int:
         session_id=session_id, client_message_id=client_message_id
     ) or {}
     journal_state = safe_assignment_token(journal.get("state"))
-    if journal_state in {"executing", "outcome_unknown"} and replay.get(
+    if journal_state in {"executing", "outcome_unknown", "budget_exhausted"} and replay.get(
         "assistant"
     ):
         recovered_reply = _redact_persona_chat_text(
@@ -1677,6 +1677,32 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id, client_message_id=client_message_id
         ) or {}
         journal_state = "projected"
+    if journal_state == "budget_exhausted":
+        # Settled, NOT ambiguous: this turn ended on its wall clock and the
+        # harness knows it. Never route the operator to turn-resolve (that verb
+        # exists only for genuinely unknown provider outcomes) and never block
+        # the lane — just say plainly that this id is spent.
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "budget_exhausted",
+            "error_kind": "chat_turn_budget_exhausted",
+            "budget_exhausted": True,
+            "turn_resolution_required": False,
+            "journal_state": "budget_exhausted",
+            "root_chat_session_id": session_id,
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "turn_id": journal.get("turn_id") or client_message_id,
+            "budget_summary": journal.get("budget_summary"),
+            "error": "this turn already ended on its wall-clock budget; it is settled and needs no resolution",
+            "next_expected": "send a new client_message_id to continue; no turn-resolve is required",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
     if journal_state in {"executing", "outcome_unknown"}:
         if journal_state == "executing":
             transition_mission_chat_turn(
@@ -1974,8 +2000,25 @@ def _cmd_mission_chat_message(args) -> int:
         situational_hud_revision,
         situational_hud_for_instance,
     )
+    from agent_runtime import turn_budget as _turn_budget
+    from agent_runtime.profile_runner import RunBudgetExceeded
 
-    situational_hud = situational_hud_for_instance(instance)
+    # Wall budget for this turn, resolved ONCE (single authority: the same
+    # object arms the runner's checkpoint clamp below and renders the agent's
+    # budget line here). A relayed hop inherits the chain deadline, so the
+    # TARGET's HUD shows the SHARED remaining budget — that is how a supervisor
+    # learns what window a dispatch actually has instead of briefing 50 minutes
+    # of work into a 9-minute hop (live incident 2026-07-26).
+    wall_budget = _turn_budget.resolve_turn_wall_budget(
+        max_seconds=getattr(args, "max_seconds", 240.0),
+        relay_deadline_epoch=relay_deadline,
+        relay_chain=turn_relay_chain,
+        min_relay_seconds=relay_policy.MIN_RELAY_BUDGET_SECONDS,
+    )
+
+    situational_hud = situational_hud_for_instance(
+        instance, turn_budget=wall_budget.hud_block()
+    )
     situational_hud_revision_value = situational_hud_revision(situational_hud)
     situational_hud_delivery = runtime_context_delivery(
         native_history,
@@ -2014,6 +2057,9 @@ def _cmd_mission_chat_message(args) -> int:
         revision=situational_hud_revision_value,
         delivery=situational_hud_delivery,
         situational_hud_content=render_situational_hud_block(situational_hud),
+        # Volatile tail: emitted on EVERY delivery (including `unchanged`), so a
+        # cached HUD body can never show the agent a stale countdown.
+        volatile_content=_turn_budget.render_turn_budget_line(wall_budget),
     )
     instance.skill_manifest_hash = safe_assignment_token(
         prompt_context.get("skill_manifest_hash")
@@ -2080,19 +2126,20 @@ def _cmd_mission_chat_message(args) -> int:
         )
         # Chained relays share one deadline: this hop's wall budget is capped
         # by the time left on the chain, and the deadline is seeded (root
-        # turns mint it) so deeper hops inherit the same clock.
-        relay_wall_seconds = float(getattr(args, "max_seconds", 240.0) or 240.0)
-        _relay_remaining = relay_policy.remaining_budget_seconds(relay_deadline)
-        if _relay_remaining is not None:
-            relay_wall_seconds = max(
-                relay_policy.MIN_RELAY_BUDGET_SECONDS,
-                min(relay_wall_seconds, _relay_remaining),
-            )
+        # turns mint it) so deeper hops inherit the same clock. Both facts come
+        # from the ONE `wall_budget` object resolved above — the same object the
+        # agent's HUD line was rendered from, so the number the model was told
+        # and the number the runner enforces can never drift apart.
+        # Relative window handed to the runner: time from NOW to the same
+        # absolute deadline the agent's HUD line quoted, so prompt assembly
+        # cannot let the enforced wall outlive the shared chain deadline.
+        relay_wall_seconds = max(
+            relay_policy.MIN_RELAY_BUDGET_SECONDS,
+            wall_budget.remaining_seconds(),
+        )
         _relay_chain_token = relay_policy.RELAY_CHAIN.set(turn_relay_chain)
         _relay_deadline_token = relay_policy.RELAY_DEADLINE.set(
-            relay_deadline
-            if relay_deadline is not None
-            else _relay_time.time() + relay_wall_seconds
+            wall_budget.deadline_epoch
         )
         # situational_hud / situational_hud_content were resolved once above
         # (record-at-injection): the write-ahead row, the fed block here, and
@@ -2225,8 +2272,41 @@ def _cmd_mission_chat_message(args) -> int:
             }
     except Exception as exc:
         stream_emitter.finish(state="failed")
+        # A wall-budget death is NOT an ambiguous provider outcome: the harness
+        # knows exactly why the turn stopped. Settle it as the typed terminal
+        # `budget_exhausted` (no operator turn-resolve, never a frozen console
+        # row) and hand back an honest synthesized account of what did run —
+        # the live 2026-07-26 failure mode this replaces froze both ends of a
+        # relay at `outcome_unknown` and cost a full re-brief.
+        wall_budget_exceeded = bool(
+            provider_submitted
+            and isinstance(exc, RunBudgetExceeded)
+            and getattr(exc, "wall_budget", None)
+        )
         failed_outcome = None
-        if provider_submitted:
+        if wall_budget_exceeded:
+            budget_block = dict(getattr(exc, "wall_budget", None) or {})
+            checkpoint_summary = _turn_budget.synthesize_checkpoint_summary(
+                None, tool_names=_chat_turn_tool_names(stream_emitter.elements)
+            )
+            failed_outcome = transition_mission_chat_turn(
+                session_id=session_id,
+                client_message_id=client_message_id,
+                turn_id=stream_emitter.turn_id,
+                elements=stream_emitter.elements,
+                state="budget_exhausted",
+                metadata={
+                    "provider_submitted": True,
+                    "budget_exhausted": True,
+                    "budget_trigger": safe_assignment_token(
+                        budget_block.get("trigger")
+                    )
+                    or "wall_budget_hard_wall",
+                    "budget_summary": safe_assignment_text(str(exc), limit=400),
+                    "stored_reply": checkpoint_summary,
+                },
+            )
+        elif provider_submitted:
             failed_outcome = transition_mission_chat_turn(
                 session_id=session_id,
                 client_message_id=client_message_id,
@@ -2240,11 +2320,19 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "blocked" if provider_submitted else "failed",
+            "execution_state": (
+                "budget_exhausted"
+                if wall_budget_exceeded
+                else ("blocked" if provider_submitted else "failed")
+            ),
             "error_kind": (
-                "chat_turn_outcome_unknown"
-                if provider_submitted
-                else "chat_turn_not_submitted"
+                "chat_turn_budget_exhausted"
+                if wall_budget_exceeded
+                else (
+                    "chat_turn_outcome_unknown"
+                    if provider_submitted
+                    else "chat_turn_not_submitted"
+                )
             ),
             "persona_instance_id": instance.id,
             "persona_id": normalized_persona,
@@ -2258,11 +2346,27 @@ def _cmd_mission_chat_message(args) -> int:
             "prompt_observability": slim_chat_final_observability(prompt_context),
             "model_selection": model_selection,
             "next_expected": (
-                "resolve the exact outcome_unknown turn with action=abandon, then send a new client_message_id"
-                if provider_submitted
-                else "retry this client_message_id; Hermes did not cross the provider boundary"
+                "send a new client_message_id with a smaller scope or a larger --max-seconds; this turn is settled and needs NO turn-resolve"
+                if wall_budget_exceeded
+                else (
+                    "resolve the exact outcome_unknown turn with action=abandon, then send a new client_message_id"
+                    if provider_submitted
+                    else "retry this client_message_id; Hermes did not cross the provider boundary"
+                )
             ),
         }
+        if wall_budget_exceeded:
+            data.update(
+                {
+                    "budget_exhausted": True,
+                    "turn_resolution_required": False,
+                    "journal_state": "budget_exhausted",
+                    "wall_budget": dict(getattr(exc, "wall_budget", None) or {}),
+                    "checkpoint_summary": _turn_budget.synthesize_checkpoint_summary(
+                        None, tool_names=_chat_turn_tool_names(stream_emitter.elements)
+                    ),
+                }
+            )
         if failed_outcome is not None and failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_persist_outcome"] = failed_outcome.value
         if getattr(args, "stream", False):
@@ -2274,6 +2378,32 @@ def _cmd_mission_chat_message(args) -> int:
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
     active_session_id = _persona_chat_native_tip(session_db, session_id)
     native_revision = _persona_chat_native_revision(session_db, session_id)
+    # Graceful checkpoint: the wall budget ended this turn, but it ended it at a
+    # boundary and the agent still produced a real, durable reply. That reply
+    # MUST project like any other (the whole point of the checkpoint), so the
+    # journal keeps its normal native_committed -> projected walk; the
+    # budget provenance rides the record metadata and the terminal frame so
+    # "why is this reply a checkpoint?" is answerable from the record.
+    budget_checkpoint = (getattr(chat_result, "raw", None) or {}).get(
+        "wall_budget_checkpoint"
+    )
+    budget_checkpoint = budget_checkpoint if isinstance(budget_checkpoint, dict) else None
+    budget_engaged = bool(budget_checkpoint and budget_checkpoint.get("engaged"))
+    budget_metadata: dict[str, object] = (
+        {
+            "budget_exhausted": True,
+            "budget_trigger": safe_assignment_token(budget_checkpoint.get("trigger"))
+            or "wall_budget_checkpoint",
+            "budget_summary": safe_assignment_text(
+                f"wall budget checkpoint: "
+                f"{budget_checkpoint.get('remaining_at_checkpoint_seconds')}s left of "
+                f"{budget_checkpoint.get('total_seconds')}s when new tool work stopped",
+                limit=400,
+            ),
+        }
+        if budget_engaged
+        else {}
+    )
     if runtime_registry is not None:
         runtime_registry.finish(
             session_id,
@@ -2300,6 +2430,7 @@ def _cmd_mission_chat_message(args) -> int:
             "native_revision": native_revision,
             "native_committed": True,
             "stored_reply": reply_text,
+            **budget_metadata,
         },
     )
     # The native reply is durable. Projection/bookkeeping failures deliberately
@@ -2342,7 +2473,21 @@ def _cmd_mission_chat_message(args) -> int:
             "goal_id": goal_id,
             "relay_chain": list(turn_relay_chain),
             "client_message_id": client_message_id,
-            "execution_state": "completed",
+            # A checkpointed turn is a SUCCESS with a truncated scope, not a
+            # failure: a real reply was produced and committed. `ok` stays true
+            # so relay callers do not treat it as an error; the typed
+            # `execution_state` + `budget_exhausted` flag carry the truncation,
+            # and the operator is never told to run turn-resolve.
+            "execution_state": "budget_exhausted" if budget_engaged else "completed",
+            **(
+                {
+                    "budget_exhausted": True,
+                    "turn_resolution_required": False,
+                    "wall_budget": budget_checkpoint,
+                }
+                if budget_engaged
+                else {}
+            ),
             "kind": "mission_chat_message",
             "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None)) or "chat",
             "surface_prompt": safe_assignment_text(getattr(args, "surface_prompt", ""), limit=4000) or "",
@@ -2385,7 +2530,13 @@ def _cmd_mission_chat_message(args) -> int:
             "queued_skills_loaded": preloaded_skills_loaded,
             "queued_skills_missing": preloaded_skills_missing,
             "model_selection": model_selection,
-            "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
+            "next_expected": (
+                "wall budget ran out: this is the agent's final checkpoint reply, "
+                "already committed. Send a new client_message_id to continue "
+                "(no turn-resolve required); raise --max-seconds or narrow the ask"
+                if budget_engaged
+                else "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context"
+            ),
         }
         stream_emitter.finish(
             state="completed",
@@ -4457,6 +4608,24 @@ def _safe_persona_chat_body_text(value, *, limit: int) -> str:
         # Truncation must be visible, never silent.
         normalized = normalized[:limit].rstrip() + " … [truncated]"
     return normalized
+
+
+def _chat_turn_tool_names(elements) -> list[str]:
+    """Tool names this turn actually ran, in emitter order.
+
+    Feeds the synthesized budget-exhausted summary: when not even the final
+    checkpoint call fits, the operator still gets an honest account of what DID
+    execute instead of a blank blocked turn.
+    """
+
+    names: list[str] = []
+    for element in elements or ():
+        if not isinstance(element, dict) or element.get("kind") != "tool":
+            continue
+        name = safe_assignment_token(element.get("name"))
+        if name:
+            names.append(name)
+    return names
 
 
 def _persona_chat_existing_turn(
