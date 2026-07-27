@@ -16,8 +16,16 @@ dispatched task, with the predecessor recorded as typed lineage
 back in the turn envelope (``session_established``). Continuation stays
 possible and becomes *explicit* — the caller passes the ``session_id`` the
 dispatch returned (in-task follow-ups, clarify round-trips), or
-``new_session: false`` to deliberately continue the durable pair thread. Recall
+``new_session: false`` to continue the target's CURRENT default thread. Recall
 across retired threads rides ``session_search`` plus the lineage chain.
+
+There is deliberately NO durable per-pair thread any more. The instance's
+``default_chat_session_id`` is a *latest-thread* pointer, not a home: every
+fresh dispatch mint repoints it through ``open_chat``, so ``sticky_default``
+continues whatever thread ran most recently — which is the last dispatched task
+whenever one has happened since. The mega-thread-as-home concept is retired on
+purpose (it was the cost bug), and a second "durable pair" pointer is NOT the
+fix: continuing a SPECIFIC conversation is what ``session_id`` is for.
 
 The decision lives here rather than in the handler because three callers must
 agree on it (the ``agent_chat_send`` tool, the ``hermes harness mission-chat
@@ -31,14 +39,16 @@ explicit caller intent always beats the configured default.
 
 1. ``session_id``            → continue THAT thread (``explicit_session_id``)
 2. ``new_session=True``      → fresh thread (``explicit_new_session``)
-3. ``new_session=False``     → durable pair thread (``sticky_default``)
+3. ``new_session=False``     → the target's CURRENT default thread
+                               (``sticky_default``)
 4. unset (``None``)          → the configured policy decides
    (``policy_new_per_dispatch`` / ``policy_sticky``)
 
 Note the tri-state: ``False`` and "unset" are DIFFERENT answers now, so the
 CLI's ``--new-session`` (argparse ``store_true`` → ``False`` when absent) keeps
-the operator console on its durable thread byte-for-byte, while a tool caller
-that says nothing gets the dispatch default.
+the operator console on the continue lane byte-for-byte — the same thread it
+would have used before this module existed — while a tool caller that says
+nothing gets the dispatch default.
 """
 
 from __future__ import annotations
@@ -128,7 +138,11 @@ class DispatchSessionDecision:
 
     mint: bool
     reason: str
-    policy: str
+    #: The configured policy this decision was resolved AGAINST, or ``None`` when
+    #: it was never consulted — the explicit lanes (``session_id`` /
+    #: ``new_session``) outrank config, and reporting a policy nobody read would
+    #: be a guess. Diagnostic only: ``session_established`` carries ``reason``.
+    policy: str | None
 
     @property
     def explicit(self) -> bool:
@@ -150,33 +164,47 @@ def resolve_dispatch_session_decision(
     """The one place the fresh-vs-continue question is answered.
 
     *policy* defaults to the configured
-    ``agent_runtime.mission_chat.dispatch_session_policy`` (loaded lazily so
-    this module stays importable without touching config, and so a config fault
-    degrades to the built-in default instead of failing a turn)."""
+    ``agent_runtime.mission_chat.dispatch_session_policy``, resolved lazily in
+    BOTH senses:
 
-    if policy is None:
+    * lazy import — this module stays pure/importable without touching config,
+      and a config fault degrades to the built-in default instead of failing a
+      turn;
+    * lazy call — a caller who stated their own intent (``session_id``, or
+      ``new_session`` either way) outranks the policy, so it is never loaded.
+      That matters on the hot path: ``mission_chat_dispatch_session_policy()``
+      parses the root ``config.yaml`` UNCACHED, and the explicit-session lane
+      runs this resolver on EVERY mission-chat turn purely to name the reason.
+      The returned decision reports ``policy=None`` for those lanes rather than
+      guessing at a value nothing read."""
+
+    def _configured_policy() -> str:
+        if policy is not None:
+            return normalize_dispatch_session_policy(policy)
         try:  # lazy: keeps this module pure/importable and config faults non-fatal
             from agent_runtime.config import mission_chat_dispatch_session_policy
 
-            resolved_policy = mission_chat_dispatch_session_policy()
+            return mission_chat_dispatch_session_policy()
         except Exception:  # pragma: no cover - defensive; a config fault must not kill a turn
-            resolved_policy = DEFAULT_DISPATCH_SESSION_POLICY
-    else:
-        resolved_policy = normalize_dispatch_session_policy(policy)
+            return DEFAULT_DISPATCH_SESSION_POLICY
 
+    # Explicit caller intent: decided without consulting (or loading) config.
+    # ``policy`` is echoed only when the caller handed one in.
+    stated_policy = normalize_dispatch_session_policy(policy) if policy is not None else None
     if str(session_id or "").strip():
         return DispatchSessionDecision(
-            mint=False, reason=REASON_EXPLICIT_SESSION_ID, policy=resolved_policy
+            mint=False, reason=REASON_EXPLICIT_SESSION_ID, policy=stated_policy
         )
     flag = coerce_optional_flag(new_session)
     if flag is True:
         return DispatchSessionDecision(
-            mint=True, reason=REASON_EXPLICIT_NEW_SESSION, policy=resolved_policy
+            mint=True, reason=REASON_EXPLICIT_NEW_SESSION, policy=stated_policy
         )
     if flag is False:
         return DispatchSessionDecision(
-            mint=False, reason=REASON_STICKY_DEFAULT, policy=resolved_policy
+            mint=False, reason=REASON_STICKY_DEFAULT, policy=stated_policy
         )
+    resolved_policy = _configured_policy()
     if resolved_policy == STICKY:
         return DispatchSessionDecision(
             mint=False, reason=REASON_POLICY_STICKY, policy=resolved_policy
@@ -184,6 +212,24 @@ def resolve_dispatch_session_decision(
     return DispatchSessionDecision(
         mint=True, reason=REASON_POLICY_NEW_PER_DISPATCH, policy=resolved_policy
     )
+
+
+def superseded_session_id(predecessor, *, established) -> str | None:
+    """The thread a fresh mint SUPERSEDED — never the thread itself.
+
+    One rule, applied at both places a mint records lineage (the envelope's
+    ``predecessor_session_id`` and the session meta's ``_dispatched_from``),
+    because they must not be able to disagree. It exists because of the replay
+    lane: a retried dispatch resolves the same idempotency-keyed mint receipt
+    and gets the SAME session back, by which time the instance's default-thread
+    pointer already IS that session — so the predecessor read a moment earlier
+    is the thread itself, and recording it would fabricate a lineage loop
+    (``A superseded A``) that a reader following the chain never escapes."""
+
+    predecessor_id = str(predecessor or "").strip()
+    if not predecessor_id or predecessor_id == str(established or "").strip():
+        return None
+    return predecessor_id
 
 
 def session_established_payload(

@@ -9,10 +9,19 @@ own contract ("omit to continue the target's default chat session ... the whole
 exchange is visible in Mission Control").
 
 The fix routes the omitted-session path through
-``default_chat_session_id_for_instance`` — the single resolve-or-mint chokepoint:
-continue the CANONICAL persona instance's current chat session, minting a fresh
-one only when the target has never chatted. These tests pin threading,
-canonical-id use (no phantom mints), and end-to-end visibility in the projection.
+``default_chat_session_id_for_instance`` — the single resolve-or-mint chokepoint,
+so every session this lane establishes is canonical, pointed, and visible.
+
+The live contract on top of that chokepoint is V3 (task-scoped dispatch,
+2026-07-27): an omitted session no longer means "continue", it means "open this
+task's own thread" (``agent_runtime.dispatch_session_policy``, default
+``new_per_dispatch``). Continuation is explicit — pass back the returned
+``session_id``; ``new_session: false`` continues the target's CURRENT default
+thread, which every fresh mint repoints, so it is not a durable pair thread.
+These tests pin the 2026-07-18 chokepoint guarantees (canonical id, pointed,
+projection-visible, no phantom mints) AND the V3 decisions layered on them:
+fresh-per-dispatch, recorded lineage, the reported ``session_established``, and
+that a send refused on its own arguments mints nothing at all.
 """
 
 from __future__ import annotations
@@ -934,6 +943,25 @@ def _send(capsys, args) -> dict:
     return payload
 
 
+def _refused(capsys, args) -> dict:
+    """Drive the same handler for a send it must REFUSE."""
+
+    import json as _json
+
+    from hermes_cli import harness
+
+    code = harness._cmd_mission_chat_message(args)
+    payload = _json.loads(capsys.readouterr().out)
+    assert code == 2, payload
+    assert payload["ok"] is False
+    return payload
+
+
+def _dev_chat_sessions(db) -> list[str]:
+    prefix = f"persona_chat_{persona_instance_id_for('dev')}_"
+    return [session_id for session_id in db.sessions if session_id.startswith(prefix)]
+
+
 def test_dispatch_default_opens_a_fresh_thread_per_task(
     monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
 ):
@@ -1031,6 +1059,124 @@ def test_explicit_continuation_keeps_the_durable_pair_thread(
     # honestly as fresh, with the sticky reason it was actually decided by.
     assert first["session_established"]["fresh"] is True
     assert first["session_established"]["reason"] == "sticky_default"
+
+
+def test_sticky_continuation_follows_the_latest_thread_not_a_pair_thread(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # The retired vocabulary said new_session=false continues "the durable pair
+    # thread". There is no such thread: every fresh dispatch repoints the
+    # instance's default-thread pointer through open_chat, so "continue" means
+    # the MOST RECENTLY established thread. Interleave the two lanes and pin the
+    # actual pointer semantics — a conversation you want to keep is continued by
+    # its session_id, never by a flag.
+    _install_dispatch_handler_doubles(monkeypatch)
+
+    conversation = _send(
+        capsys, _dispatch_args("how are the builds looking", "cm-interleave-1", new_session=False)
+    )
+    dispatched = _send(capsys, _dispatch_args("audit the download resume path", "cm-interleave-2"))
+    followed = _send(
+        capsys, _dispatch_args("and the flaky login test?", "cm-interleave-3", new_session=False)
+    )
+
+    assert dispatched["session_id"] != conversation["session_id"], (
+        "the dispatch must open its own task thread"
+    )
+    # THE point: the sticky send lands in the DISPATCH-minted thread, because
+    # that is what the pointer now names — not back in the earlier conversation.
+    assert followed["session_id"] == dispatched["session_id"]
+    assert followed["session_established"] == {
+        "fresh": False,
+        "reason": "sticky_default",
+        "predecessor_session_id": None,
+    }
+    # The earlier conversation is not lost, just no longer the default: it is
+    # continued by naming it, which is exactly what the contract now says.
+    resumed = _send(
+        capsys,
+        _dispatch_args("back to the builds", "cm-interleave-4", session_id=conversation["session_id"]),
+    )
+    assert resumed["session_id"] == conversation["session_id"]
+    assert resumed["session_established"]["reason"] == "explicit_session_id"
+
+
+def test_a_dispatch_refused_on_its_own_arguments_mints_nothing(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # Minting before validating meant every retried or refused dispatch left a
+    # titled empty thread in the sidebar. Under new_per_dispatch that is not a
+    # cosmetic leak: the mint also repoints the default-thread pointer, so a
+    # refusal would steal the thread the next sticky send continues.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    blank = _refused(capsys, _dispatch_args("   ", "cm-reject-message"))
+    assert blank["error"] == "message is required"
+
+    override = _refused(
+        capsys,
+        _dispatch_args(
+            "triage the flaky login test",
+            "cm-reject-override",
+            use_agent_default=True,
+            model="gpt-5-codex",
+        ),
+    )
+    assert override["error_kind"] == "invalid_chat_model_override"
+
+    assert _dev_chat_sessions(db) == [], "a refused dispatch must not create a thread"
+    assert (
+        resolve_default_chat_session_id_for_instance(PersonaInstanceStore(), persona_id="dev")
+        is None
+    ), "a refused dispatch must not establish a default-thread pointer"
+
+
+def test_a_refused_dispatch_leaves_an_established_thread_pointed_where_it_was(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # The repoint half of the same bug: with a live thread already in place, a
+    # refused dispatch must not mint a successor and repoint onto it.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    established = _send(capsys, _dispatch_args("task one", "cm-keep-pointer-1"))
+    _refused(
+        capsys,
+        _dispatch_args(
+            "task two",
+            "cm-keep-pointer-2",
+            use_agent_default=True,
+            provider="not a provider",
+        ),
+    )
+
+    assert _dev_chat_sessions(db) == [established["session_id"]]
+    assert resolve_default_chat_session_id_for_instance(
+        PersonaInstanceStore(), persona_id="dev"
+    ) == established["session_id"]
+
+
+def test_a_replayed_dispatch_reports_the_same_thread_lineage(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # A resend of the same client_message_id is the SAME turn answered again:
+    # the mint receipt is idempotency-keyed, so it lands back in the thread it
+    # established. The envelope must say so — a caller that reads
+    # session_established to decide where its follow-up goes cannot have that
+    # answer vanish on a retry.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    earlier = _send(capsys, _dispatch_args("task one", "cm-replay-1"))
+    second = _send(capsys, _dispatch_args("triage the flaky login test", "cm-replay-2"))
+    replay = _send(capsys, _dispatch_args("triage the flaky login test", "cm-replay-2"))
+
+    assert replay["idempotent_replay"] is True
+    assert replay["session_id"] == second["session_id"]
+    assert replay["session_established"] == second["session_established"]
+    assert replay["session_established"]["predecessor_session_id"] == earlier["session_id"]
+    # …and the retry did not rewrite the session's own lineage into a loop: by
+    # the time it ran, the default-thread pointer WAS this thread.
+    lineage = db.session_meta(second["session_id"])["_dispatched_from"]
+    assert lineage["predecessor_chat_session_id"] == earlier["session_id"]
 
 
 def test_sticky_policy_restores_the_durable_thread_for_unset_callers(

@@ -30,6 +30,7 @@ from agent_runtime.dispatch_session_policy import (
     normalize_dispatch_session_policy,
     resolve_dispatch_session_decision,
     session_established_payload,
+    superseded_session_id,
 )
 
 
@@ -78,6 +79,38 @@ def test_explicit_new_session_false_continues_under_every_policy(policy):
     assert decision.mint is False
     assert decision.reason == REASON_STICKY_DEFAULT
     assert decision.explicit is True
+
+
+def test_an_explicit_caller_never_loads_the_configured_policy(monkeypatch):
+    # `mission_chat_dispatch_session_policy()` parses the ROOT config.yaml
+    # UNCACHED. The explicit lanes outrank it, and the explicit-session lane in
+    # particular runs this resolver on EVERY mission-chat turn purely to name a
+    # reason — so consulting config there was a per-turn YAML parse for a value
+    # nothing reads. Only "the caller stated nothing" may reach it.
+    import agent_runtime.config as runtime_config_module
+
+    loads: list[int] = []
+
+    def _counted(cfg=None):
+        loads.append(1)
+        return STICKY
+
+    monkeypatch.setattr(
+        runtime_config_module, "mission_chat_dispatch_session_policy", _counted
+    )
+
+    for stated in (
+        dict(session_id="persona_chat_personainst_qa_abcdef123456"),
+        dict(new_session=True),
+        dict(new_session=False),
+    ):
+        decision = resolve_dispatch_session_decision(**stated)
+        assert loads == [], f"config consulted for an explicit caller: {stated}"
+        # Nothing was consulted, so nothing is claimed about deployment policy.
+        assert decision.policy is None
+
+    assert resolve_dispatch_session_decision().reason == REASON_POLICY_STICKY
+    assert loads == [1], "the unset lane is the only one that may load config"
 
 
 def test_session_id_beats_a_contradictory_new_session_flag():
@@ -164,6 +197,23 @@ def test_predecessor_is_carried_only_by_a_fresh_thread():
         predecessor_session_id="persona_chat_personainst_qa_aaaaaaaaaaaa",
     )
     assert continued["predecessor_session_id"] is None
+
+
+def test_a_session_is_never_its_own_predecessor():
+    # The replay lane: a retried dispatch resolves the same idempotency-keyed
+    # mint receipt, so by the time the envelope is built the default-thread
+    # pointer read a moment earlier IS this thread. Recording that would write a
+    # lineage loop ("A superseded A") into both the envelope and the session
+    # meta's `_dispatched_from`, which a reader following the chain never leaves.
+    same = "persona_chat_personainst_dev_aaaaaaaaaaaa"
+    older = "persona_chat_personainst_dev_bbbbbbbbbbbb"
+    assert superseded_session_id(same, established=same) is None
+    assert superseded_session_id(older, established=same) == older
+    # Nothing to supersede reads as nothing, in every empty shape.
+    assert superseded_session_id(None, established=same) is None
+    assert superseded_session_id("  ", established=same) is None
+    # No established session yet (a first-ever mint) still reports the truth.
+    assert superseded_session_id(older, established=None) == older
 
 
 # ── titles make task-scoped threads navigable ───────────────────────────────

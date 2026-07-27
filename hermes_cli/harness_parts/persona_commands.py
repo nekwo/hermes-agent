@@ -1407,6 +1407,11 @@ def _cmd_mission_chat_message(args) -> int:
     # every freshly minted dispatch thread as a plain continuation.
     session_established = getattr(args, "_dispatch_session_established", None)
     if session_established is None and session_id:
+        # No `policy=`: an explicit session id outranks deployment policy, and
+        # the resolver short-circuits before loading it — this lane runs on
+        # every mission-chat turn and `mission_chat_dispatch_session_policy()`
+        # parses the root config.yaml UNCACHED, to fill a field the
+        # `explicit_session_id` reason never reads.
         session_established = session_established_payload(
             resolve_dispatch_session_decision(session_id=session_id),
             fresh=False,
@@ -1519,18 +1524,16 @@ def _cmd_mission_chat_message(args) -> int:
             return 2
         persona_instance_id = owner
     if not session_id:
-        # Omitted session (agent_chat_send relay lane, and any first-turn open):
-        # CONTINUE the target's default chat session so repeated relays thread
-        # into ONE conversation — the tool contract's "omit to continue the
-        # target's default chat session". Resolve the canonical instance's
-        # current chat session (mint a fresh one only when it has never
-        # chatted); never a new random session per send, which orphaned the
-        # relay lane (unpointed session, invisible to the snapshot projection).
-        #
-        # new_session=True (agent_chat_send's clean-thread lane) forces a fresh
-        # canonical mint through the SAME chokepoint (mint= mode), never a
-        # parallel pipeline; open_chat then repoints the instance so the pair's
-        # new thread becomes the default going forward.
+        # Omitted session (agent_chat_send dispatch lane, and any first-turn
+        # open): the thread target is decided by policy below, not by this
+        # branch. Under the default `new_per_dispatch` a dispatch MINTS its own
+        # task-scoped thread; under `sticky` (or an explicit new_session=False)
+        # it continues the target's current default thread. Either way the
+        # session comes from the canonical resolve-or-mint chokepoint — never a
+        # new random session per send, which orphaned the relay lane in
+        # 2026-07-18 (unpointed session, invisible to the snapshot projection).
+        # `open_chat` below repoints the instance's default pointer onto
+        # whatever thread this turn established.
         #
         # BARE persona (no pin, no session): route through the "placements shadow
         # canonical" ruling — a single in-scope placement is the default target,
@@ -1568,7 +1571,8 @@ def _cmd_mission_chat_message(args) -> int:
         # task-scoped thread instead of accumulating in one mega-thread per
         # pair (which re-fed the whole transcript every turn). The CLI/serve
         # lane's argparse `--new-session` is store_true, so an operator console
-        # send arrives as an explicit False and keeps its durable thread.
+        # send arrives as an explicit False and keeps continuing the target's
+        # current default thread, exactly as before this policy existed.
         dispatch_decision = resolve_dispatch_session_decision(
             session_id=None,
             new_session=getattr(args, "new_session", None),
@@ -1588,6 +1592,32 @@ def _cmd_mission_chat_message(args) -> int:
                 dispatch_decision, fresh=False, predecessor_session_id=None
             )
         else:
+            # PRE-MINT GATE. The mint below is this turn's first DURABLE side
+            # effect: a titled session row, and — once `open_chat` binds it —
+            # a REPOINT of the instance's default-thread pointer. Under the
+            # new_per_dispatch default, running it before the caller's own
+            # arguments have been checked meant every refused or retried
+            # dispatch littered an empty task thread AND stole the pointer that
+            # `new_session:false` follows. So the refusals decidable from
+            # `args` alone are evaluated FIRST. They need no session id, so
+            # ordering them here costs nothing; their original, session-bearing
+            # sites below stay put as defense in depth for the explicit-session
+            # lane (which never mints).
+            premint_refusal = _mission_chat_caller_refusal(
+                args,
+                persona_id=normalized_persona,
+                persona_instance_id=persona_instance_id,
+            )
+            if premint_refusal is not None:
+                if getattr(args, "stream", False):
+                    _emit_chat_final(premint_refusal)
+                else:
+                    print(
+                        emit_json(premint_refusal)
+                        if args.json
+                        else premint_refusal["error"]
+                    )
+                return 2
             # A fresh thread is only navigable if it is NAMED: nine identical
             # "QA Agent chat" rows are worse than the mega-thread they replaced.
             # An explicit --title/`title` wins; otherwise a deliberate fresh
@@ -1622,7 +1652,18 @@ def _cmd_mission_chat_message(args) -> int:
             )
             session_id = str(receipt["root_chat_session_id"])
             session_established = session_established_payload(
-                dispatch_decision, fresh=True, predecessor_session_id=existing_root
+                dispatch_decision,
+                fresh=True,
+                # The mint reports the lineage it actually RECORDED, so the
+                # envelope and `_dispatched_from` cannot disagree. It matters on
+                # a RETRY of the same client_message_id: that resolves the same
+                # idempotency-keyed receipt, by which time `existing_root` has
+                # become this very thread — reporting it here would claim "A
+                # superseded A", and reporting nothing would lose the real
+                # predecessor the first pass established.
+                predecessor_session_id=(receipt.get("dispatched_from") or {}).get(
+                    "predecessor_chat_session_id"
+                ),
             )
         args.session_id = session_id
         # Survives the lease re-entry above, which sees args.session_id set.
@@ -1712,16 +1753,12 @@ def _cmd_mission_chat_message(args) -> int:
             instance=instance,
         )
     except ValueError as exc:
-        data = {
-            "ok": False,
-            "error_kind": "invalid_chat_model_override",
-            "error": safe_assignment_text(str(exc), limit=320),
-            "persona_instance_id": instance.id,
-            "persona_id": normalized_persona,
-            "session_id": session_id,
-            "chat_session_id": session_id,
-            "next_expected": "choose a valid provider/model id or clear the chat-scoped override; Hermes profile defaults were not changed",
-        }
+        data = _invalid_chat_model_override_payload(
+            exc,
+            persona_id=normalized_persona,
+            persona_instance_id=instance.id,
+            session_id=session_id,
+        )
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -1778,7 +1815,7 @@ def _cmd_mission_chat_message(args) -> int:
     persona = apply_instance_model_overrides(persona, instance)
     message = safe_assignment_text(getattr(args, "message", None), limit=12000)
     if not message:
-        data = {"ok": False, "error": "message is required"}
+        data = _missing_chat_message_payload()
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -1926,6 +1963,13 @@ def _cmd_mission_chat_message(args) -> int:
             "active_session_id": journal.get("active_session_id") or _persona_chat_native_tip(session_db, session_id),
             "session_id": session_id,
             "chat_session_id": session_id,
+            # Same lineage the live envelope reports. A replay is the SAME turn
+            # answered again (the mint receipt is idempotency-keyed, so a
+            # retried dispatch lands back in the thread it established), so it
+            # must report the same {fresh, reason, predecessor_session_id} —
+            # a caller that reads `session_established` to decide where its
+            # follow-up goes cannot have that answer disappear on a retry.
+            "session_established": session_established,
             "client_message_id": client_message_id,
             "turn_id": journal.get("turn_id") or client_message_id,
             "execution_state": "completed",
@@ -1988,6 +2032,9 @@ def _cmd_mission_chat_message(args) -> int:
             "persona_id": normalized_persona,
             "session_id": session_id,
             "chat_session_id": session_id,
+            # See the projected-replay envelope above: a replay reports the same
+            # thread lineage the original turn did.
+            "session_established": session_established,
             "task_id": task_id,
             "goal_id": goal_id,
             "client_message_id": client_message_id,
@@ -4330,6 +4377,70 @@ def _requested_chat_model_override(args) -> dict[str, object] | None:
         "scope": "mission_control_chat_session",
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _missing_chat_message_payload() -> dict[str, object]:
+    """Refusal for a send that carries no message text.
+
+    One spelling for two call sites: the pre-mint gate and the post-lease check
+    that has always owned it."""
+
+    return {"ok": False, "error": "message is required"}
+
+
+def _invalid_chat_model_override_payload(
+    exc: Exception,
+    *,
+    persona_id: str,
+    persona_instance_id: str | None,
+    session_id: str | None,
+) -> dict[str, object]:
+    """Refusal for a provider/model override the caller stated wrongly.
+
+    Built here rather than inline because the same refusal is now reachable
+    from TWO points of one turn — the pre-mint gate (no session exists yet, so
+    the session fields are honestly null) and the post-``open_chat`` resolve —
+    and one envelope with two spellings is how ``error_kind`` drifts."""
+
+    return {
+        "ok": False,
+        "error_kind": "invalid_chat_model_override",
+        "error": safe_assignment_text(str(exc), limit=320),
+        "persona_instance_id": persona_instance_id,
+        "persona_id": persona_id,
+        "session_id": session_id,
+        "chat_session_id": session_id,
+        "next_expected": "choose a valid provider/model id or clear the chat-scoped override; Hermes profile defaults were not changed",
+    }
+
+
+def _mission_chat_caller_refusal(
+    args,
+    *,
+    persona_id: str,
+    persona_instance_id: str | None,
+) -> dict[str, object] | None:
+    """The refusals decidable from the caller's arguments alone, or ``None``.
+
+    Exists so they can run BEFORE a dispatch mints its task-scoped thread: a
+    mint is durable (a titled row in Mission Control) and a repoint (the
+    instance's default-thread pointer), so a send that was always going to be
+    refused must not leave either behind. Both checks are pure functions of
+    ``args``, so evaluating them here AND at their original sites is free and
+    keeps those sites intact for the explicit-session lane."""
+
+    if not safe_assignment_text(getattr(args, "message", None), limit=12000):
+        return _missing_chat_message_payload()
+    try:
+        _requested_chat_model_override(args)
+    except ValueError as exc:
+        return _invalid_chat_model_override_payload(
+            exc,
+            persona_id=persona_id,
+            persona_instance_id=persona_instance_id,
+            session_id=None,
+        )
+    return None
 
 
 def _session_row(session_db, session_id: str | None) -> dict[str, object]:

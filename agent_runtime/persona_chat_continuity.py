@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterator
 from datetime import datetime, timezone
 
 from . import paths
+from .dispatch_session_policy import superseded_session_id
 from .persona_assignments import (
     PersonaInstanceStore,
     persona_chat_session_id_for,
@@ -457,7 +458,15 @@ class PersonaChatMintReceiptStore:
                 "persona_instance_id": instance_id,
                 "source": PERSONA_CHAT_SESSION_SOURCE,
             }
-            lineage = _dispatch_lineage_meta(dispatched_from)
+            lineage = _dispatch_lineage_meta(dispatched_from, root=root)
+            if not lineage:
+                # REPLAY: the same idempotency key resolves the root this call
+                # already established, so the caller's "predecessor" is now this
+                # very session and drops out as a self-reference. The lineage it
+                # was BORN with is still true — carry it forward, because this
+                # meta write replaces the stored value wholesale and would
+                # otherwise erase the provenance on a retry.
+                lineage = _stored_dispatch_lineage(session_db, root)
             if lineage:
                 meta["_dispatched_from"] = lineage
             session_db.update_session_meta(root, json.dumps(meta, sort_keys=True))
@@ -475,7 +484,15 @@ class PersonaChatMintReceiptStore:
             )
             receipt.update({"state": "completed", "completed_at": time.time()})
             _atomic_json(path, receipt)
-            return {**receipt, "default_chat_session_id": instance.default_chat_session_id}
+            return {
+                **receipt,
+                "default_chat_session_id": instance.default_chat_session_id,
+                # The lineage this mint actually RECORDED (not the lineage it was
+                # asked for), so the reply envelope reports the same predecessor
+                # the session meta holds — on a first mint and on a replay alike.
+                # Not persisted into the receipt file: the meta is its home.
+                "dispatched_from": dict(lineage),
+            }
         finally:
             try:
                 _unlock(fd)
@@ -491,14 +508,46 @@ class PersonaChatMintReceiptStore:
 _DISPATCH_LINEAGE_KEYS = ("predecessor_chat_session_id", "requested_by_session")
 
 
-def _dispatch_lineage_meta(dispatched_from: dict[str, Any] | None) -> dict[str, str]:
-    """Bounded, string-only projection of the dispatch lineage."""
+def _stored_dispatch_lineage(session_db: Any, root: str) -> dict[str, str]:
+    """The ``_dispatched_from`` already recorded for *root*, if any."""
+
+    try:
+        row = session_db.get_session(root)
+    except Exception:
+        return {}
+    raw = (row if isinstance(row, dict) else {}).get("model_config")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw) if raw.strip() else {}
+        except Exception:
+            return {}
+    stored = raw.get("_dispatched_from") if isinstance(raw, dict) else None
+    if not isinstance(stored, dict):
+        return {}
+    return {
+        str(key): text
+        for key in _DISPATCH_LINEAGE_KEYS
+        if (text := safe_assignment_text(stored.get(key), limit=240))
+    }
+
+
+def _dispatch_lineage_meta(
+    dispatched_from: dict[str, Any] | None, *, root: str
+) -> dict[str, str]:
+    """Bounded, string-only projection of the dispatch lineage.
+
+    *root* is the session this meta belongs to: a replayed mint resolves the
+    same receipt and re-writes this meta with a predecessor that has since
+    BECOME this session, so the self-reference is dropped through the shared
+    :func:`superseded_session_id` rule the reply envelope uses."""
 
     if not isinstance(dispatched_from, dict):
         return {}
     lineage: dict[str, str] = {}
     for key in _DISPATCH_LINEAGE_KEYS:
         value = safe_assignment_text(dispatched_from.get(key), limit=240)
+        if key == "predecessor_chat_session_id":
+            value = superseded_session_id(value, established=root) or ""
         if value:
             lineage[key] = value
     return lineage
