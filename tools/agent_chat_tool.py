@@ -15,6 +15,16 @@ In-process matters: one Hermes process shelling out to another can hit the
 ``agent.log`` rotation lock (see mission_goal_tool.py), and the operator lane
 must never fork a second, slightly different chat pipeline.
 
+Thread contract (V3 — task-scoped dispatch, 2026-07-27): a send that names no
+thread opens a FRESH one per dispatched task (``agent_runtime.mission_chat.
+dispatch_session_policy``, default ``new_per_dispatch``); continuation is
+explicit — pass back the ``session_id`` the reply returned, or ``new_session:
+false`` for the durable pair thread. Every reply carries
+``session_established`` {fresh, reason, predecessor_session_id}, and a fresh
+thread records its predecessor in the session meta (``_dispatched_from``). The
+decision itself belongs to ``agent_runtime.dispatch_session_policy``; this tool
+only forwards the caller's tri-state intent uncoerced.
+
 Scope contract (V2 — chained relays enabled 2026-07-08):
 - relays may chain (operator -> Alice -> Neko -> Dev). Depth, cycle, and
   budget decisions are owned by ONE authority — ``agent_runtime.relay_policy``
