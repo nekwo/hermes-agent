@@ -531,6 +531,120 @@ def test_new_session_with_explicit_session_is_a_typed_refusal(monkeypatch):
     assert data["error_kind"] == "contradictory_thread_target"
 
 
+def test_clarify_token_is_offered_and_forwarded_verbatim(monkeypatch):
+    # The echo half of the clarify binding. The tool never RESOLVES the token —
+    # one ticket-store authority, and it lives with the handler that owns the
+    # session lane — so all this surface owes is an honest schema slot and an
+    # untouched forward.
+    assert "clarify_token" in AGENT_CHAT_SEND_SCHEMA["parameters"]["properties"]
+    assert "clarify_token" not in AGENT_CHAT_SEND_SCHEMA["parameters"]["required"]
+
+    seen = {}
+
+    def fake_handler(args):
+        seen["clarify_token"] = args.clarify_token
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert json.loads(
+        agent_chat_send(persona_id="qa", message="launcher", clarify_token="clarify-9f2c4ab17d03")
+    )["ok"]
+    assert seen["clarify_token"] == "clarify-9f2c4ab17d03"
+    # An omitted token reaches the handler as None, never as an empty string a
+    # store lookup would have to special-case.
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi"))["ok"]
+    assert seen["clarify_token"] is None
+
+
+def test_the_registry_handler_passes_the_clarify_token_through(monkeypatch):
+    # The model calls this tool through the registry, not the Python function;
+    # a kwarg the registry lambda forgets is a kwarg the model can never use.
+    seen = {}
+
+    def fake_handler(args):
+        seen["clarify_token"] = args.clarify_token
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    entry = registry.get_entry("agent_chat_send")
+    entry.handler(
+        {"persona_id": "qa", "message": "launcher", "clarify_token": "clarify-abcdef123456"}
+    )
+    assert seen["clarify_token"] == "clarify-abcdef123456"
+
+
+def test_clarify_token_with_new_session_is_a_typed_refusal(monkeypatch):
+    # The ONE clarify combination with no correct reading: "put this answer
+    # where the question was" and "put it somewhere new" cannot both hold. A
+    # stale session_id alongside a token is NOT this case — the token
+    # deliberately wins that one downstream, because getting session_id wrong is
+    # the exact failure the token absorbs.
+    def fake_handler(args):  # pragma: no cover - must not be reached
+        raise AssertionError("contradictory thread target must refuse before dispatch")
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    data = json.loads(
+        agent_chat_send(
+            persona_id="qa",
+            message="launcher",
+            new_session=True,
+            clarify_token="clarify-9f2c4ab17d03",
+        )
+    )
+    assert data["ok"] is False
+    assert data["error_kind"] == "contradictory_thread_target"
+    assert "clarify_token" in data["error"]
+
+
+def test_clarify_binding_is_returned_to_the_answering_agent(monkeypatch):
+    # Where the answer actually landed, and why — including a session_id the
+    # token outranked, so the override is never silent to the caller either.
+    def fake_handler(args):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "reply": "ack",
+                    "session_id": "persona_chat_personainst_qa_ffffffffffff",
+                    "clarify_binding": {
+                        "token": "clarify-9f2c4ab17d03",
+                        "state": "bound",
+                        "bound_via": "clarify_token",
+                        "bound_session_id": "persona_chat_personainst_qa_ffffffffffff",
+                        "overrode_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
+                    },
+                }
+            )
+        )
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    data = json.loads(agent_chat_send(persona_id="qa", message="launcher"))
+    assert data["clarify_binding"]["bound_via"] == "clarify_token"
+    assert (
+        data["clarify_binding"]["overrode_session_id"]
+        == "persona_chat_personainst_qa_aaaaaaaaaaaa"
+    )
+
+    # Absent on every ordinary turn — the compact result must not grow a null key.
+    def quiet_handler(args):
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", quiet_handler)
+    assert "clarify_binding" not in json.loads(agent_chat_send(persona_id="qa", message="hi"))
+
+
 def test_threads_lists_default_thread_without_minting_for_never_chatted(isolate_agent_runtime_root):
     from agent_runtime.persona_assignments import (
         PersonaInstanceStore,

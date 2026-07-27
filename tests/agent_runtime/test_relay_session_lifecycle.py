@@ -1277,11 +1277,15 @@ def test_explicit_session_id_continues_that_exact_thread(
     )
 
     assert followed["session_id"] == opened["session_id"]
-    assert followed["session_established"] == {
-        "fresh": False,
-        "reason": "explicit_session_id",
-        "predecessor_session_id": None,
-    }
+    # Asserted key BY KEY, not as an exact dict. The exact-dict form pinned the
+    # ABSENCE of every other field as contract, so any additive envelope work
+    # broke a test that has nothing to say about it (the clarify-binding block
+    # is a top-level sibling for exactly this reason). What this test is about
+    # is the three values below.
+    established = followed["session_established"]
+    assert established["fresh"] is False
+    assert established["reason"] == "explicit_session_id"
+    assert established["predecessor_session_id"] is None
 
 
 def test_clarify_round_trip_stays_in_one_session_under_the_new_default(
@@ -1321,6 +1325,202 @@ def test_clarify_round_trip_stays_in_one_session_under_the_new_default(
     assert resolve_default_chat_session_id_for_instance(
         PersonaInstanceStore(), persona_id="dev"
     ) == dispatched["session_id"]
+
+
+class _StrictDispatchTranscriptDB(_DispatchTranscriptDB):
+    """The same double, but seen as real persistence by the handler's guards.
+
+    ``unknown_chat_session`` / ``foreign_chat_session`` are gated on
+    ``session_db.__class__.__module__ == "hermes_state"`` (an "is this the real
+    store?" sniff). The clarify design's load-bearing claim is that a token gets
+    BOTH guards for free by resolving before them, so proving it requires a
+    double those guards actually look at."""
+
+    __module__ = "hermes_state"
+
+
+def _mint_clarify_ticket(session_id: str, **overrides) -> str:
+    from agent_runtime.persona_chat_continuity import PersonaChatClarifyTicketStore
+
+    token = PersonaChatClarifyTicketStore().mint(
+        chat_session_id=session_id,
+        persona_instance_id=persona_instance_id_for("dev"),
+        persona_id="dev",
+        asked_by_client_message_id="agent-relay-aaaaaaaaaaaa",
+        **overrides,
+    )
+    assert token
+    return token
+
+
+def test_clarify_token_binds_the_answer_when_the_parent_names_no_session(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    """THE headline case, and the reason the token exists.
+
+    Under ``new_per_dispatch`` an answer that names no session opens a THIRD
+    thread and the child reads a bare choice with no question attached. The
+    only thing that used to prevent it was prompt text asking a model to
+    reproduce an opaque session id. Now the runtime owns the binding: the
+    answer carries only the token and still lands in the question's thread."""
+
+    db = _install_dispatch_handler_doubles(
+        monkeypatch,
+        clarify_request={"question": "launcher or backend?", "choices": ["launcher", "backend"]},
+    )
+
+    dispatched = _send(capsys, _dispatch_args("fix the failing test", "cm-token-1"))
+    token = dispatched["clarify_request"]["clarify_token"]
+    assert token.startswith("clarify-")
+
+    answer = _send(
+        capsys,
+        _dispatch_args("launcher", "cm-token-2", clarify_token=token),
+    )
+
+    assert answer["session_id"] == dispatched["session_id"]
+    assert answer["session_established"]["reason"] == "clarify_token"
+    assert answer["session_established"]["fresh"] is False
+    assert answer["clarify_binding"]["bound_via"] == "clarify_token"
+    assert answer["clarify_binding"]["bound_session_id"] == dispatched["session_id"]
+    assert answer["clarify_binding"]["overrode_session_id"] is None
+    # One thread for the whole exchange — no third thread behind the caller's back.
+    assert _dev_chat_sessions(db) == [dispatched["session_id"]]
+
+
+def test_clarify_token_overrides_a_wrong_session_id_and_says_so(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # A caller unreliable enough to need the token is exactly the caller who
+    # will also attach a stale session id. Refusing that would defeat the
+    # design; landing it silently would hide a real disagreement. It lands, and
+    # the override is named.
+    _install_dispatch_handler_doubles(
+        monkeypatch,
+        clarify_request={"question": "launcher or backend?"},
+    )
+
+    stale = _send(capsys, _dispatch_args("earlier task", "cm-override-0"))
+    asked = _send(capsys, _dispatch_args("fix the failing test", "cm-override-1"))
+    token = asked["clarify_request"]["clarify_token"]
+    assert stale["session_id"] != asked["session_id"]
+
+    answer = _send(
+        capsys,
+        _dispatch_args(
+            "launcher",
+            "cm-override-2",
+            clarify_token=token,
+            session_id=stale["session_id"],
+        ),
+    )
+
+    assert answer["session_id"] == asked["session_id"]
+    assert answer["session_established"]["reason"] == "clarify_token"
+    assert answer["clarify_binding"]["overrode_session_id"] == stale["session_id"]
+
+
+def test_an_unknown_clarify_token_degrades_instead_of_refusing(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # Tickets are swept on a TTL, so a token CAN legitimately outlive its
+    # record. Turning that into a hard failure would punish the parent that did
+    # exactly the right thing — so the turn falls through to normal precedence
+    # and reports why.
+    _install_dispatch_handler_doubles(monkeypatch)
+
+    answer = _send(
+        capsys,
+        _dispatch_args("launcher", "cm-unknown-1", clarify_token="clarify-deadbeefdead"),
+    )
+
+    assert answer["clarify_binding"]["state"] == "unknown_token"
+    assert answer["clarify_binding"]["bound_via"] == "none"
+    assert answer["session_established"]["reason"] == "policy_new_per_dispatch"
+
+
+def test_a_clarify_token_cannot_smuggle_in_a_foreign_session(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    """Placement, not a new guard: resolution happens BEFORE the existing
+    ownership checks, so a token naming another instance's thread is refused by
+    the same ``foreign_chat_session`` every explicit session id already hits."""
+
+    import json as _json
+
+    from hermes_cli import harness
+
+    db = _StrictDispatchTranscriptDB()
+    _install_dispatch_handler_doubles(monkeypatch)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    foreign = f"persona_chat_{persona_instance_id_for('qa')}_abcdef123456"
+    db.create_session(foreign, "agent_runtime_persona_chat")
+    db.update_session_meta(
+        foreign,
+        _json.dumps(
+            {
+                "mission_chat_root_id": foreign,
+                "persona_instance_id": persona_instance_id_for("qa"),
+                "source": "agent_runtime_persona_chat",
+            }
+        ),
+    )
+    token = _mint_clarify_ticket(foreign)
+
+    refusal = _refused(
+        capsys, _dispatch_args("launcher", "cm-foreign-1", clarify_token=token)
+    )
+
+    assert refusal["error_kind"] == "foreign_chat_session"
+    assert refusal["session_id"] == foreign
+
+
+def test_a_prompt_compliant_answer_still_settles_the_open_question(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # A parent that answered correctly WITHOUT the token must not leave the
+    # ticket open forever: the adoption metric would then read pessimistically
+    # for every caller doing the right thing, which is the reading that would
+    # argue for building more machinery than this needs.
+    from agent_runtime.persona_chat_continuity import PersonaChatClarifyTicketStore
+
+    _install_dispatch_handler_doubles(
+        monkeypatch,
+        clarify_request={"question": "launcher or backend?"},
+    )
+
+    asked = _send(capsys, _dispatch_args("fix the failing test", "cm-settle-1"))
+    token = asked["clarify_request"]["clarify_token"]
+
+    answer = _send(
+        capsys,
+        _dispatch_args("launcher", "cm-settle-2", session_id=asked["session_id"]),
+    )
+
+    assert answer["session_established"]["reason"] == "explicit_session_id"
+    assert answer["clarify_binding"]["bound_via"] == "session_id"
+    assert PersonaChatClarifyTicketStore().resolve(token)["state"] == "answered"
+
+
+def test_the_clarify_gate_off_restores_the_pre_token_lane(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # The whole rollback: no token minted, none resolved, and the wire shape
+    # reverts to {question, choices}. Nothing to migrate, nothing to unwind.
+    from hermes_cli import harness
+
+    monkeypatch.setattr(
+        harness, "mission_chat_clarify_token_binding", lambda cfg=None: False
+    )
+    _install_dispatch_handler_doubles(
+        monkeypatch,
+        clarify_request={"question": "launcher or backend?"},
+    )
+
+    asked = _send(capsys, _dispatch_args("fix the failing test", "cm-gate-1"))
+    assert asked["clarify_request"] == {"question": "launcher or backend?"}
+    assert "clarify_binding" not in asked
 
 
 def test_fresh_dispatch_threads_are_named_after_the_task(

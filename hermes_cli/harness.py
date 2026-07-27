@@ -20,7 +20,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
-from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, provision_bundled_personas, resolve_mission_chat_max_seconds
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, provision_bundled_personas, resolve_mission_chat_max_seconds
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.dispatch_session_policy import (
     derive_dispatch_title,
@@ -134,6 +134,7 @@ from agent_runtime.mission_chat_turns import (
 )
 from agent_runtime.persona_chat_continuity import (
     PersonaChatBusyError,
+    PersonaChatClarifyTicketStore,
     PersonaChatMintReceiptStore,
     PERSONA_CHAT_SESSION_SOURCE,
     native_history_revision,
@@ -1344,6 +1345,12 @@ def build_parser(parent_subparsers) -> None:
     # the flag entirely (the agent_chat_send dispatch lane, which forwards
     # None) falls through to agent_runtime.mission_chat.dispatch_session_policy.
     mission_chat_message.add_argument("--new-session", dest="new_session", action="store_true", help="Force a fresh canonical chat session for the target instead of continuing the default thread (agent_chat_send new_session lane); ignored when --session-id is given")
+    # The echo half of the clarify binding. A reply that carries the token the
+    # question shipped down lands in the question's OWN thread — outranking both
+    # the policy default and a stale --session-id (reported, never silent, in the
+    # turn's clarify_binding block). Unknown/pruned tokens degrade to normal
+    # precedence rather than refusing.
+    mission_chat_message.add_argument("--clarify-token", dest="clarify_token", default=None, help="Answer a clarify question by its token (clarify_request.clarify_token from the asking turn); binds this reply to the thread the question was asked in")
     mission_chat_message.add_argument("--task", dest="task_id", default=None)
     mission_chat_message.add_argument("--goal", dest="goal_id", default=None)
     # Default None = "no title opinion": consumed as the fresh thread's title

@@ -555,6 +555,226 @@ class PersonaChatMintReceiptStore:
             os.close(fd)
 
 
+#: How long a clarify ticket file is kept before the sweep may prune it. TTL
+#: governs GARBAGE COLLECTION ONLY — an expired-but-present ticket still binds
+#: (see :class:`PersonaChatClarifyTicketStore`). One rule, no cliff.
+CLARIFY_TICKET_TTL_SECONDS = 604_800  # 7 days
+
+#: ``clarify-<12 hex>`` — mirrors the relay id precedent
+#: (``agent-relay-<12 hex>``, ``tools/agent_chat_tool.py``). 48 bits is ample:
+#: the token is a LOOKUP KEY validated against a stored record, never a
+#: capability secret. The session it resolves to is independently re-validated
+#: by the handler's existing ``unknown_chat_session`` / ``foreign_chat_session``
+#: guards, so guessing a token buys nothing a caller could not already name.
+CLARIFY_TOKEN_PREFIX = "clarify-"
+
+#: Ticket lifecycle states. ``open`` → the question is unanswered; ``answered``
+#: → some turn landed in its session (with or without an echoed token);
+#: ``rebound`` → a later, DIFFERENT turn bound through the same token.
+CLARIFY_TICKET_OPEN = "open"
+CLARIFY_TICKET_ANSWERED = "answered"
+CLARIFY_TICKET_REBOUND = "rebound"
+
+
+class PersonaChatClarifyTicketStore:
+    """Binds a clarify ANSWER to the thread its QUESTION was asked in.
+
+    A child that calls ``clarify`` on the mission-chat lane has its question
+    threaded back to the asker as ``clarify_request``. Until this store existed,
+    the ONLY thing linking that question to its answer was the enclosing
+    ``session_id``, and passing it back was enforced by prompt text alone — so a
+    parent that omitted it fell through to ``policy_new_per_dispatch`` and the
+    child read a bare choice with no question attached. Continuity that depends
+    on a model reproducing an opaque identifier is not continuity; the runtime
+    owns the binding now.
+
+    A sidecar keyed store, deliberately NOT session meta:
+    :meth:`PersonaChatMintReceiptStore.mint` writes meta WHOLESALE
+    (``update_session_meta(root, json.dumps(meta))``), which is exactly why
+    ``640131e8c`` had to add carry-forward logic for ``_dispatched_from``. A
+    ticket parked in meta would be erased by the next mint against that root.
+
+    **The filename is the digest of the token, never the token itself.** The
+    token arrives as a caller-supplied string from a model; interpolating it
+    into a path is traversal. Same precedent as the mint receipt store above.
+    """
+
+    def _path(self, token: str) -> Path:
+        digest = hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+        return paths.store_root() / "persona_chat_clarify_tickets" / f"{digest}.json"
+
+    @staticmethod
+    def new_token() -> str:
+        import uuid
+
+        return f"{CLARIFY_TOKEN_PREFIX}{uuid.uuid4().hex[:12]}"
+
+    def mint(
+        self,
+        *,
+        chat_session_id: str,
+        persona_instance_id: str | None = None,
+        persona_id: str | None = None,
+        asked_by_client_message_id: str | None = None,
+        asked_turn_id: str | None = None,
+        requested_by_session: str | None = None,
+    ) -> str | None:
+        """Record a clarify ticket for the question this turn is asking.
+
+        Returns the token to ship down inside ``clarify_request``, or ``None``
+        when there is no session to bind to or the write failed. Best-effort by
+        construction: a ticket that cannot be written must not fail the turn
+        that produced a real reply — the caller degrades to today's precedence,
+        which is exactly the pre-token behavior."""
+
+        root = safe_assignment_text(chat_session_id, limit=240)
+        if not root:
+            return None
+        token = self.new_token()
+        record = {
+            "schema_version": 1,
+            "clarify_token": token,
+            "chat_session_id": root,
+            "persona_instance_id": safe_assignment_token(persona_instance_id) or None,
+            "persona_id": safe_assignment_token(persona_id) or None,
+            "asked_by_client_message_id": safe_assignment_text(
+                asked_by_client_message_id, limit=240
+            )
+            or None,
+            "asked_turn_id": safe_assignment_text(asked_turn_id, limit=240) or None,
+            "requested_by_session": safe_assignment_text(requested_by_session, limit=240)
+            or None,
+            "state": CLARIFY_TICKET_OPEN,
+            "created_at": time.time(),
+            "answered_at": None,
+            "answered_by_client_message_id": None,
+            "bound_via": None,
+        }
+        path = self._path(token)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_json(path, record)
+        except OSError:
+            return None
+        return token
+
+    def resolve(self, token: str | None) -> dict[str, Any] | None:
+        """The stored ticket for *token*, or ``None`` for unknown/unreadable.
+
+        NEVER RAISES. An unknown or GC'd token must DEGRADE (the caller falls
+        through to normal precedence and reports ``unknown_token``), never
+        refuse: turning a pruned ticket into a hard failure would punish a
+        parent that did exactly the right thing."""
+
+        candidate = safe_assignment_text(token, limit=240)
+        if not candidate:
+            return None
+        try:
+            record = json.loads(self._path(candidate).read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(record, dict):
+            return None
+        # A record whose stored token does not match is not this token's ticket:
+        # a digest collision or a hand-edited file must never bind a turn onto
+        # somebody else's thread.
+        if str(record.get("clarify_token") or "") != candidate:
+            return None
+        return record
+
+    def settle(
+        self,
+        token: str | None,
+        *,
+        client_message_id: str | None = None,
+        bound_via: str = "clarify_token",
+    ) -> dict[str, Any] | None:
+        """Mark the ticket answered, idempotently, and report its new state.
+
+        Re-presentation with the SAME ``client_message_id`` (a lease re-entry, a
+        relay retry) settles identically — the same replay-signal discipline the
+        mint receipt uses. A settle from a DIFFERENT message is a genuine second
+        answer and is recorded as ``rebound``: visible, never an error, because
+        binding a token to its live thread is always the right outcome. The
+        returned dict is the record as it now stands (or ``None`` when the token
+        does not resolve)."""
+
+        record = self.resolve(token)
+        if record is None:
+            return None
+        message_id = safe_assignment_text(client_message_id, limit=240) or None
+        already = record.get("answered_by_client_message_id")
+        if record.get("state") == CLARIFY_TICKET_OPEN:
+            record["state"] = CLARIFY_TICKET_ANSWERED
+        elif already and message_id and already != message_id:
+            record["state"] = CLARIFY_TICKET_REBOUND
+        if not already or (message_id and already == message_id):
+            record["answered_by_client_message_id"] = message_id or already
+            record["answered_at"] = record.get("answered_at") or time.time()
+            record["bound_via"] = record.get("bound_via") or str(bound_via)
+        try:
+            _atomic_json(self._path(str(record.get("clarify_token"))), record)
+        except OSError:
+            pass
+        return record
+
+    def open_ticket_for_session(self, chat_session_id: str | None) -> dict[str, Any] | None:
+        """The newest OPEN ticket bound to *chat_session_id*, if any.
+
+        Settlement without a token: any turn landing in a session with an open
+        ticket settles it. Without this, every prompt-compliant-via-``session_id``
+        parent would leave a permanently-open ticket and the adoption metric
+        would lie in the pessimistic direction."""
+
+        root = safe_assignment_text(chat_session_id, limit=240)
+        if not root:
+            return None
+        newest: dict[str, Any] | None = None
+        for record in self._iter_records():
+            if record.get("state") != CLARIFY_TICKET_OPEN:
+                continue
+            if str(record.get("chat_session_id") or "") != root:
+                continue
+            if newest is None or float(record.get("created_at") or 0.0) > float(
+                newest.get("created_at") or 0.0
+            ):
+                newest = record
+        return newest
+
+    def sweep(self, *, ttl_seconds: float = CLARIFY_TICKET_TTL_SECONDS) -> int:
+        """Prune ticket files older than *ttl_seconds*. Returns the count.
+
+        TTL governs GC only — nothing consults it when deciding whether a token
+        binds, so a ticket that survives past its TTL keeps working right up
+        until a sweep removes the file. One rule, no cliff."""
+
+        cutoff = time.time() - max(float(ttl_seconds), 0.0)
+        pruned = 0
+        for record in self._iter_records():
+            if float(record.get("created_at") or 0.0) > cutoff:
+                continue
+            try:
+                self._path(str(record.get("clarify_token"))).unlink(missing_ok=True)
+            except OSError:
+                continue
+            pruned += 1
+        return pruned
+
+    def _iter_records(self) -> Iterator[dict[str, Any]]:
+        root = paths.store_root() / "persona_chat_clarify_tickets"
+        try:
+            entries = sorted(root.glob("*.json"))
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                record = json.loads(entry.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(record, dict) and record.get("clarify_token"):
+                yield record
+
+
 #: Keys accepted inside ``_dispatched_from``. An allow-list rather than a
 #: pass-through: session meta is read back by projections and shipped to the
 #: launcher, so an unbounded caller-supplied dict is a payload-growth and

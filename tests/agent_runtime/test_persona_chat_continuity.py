@@ -14,7 +14,9 @@ from agent_runtime.mission_chat_turns import (
 from agent_runtime.models import PersonaInstance
 from agent_runtime.persona_assignments import PersonaInstanceStore
 from agent_runtime.persona_chat_continuity import (
+    CLARIFY_TICKET_TTL_SECONDS,
     PersonaChatBusyError,
+    PersonaChatClarifyTicketStore,
     PersonaChatMintReceiptStore,
     PersonaChatRuntimeRegistry,
     current_tool_execution_scope,
@@ -393,6 +395,146 @@ def test_orphan_sweep_without_orphans_appends_no_event(isolate_agent_runtime_roo
 
     assert repair_orphaned_chat_turns() == []
     assert EventLog().tail(1) == []
+
+
+# ── clarify tickets: the answer's binding to its question's thread ──────────
+
+
+_CLARIFY_ROOT = "persona_chat_personainst_dev_abcdef123456"
+
+
+def _clarify_ticket(store: PersonaChatClarifyTicketStore, **overrides) -> str:
+    values = {
+        "chat_session_id": _CLARIFY_ROOT,
+        "persona_instance_id": "personainst_dev",
+        "persona_id": "dev",
+        "asked_by_client_message_id": "agent-relay-aaaaaaaaaaaa",
+    }
+    values.update(overrides)
+    token = store.mint(**values)
+    assert token
+    return token
+
+
+def test_clarify_ticket_round_trips_a_token_to_its_session(isolate_agent_runtime_root):
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    assert token.startswith("clarify-")
+    record = store.resolve(token)
+    assert record["chat_session_id"] == _CLARIFY_ROOT
+    assert record["persona_instance_id"] == "personainst_dev"
+    assert record["state"] == "open"
+
+
+def test_an_unknown_clarify_token_resolves_to_nothing_instead_of_raising(
+    isolate_agent_runtime_root,
+):
+    # The degrade path. A pruned or fabricated token must be an ordinary "no",
+    # because the caller turns it into a fallthrough, not a refusal.
+    store = PersonaChatClarifyTicketStore()
+    assert store.resolve("clarify-deadbeefdead") is None
+    assert store.resolve(None) is None
+    assert store.resolve("") is None
+    assert store.settle("clarify-deadbeefdead", client_message_id="cm-1") is None
+
+
+def test_the_clarify_token_never_appears_in_a_filename(isolate_agent_runtime_root):
+    """The token is a caller-supplied string from a model.
+
+    Interpolating one into a path is traversal, so the filename is the digest —
+    the same precedent the mint receipt store set."""
+
+    import hashlib
+
+    from agent_runtime import paths
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    files = list((paths.store_root() / "persona_chat_clarify_tickets").glob("*.json"))
+    assert len(files) == 1
+    assert files[0].stem == hashlib.sha256(token.encode("utf-8")).hexdigest()
+    assert token not in files[0].name
+
+
+def test_settling_the_same_message_twice_is_idempotent(isolate_agent_runtime_root):
+    # A lease re-entry or a relay retry re-presents the SAME client_message_id.
+    # It is one answer, presented twice — never a second one.
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    first = store.settle(token, client_message_id="cm-answer")
+    second = store.settle(token, client_message_id="cm-answer")
+
+    assert first["state"] == "answered"
+    assert second["state"] == "answered"
+    assert second["answered_by_client_message_id"] == "cm-answer"
+    assert second["answered_at"] == first["answered_at"]
+
+
+def test_a_second_distinct_answer_is_reported_as_a_rebind(isolate_agent_runtime_root):
+    # A spent token still BINDS — a follow-up after the answer belongs in the
+    # same conversation — so single-use governs accounting, not permission.
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    store.settle(token, client_message_id="cm-answer")
+    again = store.settle(token, client_message_id="cm-follow-up")
+
+    assert again["state"] == "rebound"
+    assert store.resolve(token)["chat_session_id"] == _CLARIFY_ROOT
+
+
+def test_an_expired_ticket_still_binds_until_it_is_swept(isolate_agent_runtime_root):
+    # TTL governs GC only. One rule, no cliff: a ticket that outlived its TTL
+    # keeps working until a sweep actually removes the file.
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    path = store._path(token)
+    stale = json.loads(path.read_text(encoding="utf-8"))
+    stale["created_at"] = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
+    path.write_text(json.dumps(stale), encoding="utf-8")
+
+    assert store.resolve(token)["chat_session_id"] == _CLARIFY_ROOT
+    assert store.sweep() == 1
+    assert store.resolve(token) is None
+
+
+def test_the_sweep_keeps_tickets_inside_their_ttl(isolate_agent_runtime_root):
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    assert store.sweep() == 0
+    assert store.resolve(token) is not None
+
+
+def test_the_open_ticket_for_a_session_is_the_newest_unanswered_one(
+    isolate_agent_runtime_root,
+):
+    # Settlement without a token rides this lookup: any turn landing in a
+    # session with an open question answers it. Without it, every parent that
+    # complied via session_id would leave a permanently-open ticket and the
+    # adoption metric would read pessimistically forever.
+    store = PersonaChatClarifyTicketStore()
+    other = _clarify_ticket(store, chat_session_id="persona_chat_personainst_qa_bbbbbbbbbbbb")
+    older = _clarify_ticket(store)
+    newer = _clarify_ticket(store)
+
+    found = store.open_ticket_for_session(_CLARIFY_ROOT)
+    assert found["clarify_token"] == newer
+
+    store.settle(newer, client_message_id="cm-answer", bound_via="session_id")
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == older
+    # …and a different session's question was never touched.
+    assert store.resolve(other)["state"] == "open"
+    assert store.open_ticket_for_session(None) is None
+
+
+def test_a_ticket_with_no_session_is_never_minted(isolate_agent_runtime_root):
+    # Nothing to bind to is not an error, it is an absence: the question still
+    # ships, the answer just falls through to today's precedence.
+    assert PersonaChatClarifyTicketStore().mint(chat_session_id="") is None
 
 
 # ── a mint for a target that can never be served writes nothing ─────────────

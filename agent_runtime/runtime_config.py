@@ -217,10 +217,26 @@ class MissionChatConfig:
             # (default — one thread per task) or sticky (one durable thread
             # per pair). An explicit session_id / new_session always wins.
             dispatch_session_policy: new_per_dispatch
+            # Bind a clarify ANSWER to the thread its QUESTION was asked in,
+            # via an echoed clarify_token, instead of trusting the replier to
+            # reproduce the session_id. Default true.
+            clarify_token_binding: true
     """
 
     default_max_seconds: float = 240.0
     dispatch_session_policy: str = DEFAULT_DISPATCH_SESSION_POLICY
+    #: Whether the mission-chat lane mints a ``clarify_token`` alongside a
+    #: ``clarify_request`` and binds a reply that echoes one back to the thread
+    #: the question was asked in. Defaults to **True**: the failure it retires
+    #: (a clarify answer opening a THIRD thread, leaving the child reading a
+    #: bare choice with no question attached) is silent and lossy, and both
+    #: directions are additive — a caller that never echoes hits exactly
+    #: today's precedence. Flipping it to ``false`` IS the rollback: no token is
+    #: minted, none is resolved, ticket files go inert and the TTL sweep
+    #: reclaims them. Loaded through ``load_root_runtime_config`` for the same
+    #: reason ``dispatch_session_policy`` is — one profile's own config must not
+    #: change how every other profile threads.
+    clarify_token_binding: bool = True
 
 
 @dataclass(slots=True)

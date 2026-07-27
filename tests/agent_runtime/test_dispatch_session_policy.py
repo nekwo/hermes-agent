@@ -18,7 +18,9 @@ import pytest
 from agent_runtime.dispatch_session_policy import (
     DEFAULT_DISPATCH_SESSION_POLICY,
     DISPATCH_SESSION_POLICIES,
+    DISPATCH_SESSION_REASONS,
     NEW_PER_DISPATCH,
+    REASON_CLARIFY_TOKEN,
     REASON_EXPLICIT_NEW_SESSION,
     REASON_EXPLICIT_SESSION_ID,
     REASON_POLICY_NEW_PER_DISPATCH,
@@ -124,6 +126,85 @@ def test_session_id_beats_a_contradictory_new_session_flag():
     )
     assert decision.reason == REASON_EXPLICIT_SESSION_ID
     assert decision.mint is False
+
+
+# ── rung 0: a resolved clarify ticket outranks everything ───────────────────
+
+
+_CLARIFY_SESSION = "persona_chat_personainst_dev_cccccccccccc"
+
+
+@pytest.mark.parametrize("policy", DISPATCH_SESSION_POLICIES)
+@pytest.mark.parametrize(
+    "stated",
+    [
+        {},
+        {"session_id": "persona_chat_personainst_dev_aaaaaaaaaaaa"},
+        {"new_session": True},
+        {"new_session": False},
+        {
+            "session_id": "persona_chat_personainst_dev_aaaaaaaaaaaa",
+            "new_session": False,
+        },
+    ],
+)
+def test_clarify_token_session_beats_every_other_input(policy, stated):
+    # The whole point: an agent answering a clarifying question is the caller
+    # LEAST likely to get its thread arguments right, so the resolved ticket
+    # outranks all of them — including a session_id naming a different thread.
+    # Refusing that conflict would defeat the design; the handler reports the
+    # override instead (clarify_binding.overrode_session_id).
+    decision = resolve_dispatch_session_decision(
+        clarify_session_id=_CLARIFY_SESSION, policy=policy, **stated
+    )
+    assert decision.mint is False
+    assert decision.reason == REASON_CLARIFY_TOKEN
+    assert decision.explicit is True
+
+
+def test_clarify_reason_is_in_the_vocabulary():
+    # The envelope's `reason` is a closed vocabulary a reader switches on; a
+    # value that never joined it is a value nothing downstream can name.
+    assert REASON_CLARIFY_TOKEN in DISPATCH_SESSION_REASONS
+
+
+def test_an_unresolved_clarify_token_leaves_precedence_untouched():
+    # The handler hands in None when a token was pruned or never presented.
+    # Degrade, do not refuse: normal precedence answers exactly as before.
+    assert (
+        resolve_dispatch_session_decision(
+            clarify_session_id=None, policy=NEW_PER_DISPATCH
+        ).reason
+        == REASON_POLICY_NEW_PER_DISPATCH
+    )
+    assert (
+        resolve_dispatch_session_decision(
+            clarify_session_id="   ",
+            session_id="persona_chat_personainst_dev_aaaaaaaaaaaa",
+        ).reason
+        == REASON_EXPLICIT_SESSION_ID
+    )
+
+
+def test_clarify_binding_never_loads_the_configured_policy(monkeypatch):
+    # Same hot-path rule as every other explicit lane: `clarify_session_id` is
+    # stated intent, and `mission_chat_dispatch_session_policy()` parses the root
+    # config.yaml UNCACHED.
+    import agent_runtime.config as runtime_config_module
+
+    loads: list[int] = []
+
+    def _counted(cfg=None):
+        loads.append(1)
+        return STICKY
+
+    monkeypatch.setattr(
+        runtime_config_module, "mission_chat_dispatch_session_policy", _counted
+    )
+
+    decision = resolve_dispatch_session_decision(clarify_session_id=_CLARIFY_SESSION)
+    assert loads == []
+    assert decision.policy is None
 
 
 # ── tri-state coercion ──────────────────────────────────────────────────────

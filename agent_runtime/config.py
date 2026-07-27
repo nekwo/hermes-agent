@@ -774,7 +774,33 @@ def _mission_chat_config(raw: dict[str, Any]) -> MissionChatConfig:
             raw.get("dispatch_session_policy"),
             defaults.dispatch_session_policy,
         ),
+        clarify_token_binding=bool(
+            raw.get("clarify_token_binding", defaults.clarify_token_binding)
+        ),
     )
+
+
+def mission_chat_clarify_token_binding(cfg: AgentRuntimeConfig | None = None) -> bool:
+    """Whether a clarify answer is bound to its question's thread by token.
+
+    Mirrors :func:`mission_chat_dispatch_session_policy` exactly, and for the
+    same reason: this decides how EVERY profile's clarify round-trips thread, so
+    it is harness-wide operator policy read from the ROOT config, and a config
+    fault degrades to the built-in default (``True``) rather than failing the
+    turn. The gate is checked at the two seams that matter — minting a ticket
+    when a turn asks a question, and resolving an echoed token when a turn
+    answers one — so flipping it off returns the lane to today's precedence with
+    no migration and nothing to unwind."""
+
+    if cfg is not None:
+        return bool(
+            getattr(cfg.mission_chat, "clarify_token_binding", MissionChatConfig().clarify_token_binding)
+        )
+    try:
+        return bool(load_root_runtime_config().mission_chat.clarify_token_binding)
+    except Exception:  # pragma: no cover - defensive; a config fault must not kill a turn
+        logger.debug("mission_chat clarify-token gate load failed; using the built-in default", exc_info=True)
+        return MissionChatConfig().clarify_token_binding
 
 
 def mission_chat_dispatch_session_policy(cfg: AgentRuntimeConfig | None = None) -> str:

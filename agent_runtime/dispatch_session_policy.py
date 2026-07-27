@@ -37,12 +37,22 @@ is pure: no config read at import, no store access, no I/O.
 Precedence (highest first) — mirrors ``resolve_mission_chat_max_seconds``:
 explicit caller intent always beats the configured default.
 
+0. ``clarify_session_id``    → continue the thread a clarify ticket named
+                               (``clarify_token``)
 1. ``session_id``            → continue THAT thread (``explicit_session_id``)
 2. ``new_session=True``      → fresh thread (``explicit_new_session``)
 3. ``new_session=False``     → the target's CURRENT default thread
                                (``sticky_default``)
 4. unset (``None``)          → the configured policy decides
    (``policy_new_per_dispatch`` / ``policy_sticky``)
+
+Rung 0 outranks a *conflicting* ``session_id`` on purpose. The clarify token
+exists because agents are unreliable about session arguments — refusing a reply
+that echoed the token AND attached a stale session id would defeat the point of
+minting the token at all. The override is never silent: the handler reports it
+in the turn's ``clarify_binding.overrode_session_id``. Resolving the token to a
+session id is the HANDLER's job (it owns the ticket store); this module stays
+pure and only ranks the plain string it is handed.
 
 Note the tri-state: ``False`` and "unset" are DIFFERENT answers now, so the
 CLI's ``--new-session`` (argparse ``store_true`` → ``False`` when absent) keeps
@@ -65,6 +75,7 @@ DEFAULT_DISPATCH_SESSION_POLICY = NEW_PER_DISPATCH
 #: Typed reasons carried in the ``session_established`` envelope block. A caller
 #: (human reading Mission Control, or an agent reading its own tool result) can
 #: always tell WHY it landed in the session it landed in.
+REASON_CLARIFY_TOKEN = "clarify_token"
 REASON_EXPLICIT_SESSION_ID = "explicit_session_id"
 REASON_EXPLICIT_NEW_SESSION = "explicit_new_session"
 REASON_STICKY_DEFAULT = "sticky_default"
@@ -72,6 +83,7 @@ REASON_POLICY_NEW_PER_DISPATCH = "policy_new_per_dispatch"
 REASON_POLICY_STICKY = "policy_sticky"
 
 DISPATCH_SESSION_REASONS = (
+    REASON_CLARIFY_TOKEN,
     REASON_EXPLICIT_SESSION_ID,
     REASON_EXPLICIT_NEW_SESSION,
     REASON_STICKY_DEFAULT,
@@ -149,6 +161,7 @@ class DispatchSessionDecision:
         """True when the caller stated the thread target rather than inheriting it."""
 
         return self.reason in (
+            REASON_CLARIFY_TOKEN,
             REASON_EXPLICIT_SESSION_ID,
             REASON_EXPLICIT_NEW_SESSION,
             REASON_STICKY_DEFAULT,
@@ -157,6 +170,7 @@ class DispatchSessionDecision:
 
 def resolve_dispatch_session_decision(
     *,
+    clarify_session_id: str | None = None,
     session_id: str | None = None,
     new_session=None,
     policy: str | None = None,
@@ -170,8 +184,9 @@ def resolve_dispatch_session_decision(
     * lazy import — this module stays pure/importable without touching config,
       and a config fault degrades to the built-in default instead of failing a
       turn;
-    * lazy call — a caller who stated their own intent (``session_id``, or
-      ``new_session`` either way) outranks the policy, so it is never loaded.
+    * lazy call — a caller who stated their own intent (a resolved
+      ``clarify_session_id``, a ``session_id``, or ``new_session`` either way)
+      outranks the policy, so it is never loaded.
       That matters on the hot path: ``mission_chat_dispatch_session_policy()``
       parses the root ``config.yaml`` UNCACHED, and the explicit-session lane
       runs this resolver on EVERY mission-chat turn purely to name the reason.
@@ -191,6 +206,13 @@ def resolve_dispatch_session_decision(
     # Explicit caller intent: decided without consulting (or loading) config.
     # ``policy`` is echoed only when the caller handed one in.
     stated_policy = normalize_dispatch_session_policy(policy) if policy is not None else None
+    # RUNG 0. A resolved clarify ticket names a CONCRETE session (not a pointer),
+    # so the answer to a question lands in the thread the question was asked in
+    # even when the replying agent named no session — or named the wrong one.
+    if str(clarify_session_id or "").strip():
+        return DispatchSessionDecision(
+            mint=False, reason=REASON_CLARIFY_TOKEN, policy=stated_policy
+        )
     if str(session_id or "").strip():
         return DispatchSessionDecision(
             mint=False, reason=REASON_EXPLICIT_SESSION_ID, policy=stated_policy

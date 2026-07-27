@@ -1414,6 +1414,47 @@ def _cmd_mission_chat_message(args) -> int:
         requested_instance_id, persona_id=normalized_persona
     )
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
+    # What the CALLER named, before anything on this turn overwrites it. Kept so
+    # the settlement can tell "they answered in the right thread because they
+    # named it" from "they inherited it" — the adoption signal this whole
+    # binding is measured by. Carried on `args` for the same reason
+    # `_dispatch_session_established` is: by the lease re-entry BOTH the clarify
+    # bind and the omitted-session mint have written a session back onto
+    # `args.session_id`, so a second pass would read every sticky continuation
+    # as a thread the caller had named.
+    stated_session_id = getattr(args, "_stated_session_id", None)
+    if stated_session_id is None:
+        stated_session_id = session_id
+        args._stated_session_id = stated_session_id
+    # CLARIFY CONTINUITY. Resolved HERE — after the caller's session id is read,
+    # BEFORE the target decision below — and both consequences are free:
+    #
+    #   1. a ticket-supplied session flows through the EXISTING
+    #      `unknown_chat_session` / `foreign_chat_session` guards below, so a
+    #      token can never smuggle in a session the caller could not have named
+    #      legitimately (a token for another instance's thread is refused as
+    #      `foreign_chat_session`, reached without a line of new guard code);
+    #   2. a bound turn never reaches the omitted-session branch, so it never
+    #      mints, never repoints the instance's default-thread pointer, and
+    #      never runs the pre-mint gate.
+    #
+    # Stashed on `args` for exactly the reason `_dispatch_session_established`
+    # is: this handler RE-ENTERS itself once to take the chat-root lease, and by
+    # then `args.session_id` has been rewritten — a second pass would rediscover
+    # "the caller named a session", report the turn as a plain
+    # `explicit_session_id` continuation, and settle the ticket twice.
+    clarify_binding = getattr(args, "_clarify_binding", None)
+    if clarify_binding is None:
+        clarify_binding = _resolve_mission_chat_clarify_binding(args, session_id=session_id)
+        args._clarify_binding = clarify_binding
+    clarify_session_id = (
+        safe_assignment_text((clarify_binding or {}).get("bound_session_id"), limit=240)
+        if (clarify_binding or {}).get("bound_via") == "clarify_token"
+        else ""
+    )
+    if clarify_session_id:
+        session_id = clarify_session_id
+        args.session_id = clarify_session_id
     # How this turn's thread was established — typed, and carried in the reply
     # envelope so a dispatching agent can tell "this is a fresh task thread,
     # here is the one it superseded" from "this continued what we had". Decided
@@ -1433,7 +1474,9 @@ def _cmd_mission_chat_message(args) -> int:
         # parses the root config.yaml UNCACHED, to fill a field the
         # `explicit_session_id` reason never reads.
         session_established = session_established_payload(
-            resolve_dispatch_session_decision(session_id=session_id),
+            resolve_dispatch_session_decision(
+                clarify_session_id=clarify_session_id or None, session_id=session_id
+            ),
             fresh=False,
             predecessor_session_id=None,
         )
@@ -2654,6 +2697,27 @@ def _cmd_mission_chat_message(args) -> int:
         except Exception:
             pass
 
+        # Clarify accounting, in this order and only now that the reply is
+        # durable: SETTLE the question this turn answered before MINTING a
+        # ticket for any question it asks. Reversed, the tokenless settlement
+        # would find the ticket this very turn just created and mark a brand-new
+        # question answered by the turn that asked it.
+        clarify_binding = _settle_mission_chat_clarify_binding(
+            clarify_binding,
+            session_id=session_id,
+            client_message_id=client_message_id,
+            explicit_session_id=stated_session_id,
+        )
+        clarify_request = _mission_chat_clarify_request_payload(
+            chat_result,
+            session_id=session_id,
+            persona_id=normalized_persona,
+            persona_instance_id=instance.id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            requested_by_session=requested_by_session,
+        )
+
         data = {
             "ok": True,
             "protocol_version": 2 if stream else None,
@@ -2670,6 +2734,15 @@ def _cmd_mission_chat_message(args) -> int:
             # supersedes) or continued an existing one — the same lineage the
             # session meta records as `_dispatched_from`.
             "session_established": session_established,
+            # Clarify binding — a TOP-LEVEL SIBLING of session_established, not a
+            # field inside it: that block's shape is pinned by contract, and
+            # nesting here would break it. Present only when this turn presented
+            # a clarify token or settled an open ticket; absent means neither
+            # happened, which is the whole normal path. `bound_via` is the
+            # adoption signal (`clarify_token` = the runtime bound it,
+            # `session_id` = the caller named the right thread themselves,
+            # `none` = they landed there by inheritance).
+            **({"clarify_binding": clarify_binding} if clarify_binding else {}),
             "active_session_id": active_session_id,
             "task_id": task_id,
             "goal_id": goal_id,
@@ -2700,7 +2773,10 @@ def _cmd_mission_chat_message(args) -> int:
             # operator's / caller's next message in this same session. The HUD
             # renders `choices` as pickable rows; agent_chat_send forwards it up
             # the relay so a briefed child can surface context only it has.
-            "clarify_request": (getattr(chat_result, "raw", {}) or {}).get("clarify_request"),
+            # `clarify_token` rides inside it: echo that token back on the reply
+            # and the runtime — not the model's memory for opaque ids — puts the
+            # answer in this thread.
+            "clarify_request": clarify_request,
             "turn_id": safe_assignment_token(client_message_id),
             "run_ids": [],
             "input_tokens": getattr(chat_result, "input_tokens", None),
@@ -4507,6 +4583,170 @@ def _mission_chat_caller_refusal(
             session_id=None,
         )
     return None
+
+
+def _clarify_ticket_store_populated() -> bool:
+    """Cheap probe: has this runtime ever minted a clarify ticket?
+
+    The tokenless settlement below (a turn landing in a session that has an open
+    ticket) has to run on turns that present NO token, which is nearly all of
+    them. Gating it on ``mission_chat_clarify_token_binding()`` would put an
+    UNCACHED root-``config.yaml`` parse on every mission-chat turn — the exact
+    cost ``resolve_dispatch_session_decision``'s lazy-config note exists to
+    avoid. One ``exists()`` answers it instead: with the gate off nothing ever
+    mints, so the directory never appears and no ticket work (and no config
+    read) happens at all."""
+
+    try:
+        return (paths.store_root() / "persona_chat_clarify_tickets").exists()
+    except OSError:  # pragma: no cover - defensive; a store probe must not fail a turn
+        return False
+
+
+def _resolve_mission_chat_clarify_binding(
+    args, *, session_id: str | None
+) -> dict[str, object] | None:
+    """Resolve an echoed ``clarify_token`` into the thread it was asked in.
+
+    Returns the turn's ``clarify_binding`` report block, or ``None`` when the
+    caller presented no token (the overwhelmingly common case, and the one that
+    must cost nothing — no store read, no config parse).
+
+    **The token beats a conflicting ``session_id``, loudly.** Refusing would
+    defeat the purpose: this binding exists precisely because agents are
+    unreliable about session arguments, so a reply that echoes the token AND
+    attaches a stale session id must still land correctly. Silence would be the
+    other half of the same failure, so the override is reported in
+    ``overrode_session_id``.
+
+    **An unknown or pruned token degrades, it does not refuse.** Tickets are
+    swept on a TTL; turning a GC'd ticket into a hard failure would punish a
+    parent that did exactly the right thing. The turn falls through to normal
+    precedence and says so (``state: "unknown_token"``)."""
+
+    token = safe_assignment_text(getattr(args, "clarify_token", None), limit=240)
+    if not token:
+        return None
+    if not mission_chat_clarify_token_binding():
+        return None
+    ticket = PersonaChatClarifyTicketStore().resolve(token)
+    bound_session_id = safe_assignment_text(
+        (ticket or {}).get("chat_session_id"), limit=240
+    )
+    if not bound_session_id:
+        return {
+            "token": token,
+            "state": "unknown_token",
+            "bound_via": "none",
+            "bound_session_id": None,
+            "overrode_session_id": None,
+        }
+    stated = safe_assignment_text(session_id, limit=200)
+    return {
+        "token": token,
+        "state": "bound",
+        "bound_via": "clarify_token",
+        "bound_session_id": bound_session_id,
+        "overrode_session_id": stated if stated and stated != bound_session_id else None,
+    }
+
+
+def _settle_mission_chat_clarify_binding(
+    binding: dict[str, object] | None,
+    *,
+    session_id: str | None,
+    client_message_id: str | None,
+    explicit_session_id: str | None,
+) -> dict[str, object] | None:
+    """Close out this turn's clarify accounting and return the report block.
+
+    Two settlements, one chokepoint. A turn that BOUND through a token settles
+    that ticket (``bound``, or ``rebound`` when a different message answers the
+    same question again). A turn that presented NO token but landed in a session
+    that HAS an open ticket settles it anyway — ``bound_via: "session_id"`` when
+    the caller named the thread, ``"none"`` when they merely inherited it. That
+    tokenless half is not bookkeeping pedantry: without it every
+    prompt-compliant parent leaves a permanently-open ticket and the adoption
+    metric lies in the pessimistic direction, which is the direction that would
+    argue for building more machinery than this needs.
+
+    Called only after the turn's reply is durable — a refused turn answered
+    nothing and must not mark a question answered."""
+
+    store = PersonaChatClarifyTicketStore()
+    if binding is not None:
+        if binding.get("bound_via") != "clarify_token":
+            return binding
+        record = store.settle(
+            binding.get("token"),
+            client_message_id=client_message_id,
+            bound_via="clarify_token",
+        )
+        if record is not None and record.get("state") == "rebound":
+            binding = {**binding, "state": "rebound"}
+        return binding
+    if not _clarify_ticket_store_populated():
+        return None
+    ticket = store.open_ticket_for_session(session_id)
+    if ticket is None:
+        return None
+    bound_via = "session_id" if safe_assignment_text(explicit_session_id, limit=200) else "none"
+    store.settle(
+        ticket.get("clarify_token"),
+        client_message_id=client_message_id,
+        bound_via=bound_via,
+    )
+    return {
+        "token": safe_assignment_text(ticket.get("clarify_token"), limit=240) or None,
+        "state": "answered",
+        "bound_via": bound_via,
+        "bound_session_id": safe_assignment_text(ticket.get("chat_session_id"), limit=240)
+        or None,
+        "overrode_session_id": None,
+    }
+
+
+def _mission_chat_clarify_request_payload(
+    chat_result,
+    *,
+    session_id: str | None,
+    persona_id: str,
+    persona_instance_id: str | None,
+    client_message_id: str | None,
+    turn_id: str | None,
+    requested_by_session: str | None,
+) -> dict[str, object] | None:
+    """The turn's ``clarify_request``, with a freshly minted binding token.
+
+    The token is minted HERE — where the question is materialized into the turn
+    payload — and never inside :class:`MissionChatClarifyCapture`, which is
+    deliberately a pure dataclass with no store and no session id. No clarify,
+    no ticket: the normal path pays nothing.
+
+    A mint failure is not a turn failure. The question still ships (without a
+    token), the answering parent falls through to today's precedence, and the
+    only thing lost is the structural binding — which is exactly the state the
+    lane was in before this existed."""
+
+    raw = (getattr(chat_result, "raw", None) or {}).get("clarify_request")
+    if not isinstance(raw, dict) or not raw:
+        # Passed through verbatim, exactly as before this seam existed: no
+        # question asked, nothing to bind.
+        return raw
+    if not mission_chat_clarify_token_binding():
+        return dict(raw)
+    token = PersonaChatClarifyTicketStore().mint(
+        chat_session_id=session_id,
+        persona_instance_id=persona_instance_id,
+        persona_id=persona_id,
+        asked_by_client_message_id=client_message_id,
+        asked_turn_id=turn_id,
+        requested_by_session=requested_by_session,
+    )
+    payload = dict(raw)
+    if token:
+        payload["clarify_token"] = token
+    return payload
 
 
 def _mission_chat_retired_target_refusal(

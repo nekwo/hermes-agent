@@ -28,6 +28,13 @@ thread records its predecessor in the session meta (``_dispatched_from``). The
 decision itself belongs to ``agent_runtime.dispatch_session_policy``; this tool
 only forwards the caller's tri-state intent uncoerced.
 
+Clarify continuity (2026-07-27): a ``clarify_request`` carries a
+``clarify_token``. Echoing it on the reply binds the answer to the thread the
+question was asked in — outranking policy AND a stale ``session_id`` — so the
+one exchange that MUST stay threaded no longer depends on a model reproducing an
+opaque session id. The token resolves in the handler (one ticket-store
+authority); this tool forwards it and reports the resulting ``clarify_binding``.
+
 Scope contract (V2 — chained relays enabled 2026-07-08):
 - relays may chain (operator -> Alice -> Neko -> Dev). Depth, cycle, and
   budget decisions are owned by ONE authority — ``agent_runtime.relay_policy``
@@ -69,7 +76,7 @@ _MESSAGE_LIMIT = 12000
 AGENT_CHAT_SEND_SCHEMA = {
     "name": "agent_chat_send",
     "description": (
-        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Each new task you dispatch starts a FRESH thread by default; to continue an exchange (their clarifying question, an in-task follow-up) pass back the session_id their reply returned. new_session=false continues the target's CURRENT default thread (the most recent one) instead. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
+        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Each new task you dispatch starts a FRESH thread by default; to continue an exchange (an in-task follow-up) pass back the session_id their reply returned. Answering their clarifying question: pass back the clarify_token from their clarify_request and your answer lands in that question's thread. new_session=false continues the target's CURRENT default thread (the most recent one) instead. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
     ),
     "parameters": {
         "type": "object",
@@ -95,6 +102,15 @@ AGENT_CHAT_SEND_SCHEMA = {
                     "Continue THIS exact thread — pass back the session_id a previous reply "
                     "returned to answer their clarifying question or send an in-task follow-up. "
                     "Omit when dispatching a new task. Cannot be combined with new_session=true."
+                ),
+            },
+            "clarify_token": {
+                "type": "string",
+                "description": (
+                    "Answering a teammate's clarifying question: pass back the clarify_token that "
+                    "came inside their clarify_request. It puts your answer in the thread the "
+                    "question was asked in, so you do not have to get session_id right. Omit for "
+                    "anything else. Cannot be combined with new_session=true."
                 ),
             },
             "new_session": {
@@ -145,6 +161,7 @@ def agent_chat_send(
     persona_id,
     message,
     session_id=None,
+    clarify_token=None,
     new_session=None,
     title=None,
     max_seconds=240,
@@ -159,6 +176,7 @@ def agent_chat_send(
     persona_id = (persona_id or "").strip()
     message = (message or "").strip()
     resolved_session_id = (str(session_id).strip() or None) if session_id else None
+    resolved_clarify_token = (str(clarify_token).strip() or None) if clarify_token else None
     # TRI-STATE, not a bool: True = fresh thread, False = continue the target's
     # current default thread, UNSET = let agent_runtime.mission_chat.dispatch_session_policy
     # decide (default: one fresh thread per dispatched task). `bool()` here would
@@ -179,6 +197,19 @@ def agent_chat_send(
         return _refusal(
             "agent_chat_send: new_session=true and session_id are contradictory — omit session_id "
             "to start a fresh thread, or drop new_session to continue that specific thread.",
+            error_kind="contradictory_thread_target",
+        )
+    if new_session is True and resolved_clarify_token:
+        # The symmetric contradiction, and the ONE clarify case with no correct
+        # reading: a clarify token means "put this answer where the question
+        # was", new_session=true means "put it somewhere new". A stale
+        # session_id alongside a token is NOT this — the token deliberately wins
+        # that one downstream, because getting session_id wrong is exactly the
+        # failure the token exists to absorb.
+        return _refusal(
+            "agent_chat_send: new_session=true and clarify_token are contradictory — a clarify "
+            "answer belongs in the thread its question was asked in. Drop new_session to answer "
+            "them, or drop clarify_token to dispatch something new.",
             error_kind="contradictory_thread_target",
         )
 
@@ -223,6 +254,11 @@ def agent_chat_send(
         persona_id=persona_id,
         persona_instance_id=target_instance_id,
         session_id=resolved_session_id,
+        # Clarify continuity: the handler resolves this token to the thread the
+        # question was asked in and outranks everything else with it. Forwarded
+        # verbatim — the tool never resolves it (one ticket-store authority, and
+        # it lives with the handler that owns the session lane).
+        clarify_token=resolved_clarify_token,
         # Fresh-thread lane: the handler mints a new canonical session through the
         # SAME default-session chokepoint (mint= mode), never a tool-side mint —
         # keeping ONE minting authority (the orphaned-relay fix's whole point).
@@ -299,10 +335,16 @@ def agent_chat_send(
     # new_per_dispatch default, omitting it opens another fresh thread.
     if payload.get("session_established") is not None:
         result["session_established"] = payload.get("session_established")
+    # Where a clarify answer actually landed, and why. Present only when this
+    # send carried a token or settled an open question; `overrode_session_id`
+    # names a session_id the token outranked, so the override is never silent.
+    if payload.get("clarify_binding") is not None:
+        result["clarify_binding"] = payload.get("clarify_binding")
     # Clarify-back: the briefed agent asked a question instead of answering
     # (it holds context you don't — e.g. "which dev, launcher or backend?").
-    # Forward the structured question so you can answer it by sending the choice
-    # back into this same session_id; that continues the exchange as chat.
+    # Forwarded WHOLESALE, which is why the `clarify_token` inside it needs no
+    # code here: answer by sending the choice back with that token (or this
+    # session_id) and the exchange continues as one conversation.
     if payload.get("clarify_request") is not None:
         result["clarify_request"] = payload.get("clarify_request")
     if payload.get("relay_chain") is not None:
@@ -695,6 +737,7 @@ registry.register(
         persona_id=args.get("persona_id"),
         message=args.get("message"),
         session_id=args.get("session_id"),
+        clarify_token=args.get("clarify_token"),
         # No `False` default: an omitted new_session must reach the policy
         # resolver as "unset", not as an explicit request to continue.
         new_session=args.get("new_session"),
