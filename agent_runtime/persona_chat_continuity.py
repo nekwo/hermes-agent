@@ -669,6 +669,25 @@ class PersonaChatClarifyTicketStore:
             _atomic_json(path, record)
         except OSError:
             return None
+        # GC RUNS HERE, on the mint, because this is the only cold seam in the
+        # lane. The TTL was defined with no caller, so nothing ever pruned: the
+        # directory grew for the life of the runtime, and since
+        # ``open_ticket_for_session`` reads EVERY file in it, the tokenless
+        # settlement on every mission-chat turn paid for every ticket ever
+        # minted (measured: ~4s per turn at 400 tickets). A question is asked
+        # far more rarely than a turn is taken, and this one already writes, so
+        # it is the seam that can afford the scan the hot path cannot.
+        #
+        # After the write, never before: a sweep that ran first would still
+        # leave this ticket unpruned, and one that ran on the read path would
+        # put the cost back where it must not be. The just-written ticket is
+        # never its own victim — ``created_at`` is now, and the cutoff is a full
+        # TTL behind it. Best-effort: reclaiming disk must not fail the question
+        # that was actually asked.
+        try:
+            self.sweep()
+        except OSError:  # pragma: no cover - defensive; GC must never fail a turn
+            pass
         return token
 
     def resolve(self, token: str | None) -> dict[str, Any] | None:

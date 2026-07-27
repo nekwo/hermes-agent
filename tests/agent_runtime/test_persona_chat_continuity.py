@@ -509,6 +509,32 @@ def test_the_sweep_keeps_tickets_inside_their_ttl(isolate_agent_runtime_root):
     assert store.resolve(token) is not None
 
 
+def test_minting_a_ticket_reclaims_the_expired_ones(isolate_agent_runtime_root):
+    """The GC has a CALLER — the defect a defined-but-uncalled TTL hides.
+
+    ``sweep`` existed with no call site, so nothing ever pruned: the directory
+    grew for the life of the runtime. That is not merely disk, because
+    ``open_ticket_for_session`` reads EVERY file in it and the tokenless
+    settlement runs that on every mission-chat turn — so an unpruned store makes
+    each turn pay for every question ever asked. Pinned on the mint, the lane's
+    only cold seam: asking a question is rare, taking a turn is not."""
+
+    store = PersonaChatClarifyTicketStore()
+    expired = [_clarify_ticket(store) for _ in range(3)]
+    for token in expired:
+        path = store._path(token)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["created_at"] = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
+        path.write_text(json.dumps(record), encoding="utf-8")
+    fresh = _clarify_ticket(store)
+
+    # Minting the NEXT question reclaimed all three, and never itself.
+    assert [store.resolve(token) for token in expired] == [None, None, None]
+    assert store.resolve(fresh)["chat_session_id"] == _CLARIFY_ROOT
+    # …so the per-turn lookup only ever walks the live window.
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == fresh
+
+
 def test_the_open_ticket_for_a_session_is_the_newest_unanswered_one(
     isolate_agent_runtime_root,
 ):
