@@ -667,6 +667,93 @@ def test_a_flaky_tombstone_probe_cannot_escape_the_mint_lane_untyped(
     assert db.get_session(receipt["root_chat_session_id"]) is not None
 
 
+def test_a_retire_that_lands_mid_mint_still_leaves_no_titled_thread(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The race the entry precondition could not close, forced open.
+
+    ``retire`` refuses only on a live run/worker binding or an active
+    assignment, and a chat mint holds neither until it binds — so a retirement
+    landing AFTER the precondition passed used to let the lane reserve, create,
+    write meta and TITLE the session before the bind refused, leaving a titled
+    thread in Mission Control for a placement that no longer existed. Binding
+    before the first session-visible write is what closes it, and this pins the
+    ordering rather than the symptom: a bind moved back to the end of the lane
+    fails here."""
+
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+    from agent_runtime.persona_chat_history import PERSONA_CHAT_SESSION_SOURCE
+
+    class _RetiringMidLaneStore(PersonaInstanceStore):
+        """Retires the target the instant the mint's precondition passes.
+
+        Armed only after setup: ``add_instance`` binds through ``open_chat``,
+        which asks this same seam."""
+
+        armed = False
+
+        def assert_bindable(self, **kwargs):
+            resolved = super().assert_bindable(**kwargs)
+            if self.armed:
+                self.armed = False
+                super().retire(resolved, reason="placement deleted mid-dispatch")
+            return resolved
+
+    db = SessionDB(tmp_path / "state.db")
+    store = _RetiringMidLaneStore()
+    placement = store.add_instance(
+        persona_id="dev", placement_id="dev_agent_2", display_name="Dev (2)"
+    )
+    store.armed = True
+
+    with pytest.raises(RetiredPersonaInstanceError):
+        PersonaChatMintReceiptStore().mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id=placement.id,
+            idempotency_key="retired-while-minting",
+            title="triage the flaky login test",
+        )
+
+    assert db.list_sessions_rich(source=PERSONA_CHAT_SESSION_SOURCE, limit=50) == []
+    assert placement.id not in {row.id for row in PersonaInstanceStore().list_all()}
+
+
+def test_the_mint_binds_before_it_creates_the_session_row(
+    isolate_agent_runtime_root, tmp_path
+):
+    # The same ordering, stated positively so the invariant is readable without
+    # a fault: nothing a reader would see in Mission Control is written until
+    # the target has been proven bindable BY BINDING.
+    order: list[str] = []
+
+    class _OrderedStore(PersonaInstanceStore):
+        def open_chat(self, **kwargs):
+            order.append("bind")
+            return super().open_chat(**kwargs)
+
+    class _OrderedDB(SessionDB):
+        def create_session(self, *args, **kwargs):
+            order.append("create_session")
+            return super().create_session(*args, **kwargs)
+
+        def set_session_title(self, *args, **kwargs):
+            order.append("title")
+            return super().set_session_title(*args, **kwargs)
+
+    PersonaChatMintReceiptStore().mint(
+        instance_store=_OrderedStore(),
+        session_db=_OrderedDB(tmp_path / "state.db"),
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="ordering",
+        title="Dev chat",
+    )
+
+    assert order == ["bind", "create_session", "title"]
+
+
 def test_the_mint_refusal_names_its_target_the_way_every_other_refusal_does(
     isolate_agent_runtime_root, tmp_path
 ):

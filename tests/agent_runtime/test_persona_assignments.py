@@ -5196,7 +5196,47 @@ def test_a_live_row_outranks_a_stale_retire_tombstone_for_the_same_id(
     assert tombstone.is_file(), "the tombstone must survive for this to prove anything"
     assert store.retired_instance_archive_path(retired.id) is None
 
-def test_open_chat_cli_rejects_unpersisted_retired_root_at_cutoff(
+def test_assert_bindable_answers_the_binds_refusals_without_writing(
+    isolate_agent_runtime_root,
+):
+    """The seam that lets a lane refuse BEFORE its first durable write.
+
+    ``open_chat`` answers "may this bind happen?" only by raising at the end
+    of whatever the caller already did, which is why a mint could reach it
+    with a titled session row already on disk. Same refusals, same typed
+    error, same canonical target id — asserted without touching the store."""
+
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+
+    store = PersonaInstanceStore()
+    live = _placement_instance(placement_id="dev_agent_2")
+
+    # A live placement is bindable, and the canonical id comes back once.
+    assert store.assert_bindable(persona_id="dev", persona_instance_id=live.id) == live.id
+    # A first-ever canonical channel is bindable too: retirement is the
+    # ABSENCE of a live row PLUS a tombstone, never absence alone.
+    assert store.assert_bindable(persona_id="qa") == "personainst_qa"
+    assert not paths.persona_instance_path("personainst_qa").exists()
+
+    # A sibling's session is the same ValueError the bind raises.
+    with pytest.raises(ValueError):
+        store.assert_bindable(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id=f"persona_chat_{live.id}_abcdef123456",
+        )
+
+    archived = store.retire(live.id, reason="placement deleted")
+    with pytest.raises(RetiredPersonaInstanceError) as excinfo:
+        store.assert_bindable(persona_id="dev", persona_instance_id=live.id)
+    assert excinfo.value.persona_instance_id == live.id
+    assert str(excinfo.value.archive_path) == archived["archive_path"]
+    # …and the refusal never revived the row it refused.
+    assert live.id not in {row.id for row in PersonaInstanceStore().list_all()}
+
+
+def test_open_chat_cli_reports_a_retired_root_as_retired_not_unknown(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
@@ -5224,10 +5264,53 @@ def test_open_chat_cli_rejects_unpersisted_retired_root_at_cutoff(
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert payload["error_kind"] == "unknown_chat_session"
+    # `retired_persona_instance`, not `unknown_chat_session`. Retiring a
+    # placement archives the row and deliberately PRESERVES its chat on disk,
+    # so re-opening that thread has a typed end-of-life answer: the tombstone
+    # path and "history preserved". "unknown chat session" named the wrong
+    # fact (the root is known; its owner ended) and offered the wrong next
+    # step. The genuinely-unknown case is a different case, pinned below.
+    assert payload["persona_instance_id"] == instance.id
+    assert payload["history_preserved"] is True
+    assert payload["error_kind"] == "retired_persona_instance"
     assert instance.id not in {
         row.id for row in PersonaInstanceStore().list_all()
     }
+
+
+def test_open_chat_cli_still_rejects_a_genuinely_unknown_root(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    """The case `unknown_chat_session` is actually for, kept distinct.
+
+    A LIVE instance whose named root was never persisted: nothing was
+    retired, nothing has an archive to point at, and "open a server-minted
+    chat root before sending" is the right next step. The retirement
+    pre-flight must not swallow it."""
+
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    instance = _placement_instance(placement_id="dev_agent_3")
+    assert instance.id in {row.id for row in PersonaInstanceStore().list_all()}
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id=instance.persona_id,
+            session_id=f"persona_chat_{instance.id}_abcdef123456",
+            kill_active=False,
+            add_instance=False,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_kind"] == "unknown_chat_session"
 
 
 def test_retire_refuses_canonical_persona_channel(isolate_agent_runtime_root):

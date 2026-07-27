@@ -25,8 +25,6 @@ from . import paths
 from .dispatch_session_policy import superseded_session_id
 from .persona_assignments import (
     PersonaInstanceStore,
-    RetiredPersonaInstanceError,
-    canonical_chat_instance_id,
     persona_chat_session_id_for,
     safe_assignment_text,
     safe_assignment_token,
@@ -419,43 +417,37 @@ class PersonaChatMintReceiptStore:
         lineage (``native_lineage_summary`` raises on a foreign parent, and
         usage aggregation blanks), so borrowing it for relay provenance would
         corrupt both. Marker-key precedent: ``_delegate_from`` / ``_branched_from``.
+
+        Order of operations is load-bearing, not incidental: assert bindable →
+        reserve the receipt → BIND → create the session → meta → title. The bind
+        used to be last, which is why a ``retire`` landing mid-lane still left a
+        titled thread behind for a placement that no longer existed. See the
+        early-bind comment below.
         """
 
         instance_id = safe_assignment_token(persona_instance_id)
         key = safe_assignment_text(idempotency_key, limit=240)
         if not instance_id or not key:
             raise ValueError("persona_instance_id and idempotency_key are required")
-        # PRECONDITION, asserted before this lane's FIRST durable write. The
-        # ``open_chat`` bind at the end of the lane refuses a retired placement
-        # by raising — but by then the receipt is reserved, the session row
-        # exists, and it is titled, so a dispatch to a target that could never
-        # be served left a permanent thread in Mission Control. The refusal is
-        # decidable from the store alone, so decide it here and leave nothing
-        # behind. Same typed error callers already handle from ``open_chat``,
-        # same single retirement predicate; only the litter is gone.
+        # PRECONDITION, asserted before this lane's FIRST durable write, through
+        # the SAME seam the bind itself uses (``assert_bindable`` → one
+        # derivation of the target id, one retirement rule, one refusal). It
+        # reports the id the seam resolved, not the caller's raw token: a refusal
+        # reachable from three sites must not identify its target three ways.
         #
-        # SCOPE, precisely: this closes the refusal that is TRUE AT ENTRY —
-        # the target was already retired when the mint arrived, which is every
-        # dispatch at a deleted placement. It does NOT close a ``retire()`` that
-        # lands AFTER this line: the lane below still reserves the receipt,
-        # creates the session, writes meta and titles it before ``open_chat``
-        # binds, and ``retire`` refuses only on a live run/worker binding or an
-        # active assignment — neither of which this mint holds until that bind.
-        # Losing that race still litters. Closing it needs the bind moved ahead
-        # of the first durable write (or a lock shared with ``retire``), not a
-        # second check here.
-        retired_archive = instance_store.retired_instance_archive_path(
-            instance_id, persona_id=persona_id
+        # It closes the refusal that is TRUE AT ENTRY — the target was already
+        # retired when the mint arrived, which is every dispatch at a deleted
+        # placement. The narrower race (a ``retire`` landing WHILE this lane
+        # runs) is closed by the early bind below, not here.
+        #
+        # The local ``instance_id`` deliberately stays the CALLER's token: it
+        # keys the idempotency receipt path and derives the root session id, and
+        # canonicalizing it here would re-key every in-flight receipt — a replay
+        # would miss its own reservation and mint a SECOND thread for a task
+        # that already has one.
+        instance_store.assert_bindable(
+            persona_id=persona_id, persona_instance_id=instance_id
         )
-        if retired_archive is not None:
-            # Report the id the PREDICATE resolved, not the caller's raw token:
-            # the pre-flight refusal and ``open_chat`` both name the canonical
-            # id, and one refusal reachable from three sites must not identify
-            # its target three ways.
-            raise RetiredPersonaInstanceError(
-                canonical_chat_instance_id(persona_id, instance_id),
-                archive_path=retired_archive,
-            )
         path = self._path(instance_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_suffix(".lock")
@@ -488,6 +480,32 @@ class PersonaChatMintReceiptStore:
                     "created_at": time.time(),
                 }
                 _atomic_json(path, receipt)
+            # EARLY BIND. This used to be the LAST step of the lane, and that
+            # position was the whole remaining defect: ``retire`` refuses only on
+            # a live run/worker binding or an active assignment, and a chat mint
+            # held neither until it bound — so a ``retire`` landing after the
+            # precondition above still let the lane create the session, write its
+            # meta and TITLE it before the bind refused, leaving a titled thread
+            # in Mission Control for a placement that no longer exists.
+            #
+            # Binding first inverts that. The bind is the step that proves the
+            # target is still live, so it runs before the first SESSION-visible
+            # write; from here on every write belongs to a target this lane has
+            # already proven bindable. A ``retire`` that lands after this point
+            # archives a row that legitimately owned the thread — its tombstone
+            # carries the pointer, and preserved chat history is exactly what
+            # ``retire`` promises. No orphan either way.
+            #
+            # Ordered AFTER the receipt reservation on purpose: the receipt is
+            # what makes the whole lane idempotent, it is internal (never a
+            # Mission Control row), and reserving first means a crash between the
+            # two is repaired by a retry that resolves the same root instead of
+            # minting a second one.
+            instance = instance_store.open_chat(
+                persona_id=persona_id,
+                persona_instance_id=instance_id,
+                session_id=root,
+            )
             session_db.create_session(
                 session_id=root,
                 source=PERSONA_CHAT_SESSION_SOURCE,
@@ -531,11 +549,6 @@ class PersonaChatMintReceiptStore:
                     if "already in use" not in str(exc).lower():
                         raise
                     session_db.set_session_title(root, f"{title} · {root[-8:]}")
-            instance = instance_store.open_chat(
-                persona_id=persona_id,
-                persona_instance_id=instance_id,
-                session_id=root,
-            )
             receipt.update({"state": "completed", "completed_at": time.time()})
             _atomic_json(path, receipt)
             return {

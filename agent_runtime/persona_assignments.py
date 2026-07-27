@@ -1601,6 +1601,72 @@ class PersonaInstanceStore:
             )
             return None
 
+    def assert_bindable(
+        self,
+        *,
+        persona_id: str,
+        session_id: str | None = None,
+        persona_instance_id: str | None = None,
+    ) -> str:
+        """Everything :meth:`open_chat` refuses, asserted WITHOUT writing anything.
+
+        Returns the canonical instance id the bind would target, so a caller that
+        needs to act before the bind derives that id ONCE, here, rather than
+        re-deriving it and drifting.
+
+        This exists because ``open_chat`` answers "may this bind happen?" only by
+        RAISING at the end of whatever the caller already did. For
+        :meth:`PersonaChatMintReceiptStore.mint` that end came after a session row
+        had been created, meta written and a title set — so a dispatch to a target
+        that could never be served left a permanent titled thread in Mission
+        Control, and the refusal arrived one durable write too late. A refusal
+        decidable without writing must be decidable WITHOUT writing, and it must be
+        the SAME refusal: one derivation, one spelling of the target id, one
+        retirement rule (:meth:`retired_instance_archive_path`).
+
+        ``session_id`` is optional so a caller can ask "is this instance bindable
+        at all?" before it has minted a root; when present it is checked for the
+        sibling-steal the bind refuses. ``open_chat`` calls this first and is the
+        write chokepoint, so this costs one extra row read on the bind path and
+        buys the pre-flight callers an answer they can trust.
+        """
+
+        normalized_persona = _normalize_instance_source_persona(persona_id)
+        if not normalized_persona:
+            raise ValueError("persona_id is required")
+        normalized_instance = (
+            canonical_persona_instance_id(persona_instance_id, persona_id=normalized_persona)
+            if persona_instance_id
+            else None
+        )
+        instance_id = normalized_instance or persona_instance_id_for(normalized_persona)
+        # A chat session encodes the instance it was minted for; binding one
+        # instance's session onto ANOTHER instance's pointer is the sibling steal
+        # that overwrote ``personainst_qa``'s default-chat pointer with a
+        # placement sibling's session (live 2026-07-18: the console's open-chat of
+        # a sibling bound its session onto the canonical primary, then a
+        # bare-persona relay adopted the poisoned pointer — both instances folded
+        # onto ONE operator channel). Refuse loudly at the write chokepoint every
+        # send/open flows through — the existing ``_session_owned_by_other_instance``
+        # guard only covered ``add_instance``. Legacy/opaque ``persona_chat_*``
+        # sessions (no encoded owner) and the instance's own sessions bind freely.
+        normalized_session = safe_assignment_text(session_id, limit=200)
+        if normalized_session and chat_session_is_foreign_to_instance(
+            normalized_session, instance_id
+        ):
+            owner = chat_session_owner_instance_id(normalized_session)
+            raise ValueError(
+                f"chat session {normalized_session!r} belongs to instance {owner!r}; "
+                f"it cannot be bound onto {instance_id!r} — open that instance's own "
+                "chat lane instead of adopting a sibling's session"
+            )
+        # ONE retirement rule, composed in one place (absence of a live row PLUS a
+        # ``*_retire`` tombstone) and asked here by every caller that needs it.
+        retired_archive = self.retired_instance_archive_path(instance_id)
+        if retired_archive is not None:
+            raise RetiredPersonaInstanceError(instance_id, archive_path=retired_archive)
+        return instance_id
+
     def open_chat(
         self,
         *,
@@ -1632,29 +1698,14 @@ class PersonaInstanceStore:
         if not normalized_session:
             raise ValueError("session_id is required")
 
-        normalized_instance = (
-            canonical_persona_instance_id(persona_instance_id, persona_id=normalized_persona)
-            if persona_instance_id
-            else None
+        # The bind's refusals — sibling steal and retirement — live in ONE
+        # read-only seam so a pre-flight caller and the bind itself cannot
+        # disagree about who this is or whether it may be bound.
+        instance_id = self.assert_bindable(
+            persona_id=persona_id,
+            session_id=normalized_session,
+            persona_instance_id=persona_instance_id,
         )
-        instance_id = normalized_instance or persona_instance_id_for(normalized_persona)
-        # A chat session encodes the instance it was minted for; binding one
-        # instance's session onto ANOTHER instance's pointer is the sibling steal
-        # that overwrote ``personainst_qa``'s default-chat pointer with a
-        # placement sibling's session (live 2026-07-18: the console's open-chat of
-        # a sibling bound its session onto the canonical primary, then a
-        # bare-persona relay adopted the poisoned pointer — both instances folded
-        # onto ONE operator channel). Refuse loudly at the write chokepoint every
-        # send/open flows through — the existing ``_session_owned_by_other_instance``
-        # guard only covered ``add_instance``. Legacy/opaque ``persona_chat_*``
-        # sessions (no encoded owner) and the instance's own sessions bind freely.
-        if chat_session_is_foreign_to_instance(normalized_session, instance_id):
-            owner = chat_session_owner_instance_id(normalized_session)
-            raise ValueError(
-                f"chat session {normalized_session!r} belongs to instance {owner!r}; "
-                f"it cannot be bound onto {instance_id!r} — open that instance's own "
-                "chat lane instead of adopting a sibling's session"
-            )
         safe_display_name = safe_assignment_text(display_name, limit=120) if display_name is not None else None
         safe_default_display_name = (
             safe_assignment_text(default_display_name, limit=120) if default_display_name is not None else None
@@ -1664,13 +1715,6 @@ class PersonaInstanceStore:
         try:
             instance = self.get(instance_id)
         except Exception:
-            # One retirement rule, asked here and by every pre-flight caller.
-            retired_archive = self.retired_instance_archive_path(instance_id)
-            if retired_archive is not None:
-                raise RetiredPersonaInstanceError(
-                    instance_id,
-                    archive_path=retired_archive,
-                )
             ts = now()
             role = "profile" if normalized_persona.startswith("profile:") else normalized_persona
             instance = PersonaInstance(

@@ -489,6 +489,32 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 data = {"ok": False, "error": "session_id is required unless add_instance is true"}
                 print(emit_json(data) if args.json else data["error"])
                 return 2
+            # RETIREMENT, asked before the session-existence cutoff below.
+            # Retiring a placement archives the row but deliberately leaves its
+            # chat on disk, so an operator (or a stale launcher frame) re-opening
+            # that thread is asking about something that HAS a typed end-of-life
+            # answer — the tombstone and "history preserved". It used to get
+            # `unknown_chat_session` instead, which names the wrong fact and
+            # offers the wrong next step ("open a server-minted chat root").
+            #
+            # The owner comes from the session id itself (`persona_chat_<
+            # instance>_<hex>` encodes it), so this answers even when the row is
+            # archived and no SessionDB entry survives — precisely the case that
+            # read as "unknown". Read-only, through the ONE bind seam, so a live
+            # row always wins and a legitimately re-created placement is never
+            # refused by its own history. A bare persona resolves to the
+            # canonical channel, which cannot be retired.
+            PersonaInstanceStore().assert_bindable(
+                persona_id=persona_id,
+                # No session_id: the sibling-steal refusal is a ValueError, and
+                # the `foreign_chat_session` guard below already owns that answer
+                # with the envelope the operator needs.
+                persona_instance_id=(
+                    safe_assignment_token(getattr(args, "persona_instance_id", None))
+                    or chat_session_owner_instance_id(args.session_id)
+                    or None
+                ),
+            )
             session_db = _default_persona_session_db()
             if (
                 session_db.__class__.__module__ == "hermes_state"
@@ -1730,23 +1756,14 @@ def _cmd_mission_chat_message(args) -> int:
                 # here was the untyped traceback the operator saw instead of a
                 # refusal.
                 #
-                # What reaches it: the mint's own PRECONDITION, i.e. a target
-                # already retired when the mint began — a caller that skipped
-                # the pre-flight above by another road, or a `retire` that
-                # landed in the gap between the pre-flight and the mint. That
-                # precondition fires before the lane's first durable write, so
-                # these arrive with nothing left behind.
-                #
-                # What does NOT reach it, and is NOT closed anywhere: a `retire`
-                # that lands AFTER the precondition passes, while the lane is
-                # reserving the receipt, creating the session, and titling it.
-                # The mint completes; the refusal surfaces later, from the
-                # `open_chat` bind, with the titled thread already durable. That
-                # window is real — `retire` refuses only on a live run/worker
-                # binding or an active assignment, and a chat mint holds neither
-                # until that bind. Only moving the bind ahead of the first
-                # durable write (or sharing a lock with `retire`) closes it; a
-                # third check on this path would not.
+                # What reaches it: a target already retired when the mint began
+                # (a caller that skipped the pre-flight above by another road,
+                # or a `retire` that landed in the gap between the pre-flight
+                # and the mint), AND a `retire` that lands inside the mint lane
+                # itself. Both now arrive with nothing left behind: the mint
+                # asserts bindability before its first durable write and BINDS
+                # before its first session-visible one, so a refusal from either
+                # point precedes the titled row that used to survive it.
                 data = _retired_persona_instance_payload(exc)
                 if getattr(args, "stream", False):
                     _emit_chat_final(data)
@@ -1787,12 +1804,13 @@ def _cmd_mission_chat_message(args) -> int:
             kill_active=False,
         )
     except RetiredPersonaInstanceError as exc:
-        # THE site where losing the retire race surfaces: a placement retired
-        # after the mint's precondition passed refuses only here, at the bind,
-        # by which time this turn's thread is minted and titled. The refusal is
-        # typed and identical either way; the litter is not, and is not claimed
-        # to be. See the mint handler above for why the bind's position — not
-        # another check — is what would close it.
+        # A placement retired between this turn's thread being established and
+        # this bind. Defense in depth rather than the litter site it used to be:
+        # the mint now binds before its first session-visible write, so a
+        # retirement that beats the mint leaves nothing behind, and one that
+        # lands after it archives a row that legitimately owned the thread
+        # (`retire` preserves chat history by contract). This still refuses, and
+        # still refuses with the same typed error.
         data = _retired_persona_instance_payload(exc)
         if getattr(args, "stream", False):
             _emit_chat_final(data)
