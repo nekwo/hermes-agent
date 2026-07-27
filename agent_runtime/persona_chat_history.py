@@ -101,7 +101,11 @@ TERMINAL_TURN_MARKERS: dict[str, TerminalTurnMarker] = {
 # store itself calls terminal. A typo, or a state that is still in flight, would
 # otherwise mark a LIVE turn as over — the opposite failure of the one this
 # table fixes, and a worse one. Raised (not asserted) so ``python -O`` cannot
-# strip the contract.
+# strip the contract. The turn store's own vocabulary guards
+# (``mission_chat_turns._guard_turn_state_vocabulary``) already prove
+# ``TERMINAL_TURN_STATES`` partitions the known universe with the in-flight and
+# settling buckets, so this check is the last link of one chain, not a second
+# opinion about which states are terminal.
 _UNKNOWN_MARKER_STATES = sorted(set(TERMINAL_TURN_MARKERS) - TERMINAL_TURN_STATES)
 if _UNKNOWN_MARKER_STATES:  # pragma: no cover - import-time contract guard
     raise RuntimeError(

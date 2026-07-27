@@ -1213,7 +1213,7 @@ def _publish_persona_chat_projection_event(
         session_id=session_id,
         client_message_id=client_message_id,
     ) or {}
-    if record.get("state") != "projected" or record.get(
+    if record.get("state") != TURN_STATE_PROJECTED or record.get(
         "projection_event_emitted"
     ):
         return False
@@ -1246,7 +1246,7 @@ def _publish_persona_chat_projection_event(
         session_id=session_id,
         client_message_id=client_message_id,
         turn_id=turn_id,
-        state="projected",
+        state=TURN_STATE_PROJECTED,
         metadata={"projection_event_emitted": True},
         elements=record.get("elements") or [],
     )
@@ -1700,9 +1700,11 @@ def _cmd_mission_chat_message(args) -> int:
         session_id=session_id, client_message_id=client_message_id
     ) or {}
     journal_state = safe_assignment_token(journal.get("state"))
-    if journal_state in {"executing", "outcome_unknown", "budget_exhausted"} and replay.get(
-        "assistant"
-    ):
+    # A durable reply already in SessionDB outranks whatever the journal thinks
+    # happened. The recoverable set is the turn store's (a view of its own
+    # transition table), never a literal spelled here — the wall-budget state
+    # was invisible to exactly this kind of inline set until 2026-07-26.
+    if journal_state in REPLY_RECOVERABLE_TURN_STATES and replay.get("assistant"):
         recovered_reply = _redact_persona_chat_text(
             replay["assistant"].get("content"), limit=PERSONA_CHAT_REPLY_LIMIT
         )
@@ -1710,7 +1712,7 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=journal.get("turn_id") or client_message_id,
-            state="native_committed",
+            state=TURN_STATE_NATIVE_COMMITTED,
             metadata={
                 "root_chat_session_id": session_id,
                 "active_session_id": _persona_chat_native_tip(
@@ -1728,7 +1730,8 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id, client_message_id=client_message_id
         ) or {}
         journal_state = safe_assignment_token(journal.get("state"))
-    if journal_state == "native_committed":
+    # Settling: the reply is durable, the projection is not. Finish the walk.
+    if journal_state in SETTLING_TURN_STATES:
         stored_reply = journal.get("stored_reply")
         if stored_reply is None and replay.get("assistant"):
             stored_reply = _redact_persona_chat_text(
@@ -1739,7 +1742,7 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=journal.get("turn_id") or client_message_id,
-            state="projected",
+            state=TURN_STATE_PROJECTED,
             metadata={
                 "stored_reply": stored_reply,
                 "projection_committed": True,
@@ -1749,8 +1752,8 @@ def _cmd_mission_chat_message(args) -> int:
         journal = mission_chat_turn_record(
             session_id=session_id, client_message_id=client_message_id
         ) or {}
-        journal_state = "projected"
-    if journal_state == "budget_exhausted":
+        journal_state = TURN_STATE_PROJECTED
+    if journal_state == TURN_STATE_BUDGET_EXHAUSTED:
         # Settled, NOT ambiguous: this turn ended on its wall clock and the
         # harness knows it. Never route the operator to turn-resolve (that verb
         # exists only for genuinely unknown provider outcomes) and never block
@@ -1762,7 +1765,7 @@ def _cmd_mission_chat_message(args) -> int:
             "error_kind": "chat_turn_budget_exhausted",
             "budget_exhausted": True,
             "turn_resolution_required": False,
-            "journal_state": "budget_exhausted",
+            "journal_state": TURN_STATE_BUDGET_EXHAUSTED,
             "root_chat_session_id": session_id,
             "session_id": session_id,
             "client_message_id": client_message_id,
@@ -1776,13 +1779,15 @@ def _cmd_mission_chat_message(args) -> int:
         else:
             print(emit_json(data) if args.json else data["error"])
         return 2
-    if journal_state in {"executing", "outcome_unknown"}:
-        if journal_state == "executing":
+    # No proven reply and the journal says a provider call may still be
+    # outstanding: refuse the resend and route to the resolve verb.
+    if journal_state in RESEND_BLOCKING_TURN_STATES:
+        if journal_state == TURN_STATE_EXECUTING:
             transition_mission_chat_turn(
                 session_id=session_id,
                 client_message_id=client_message_id,
                 turn_id=journal.get("turn_id") or client_message_id,
-                state="outcome_unknown",
+                state=TURN_STATE_OUTCOME_UNKNOWN,
                 metadata={"provider_submitted": True},
             )
         data = {
@@ -1802,7 +1807,7 @@ def _cmd_mission_chat_message(args) -> int:
         else:
             print(emit_json(data) if args.json else data["error"])
         return 2
-    if journal_state == "projected" and journal.get("stored_reply") is not None:
+    if journal_state == TURN_STATE_PROJECTED and journal.get("stored_reply") is not None:
         _publish_persona_chat_projection_event(
             session_id=session_id,
             client_message_id=client_message_id,
@@ -1832,7 +1837,7 @@ def _cmd_mission_chat_message(args) -> int:
             "execution_state": "completed",
             "reply": reply_text,
             "idempotent_replay": True,
-            "journal_state": "projected",
+            "journal_state": TURN_STATE_PROJECTED,
         }
         if getattr(args, "stream", False):
             _emit_chat_final(data)
@@ -1847,28 +1852,28 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
-            state="pending",
+            state=TURN_STATE_PENDING,
             metadata={"root_chat_session_id": session_id, "pending_user_message": message},
         )
         transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
-            state="executing",
+            state=TURN_STATE_EXECUTING,
             metadata={"provider_submitted": True},
         )
         transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
-            state="native_committed",
+            state=TURN_STATE_NATIVE_COMMITTED,
             metadata={"native_committed": True, "stored_reply": reply_text},
         )
         transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
-            state="projected",
+            state=TURN_STATE_PROJECTED,
             metadata={"projection_committed": True, "stored_reply": reply_text},
         )
         _publish_persona_chat_projection_event(
@@ -1925,7 +1930,7 @@ def _cmd_mission_chat_message(args) -> int:
     abandoned_ids = {
         str(record.get("client_message_id") or "")
         for record in mission_chat_turn_records(session_id=session_id)
-        if record.get("state") == "abandoned"
+        if record.get("state") == TURN_STATE_ABANDONED
     }
     native_history = safe_native_history(
         [
@@ -2072,7 +2077,7 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
-            state="pending",
+            state=TURN_STATE_PENDING,
             elements=stream_emitter.elements,
             metadata={
                 "root_chat_session_id": session_id,
@@ -2118,7 +2123,7 @@ def _cmd_mission_chat_message(args) -> int:
                 session_id=session_id,
                 client_message_id=client_message_id,
                 turn_id=stream_emitter.turn_id,
-                state="executing",
+                state=TURN_STATE_EXECUTING,
                 metadata={
                     "provider_submitted": True,
                     "provider_request_fingerprint": request_fingerprint,
@@ -2148,7 +2153,7 @@ def _cmd_mission_chat_message(args) -> int:
                 permission_session_id=session_id,
                 conversation_history=native_history,
                 reuse_current_user_message=(
-                    journal_state == "pending" and bool(replay.get("operator"))
+                    journal_state == TURN_STATE_PENDING and bool(replay.get("operator"))
                 ),
                 root_chat_session_id=session_id,
                 client_message_id=client_message_id,
@@ -2255,7 +2260,7 @@ def _cmd_mission_chat_message(args) -> int:
                 client_message_id=client_message_id,
                 turn_id=stream_emitter.turn_id,
                 elements=stream_emitter.elements,
-                state="budget_exhausted",
+                state=TURN_STATE_BUDGET_EXHAUSTED,
                 metadata={
                     "provider_submitted": True,
                     "budget_exhausted": True,
@@ -2273,7 +2278,7 @@ def _cmd_mission_chat_message(args) -> int:
                 client_message_id=client_message_id,
                 turn_id=stream_emitter.turn_id,
                 elements=stream_emitter.elements,
-                state="outcome_unknown",
+                state=TURN_STATE_OUTCOME_UNKNOWN,
                 metadata={"provider_submitted": True},
             )
         if runtime_registry is not None:
@@ -2321,7 +2326,7 @@ def _cmd_mission_chat_message(args) -> int:
                 {
                     "budget_exhausted": True,
                     "turn_resolution_required": False,
-                    "journal_state": "budget_exhausted",
+                    "journal_state": TURN_STATE_BUDGET_EXHAUSTED,
                     "wall_budget": dict(getattr(exc, "wall_budget", None) or {}),
                     "checkpoint_summary": _turn_budget.synthesize_checkpoint_summary(
                         None, tool_names=_chat_turn_tool_names(stream_emitter.elements)
@@ -2375,7 +2380,7 @@ def _cmd_mission_chat_message(args) -> int:
         session_id=session_id,
         client_message_id=client_message_id,
         turn_id=stream_emitter.turn_id,
-        state="native_committed",
+        state=TURN_STATE_NATIVE_COMMITTED,
         elements=stream_emitter.elements,
         metadata={
             "root_chat_session_id": session_id,
@@ -2510,7 +2515,7 @@ def _cmd_mission_chat_message(args) -> int:
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="projected",
+            state=TURN_STATE_PROJECTED,
             metadata={
                 "projection_committed": True,
                 "stored_reply": reply_text,
@@ -2773,7 +2778,7 @@ def _cmd_mission_chat_turn_resolve(args) -> int:
         "ok": outcome is MissionChatTurnPersistOutcome.PERSISTED,
         "capability_id": "mission.chat.turn.resolve",
         "resolution": "abandon",
-        "journal_state": "abandoned",
+        "journal_state": TURN_STATE_ABANDONED,
         "root_chat_session_id": session_id,
         "session_id": session_id,
         "client_message_id": client_message_id,
@@ -4991,7 +4996,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=emitter.turn_id,
             elements=emitter.elements,
-            state="running",
+            state=TURN_STATE_RUNNING,
         ),
     )
 
@@ -5012,7 +5017,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="running",
+            state=TURN_STATE_RUNNING,
             write_ahead=True,
         )
         # Keep the model run out of SessionDB. The canonical operator transcript
@@ -5043,7 +5048,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="failed",
+            state=TURN_STATE_FAILED,
         )
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
         data = {
@@ -5133,7 +5138,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="completed",
+            state=TURN_STATE_COMPLETED,
         )
         if terminal_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_persist_outcome"] = terminal_outcome.value
@@ -5154,7 +5159,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="failed",
+            state=TURN_STATE_FAILED,
         )
         if not assignment_completed:
             try:

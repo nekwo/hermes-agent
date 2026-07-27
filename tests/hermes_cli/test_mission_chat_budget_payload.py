@@ -125,7 +125,15 @@ def test_budget_payloads_declare_that_no_resolution_is_required():
 
 
 def test_budget_settle_uses_the_typed_terminal_state_not_outcome_unknown():
-    """The wall-budget branch must transition to ``budget_exhausted``."""
+    """The wall-budget branch must transition to ``budget_exhausted``.
+
+    The state argument is read through the turn store's vocabulary table: a
+    bare literal and the ``TURN_STATE_*`` constant that carries the same value
+    are both accepted, and a constant that does NOT resolve to a known turn
+    state fails here rather than silently dropping out of the collected set.
+    """
+
+    from agent_runtime import mission_chat_turns
 
     func = _mission_chat_message_func()
     states: list[str] = []
@@ -137,8 +145,17 @@ def test_budget_settle_uses_the_typed_terminal_state_not_outcome_unknown():
         if name != "transition_mission_chat_turn":
             continue
         for keyword in node.keywords:
-            if keyword.arg == "state" and isinstance(keyword.value, ast.Constant):
-                states.append(str(keyword.value.value))
+            if keyword.arg != "state":
+                continue
+            value = keyword.value
+            if isinstance(value, ast.Constant):
+                states.append(str(value.value))
+            elif isinstance(value, ast.Name) and value.id.startswith("TURN_STATE_"):
+                resolved = getattr(mission_chat_turns, value.id, None)
+                assert resolved in mission_chat_turns.ALL_TURN_STATES, (
+                    f"{value.id} is not a turn state the store knows about"
+                )
+                states.append(str(resolved))
     assert "budget_exhausted" in states
     # The ambiguous state stays for genuinely ambiguous outcomes — this slice
     # narrows when it is used, it does not delete it.

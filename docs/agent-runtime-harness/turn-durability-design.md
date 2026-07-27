@@ -202,6 +202,61 @@ states, the table guards, the graceful-reply case that must synthesize nothing,
 the in-flight turn that must never be marked over, the pre-`settled_state`
 archive row, and the finished call that must keep its real outcome).
 
+### One vocabulary, three buckets, guarded (2026-07-27)
+
+The section above fixed the same defect **twice**, in two modules ~700 lines
+apart. Recurrence is the finding: the bug was never either literal, it was that
+a consumer was free to spell one. So the vocabulary is now a single owned table
+in `agent_runtime/mission_chat_turns.py`, and every consumer reads it.
+
+Every known state belongs to **exactly one** lifecycle bucket:
+
+| bucket | states | meaning |
+| --- | --- | --- |
+| `INFLIGHT_TURN_STATES` | `pending`, `executing`, `outcome_unknown`, `running` | an executor still owes a settlement; repair sweeps flip these, retention/GC protect them |
+| `SETTLING_TURN_STATES` | `native_committed` | the reply is durable, the projection is not: never repair-flipped (a flip would destroy a recorded reply), not yet terminal |
+| `TERMINAL_TURN_STATES` | `projected`, `abandoned`, `budget_exhausted`, `completed`, `failed`, `interrupted` | settled; no repair, no operator resolution |
+
+`SETTLING_TURN_STATES` is new **as a name only**. `native_committed` had always
+been in neither set — an unclassified state no guard could see, which is
+precisely the shape of the wall-budget bug. Naming it makes the partition
+provable; it changes no decision.
+
+Three decision sets sit on top, each one a question a consumer actually asks:
+
+| set | states | asked by |
+| --- | --- | --- |
+| `REPLY_RECOVERABLE_TURN_STATES` | `executing`, `outcome_unknown`, `budget_exhausted` | a resend that finds a durable reply promotes to `native_committed` from these |
+| `RESEND_BLOCKING_TURN_STATES` | `executing`, `outcome_unknown` | …and with no such proof, a resend from these is refused pending resolution |
+| `OPERATOR_RESOLVABLE_TURN_STATES` | `outcome_unknown` | the only state `turn-resolve --action abandon` accepts |
+
+Import-time guards (raised, not asserted, so `python -O` cannot strip them —
+same convention as `TERMINAL_TURN_MARKERS`): every set names only known states;
+the three buckets are pairwise disjoint AND cover the known universe; the
+refusal ladder is nested (`resolvable ⊆ blocking ⊆ recoverable`);
+`REPLY_RECOVERABLE_TURN_STATES` equals the set of states from which
+`_JOURNAL_TRANSITIONS` accepts a promotion to `native_committed` (it is a VIEW
+of the transition table, not a second opinion); and the transition table plus
+the legacy→journal alias map name only real states.
+
+Consumers hold no literals. `hermes_cli/harness_parts/persona_commands.py` runs
+inside `harness.py`'s globals, so a vocabulary name it uses but `harness.py`
+does not import is a `NameError` on a live chat turn rather than an import
+error — an AST guard covers that seam too.
+
+Tests: `tests/agent_runtime/test_turn_state_vocabulary.py` — the full state ×
+bucket classification asserted through the real store functions (repair sweep,
+boot sweep, retention cap, `abandon`), the journal transition acceptance
+matrix, an independent copy of the classification table that must agree with
+the runtime one, and one case per import guard proving each can actually fail.
+
+Known gap, deliberately unchanged: the marker synthesizer produces rows for
+`interrupted` and `budget_exhausted` only. `projected` / `completed` have a
+reply and `abandoned` was resolved by the operator, so those need none — but
+`failed` is terminal, reply-less, and marker-less, which is a real hole. Closing
+it is a behavior change and was out of scope for a consolidation pass; it is
+recorded here rather than left silent.
+
 ## Problem
 
 Mission-chat recording is write-ahead for the operator message and
