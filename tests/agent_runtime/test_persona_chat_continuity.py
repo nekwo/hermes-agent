@@ -721,6 +721,97 @@ def test_the_sweep_reclaims_index_files_it_can_prove_are_dead(isolate_agent_runt
     assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == fresh
 
 
+def test_a_pointer_that_could_not_be_written_retracts_the_marker(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """A lost ADD may not leave the index still claiming to be complete.
+
+    The marker is what lets "no index file for this session" be read as "no open
+    tickets". If the pointer write fails — a full store, or the ordinary Windows
+    case of an AV or indexer holding the replace target — the ticket is on disk
+    and OPEN while the marker goes on swearing the index knows about it. Nothing
+    rebuilds, so the tokenless settlement never finds it again: a silent,
+    permanent miss, landing on exactly the number the adoption readout exists to
+    report. Taking the claim back costs one rebuild and heals it."""
+
+    import agent_runtime.persona_chat_continuity as continuity
+
+    store = PersonaChatClarifyTicketStore()
+    _clarify_ticket(store)  # establishes the index + marker
+    index_dir = store._index_dir()
+    real_atomic = continuity._atomic_json
+
+    def failing_pointer_write(path, value):
+        if path.parent == index_dir and path.name != "_index_state.json":
+            raise OSError(32, "the process cannot access the file")
+        return real_atomic(path, value)
+
+    monkeypatch.setattr(continuity, "_atomic_json", failing_pointer_write)
+    lost = _clarify_ticket(store)
+    monkeypatch.setattr(continuity, "_atomic_json", real_atomic)
+
+    # The ticket itself was never in doubt — only the pointer to it.
+    assert store.resolve(lost)["state"] == "open"
+    # The completeness claim is gone, so the next lookup rebuilds instead of
+    # answering "no open tickets" from an index that silently lost one…
+    assert not store._index_state_path().exists()
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == lost
+    # …and having healed once, it is back on the O(1) path.
+    assert store._index_state_path().exists()
+    assert store._index_entries(_CLARIFY_ROOT)[0]["clarify_token"] == lost
+
+
+def test_a_rebuild_cannot_drop_a_pointer_minted_while_it_scanned(
+    isolate_agent_runtime_root,
+):
+    """The rebuild's scan is a snapshot; its write must not act like a truth.
+
+    A rebuild reads every ticket, then writes each session's pointers. A mint
+    landing between those two steps is invisible to the scan, and a write that
+    REPLACED the file would erase the pointer that mint had already recorded —
+    permanently, because the marker the rebuild writes last stops any later
+    rebuild from recovering it. The damage is not merely a miss: the lookup goes
+    on answering with an OLDER open ticket, so the tokenless settlement closes a
+    question that was already superseded — something the pre-index glob never
+    did. Unioning is safe precisely because the index is a cache: an entry the
+    ticket files do not back is verified away on the read path."""
+
+    store = PersonaChatClarifyTicketStore()
+    earlier = _clarify_ticket(store)
+    # A store with no marker: first use after this code arrives, or any crash
+    # that left a rebuild unfinished.
+    store._invalidate_index()
+
+    concurrent: list[str] = []
+    fired: list[bool] = []
+    real_iter = PersonaChatClarifyTicketStore._iter_records
+
+    def scan_then_let_a_mint_land(self):
+        records = list(real_iter(self))
+        if not fired:
+            # Guard set BEFORE the nested mint: that mint scans too (sweep, and
+            # its own rebuild), and re-entering here would recurse forever.
+            fired.append(True)
+            # The concurrent turn: it mints, and records its own pointer, while
+            # the rebuild above is holding a scan that predates it.
+            concurrent.append(_clarify_ticket(PersonaChatClarifyTicketStore()))
+        return iter(records)
+
+    PersonaChatClarifyTicketStore._iter_records = scan_then_let_a_mint_land
+    try:
+        assert PersonaChatClarifyTicketStore()._rebuild_index() is True
+    finally:
+        PersonaChatClarifyTicketStore._iter_records = real_iter
+
+    minted = concurrent[0]
+    tokens = [entry["clarify_token"] for entry in store._index_entries(_CLARIFY_ROOT)]
+    assert minted in tokens, "the rebuild replaced a pointer it never scanned"
+    assert earlier in tokens
+    # …and the lookup answers with the NEWEST open ticket, which is what the
+    # pre-index glob would have returned.
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == minted
+
+
 # ── a mint for a target that can never be served writes nothing ─────────────
 
 

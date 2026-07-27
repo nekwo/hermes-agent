@@ -644,6 +644,15 @@ class PersonaChatClarifyTicketStore:
     # session with no tickets — the overwhelmingly common case — could never be
     # told from a missing index and would fall back to the glob on every turn,
     # which is the cost this exists to retire.
+    #
+    # THAT CLAIM IS RETRACTABLE, and must be. Being a cache saves this index
+    # from every failure that leaves it with an entry too MANY — the read path
+    # verifies those away. Nothing saves it from an entry too FEW, because the
+    # marker is precisely what stops anyone from going and looking. So the two
+    # writes that can lose a pointer take the claim back rather than keep it:
+    # a failed add (:meth:`_index_add`) and a rebuild racing a concurrent mint
+    # (:meth:`_rebuild_index`, which unions instead of replacing). One extra
+    # rebuild is the price; a permanently invisible open ticket is not.
 
     def _index_dir(self) -> Path:
         return self._root_dir() / "by_session"
@@ -678,14 +687,21 @@ class PersonaChatClarifyTicketStore:
         entries.sort(key=lambda item: item["created_at"], reverse=True)
         return entries
 
-    def _write_index(self, chat_session_id: str, entries: list[dict[str, Any]]) -> None:
+    def _write_index(self, chat_session_id: str, entries: list[dict[str, Any]]) -> bool:
+        """Record *entries* as the open pointers for *chat_session_id*.
+
+        Returns ``False`` when they could not be recorded at all. Whether that
+        is survivable depends entirely on the direction: a failed DROP leaves a
+        pointer the read path verifies away anyway, a failed ADD loses one
+        outright — see :meth:`_index_add`."""
+
         path = self._index_path(chat_session_id)
         if not entries:
             try:
                 path.unlink(missing_ok=True)
             except OSError:
-                pass
-            return
+                return False
+            return True
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_json(
@@ -697,7 +713,8 @@ class PersonaChatClarifyTicketStore:
                 },
             )
         except OSError:
-            pass
+            return False
+        return True
 
     def _rebuild_index(self) -> bool:
         """Rebuild every per-session index from the ticket files. Idempotent.
@@ -721,13 +738,31 @@ class PersonaChatClarifyTicketStore:
         try:
             self._index_dir().mkdir(parents=True, exist_ok=True)
             for root, entries in by_session.items():
-                entries.sort(key=lambda item: item["created_at"], reverse=True)
+                # UNION with what is already recorded, never a replacement. The
+                # scan above is a SNAPSHOT, and a mint that lands after it but
+                # before this write would otherwise have its pointer overwritten
+                # by the pre-mint view — and lost for good, because the marker
+                # written below then stops any later rebuild from recovering it.
+                # That is not merely a miss: the lookup goes on answering with an
+                # OLDER open ticket that the pre-index glob would never have
+                # returned, so the tokenless settlement closes the wrong
+                # question. A union can only ever ADD a pointer, and one the
+                # ticket files do not back is dropped on the read path like every
+                # other stale entry — the same verification that makes this
+                # index a cache and not an authority.
+                merged = {entry["clarify_token"]: entry for entry in entries}
+                for entry in self._index_entries(root):
+                    merged.setdefault(entry["clarify_token"], entry)
                 _atomic_json(
                     self._index_path(root),
                     {
                         "schema_version": 1,
                         "chat_session_id": root,
-                        "open_tokens": entries,
+                        "open_tokens": sorted(
+                            merged.values(),
+                            key=lambda item: item["created_at"],
+                            reverse=True,
+                        ),
                     },
                 )
             _atomic_json(
@@ -750,18 +785,46 @@ class PersonaChatClarifyTicketStore:
             return False
         return self._rebuild_index()
 
+    def _invalidate_index(self) -> None:
+        """Retract the completeness claim, forcing ONE rebuild on the next read.
+
+        The marker is the whole reason "no index file for this session" may be
+        read as "no open tickets". Anything that leaves that claim false has to
+        take the claim back, or the index goes on answering a question it can no
+        longer answer."""
+
+        try:
+            self._index_state_path().unlink(missing_ok=True)
+        except OSError:  # pragma: no cover - defensive; the ticket is what matters
+            pass
+
     def _index_add(self, chat_session_id: str, token: str, created_at: float) -> None:
         entries = self._index_entries(chat_session_id)
         if any(entry["clarify_token"] == token for entry in entries):
             return
         entries.append({"clarify_token": token, "created_at": float(created_at)})
         entries.sort(key=lambda item: item["created_at"], reverse=True)
-        self._write_index(chat_session_id, entries)
+        if not self._write_index(chat_session_id, entries):
+            # A SWALLOWED ADD IS A SILENT PERMANENT MISS. The ticket is on disk
+            # and open, the marker still swears the index is complete, so the
+            # tokenless settlement never looks for it again and nothing ever
+            # rebuilds — and the loss lands squarely on the one number the
+            # adoption readout exists to report. A transient replace failure is
+            # not exotic on Windows (an AV or indexer holding the target is the
+            # ordinary case), so this cannot be reasoned away as crash-only.
+            # Retracting the marker turns it into ONE extra rebuild on the next
+            # lookup, which re-derives the pointer from the ticket file that IS
+            # there. The marker exists so the scan is not paid ROUTINELY, not so
+            # it is never paid at all.
+            self._invalidate_index()
 
     def _index_drop(self, chat_session_id: str, token: str) -> None:
         entries = self._index_entries(chat_session_id)
         remaining = [entry for entry in entries if entry["clarify_token"] != token]
         if len(remaining) != len(entries):
+            # A failed drop is survivable and deliberately NOT invalidating: the
+            # entry it left behind names a settled ticket, which the read path
+            # re-verifies and discards. Only a lost ADD costs a ticket.
             self._write_index(chat_session_id, remaining)
 
     @staticmethod

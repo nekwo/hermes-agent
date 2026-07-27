@@ -394,7 +394,14 @@ def test_no_guard_hand_spells_the_module_sniff_any_more():
 
     A grep gate rather than a behavior assertion, because the defect this
     retires is a QUESTION ASKED IN FOUR PLACES — a fifth hand-spelling would
-    pass every behavioral test in this file and still be the bug."""
+    pass every behavioral test in this file and still be the bug.
+
+    Scanned RECURSIVELY over the whole fork boundary, not just the three
+    directories the four original guards happened to sit in. A gate that only
+    looks where the bug already was is a gate the next instance walks around:
+    `session_db` is handled in `hermes_cli/` modules outside `harness.py` and in
+    `tools/` too, and a sniff spelled one directory deeper than a non-recursive
+    glob is exactly as wrong and exactly as invisible."""
 
     from pathlib import Path
 
@@ -404,12 +411,9 @@ def test_no_guard_hand_spells_the_module_sniff_any_more():
     predicate_home = repo_root / "agent_runtime" / "chat_session_scope.py"
     offenders = [
         f"{path.relative_to(repo_root).as_posix()}:{number}"
-        for path in [
-            repo_root / "hermes_cli" / "harness.py",
-            *(repo_root / "hermes_cli" / "harness_parts").glob("*.py"),
-            *(repo_root / "agent_runtime").glob("*.py"),
-        ]
-        if path != predicate_home
+        for directory in ("agent_runtime", "hermes_cli", "tools")
+        for path in sorted((repo_root / directory).rglob("*.py"))
+        if path != predicate_home and "__pycache__" not in path.parts
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
         if "__module__" in line and "hermes_state" in line
     ]
