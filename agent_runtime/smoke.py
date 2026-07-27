@@ -98,11 +98,11 @@ def _configured_root_report() -> str:
 def _temp_root_deprecation(temp_root: bool) -> dict | None:
     """A typed note when a caller asked for the pre-Q5 configured-root mode.
 
-    The CLI still parses ``--temp-root`` (its registration lives outside this
-    fork's edit boundary — see
-    ``docs/agent-runtime-harness/env-determinism-audit.md`` Q5), so the handler
-    is where the ruling is enforced. Ignoring a flag SILENTLY would be its own
-    small lie, so the payload says what happened.
+    The CLI stopped parsing ``--temp-root`` on 2026-07-27 (audit §7.3), so no
+    ``harness smoke`` invocation can reach this branch any more. It stays for
+    PROGRAMMATIC callers of :func:`run_smoke`, which is where the ruling has to
+    be enforced regardless of what any front end offers. Ignoring the request
+    SILENTLY would be its own small lie, so the payload says what happened.
     """
 
     if temp_root:

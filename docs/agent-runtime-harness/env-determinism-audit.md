@@ -558,13 +558,12 @@ exact. None of them gates the wave-4 fixes — they close residuals.
 |---|---|---|
 | 7.1 `tools/terminal_tool.py` receipt delegation | **APPLIED** — operator-approved, wave 5 | 2026-07-27 |
 | 7.2 `tools/skills_sync.py` call-time accessors | **APPLIED** — operator-approved, wave 5 | 2026-07-27 |
-| 7.3 `smoke --temp-root` retirement | still owed (not approved in wave 5) | — |
+| 7.3 `smoke --temp-root` retirement | **APPLIED** — operator-approved, wave 6 (one prose instruction refused, see §7.3) | 2026-07-27 |
 
-The diffs are kept verbatim below as the record of what was applied — and, for
-7.3, of what is still owed. Each applied section carries an **Applied** note
-naming the guard that now watches the NEW shape: those guards were inverted in
-the same change, so a silent revert fails a test instead of quietly rotting this
-doc back into a lie.
+The diffs are kept verbatim below as the record of what was applied. Each
+applied section carries an **Applied** note naming the guard that now watches
+the NEW shape: those guards were inverted in the same change, so a silent revert
+fails a test instead of quietly rotting this doc back into a lie.
 
 ### 7.1 `tools/terminal_tool.py::_log_harness_blocked_attempt` → delegate (Q3)
 
@@ -676,10 +675,30 @@ the one it exists to stop. The comment at that site now says so.
 
 ### 7.3 the `smoke` subparser → retire the `--temp-root` flag (Q5)
 
-**Still owed** — deliberately NOT applied in wave 5 (only 7.1 and 7.2 were
-approved). The reasoning below still holds: `hermes_cli/harness.py` and
-`harness_parts/runtime_commands.py` remain under concurrent refactor, and the
-behavior is already correct without the diff.
+**Applied 2026-07-27** (wave 6). Both literal hunks below are in. Guards:
+`tests/hermes_cli/test_harness_cli.py::test_the_smoke_subparser_no_longer_registers_temp_root`
+(the flag is gone from the parser AND `--temp-root` is now a parse error) and
+the existing `::test_harness_parser_exposes_smoke`, which moved off the flag.
+`run_smoke`'s `temp_root=` parameter was deliberately **kept**: it is still the
+seam six Q5 tests drive directly (`test_env_determinism_audit.py` §"a smoke run
+is synthetic, always"), and the CLI no longer being able to set it is exactly
+the point — the handler keeps enforcing the ruling for any programmatic caller
+that still passes `temp_root=False`.
+
+**One prose instruction below was REFUSED, and it was wrong, not merely
+risky.** The paragraph after the diffs says `hermes_cli/harness.py`'s
+`import os` "became unused … Remove it with this diff." It is not unused.
+`harness._load_command_parts()` `exec`s `harness_parts/*.py` into harness.py's
+**own globals**, so those files carry no import block and every name they use
+must be imported by harness.py — and two of them read `os`
+(`persona_commands._persona_chat_fault_injection`, and `runtime_commands`'s
+`HERMES_HOME` report row). Grepping harness.py's own source says "unused",
+which is how the audit reached that conclusion; deleting the import raises
+`NameError` on a **live chat turn** and on nothing a test run would notice.
+Guard: `tests/agent_runtime/test_env_determinism_audit.py::test_the_harness_keeps_the_import_its_execd_command_parts_depend_on`
+— it asserts the import survives *and* that the exec'd parts still read it, so
+the day they genuinely stop, the guard says so instead of silently permitting a
+removal that was only ever accidentally safe.
 
 In `hermes_cli/harness.py`, where the `smoke` subparser is built:
 
@@ -695,15 +714,16 @@ In `hermes_cli/harness.py`, where the `smoke` subparser is built:
 +    data = run_smoke(no_model=args.no_model)
 ```
 
-While in that file: `hermes_cli/harness.py`'s `import os` became unused when the
-Q6 seeder was removed from `_cmd_goal_run` (it was that module's only `os`
-reference). It was deliberately left in place — the import block is the highest
--collision region of a file under concurrent refactor, and a dead import is a
-cheaper debt than a lost race. Remove it with this diff.
+~~While in that file: `hermes_cli/harness.py`'s `import os` became unused when
+the Q6 seeder was removed from `_cmd_goal_run` (it was that module's only `os`
+reference)… Remove it with this diff.~~ **Struck 2026-07-27 — see the refusal
+note at the top of this section. `import os` is load-bearing for the exec'd
+command parts; it stays.**
 
 None of this was landed in wave 4 because both files were under concurrent
 structural refactor by a parallel agent, and a two-file signature change is
-exactly the kind of edit that loses a race. The behavior is already correct
-without it: the fork-owned handler ignores the flag and emits the typed
-`smoke_runtime_root_always_temp` deprecation, so this diff is cleanup, not a
-fix. `run_smoke`'s `temp_root=` parameter can go with it.
+exactly the kind of edit that loses a race. The behavior was already correct
+without it: the fork-owned handler ignored the flag and emitted the typed
+`smoke_runtime_root_always_temp` deprecation, so this was cleanup, not a fix —
+which is why `run_smoke`'s `temp_root=` parameter did **not** go with it (it is
+the seam the Q5 tests drive, and the ruling still needs enforcing there).

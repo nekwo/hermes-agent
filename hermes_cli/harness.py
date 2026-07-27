@@ -1542,7 +1542,6 @@ def build_parser(parent_subparsers) -> None:
 
     smoke = subs.add_parser("smoke", help="Run a safe Mission Control smoke goal")
     smoke.add_argument("--json", action="store_true")
-    smoke.add_argument("--temp-root", action="store_true", default=False)
     smoke.add_argument("--no-model", action="store_true", default=False)
     smoke.set_defaults(func=_cmd_smoke)
 

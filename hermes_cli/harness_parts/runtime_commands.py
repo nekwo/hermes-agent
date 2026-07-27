@@ -1029,7 +1029,7 @@ def _cmd_agents(args) -> int:
 
 
 def _cmd_smoke(args) -> int:
-    data = run_smoke(temp_root=args.temp_root, no_model=args.no_model)
+    data = run_smoke(no_model=args.no_model)
     if args.json:
         print(emit_json(data))
     else:

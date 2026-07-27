@@ -507,9 +507,27 @@ def test_harness_parser_exposes_observe():
 
 
 def test_harness_parser_exposes_smoke():
-    args = parser().parse_args(["harness", "smoke", "--json", "--temp-root", "--no-model"])
+    args = parser().parse_args(["harness", "smoke", "--json", "--no-model"])
     assert args.command == "harness" and args.harness_command == "smoke"
-    assert args.temp_root is True and args.no_model is True
+    assert args.no_model is True
+
+
+def test_the_smoke_subparser_no_longer_registers_temp_root():
+    """env-determinism audit §7.3, applied 2026-07-27 (inverted guard).
+
+    A smoke run is synthetic and ALWAYS uses a temp runtime root, so the flag
+    could only ever be ignored — and an ignored flag that still parses is a
+    documented lie an operator has to discover. It is gone from the parser, and
+    the handler no longer reads it. This guard is the §7.1/§7.2 convention: it
+    watches the NEW shape, so a silent revert fails a test instead of quietly
+    rotting the audit doc back into a claim nobody checks.
+    """
+
+    import pytest
+
+    assert not hasattr(parser().parse_args(["harness", "smoke", "--json"]), "temp_root")
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "smoke", "--temp-root"])
 
 
 def test_harness_incident_close_closes_incident_with_reason(tmp_path, monkeypatch, capsys):

@@ -637,3 +637,47 @@ def test_the_fork_side_never_reads_the_frozen_constants() -> None:
         "docs/agent-runtime-harness/env-determinism-audit.md §3. Offenders: "
         + ", ".join(offenders)
     )
+
+
+# ── audit §7.3: the retired --temp-root flag, and the import it did NOT free ──
+#
+# §7.3 landed 2026-07-27. Its two literal hunks (drop the subparser
+# registration, drop the argument at the call site) are guarded next door in
+# tests/hermes_cli/test_harness_cli.py. The doc's third, PROSE instruction —
+# "harness.py's `import os` became unused, remove it with this diff" — was
+# WRONG and is deliberately NOT applied. This guard records why, because the
+# failure it prevents is invisible to every test run.
+
+
+def test_the_harness_keeps_the_import_its_execd_command_parts_depend_on() -> None:
+    """``import os`` in ``hermes_cli/harness.py`` is NOT dead.
+
+    ``harness._load_command_parts()`` ``exec``s ``harness_parts/*.py`` into
+    harness.py's OWN globals, so those files have no import block of their own —
+    every name they use must be imported by harness.py. Two of them use ``os``
+    (``persona_commands._persona_chat_fault_injection`` and
+    ``runtime_commands``'s ``HERMES_HOME`` report row). Grepping harness.py's
+    source alone says the import is unused, which is exactly what the audit doc
+    concluded; deleting it would raise ``NameError`` on a LIVE chat turn and on
+    nothing a test run would notice.
+    """
+
+    import ast
+
+    import hermes_cli.harness as harness
+
+    assert hasattr(harness, "os"), "harness.py must keep `import os`"
+
+    parts_dir = Path(harness.__file__).with_name("harness_parts")
+    readers = sorted(
+        path.name
+        for path in parts_dir.glob("*.py")
+        if any(
+            isinstance(node, ast.Name) and node.id == "os"
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        )
+    )
+    assert "persona_commands.py" in readers and "runtime_commands.py" in readers, (
+        "the exec'd command parts stopped reading `os` — if that is intentional, "
+        "re-check harness.py's import instead of trusting the audit doc's prose"
+    )
