@@ -133,6 +133,7 @@ from agent_runtime.mission_chat_turns import (
     transition_mission_chat_turn,
 )
 from agent_runtime.persona_chat_continuity import (
+    CLARIFY_TICKET_TTL_SECONDS,
     PersonaChatBusyError,
     PersonaChatClarifyTicketStore,
     PersonaChatMintReceiptStore,
@@ -1410,6 +1411,19 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_resolve.add_argument("--action", choices=["abandon"], required=True)
     mission_chat_resolve.add_argument("--json", action="store_true")
     mission_chat_resolve.set_defaults(func=_cmd_mission_chat_turn_resolve)
+    # Read-only adoption readout for the clarify-token binding. Registered with
+    # the NON-mutating stage42 args on purpose: it never mints, settles, or
+    # sweeps, so it has no --dry-run to honor and nothing to confirm. Whether
+    # agents are echoing the token is answered from state the binding already
+    # records, with no new event kinds (telemetry is not the EventLog here).
+    mission_chat_clarify_tickets = mission_chat_subs.add_parser(
+        "clarify-tickets",
+        help="Clarify-token adoption readout: live tickets with state/age/session binding, and the bound_via histogram",
+    )
+    _add_stage42_global_args(mission_chat_clarify_tickets)
+    mission_chat_clarify_tickets.add_argument("--session-id", default=None, help="Only list tickets bound to this chat root (counts still cover the whole store)")
+    mission_chat_clarify_tickets.add_argument("--state", default=None, choices=["open", "answered", "rebound"], help="Only list tickets in this lifecycle state (counts still cover the whole store)")
+    mission_chat_clarify_tickets.set_defaults(func=_cmd_mission_chat_clarify_tickets)
 
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")

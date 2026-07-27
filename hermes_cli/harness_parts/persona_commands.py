@@ -3012,6 +3012,124 @@ def _cmd_mission_chat_queue_skill(args) -> int:
     return 0
 
 
+#: The three ways a clarify question's answer can have reached its thread, plus
+#: the bucket for a question that has not been answered at all. ORDERED, because
+#: the histogram is read as a ladder: `clarify_token` is the runtime owning the
+#: binding, `session_id` is a caller that complied with the prompt, `none` is the
+#: bug still happening, and `unsettled` is a question nobody answered yet.
+CLARIFY_BOUND_VIA_BUCKETS = ("clarify_token", "session_id", "none", "unsettled")
+
+
+def _clarify_ticket_row(record: dict, *, now: float, ttl_seconds: float) -> dict:
+    created_at = float(record.get("created_at") or 0.0)
+    answered_at = record.get("answered_at")
+    return {
+        # The token is a LOOKUP KEY validated against a stored record, never a
+        # capability secret (see PersonaChatClarifyTicketStore), so printing it
+        # is what makes this readout actionable: an operator can hand a stuck
+        # agent the token its answer should have carried.
+        "id": safe_assignment_text(record.get("clarify_token"), limit=240) or None,
+        "state": str(record.get("state") or "") or None,
+        "bound_via": record.get("bound_via") or None,
+        "age_seconds": round(max(now - created_at, 0.0), 3) if created_at else None,
+        # Orthogonal to state, and deliberately so: TTL governs GC only, so an
+        # expired ticket is one the sweep MAY prune — it still binds until the
+        # file is actually gone. Reporting it as a state would claim a cliff the
+        # store does not have.
+        "expired": bool(created_at and (now - created_at) > ttl_seconds),
+        "chat_session_id": safe_assignment_text(record.get("chat_session_id"), limit=240)
+        or None,
+        "persona_id": record.get("persona_id") or None,
+        "persona_instance_id": record.get("persona_instance_id") or None,
+        "asked_by_client_message_id": record.get("asked_by_client_message_id") or None,
+        "answered_by_client_message_id": record.get("answered_by_client_message_id") or None,
+        "requested_by_session": record.get("requested_by_session") or None,
+        "answered_age_seconds": (
+            round(max(now - float(answered_at), 0.0), 3) if answered_at else None
+        ),
+    }
+
+
+def _cmd_mission_chat_clarify_tickets(args) -> int:
+    """Read-only adoption readout for the clarify-token binding.
+
+    The design's rollout step: watch echo adoption climb, WITHOUT new event
+    kinds (telemetry is not the EventLog here). Everything below is read from
+    state the binding already records — the per-turn ``clarify_binding.bound_via``
+    is mirrored onto the ticket at settle, so the ticket files alone answer it.
+
+    ``bound_via: "none"`` is the number that matters. It counts questions whose
+    answer landed in a thread the caller neither named nor bound — the original
+    defect, still happening. ``clarify_token`` climbing against it is the whole
+    point of the feature; ``unsettled`` is a question nobody has answered yet and
+    is not evidence either way.
+
+    Strictly read-only: no mint, no settle, and NO SWEEP. A readout that pruned
+    would silently change the very population it is reporting on, and an operator
+    checking adoption twice would get two different denominators."""
+
+    store = PersonaChatClarifyTicketStore()
+    now = time.time()
+    ttl_seconds = float(CLARIFY_TICKET_TTL_SECONDS)
+    try:
+        records = store.list_tickets()
+    except OSError:
+        records = []
+    wanted_session = safe_assignment_text(getattr(args, "session_id", None), limit=240)
+    wanted_state = safe_assignment_token(getattr(args, "state", None))
+    rows = [_clarify_ticket_row(record, now=now, ttl_seconds=ttl_seconds) for record in records]
+
+    # Counts are computed over the WHOLE store, before --session-id/--state/
+    # --limit narrow the listing. A filtered view is a lens on the population,
+    # not a redefinition of it: an adoption ratio that moved because the operator
+    # asked to see fewer rows would be a lying metric.
+    states: dict[str, int] = {}
+    bound_via: dict[str, int] = {bucket: 0 for bucket in CLARIFY_BOUND_VIA_BUCKETS}
+    expired = 0
+    for row in rows:
+        states[str(row["state"] or "unknown")] = states.get(str(row["state"] or "unknown"), 0) + 1
+        bucket = str(row["bound_via"] or "unsettled")
+        bound_via[bucket] = bound_via.get(bucket, 0) + 1
+        if row["expired"]:
+            expired += 1
+
+    listed = rows
+    if wanted_session:
+        listed = [row for row in listed if row["chat_session_id"] == wanted_session]
+    if wanted_state:
+        listed = [row for row in listed if row["state"] == wanted_state]
+    listed = _sort_rows(listed, getattr(args, "sort", None))
+    limit = getattr(args, "limit", None)
+    truncated = False
+    if limit is not None and limit >= 0 and len(listed) > limit:
+        listed = listed[:limit]
+        truncated = True
+
+    data = _list_envelope("clarify_ticket", listed, cursor=None, truncated=truncated)
+    data.update(
+        {
+            "ok": True,
+            "capability_id": "mission.chat.clarify_tickets",
+            # The gate's CURRENT setting, which is not the same question as
+            # whether the tickets below were minted under it: turning the gate
+            # off stops minting but leaves the store readable, and those tickets
+            # are exactly what an operator wants to see after a rollback.
+            "binding_enabled": bool(mission_chat_clarify_token_binding()),
+            "ttl_seconds": ttl_seconds,
+            "total": len(rows),
+            "states": states,
+            "bound_via": bound_via,
+            "expired": expired,
+            "next_expected": (
+                "watch bound_via.none — every one of those is a clarify answer that "
+                "opened a fresh thread instead of returning to the question"
+            ),
+        }
+    )
+    _print_stage42(data, args=args, default_output="json")
+    return 0
+
+
 def _cmd_mission_chat_turn_resolve(args) -> int:
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=240)
     client_message_id = safe_assignment_text(
