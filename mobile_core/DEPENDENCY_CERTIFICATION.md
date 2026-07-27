@@ -4,7 +4,7 @@
 closure contains no native extension, provider SDK, dynamic installer, desktop
 runtime, or forbidden process/tool module. The built core wheel is
 `hermes_mobile_core-0.1.0-py3-none-any.whl` (`Root-Is-Purelib: true`) and is
-37,424 bytes.
+approximately 37.4 KB (compressed ZIP size varies slightly with build timestamps).
 
 Certification baseline: Hermes checkout
 `d994dbf5be9e9b159062914f72f5c55040674c13`; the newest commit affecting the
