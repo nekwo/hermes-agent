@@ -393,3 +393,81 @@ def test_orphan_sweep_without_orphans_appends_no_event(isolate_agent_runtime_roo
 
     assert repair_orphaned_chat_turns() == []
     assert EventLog().tail(1) == []
+
+
+# ── a mint for a target that can never be served writes nothing ─────────────
+
+
+def _retired_placement(store: PersonaInstanceStore) -> tuple[PersonaInstance, dict]:
+    placement = store.add_instance(
+        persona_id="dev", placement_id="dev_agent_2", display_name="Dev (2)"
+    )
+    return placement, store.retire(placement.id, reason="placement deleted")
+
+
+def test_mint_refuses_a_retired_target_before_its_first_durable_write(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The litter bug at its source.
+
+    ``mint`` bound the instance LAST — reserve receipt, create session, write
+    meta, write title, then ``open_chat``. For a retired placement that final
+    bind is a refusal, so the lane always ran to completion first and left a
+    titled thread in Mission Control for a dispatch that could never be served.
+    The refusal is decidable from the store before any of it, so it is."""
+
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+    from agent_runtime.persona_chat_history import PERSONA_CHAT_SESSION_SOURCE
+
+    db = SessionDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    placement, archived = _retired_placement(store)
+
+    with pytest.raises(RetiredPersonaInstanceError) as excinfo:
+        PersonaChatMintReceiptStore().mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id=placement.id,
+            idempotency_key="dispatch-to-a-retired-placement",
+            title="triage the flaky login test",
+        )
+
+    assert excinfo.value.code == "retired_persona_instance"
+    assert excinfo.value.persona_instance_id == placement.id
+    assert str(excinfo.value.archive_path) == archived["archive_path"]
+    # Nothing durable survives the refusal: no session row, and not even the
+    # receipt directory the reserve step would have created.
+    assert db.list_sessions_rich(source=PERSONA_CHAT_SESSION_SOURCE, limit=50) == []
+    assert not (paths.store_root() / "persona_chat_mint_receipts").exists()
+    # And the tombstone is still a tombstone — the refusal never revives the row.
+    assert placement.id not in {row.id for row in store.list_all()}
+
+
+def test_mint_for_a_live_target_is_untouched_by_the_retirement_precondition(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The precondition must not answer "retired" for a first-ever instance.
+
+    A brand-new instance has no live row either — retirement is that absence
+    PLUS a tombstone — so a predicate that keyed on absence alone would refuse
+    every first mint in the product."""
+
+    db = SessionDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    _retired_placement(store)  # a tombstone exists, for a DIFFERENT id
+
+    receipt = PersonaChatMintReceiptStore().mint(
+        instance_store=store,
+        session_db=db,
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="first-ever",
+        title="Dev chat",
+    )
+
+    root = receipt["root_chat_session_id"]
+    assert receipt["state"] == "completed"
+    assert db.get_session(root) is not None
+    assert store.get("personainst_dev").default_chat_session_id == root

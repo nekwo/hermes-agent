@@ -1063,16 +1063,36 @@ def _chat_busy_payload(exc: ChatBusyError) -> dict[str, object]:
 def _retired_persona_instance_payload(
     exc: RetiredPersonaInstanceError,
 ) -> dict[str, object]:
+    return _retired_persona_instance_refusal(
+        persona_instance_id=exc.persona_instance_id,
+        archive_path=exc.archive_path,
+        error_kind=exc.code,
+    )
+
+
+def _retired_persona_instance_refusal(
+    *,
+    persona_instance_id: str,
+    archive_path: object,
+    error_kind: str = "retired_persona_instance",
+) -> dict[str, object]:
+    """ONE retired-target refusal body, whether or not an exception carried it.
+
+    A pre-flight that refuses BEFORE the write lane has no exception to render,
+    but the caller must not be able to tell the difference: same ``error_kind``,
+    same fields, same ``next_expected``. Two spellings of this payload would be
+    two contracts."""
+
     return {
         "ok": False,
         "execution_state": "refused",
-        "error_kind": exc.code,
+        "error_kind": error_kind,
         "error": (
-            f"persona instance {exc.persona_instance_id} was retired with its "
+            f"persona instance {persona_instance_id} was retired with its "
             "placement and cannot be reopened as a live agent"
         ),
-        "persona_instance_id": exc.persona_instance_id,
-        "archive_path": str(exc.archive_path),
+        "persona_instance_id": persona_instance_id,
+        "archive_path": str(archive_path),
         "history_preserved": True,
         "next_expected": (
             "view the preserved chat history read-only, or create a fresh "
@@ -1603,8 +1623,19 @@ def _cmd_mission_chat_message(args) -> int:
             # ordering them here costs nothing; their original, session-bearing
             # sites below stay put as defense in depth for the explicit-session
             # lane (which never mints).
+            #
+            # A RETIRED target is the same defect one layer out: `open_chat`
+            # refuses it by raising, but the mint reaches `open_chat` only after
+            # creating and titling the row, so the refusal landed one durable
+            # thread too late — and outside the typed handler below, so it also
+            # escaped as a traceback. It needs the store rather than `args`, so
+            # it is its own read-only pre-flight, evaluated through the same gate.
             premint_refusal = _mission_chat_caller_refusal(
                 args,
+                persona_id=normalized_persona,
+                persona_instance_id=persona_instance_id,
+            ) or _mission_chat_retired_target_refusal(
+                instance_store,
                 persona_id=normalized_persona,
                 persona_instance_id=persona_instance_id,
             )
@@ -1635,21 +1666,36 @@ def _cmd_mission_chat_message(args) -> int:
                     or derive_dispatch_title(getattr(args, "message", None))
                     or persona_thread_title
                 )
-            receipt = PersonaChatMintReceiptStore().mint(
-                instance_store=instance_store,
-                session_db=session_db,
-                persona_id=normalized_persona,
-                persona_instance_id=persona_instance_id,
-                idempotency_key=(
-                    safe_assignment_text(getattr(args, "idempotency_key", None), limit=240)
-                    or f"send:{client_message_id}"
-                ),
-                title=mint_title,
-                dispatched_from={
-                    "predecessor_chat_session_id": existing_root,
-                    "requested_by_session": requested_by_session,
-                },
-            )
+            try:
+                receipt = PersonaChatMintReceiptStore().mint(
+                    instance_store=instance_store,
+                    session_db=session_db,
+                    persona_id=normalized_persona,
+                    persona_instance_id=persona_instance_id,
+                    idempotency_key=(
+                        safe_assignment_text(getattr(args, "idempotency_key", None), limit=240)
+                        or f"send:{client_message_id}"
+                    ),
+                    title=mint_title,
+                    dispatched_from={
+                        "predecessor_chat_session_id": existing_root,
+                        "requested_by_session": requested_by_session,
+                    },
+                )
+            except RetiredPersonaInstanceError as exc:
+                # The pre-flight above closes the practical window; this closes
+                # the race (a placement retired between the two) and any caller
+                # that reaches the mint by another road. The mint asserts the
+                # same precondition before its first durable write, so this
+                # arrives with nothing left behind — but it must arrive TYPED.
+                # An unhandled raise here was the untyped traceback the operator
+                # saw instead of a refusal.
+                data = _retired_persona_instance_payload(exc)
+                if getattr(args, "stream", False):
+                    _emit_chat_final(data)
+                else:
+                    print(emit_json(data) if args.json else data["error"])
+                return 2
             session_id = str(receipt["root_chat_session_id"])
             session_established = session_established_payload(
                 dispatch_decision,
@@ -4441,6 +4487,42 @@ def _mission_chat_caller_refusal(
             session_id=None,
         )
     return None
+
+
+def _mission_chat_retired_target_refusal(
+    instance_store: PersonaInstanceStore,
+    *,
+    persona_id: str,
+    persona_instance_id: str | None,
+) -> dict[str, object] | None:
+    """Refusal when the dispatch target's placement was RETIRED, or ``None``.
+
+    The sibling of :func:`_mission_chat_caller_refusal` for the one refusal that
+    is not a function of ``args``: it needs the store. Same reason for being
+    here rather than only at its original site — ``open_chat`` surfaces this
+    refusal by raising, but the mint below binds through ``open_chat`` only
+    AFTER creating and titling the session row, so a dispatch to a target that
+    can never be served used to leave a permanent empty thread behind (and
+    escape as an untyped traceback, because this call site's typed handler
+    wraps the LATER bind, not the mint).
+
+    Read-only: the store predicate never writes, and a store that cannot answer
+    returns ``None`` rather than fabricating a refusal — the mint lane and
+    ``open_chat`` both still refuse a retired target, so failing open here costs
+    the litter, never the guarantee."""
+
+    try:
+        archive_path = instance_store.retired_instance_archive_path(
+            persona_instance_id, persona_id=persona_id
+        )
+    except Exception:
+        return None
+    if archive_path is None:
+        return None
+    return _retired_persona_instance_refusal(
+        persona_instance_id=canonical_chat_instance_id(persona_id, persona_instance_id),
+        archive_path=archive_path,
+    )
 
 
 def _session_row(session_db, session_id: str | None) -> dict[str, object]:

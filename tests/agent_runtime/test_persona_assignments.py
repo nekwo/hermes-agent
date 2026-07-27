@@ -5130,6 +5130,36 @@ def test_retired_placement_cannot_be_resurrected_from_its_saved_chat(
     assert instance.id not in {row.id for row in store.list_all()}
 
 
+def test_retirement_is_answerable_read_only_before_anything_is_written(
+    isolate_agent_runtime_root,
+):
+    """``open_chat`` answers "is this target retired?" only by RAISING, which is
+    too late for a caller whose durable writes come first (the chat mint created
+    and titled a session row, then bound). The same rule — no live row PLUS a
+    ``*_retire`` tombstone — is available as a read-only predicate, and the rule
+    itself has exactly one home: ``open_chat`` asks the predicate too."""
+
+    store = PersonaInstanceStore()
+    live = _placement_instance(placement_id="dev_agent_3")
+    retired = _placement_instance(placement_id="dev_agent_2")
+    result = store.retire(retired.id, reason="placement deleted")
+
+    assert str(store.retired_instance_archive_path(retired.id)) == result["archive_path"]
+    # A live placement is never a tombstone, and neither is an id that never
+    # existed — retirement is absence PLUS a tombstone, not absence alone, or
+    # every first-ever mint in the product would refuse.
+    assert store.retired_instance_archive_path(live.id) is None
+    assert store.retired_instance_archive_path("personainst_never_placed") is None
+    assert store.retired_instance_archive_path(None) is None
+    # The predicate is READ-ONLY: asking must not resurrect, create, or evict.
+    assert {row.id for row in store.list_all()} == {live.id}
+    # ``persona_id`` resolves a caller-supplied id through the same derivation
+    # ``open_chat`` uses, so a drifted actor token gets the same answer.
+    assert str(
+        store.retired_instance_archive_path(f"persona_{retired.id}", persona_id="dev")
+    ) == result["archive_path"]
+
+
 def test_open_chat_cli_rejects_unpersisted_retired_root_at_cutoff(
     monkeypatch,
     capsys,

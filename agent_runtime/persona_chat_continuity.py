@@ -25,6 +25,7 @@ from . import paths
 from .dispatch_session_policy import superseded_session_id
 from .persona_assignments import (
     PersonaInstanceStore,
+    RetiredPersonaInstanceError,
     persona_chat_session_id_for,
     safe_assignment_text,
     safe_assignment_token,
@@ -423,6 +424,19 @@ class PersonaChatMintReceiptStore:
         key = safe_assignment_text(idempotency_key, limit=240)
         if not instance_id or not key:
             raise ValueError("persona_instance_id and idempotency_key are required")
+        # PRECONDITION, asserted before this lane's FIRST durable write. The
+        # ``open_chat`` bind at the end of the lane refuses a retired placement
+        # by raising — but by then the receipt is reserved, the session row
+        # exists, and it is titled, so a dispatch to a target that could never
+        # be served left a permanent thread in Mission Control. The refusal is
+        # decidable from the store alone, so decide it here and leave nothing
+        # behind. Same typed error callers already handle from ``open_chat``,
+        # same single retirement predicate; only the litter is gone.
+        retired_archive = instance_store.retired_instance_archive_path(
+            instance_id, persona_id=persona_id
+        )
+        if retired_archive is not None:
+            raise RetiredPersonaInstanceError(instance_id, archive_path=retired_archive)
         path = self._path(instance_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_suffix(".lock")

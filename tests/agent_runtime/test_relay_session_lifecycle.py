@@ -1358,3 +1358,125 @@ def test_the_durable_thread_keeps_its_persona_title(
     title = db.get_session_title(opened["session_id"])
     assert title.endswith(" chat"), title  # "<display name> chat", the durable name
     assert title not in ("Operator message", "hello there")
+
+
+# ── dispatching at a retired placement ──────────────────────────────────────
+
+
+def _retire_a_placement(placement_id: str = "dev_agent_2") -> tuple[str, str]:
+    """A retired ``dev`` placement: the id, and its archive path."""
+
+    store = PersonaInstanceStore()
+    placement = store.add_instance(
+        persona_id="dev", placement_id=placement_id, display_name="Dev (2)"
+    )
+    archived = store.retire(placement.id, reason="placement deleted")
+    return placement.id, archived["archive_path"]
+
+
+def _mint_receipt_files() -> list[Path]:
+    from agent_runtime import paths
+
+    receipts = paths.store_root() / "persona_chat_mint_receipts"
+    return sorted(receipts.glob("*.json")) if receipts.exists() else []
+
+
+def test_a_dispatch_to_a_retired_placement_mints_nothing(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # A retired placement is an end-of-life tombstone: `open_chat` refuses to
+    # bind it. But the mint reaches `open_chat` LAST — after reserving the
+    # receipt, creating the session row and titling it — so every dispatch at a
+    # corpse left a titled thread in Mission Control, and the refusal arrived
+    # from outside this call site's typed handler, i.e. as a traceback.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+    retired_id, archive_path = _retire_a_placement()
+
+    refusal = _refused(
+        capsys,
+        _dispatch_args(
+            "triage the flaky login test",
+            "cm-retired-1",
+            persona_instance_id=retired_id,
+        ),
+    )
+
+    assert refusal["error_kind"] == "retired_persona_instance"
+    assert refusal["execution_state"] == "refused"
+    assert refusal["persona_instance_id"] == retired_id
+    assert refusal["archive_path"] == archive_path
+    assert refusal["history_preserved"] is True
+    # (a) no session row, (b) no mint receipt, (c) no default-thread pointer.
+    assert db.sessions == {}, "a dispatch at a retired placement must not create a thread"
+    assert _mint_receipt_files() == []
+    store = PersonaInstanceStore()
+    assert (
+        resolve_default_chat_session_id_for_instance(
+            store, persona_id="dev", persona_instance_id=retired_id
+        )
+        is None
+    )
+    # …and the refusal never revived the tombstoned row into the live roster.
+    assert retired_id not in {row.id for row in store.list_all()}
+
+
+def test_a_dispatch_to_a_retired_placement_leaves_live_threads_alone(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # The repoint half: a live sibling's established thread must survive a
+    # refused dispatch at the corpse untouched — pointer and all.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+    retired_id, _ = _retire_a_placement()
+
+    established = _send(capsys, _dispatch_args("task one", "cm-retired-live-1"))
+    receipts_before = _mint_receipt_files()
+
+    _refused(
+        capsys,
+        _dispatch_args("task two", "cm-retired-live-2", persona_instance_id=retired_id),
+    )
+
+    assert _dev_chat_sessions(db) == [established["session_id"]]
+    assert list(db.sessions) == [established["session_id"]]
+    assert _mint_receipt_files() == receipts_before
+    assert resolve_default_chat_session_id_for_instance(
+        PersonaInstanceStore(), persona_id="dev"
+    ) == established["session_id"]
+
+
+def test_a_streamed_dispatch_to_a_retired_placement_refuses_the_same_way(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # The serve/stream lane must not be the one that still tracebacks: the
+    # refusal is one `chat.final` frame carrying the same typed payload.
+    import json as _json
+
+    from hermes_cli import harness
+
+    db = _install_dispatch_handler_doubles(monkeypatch)
+    retired_id, archive_path = _retire_a_placement()
+
+    code = harness._cmd_mission_chat_message(
+        _dispatch_args(
+            "triage the flaky login test",
+            "cm-retired-stream",
+            persona_instance_id=retired_id,
+            stream=True,
+            json=False,
+        )
+    )
+
+    frames = [
+        _json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip()
+    ]
+    assert code == 2
+    assert [frame["type"] for frame in frames] == ["chat.final"]
+    final = frames[0]
+    assert final["ok"] is False
+    assert final["error_kind"] == "retired_persona_instance"
+    assert final["persona_instance_id"] == retired_id
+    assert final["archive_path"] == archive_path
+    assert db.sessions == {}
+    assert _mint_receipt_files() == []

@@ -1531,6 +1531,49 @@ class PersonaInstanceStore:
         self._write(instance)
         return self.get(instance.id)
 
+    def retired_instance_archive_path(
+        self,
+        persona_instance_id: str | None,
+        *,
+        persona_id: str | None = None,
+    ) -> Path | None:
+        """The retirement tombstone for *persona_instance_id*, or ``None``.
+
+        THE read-only retirement predicate. Retirement is not a flag on a row —
+        it is the ABSENCE of a live row PLUS the presence of a ``*_retire``
+        archive — so every caller that needs the answer has to compose those two
+        facts. Composing them inline at each site is how a second, subtly
+        different retirement rule gets born (one that reads a reconcile/prune
+        archive as a tombstone, say, and makes a legitimate future mint
+        impossible), so the composition lives here and :meth:`open_chat` — the
+        write chokepoint that refuses a retired placement — asks this same
+        method instead of re-deriving it.
+
+        It exists because ``open_chat`` answers the question only by RAISING,
+        and by then a caller like ``PersonaChatMintReceiptStore.mint`` has
+        already created a titled session row. A refusal decidable without
+        writing anything must be decidable WITHOUT writing anything.
+
+        Never creates, mutates, or resurrects a row. Pass ``persona_id`` to
+        resolve a caller-supplied (or omitted) instance id through the same
+        :func:`canonical_chat_instance_id` derivation ``open_chat`` uses;
+        without it the id is taken as already canonical.
+        """
+        instance_id = (
+            canonical_chat_instance_id(persona_id, persona_instance_id)
+            if persona_id
+            else safe_assignment_token(persona_instance_id)
+        )
+        if not instance_id:
+            return None
+        try:
+            self.get(instance_id)
+        except Exception:
+            return _retired_persona_instance_archive_path(instance_id)
+        # A live row always wins: the archive is history, and an id carried by a
+        # live placement is live — never a tombstone.
+        return None
+
     def open_chat(
         self,
         *,
@@ -1594,7 +1637,8 @@ class PersonaInstanceStore:
         try:
             instance = self.get(instance_id)
         except Exception:
-            retired_archive = _retired_persona_instance_archive_path(instance_id)
+            # One retirement rule, asked here and by every pre-flight caller.
+            retired_archive = self.retired_instance_archive_path(instance_id)
             if retired_archive is not None:
                 raise RetiredPersonaInstanceError(
                     instance_id,
