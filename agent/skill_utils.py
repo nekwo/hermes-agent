@@ -850,8 +850,14 @@ def skill_frontmatter_runtime_compatibility(
     frontmatter = frontmatter if isinstance(frontmatter, dict) else {}
     metadata = frontmatter.get("metadata") if isinstance(frontmatter, dict) else {}
     hermes = metadata.get("hermes") if isinstance(metadata, dict) else {}
-    surfaces = hermes.get("surfaces") if isinstance(hermes, dict) else None
-    modes = hermes.get("modes") if isinstance(hermes, dict) else None
+    if not isinstance(hermes, dict):
+        # A skill authored for another runtime (metadata present, hermes block
+        # absent or None) must degrade to defaults; this function runs for every
+        # skill in the shared root on every prompt-observability build, so one
+        # foreign manifest must not take down the whole lane.
+        hermes = {}
+    surfaces = hermes.get("surfaces")
+    modes = hermes.get("modes")
     if isinstance(surfaces, str):
         surfaces = [surfaces]
     elif not isinstance(surfaces, (list, tuple, set)):

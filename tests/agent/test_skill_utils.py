@@ -15,6 +15,7 @@ from agent.skill_utils import (
     resolve_skill_config_values,
     required_preload_skill_ids,
     resolve_skill,
+    skill_frontmatter_runtime_compatibility,
     skill_package_content_hash,
     skill_runtime_compatibility,
     skill_matches_platform,
@@ -64,6 +65,34 @@ def test_runtime_compatibility_rejects_root_only_skill_in_standard_chat(tmp_path
     assert skill_runtime_compatibility(
         candidate, surface="mission_chat", root_node_mode=False
     )["reason"] == "mode_not_supported"
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        # Claude-format skill: metadata dict present, no hermes block at all.
+        {"name": "foreign", "metadata": {"short-description": "x"}},
+        # Degenerate YAML: `hermes:` key present with a None value.
+        {"name": "foreign", "metadata": {"hermes": None}},
+        # hermes block is a non-dict scalar (malformed-YAML fallback shape).
+        {"name": "foreign", "metadata": {"hermes": "nope"}},
+    ],
+)
+def test_runtime_compatibility_tolerates_non_hermes_metadata(frontmatter):
+    """A skill without a usable metadata.hermes block degrades to defaults.
+
+    Regression pin for 2026-07-27: a Claude-format skill moved into the shared
+    skills root (metadata present, no hermes key) made
+    ``hermes.get("load_policy")`` raise AttributeError on None, which killed
+    every mission-chat turn via available_skills_context. One foreign manifest
+    must never take down the prompt-observability lane.
+    """
+
+    result = skill_frontmatter_runtime_compatibility(
+        frontmatter, surface="mission_chat"
+    )
+    assert result["compatible"] is True
+    assert result["load_policy"] == "explicit"
 
 
 def test_canonical_harness_skill_refuses_non_shared_source_and_duplicates(
