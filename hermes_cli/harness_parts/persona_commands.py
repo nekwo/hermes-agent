@@ -4131,33 +4131,37 @@ def _persona_chat_persistence_failed(
 
 def _default_persona_session_db():
     try:
-        from hermes_state import SessionDB
-        from hermes_constants import (
-            get_hermes_head_home,
-            get_hermes_home_override,
-            hermes_head_home_is_authoritative,
+        from hermes_constants import get_hermes_home_override
+
+        from agent_runtime.chat_session_scope import (
+            open_chat_session_db,
+            resolve_chat_session_scope,
         )
 
         # The persona-chat SessionDB is the OPERATOR-visible transcript store —
         # the exact DB ``persona_chat_history`` (the snapshot projection) reads.
         # Under an in-process persona profile override it must bind to the
-        # recorded outermost/operator home, never the active profile DB. The
-        # launcher also supplies an explicit HERMES_HEAD_HOME so changing its
-        # selected runtime profile cannot split one shared persona-instance
-        # pointer across multiple profile-local SessionDBs.
+        # operator home, never the active profile DB, or one shared
+        # persona-instance pointer splits across profile-local SessionDBs (the
+        # 2026-07-27 cockpit read-lane gap: bindings in the shared runtime root
+        # pointing at transcripts minted in ``profiles/alice/state.db``).
         #
-        # Fail closed ONLY when no head authority exists: with an override
-        # active and no recorded/configured head, get_hermes_head_home()
-        # degenerates to the override itself and the operator home is unknown.
-        # An authoritative head that happens to EQUAL the override is the
-        # legitimate same-DB case — a persona bound to the head profile (e.g.
-        # Neko on the seeded base profile) relaying in-process. The former
-        # path-equality check conflated the two and killed every relay such a
-        # persona sent (live 2026-07-23, chat_session_db_unavailable).
+        # Fail closed ONLY when NO authority resolved a head at all: with an
+        # override active and an AMBIENT scope, the "head" degenerates to the
+        # override itself and the operator home is unknown. An authoritative
+        # head that happens to EQUAL the override is the legitimate same-DB
+        # case — a persona bound to the head profile (e.g. Neko on the seeded
+        # base profile) relaying in-process. The former path-equality check
+        # conflated the two and killed every relay such a persona sent (live
+        # 2026-07-23, chat_session_db_unavailable).
+        scope = resolve_chat_session_scope()
         override = get_hermes_home_override()
-        if override is not None and not hermes_head_home_is_authoritative():
+        if override is not None and not scope.authoritative:
             raise PersonaChatPersistenceError("session_db_acquire")
-        return SessionDB(db_path=get_hermes_head_home() / "state.db")
+        db = open_chat_session_db(scope)
+        if db is None:
+            raise PersonaChatPersistenceError("session_db_acquire")
+        return db
     except PersonaChatPersistenceError:
         raise
     except Exception as exc:

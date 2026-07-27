@@ -716,17 +716,15 @@ def _get_session_row(db: Any, session_id: str) -> dict[str, Any] | None:
 
 
 def _default_session_db() -> Any | None:
-    try:
-        from hermes_constants import get_hermes_head_home
-        from hermes_state import SessionDB
+    # History pointers, on-demand message tails, open/send validation and
+    # transcript writes must all resolve the same operator-visible database.
+    # A Launcher-selected profile changes HERMES_HOME, but not the chat scope:
+    # ``chat_session_scope`` is the ONE place that decides which database that
+    # is (relay context > HERMES_HEAD_HOME > the shared runtime root's recorded
+    # head pointer > the degraded ambient home).
+    from .chat_session_scope import open_chat_session_db
 
-        # History pointers, on-demand message tails, open/send validation and
-        # transcript writes must all resolve the same operator-visible database.
-        # A Launcher-selected profile changes HERMES_HOME, but not the shared
-        # persona-instance authority rooted at HERMES_HEAD_HOME.
-        return SessionDB(db_path=get_hermes_head_home() / "state.db")
-    except Exception:
-        return None
+    return open_chat_session_db()
 
 
 def _mission_assignment_for(

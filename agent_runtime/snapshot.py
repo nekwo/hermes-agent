@@ -1672,13 +1672,11 @@ def write_snapshot(snapshot: dict | None = None) -> dict:
 
 
 def _default_persona_session_db():
-    try:
-        from hermes_constants import get_hermes_head_home
-        from hermes_state import SessionDB
+    # Same acquisition as the projection lane it feeds — see
+    # ``chat_session_scope`` for the resolution ladder.
+    from .chat_session_scope import open_chat_session_db
 
-        return SessionDB(db_path=get_hermes_head_home() / "state.db")
-    except Exception:
-        return None
+    return open_chat_session_db()
 
 
 def _archived_task_summaries(limit: int = 25) -> list[dict]:

@@ -217,9 +217,19 @@ def _runtime_state_fingerprint() -> tuple | None:
     # would serve stale turn elements.
     _stat_turn_store_tree(root, _stat)
     try:
-        from hermes_state import SessionDB
+        # Fingerprint the database the CHAT LANE actually writes, not the one
+        # ambient HERMES_HOME resolution happens to hand this process. A bare
+        # ``SessionDB()`` keyed the cache on ``HERMES_HOME/state.db`` while every
+        # chat write goes to the resolved chat scope; whenever the two diverge a
+        # cached snapshot could serve a frozen Chat History for the life of the
+        # serve process (defect D1 in
+        # ``docs/agent-runtime-harness/chat-session-presence-authority.md``,
+        # the serve twin of the stream-lane fix 639242901). Resolving the PATH
+        # also stops the poll loop from opening — and potentially creating — a
+        # database just to read its own filename.
+        from agent_runtime.chat_session_scope import chat_session_db_path
 
-        db_path = str(SessionDB().db_path)
+        db_path = str(chat_session_db_path())
         for suffix in ("", "-wal", "-journal"):
             _stat(db_path + suffix)
     except Exception:
@@ -472,6 +482,16 @@ def serve_loop(
         max_entries=persona_chat_cfg.max_hot_sessions,
         ttl_seconds=persona_chat_cfg.idle_ttl_seconds,
     )
+    # Publish this process's EXPLICIT chat head home into the shared runtime
+    # store root — the ONE writer of that pointer. The Launcher always starts
+    # serve with HERMES_HEAD_HOME; a plain CLI turn started later names no head
+    # and, without the pointer, degrades to its own profile database, minting
+    # the transcript where the cockpit never looks while writing the binding
+    # into the shared store (the 2026-07-27 read-lane gap). No-op when this
+    # process named no head of its own, and best effort by contract.
+    from agent_runtime.chat_session_scope import publish_chat_head_home
+
+    publish_chat_head_home()
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")
     read_cache = _ReadModelCache(read_cache_max_age)

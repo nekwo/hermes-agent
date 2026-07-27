@@ -537,9 +537,9 @@ def _scope_fingerprint() -> str:
             except OSError:
                 continue
     try:
-        from hermes_constants import get_hermes_head_home
+        from .chat_session_scope import chat_session_db_path
 
-        db_path = get_hermes_head_home() / "state.db"
+        db_path = chat_session_db_path()
         for suffix in ("", "-wal", "-journal"):
             candidate = db_path.with_name(db_path.name + suffix)
             try:

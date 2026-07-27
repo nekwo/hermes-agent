@@ -118,9 +118,23 @@ def return_summary_to_parent_session(
 
 
 def _session_db():
-    from hermes_state import SessionDB
+    """The OPERATOR-visible chat database — never the ambient ``HERMES_HOME`` one.
 
-    return SessionDB()
+    A child returning a distilled summary to its parent runs precisely under a
+    persona profile-home override, so a bare ``SessionDB()`` wrote the summary
+    into the CHILD's profile database (where the projection never reads it) and
+    minted a phantom parent-session row there. A phantom row is worse than a
+    missing one: a misrouted presence probe reading that database answers
+    "present" for a session the operator cannot see. (Defect D2 in
+    ``docs/agent-runtime-harness/chat-session-presence-authority.md``.)
+    """
+
+    from .chat_session_scope import open_chat_session_db
+
+    db = open_chat_session_db()
+    if db is None:
+        raise RuntimeError("chat session database unavailable")
+    return db
 
 
 def _bounded_refs(values: list[str]) -> list[str]:

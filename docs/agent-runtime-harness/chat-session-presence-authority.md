@@ -1,9 +1,65 @@
 # ONE chat-session presence authority — design (2026-07-26)
 
-Status: **decision-ready, not implemented.** Owner: fork
-(`agent_runtime/`, `hermes_cli/harness_parts/`, `hermes_state.py`).
+Status: **P1 SHIPPED 2026-07-27** (`agent_runtime/chat_session_scope.py`);
+P2–P6 remain as written. Owner: fork (`agent_runtime/`,
+`hermes_cli/harness_parts/`, `hermes_state.py`).
 Trigger: the 2026-07-25 binding massacre (below). Stopgap guard already
 shipped as `8c3942a21`; this document retires the class the guard patched.
+
+## What shipped in P1 — and the THIRD defect it had to fix
+
+The 2026-07-27 cockpit read-lane gap (Chat History listing six stale sessions
+and none of the day's CLI-lane sessions, confirmed twice live) is **not** D1 or
+D2. Under the Launcher's own environment
+(`mission_control_settings.dart`: `HERMES_HOME=<root>/profiles/<profile>`,
+`HERMES_HEAD_HOME=<root>/profiles/base`, default profile `base`) the two roots
+are the SAME path, so both latent defects were dormant exactly as this document
+predicted. The live defect is a third member of the class:
+
+**D3 — the persona-instance store collapses per-profile homes onto the shared
+runtime root; the chat SessionDB does not.** `resolution._default_hermes_root`
+maps `<root>/profiles/<x>` → `<root>`, so every profile shares ONE
+`persona_instances/` directory and therefore one `default_chat_session_id` per
+instance. `get_hermes_head_home()` performs no such collapse: with no head
+named it degrades to `get_hermes_home()`. Only the Launcher names a head, so a
+CLI-lane turn under a profile home minted its transcript into
+`<root>/profiles/<active>/state.db` while writing the binding into the SHARED
+store, and the cockpit — reading the head database — dropped the row as
+`session_not_in_db`. Live evidence: the three most recently updated bindings in
+`X:\Eternia\.hermes\agent-runtime` pointed at sessions present only in
+`profiles/alice/state.db`.
+
+Shipped:
+
+- **`agent_runtime/chat_session_scope.py`** — the single acquisition, with a
+  typed ladder (`ChatHeadSource.RELAY_CONTEXT` > `ENV_HEAD_HOME` >
+  `SHARED_ROOT_POINTER` > `AMBIENT_HOME`) and two postures on the resolved
+  scope: `authoritative` (enough to read or mint) and `explicitly_named`
+  (required by the destructive lane, so `8c3942a21`'s behavior is unchanged).
+- **The head pointer (`<store_root>/chat_head_home.json`)** — the D3 fix. The
+  process that legitimately knows the operator head (`harness serve`, always
+  started by the Launcher with an explicit `HERMES_HEAD_HOME`) publishes it once
+  into the shared runtime root; any later process that names no head reads it
+  instead of degrading to its own profile database. One writer, at serve boot.
+  Env and relay context always win, so this can only narrow the ambient
+  fallback.
+- **Seven delegating sites**, each preserving its own failure posture:
+  `persona_chat_history._default_session_db`,
+  `snapshot._default_persona_session_db`, `stream._scope_fingerprint`,
+  `persona_assignments._session_presence_probe` (still requires an explicitly
+  named head), `persona_commands._default_persona_session_db` (still raises
+  `PersonaChatPersistenceError`; now fails closed only on an AMBIENT scope),
+  `continuity._session_db` (**D2**), `serve._runtime_state_fingerprint`
+  (**D1**, and it no longer opens a database just to read its own path).
+- **`tests/agent_runtime/test_chat_session_scope.py`** — the ladder table, the
+  pointer lifecycle, D1, D2, and the check that failed twice live: mint through
+  the real CLI-lane acquisition under a different profile home, then assert the
+  serve projection lists it and records no `session_not_in_db` drop. The
+  companion test removes the pointer and pins the gap reproducing.
+
+Not shipped (unchanged from the plan below): the CI AST chokepoint guard (R1),
+typed `PresenceVerdict`/`PresenceRefused` (P2), the advisory-lane
+reclassification (P3), SessionDB identity (P4/R4), and P5/P6.
 
 Sibling docs: `12-read-path-freshness-hardening.md` (the "emission is
 convention, not enforcement" ruling this design applies to presence),
