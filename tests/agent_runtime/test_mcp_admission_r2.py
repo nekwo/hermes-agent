@@ -671,14 +671,29 @@ def _denied(code: str, server: str = "launcher_qa") -> McpAdmission:
     )
 
 
-def test_the_line_is_absent_on_a_clean_admission(qa_profile):
+def test_a_clean_admission_names_what_it_admitted(qa_profile):
+    """Operator ruling 2026-07-27 — replaces the old "a clean turn pays
+    nothing" pin. The silence was a bet that an agent reads its tool list
+    rather than its turn context; when it does not, silence and absence are
+    the same thing, which is W3 from a third direction."""
+
     admission = resolve_mcp_admission(
         _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
     )
 
     assert admission.server_names == ("launcher_qa",)
     assert admission.denied == ()
-    assert render_mcp_admission_line(admission) == ""
+
+    line = render_mcp_admission_line(admission)
+
+    assert line == (
+        "- MCP tools: Admitted on this turn: launcher_qa; those servers' "
+        "mcp__<server>__* tools ARE in your tool list, so call them directly."
+    )
+    assert "\n" not in line
+    # The denial wording is a DENIAL wording: none of it leaks onto a turn that
+    # lost nothing.
+    assert "NOT available" not in line and "unavailable" not in line
 
 
 def test_there_is_no_line_without_an_admission_object():
@@ -744,7 +759,10 @@ def test_the_line_covers_execution_time_degradations():
         server_names=("launcher_qa",),
     )
 
-    assert render_mcp_admission_line(clean) == ""
+    # Before the outcome is known the line is the clean shape — the positive
+    # half only, no denial wording (2026-07-27 ruling).
+    assert "Admitted on this turn: launcher_qa" in render_mcp_admission_line(clean)
+    assert MCP_ADMISSION_TIMEOUT not in render_mcp_admission_line(clean)
     assert MCP_ADMISSION_TIMEOUT in render_mcp_admission_line(
         clean, outcome=_timed_out_outcome()
     )
@@ -1080,9 +1098,10 @@ def test_a_fully_denied_turn_still_renders_the_denial_line_verbatim():
     assert line.endswith("say plainly in your reply that the tools were unavailable.")
 
 
-def test_a_clean_admission_still_pays_nothing():
-    """Unchanged by the partial-admission clause: an agent whose tool list is
-    complete needs no line at all."""
+def test_a_clean_admission_renders_the_admitted_half_alone():
+    """The 2026-07-27 flip, from the other end: the SAME sentence the partial
+    line appends is the whole line here — one wording, one place to change it,
+    so the two shapes can never drift into two vocabularies."""
 
     clean = McpAdmission(
         lane=LANE_MISSION_CHAT,
@@ -1093,4 +1112,26 @@ def test_a_clean_admission_still_pays_nothing():
         server_names=("launcher_qa",),
     )
 
-    assert render_mcp_admission_line(clean) == ""
+    line = render_mcp_admission_line(clean)
+    partial = render_mcp_admission_line(_partial(admitted="launcher_qa", dark="other"))
+    sentence = "Admitted on this turn: launcher_qa; those servers' mcp__<server>__* tools ARE in your tool list, so call them directly."
+
+    assert line == f"- MCP tools: {sentence}"
+    assert partial.endswith(f" {sentence}")
+
+
+def test_a_persona_that_declares_no_server_still_pays_nothing():
+    """The flip did NOT turn the line into an unconditional tax. Nothing
+    requested, nothing admitted, nothing denied — nothing to say."""
+
+    nothing = McpAdmission(
+        lane=LANE_MISSION_CHAT,
+        role="qa",
+        permission_mode="profile_default",
+        enabled=True,
+        requested=(),
+        server_names=(),
+    )
+
+    assert render_mcp_admission_line(nothing) == ""
+    assert render_mcp_admission_line(None) == ""

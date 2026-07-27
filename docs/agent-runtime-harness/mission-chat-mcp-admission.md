@@ -22,8 +22,16 @@ admission now names the ADMITTED servers alongside the denied ones. Telling an
 agent only "launcher_qa is dark" on a mixed turn reads as "MCP is dark", and it
 improvises around the server it actually has — the same W3 failure arrived at
 from the other direction. One appended sentence, and only when something was
-admitted, so a fully-denied line stays byte-identical, the flag-on/flag-off
-"one voice" drift guard is untouched, and a clean turn still pays nothing.
+admitted, so a fully-denied line stays byte-identical and the flag-on/flag-off
+"one voice" drift guard is untouched. Later the same day, an operator ruling
+extended that sentence to the **fully-clean** admission, which had deliberately
+stayed silent: `render_mcp_admission_line` now renders the admitted half alone
+(`- MCP tools: Admitted on this turn: launcher_qa; those servers'
+mcp__<server>__* tools ARE in your tool list, so call them directly.`). The
+silence was a bet that an agent reads its tool list rather than its turn
+context; when it does not, silence is indistinguishable from absence — W3 from a
+third direction. It is the SAME sentence in both shapes, so there is one wording
+to change. A persona that declares no server still pays nothing.
 
 Sibling docs: `harness-serve-design.md` (the warm-process lane this design
 depends on), `04-decision-hud-simplification-map.md` (the "agents work

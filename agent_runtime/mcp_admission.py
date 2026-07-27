@@ -1618,19 +1618,29 @@ def render_mcp_admission_line(
     why the launcher repo needs a grep gate for them). Telling it the truth in
     band is cheaper than fencing every workaround it can invent.
 
-    Returns ``""`` when there is nothing to say — no admission, nothing declared,
-    or a clean admission where everything declared was admitted. A clean turn
-    must not pay a line, and an agent that HAS the tools does not need to be told
-    about a mechanism.
+    Returns ``""`` when there is genuinely nothing to say: no admission at all,
+    or an admission that declared nothing and denied nothing. A persona with no
+    MCP server still pays nothing.
 
-    **A PARTIAL admission names both halves.** When the line renders at all and
-    some declared server WAS admitted, the admitted names ride the same line. The
-    denial half alone is actively misleading on a mixed turn: an agent told only
-    "launcher_qa is dark" reads "MCP is dark" and improvises around the server it
-    actually has — the same W3 improvisation this line exists to stop, arrived at
-    from the other direction. Kept to one sentence, appended after the shared
-    denial wording so the flag-on/flag-off "one voice" contract on that wording
-    is byte-for-byte untouched (``test_mcp_lane_agent_context_line``).
+    **Every admission that HAPPENED names its servers** (operator ruling,
+    2026-07-27). One sentence, two shapes:
+
+    * a PARTIAL admission appends the admitted names after the denial wording;
+    * a fully-CLEAN admission renders that sentence on its own.
+
+    The denial half alone is actively misleading on a mixed turn: an agent told
+    only "launcher_qa is dark" reads "MCP is dark" and improvises around the
+    server it actually has — the same W3 improvisation this line exists to stop,
+    arrived at from the other direction. The clean case used to stay silent on
+    the theory that an agent which HAS the tools needs no telling; that theory
+    assumes the agent reads its tool list rather than its turn context, and when
+    it does not, silence is indistinguishable from absence — W3 again, from a
+    third direction. Naming what it has costs one sentence and removes the
+    inference.
+
+    The denial wording itself is untouched in both shapes, so the flag-on /
+    flag-off "one voice" contract on it is byte-for-byte the same
+    (``test_mcp_lane_agent_context_line``).
 
     ``outcome`` contributes only its ``execution_denied`` rows (busy / timeout /
     admitted-but-did-not-register). The policy denials it also carries are
@@ -1654,7 +1664,10 @@ def render_mcp_admission_line(
             if (denial.server, denial.code) not in seen
         )
     if not denials:
-        return ""
+        # Nothing was refused. If something was ADMITTED, say so — the positive
+        # half is the whole line on a clean turn.
+        clean = _admitted_clause(admission, {})
+        return f"{_ADMISSION_LINE_PREFIX}{clean}" if clean else ""
 
     # One entry per server, first (most specific) code wins — resolution denials
     # are ordered narrowest-first and execution rows are appended after them.
@@ -1676,7 +1689,11 @@ def render_mcp_admission_line(
 def _admitted_clause(
     admission: "McpAdmission | None", denied_servers: "Mapping[str, str]"
 ) -> str:
-    """The positive half of a PARTIAL admission — ``""`` when there isn't one.
+    """The positive half of an admission — ``""`` when nothing was admitted.
+
+    Rendered on BOTH shapes: appended after the denial wording on a partial
+    admission, and standing alone as the whole line on a clean one. Same bytes
+    either way, so there is one sentence to read and one place to change it.
 
     Admitted-then-degraded servers are excluded by construction: anything that
     reached ``execution_denied`` is already in ``denied_servers``, so a server
