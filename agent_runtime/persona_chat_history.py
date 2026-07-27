@@ -18,6 +18,7 @@ from .persona_assignments import persona_instance_id_for, safe_assignment_text, 
 from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .redaction_mode import redaction_observe_enabled
 from .relay_policy import parse_relay_sender_marker
+from .run_budget import ACCOUNTING_KEY as RUN_BUDGET_ACCOUNTING_KEY
 from .runtime_hud import (
     extract_runtime_context_envelope,
     extract_skill_preload_envelope,
@@ -1132,6 +1133,14 @@ def _safe_curated_messages(
     redacted = False
     assistant_client_message_ids: set[str] = set()
     seen_logical_rows: set[tuple[str, str, str]] = set()
+    # ONE read of this chat's turn journal, shared by the reply rows below and
+    # by the terminal-marker rows appended after them. The journal is a
+    # per-session file with no read cache, so fetching it again per row — just
+    # to add one small key — would have turned a bounded page into N file reads.
+    turn_records = mission_chat_turn_records(session_id=session_id)
+    turn_records_by_message = {
+        str(record.get("client_message_id") or ""): record for record in turn_records
+    }
     # Curate the agent's raw working transcript into an operator-facing one.
     # The bound session is the agent's internal session, so its raw rows are
     # verbose tick-context prompts (role=user) and serialized decision dicts
@@ -1243,11 +1252,21 @@ def _safe_curated_messages(
             )
             if elements:
                 row["turn_elements"] = elements
+            # "What bounded this turn?" — carried verbatim off the turn record
+            # (see mission_chat_turns._JOURNAL_RUN_BUDGET_FIELD). The row shapes
+            # here are an explicit allowlist, so an unknown key does NOT ride
+            # through on its own; this is the additive extension that lets the
+            # cockpit read the block the settle point persisted. Read-only: the
+            # projection reads the journal, it never writes it.
+            _carry_run_budget(
+                row, turn_records_by_message.get(str(logical_client_message_id or ""))
+            )
         rows.append(row)
     rows.extend(
         _terminal_turn_marker_rows(
             session_id=session_id,
             assistant_client_message_ids=assistant_client_message_ids,
+            records=turn_records,
         )
     )
     rows = _ordered_message_rows(rows)
@@ -1297,10 +1316,26 @@ def _decode_history_cursor(value: str) -> dict[str, Any] | None:
         return None
 
 
+def _carry_run_budget(row: dict[str, Any], record: dict[str, Any] | None) -> None:
+    """Ride the turn record's accounting block onto a projected row, or nothing.
+
+    Absence-preserving in both directions: a record with no block (an older
+    turn, or one that declared no budget) leaves the row untouched, so a reader
+    can still tell "nothing bounded this turn" from "nobody accounted it". The
+    block is copied verbatim — the store already bounded it through the one
+    ``run_budget.safe_accounting_block`` reader.
+    """
+
+    block = (record or {}).get(RUN_BUDGET_ACCOUNTING_KEY)
+    if isinstance(block, dict) and block:
+        row[RUN_BUDGET_ACCOUNTING_KEY] = block
+
+
 def _terminal_turn_marker_rows(
     *,
     session_id: str,
     assistant_client_message_ids: set[str],
+    records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Synthesize the typed marker row for every terminally-settled, reply-less turn.
 
@@ -1313,10 +1348,18 @@ def _terminal_turn_marker_rows(
 
     ``settled_state`` rides along so downstream projections carry the REASON the
     turn is over without re-deriving it from the marker kind or the prose.
+
+    ``records`` lets the caller hand in the journal read it already did; left
+    None (direct callers, tests) this reads the journal itself. The marker row
+    is the ONLY row a reply-less budget-exhausted turn gets, so the accounting
+    block has to ride here too — otherwise the exact turns whose bound is worth
+    reading are the ones that carry no bound.
     """
 
     rows: list[dict[str, Any]] = []
-    for record in mission_chat_turn_records(session_id=session_id):
+    if records is None:
+        records = mission_chat_turn_records(session_id=session_id)
+    for record in records:
         state = safe_assignment_token(record.get("state"))
         marker = TERMINAL_TURN_MARKERS.get(state or "")
         if marker is None:
@@ -1327,25 +1370,25 @@ def _terminal_turn_marker_rows(
         turn_id = safe_assignment_token(record.get("turn_id")) or safe_assignment_token(client_message_id)
         if not turn_id:
             continue
-        rows.append(
-            {
-                "id": f"{session_id}:{marker.id_slug}:{client_message_id}",
-                "role": "system",
-                # Typed marker: downstream projections (operator conversation,
-                # Mission Control tiles) key on this instead of matching text.
-                "kind": marker.kind,
-                "text": marker.text,
-                "timestamp": _iso_timestamp(record.get("updated_at")),
-                "redaction_status": "safe",
-                "client_message_id": client_message_id,
-                "turn_id": turn_id,
-                # The canonical turn-store state, not a second vocabulary.
-                "settled_state": state,
-                # C8 ordering key: the terminal marker IS the turn's terminal
-                # row (a turn has a reply or a marker, never both).
-                "turn_seq": TURN_SEQ_TERMINAL,
-            }
-        )
+        marker_row: dict[str, Any] = {
+            "id": f"{session_id}:{marker.id_slug}:{client_message_id}",
+            "role": "system",
+            # Typed marker: downstream projections (operator conversation,
+            # Mission Control tiles) key on this instead of matching text.
+            "kind": marker.kind,
+            "text": marker.text,
+            "timestamp": _iso_timestamp(record.get("updated_at")),
+            "redaction_status": "safe",
+            "client_message_id": client_message_id,
+            "turn_id": turn_id,
+            # The canonical turn-store state, not a second vocabulary.
+            "settled_state": state,
+            # C8 ordering key: the terminal marker IS the turn's terminal
+            # row (a turn has a reply or a marker, never both).
+            "turn_seq": TURN_SEQ_TERMINAL,
+        }
+        _carry_run_budget(marker_row, record)
+        rows.append(marker_row)
     return rows
 
 

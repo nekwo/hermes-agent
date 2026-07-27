@@ -41,6 +41,16 @@ the tool-start gate, the registry handler swap or the reserve math into this
 module would fold three intentionally different trip semantics into one, which
 is the opposite of the goal. This is the accounting seam, not a scheduler.
 
+Reading the block back
+----------------------
+:func:`safe_accounting_block` is the ONE reader every persistence/projection
+boundary goes through, and :func:`turn_run_budget_metadata` is the one adapter
+that turns "the run that just ended" into the journal metadata fragment a
+settle point splices in. Both are absence-preserving: a run that declared no
+budget yields nothing, never an empty claim. Without them each boundary would
+grow its own copy of the shape and they would drift — which is the exact defect
+this module was created to retire, one layer up.
+
 Pure and stdlib-only, so the accounting shape is unit-testable without a
 harness, an agent, or a clock that sleeps.
 """
@@ -376,6 +386,75 @@ _DEFAULT_UNIT: dict[RunBudgetKind, str] = {
     RunBudgetKind.TOTAL_TOKENS: UNIT_TOKENS,
     RunBudgetKind.MCP_CALLS: UNIT_CALLS,
 }
+
+
+#: Bound on the per-budget rows any persistence boundary will carry. The ledger
+#: emits one row per declared mechanism (a handful); the cap exists so a
+#: malformed/foreign block can never make a record unbounded.
+ACCOUNTING_ROW_CAP = 32
+
+#: The key the block is filed under everywhere it is carried: the run's
+#: ``profile_timing``, the run record's ``llm``, the mission-chat turn journal
+#: record, and the chat-history projection rows built from it. One spelling.
+ACCOUNTING_KEY = "run_budget"
+
+
+def safe_accounting_block(value: Any) -> dict[str, Any] | None:
+    """The WHOLE accounting block, kept structured — or ``None``.
+
+    See ``docs/agent-runtime-harness/run-budget-accounting.md`` §3 for the shape
+    (``bounded_by`` / ``trip_reason`` / ``enforcement`` / ``tripped`` /
+    ``budgets``). The block is carried **verbatim**: this reader bounds it and
+    drops non-string keys, it never renames, reshapes or fills anything in, so
+    every consumer reads the one contract the doc documents.
+
+    Returns ``None`` when there is nothing to carry, so a caller can drop the
+    key entirely rather than record an empty claim. "No block" and "a block that
+    says nothing was bounded" are different facts and must stay different.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    block: dict[str, Any] = {key: item for key, item in value.items() if isinstance(key, str)}
+    if not block:
+        return None
+    rows = block.get("budgets")
+    if isinstance(rows, list):
+        block["budgets"] = [row for row in rows[:ACCOUNTING_ROW_CAP] if isinstance(row, dict)]
+    return block
+
+
+def turn_run_budget_metadata(*, result: Any = None, error: BaseException | None = None) -> dict[str, Any]:
+    """The journal-metadata fragment for the run that just ended.
+
+    A settle point splices this in (``**turn_run_budget_metadata(...)``) so the
+    ledger block lands on the durable turn record under
+    :data:`ACCOUNTING_KEY`. Two sources, because a run ends two ways:
+
+    * ``result`` — a completed run, whose block rides ``profile_timing``;
+    * ``error`` — a tripped run, where no result exists and the block rides
+      ``RunBudgetExceeded.run_budget``.
+
+    Returns ``{}`` when neither source carries a block: a result that never went
+    through the runner, or an exception that is not a budget trip. Absent stays
+    absent — no empty-dict backfill, so an older record stays honestly silent
+    instead of claiming an accounting nobody took.
+
+    Note the distinction this preserves: a real run that declared NO budget
+    still produces a block, with zero ``budgets`` rows ("accounted, nothing
+    bounded this turn"). That is carried, because collapsing it to absence would
+    make an unbounded turn indistinguishable from a record written before any of
+    this existed.
+    """
+
+    block = None
+    if error is not None:
+        block = safe_accounting_block(getattr(error, ACCOUNTING_KEY, None))
+    if block is None and result is not None:
+        timing = getattr(result, "profile_timing", None)
+        if isinstance(timing, dict):
+            block = safe_accounting_block(timing.get(ACCOUNTING_KEY))
+    return {ACCOUNTING_KEY: block} if block is not None else {}
 
 
 def _as_number(value: Any) -> float | None:

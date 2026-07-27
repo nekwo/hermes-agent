@@ -1982,6 +1982,11 @@ def _cmd_mission_chat_message(args) -> int:
     from agent_runtime import turn_budget as _turn_budget
     from agent_runtime.mission_chat_turn_context import build_mission_chat_turn_context
     from agent_runtime.profile_runner import RunBudgetExceeded
+    # Function-local on purpose: this file is exec'd into harness.py's globals,
+    # so a module-level name here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn (nothing a test run would notice). A local
+    # import binds in this function's scope and needs no harness cooperation.
+    from agent_runtime.run_budget import turn_run_budget_metadata
 
     # The WHOLE per-turn context — wall budget, capability account, situational
     # HUD + delivery, skill preload envelope, workspace AGENTS.md, runtime
@@ -2301,6 +2306,11 @@ def _cmd_mission_chat_message(args) -> int:
                     or "wall_budget_hard_wall",
                     "budget_summary": safe_assignment_text(str(exc), limit=400),
                     "stored_reply": checkpoint_summary,
+                    # The WHOLE accounting block, verbatim. A raised run has no
+                    # result to carry it, so it rides the exception — and this
+                    # is the only place it can become durable, because a pure
+                    # chat turn writes no run record.
+                    **turn_run_budget_metadata(error=exc),
                 },
             )
         elif provider_submitted:
@@ -2310,7 +2320,10 @@ def _cmd_mission_chat_message(args) -> int:
                 turn_id=stream_emitter.turn_id,
                 elements=stream_emitter.elements,
                 state=TURN_STATE_OUTCOME_UNKNOWN,
-                metadata={"provider_submitted": True},
+                # A non-wall budget trip (read/search loop, api calls, tokens)
+                # settles here, and it is bounded just as knowably. Yields {}
+                # for any other exception, so absence stays absence.
+                metadata={"provider_submitted": True, **turn_run_budget_metadata(error=exc)},
             )
         if runtime_registry is not None:
             runtime_registry.transition(session_id, "failed")
@@ -2386,21 +2399,31 @@ def _cmd_mission_chat_message(args) -> int:
     )
     budget_checkpoint = budget_checkpoint if isinstance(budget_checkpoint, dict) else None
     budget_engaged = bool(budget_checkpoint and budget_checkpoint.get("engaged"))
-    budget_metadata: dict[str, object] = (
-        {
-            "budget_exhausted": True,
-            "budget_trigger": safe_assignment_token(budget_checkpoint.get("trigger"))
-            or "wall_budget_checkpoint",
-            "budget_summary": safe_assignment_text(
-                f"wall budget checkpoint: "
-                f"{budget_checkpoint.get('remaining_at_checkpoint_seconds')}s left of "
-                f"{budget_checkpoint.get('total_seconds')}s when new tool work stopped",
-                limit=400,
-            ),
-        }
-        if budget_engaged
-        else {}
-    )
+    budget_metadata: dict[str, object] = {
+        # UNCONDITIONAL, unlike the checkpoint provenance below: the accounting
+        # block is the answer to "what bounded this turn?" and an UNTRIPPED turn
+        # answers it too ("nothing did, and here is the headroom"). Gating it on
+        # `budget_engaged` would keep exactly the pre-2026-07-27 blindness — a
+        # turn that stopped at its bound and one that finished with room to
+        # spare would again be indistinguishable from the record. Yields {} when
+        # the run declared no budget at all, so absence still means absence.
+        **turn_run_budget_metadata(result=chat_result),
+        **(
+            {
+                "budget_exhausted": True,
+                "budget_trigger": safe_assignment_token(budget_checkpoint.get("trigger"))
+                or "wall_budget_checkpoint",
+                "budget_summary": safe_assignment_text(
+                    f"wall budget checkpoint: "
+                    f"{budget_checkpoint.get('remaining_at_checkpoint_seconds')}s left of "
+                    f"{budget_checkpoint.get('total_seconds')}s when new tool work stopped",
+                    limit=400,
+                ),
+            }
+            if budget_engaged
+            else {}
+        ),
+    }
     if runtime_registry is not None:
         runtime_registry.finish(
             session_id,

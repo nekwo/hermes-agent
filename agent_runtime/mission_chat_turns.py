@@ -11,6 +11,10 @@ from typing import Any, Callable, Iterator, TypeVar
 
 from . import paths
 from .persona_assignments import safe_assignment_text, safe_assignment_token
+from .run_budget import (
+    ACCOUNTING_KEY as RUN_BUDGET_ACCOUNTING_KEY,
+    safe_accounting_block as safe_run_budget_accounting,
+)
 
 # ---------------------------------------------------------------------------
 # Storage layout (one file per chat session)
@@ -1104,6 +1108,26 @@ _JOURNAL_TEXT_FIELDS = {
 }
 
 
+#: The ONE structured entry on a turn record, carried verbatim from
+#: ``run_budget.RunBudgetLedger.accounting()`` — the whole "what bounded this
+#: turn?" block (``bounded_by`` / ``trip_reason`` / ``enforcement`` /
+#: ``tripped`` / ``budgets``), documented in
+#: ``docs/agent-runtime-harness/run-budget-accounting.md`` §3.
+#:
+#: A pure chat turn produces NO run record (``runs/`` is the goal/task lane), so
+#: before this the ledger reached the live envelope and then evaporated: the
+#: cockpit had nowhere to read "this reply is short because the wall closed"
+#: after the turn settled. The turn journal IS the chat lane's run record, so
+#: the block lives here, under the same key and in the same shape every other
+#: carrier uses.
+#:
+#: ABSENT STAYS ABSENT. Older records and turns that declared no budget get no
+#: key — never an empty dict, because "nothing bounded this turn" and "nobody
+#: accounted this turn" are different facts and a reader must be able to tell
+#: them apart.
+_JOURNAL_RUN_BUDGET_FIELD = RUN_BUDGET_ACCOUNTING_KEY
+
+
 def _safe_journal_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -1112,6 +1136,9 @@ def _safe_journal_metadata(value: Any) -> dict[str, Any]:
         text = safe_assignment_text(value.get(key), limit=limit)
         if text:
             result[key] = text
+    run_budget = safe_run_budget_accounting(value.get(_JOURNAL_RUN_BUDGET_FIELD))
+    if run_budget is not None:
+        result[_JOURNAL_RUN_BUDGET_FIELD] = run_budget
     for key in (
         "provider_submitted",
         "native_committed",

@@ -130,6 +130,49 @@ carry-forward the timing map already had), and a run that declared no budget
 records no key at all. Pinned in `tests/agent_runtime/test_run_budget.py`
 (§"The block reaches the RUN RECORD").
 
+**On the mission-chat TURN record (2026-07-27, operator ruling).** A pure chat
+turn produces no `AgentRun` at all — `runs/` is the goal/task lane — so the
+paragraph above never reaches it: the block rode the live envelope and then
+evaporated, and the cockpit had nowhere to read "what bounded this turn?" once
+the turn settled. **The mission-chat turn journal IS the chat lane's run
+record**, so the block is persisted there, under the same key and in the same
+verbatim shape:
+
+- **Key** — `run_budget`, **top-level** on the turn record
+  (`agent_runtime/mission_chat_turns.py`, `_JOURNAL_RUN_BUDGET_FIELD`). Not
+  nested under the wall provenance beside it: `budget_trigger` /
+  `budget_summary` describe the wall checkpoint specifically; this describes
+  every bound the turn had.
+- **Schema version** — unchanged at `2`. This store versions its record
+  *shape*, and every optional additive key so far (`started_at`,
+  `budget_exhausted`, `budget_trigger`, `budget_summary`) landed at 2 with
+  absence as the signal.
+- **Settle points** — the same ones that already write the wall provenance, in
+  `hermes_cli/harness_parts/persona_commands.py::_cmd_mission_chat_message`:
+  the `native_committed` transition on a completed turn (**unconditional** — an
+  untripped turn's headroom is exactly what makes "stopped at the bound"
+  distinguishable from "finished with room to spare"), the `budget_exhausted`
+  transition on a wall trip, and `outcome_unknown`, where a non-wall trip
+  (read/search, api calls, tokens) settles. All three go through one adapter,
+  `run_budget.turn_run_budget_metadata`, so no settle site re-reads the block's
+  shape for itself.
+- **Absent semantics** — absent stays absent. No block from either source ⇒ no
+  key, never `{}`. A real run that declared no budget still records its (empty)
+  ledger: "accounted, nothing bounded" and "written before any of this existed"
+  are different facts.
+- **Projection** — the chat-history rows are an explicit allowlist, so the key
+  does **not** ride through on its own. `persona_chat_history` carries it
+  additively onto both shapes a turn can project as: the agent reply row (beside
+  `turn_elements`) and the terminal marker row a reply-less budget-exhausted
+  turn gets instead. Read-only / emit-path: the projection reads the journal and
+  never writes it (pinned). The same pass folded the per-row journal reads into
+  one read per page, so the key costs no extra I/O.
+- **One reader** — `run_budget.safe_accounting_block` is now the single bounding
+  reader at every persistence boundary; `persona_runtime._safe_run_budget_block`
+  delegates to it instead of keeping a second copy of the same logic.
+
+Pinned in `tests/agent_runtime/test_mission_chat_turn_run_budget.py`.
+
 ## 4. What deliberately did NOT change
 
 Config keys, defaults, clamps, exception types, exception message strings,
@@ -159,7 +202,7 @@ graceful window is reachable inside a second.
 
 - Link this doc from `00-index.md` under Operator forensics (left out of the
   landing commit to avoid colliding with parallel wave-4 edits to the index).
-- The block is not yet rendered on any operator surface — Mission Control's
-  cockpit reads `run.progress`, not `profile_timing`. Surfacing "what bounded
-  this turn" as a cockpit row is the natural next slice, and needs no runtime
-  change: the data is now in the run record.
+- ~~The block is not yet rendered on any operator surface~~ — the run-record row
+  landed in the launcher (Mission Control `mission_run_budget_row.dart`), and as
+  of 2026-07-27 the chat lane has its own home on the turn record (§3) for the
+  cockpit's chat surface to render from.

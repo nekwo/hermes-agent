@@ -1385,35 +1385,20 @@ def _record_timing_value(timing_map: dict[str, int], key: object, value: object)
     timing_map[safe_key] = parsed
 
 
-#: Bound on the per-budget rows carried onto a run record. The ledger emits one
-#: row per mechanism (a handful); the cap exists so a malformed block can never
-#: make a run record unbounded.
-_RUN_BUDGET_ROW_CAP = 32
-
-
 def _safe_run_budget_block(value: object) -> dict[str, object] | None:
     """The run's WHOLE budget accounting block, kept structured.
 
-    See ``docs/agent-runtime-harness/run-budget-accounting.md`` §3 for the shape
-    (``bounded_by`` / ``trip_reason`` / ``enforcement`` / ``tripped`` /
-    ``budgets``). Returns ``None`` when there is nothing to carry, so the
-    caller's ``None``-filter drops the key entirely rather than recording an
-    empty claim.
+    Delegates to ``run_budget.safe_accounting_block`` — ONE reader for the block
+    at every persistence boundary (run record, mission-chat turn journal,
+    chat-history projection). This used to be a local copy of that bounding
+    logic; a second copy is how the two boundaries start disagreeing about what
+    the block IS, which is the defect ``run_budget`` exists to retire. Kept as a
+    module-local seam because callers/tests patch it here.
     """
 
-    if not isinstance(value, dict):
-        return None
-    block: dict[str, object] = {
-        key: item for key, item in value.items() if isinstance(key, str)
-    }
-    if not block:
-        return None
-    rows = block.get("budgets")
-    if isinstance(rows, list):
-        block["budgets"] = [
-            row for row in rows[:_RUN_BUDGET_ROW_CAP] if isinstance(row, dict)
-        ]
-    return block
+    from .run_budget import safe_accounting_block
+
+    return safe_accounting_block(value)
 
 
 def _safe_timing_map(value: object) -> dict[str, int]:
