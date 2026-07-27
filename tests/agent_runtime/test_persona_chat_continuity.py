@@ -563,6 +563,164 @@ def test_a_ticket_with_no_session_is_never_minted(isolate_agent_runtime_root):
     assert PersonaChatClarifyTicketStore().mint(chat_session_id="") is None
 
 
+# ── the open-ticket lookup is O(1), and is never its own authority ──────────
+
+
+def _files_read(monkeypatch) -> list[str]:
+    """Every file the next call actually opens."""
+
+    from pathlib import Path
+
+    opened: list[str] = []
+    original = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        # Counted on SUCCESS: a probe for a file that is not there costs a
+        # failed stat, not a read, and is exactly what "no open tickets for this
+        # session" is supposed to cost.
+        payload = original(self, *args, **kwargs)
+        opened.append(self.name)
+        return payload
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    return opened
+
+
+def test_the_open_ticket_lookup_does_not_read_every_ticket(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """The per-turn cost must not scale with the store.
+
+    ``open_ticket_for_session`` runs on nearly every mission-chat turn (the
+    tokenless settlement rides it). Globbing the ticket directory made each turn
+    pay for every question ever asked inside the live TTL window — an O(store)
+    read on the hot path of a store that is meant to be write-rare. The
+    by-session index answers it in a bounded number of reads: the index file,
+    then the one ticket it names."""
+
+    store = PersonaChatClarifyTicketStore()
+    for index in range(12):
+        _clarify_ticket(store, chat_session_id=f"persona_chat_personainst_dev_{index:012d}")
+    wanted = _clarify_ticket(store)
+
+    opened = _files_read(monkeypatch)
+    found = store.open_ticket_for_session(_CLARIFY_ROOT)
+
+    assert found["clarify_token"] == wanted
+    # One index file + one ticket file. Thirteen tickets exist; twelve of them
+    # were never touched.
+    assert len(opened) == 2, opened
+
+
+def test_a_session_with_no_ticket_costs_no_reads(isolate_agent_runtime_root, monkeypatch):
+    # The common shape by far: a turn in a session that never asked anything.
+    # "No index file for this session" has to MEAN "no open tickets" — that is
+    # what the marker buys — or the fallback scan would run on every turn and
+    # nothing would have been fixed.
+    store = PersonaChatClarifyTicketStore()
+    _clarify_ticket(store)
+
+    opened = _files_read(monkeypatch)
+    assert store.open_ticket_for_session("persona_chat_personainst_qa_ffffffffffff") is None
+    assert opened == []
+
+
+def test_a_pre_existing_ticket_store_is_indexed_on_first_use(isolate_agent_runtime_root):
+    """A store written before the index existed must still be found.
+
+    The rebuild is the migration: it reads the tickets themselves, so a
+    directory that predates this code (or a crash that lost the index) converges
+    on the first call rather than needing a repair pass."""
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    for path in store._index_dir().glob("*.json"):
+        path.unlink()
+
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == token
+    assert store._index_state_path().exists()
+
+
+def test_a_stale_index_entry_degrades_to_a_miss_never_a_wrong_binding(
+    isolate_agent_runtime_root,
+):
+    """The index is a cache of POINTERS, never a second source of truth.
+
+    Every token it hands back is re-read from its own ticket file and verified
+    against that record's own state and session before it can bind anything. So
+    a hand-edited, half-written, or simply outdated entry can only ever cost a
+    wasted read — it can never bind a turn onto a thread the ticket does not
+    name."""
+
+    store = PersonaChatClarifyTicketStore()
+    live = _clarify_ticket(store)
+    foreign = _clarify_ticket(
+        store, chat_session_id="persona_chat_personainst_qa_bbbbbbbbbbbb"
+    )
+
+    # Forge the index: a token for ANOTHER session, plus one that resolves to
+    # nothing, both ranked newer than the real ticket.
+    now = time.time()
+    store._write_index(
+        _CLARIFY_ROOT,
+        [
+            {"clarify_token": "clarify-deadbeefdead", "created_at": now + 20},
+            {"clarify_token": foreign, "created_at": now + 10},
+            {"clarify_token": live, "created_at": now},
+        ],
+    )
+
+    found = store.open_ticket_for_session(_CLARIFY_ROOT)
+
+    assert found["clarify_token"] == live
+    # …and the two entries that failed verification are gone, so the index
+    # converges without a repair pass.
+    assert [entry["clarify_token"] for entry in store._index_entries(_CLARIFY_ROOT)] == [live]
+
+
+def test_settling_a_ticket_takes_it_out_of_the_index(isolate_agent_runtime_root):
+    store = PersonaChatClarifyTicketStore()
+    older = _clarify_ticket(store)
+    newer = _clarify_ticket(store)
+
+    store.settle(newer, client_message_id="cm-answer", bound_via="session_id")
+
+    assert [entry["clarify_token"] for entry in store._index_entries(_CLARIFY_ROOT)] == [older]
+    store.settle(older, client_message_id="cm-answer-2", bound_via="session_id")
+    assert store._index_entries(_CLARIFY_ROOT) == []
+    assert store.open_ticket_for_session(_CLARIFY_ROOT) is None
+
+
+def test_the_sweep_reclaims_index_files_it_can_prove_are_dead(isolate_agent_runtime_root):
+    """By mtime, which is the whole safety argument.
+
+    An index file's mtime is bumped by every add and every drop, so a file
+    untouched for a full TTL can only name tokens minted before that mtime — all
+    of them already unlinked by the ticket loop. A session whose turn is minting
+    right now has a fresh mtime and is skipped, so the sweep can never clobber a
+    live pointer."""
+
+    import os
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    path = store._path(token)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["created_at"] = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    index_path = store._index_path(_CLARIFY_ROOT)
+    aged = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
+    os.utime(index_path, (aged, aged))
+
+    assert store.sweep() == 1
+    assert not index_path.exists()
+
+    # A freshly-touched index file survives the same sweep.
+    fresh = _clarify_ticket(store)
+    assert store.sweep() == 0
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == fresh
+
+
 # ── a mint for a target that can never be served writes nothing ─────────────
 
 

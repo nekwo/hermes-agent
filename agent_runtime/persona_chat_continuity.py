@@ -612,9 +612,157 @@ class PersonaChatClarifyTicketStore:
     into a path is traversal. Same precedent as the mint receipt store above.
     """
 
+    def _root_dir(self) -> Path:
+        return paths.store_root() / "persona_chat_clarify_tickets"
+
     def _path(self, token: str) -> Path:
         digest = hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
-        return paths.store_root() / "persona_chat_clarify_tickets" / f"{digest}.json"
+        return self._root_dir() / f"{digest}.json"
+
+    # ── Open-ticket index (by session) ──────────────────────────────────────
+    #
+    # WHY THIS EXISTS. ``open_ticket_for_session`` is the tokenless-settlement
+    # lookup and it runs on nearly EVERY mission-chat turn. Reading it as a glob
+    # over the ticket directory made each turn pay for every question ever asked
+    # inside the live TTL window — a per-turn cost that grows with a store that
+    # is supposed to be write-rare. The index answers the same question in a
+    # bounded number of file reads: one index file, then the newest candidate
+    # ticket it names.
+    #
+    # AUTHORITY AND SELF-HEALING. The index is a CACHE OF POINTERS, never a
+    # second source of truth. Every token it hands back is re-read from its own
+    # ticket file and re-verified (``state == open`` AND the record's own
+    # ``chat_session_id`` matches) before it can bind anything, so a stale,
+    # hand-edited, or half-written entry can only ever produce a MISS — never a
+    # wrong binding. Entries that fail that verification are dropped on the way
+    # past, so the index converges without a repair pass.
+    #
+    # THE MARKER FILE is what makes "no index file for this session" mean "no
+    # open tickets" rather than "index lost". It is written LAST, after a full
+    # rebuild from the ticket files themselves, so a crashed rebuild simply
+    # leaves no marker and the next call redoes it (idempotent). Without it, a
+    # session with no tickets — the overwhelmingly common case — could never be
+    # told from a missing index and would fall back to the glob on every turn,
+    # which is the cost this exists to retire.
+
+    def _index_dir(self) -> Path:
+        return self._root_dir() / "by_session"
+
+    def _index_path(self, chat_session_id: str) -> Path:
+        digest = hashlib.sha256(str(chat_session_id or "").encode("utf-8")).hexdigest()
+        return self._index_dir() / f"{digest}.json"
+
+    def _index_state_path(self) -> Path:
+        # Leading underscore, never a sha256 hex digest, so it cannot collide
+        # with a per-session file.
+        return self._index_dir() / "_index_state.json"
+
+    def _index_entries(self, chat_session_id: str) -> list[dict[str, Any]]:
+        """The open-token pointers recorded for *chat_session_id*, newest first."""
+
+        try:
+            payload = json.loads(
+                self._index_path(chat_session_id).read_text(encoding="utf-8")
+            )
+        except Exception:
+            return []
+        raw = payload.get("open_tokens") if isinstance(payload, dict) else None
+        entries = [
+            {
+                "clarify_token": str(item.get("clarify_token") or ""),
+                "created_at": float(item.get("created_at") or 0.0),
+            }
+            for item in (raw if isinstance(raw, list) else [])
+            if isinstance(item, dict) and item.get("clarify_token")
+        ]
+        entries.sort(key=lambda item: item["created_at"], reverse=True)
+        return entries
+
+    def _write_index(self, chat_session_id: str, entries: list[dict[str, Any]]) -> None:
+        path = self._index_path(chat_session_id)
+        if not entries:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_json(
+                path,
+                {
+                    "schema_version": 1,
+                    "chat_session_id": str(chat_session_id),
+                    "open_tokens": entries,
+                },
+            )
+        except OSError:
+            pass
+
+    def _rebuild_index(self) -> bool:
+        """Rebuild every per-session index from the ticket files. Idempotent.
+
+        Runs once per store (on the first mint or lookup after this code
+        arrives, and again after any crash that left no marker). The marker is
+        written LAST so a partial rebuild is simply redone rather than trusted.
+        """
+
+        by_session: dict[str, list[dict[str, Any]]] = {}
+        for record in self._iter_records():
+            if record.get("state") != CLARIFY_TICKET_OPEN:
+                continue
+            root = str(record.get("chat_session_id") or "")
+            token = str(record.get("clarify_token") or "")
+            if not root or not token:
+                continue
+            by_session.setdefault(root, []).append(
+                {"clarify_token": token, "created_at": float(record.get("created_at") or 0.0)}
+            )
+        try:
+            self._index_dir().mkdir(parents=True, exist_ok=True)
+            for root, entries in by_session.items():
+                entries.sort(key=lambda item: item["created_at"], reverse=True)
+                _atomic_json(
+                    self._index_path(root),
+                    {
+                        "schema_version": 1,
+                        "chat_session_id": root,
+                        "open_tokens": entries,
+                    },
+                )
+            _atomic_json(
+                self._index_state_path(), {"schema_version": 1, "rebuilt_at": time.time()}
+            )
+        except OSError:
+            return False
+        return True
+
+    def _ensure_index(self) -> bool:
+        """``True`` when the by-session index may be trusted as complete.
+
+        ``False`` means the caller must fall back to the scan — correctness
+        never depends on the index being present."""
+
+        try:
+            if self._index_state_path().exists():
+                return True
+        except OSError:
+            return False
+        return self._rebuild_index()
+
+    def _index_add(self, chat_session_id: str, token: str, created_at: float) -> None:
+        entries = self._index_entries(chat_session_id)
+        if any(entry["clarify_token"] == token for entry in entries):
+            return
+        entries.append({"clarify_token": token, "created_at": float(created_at)})
+        entries.sort(key=lambda item: item["created_at"], reverse=True)
+        self._write_index(chat_session_id, entries)
+
+    def _index_drop(self, chat_session_id: str, token: str) -> None:
+        entries = self._index_entries(chat_session_id)
+        remaining = [entry for entry in entries if entry["clarify_token"] != token]
+        if len(remaining) != len(entries):
+            self._write_index(chat_session_id, remaining)
 
     @staticmethod
     def new_token() -> str:
@@ -688,6 +836,16 @@ class PersonaChatClarifyTicketStore:
             self.sweep()
         except OSError:  # pragma: no cover - defensive; GC must never fail a turn
             pass
+        # Index AFTER the ticket exists, so a crash between the two can only
+        # lose the pointer (the tokenless settlement misses; the token itself
+        # still binds), never publish a pointer to a ticket that is not there.
+        # A rebuild triggered here already contains this ticket — the add is
+        # idempotent, so the two cannot double-count.
+        try:
+            if self._ensure_index():
+                self._index_add(root, token, float(record["created_at"]))
+        except OSError:  # pragma: no cover - defensive; the ticket is what matters
+            pass
         return token
 
     def resolve(self, token: str | None) -> dict[str, Any] | None:
@@ -748,6 +906,17 @@ class PersonaChatClarifyTicketStore:
             _atomic_json(self._path(str(record.get("clarify_token"))), record)
         except OSError:
             pass
+        # A settled ticket is no longer a candidate for the tokenless lookup, so
+        # it leaves the index. Best-effort: a failure here costs one wasted
+        # verification on the next lookup, which then drops the entry itself.
+        if record.get("state") != CLARIFY_TICKET_OPEN:
+            try:
+                self._index_drop(
+                    str(record.get("chat_session_id") or ""),
+                    str(record.get("clarify_token") or ""),
+                )
+            except OSError:  # pragma: no cover - defensive
+                pass
         return record
 
     def open_ticket_for_session(self, chat_session_id: str | None) -> dict[str, Any] | None:
@@ -756,11 +925,48 @@ class PersonaChatClarifyTicketStore:
         Settlement without a token: any turn landing in a session with an open
         ticket settles it. Without this, every prompt-compliant-via-``session_id``
         parent would leave a permanently-open ticket and the adoption metric
-        would lie in the pessimistic direction."""
+        would lie in the pessimistic direction.
+
+        THIS RUNS ON NEARLY EVERY MISSION-CHAT TURN, so it answers from the
+        by-session index — one index read plus the newest ticket it names — and
+        falls back to the full scan only when the index cannot be established.
+        The index is never trusted on its own: every token it offers is re-read
+        and re-verified against its own record, so the worst a stale entry can
+        do is cost one wasted read and get itself dropped."""
 
         root = safe_assignment_text(chat_session_id, limit=240)
         if not root:
             return None
+        if not self._ensure_index():
+            return self._scan_open_ticket_for_session(root)
+        entries = self._index_entries(root)
+        stale = 0
+        for entry in entries:
+            record = self.resolve(entry["clarify_token"])
+            if (
+                record is None
+                or record.get("state") != CLARIFY_TICKET_OPEN
+                or str(record.get("chat_session_id") or "") != root
+            ):
+                stale += 1
+                continue
+            # Stop at the first live ticket: the entries are newest-first, so
+            # this IS the answer, and reading past it would trade the O(1) the
+            # index exists for. Anything stale BEHIND it is dropped when it in
+            # turn becomes the head, or by the sweep.
+            if stale:
+                self._write_index(root, entries[stale:])
+            return record
+        if stale:
+            self._write_index(root, [])
+        return None
+
+    def _scan_open_ticket_for_session(self, root: str) -> dict[str, Any] | None:
+        """Index-free lookup: the pre-index behavior, kept as the fallback.
+
+        Reached only when the index could not be written (read-only or full
+        store root). Correctness must never depend on the index existing."""
+
         newest: dict[str, Any] | None = None
         for record in self._iter_records():
             if record.get("state") != CLARIFY_TICKET_OPEN:
@@ -790,10 +996,40 @@ class PersonaChatClarifyTicketStore:
             except OSError:
                 continue
             pruned += 1
+        self._sweep_index(cutoff)
         return pruned
 
+    def _sweep_index(self, cutoff: float) -> None:
+        """Drop index files that cannot name a live ticket any more.
+
+        BY MTIME, not by content, and that is the whole safety argument: an
+        index file's mtime is bumped by every add and every drop, so a file
+        untouched for a full TTL can only name tokens minted before that mtime —
+        all of them already unlinked by the loop above. A session whose turn is
+        minting concurrently has a fresh mtime and is skipped.
+
+        Deliberately NOT a read-modify-write per pruned ticket: that would race
+        a concurrent mint on the same session and could clobber a live pointer.
+        Entries for individually-pruned tickets self-heal on the read path
+        instead."""
+
+        try:
+            entries = list(self._index_dir().glob("*.json"))
+        except OSError:
+            return
+        state_path = self._index_state_path()
+        for entry in entries:
+            if entry == state_path:
+                continue
+            try:
+                if entry.stat().st_mtime > cutoff:
+                    continue
+                entry.unlink(missing_ok=True)
+            except OSError:
+                continue
+
     def _iter_records(self) -> Iterator[dict[str, Any]]:
-        root = paths.store_root() / "persona_chat_clarify_tickets"
+        root = self._root_dir()
         try:
             entries = sorted(root.glob("*.json"))
         except OSError:
