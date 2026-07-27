@@ -436,6 +436,35 @@ def test_mission_chat_operative_rules_route_named_agents_without_creating_goals(
     ) in rules
 
 
+def test_mission_chat_operative_rules_preserve_media_lines_verbatim():
+    # The operator console renders `MEDIA:<path>` lines (and bare absolute
+    # screenshot paths on their own line) as image attachment cards; text inside
+    # backticks/a code fence is quoted source, so a lead that "tidies" a relayed
+    # path into inline code destroys the card. The rules must teach the verbatim
+    # relay AND the reason, and it must read as the explicit carve-out to the
+    # clean-prose rule that precedes it (not as a competing instruction).
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    bullets = [line for line in rules.splitlines() if line.startswith("- ")]
+    assert "HARD RULE" in bullets[0], "the acknowledge-before-acting rule must remain first"
+
+    media_bullet = next((line for line in bullets if "MEDIA:" in line), None)
+    assert media_bullet is not None, "operative rules must teach the MEDIA-verbatim relay"
+    assert "VERBATIM" in media_bullet
+    assert "never wrap it in backticks or a code fence" in media_bullet
+    assert "bare absolute screenshot path" in media_bullet
+    # The WHY ships with the rule — a rule without its reason gets rationalized away.
+    assert "WHY:" in media_bullet
+    assert "image attachment cards" in media_bullet
+
+    # It is the carve-out to the clean-prose bullet, so it must follow it.
+    prose_index = next(
+        i for i, line in enumerate(bullets) if "Keep replies as clean teammate prose" in line
+    )
+    assert bullets.index(media_bullet) == prose_index + 1
+
+
 def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkeypatch):
     # A profile-backed persona reads its canonical SOUL.md by default (an
     # explicit `soul_overlay_path` remains an override) from

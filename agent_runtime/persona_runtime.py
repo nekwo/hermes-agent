@@ -686,7 +686,13 @@ def _mission_chat_operative_rules() -> str:
         "- When a persona runs more than one instance on your level, a BARE persona id is ambiguous and the send is refused "
         "(`ambiguous_target`) with the candidate @personainst_* handles — address the exact instance you mean by its @handle.\n"
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
-        "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane."
+        "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane.\n"
+        "- One carve-out to that: image lines are content, not scaffolding. When you relay, quote, or summarize a "
+        "teammate's reply that carries a `MEDIA:<absolute image path>` line, reproduce that line VERBATIM on a line of "
+        "its own — never wrap it in backticks or a code fence, never fold it into a sentence, never retype or shorten "
+        "the path. Same for a bare absolute screenshot path standing alone on its own line. WHY: the operator's console "
+        "renders those lines as image attachment cards, and text inside code formatting is treated as quoted source "
+        "rather than a declaration — so any rewrap silently costs the operator the picture they asked you for."
     )
 
 
