@@ -1372,8 +1372,26 @@ def _cmd_mission_chat_message(args) -> int:
     # Canonicalize a caller-supplied instance id at THIS boundary (the same
     # chokepoint open_chat uses), so an instance-shaped target can never mint a
     # variant row.
+    #
+    # An instance-shaped `--persona` (`personainst_qa_agent_f24601ba`) IS a
+    # caller pin, and it arrives in the persona slot constantly (Mission Control
+    # payloads, agent @handle targeting, legacy SessionDB rows).
+    # `_resolve_mission_chat_persona_id` above canonicalizes it DOWN to the
+    # persona id so every persona-keyed lookup works — and the instance half
+    # used to be dropped right here, leaving the caller's explicit pin to be
+    # re-decided by the bare-persona placement resolver below. Recover the pin
+    # at this same chokepoint (no second resolver: `canonical_persona_instance_id`
+    # remains the one derivation authority) so an explicit @handle is
+    # authoritative BEFORE "placements shadow canonical" runs — which is what
+    # that ruling already documents: it never fires when the caller already
+    # disambiguated with a `personainst_*` target.
+    requested_instance_id = getattr(args, "persona_instance_id", None)
+    if not safe_assignment_token(requested_instance_id):
+        raw_persona_target = safe_assignment_token(getattr(args, "persona_id", None))
+        if raw_persona_target.startswith(PERSONA_INSTANCE_ID_PREFIX):
+            requested_instance_id = raw_persona_target
     persona_instance_id = canonical_persona_instance_id(
-        getattr(args, "persona_instance_id", None), persona_id=normalized_persona
+        requested_instance_id, persona_id=normalized_persona
     )
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
     # Sender identity for workspace-scoped target resolution: the chat-root
@@ -1501,7 +1519,20 @@ def _cmd_mission_chat_message(args) -> int:
         # canonical row. The guard above already refused two-or-more in-scope
         # placements, so this resolves to at most one; with none it returns None
         # and the canonical channel is the reachability fallback.
-        resolved_instance_id = (
+        #
+        # ONE instance identity for the turn: whatever resolves the root/mint
+        # here is the instance `open_chat` BINDS below, so it is assigned back
+        # onto `persona_instance_id` rather than kept as a second local. Keeping
+        # them apart meant the bind received the RAW pin (`None` for a bare or
+        # instance-shaped send), fell back to the canonical channel, and the
+        # sibling-steal guard correctly refused the root this very turn had just
+        # minted for the placement ("chat session
+        # 'persona_chat_personainst_qa_agent_f24601ba_...' belongs to instance
+        # 'personainst_qa_agent_f24601ba'; it cannot be bound onto
+        # 'personainst_qa'") — refusing every placement-routed send, new-session
+        # and continue alike. The explicit-session branch above already adopts
+        # its resolved owner the same way; this is the omitted-session mirror.
+        persona_instance_id = (
             persona_instance_id
             or _mission_chat_bare_persona_target(
                 instance_store,
@@ -1515,7 +1546,7 @@ def _cmd_mission_chat_message(args) -> int:
             existing_root = resolve_default_chat_session_id_for_instance(
                 instance_store,
                 persona_id=normalized_persona,
-                persona_instance_id=resolved_instance_id,
+                persona_instance_id=persona_instance_id,
             )
         if existing_root:
             session_id = existing_root
@@ -1524,7 +1555,7 @@ def _cmd_mission_chat_message(args) -> int:
                 instance_store=instance_store,
                 session_db=session_db,
                 persona_id=normalized_persona,
-                persona_instance_id=resolved_instance_id,
+                persona_instance_id=persona_instance_id,
                 idempotency_key=(
                     safe_assignment_text(getattr(args, "idempotency_key", None), limit=240)
                     or f"send:{client_message_id}"
