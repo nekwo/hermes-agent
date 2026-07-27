@@ -1050,11 +1050,14 @@ def test_explicit_continuation_keeps_the_durable_pair_thread(
     second = _send(capsys, _dispatch_args("still here", "cm-sticky-2", new_session=False))
 
     assert second["session_id"] == first["session_id"]
-    assert second["session_established"] == {
-        "fresh": False,
-        "reason": "sticky_default",
-        "predecessor_session_id": None,
-    }
+    # Asserted key BY KEY, not as an exact dict: the exact-dict form pinned the
+    # ABSENCE of every other envelope field as contract, so additive work
+    # elsewhere broke a test that has nothing to say about it. All three values
+    # this test actually cares about are still pinned, exactly as before.
+    established = second["session_established"]
+    assert established["fresh"] is False
+    assert established["reason"] == "sticky_default"
+    assert established["predecessor_session_id"] is None
     # The first send had no thread to continue, so it minted one — reported
     # honestly as fresh, with the sticky reason it was actually decided by.
     assert first["session_established"]["fresh"] is True
@@ -1086,11 +1089,13 @@ def test_sticky_continuation_follows_the_latest_thread_not_a_pair_thread(
     # THE point: the sticky send lands in the DISPATCH-minted thread, because
     # that is what the pointer now names — not back in the earlier conversation.
     assert followed["session_id"] == dispatched["session_id"]
-    assert followed["session_established"] == {
-        "fresh": False,
-        "reason": "sticky_default",
-        "predecessor_session_id": None,
-    }
+    # Key by key, not an exact dict — same reason as the sibling sticky case
+    # above: the shape of the whole envelope is not what this test is about, and
+    # pinning it here only made additive work fail in the wrong place.
+    established = followed["session_established"]
+    assert established["fresh"] is False
+    assert established["reason"] == "sticky_default"
+    assert established["predecessor_session_id"] is None
     # The earlier conversation is not lost, just no longer the default: it is
     # continued by naming it, which is exactly what the contract now says.
     resumed = _send(
