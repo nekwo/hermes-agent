@@ -1399,13 +1399,20 @@ def _cmd_mission_chat_message(args) -> int:
     # here is the one it superseded" from "this continued what we had". Decided
     # here for the explicit-session lane; re-decided by policy below when the
     # caller named no session.
-    session_established = None
-    if session_id:
+    #
+    # Carried on `args` because this handler RE-ENTERS itself once to take the
+    # chat-root lease (see `_persona_chat_root_lease_acquired` below), and by
+    # then the resolved session has been written back onto `args.session_id` —
+    # so a second pass would rediscover "the caller named a session" and report
+    # every freshly minted dispatch thread as a plain continuation.
+    session_established = getattr(args, "_dispatch_session_established", None)
+    if session_established is None and session_id:
         session_established = session_established_payload(
             resolve_dispatch_session_decision(session_id=session_id),
             fresh=False,
             predecessor_session_id=None,
         )
+        args._dispatch_session_established = session_established
     # Sender identity for workspace-scoped target resolution: the chat-root
     # session of the agent that requested this send (agent-to-agent relay
     # threads it through the envelope; a bare operator CLI send omits it).
@@ -1618,6 +1625,8 @@ def _cmd_mission_chat_message(args) -> int:
                 dispatch_decision, fresh=True, predecessor_session_id=existing_root
             )
         args.session_id = session_id
+        # Survives the lease re-entry above, which sees args.session_id set.
+        args._dispatch_session_established = session_established
     display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or _display_name_for_profile(normalized_persona)
     try:
         instance = instance_store.open_chat(

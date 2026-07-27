@@ -338,14 +338,33 @@ def test_read_only_companions_are_registered_on_the_agent_chat_toolset():
 
 
 def test_send_schema_teaches_the_verb_set():
-    # The scope addition: the send description teaches the whole verb set + the
-    # @handle addressing model, and exposes the new_session parameter.
+    # The scope addition: the send description teaches the @handle addressing
+    # model and the thread contract, and exposes the thread-target parameters.
     text = AGENT_CHAT_SEND_SCHEMA["description"]
     assert "new_session" in text
-    assert "agent_chat_threads" in text and "agent_chat_open" in text
+    assert "session_id" in text
     assert "personainst_" in text  # @handle addressing is taught
     props = AGENT_CHAT_SEND_SCHEMA["parameters"]["properties"]
     assert "new_session" in props and props["new_session"]["type"] == "boolean"
+    assert "title" in props and props["title"]["type"] == "string"
+
+
+def test_send_schema_teaches_the_task_scoped_thread_contract():
+    # The model reads this description to decide whether to pass a session_id.
+    # It must say a NEW task gets a fresh thread and that continuing an exchange
+    # means passing the returned session back — otherwise the agent keeps the old
+    # "omit to continue" habit and every follow-up opens another empty thread.
+    text = AGENT_CHAT_SEND_SCHEMA["description"].lower()
+    assert "fresh" in text
+    assert "session_id" in text and "continue" in text
+
+
+def test_new_session_has_no_schema_default_so_unset_stays_unset():
+    # A `"default": false` here (or in the registry handler) collapses the
+    # tri-state: providers fill declared defaults, so "the caller said nothing"
+    # would arrive as an explicit "continue the durable thread" and silently pin
+    # every dispatch to the pre-policy mega-thread behavior.
+    assert "default" not in AGENT_CHAT_SEND_SCHEMA["parameters"]["properties"]["new_session"]
 
 
 def test_read_tool_descriptions_say_when_to_use_them():
@@ -357,8 +376,9 @@ def test_read_tool_descriptions_say_when_to_use_them():
 
 
 def test_new_session_flag_is_forwarded_to_the_handler(monkeypatch):
-    # The tool forwards new_session; the handler owns the mint (through the
-    # default-session chokepoint). The tool must NOT invent a session id here.
+    # The tool forwards new_session as a TRI-STATE and never decides the thread
+    # itself; the handler's policy resolver owns the answer and the mint (through
+    # the default-session chokepoint). The tool must NOT invent a session id.
     seen = {}
 
     def fake_handler(args):
@@ -370,13 +390,126 @@ def test_new_session_flag_is_forwarded_to_the_handler(monkeypatch):
     import hermes_cli.harness as harness
 
     monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
-    # Default: new_session absent → forwarded as False, session omitted.
+    # Absent → forwarded as None ("no opinion"), NOT False. Coercing to False
+    # here would answer the policy question inside the tool and pin every
+    # dispatch to the durable pair thread.
     assert json.loads(agent_chat_send(persona_id="qa", message="hi"))["ok"]
-    assert seen["new_session"] is False and seen["session_id"] is None
+    assert seen["new_session"] is None and seen["session_id"] is None
     # new_session=True forwarded; session stays None so the handler mints via the
     # chokepoint (one minting authority), not a tool-side mint.
     assert json.loads(agent_chat_send(persona_id="qa", message="hi", new_session=True))["ok"]
     assert seen["new_session"] is True and seen["session_id"] is None
+    # Explicit False is a real answer of its own: continue the durable thread.
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi", new_session=False))["ok"]
+    assert seen["new_session"] is False and seen["session_id"] is None
+
+
+def test_registry_handler_does_not_default_new_session_to_false(monkeypatch):
+    # The registry lambda is the real model-facing entry point; a `False`
+    # default there would defeat the tri-state just as thoroughly as a schema
+    # default. Drive it exactly as the tool dispatcher does.
+    seen = {}
+
+    def fake_handler(args):
+        seen["new_session"] = getattr(args, "new_session", None)
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    entry = registry.get_entry("agent_chat_send")
+    assert json.loads(entry.handler({"persona_id": "qa", "message": "hi"}))["ok"]
+    assert seen["new_session"] is None
+
+
+def test_string_boolean_new_session_is_not_inverted(monkeypatch):
+    # bool("false") is True. A provider that serializes booleans as text would
+    # have turned "continue our thread" into "start a fresh one".
+    seen = {}
+
+    def fake_handler(args):
+        seen["new_session"] = getattr(args, "new_session", None)
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi", new_session="false"))["ok"]
+    assert seen["new_session"] is False
+
+
+def test_title_names_the_thread_this_dispatch_opens(monkeypatch):
+    # Task-scoped threads are only navigable when named. The tool forwards the
+    # caller's title; deriving one from the message when absent is the handler's
+    # job (it is the side that knows whether this send actually mints).
+    seen = {}
+
+    def fake_handler(args):
+        seen["title"] = getattr(args, "title", None)
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert json.loads(
+        agent_chat_send(persona_id="qa", message="triage this", title="Flaky login triage")
+    )["ok"]
+    assert seen["title"] == "Flaky login triage"
+    # No title → None forwarded, never a placeholder like "Agent relay to qa",
+    # which would name every dispatch thread after the plumbing.
+    assert json.loads(agent_chat_send(persona_id="qa", message="triage this"))["ok"]
+    assert seen["title"] is None
+    assert json.loads(agent_chat_send(persona_id="qa", message="triage this", title="   "))["ok"]
+    assert seen["title"] is None
+
+
+def test_session_established_lineage_is_returned_to_the_caller(monkeypatch):
+    # The dispatching agent must be able to tell "I opened a fresh task thread
+    # (superseding this one)" from "I continued what we had" — and it needs the
+    # session id to continue THIS exchange rather than opening another thread.
+    def fake_handler(args):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "reply": "ack",
+                    "session_id": "persona_chat_personainst_qa_ffffffffffff",
+                    "session_established": {
+                        "fresh": True,
+                        "reason": "policy_new_per_dispatch",
+                        "predecessor_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
+                    },
+                }
+            )
+        )
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    data = json.loads(agent_chat_send(persona_id="qa", message="hi"))
+    assert data["session_established"] == {
+        "fresh": True,
+        "reason": "policy_new_per_dispatch",
+        "predecessor_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
+    }
+    assert data["session_id"] == "persona_chat_personainst_qa_ffffffffffff"
+
+
+def test_result_stays_compact_when_the_handler_reports_no_lineage(monkeypatch):
+    # The compact result is the whole point of this lane (the handler payload is
+    # ~75KB); an absent block must not become a null key on every reply.
+    def fake_handler(args):
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert "session_established" not in json.loads(agent_chat_send(persona_id="qa", message="hi"))
 
 
 def test_new_session_with_explicit_session_is_a_typed_refusal(monkeypatch):

@@ -234,3 +234,77 @@ def test_absent_flag_resolves_to_the_configured_lane_default():
     )
 
     assert resolve_mission_chat_max_seconds(args.max_seconds, cfg) == 1200.0
+
+
+# ── dispatch_session_policy (the other MissionChatConfig knob) ──────────────
+#
+# Which chat session an agent→agent dispatch lands in when the caller names
+# none. Same stance as the budget default: config sets the answer for callers
+# with no opinion, an explicit caller always wins, and a malformed stanza
+# degrades instead of failing every dispatch on the lane. The decision table
+# itself is pinned in test_dispatch_session_policy.py; this covers the
+# CONFIG seam.
+
+
+def test_absent_stanza_dispatches_to_a_fresh_thread_per_task():
+    from agent_runtime.config import mission_chat_dispatch_session_policy
+    from agent_runtime.dispatch_session_policy import NEW_PER_DISPATCH
+
+    assert MissionChatConfig().dispatch_session_policy == NEW_PER_DISPATCH
+    assert (
+        mission_chat_dispatch_session_policy(_cfg("agent_runtime: {}\n"))
+        == NEW_PER_DISPATCH
+    )
+
+
+def test_sticky_is_configurable_deployment_wide():
+    from agent_runtime.config import mission_chat_dispatch_session_policy
+    from agent_runtime.dispatch_session_policy import STICKY
+
+    cfg = _cfg(
+        """
+        agent_runtime:
+          mission_chat:
+            dispatch_session_policy: sticky
+        """
+    )
+
+    assert cfg.mission_chat.dispatch_session_policy == STICKY
+    assert mission_chat_dispatch_session_policy(cfg) == STICKY
+    # The two knobs are independent — reading one must not disturb the other.
+    assert cfg.mission_chat.default_max_seconds == LEGACY_DEFAULT
+
+
+def test_a_misspelled_policy_degrades_to_the_default():
+    from agent_runtime.config import mission_chat_dispatch_session_policy
+    from agent_runtime.dispatch_session_policy import NEW_PER_DISPATCH
+
+    cfg = _cfg(
+        """
+        agent_runtime:
+          mission_chat:
+            dispatch_session_policy: per-task-ish
+        """
+    )
+
+    assert mission_chat_dispatch_session_policy(cfg) == NEW_PER_DISPATCH
+
+
+def test_both_knobs_parse_together():
+    from agent_runtime.config import (
+        mission_chat_default_max_seconds,
+        mission_chat_dispatch_session_policy,
+    )
+    from agent_runtime.dispatch_session_policy import STICKY
+
+    cfg = _cfg(
+        """
+        agent_runtime:
+          mission_chat:
+            default_max_seconds: 1800
+            dispatch_session_policy: sticky
+        """
+    )
+
+    assert mission_chat_default_max_seconds(cfg) == 1800.0
+    assert mission_chat_dispatch_session_policy(cfg) == STICKY

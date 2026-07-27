@@ -749,3 +749,398 @@ def test_unresolvable_sender_projects_as_agent_without_a_name(isolate_agent_runt
     assert message["actor_instance_id"] is None
     assert "actor_display_name" not in message
     assert message["role"] == "operator"
+
+
+# --------------------------------------------------------------------------- #
+# Task-scoped dispatch sessions (2026-07-27)                                  #
+#                                                                             #
+# The 2026-07-18 fix above made an omitted-session relay CONTINUE the target's #
+# default thread. Correct for a conversation, wrong for a dispatch: a mission  #
+# lead briefing one teammate on ten unrelated tasks piled all ten into one     #
+# thread that was re-fed to the provider every turn (observed: 293K input      #
+# tokens for a 1.7K-output task). A dispatch now opens its OWN thread by       #
+# default, records the thread it superseded, and reports how the thread was    #
+# established — while the 2026-07-18 guarantees hold: the mint still rides the #
+# canonical chokepoint, so the session is pointed, canonical, and visible.     #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def dispatch_home(tmp_path, monkeypatch):
+    """A throwaway home for the handler lane.
+
+    Driving the real handler reaches ``active_profile_name()``, which reads
+    ``Path.home()/.hermes/active_profile``. The hermetic runner blanks the home
+    env vars, so ``Path.home()`` raises there — and pointing at the developer's
+    REAL home would make the test read live profile state. Give it a temp one."""
+
+    home = tmp_path / "home"
+    (home / ".hermes").mkdir(parents=True, exist_ok=True)
+    for var in ("HOME", "USERPROFILE", "HERMES_HOME"):
+        monkeypatch.setenv(var, str(home))
+    return home
+
+
+class _DispatchTranscriptDB:
+    """Minimal SessionDB stand-in for driving the handler end to end."""
+
+    def __init__(self):
+        self.sessions: dict[str, dict] = {}
+        self.messages: dict[str, list] = {}
+        self.titles: dict[str, str] = {}
+
+    def create_session(self, session_id, source, **kwargs):
+        self.sessions.setdefault(session_id, {"source": source, **kwargs})
+        self.messages.setdefault(session_id, [])
+        return session_id
+
+    def get_session(self, session_id):
+        session = self.sessions.get(session_id)
+        if session is None:
+            return None
+        return {
+            "id": session_id,
+            "source": session.get("source"),
+            "system_prompt": session.get("system_prompt"),
+            "model": session.get("model"),
+            "model_config": session.get("model_config"),
+            "title": self.titles.get(session_id),
+            "preview": None,
+            "message_count": len(self.messages.get(session_id, [])),
+            "started_at": None,
+            "last_active": None,
+            "archived": 0,
+        }
+
+    def list_sessions_rich(self, **kwargs):
+        source = kwargs.get("source")
+        exclude_sources = set(kwargs.get("exclude_sources") or [])
+        rows = []
+        for session_id, session in self.sessions.items():
+            row_source = session.get("source")
+            if source and row_source != source:
+                continue
+            if row_source in exclude_sources:
+                continue
+            rows.append({**self.get_session(session_id)})
+        return rows
+
+    def append_message(self, session_id, role, content=None, **kwargs):
+        self.messages.setdefault(session_id, []).append({"role": role, "content": content, **kwargs})
+        return len(self.messages[session_id])
+
+    def get_messages(self, session_id, include_inactive=False):
+        return list(self.messages.get(session_id, []))
+
+    def get_session_title(self, session_id):
+        return self.titles.get(session_id)
+
+    def set_session_title(self, session_id, title):
+        self.titles[session_id] = title
+
+    def update_session_meta(self, session_id, model_config_json, model=None):
+        session = self.sessions.setdefault(session_id, {})
+        session["model_config"] = model_config_json
+        if model is not None:
+            session["model"] = model
+
+    def delete_session(self, session_id, **kwargs):
+        return bool(self.sessions.pop(session_id, None))
+
+    def session_meta(self, session_id) -> dict:
+        import json as _json
+
+        raw = (self.sessions.get(session_id) or {}).get("model_config")
+        return _json.loads(raw) if raw else {}
+
+
+def _dispatch_args(message: str, client_message_id: str, **overrides):
+    """Args as agent_chat_send builds them: no session, no new_session opinion."""
+
+    from types import SimpleNamespace
+
+    base = dict(
+        persona_id="dev",
+        persona_instance_id=None,
+        session_id=None,
+        task_id=None,
+        goal_id=None,
+        title=None,
+        message=message,
+        provider=None,
+        model=None,
+        use_agent_default=False,
+        surface_prompt="",
+        intent_hint="chat",
+        requested_by="agent:worker_session_lead",
+        requested_by_session=None,
+        client_message_id=client_message_id,
+        stream=False,
+        max_seconds=5.0,
+        json=True,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _install_dispatch_handler_doubles(monkeypatch, *, clarify_request=None):
+    """Stub the model turn + transcript store; keep the REAL session lane."""
+
+    from agent_runtime.config import AgentRuntimeConfig
+    from hermes_cli import harness
+
+    db = _DispatchTranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: AgentRuntimeConfig())
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "_maybe_auto_title_persona_chat", lambda **_kwargs: None)
+
+    class _FakeRuntime:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona_arg, message, **kwargs):
+            from types import SimpleNamespace
+
+            raw = {
+                "model_input_observability": {
+                    "kind": "redaction_safe_final_model_input",
+                    "message_count": 1,
+                    "messages": [],
+                }
+            }
+            if clarify_request is not None:
+                raw["clarify_request"] = clarify_request
+            return SimpleNamespace(
+                final_response="ack",
+                input_tokens=1,
+                output_tokens=1,
+                total_tokens=2,
+                raw=raw,
+            )
+
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
+    return db
+
+
+def _send(capsys, args) -> dict:
+    import json as _json
+
+    from hermes_cli import harness
+
+    code = harness._cmd_mission_chat_message(args)
+    payload = _json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    assert payload["ok"] is True
+    return payload
+
+
+def test_dispatch_default_opens_a_fresh_thread_per_task(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    _install_dispatch_handler_doubles(monkeypatch)
+
+    first = _send(capsys, _dispatch_args("triage the flaky login test", "cm-dispatch-1"))
+    second = _send(capsys, _dispatch_args("audit the download resume path", "cm-dispatch-2"))
+
+    assert first["session_id"] != second["session_id"], (
+        "two unrelated dispatches must not share one mega-thread"
+    )
+    for payload in (first, second):
+        assert payload["session_established"]["fresh"] is True
+        assert payload["session_established"]["reason"] == "policy_new_per_dispatch"
+
+
+def test_fresh_dispatch_thread_is_canonical_pointed_and_visible(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # The 2026-07-18 orphaned-relay guarantee must survive the new default: the
+    # mint rides the canonical chokepoint, so the session belongs to the
+    # canonical instance, becomes its pointer, and renders in the projection.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    payload = _send(capsys, _dispatch_args("investigate the cold-start cost", "cm-dispatch-3"))
+    session_id = payload["session_id"]
+    handle = persona_instance_id_for("dev")
+
+    assert session_id.startswith(f"persona_chat_{handle}_")
+    store = PersonaInstanceStore()
+    assert resolve_default_chat_session_id_for_instance(store, persona_id="dev") == session_id
+    rows = persona_chat_history_summary(persona_instances=store.list_all(), session_db=db)
+    visible = [row for row in rows if row["session_id"] == session_id]
+    assert len(visible) == 1
+    assert visible[0]["persona_instance_id"] == handle
+
+
+def test_fresh_dispatch_records_the_thread_it_superseded(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # Lineage, not amnesia: the retired thread is reachable from the new one via
+    # the session meta, and named in the reply envelope.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    first = _send(capsys, _dispatch_args("task one", "cm-lineage-1"))
+    second = _send(
+        capsys,
+        _dispatch_args("task two", "cm-lineage-2", requested_by_session="worker_session_lead"),
+    )
+
+    assert second["session_established"]["predecessor_session_id"] == first["session_id"]
+    lineage = db.session_meta(second["session_id"])["_dispatched_from"]
+    assert lineage["predecessor_chat_session_id"] == first["session_id"]
+    assert lineage["requested_by_session"] == "worker_session_lead"
+    # The very first dispatch had nothing to supersede — honest null, not a
+    # self-reference.
+    assert first["session_established"]["predecessor_session_id"] is None
+    assert "_dispatched_from" not in db.session_meta(first["session_id"])
+
+
+def test_dispatch_lineage_never_borrows_parent_session_id(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # parent_session_id is claimed by native-compression lineage on this lane
+    # (native_lineage_summary raises on a foreign parent; usage aggregation
+    # blanks). Relay provenance must ride its own marker key.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    _send(capsys, _dispatch_args("task one", "cm-parent-1"))
+    second = _send(capsys, _dispatch_args("task two", "cm-parent-2"))
+
+    meta = db.session_meta(second["session_id"])
+    assert "_dispatched_from" in meta
+    assert "parent_session_id" not in meta
+
+
+def test_explicit_continuation_keeps_the_durable_pair_thread(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # new_session=False is a real answer, not "unset": it continues the durable
+    # thread even while the policy default is new_per_dispatch. This is also the
+    # CLI/serve operator-console lane (argparse store_true gives explicit False).
+    _install_dispatch_handler_doubles(monkeypatch)
+
+    first = _send(capsys, _dispatch_args("hello", "cm-sticky-1", new_session=False))
+    second = _send(capsys, _dispatch_args("still here", "cm-sticky-2", new_session=False))
+
+    assert second["session_id"] == first["session_id"]
+    assert second["session_established"] == {
+        "fresh": False,
+        "reason": "sticky_default",
+        "predecessor_session_id": None,
+    }
+    # The first send had no thread to continue, so it minted one — reported
+    # honestly as fresh, with the sticky reason it was actually decided by.
+    assert first["session_established"]["fresh"] is True
+    assert first["session_established"]["reason"] == "sticky_default"
+
+
+def test_sticky_policy_restores_the_durable_thread_for_unset_callers(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    import agent_runtime.config as runtime_config_module
+
+    monkeypatch.setattr(
+        runtime_config_module, "mission_chat_dispatch_session_policy", lambda cfg=None: "sticky"
+    )
+    _install_dispatch_handler_doubles(monkeypatch)
+
+    first = _send(capsys, _dispatch_args("task one", "cm-policy-sticky-1"))
+    second = _send(capsys, _dispatch_args("task two", "cm-policy-sticky-2"))
+
+    assert second["session_id"] == first["session_id"]
+    assert second["session_established"]["reason"] == "policy_sticky"
+    assert second["session_established"]["fresh"] is False
+
+
+def test_explicit_session_id_continues_that_exact_thread(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    _install_dispatch_handler_doubles(monkeypatch)
+
+    opened = _send(capsys, _dispatch_args("start the task", "cm-explicit-1"))
+    followed = _send(
+        capsys,
+        _dispatch_args("one more detail", "cm-explicit-2", session_id=opened["session_id"]),
+    )
+
+    assert followed["session_id"] == opened["session_id"]
+    assert followed["session_established"] == {
+        "fresh": False,
+        "reason": "explicit_session_id",
+        "predecessor_session_id": None,
+    }
+
+
+def test_clarify_round_trip_stays_in_one_session_under_the_new_default(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # THE correctness check for the flipped default. A briefed agent that asks a
+    # clarifying question must be answerable IN THAT THREAD — the answer carries
+    # the session_id the reply returned. If the answer relied on stickiness it
+    # would now open a third thread and the agent would read the choice with no
+    # question attached.
+    db = _install_dispatch_handler_doubles(
+        monkeypatch,
+        clarify_request={"question": "launcher or backend?", "choices": ["launcher", "backend"]},
+    )
+
+    dispatched = _send(capsys, _dispatch_args("fix the failing test", "cm-clarify-1"))
+    assert dispatched["clarify_request"] is not None
+    assert dispatched["session_established"]["fresh"] is True
+
+    answer = _send(
+        capsys,
+        _dispatch_args("launcher", "cm-clarify-2", session_id=dispatched["session_id"]),
+    )
+
+    assert answer["session_id"] == dispatched["session_id"]
+    assert answer["session_established"]["reason"] == "explicit_session_id"
+    # One thread for the whole exchange — the question and its answer are in it.
+    chat_sessions = [
+        session_id
+        for session_id in db.sessions
+        if session_id.startswith(f"persona_chat_{persona_instance_id_for('dev')}_")
+    ]
+    assert chat_sessions == [dispatched["session_id"]]
+    # …and the answer did not mint a second one behind the caller's back.
+    assert answer["session_established"]["fresh"] is False
+    assert answer["session_established"]["predecessor_session_id"] is None
+    assert resolve_default_chat_session_id_for_instance(
+        PersonaInstanceStore(), persona_id="dev"
+    ) == dispatched["session_id"]
+
+
+def test_fresh_dispatch_threads_are_named_after_the_task(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # Task-scoped threads are only navigable when named; a sidebar of identical
+    # "Dev chat" rows is worse than the mega-thread it replaced.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    derived = _send(
+        capsys, _dispatch_args("Triage the flaky login test on Windows", "cm-title-1")
+    )
+    explicit = _send(
+        capsys,
+        _dispatch_args("anything", "cm-title-2", title="Download resume audit"),
+    )
+
+    assert db.get_session_title(derived["session_id"]) == "Triage the flaky login test on Windows"
+    assert db.get_session_title(explicit["session_id"]) == "Download resume audit"
+
+
+def test_the_durable_thread_keeps_its_persona_title(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # The operator console mints its first thread through this same lane and
+    # passes a generic --title; that lane must keep the stable per-persona name
+    # rather than being renamed after one message.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    opened = _send(
+        capsys,
+        _dispatch_args("hello there", "cm-console-1", new_session=False, title="Operator message"),
+    )
+
+    title = db.get_session_title(opened["session_id"])
+    assert title.endswith(" chat"), title  # "<display name> chat", the durable name
+    assert title not in ("Operator message", "hello there")
