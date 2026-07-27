@@ -19,7 +19,10 @@ Thread contract (V3 — task-scoped dispatch, 2026-07-27): a send that names no
 thread opens a FRESH one per dispatched task (``agent_runtime.mission_chat.
 dispatch_session_policy``, default ``new_per_dispatch``); continuation is
 explicit — pass back the ``session_id`` the reply returned, or ``new_session:
-false`` for the durable pair thread. Every reply carries
+false`` to continue the target's CURRENT default thread (the most recently
+established one: every dispatch mint repoints that pointer through
+``open_chat``, so it is NOT a stable per-pair thread — naming the ``session_id``
+is the only way to continue a SPECIFIC conversation). Every reply carries
 ``session_established`` {fresh, reason, predecessor_session_id}, and a fresh
 thread records its predecessor in the session meta (``_dispatched_from``). The
 decision itself belongs to ``agent_runtime.dispatch_session_policy``; this tool
@@ -66,7 +69,7 @@ _MESSAGE_LIMIT = 12000
 AGENT_CHAT_SEND_SCHEMA = {
     "name": "agent_chat_send",
     "description": (
-        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Each new task you dispatch starts a FRESH thread by default; to continue an exchange (their clarifying question, an in-task follow-up) pass back the session_id their reply returned. new_session=false continues your durable pair thread instead. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
+        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Each new task you dispatch starts a FRESH thread by default; to continue an exchange (their clarifying question, an in-task follow-up) pass back the session_id their reply returned. new_session=false continues the target's CURRENT default thread (the most recent one) instead. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
     ),
     "parameters": {
         "type": "object",
@@ -98,8 +101,10 @@ AGENT_CHAT_SEND_SCHEMA = {
                 "type": "boolean",
                 "description": (
                     "Omit this: a new task dispatch already gets its own fresh thread. Pass false to "
-                    "continue your durable pair thread with the target instead, or true to force a "
-                    "fresh thread where the default would not. Cannot be combined with session_id."
+                    "continue the target's CURRENT default thread instead — that is the most "
+                    "recently established one, not a stable per-pair thread, so name the session_id "
+                    "when you mean a SPECIFIC conversation. Pass true to force a fresh thread where "
+                    "the default would not. Cannot be combined with session_id."
                 ),
             },
             "title": {
@@ -154,8 +159,8 @@ def agent_chat_send(
     persona_id = (persona_id or "").strip()
     message = (message or "").strip()
     resolved_session_id = (str(session_id).strip() or None) if session_id else None
-    # TRI-STATE, not a bool: True = fresh thread, False = continue the durable
-    # pair thread, UNSET = let agent_runtime.mission_chat.dispatch_session_policy
+    # TRI-STATE, not a bool: True = fresh thread, False = continue the target's
+    # current default thread, UNSET = let agent_runtime.mission_chat.dispatch_session_policy
     # decide (default: one fresh thread per dispatched task). `bool()` here would
     # collapse "unset" into an explicit "sticky" and silently pin every caller to
     # the old mega-thread behavior.
@@ -368,7 +373,7 @@ AGENT_CHAT_THREADS_SCHEMA = {
 AGENT_CHAT_OPEN_SCHEMA = {
     "name": "agent_chat_open",
     "description": (
-        "Read the recent message tail of your shared thread with ONE teammate (persona id, or a @personainst_* handle for a specific instance). Read-only; never creates a session. Disambiguator: agent_chat_open READS a thread; agent_chat_send replies; agent_chat_threads lists your threads."
+        "Review the recent message tail of a thread with ONE teammate (persona id, or a @personainst_* handle for a specific instance) — 'what did we last say to each other?' before you continue it or inspect what a dispatched task actually said. Reviews their current default thread, or the session_id you name. Read-only; never creates a session. Disambiguator: agent_chat_open READS a thread; agent_chat_send replies; agent_chat_threads lists your threads."
     ),
     "parameters": {
         "type": "object",

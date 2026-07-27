@@ -1337,8 +1337,10 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--persona-instance-id", default=None)
     mission_chat_message.add_argument("--session-id", default=None)
     # store_true (absent → False) is deliberate on THIS lane: False is now an
-    # explicit "continue the durable thread", so the operator console and any
-    # bare CLI send keep threading exactly as before, while a caller that omits
+    # explicit "continue the target's current default thread", so the operator
+    # console and any bare CLI send keep threading exactly as before (that
+    # pointer follows the most recently established thread — it is not a
+    # separate durable pair thread), while a caller that omits
     # the flag entirely (the agent_chat_send dispatch lane, which forwards
     # None) falls through to agent_runtime.mission_chat.dispatch_session_policy.
     mission_chat_message.add_argument("--new-session", dest="new_session", action="store_true", help="Force a fresh canonical chat session for the target instead of continuing the default thread (agent_chat_send new_session lane); ignored when --session-id is given")
