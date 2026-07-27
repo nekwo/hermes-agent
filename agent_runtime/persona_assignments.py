@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import uuid
 from dataclasses import dataclass, field
@@ -1558,6 +1559,16 @@ class PersonaInstanceStore:
         resolve a caller-supplied (or omitted) instance id through the same
         :func:`canonical_chat_instance_id` derivation ``open_chat`` uses;
         without it the id is taken as already canonical.
+
+        NEVER RAISES for a storage failure. Both callers ask this before their
+        first durable write, and the mint's caller handles exactly one typed
+        error (:class:`RetiredPersonaInstanceError`) — so an ``OSError`` from a
+        flaky/UNC store root escaping here would reach the operator as the
+        untyped traceback this predicate exists to retire. A probe that cannot
+        read the archive cannot PROVE retirement, so it reports ``None`` (the
+        pre-flight's posture, now shared by construction) and logs; the write
+        chokepoint ``open_chat`` still refuses a retired target, so failing open
+        costs the litter, never the guarantee.
         """
         instance_id = (
             canonical_chat_instance_id(persona_id, persona_instance_id)
@@ -1569,10 +1580,26 @@ class PersonaInstanceStore:
         try:
             self.get(instance_id)
         except Exception:
+            pass
+        else:
+            # A live row always wins: the archive is history, and an id carried by a
+            # live placement is live — never a tombstone.
+            return None
+        try:
             return _retired_persona_instance_archive_path(instance_id)
-        # A live row always wins: the archive is history, and an id carried by a
-        # live placement is live — never a tombstone.
-        return None
+        except OSError:
+            # The tombstone probe is filesystem I/O (``exists`` / ``iterdir`` /
+            # ``is_file``) over the archive root. Loud in the log, quiet in the
+            # answer: a caller must not be handed a refusal the store never
+            # actually proved, nor a traceback from a lane that has a typed
+            # refusal contract.
+            logging.getLogger(__name__).warning(
+                "retirement tombstone probe failed for %s; "
+                "treating the target as NOT retired",
+                instance_id,
+                exc_info=True,
+            )
+            return None
 
     def open_chat(
         self,

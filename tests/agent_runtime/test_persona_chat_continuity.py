@@ -471,3 +471,88 @@ def test_mint_for_a_live_target_is_untouched_by_the_retirement_precondition(
     assert receipt["state"] == "completed"
     assert db.get_session(root) is not None
     assert store.get("personainst_dev").default_chat_session_id == root
+
+
+def test_a_flaky_tombstone_probe_cannot_escape_the_mint_lane_untyped(
+    isolate_agent_runtime_root, tmp_path, monkeypatch, caplog
+):
+    """The untyped escape this fix exists to kill, one layer down.
+
+    The precondition's answer comes from filesystem I/O — ``exists`` /
+    ``iterdir`` / ``is_file`` over an archive root that in production can be a
+    UNC share. This call site handles exactly ONE typed error, so an ``OSError``
+    from a flaky root would sail straight past it and reach the operator as the
+    traceback the whole fix was about, just with a different exception class.
+
+    The predicate owns the posture so both call sites inherit it: a probe that
+    cannot READ the archive cannot PROVE retirement, so it answers "not
+    retired" — the pre-flight's existing fail-open — and warns rather than
+    failing silently. ``open_chat`` is still the write chokepoint that refuses,
+    so the cost of failing open is the litter, never the guarantee.
+    """
+
+    import logging
+
+    from agent_runtime import persona_assignments
+
+    db = SessionDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+
+    def _flaky(_instance_id):
+        raise OSError("the store root went away mid-probe")
+
+    monkeypatch.setattr(
+        persona_assignments, "_retired_persona_instance_archive_path", _flaky
+    )
+
+    with caplog.at_level(logging.WARNING, logger=persona_assignments.__name__):
+        assert store.retired_instance_archive_path("personainst_dev") is None
+    assert any(
+        "retirement tombstone probe failed" in record.getMessage()
+        for record in caplog.records
+    ), "failing open must not be silent"
+
+    # …and the lane that used to traceback now runs to completion.
+    receipt = PersonaChatMintReceiptStore().mint(
+        instance_store=store,
+        session_db=db,
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="flaky-probe",
+        title="Dev chat",
+    )
+
+    assert db.get_session(receipt["root_chat_session_id"]) is not None
+
+
+def test_the_mint_refusal_names_its_target_the_way_every_other_refusal_does(
+    isolate_agent_runtime_root, tmp_path
+):
+    """One refusal, three enforcement points, ONE spelling of the target id.
+
+    ``mint`` reported the caller's raw token while the dispatch pre-flight and
+    ``open_chat`` both report the id the canonical derivation resolved — so a
+    caller that spelled the target with a drifted actor token got the same
+    refusal under two different names depending on which point happened to
+    fire. ``persona_instance_id`` is the field an operator (and the archived
+    history it points at) is keyed off; it cannot depend on which guard won.
+    """
+
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+
+    db = SessionDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    placement, archived = _retired_placement(store)
+
+    with pytest.raises(RetiredPersonaInstanceError) as excinfo:
+        PersonaChatMintReceiptStore().mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id=f"persona_{placement.id}",
+            idempotency_key="drifted-actor-token",
+            title="triage the flaky login test",
+        )
+
+    assert excinfo.value.persona_instance_id == placement.id
+    assert str(excinfo.value.archive_path) == archived["archive_path"]

@@ -26,6 +26,7 @@ from .dispatch_session_policy import superseded_session_id
 from .persona_assignments import (
     PersonaInstanceStore,
     RetiredPersonaInstanceError,
+    canonical_chat_instance_id,
     persona_chat_session_id_for,
     safe_assignment_text,
     safe_assignment_token,
@@ -432,11 +433,29 @@ class PersonaChatMintReceiptStore:
         # decidable from the store alone, so decide it here and leave nothing
         # behind. Same typed error callers already handle from ``open_chat``,
         # same single retirement predicate; only the litter is gone.
+        #
+        # SCOPE, precisely: this closes the refusal that is TRUE AT ENTRY —
+        # the target was already retired when the mint arrived, which is every
+        # dispatch at a deleted placement. It does NOT close a ``retire()`` that
+        # lands AFTER this line: the lane below still reserves the receipt,
+        # creates the session, writes meta and titles it before ``open_chat``
+        # binds, and ``retire`` refuses only on a live run/worker binding or an
+        # active assignment — neither of which this mint holds until that bind.
+        # Losing that race still litters. Closing it needs the bind moved ahead
+        # of the first durable write (or a lock shared with ``retire``), not a
+        # second check here.
         retired_archive = instance_store.retired_instance_archive_path(
             instance_id, persona_id=persona_id
         )
         if retired_archive is not None:
-            raise RetiredPersonaInstanceError(instance_id, archive_path=retired_archive)
+            # Report the id the PREDICATE resolved, not the caller's raw token:
+            # the pre-flight refusal and ``open_chat`` both name the canonical
+            # id, and one refusal reachable from three sites must not identify
+            # its target three ways.
+            raise RetiredPersonaInstanceError(
+                canonical_chat_instance_id(persona_id, instance_id),
+                archive_path=retired_archive,
+            )
         path = self._path(instance_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = path.with_suffix(".lock")

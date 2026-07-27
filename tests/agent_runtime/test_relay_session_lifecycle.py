@@ -1480,3 +1480,51 @@ def test_a_streamed_dispatch_to_a_retired_placement_refuses_the_same_way(
     assert final["archive_path"] == archive_path
     assert db.sessions == {}
     assert _mint_receipt_files() == []
+
+
+def test_a_retired_target_is_refused_before_the_mint_lane_is_ever_entered(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    """Pins the PRE-FLIGHT specifically, not just its outcome.
+
+    Three enforcement points render one refusal body, so the tests above pass
+    on any ONE of them: delete the pre-flight and the mint's own precondition
+    answers byte-identically, green suite, no signal. But they are not
+    interchangeable — the pre-flight is what keeps the lane from being ENTERED,
+    and everything downstream of entering it (the receipt reserve, the session
+    row, the retire race that opens once the mint is running) only stays
+    impossible while the refusal lands first. So make the reach itself the
+    failure: this ``mint`` cannot be called without failing the test.
+    """
+
+    from agent_runtime.persona_chat_continuity import PersonaChatMintReceiptStore
+
+    db = _install_dispatch_handler_doubles(monkeypatch)
+    retired_id, archive_path = _retire_a_placement()
+
+    def _never_reached(self, **kwargs):
+        raise AssertionError(
+            "the dispatch lane entered the mint for a retired target — the "
+            "pre-mint refusal is no longer doing the work"
+        )
+
+    monkeypatch.setattr(PersonaChatMintReceiptStore, "mint", _never_reached)
+
+    refusal = _refused(
+        capsys,
+        _dispatch_args(
+            "triage the flaky login test",
+            "cm-retired-preflight",
+            persona_instance_id=retired_id,
+        ),
+    )
+
+    # Same contract as the reachable-mint path: the operator cannot tell which
+    # enforcement point fired, only that it fired before anything was written.
+    assert refusal["error_kind"] == "retired_persona_instance"
+    assert refusal["execution_state"] == "refused"
+    assert refusal["persona_instance_id"] == retired_id
+    assert refusal["archive_path"] == archive_path
+    assert refusal["history_preserved"] is True
+    assert db.sessions == {}
+    assert _mint_receipt_files() == []

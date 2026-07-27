@@ -5160,6 +5160,42 @@ def test_retirement_is_answerable_read_only_before_anything_is_written(
     ) == result["archive_path"]
 
 
+def test_a_live_row_outranks_a_stale_retire_tombstone_for_the_same_id(
+    isolate_agent_runtime_root,
+):
+    """The predicate's live-row-wins branch, pinned on a CONSTRUCTED state.
+
+    No public verb can produce this state today: ``retire`` archives the row in
+    the same breath as it writes the tombstone, so live-row-AND-tombstone is
+    unreachable through the store's API — which is exactly why this branch
+    survives every realistic scenario untested and reads like dead weight to
+    the next person holding a knife.
+
+    It is armor for the verb this design invites next. Tombstones are permanent,
+    so an un-retire / re-placement that writes an id back into the live roster
+    would leave precisely this shape behind — and a predicate that consulted
+    only the archive would then call that live placement retired and refuse
+    every chat it ever opened. So the state is built by hand: the archived row
+    put back on disk, the tombstone deliberately left where it is.
+    """
+
+    from agent_runtime import paths
+
+    store = PersonaInstanceStore()
+    retired = _placement_instance(placement_id="dev_agent_2")
+    result = store.retire(retired.id, reason="placement deleted")
+    tombstone = Path(result["archive_path"])
+    assert str(store.retired_instance_archive_path(retired.id)) == result["archive_path"]
+
+    live_path = paths.persona_instance_path(retired.id)
+    live_path.parent.mkdir(parents=True, exist_ok=True)
+    live_path.write_text(tombstone.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # Both facts hold at once now, and the LIVE one is the one that decides.
+    assert store.get(retired.id).id == retired.id
+    assert tombstone.is_file(), "the tombstone must survive for this to prove anything"
+    assert store.retired_instance_archive_path(retired.id) is None
+
 def test_open_chat_cli_rejects_unpersisted_retired_root_at_cutoff(
     monkeypatch,
     capsys,

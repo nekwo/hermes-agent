@@ -1683,13 +1683,27 @@ def _cmd_mission_chat_message(args) -> int:
                     },
                 )
             except RetiredPersonaInstanceError as exc:
-                # The pre-flight above closes the practical window; this closes
-                # the race (a placement retired between the two) and any caller
-                # that reaches the mint by another road. The mint asserts the
-                # same precondition before its first durable write, so this
-                # arrives with nothing left behind — but it must arrive TYPED.
-                # An unhandled raise here was the untyped traceback the operator
-                # saw instead of a refusal.
+                # What this handler guarantees is the TYPE. An unhandled raise
+                # here was the untyped traceback the operator saw instead of a
+                # refusal.
+                #
+                # What reaches it: the mint's own PRECONDITION, i.e. a target
+                # already retired when the mint began — a caller that skipped
+                # the pre-flight above by another road, or a `retire` that
+                # landed in the gap between the pre-flight and the mint. That
+                # precondition fires before the lane's first durable write, so
+                # these arrive with nothing left behind.
+                #
+                # What does NOT reach it, and is NOT closed anywhere: a `retire`
+                # that lands AFTER the precondition passes, while the lane is
+                # reserving the receipt, creating the session, and titling it.
+                # The mint completes; the refusal surfaces later, from the
+                # `open_chat` bind, with the titled thread already durable. That
+                # window is real — `retire` refuses only on a live run/worker
+                # binding or an active assignment, and a chat mint holds neither
+                # until that bind. Only moving the bind ahead of the first
+                # durable write (or sharing a lock with `retire`) closes it; a
+                # third check on this path would not.
                 data = _retired_persona_instance_payload(exc)
                 if getattr(args, "stream", False):
                     _emit_chat_final(data)
@@ -1730,6 +1744,12 @@ def _cmd_mission_chat_message(args) -> int:
             kill_active=False,
         )
     except RetiredPersonaInstanceError as exc:
+        # THE site where losing the retire race surfaces: a placement retired
+        # after the mint's precondition passed refuses only here, at the bind,
+        # by which time this turn's thread is minted and titled. The refusal is
+        # typed and identical either way; the litter is not, and is not claimed
+        # to be. See the mint handler above for why the bind's position — not
+        # another check — is what would close it.
         data = _retired_persona_instance_payload(exc)
         if getattr(args, "stream", False):
             _emit_chat_final(data)
