@@ -119,6 +119,17 @@ entry. Existing consumers either copy the dict wholesale
 for all of them; no launcher change is required (the launcher does not read
 `profile_timing` at all).
 
+**On the run record (2026-07-27).** That scalar filter meant the block reached
+the CLI envelope (which copies `profile_timing` wholesale) but was silently
+dropped from `AgentRun.llm`, so the run record kept no answer to "what bounded
+this run?". `persona_runtime._apply_llm_metadata` now lifts it onto
+`run.llm["run_budget"]` as its own key — the `timing` map keeps its integer
+contract, and nothing has to smuggle a nested dict through a filter written for
+scalars. A later result without a block does not erase a recorded one (the same
+carry-forward the timing map already had), and a run that declared no budget
+records no key at all. Pinned in `tests/agent_runtime/test_run_budget.py`
+(§"The block reaches the RUN RECORD").
+
 ## 4. What deliberately did NOT change
 
 Config keys, defaults, clamps, exception types, exception message strings,

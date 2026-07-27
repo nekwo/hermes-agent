@@ -1305,10 +1305,25 @@ def _apply_llm_metadata(run: AgentRun, result: AgentRunResult, *, timing: dict[s
     for key, value in (timing or {}).items():
         _record_timing_value(timing_map, key, value)
     profile_timing = getattr(result, "profile_timing", None)
+    run_budget = None
     if isinstance(profile_timing, dict):
+        # ``run_budget`` is the ONE structured entry in an otherwise
+        # ``_ms``/``_count`` integer map, so ``_record_timing_value`` filters it
+        # out by design — and the run record therefore lost the only answer to
+        # "what bounded this run?". Lift it onto ``run.llm`` as its own key: the
+        # timing map keeps its integer contract, and nothing has to smuggle a
+        # nested dict through a filter written for scalars.
+        run_budget = _safe_run_budget_block(profile_timing.get("run_budget"))
         for key, value in profile_timing.items():
             timing_key = key if str(key).startswith("profile_") else f"profile_{key}"
             _record_timing_value(timing_map, timing_key, value)
+    if run_budget is None:
+        # A later result without an accounting block must not erase the block an
+        # earlier one recorded — the same carry-forward the timing map gets.
+        previous = getattr(run, "llm", None)
+        if isinstance(previous, dict):
+            run_budget = _safe_run_budget_block(previous.get("run_budget"))
+    llm["run_budget"] = run_budget
     if result.latency_ms is not None:
         _record_timing_value(timing_map, "profile_runner_ms", result.latency_ms)
         if "provider_call_ms" not in timing_map:
@@ -1368,6 +1383,37 @@ def _record_timing_value(timing_map: dict[str, int], key: object, value: object)
         timing_map[total_key] = previous_total + parsed
         timing_map[max_key] = max(previous_max, parsed)
     timing_map[safe_key] = parsed
+
+
+#: Bound on the per-budget rows carried onto a run record. The ledger emits one
+#: row per mechanism (a handful); the cap exists so a malformed block can never
+#: make a run record unbounded.
+_RUN_BUDGET_ROW_CAP = 32
+
+
+def _safe_run_budget_block(value: object) -> dict[str, object] | None:
+    """The run's WHOLE budget accounting block, kept structured.
+
+    See ``docs/agent-runtime-harness/run-budget-accounting.md`` §3 for the shape
+    (``bounded_by`` / ``trip_reason`` / ``enforcement`` / ``tripped`` /
+    ``budgets``). Returns ``None`` when there is nothing to carry, so the
+    caller's ``None``-filter drops the key entirely rather than recording an
+    empty claim.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    block: dict[str, object] = {
+        key: item for key, item in value.items() if isinstance(key, str)
+    }
+    if not block:
+        return None
+    rows = block.get("budgets")
+    if isinstance(rows, list):
+        block["budgets"] = [
+            row for row in rows[:_RUN_BUDGET_ROW_CAP] if isinstance(row, dict)
+        ]
+    return block
 
 
 def _safe_timing_map(value: object) -> dict[str, int]:
