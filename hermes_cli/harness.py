@@ -22,6 +22,11 @@ from hermes_cli.profiles import list_profiles
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, provision_bundled_personas, resolve_mission_chat_max_seconds
 from agent_runtime.continuity import return_summary_to_parent_session
+from agent_runtime.dispatch_session_policy import (
+    derive_dispatch_title,
+    resolve_dispatch_session_decision,
+    session_established_payload,
+)
 from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
@@ -1331,10 +1336,18 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--persona", dest="persona_id", required=True)
     mission_chat_message.add_argument("--persona-instance-id", default=None)
     mission_chat_message.add_argument("--session-id", default=None)
+    # store_true (absent → False) is deliberate on THIS lane: False is now an
+    # explicit "continue the durable thread", so the operator console and any
+    # bare CLI send keep threading exactly as before, while a caller that omits
+    # the flag entirely (the agent_chat_send dispatch lane, which forwards
+    # None) falls through to agent_runtime.mission_chat.dispatch_session_policy.
     mission_chat_message.add_argument("--new-session", dest="new_session", action="store_true", help="Force a fresh canonical chat session for the target instead of continuing the default thread (agent_chat_send new_session lane); ignored when --session-id is given")
     mission_chat_message.add_argument("--task", dest="task_id", default=None)
     mission_chat_message.add_argument("--goal", dest="goal_id", default=None)
-    mission_chat_message.add_argument("--title", default="Operator message")
+    # Default None = "no title opinion": consumed as the fresh thread's title
+    # when this send mints one, otherwise the durable "<persona> chat" title
+    # stands. A literal default would name every freshly minted thread after it.
+    mission_chat_message.add_argument("--title", default=None, help="Title for a chat session this send MINTS (a fresh --new-session thread, or a dispatch under the new_per_dispatch policy); ignored when continuing an existing thread")
     mission_chat_message.add_argument("--message", required=True)
     mission_chat_message.add_argument("--provider", default=None, help="Provider override for this persona chat session only")
     mission_chat_message.add_argument("--model", default=None, help="Model override for this persona chat session only")

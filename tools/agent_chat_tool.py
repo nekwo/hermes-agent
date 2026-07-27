@@ -45,6 +45,7 @@ import uuid
 from types import SimpleNamespace
 
 from agent_runtime import relay_policy
+from agent_runtime.dispatch_session_policy import coerce_optional_flag
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ _MESSAGE_LIMIT = 12000
 AGENT_CHAT_SEND_SCHEMA = {
     "name": "agent_chat_send",
     "description": (
-        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Omit session_id to continue the durable pair thread; new_session=true starts a fresh one. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
+        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Each new task you dispatch starts a FRESH thread by default; to continue an exchange (their clarifying question, an in-task follow-up) pass back the session_id their reply returned. new_session=false continues your durable pair thread instead. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
     ),
     "parameters": {
         "type": "object",
@@ -78,19 +79,26 @@ AGENT_CHAT_SEND_SCHEMA = {
             "session_id": {
                 "type": "string",
                 "description": (
-                    "Optional target chat session id. Omit to continue the target's default chat "
-                    "session (repeated sends thread into one conversation). Mutually exclusive with "
-                    "new_session."
+                    "Continue THIS exact thread — pass back the session_id a previous reply "
+                    "returned to answer their clarifying question or send an in-task follow-up. "
+                    "Omit when dispatching a new task. Cannot be combined with new_session=true."
                 ),
             },
             "new_session": {
                 "type": "boolean",
                 "description": (
-                    "Start a FRESH clean thread with the target instead of continuing the default "
-                    "one. Use sparingly — one durable thread per pair is the norm. Cannot be combined "
-                    "with session_id."
+                    "Omit this: a new task dispatch already gets its own fresh thread. Pass false to "
+                    "continue your durable pair thread with the target instead, or true to force a "
+                    "fresh thread where the default would not. Cannot be combined with session_id."
                 ),
-                "default": False,
+            },
+            "title": {
+                "type": "string",
+                "description": (
+                    "Optional short name for the thread this dispatch opens (e.g. 'Flaky login "
+                    "test triage'). Defaults to the opening words of your message. Ignored when "
+                    "you continue an existing thread."
+                ),
             },
             "max_seconds": {
                 "type": "number",
@@ -122,7 +130,8 @@ def agent_chat_send(
     persona_id,
     message,
     session_id=None,
-    new_session=False,
+    new_session=None,
+    title=None,
     max_seconds=240,
     requested_by_session=None,
 ):
@@ -135,14 +144,20 @@ def agent_chat_send(
     persona_id = (persona_id or "").strip()
     message = (message or "").strip()
     resolved_session_id = (str(session_id).strip() or None) if session_id else None
-    new_session = bool(new_session)
+    # TRI-STATE, not a bool: True = fresh thread, False = continue the durable
+    # pair thread, UNSET = let agent_runtime.mission_chat.dispatch_session_policy
+    # decide (default: one fresh thread per dispatched task). `bool()` here would
+    # collapse "unset" into an explicit "sticky" and silently pin every caller to
+    # the old mega-thread behavior.
+    new_session = coerce_optional_flag(new_session)
+    resolved_title = (str(title).strip() or None) if title else None
     if not persona_id:
         return _refusal("agent_chat_send requires a persona_id.")
     if not message:
         return _refusal("agent_chat_send requires a non-empty message.")
     if len(message) > _MESSAGE_LIMIT:
         return _refusal(f"message exceeds the {_MESSAGE_LIMIT}-character relay limit; send a briefing, not a dump.")
-    if new_session and resolved_session_id:
+    if new_session is True and resolved_session_id:
         # Contradictory: new_session asks for a fresh thread; session_id names an
         # existing one. Refuse rather than silently picking one — the caller must
         # decide which thread they mean.
@@ -196,10 +211,14 @@ def agent_chat_send(
         # Fresh-thread lane: the handler mints a new canonical session through the
         # SAME default-session chokepoint (mint= mode), never a tool-side mint —
         # keeping ONE minting authority (the orphaned-relay fix's whole point).
+        # Forwarded UNCOERCED (None stays None) so the handler's policy resolver
+        # can tell "the caller said nothing" from "the caller said continue".
         new_session=new_session,
         task_id=None,
         goal_id=None,
-        title=f"Agent relay to {persona_id}",
+        # Names the thread only when this send mints one; the handler derives a
+        # title from the message when the caller offered none.
+        title=resolved_title,
         message=message,
         provider=None,
         model=None,
@@ -259,6 +278,12 @@ def agent_chat_send(
         "total_tokens": payload.get("total_tokens"),
         "requested_by": requested_by,
     }
+    # Thread lineage: whether this send opened a fresh task-scoped thread, the
+    # typed reason, and the thread it superseded. The caller needs it to know
+    # that continuing THIS exchange means passing `session_id` back — under the
+    # new_per_dispatch default, omitting it opens another fresh thread.
+    if payload.get("session_established") is not None:
+        result["session_established"] = payload.get("session_established")
     # Clarify-back: the briefed agent asked a question instead of answering
     # (it holds context you don't — e.g. "which dev, launcher or backend?").
     # Forward the structured question so you can answer it by sending the choice
@@ -655,7 +680,10 @@ registry.register(
         persona_id=args.get("persona_id"),
         message=args.get("message"),
         session_id=args.get("session_id"),
-        new_session=args.get("new_session", False),
+        # No `False` default: an omitted new_session must reach the policy
+        # resolver as "unset", not as an explicit request to continue.
+        new_session=args.get("new_session"),
+        title=args.get("title"),
         max_seconds=args.get("max_seconds", 240),
         requested_by_session=kw.get("session_id"),
     ),

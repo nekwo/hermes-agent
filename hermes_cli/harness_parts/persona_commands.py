@@ -1394,6 +1394,18 @@ def _cmd_mission_chat_message(args) -> int:
         requested_instance_id, persona_id=normalized_persona
     )
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
+    # How this turn's thread was established — typed, and carried in the reply
+    # envelope so a dispatching agent can tell "this is a fresh task thread,
+    # here is the one it superseded" from "this continued what we had". Decided
+    # here for the explicit-session lane; re-decided by policy below when the
+    # caller named no session.
+    session_established = None
+    if session_id:
+        session_established = session_established_payload(
+            resolve_dispatch_session_decision(session_id=session_id),
+            fresh=False,
+            predecessor_session_id=None,
+        )
     # Sender identity for workspace-scoped target resolution: the chat-root
     # session of the agent that requested this send (agent-to-agent relay
     # threads it through the envelope; a bare operator CLI send omits it).
@@ -1541,16 +1553,51 @@ def _cmd_mission_chat_message(args) -> int:
             )
             or canonical_chat_instance_id(normalized_persona, None)
         )
-        existing_root = None
-        if not bool(getattr(args, "new_session", False)):
-            existing_root = resolve_default_chat_session_id_for_instance(
-                instance_store,
-                persona_id=normalized_persona,
-                persona_instance_id=persona_instance_id,
-            )
-        if existing_root:
+        # Fresh-vs-continue is decided by ONE authority
+        # (agent_runtime.dispatch_session_policy), not by an inline
+        # `not args.new_session` boolean: the flag is tri-state now (True /
+        # False / unset) and "unset" must be answerable by deployment policy.
+        # Default policy is new_per_dispatch — a dispatched task gets its own
+        # task-scoped thread instead of accumulating in one mega-thread per
+        # pair (which re-fed the whole transcript every turn). The CLI/serve
+        # lane's argparse `--new-session` is store_true, so an operator console
+        # send arrives as an explicit False and keeps its durable thread.
+        dispatch_decision = resolve_dispatch_session_decision(
+            session_id=None,
+            new_session=getattr(args, "new_session", None),
+        )
+        # Resolved UNCONDITIONALLY, even when we are about to mint: the thread
+        # this dispatch supersedes is the lineage a later reader follows back
+        # (recorded as `_dispatched_from`, reported as `predecessor_session_id`).
+        # Read-only — `resolve_…` never mints.
+        existing_root = resolve_default_chat_session_id_for_instance(
+            instance_store,
+            persona_id=normalized_persona,
+            persona_instance_id=persona_instance_id,
+        )
+        if existing_root and not dispatch_decision.mint:
             session_id = existing_root
+            session_established = session_established_payload(
+                dispatch_decision, fresh=False, predecessor_session_id=None
+            )
         else:
+            # A fresh thread is only navigable if it is NAMED: nine identical
+            # "QA Agent chat" rows are worse than the mega-thread they replaced.
+            # An explicit --title/`title` wins; otherwise a deliberate fresh
+            # dispatch is titled after the task it carries. A first-ever STICKY
+            # mint (the operator console's first message) keeps the durable
+            # per-persona title, so that lane is unchanged.
+            persona_thread_title = (
+                f"{safe_assignment_text(getattr(persona, 'display_name', None), limit=120) or normalized_persona} chat"
+            )
+            requested_title = safe_assignment_text(getattr(args, "title", None), limit=120)
+            mint_title = persona_thread_title
+            if dispatch_decision.mint:
+                mint_title = (
+                    requested_title
+                    or derive_dispatch_title(getattr(args, "message", None))
+                    or persona_thread_title
+                )
             receipt = PersonaChatMintReceiptStore().mint(
                 instance_store=instance_store,
                 session_db=session_db,
@@ -1560,9 +1607,16 @@ def _cmd_mission_chat_message(args) -> int:
                     safe_assignment_text(getattr(args, "idempotency_key", None), limit=240)
                     or f"send:{client_message_id}"
                 ),
-                title=f"{safe_assignment_text(getattr(persona, 'display_name', None), limit=120) or normalized_persona} chat",
+                title=mint_title,
+                dispatched_from={
+                    "predecessor_chat_session_id": existing_root,
+                    "requested_by_session": requested_by_session,
+                },
             )
             session_id = str(receipt["root_chat_session_id"])
+            session_established = session_established_payload(
+                dispatch_decision, fresh=True, predecessor_session_id=existing_root
+            )
         args.session_id = session_id
     display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or _display_name_for_profile(normalized_persona)
     try:
@@ -2488,6 +2542,12 @@ def _cmd_mission_chat_message(args) -> int:
             "session_id": session_id,
             "chat_session_id": session_id,
             "root_chat_session_id": session_id,
+            # How this turn's thread was established: {fresh, reason,
+            # predecessor_session_id}. A dispatching agent reads it to know
+            # whether it just opened a task-scoped thread (and which thread that
+            # supersedes) or continued an existing one — the same lineage the
+            # session meta records as `_dispatched_from`.
+            "session_established": session_established,
             "active_session_id": active_session_id,
             "task_id": task_id,
             "goal_id": goal_id,

@@ -11,6 +11,7 @@ import yaml
 from hermes_constants import get_config_path
 from hermes_cli.profiles import profile_exists
 
+from .dispatch_session_policy import normalize_dispatch_session_policy
 from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
@@ -768,8 +769,40 @@ def _mission_chat_config(raw: dict[str, Any]) -> MissionChatConfig:
             defaults.default_max_seconds,
             minimum=MISSION_CHAT_MIN_MAX_SECONDS,
             maximum=MISSION_CHAT_MAX_MAX_SECONDS,
-        )
+        ),
+        dispatch_session_policy=normalize_dispatch_session_policy(
+            raw.get("dispatch_session_policy"),
+            defaults.dispatch_session_policy,
+        ),
     )
+
+
+def mission_chat_dispatch_session_policy(cfg: AgentRuntimeConfig | None = None) -> str:
+    """Which thread a dispatch lands in when the caller names none.
+
+    Harness-wide operator policy, so it loads through
+    :func:`load_root_runtime_config` for the same reason the budget default
+    does — a sticky-active profile's own ``config.yaml`` must not be able to
+    change how every OTHER profile's dispatches thread. A config fault degrades
+    to the built-in default rather than failing the turn.
+
+    The precedence rule (explicit ``session_id`` / ``new_session`` always wins
+    over this) is decided in one place:
+    :func:`agent_runtime.dispatch_session_policy.resolve_dispatch_session_decision`."""
+
+    if cfg is not None:
+        return normalize_dispatch_session_policy(
+            getattr(cfg.mission_chat, "dispatch_session_policy", None),
+            MissionChatConfig().dispatch_session_policy,
+        )
+    try:
+        return normalize_dispatch_session_policy(
+            load_root_runtime_config().mission_chat.dispatch_session_policy,
+            MissionChatConfig().dispatch_session_policy,
+        )
+    except Exception:  # pragma: no cover - defensive; a config fault must not kill a turn
+        logger.debug("mission_chat dispatch policy load failed; using the built-in default", exc_info=True)
+        return MissionChatConfig().dispatch_session_policy
 
 
 def mission_chat_default_max_seconds(cfg: AgentRuntimeConfig | None = None) -> float:

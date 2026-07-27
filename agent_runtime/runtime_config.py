@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from agent_runtime.dispatch_session_policy import DEFAULT_DISPATCH_SESSION_POLICY
+
 
 @dataclass(slots=True)
 class ContinuousRoleSessionConfig:
@@ -192,6 +194,16 @@ class MissionChatConfig:
     clamp the checkpoint reserve leaves no working window at all, and above it
     one conversational turn outlives the mission wall-clock deadline.
 
+    ``dispatch_session_policy`` decides which chat session an agent→agent
+    dispatch lands in when the caller states no thread target. It defaults to
+    ``new_per_dispatch``: each dispatched task starts a fresh, task-scoped
+    thread (with typed lineage back to its predecessor) instead of accumulating
+    in one sticky mega-thread per pair, which re-fed the whole transcript to the
+    provider on every turn. ``sticky`` restores the previous behavior
+    deployment-wide. The same precedence rule applies — an explicit
+    ``session_id`` or ``new_session`` on the send always wins. The decision
+    itself lives in :mod:`agent_runtime.dispatch_session_policy`.
+
     Root ``config.yaml`` shape::
 
         agent_runtime:
@@ -201,9 +213,14 @@ class MissionChatConfig:
             # always wins. The last max(60s, 15%) of the window is reserved for
             # the turn's graceful checkpoint reply.
             default_max_seconds: 1800
+            # Thread target for a dispatch that names none: new_per_dispatch
+            # (default — one thread per task) or sticky (one durable thread
+            # per pair). An explicit session_id / new_session always wins.
+            dispatch_session_policy: new_per_dispatch
     """
 
     default_max_seconds: float = 240.0
+    dispatch_session_policy: str = DEFAULT_DISPATCH_SESSION_POLICY
 
 
 @dataclass(slots=True)

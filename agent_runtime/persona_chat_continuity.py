@@ -400,7 +400,21 @@ class PersonaChatMintReceiptStore:
         persona_instance_id: str,
         idempotency_key: str,
         title: str | None = None,
+        dispatched_from: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Reserve-then-create the instance's canonical chat root.
+
+        ``dispatched_from`` records task-scoped dispatch lineage — the thread
+        this fresh session superseded, and the sender session that asked for it
+        — into the session meta as ``_dispatched_from``. It rides the SAME meta
+        write as ``mission_chat_root_id`` (one write, one authority) rather than
+        a second update, and deliberately does NOT touch ``parent_session_id``:
+        on the persona-chat lane that column is claimed by native-compression
+        lineage (``native_lineage_summary`` raises on a foreign parent, and
+        usage aggregation blanks), so borrowing it for relay provenance would
+        corrupt both. Marker-key precedent: ``_delegate_from`` / ``_branched_from``.
+        """
+
         instance_id = safe_assignment_token(persona_instance_id)
         key = safe_assignment_text(idempotency_key, limit=240)
         if not instance_id or not key:
@@ -443,6 +457,9 @@ class PersonaChatMintReceiptStore:
                 "persona_instance_id": instance_id,
                 "source": PERSONA_CHAT_SESSION_SOURCE,
             }
+            lineage = _dispatch_lineage_meta(dispatched_from)
+            if lineage:
+                meta["_dispatched_from"] = lineage
             session_db.update_session_meta(root, json.dumps(meta, sort_keys=True))
             if title and not session_db.get_session_title(root):
                 try:
@@ -465,6 +482,26 @@ class PersonaChatMintReceiptStore:
             except OSError:
                 pass
             os.close(fd)
+
+
+#: Keys accepted inside ``_dispatched_from``. An allow-list rather than a
+#: pass-through: session meta is read back by projections and shipped to the
+#: launcher, so an unbounded caller-supplied dict is a payload-growth and
+#: leak surface, not provenance.
+_DISPATCH_LINEAGE_KEYS = ("predecessor_chat_session_id", "requested_by_session")
+
+
+def _dispatch_lineage_meta(dispatched_from: dict[str, Any] | None) -> dict[str, str]:
+    """Bounded, string-only projection of the dispatch lineage."""
+
+    if not isinstance(dispatched_from, dict):
+        return {}
+    lineage: dict[str, str] = {}
+    for key in _DISPATCH_LINEAGE_KEYS:
+        value = safe_assignment_text(dispatched_from.get(key), limit=240)
+        if value:
+            lineage[key] = value
+    return lineage
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
