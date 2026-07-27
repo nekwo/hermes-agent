@@ -130,7 +130,7 @@ classified. Only one gated on presence.
 | `stagec_mcp_visual_provider.py:450-465,545` | Stage C repo/helper pins | **1** | `_first_nonempty` precedence chains; the repo resolver validates `is_dir()`. |
 | `snapshot.py:313,315` | `HERMES_HOME`, `LOCALAPPDATA` | **1** | Diagnostic report of the ambient state. |
 
-**`HERMES_HOME` readers outside `agent_runtime/` — one is unmitigated.**
+**`HERMES_HOME` readers outside `agent_runtime/` — all three now mitigated.**
 `tools/skills_sync.py:39`, `tools/skills_tool.py:100` and
 `tools/skill_manager_tool.py:151` capture `HERMES_HOME` **at import time** into
 module-level constants. That is the same ancestry dependence in a different
@@ -144,19 +144,23 @@ hid the one that bites:
 |---|---|---|---|
 | `tools/skills_tool.py` | `_skills_dir()` ✔ | only inside the accessor | **mitigated** |
 | `tools/skill_manager_tool.py` | `_skills_dir()` ✔ | only inside the accessor | **mitigated** |
-| `tools/skills_sync.py` | **none** | ~25 sites (`SKILLS_DIR`, `MANIFEST_FILE`, `HERMES_HOME`) | **UNMITIGATED** |
+| `tools/skills_sync.py` | `_skills_dir()` / `_hermes_home()` / `_manifest_file()` ✔ | only inside the accessors | **mitigated (§7.2, 2026-07-27)** |
 
-The staleness is reproducible, not theoretical — `test_env_determinism_audit.py`
-switches `HERMES_HOME` after import and asserts `skills_sync.SKILLS_DIR` does
-not follow while `skills_tool._skills_dir()` does.
+The staleness was reproducible, not theoretical — and the guard that reproduced
+it is still there, now inverted: `test_env_determinism_audit.py` switches
+`HERMES_HOME` after import and asserts each module's accessor **follows** the
+switch while the module-level constants stay put (they are the override seam,
+not the reader). An AST sweep fails if any function body in `skills_sync` goes
+back to reading a frozen constant directly.
 
 **No fork-owned accessor was added, on purpose.** `agent_runtime/` is already
 immune by construction: `skill_publishability.py` imports only the two *pure*
 helpers (`_dir_hash`, `_read_skill_name`) and derives every skills root itself
 (`:200` documents exactly this). A new fork module here would have zero callers
-— dead code standing in for a fix. What ships instead is the drift guard plus
-the exact owed diff (§7.2), and an AST test that fails if any `agent_runtime`
-module ever imports one of the frozen names.
+— dead code standing in for a fix. What shipped instead is the drift guard plus
+the exact diff (§7.2, applied 2026-07-27 under operator approval), and an AST
+test that fails if any `agent_runtime` module ever imports one of the frozen
+names.
 
 ---
 
@@ -550,7 +554,26 @@ Everything below is outside the fork's edit boundary (`tools/`, and one argparse
 registration contended by a parallel refactor). Each is decision-ready and
 exact. None of them gates the wave-4 fixes — they close residuals.
 
+| § | Status | Landed |
+|---|---|---|
+| 7.1 `tools/terminal_tool.py` receipt delegation | **APPLIED** — operator-approved, wave 5 | 2026-07-27 |
+| 7.2 `tools/skills_sync.py` call-time accessors | **APPLIED** — operator-approved, wave 5 | 2026-07-27 |
+| 7.3 `smoke --temp-root` retirement | still owed (not approved in wave 5) | — |
+
+The diffs are kept verbatim below as the record of what was applied — and, for
+7.3, of what is still owed. Each applied section carries an **Applied** note
+naming the guard that now watches the NEW shape: those guards were inverted in
+the same change, so a silent revert fails a test instead of quietly rotting this
+doc back into a lie.
+
 ### 7.1 `tools/terminal_tool.py::_log_harness_blocked_attempt` → delegate (Q3)
+
+**Applied 2026-07-27.** The live body is now exactly the `+` side below.
+Guards: `tests/agent_runtime/test_terminal_envelope_grants.py::test_the_upstream_receipt_writer_delegates_instead_of_resolving_its_own_root`
+(upstream must keep delegating — no re-derived root, no locally-built row, no
+silent early return) and `::test_legacy_block_receipt_keeps_the_row_keys_the_upstream_writer_emits`,
+which moved from reading upstream's source text — the delegation deleted it —
+to asserting the four legacy row keys on the row the fork-owned writer emits.
 
 Replace the whole body. The fork-owned function already exists and is tested.
 
@@ -584,6 +607,29 @@ Row shape is preserved verbatim, plus `audit_root_source`. Blast radius: one
 direction only — strictly more receipts, no decision changes.
 
 ### 7.2 `tools/skills_sync.py` → call-time home (§3)
+
+**Applied 2026-07-27**, with one deliberate extension noted below. Guards:
+`tests/agent_runtime/test_env_determinism_audit.py::test_skills_sync_keeps_the_constants_as_seams_and_reads_them_at_call_time`
+(the constants survive AND an accessor exists for each),
+`::test_no_skills_sync_function_body_reads_a_frozen_constant_directly` (an AST
+sweep — one surviving in-body `SKILLS_DIR` is the whole bug back),
+`::test_the_constants_are_still_the_override_seam_the_doc_promised` (a patched
+constant still wins; an unpatched module follows a live profile switch), and
+`::test_every_skills_module_resolves_its_root_at_call_time`, whose parametrize
+list grew from two modules to three.
+
+**Extension applied on top of the literal diff.** The diff below defines only
+`_skills_dir()`, and the prose then says to replace the `MANIFEST_FILE` /
+`HERMES_HOME` uses with `_skills_dir() / ".bundled_manifest"` /
+`get_hermes_home()`. Taken literally that contradicts this section's own opening
+sentence: it would leave `MANIFEST_FILE` and `HERMES_HOME` as module-level names
+that nothing reads, so patching either would silently do nothing — and nine
+existing `tests/tools/test_skills_sync.py` cases patch exactly those two. Both
+therefore got the SAME accessor pattern (`_manifest_file()` / `_hermes_home()`,
+each with its own `_AT_IMPORT` snapshot), which keeps every documented override
+seam load-bearing and still makes a profile switch visible. Zero test churn:
+the file's failure set is unchanged (one pre-existing Windows path-separator
+failure in `TestComputeRelativeDest`).
 
 Give it the accessor its two sibling modules already have, keeping the
 module-level names (they are load-bearing for tests and external patchers).
@@ -619,7 +665,21 @@ Blast radius: every profile switch in a long-lived serve becomes visible to
 skills sync — which is the point, and is the behavior the other two modules
 already have.
 
+**Wipe guard, as landed.** `_rmtree_writable` now resolves `skills_root`
+through `_skills_dir()` — the same accessor every `dest` in the five call sites
+is computed from (`_compute_relative_dest` and the two
+`_skills_dir() / Path(*install_path.split("/"))` sites; the `.bak` paths are
+`dest.with_suffix()` siblings). That symmetry is the requirement: a guard
+reading a frozen root while the deletions followed a live switch would compare
+two different homes and either refuse every legitimate removal or wave through
+the one it exists to stop. The comment at that site now says so.
+
 ### 7.3 the `smoke` subparser → retire the `--temp-root` flag (Q5)
+
+**Still owed** — deliberately NOT applied in wave 5 (only 7.1 and 7.2 were
+approved). The reasoning below still holds: `hermes_cli/harness.py` and
+`harness_parts/runtime_commands.py` remain under concurrent refactor, and the
+behavior is already correct without the diff.
 
 In `hermes_cli/harness.py`, where the `smoke` subparser is built:
 

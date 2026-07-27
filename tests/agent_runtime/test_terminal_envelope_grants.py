@@ -883,33 +883,51 @@ def _upstream_receipt_writer_source() -> str:
     raise AssertionError("_log_harness_blocked_attempt not found in tools/terminal_tool.py")
 
 
-def test_legacy_block_receipt_keeps_the_row_keys_the_upstream_writer_emits():
-    """The fork-owned replacement must be drop-in for existing log readers."""
+def test_legacy_block_receipt_keeps_the_row_keys_the_upstream_writer_emits(tmp_path, monkeypatch):
+    """The delegation must be drop-in for existing log readers.
 
-    source = _upstream_receipt_writer_source()
-    # Every key the upstream writer puts on the row must still be produced by
-    # the replacement. If upstream adds one, this fails and routes the reader to
-    # docs/agent-runtime-harness/env-determinism-audit.md before the delegation
-    # diff is applied.
+    Before §7.1 landed this read the four row keys out of upstream's own source
+    text. The delegation deleted that source, so the guard now asserts the same
+    contract where it actually lives: on the row the fork-owned writer emits.
+    """
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path))
+    assert record_legacy_block("rm -rf /", "tree_wipe_blocked") is True
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "blocked_tool_attempts.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 1
+    row = rows[0]
     for key in ("ts", "tool", "reason", "command_preview"):
-        assert f'"{key}"' in source
-    assert '"failure_class"' not in source
+        assert key in row, f"legacy readers depend on {key!r}"
+    assert row["tool"] == "terminal"
+    assert row["reason"] == "tree_wipe_blocked"
+    assert row["command_preview"] == "rm -rf /"
+    # The legacy row is NOT the governed-decision row: no typed failure class.
+    assert "failure_class" not in row
 
 
-def test_the_upstream_receipt_writer_still_has_the_shape_the_doc_s_diff_targets():
-    """Drift guard for the operator-owed one-line delegation (audit Q3).
+def test_the_upstream_receipt_writer_delegates_instead_of_resolving_its_own_root():
+    """Audit Q3 / §7.1, applied 2026-07-27 — the shape guard, inverted.
 
-    ``tools/`` is outside this fork's edit boundary, so the Q3 fix ships as a
-    fork-owned :func:`record_legacy_block` plus a documented one-line upstream
-    change. If ``_log_harness_blocked_attempt`` changes shape, that documented
-    diff no longer applies and this test says so out loud rather than letting
-    the doc rot into a lie.
+    While the diff was operator-owed this asserted the OLD body (an
+    ``os.getenv`` root with a silent early return) so the doc could not rot into
+    a lie. Now that it has landed, the guard's job flips: upstream must keep
+    delegating. A re-derived root here would restore the silent-drop bug the
+    fork-owned ladder exists to retire, on a code path nobody watches.
     """
 
     source = _upstream_receipt_writer_source()
-    assert 'os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()' in source
-    assert "if not root:" in source
-    assert "        return" in source
+    assert "record_legacy_block(command, reason)" in source
+    assert "from agent_runtime.terminal_envelope import record_legacy_block" in source
+    # No local root resolution, no local row construction, no silent early exit.
+    assert "HERMES_AGENT_RUNTIME_ROOT" not in source
+    assert "blocked_tool_attempts.jsonl" not in source
+    assert "if not root:" not in source
 
 
 # ── operator view ───────────────────────────────────────────────────────────

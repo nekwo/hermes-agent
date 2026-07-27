@@ -474,13 +474,14 @@ def test_smoke_restores_the_ambient_variable_it_borrowed(
 # ``hermes harness serve`` the frozen value is whichever home the FIRST import
 # saw and every later profile switch is invisible to it.
 #
-# Two of the three already carry the mitigation (a call-time ``_skills_dir()``
-# that honors an explicitly patched constant and otherwise re-resolves from the
-# live home). ``skills_sync`` does not, and uses the frozen constants directly
-# throughout. ``tools/`` is outside this fork's edit boundary, so the fix ships
-# as a documented operator-owed diff — and these tests are what keep that doc
-# from rotting into a lie: they pin the shape the diff targets and reproduce the
-# staleness live, so a reader can see the bug rather than take the doc's word.
+# All three now carry the mitigation (a call-time accessor that honors an
+# explicitly patched constant and otherwise re-resolves from the live home).
+# ``skills_sync`` was the holdout — it read the frozen constants directly
+# throughout — until the operator-approved §7.2 diff landed on 2026-07-27.
+# These tests are what keep the doc from rotting into a lie in EITHER
+# direction: while the diff was owed they pinned the shape it targeted; now
+# they pin the shape it produced, so a silent revert to import-time reads fails
+# here rather than in a long-lived serve after a profile switch.
 
 
 def _tools_source(name: str) -> str:
@@ -490,43 +491,103 @@ def _tools_source(name: str) -> str:
     return Path(module.__file__).read_text(encoding="utf-8")
 
 
-def test_skills_sync_still_freezes_hermes_home_at_import_time() -> None:
-    """The shape the operator-owed diff targets (audit §3)."""
+def test_skills_sync_keeps_the_constants_as_seams_and_reads_them_at_call_time() -> None:
+    """Audit §3 / §7.2, applied 2026-07-27.
+
+    While the diff was operator-owed this asserted the ABSENCE of an accessor —
+    the shape the doc's diff targeted. Now that it has landed the guard flips:
+    the module-level constants must survive (they are the documented override
+    seam for tests and external patchers) AND an accessor must exist for each,
+    so a profile switch in a long-lived serve is visible here.
+    """
 
     source = _tools_source("skills_sync")
     assert "HERMES_HOME = get_hermes_home()" in source
     assert 'SKILLS_DIR = HERMES_HOME / "skills"' in source
     assert 'MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"' in source
-    # No call-time accessor yet — which is exactly why it is the one that bites.
-    assert "def _skills_dir(" not in source
+    for accessor in ("def _skills_dir(", "def _hermes_home(", "def _manifest_file("):
+        assert accessor in source
+    for frozen in (
+        "_SKILLS_DIR_AT_IMPORT",
+        "_HERMES_HOME_AT_IMPORT",
+        "_MANIFEST_FILE_AT_IMPORT",
+    ):
+        assert frozen in source
 
 
-def test_the_frozen_constant_does_not_follow_a_profile_switch(
+def test_no_skills_sync_function_body_reads_a_frozen_constant_directly() -> None:
+    """The accessors are only worth having if nothing bypasses them.
+
+    A single surviving ``SKILLS_DIR`` inside a function body is the whole bug
+    back: that one call site keeps pointing at whichever profile happened to be
+    active at import.
+    """
+
+    import ast
+    import importlib
+
+    module = importlib.import_module("tools.skills_sync")
+    text = Path(module.__file__).read_text(encoding="utf-8")
+    frozen = {"HERMES_HOME", "SKILLS_DIR", "MANIFEST_FILE"}
+    # The accessors themselves are the ONE sanctioned reader of each constant.
+    sanctioned = {"_skills_dir", "_hermes_home", "_manifest_file"}
+    offenders: list[str] = []
+    for node in ast.walk(ast.parse(text)):
+        if not isinstance(node, ast.FunctionDef) or node.name in sanctioned:
+            continue
+        for child in ast.walk(node):
+            if isinstance(child, ast.Name) and child.id in frozen:
+                offenders.append(f"{node.name}:{child.lineno} reads {child.id}")
+    assert offenders == [], (
+        "tools/skills_sync.py reads an import-time-frozen constant inside a "
+        "function body instead of its call-time accessor. See "
+        "docs/agent-runtime-harness/env-determinism-audit.md §7.2. Offenders: "
+        + ", ".join(offenders)
+    )
+
+
+def test_the_constants_are_still_the_override_seam_the_doc_promised(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Reproduce the staleness rather than assert it from the source alone."""
+    """Patching the module-level name still wins; an unpatched module follows.
+
+    Both halves matter. Dropping the constants would break every external
+    patcher (the reason §7.2 kept them); ignoring a live profile switch was the
+    bug §7.2 fixed. Prove both against the real module, not its source text.
+    """
 
     import tools.skills_sync as skills_sync
 
     frozen = skills_sync.SKILLS_DIR
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "another-profile"))
 
+    # The constants stay exactly where they were — that IS the seam.
     assert skills_sync.SKILLS_DIR == frozen
     assert skills_sync.MANIFEST_FILE == frozen / ".bundled_manifest"
-    # The live home HAS moved; only this module cannot see it.
-    from hermes_constants import get_hermes_home
+    # ...but the module now follows the live profile.
+    assert skills_sync._skills_dir() == tmp_path / "another-profile" / "skills"
+    assert skills_sync._hermes_home() == tmp_path / "another-profile"
+    assert (
+        skills_sync._manifest_file()
+        == tmp_path / "another-profile" / "skills" / ".bundled_manifest"
+    )
 
-    assert get_hermes_home() == tmp_path / "another-profile"
+    # An explicit patch still outranks the live profile.
+    monkeypatch.setattr(skills_sync, "SKILLS_DIR", tmp_path / "patched")
+    assert skills_sync._skills_dir() == tmp_path / "patched"
+    assert skills_sync._manifest_file() == tmp_path / "patched" / ".bundled_manifest"
+    monkeypatch.setattr(skills_sync, "MANIFEST_FILE", tmp_path / "elsewhere.manifest")
+    assert skills_sync._manifest_file() == tmp_path / "elsewhere.manifest"
 
 
-@pytest.mark.parametrize("name", ["skills_tool", "skill_manager_tool"])
-def test_the_other_two_modules_already_resolve_at_call_time(
+@pytest.mark.parametrize("name", ["skills_tool", "skill_manager_tool", "skills_sync"])
+def test_every_skills_module_resolves_its_root_at_call_time(
     name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The mitigation exists here; the doc must keep saying so accurately.
+    """All THREE now carry the mitigation (``skills_sync`` joined at §7.2).
 
-    If one of these LOSES its accessor, this fails — and the operator-owed diff
-    in the audit doc grows a second file that nobody would otherwise notice.
+    If one of these LOSES its accessor, this fails — and the audit doc grows a
+    new operator-owed diff that nobody would otherwise notice.
     """
 
     import importlib

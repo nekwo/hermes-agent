@@ -2135,20 +2135,10 @@ def _harness_envelope_block(command: str) -> Optional[Dict[str, Any]]:
 
 
 def _log_harness_blocked_attempt(command: str, reason: str) -> None:
-    root = os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()
-    if not root:
-        return
     try:
-        path = Path(root).expanduser() / "blocked_tool_attempts.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        event = {
-            "ts": time.time(),
-            "tool": "terminal",
-            "reason": reason,
-            "command_preview": command[:500],
-        }
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+        from agent_runtime.terminal_envelope import record_legacy_block
+
+        record_legacy_block(command, reason)
     except Exception:
         logger.warning("Failed to write Harness blocked-command audit", exc_info=True)
 
