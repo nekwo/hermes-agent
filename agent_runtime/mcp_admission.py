@@ -1623,6 +1623,15 @@ def render_mcp_admission_line(
     must not pay a line, and an agent that HAS the tools does not need to be told
     about a mechanism.
 
+    **A PARTIAL admission names both halves.** When the line renders at all and
+    some declared server WAS admitted, the admitted names ride the same line. The
+    denial half alone is actively misleading on a mixed turn: an agent told only
+    "launcher_qa is dark" reads "MCP is dark" and improvises around the server it
+    actually has — the same W3 improvisation this line exists to stop, arrived at
+    from the other direction. Kept to one sentence, appended after the shared
+    denial wording so the flag-on/flag-off "one voice" contract on that wording
+    is byte-for-byte untouched (``test_mcp_lane_agent_context_line``).
+
     ``outcome`` contributes only its ``execution_denied`` rows (busy / timeout /
     admitted-but-did-not-register). The policy denials it also carries are
     already on the turn's envelope, and saying the same thing twice in two
@@ -1660,5 +1669,29 @@ def render_mcp_admission_line(
         "permission mode, and do not substitute a shell/PowerShell workaround or a second "
         "lane. Use the server's harness-side contract instead (for launcher_qa: the "
         "qa.request_screenshot decision contract), and say plainly in your reply that the "
-        "tools were unavailable."
+        "tools were unavailable." + _admitted_clause(admission, ordered)
+    )
+
+
+def _admitted_clause(
+    admission: "McpAdmission | None", denied_servers: "Mapping[str, str]"
+) -> str:
+    """The positive half of a PARTIAL admission — ``""`` when there isn't one.
+
+    Admitted-then-degraded servers are excluded by construction: anything that
+    reached ``execution_denied`` is already in ``denied_servers``, so a server
+    can never be reported as both available and unavailable on one line.
+    """
+
+    names = [
+        str(server)
+        for server in getattr(admission, "server_names", ()) or ()
+        if str(server) and str(server) not in denied_servers
+    ]
+    if not names:
+        return ""
+    listed = ", ".join(dict.fromkeys(names))
+    return (
+        f" Admitted on this turn: {listed}; those servers' mcp__<server>__* tools ARE "
+        "in your tool list, so call them directly."
     )

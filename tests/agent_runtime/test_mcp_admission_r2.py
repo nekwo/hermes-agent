@@ -1016,3 +1016,81 @@ def test_the_steer_backstop_fires_only_on_a_degraded_execution(monkeypatch, torn
     assert len(_SteerRecordingAgent.steers) == 1
     assert MCP_ADMISSION_TIMEOUT in _SteerRecordingAgent.steers[0]
     assert _SteerRecordingAgent.steers[0].startswith("[harness] ")
+
+
+# ── §D3: a PARTIAL admission names both halves ──────────────────────────────
+#
+# The denial half alone is actively misleading on a mixed turn: an agent told
+# only "launcher_qa is dark" reads "MCP is dark" and improvises around the
+# server it actually HAS — the same W3 improvisation this line exists to stop,
+# arrived at from the other direction.
+
+
+def _partial(admitted: str = "other_server", dark: str = "launcher_qa") -> McpAdmission:
+    return McpAdmission(
+        lane=LANE_MISSION_CHAT,
+        role="qa",
+        permission_mode="profile_default",
+        enabled=True,
+        requested=(dark, admitted),
+        server_names=(admitted,),
+        denied=(
+            McpAdmissionDenial(
+                server=dark, code=MCP_ADMISSION_TIMEOUT, summary="s", fix_hint="f"
+            ),
+        ),
+    )
+
+
+def test_a_partial_admission_names_the_admitted_server_too():
+    line = render_mcp_admission_line(_partial())
+
+    assert "launcher_qa (" in line
+    assert "Admitted on this turn: other_server" in line
+    assert "mcp__<server>__* tools ARE" in line
+    assert "\n" not in line
+
+
+def test_the_admitted_half_never_contradicts_the_denied_half():
+    """A server that was admitted and then degraded at execution is DARK, and
+    must not also be advertised as available on the same line."""
+
+    admission = McpAdmission(
+        lane=LANE_MISSION_CHAT,
+        role="qa",
+        permission_mode="profile_default",
+        enabled=True,
+        requested=("launcher_qa",),
+        server_names=("launcher_qa",),
+    )
+
+    line = render_mcp_admission_line(admission, outcome=_timed_out_outcome())
+
+    assert MCP_ADMISSION_TIMEOUT in line
+    assert "Admitted on this turn" not in line
+
+
+def test_a_fully_denied_turn_still_renders_the_denial_line_verbatim():
+    """Byte-stability for the overwhelmingly common shape: nothing admitted,
+    nothing appended. This is the line the one-voice drift guard compares."""
+
+    line = render_mcp_admission_line(_denied(MCP_ADMISSION_TIMEOUT))
+
+    assert "Admitted on this turn" not in line
+    assert line.endswith("say plainly in your reply that the tools were unavailable.")
+
+
+def test_a_clean_admission_still_pays_nothing():
+    """Unchanged by the partial-admission clause: an agent whose tool list is
+    complete needs no line at all."""
+
+    clean = McpAdmission(
+        lane=LANE_MISSION_CHAT,
+        role="qa",
+        permission_mode="profile_default",
+        enabled=True,
+        requested=("launcher_qa",),
+        server_names=("launcher_qa",),
+    )
+
+    assert render_mcp_admission_line(clean) == ""

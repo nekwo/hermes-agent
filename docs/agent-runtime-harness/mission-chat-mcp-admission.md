@@ -17,6 +17,13 @@ until that runs the flag stays off. See §6 for what each stage actually
 contains. G5 (2026-07-26) then closed the §D3 flag-off blind spot: the agent now
 hears the R0 fact in its own turn context even with admission disabled — the
 flag gates admission, not honesty (Log entry "G5 — the flag-off blind spot").
+2026-07-27 closed the mirror blind spot on the flag-ON line: a **partial**
+admission now names the ADMITTED servers alongside the denied ones. Telling an
+agent only "launcher_qa is dark" on a mixed turn reads as "MCP is dark", and it
+improvises around the server it actually has — the same W3 failure arrived at
+from the other direction. One appended sentence, and only when something was
+admitted, so a fully-denied line stays byte-identical, the flag-on/flag-off
+"one voice" drift guard is untouched, and a clean turn still pays nothing.
 
 Sibling docs: `harness-serve-design.md` (the warm-process lane this design
 depends on), `04-decision-hud-simplification-map.md` (the "agents work
