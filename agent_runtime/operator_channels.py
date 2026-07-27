@@ -7,6 +7,7 @@ from typing import Any, Iterable
 from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction import TEXT_SECRET_ASSIGNMENT_RE
+from .run_budget import ACCOUNTING_KEY as RUN_BUDGET_ACCOUNTING_KEY
 from .persona_chat_history import (
     _canonical_persona_id,
     canonical_persona_chat_turn_id,
@@ -890,6 +891,7 @@ def _conversation_history_message(
         if turn_id:
             message["turn_id"] = turn_id
         _carry_turn_seq(message, row)
+        _carry_history_run_budget(message, row)
         return message
     # A canned pre-trace ack keeps its typed kind end-to-end so the Launcher
     # collapses/drops it structurally (never as a settled reply bubble ahead of
@@ -965,6 +967,7 @@ def _conversation_history_message(
     # (operator opens, terminal reply/interrupt closes); carry it through this
     # contract unchanged so every representation sorts on the same key.
     _carry_turn_seq(message, row)
+    _carry_history_run_budget(message, row)
     return message
 
 
@@ -972,6 +975,17 @@ def _carry_turn_seq(message: dict[str, Any], row: dict[str, Any]) -> None:
     turn_seq = row.get("turn_seq")
     if isinstance(turn_seq, int) and not isinstance(turn_seq, bool):
         message["turn_seq"] = turn_seq
+
+
+def _carry_history_run_budget(message: dict[str, Any], row: dict[str, Any]) -> None:
+    # The turn's run_budget accounting block, decorated onto the history row by
+    # persona_chat_history._carry_run_budget. Verbatim and absence-preserving:
+    # the store already bounded it through run_budget.safe_accounting_block,
+    # and a row without the block projects without the key so "nobody
+    # accounted this turn" stays distinguishable from "nothing bounded it".
+    block = row.get(RUN_BUDGET_ACCOUNTING_KEY)
+    if isinstance(block, dict) and block:
+        message[RUN_BUDGET_ACCOUNTING_KEY] = block
 
 
 def _conversation_trace_message(

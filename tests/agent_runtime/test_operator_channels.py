@@ -4,7 +4,10 @@ from agent_runtime.operator_channels import (
     _conversation_history_message,
     operator_channel_summary,
 )
-from agent_runtime.persona_chat_history import PERSONA_PRE_TRACE_ACK_KIND
+from agent_runtime.persona_chat_history import (
+    PERSONA_PRE_TRACE_ACK_KIND,
+    PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
+)
 from agent_runtime.states import TaskState, WorkerSessionState
 from hermes_time import now
 
@@ -1401,6 +1404,81 @@ def test_conversation_history_message_normal_reply_kind_is_reply():
     )
     assert message is not None
     assert message["kind"] == "reply"
+
+
+_RUN_BUDGET_BLOCK = {
+    "bounded_by": "wall",
+    "budgets": [
+        {
+            "bound": "wall",
+            "limit": 59.5,
+            "consumed": 30.0,
+            "tripped": True,
+        }
+    ],
+}
+
+
+def test_conversation_history_message_marker_carries_run_budget():
+    # The terminal marker row is the ONLY row a reply-less budget_exhausted
+    # turn gets, so the accounting block must survive this projection or the
+    # cockpit can never read what bounded the turn.
+    message = _conversation_history_message(
+        {
+            "id": "m_marker",
+            "role": "system",
+            "kind": PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
+            "text": "Wall budget reached before the turn settled.",
+            "timestamp": "2026-07-27T05:00:00Z",
+            "run_budget": _RUN_BUDGET_BLOCK,
+        },
+        channel_id="chan_neko",
+        index=3,
+        persona_id="neko_supervisor",
+        persona_instance_id="personainst_neko_supervisor",
+    )
+    assert message is not None
+    assert message["kind"] == PERSONA_TURN_BUDGET_EXHAUSTED_KIND
+    assert message["run_budget"] == _RUN_BUDGET_BLOCK
+
+
+def test_conversation_history_message_reply_carries_run_budget():
+    message = _conversation_history_message(
+        {
+            "id": "m_reply_budget",
+            "role": "agent",
+            "text": "Settled under the wall.",
+            "timestamp": "2026-07-27T05:00:01Z",
+            "run_budget": _RUN_BUDGET_BLOCK,
+        },
+        channel_id="chan_neko",
+        index=4,
+        persona_id="neko_supervisor",
+        persona_instance_id="personainst_neko_supervisor",
+    )
+    assert message is not None
+    assert message["run_budget"] == _RUN_BUDGET_BLOCK
+
+
+def test_conversation_history_message_without_run_budget_omits_key():
+    # Absence-preserving in both directions: no block and an empty block both
+    # project WITHOUT the key — an older turn never reads as "accounted".
+    for row_extra in ({}, {"run_budget": {}}):
+        message = _conversation_history_message(
+            {
+                "id": "m_reply_plain",
+                "role": "agent",
+                "text": "No accounting on this turn.",
+                "timestamp": "2026-07-27T05:00:02Z",
+                **row_extra,
+            },
+            channel_id="chan_neko",
+            index=5,
+            persona_id="neko_supervisor",
+            persona_instance_id="personainst_neko_supervisor",
+        )
+        assert message is not None
+        assert "run_budget" not in message
 
 
 def test_conversation_history_message_canonicalizes_typed_assistant_identity():
