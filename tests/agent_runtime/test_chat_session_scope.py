@@ -323,3 +323,98 @@ def test_continuity_returns_the_summary_to_the_head_database(
 
     assert db.db_path == runtime_root["head_home"] / "state.db"
     assert not (runtime_root["other_home"] / "state.db").exists()
+
+
+# ── the canonical-persistence predicate ─────────────────────────────────────
+#
+# The `unknown_chat_session` / `foreign_chat_session` guards refuse a turn
+# because a session id names no row. That inference is only sound against a
+# store where "no row" MEANS "no such session"; against anything else the same
+# silence means "cannot answer", and refusing on it rejects legitimate sessions
+# for a reason nobody checked. The question used to be spelled by hand as
+# `session_db.__class__.__module__ == "hermes_state"` at four separate guards —
+# four answers free to drift, and no seam a caller could opt into, so a double
+# that needed the production guard exercised had to SPOOF `__module__`.
+
+
+def test_the_real_store_is_canonical_persistence(tmp_path):
+    from hermes_state import SessionDB
+
+    from agent_runtime.chat_session_scope import is_canonical_session_persistence
+
+    # The module fallback, and the reason it must stay: `hermes_state` is
+    # UPSTREAM in this fork and cannot be edited to carry the marker. That is
+    # the fork boundary, not legacy tolerance.
+    assert is_canonical_session_persistence(SessionDB(tmp_path / "state.db")) is True
+
+
+def test_an_unmarked_double_is_not_canonical_persistence():
+    """The default direction is the load-bearing choice.
+
+    Defaulting the other way would quietly make every stub in the codebase
+    eligible to have turns refused against it — and that failure arrives as a
+    wrongly-rejected send, not as a loud one."""
+
+    from agent_runtime.chat_session_scope import is_canonical_session_persistence
+
+    class _Stub:
+        def get_session(self, session_id):
+            return None
+
+    assert is_canonical_session_persistence(_Stub()) is False
+    assert is_canonical_session_persistence(None) is False
+
+
+def test_a_double_opts_in_under_its_own_name(monkeypatch):
+    """The honest seam that replaced the spoof.
+
+    A double declares that it backs the full session surface with a marker
+    ATTRIBUTE. It no longer has to claim membership of a module it was never
+    defined in just to be believed by a guard."""
+
+    from agent_runtime.chat_session_scope import (
+        CANONICAL_SESSION_PERSISTENCE_ATTR,
+        is_canonical_session_persistence,
+    )
+
+    class _Double:
+        pass
+
+    double = _Double()
+    assert is_canonical_session_persistence(double) is False
+    setattr(double, CANONICAL_SESSION_PERSISTENCE_ATTR, True)
+    assert is_canonical_session_persistence(double) is True
+    # …and the marker is what the doubles actually set, not a name drifting
+    # apart from the one the predicate reads.
+    assert CANONICAL_SESSION_PERSISTENCE_ATTR == "__hermes_canonical_session_persistence__"
+
+
+def test_no_guard_hand_spells_the_module_sniff_any_more():
+    """Recurrence is the finding: one predicate, or four that drift.
+
+    A grep gate rather than a behavior assertion, because the defect this
+    retires is a QUESTION ASKED IN FOUR PLACES — a fifth hand-spelling would
+    pass every behavioral test in this file and still be the bug."""
+
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    # `chat_session_scope.py` is the ONE sanctioned home: the fallback lives
+    # inside the predicate, where the fork boundary that forces it is documented.
+    predicate_home = repo_root / "agent_runtime" / "chat_session_scope.py"
+    offenders = [
+        f"{path.relative_to(repo_root).as_posix()}:{number}"
+        for path in [
+            repo_root / "hermes_cli" / "harness.py",
+            *(repo_root / "hermes_cli" / "harness_parts").glob("*.py"),
+            *(repo_root / "agent_runtime").glob("*.py"),
+        ]
+        if path != predicate_home
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if "__module__" in line and "hermes_state" in line
+    ]
+
+    assert offenders == [], (
+        "use agent_runtime.chat_session_scope.is_canonical_session_persistence "
+        f"instead of a hand-spelled module sniff: {offenders}"
+    )

@@ -1330,13 +1330,18 @@ def test_clarify_round_trip_stays_in_one_session_under_the_new_default(
 class _StrictDispatchTranscriptDB(_DispatchTranscriptDB):
     """The same double, but seen as real persistence by the handler's guards.
 
-    ``unknown_chat_session`` / ``foreign_chat_session`` are gated on
-    ``session_db.__class__.__module__ == "hermes_state"`` (an "is this the real
-    store?" sniff). The clarify design's load-bearing claim is that a token gets
-    BOTH guards for free by resolving before them, so proving it requires a
-    double those guards actually look at."""
+    ``unknown_chat_session`` / ``foreign_chat_session`` may only refuse against a
+    store where "no row" MEANS "no such session", so they ask
+    ``is_canonical_session_persistence``. The clarify design's load-bearing claim
+    is that a token gets BOTH guards for free by resolving before them, and
+    proving that requires a double those guards actually look at.
 
-    __module__ = "hermes_state"
+    It declares itself under its OWN name. This class used to spoof
+    ``__module__ = "hermes_state"`` — a double claiming to be a module it is not,
+    purely in order to be believed — which is what forced the predicate to exist:
+    a guard reachable only by a lying test asset is not honestly tested."""
+
+    __hermes_canonical_session_persistence__ = True
 
 
 def _mint_clarify_ticket(session_id: str, **overrides) -> str:

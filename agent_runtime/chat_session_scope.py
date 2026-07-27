@@ -73,16 +73,66 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
+    "CANONICAL_SESSION_PERSISTENCE_ATTR",
     "CHAT_HEAD_POINTER_FILENAME",
     "CHAT_SESSION_DB_FILENAME",
     "ChatHeadSource",
     "ChatSessionScope",
     "chat_session_db_path",
+    "is_canonical_session_persistence",
     "open_chat_session_db",
     "publish_chat_head_home",
     "recorded_chat_head_home",
     "resolve_chat_session_scope",
 ]
+
+#: The opt-in marker a NON-``hermes_state`` object sets to declare that it is
+#: real, queryable chat persistence. See
+#: :func:`is_canonical_session_persistence` for why it is opt-in and not opt-out.
+CANONICAL_SESSION_PERSISTENCE_ATTR = "__hermes_canonical_session_persistence__"
+
+
+def is_canonical_session_persistence(session_db: Any) -> bool:
+    """Is *session_db* real chat persistence whose SILENCE is a fact?
+
+    The one predicate behind the ``unknown_chat_session`` and
+    ``foreign_chat_session`` guards. Those guards refuse a turn because a session
+    id names no row, so they may only run against a store where "no row" MEANS
+    "no such session". Against a stub, a partial double, or anything that merely
+    resembles the interface, the same silence means "this object cannot answer" —
+    and refusing on it would reject legitimate sessions for a reason nobody
+    actually checked.
+
+    Why a predicate and not four inline ``__module__`` comparisons: the sniff was
+    hand-spelled at each guard, so "may I refuse on this store?" had four answers
+    free to drift apart, and there was no seam a caller could opt into. A double
+    that needed the production guard exercised had to SPOOF
+    ``__module__ = "hermes_state"`` — claiming to be a module it is not, in order
+    to be believed. A test asset lying about its identity to reach behavior is
+    the shape that makes a guard untestable honestly.
+
+    Two ways to be canonical, in this order:
+
+    1. **The opt-in marker.** Any object may set
+       ``__hermes_canonical_session_persistence__ = True`` to declare that it
+       backs the full session surface these guards interrogate. A double then
+       says so under its own name instead of impersonating a module.
+    2. **The module fallback, for the real store only.** ``hermes_state`` is
+       UPSTREAM in this fork and cannot be edited to carry the marker, so this
+       is not legacy tolerance — it is the fork boundary. It stays narrow: the
+       class's defining module, nothing inferred by duck-typing.
+
+    An unmarked object is NOT canonical, deliberately. Defaulting the other way
+    would quietly make every stub in the codebase eligible to have turns refused
+    against it, and that failure arrives as a wrongly-rejected send rather than
+    as a loud one.
+    """
+
+    if session_db is None:
+        return False
+    if bool(getattr(session_db, CANONICAL_SESSION_PERSISTENCE_ATTR, False)):
+        return True
+    return getattr(type(session_db), "__module__", "") == "hermes_state"
 
 #: Lives beside ``persona_instances/`` in the SHARED runtime store root, because
 #: the pointer answers a question about that root: "which chat database do the

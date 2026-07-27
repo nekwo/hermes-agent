@@ -517,7 +517,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             )
             session_db = _default_persona_session_db()
             if (
-                session_db.__class__.__module__ == "hermes_state"
+                is_canonical_session_persistence(session_db)
                 and session_db.get_session(args.session_id) is None
             ):
                 data = {
@@ -530,7 +530,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             target_instance_id = safe_assignment_token(
                 getattr(args, "persona_instance_id", None)
             ) or None
-            if session_db.__class__.__module__ == "hermes_state":
+            if is_canonical_session_persistence(session_db):
                 session_owner = _persona_chat_session_owner(session_db, args.session_id)
                 try:
                     owner_instance = (
@@ -1563,7 +1563,7 @@ def _cmd_mission_chat_message(args) -> int:
 
     if (
         session_id
-        and session_db.__class__.__module__ == "hermes_state"
+        and is_canonical_session_persistence(session_db)
         and session_db.get_session(session_id) is None
     ):
         data = {
@@ -1580,7 +1580,7 @@ def _cmd_mission_chat_message(args) -> int:
         else:
             print(emit_json(data) if args.json else data["error"])
         return 2
-    if session_id and session_db.__class__.__module__ == "hermes_state":
+    if session_id and is_canonical_session_persistence(session_db):
         owner = _persona_chat_session_owner(session_db, session_id)
         owner_instance = None
         try:

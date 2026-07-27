@@ -143,6 +143,7 @@ from agent_runtime.persona_chat_continuity import (
     persona_chat_runtime_registry,
     safe_native_history,
 )
+from agent_runtime.chat_session_scope import is_canonical_session_persistence
 from agent_runtime.mcp_admission import LANE_MISSION_CHAT, resolve_mcp_admission
 from agent_runtime.mcp_lane import HARNESS_LANE
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
