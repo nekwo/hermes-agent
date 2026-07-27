@@ -1179,6 +1179,74 @@ def test_a_replayed_dispatch_reports_the_same_thread_lineage(
     assert lineage["predecessor_chat_session_id"] == earlier["session_id"]
 
 
+def test_a_replayed_relay_dispatch_keeps_the_provenance_it_was_born_with(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # THE relay lane, not a hypothetical: agent_chat_send always forwards
+    # requested_by_session, so a replay's recomputed lineage is never empty —
+    # the self-referential predecessor drops out and the sender key keeps the
+    # dict truthy. Re-deriving would then write {requested_by_session} over the
+    # stored block (this meta write replaces it wholesale) and ERASE the real
+    # predecessor. Lineage is established once, by the mint that created the
+    # thread; a retry carries it, it does not recompute it.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    earlier = _send(
+        capsys,
+        _dispatch_args("task one", "cm-relay-replay-1", requested_by_session="worker_lead"),
+    )
+    dispatched = _send(
+        capsys,
+        _dispatch_args(
+            "triage the flaky login test",
+            "cm-relay-replay-2",
+            requested_by_session="worker_lead",
+        ),
+    )
+    # The retry arrives from a DIFFERENT sender session: who asked for the thread
+    # is a fact about the mint that opened it, not about whoever resent the turn.
+    replay = _send(
+        capsys,
+        _dispatch_args(
+            "triage the flaky login test",
+            "cm-relay-replay-2",
+            requested_by_session="worker_second",
+        ),
+    )
+
+    assert replay["session_id"] == dispatched["session_id"]
+    assert replay["session_established"] == dispatched["session_established"]
+    assert replay["session_established"]["predecessor_session_id"] == earlier["session_id"]
+    lineage = db.session_meta(dispatched["session_id"])["_dispatched_from"]
+    assert lineage["predecessor_chat_session_id"] == earlier["session_id"]
+    assert lineage["requested_by_session"] == "worker_lead"
+
+
+def test_an_interleaved_retry_never_claims_the_thread_that_followed_it(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    # Replay of dispatch A AFTER dispatch B ran. The pointer now names B, so A's
+    # re-read "predecessor" is not even a self-reference any more — it survives
+    # the drop rule and would record "A superseded B". Backwards fabrication: A
+    # came first and superseded nothing. The arrow a lineage reader follows must
+    # never be invented by the order retries happen to arrive in.
+    db = _install_dispatch_handler_doubles(monkeypatch)
+
+    first = _send(capsys, _dispatch_args("task one", "cm-interleaved-1"))
+    second = _send(capsys, _dispatch_args("task two", "cm-interleaved-2"))
+    assert second["session_established"]["predecessor_session_id"] == first["session_id"]
+
+    replay = _send(capsys, _dispatch_args("task one", "cm-interleaved-1"))
+
+    assert replay["session_id"] == first["session_id"]
+    assert replay["session_established"]["predecessor_session_id"] is None
+    assert "_dispatched_from" not in db.session_meta(first["session_id"])
+    # …and B's lineage is untouched by A's retry: it still names A.
+    assert db.session_meta(second["session_id"])["_dispatched_from"] == {
+        "predecessor_chat_session_id": first["session_id"]
+    }
+
+
 def test_sticky_policy_restores_the_durable_thread_for_unset_callers(
     monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
 ):

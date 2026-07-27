@@ -217,14 +217,13 @@ def resolve_dispatch_session_decision(
 def superseded_session_id(predecessor, *, established) -> str | None:
     """The thread a fresh mint SUPERSEDED — never the thread itself.
 
-    One rule, applied at both places a mint records lineage (the envelope's
-    ``predecessor_session_id`` and the session meta's ``_dispatched_from``),
-    because they must not be able to disagree. It exists because of the replay
-    lane: a retried dispatch resolves the same idempotency-keyed mint receipt
-    and gets the SAME session back, by which time the instance's default-thread
-    pointer already IS that session — so the predecessor read a moment earlier
-    is the thread itself, and recording it would fabricate a lineage loop
-    (``A superseded A``) that a reader following the chain never escapes."""
+    ONE rule, applied where a mint records lineage, so the session meta's
+    ``_dispatched_from`` and the envelope's ``predecessor_session_id`` (which
+    reports what the mint recorded) cannot disagree. It guards the thing a
+    lineage reader can never recover from: a self-reference (``A superseded
+    A``) is a loop that following the chain never escapes. A replay does not
+    rely on it — a retry keeps the lineage the thread was born with rather than
+    recomputing one from a pointer that has since moved."""
 
     predecessor_id = str(predecessor or "").strip()
     if not predecessor_id or predecessor_id == str(established or "").strip():

@@ -407,9 +407,12 @@ class PersonaChatMintReceiptStore:
 
         ``dispatched_from`` records task-scoped dispatch lineage — the thread
         this fresh session superseded, and the sender session that asked for it
-        — into the session meta as ``_dispatched_from``. It rides the SAME meta
-        write as ``mission_chat_root_id`` (one write, one authority) rather than
-        a second update, and deliberately does NOT touch ``parent_session_id``:
+        — into the session meta as ``_dispatched_from``. It is honoured by the
+        mint that CREATES the thread; a replay of the same idempotency key
+        ignores it and carries the stored block forward unchanged. It rides the
+        SAME meta write as ``mission_chat_root_id`` (one write, one authority)
+        rather than a second update, and deliberately does NOT touch
+        ``parent_session_id``:
         on the persona-chat lane that column is claimed by native-compression
         lineage (``native_lineage_summary`` raises on a foreign parent, and
         usage aggregation blanks), so borrowing it for relay provenance would
@@ -436,7 +439,12 @@ class PersonaChatMintReceiptStore:
             except Exception:
                 receipt = {}
             root = safe_assignment_text(receipt.get("root_chat_session_id"), limit=240)
-            if not root:
+            # THE replay signal: a receipt that already names a root is one this
+            # key established on an earlier pass. Anything a retry must NOT
+            # re-derive branches on this fact, never on the shape of the values
+            # the retry happened to compute.
+            replayed = bool(root)
+            if not replayed:
                 root = persona_chat_session_id_for(instance_id)
                 receipt = {
                     "schema_version": 1,
@@ -458,15 +466,28 @@ class PersonaChatMintReceiptStore:
                 "persona_instance_id": instance_id,
                 "source": PERSONA_CHAT_SESSION_SOURCE,
             }
-            lineage = _dispatch_lineage_meta(dispatched_from, root=root)
-            if not lineage:
-                # REPLAY: the same idempotency key resolves the root this call
-                # already established, so the caller's "predecessor" is now this
-                # very session and drops out as a self-reference. The lineage it
-                # was BORN with is still true — carry it forward, because this
-                # meta write replaces the stored value wholesale and would
-                # otherwise erase the provenance on a retry.
+            if replayed:
+                # REPLAY: lineage is established ONCE, by the mint that created
+                # the thread, and is never recomputed. A retry cannot re-derive
+                # it, because both inputs have gone stale in ways that lie:
+                #   * the caller's `predecessor` was read from the instance's
+                #     default-thread pointer, which this very session has since
+                #     BECOME — so on a same-key retry it is a self-reference
+                #     (dropped), and after an INTERLEAVED later dispatch it is
+                #     that later thread, which this session never superseded.
+                #     Recording it would invert the arrow (A claiming it retired
+                #     B when A came first).
+                #   * `requested_by_session` belongs to whoever asked for the
+                #     ORIGINAL mint; the retry's sender is not that fact.
+                # And this meta write replaces the stored value wholesale, so
+                # anything not carried forward is ERASED. Carry it forward
+                # unconditionally: the stored block is the whole truth, and an
+                # empty one means the thread was born without lineage. (A mint
+                # that died between reserving the receipt and writing this meta
+                # therefore keeps no lineage — silence, never a fabricated arrow.)
                 lineage = _stored_dispatch_lineage(session_db, root)
+            else:
+                lineage = _dispatch_lineage_meta(dispatched_from, root=root)
             if lineage:
                 meta["_dispatched_from"] = lineage
             session_db.update_session_meta(root, json.dumps(meta, sort_keys=True))
@@ -536,10 +557,12 @@ def _dispatch_lineage_meta(
 ) -> dict[str, str]:
     """Bounded, string-only projection of the dispatch lineage.
 
-    *root* is the session this meta belongs to: a replayed mint resolves the
-    same receipt and re-writes this meta with a predecessor that has since
-    BECOME this session, so the self-reference is dropped through the shared
-    :func:`superseded_session_id` rule the reply envelope uses."""
+    FRESH MINTS ONLY — a replay carries the stored block forward instead of
+    re-projecting caller arguments that have gone stale (see :meth:`mint`).
+    *root* is the session this meta belongs to; a predecessor equal to it is
+    dropped through the shared :func:`superseded_session_id` rule, which a
+    fresh mint's brand-new id cannot trip but which keeps the one lineage
+    projection honest for any caller that hands in the thread itself."""
 
     if not isinstance(dispatched_from, dict):
         return {}
