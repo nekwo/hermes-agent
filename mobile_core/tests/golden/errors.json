@@ -1,0 +1,5 @@
+{
+  "rate_limit": {"status": 429, "body": {"error": {"message": "fixture rate limit"}}},
+  "server_error": {"status": 503, "body": {"error": {"message": "fixture unavailable"}}},
+  "authentication": {"status": 401, "body": {"error": {"message": "fixture invalid key"}}}
+}
