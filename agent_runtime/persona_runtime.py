@@ -688,11 +688,16 @@ def _mission_chat_operative_rules() -> str:
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
         "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane.\n"
         "- One carve-out to that: image lines are content, not scaffolding. When you relay, quote, or summarize a "
-        "teammate's reply that carries a `MEDIA:<absolute image path>` line, reproduce that line VERBATIM on a line of "
+        "teammate's reply that carries a MEDIA:<absolute image path> line, reproduce that line VERBATIM on a line of "
         "its own — never wrap it in backticks or a code fence, never fold it into a sentence, never retype or shorten "
-        "the path. Same for a bare absolute screenshot path standing alone on its own line. WHY: the operator's console "
-        "renders those lines as image attachment cards, and text inside code formatting is treated as quoted source "
-        "rather than a declaration — so any rewrap silently costs the operator the picture they asked you for."
+        "the path. Same for a bare absolute screenshot path standing alone on its own line. WHY: a MEDIA: line alone "
+        "on its own line is a DECLARATION, and the operator's console renders it as a titled image attachment card. "
+        "Wrapping that line in backticks or a code fence un-declares it — the console never sees the prefix, and "
+        "NOTHING renders. Retyping the path into a sentence, or dropping the prefix, is the quieter loss: the image "
+        "still previews, but untitled, with the raw path left sitting in your prose, and it competes for the small "
+        "per-message preview budget a declared line claims first. Either way the operator stops seeing the picture "
+        "the way it was meant to be seen — so copy the line through exactly as it arrived, and put your provenance "
+        "prose around it, never inside it."
     )
 
 

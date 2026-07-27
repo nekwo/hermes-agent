@@ -437,26 +437,39 @@ def test_mission_chat_operative_rules_route_named_agents_without_creating_goals(
 
 
 def test_mission_chat_operative_rules_preserve_media_lines_verbatim():
-    # The operator console renders `MEDIA:<path>` lines (and bare absolute
-    # screenshot paths on their own line) as image attachment cards; text inside
-    # backticks/a code fence is quoted source, so a lead that "tidies" a relayed
-    # path into inline code destroys the card. The rules must teach the verbatim
-    # relay AND the reason, and it must read as the explicit carve-out to the
-    # clean-prose rule that precedes it (not as a competing instruction).
+    # A MEDIA:<path> line standing alone is a DECLARATION the operator console
+    # renders as a titled image card. The two failure modes are NOT the same:
+    # backticking or fencing that line un-declares it and nothing paints at all,
+    # while retyping the path loose in a sentence still previews the image and
+    # merely demotes it (untitled, raw path left in the prose). The rules must
+    # teach the verbatim relay AND a WHY that survives contact with the console —
+    # a lead who watches a backticked path render fine must not catch the rule
+    # overstating its own mechanism, because that discredits it exactly where it
+    # is right. It must also read as the explicit carve-out to the clean-prose
+    # rule that precedes it (not as a competing instruction).
     from agent_runtime.persona_runtime import _mission_chat_operative_rules
 
     rules = _mission_chat_operative_rules()
     bullets = [line for line in rules.splitlines() if line.startswith("- ")]
-    assert "HARD RULE" in bullets[0], "the acknowledge-before-acting rule must remain first"
 
     media_bullet = next((line for line in bullets if "MEDIA:" in line), None)
     assert media_bullet is not None, "operative rules must teach the MEDIA-verbatim relay"
     assert "VERBATIM" in media_bullet
     assert "never wrap it in backticks or a code fence" in media_bullet
     assert "bare absolute screenshot path" in media_bullet
+
     # The WHY ships with the rule — a rule without its reason gets rationalized away.
     assert "WHY:" in media_bullet
-    assert "image attachment cards" in media_bullet
+    # ...and it names both outcomes honestly rather than collapsing them into
+    # "any rewrap loses the image", which is checkably false for a bare path.
+    assert "un-declares it" in media_bullet
+    assert "NOTHING renders" in media_bullet
+    assert "still previews" in media_bullet
+
+    # The rule must not demonstrate the form it forbids. Models imitate exemplar
+    # surface forms, so the bullet that bans backticking a MEDIA line carries no
+    # backticks of its own — the placeholder is plain prose.
+    assert "`" not in media_bullet, "the MEDIA rule must not model the formatting it forbids"
 
     # It is the carve-out to the clean-prose bullet, so it must follow it.
     prose_index = next(
