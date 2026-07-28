@@ -78,6 +78,7 @@ from .tool_visibility import (
     _profile_readiness_for_visibility,
     resolve_tool_visibility,
 )
+from .workspace_scope import exact_scoped_instance_ids
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
 AGENT_TOPOLOGY_NODE_ID_CAP = 20
@@ -675,7 +676,12 @@ def _build_snapshot_uncoalesced(
         # ``active_*_id`` keys — consumers (launcher scope switcher) key
         # selection off the row flag and must not re-derive it.
         "workspaces": [
-            _workspace_summary(item, tasks=tasks, active_id=workspace_store.active_id())
+            _workspace_summary(
+                item,
+                tasks=tasks,
+                persona_instances=topology_persona_instances,
+                active_id=workspace_store.active_id(),
+            )
             for item in workspaces
         ],
         "realms": [
@@ -3192,16 +3198,34 @@ def persona_instance_detail_for_id(entity_id: str, *, event_log=None) -> dict | 
     return None
 
 
-def _workspace_summary(workspace, *, tasks, active_id: str | None = None) -> dict:
+def _workspace_summary(
+    workspace,
+    *,
+    tasks,
+    persona_instances=(),
+    active_id: str | None = None,
+) -> dict:
     goals = [task for task in tasks if getattr(task, "workspace_id", None) == workspace.id]
+    roster_agent_ids = list(workspace.agent_ids or [])
+    live_scoped_agent_ids = exact_scoped_instance_ids(
+        persona_instances,
+        workspace_id=workspace.id,
+    )
     return {
         "id": workspace.id,
         "kind": "workspace",
         "name": workspace.name,
         "slug": workspace.slug,
         "realm_id": workspace.realm_id,
-        "agents": len(workspace.agent_ids or []),
-        "agent_ids": list(workspace.agent_ids or []),
+        # Back-compat: Launcher reads ``agents`` for the visible count and
+        # ``agent_ids`` for roster-membership scope. Keep those meanings while
+        # also shipping explicit, non-overloaded contracts for new consumers.
+        "agents": len(live_scoped_agent_ids),
+        "agent_ids": roster_agent_ids,
+        "live_scoped_agent_count": len(live_scoped_agent_ids),
+        "live_scoped_agent_ids": live_scoped_agent_ids,
+        "roster_agent_count": len(roster_agent_ids),
+        "roster_agent_ids": roster_agent_ids,
         "goals": len(goals),
         "isolation": workspace.isolation,
         "max_concurrent_lanes": workspace.max_concurrent_lanes,

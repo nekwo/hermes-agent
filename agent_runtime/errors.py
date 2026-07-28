@@ -18,6 +18,21 @@ class StoreCorrupt(AgentRuntimeError):
     """Raised when persisted JSON cannot be decoded into the expected model."""
 
 
+class DefaultScopeReconciliationRequired(AgentRuntimeError):
+    """Raised when startup cannot choose one local default scope safely.
+
+    The exception is deliberately non-mutating: callers must surface the
+    read-only migration preview and wait for an operator-approved reconciliation
+    instead of guessing which persisted realm/workspace identity should win.
+    """
+
+    code = "default_scope_reconciliation_required"
+
+    def __init__(self, message: str, *, safe_details: dict | None = None):
+        super().__init__(message)
+        self.safe_details = dict(safe_details or {})
+
+
 class NotFound(AgentRuntimeError):
     """Raised when a persisted runtime entity cannot be found."""
 

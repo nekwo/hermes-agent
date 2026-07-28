@@ -126,6 +126,31 @@ def scope_roster(instances: Iterable[Any], *, scope_workspace_id: str | None) ->
     ]
 
 
+def exact_scoped_instance_ids(
+    instances: Iterable[Any], *, workspace_id: str | None
+) -> list[str]:
+    """Ids of live-store rows that explicitly belong to ``workspace_id``.
+
+    This is intentionally stricter than :func:`scope_roster`: runtime-global
+    canonical rows and fallback visibility do not represent an agent placed in
+    a workspace. Callers pass the active ``PersonaInstanceStore.list_all``
+    rows, whose archive-never-delete retirement contract already excludes
+    retired instances from the live directory.
+    """
+
+    wanted = _norm(workspace_id)
+    if wanted is None:
+        return []
+    return sorted(
+        {
+            instance_id
+            for instance in (instances or ())
+            if _norm(getattr(instance, "workspace_id", None)) == wanted
+            and (instance_id := _norm(getattr(instance, "id", None))) is not None
+        }
+    )
+
+
 def _persona_key(instance: Any) -> Any:
     """Default persona grouping key: the row's ``persona_id`` (or ``None``)."""
 

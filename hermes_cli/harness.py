@@ -37,10 +37,11 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.default_plan import ensure_default_mission_plan
-from agent_runtime.default_scope import ensure_default_scope
+from agent_runtime.default_scope import ensure_default_scope, preview_default_scope_migration
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
+    DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
     InvalidTransition,
     NotFound,
@@ -169,6 +170,7 @@ from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_vi
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_session_summary
+from agent_runtime.workspace_scope import exact_scoped_instance_ids
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 
@@ -235,6 +237,7 @@ ERROR_EXIT_CODES = {
     "proof_missing": 6,
     "proof_gate_failed": 6,
     "needs_operator_confirm": 6,
+    "default_scope_reconciliation_required": 6,
     # Skills / readiness (6)
     "skill_hash_mismatch": 6,
     "missing_skill": 6,
@@ -644,6 +647,17 @@ def build_parser(parent_subparsers) -> None:
     )
     _add_stage42_global_args(realm_use, mutation=True)
     realm_use.set_defaults(func=_cmd_realm_use)
+    realm_default_scope = realm_subs.add_parser(
+        "default-scope",
+        help="Preview default-scope adoption/reconciliation without mutating persisted state",
+    )
+    realm_default_scope.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Required safety acknowledgement; this command is inventory-only",
+    )
+    _add_stage42_global_args(realm_default_scope)
+    realm_default_scope.set_defaults(func=_cmd_realm_default_scope)
     realm_sync = realm_subs.add_parser("sync", help="Git-backed selective sync for non-source-controlled realm artifacts")
     realm_sync_subs = realm_sync.add_subparsers(dest="realm_sync_command", required=True)
     realm_sync_status_cmd = realm_sync_subs.add_parser("status", help="Show realm sync state")
@@ -1740,6 +1754,8 @@ def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None
         safe_details.update(exc.safe_details)
     if isinstance(exc, WorkspaceDeleteBlocked):
         safe_details.update(exc.safe_details)
+    if isinstance(exc, DefaultScopeReconciliationRequired):
+        safe_details.update(exc.safe_details)
     envelope = _error_envelope(
         error_code,
         message or _safe_error_message(exc),
@@ -1771,6 +1787,7 @@ def _error_code_for_exception(exc: BaseException) -> str:
         (StaleRun, "stale_run"),
         (ProofMissing, "proof_missing"),
         (StoreCorrupt, "store_corrupt"),
+        (DefaultScopeReconciliationRequired, "default_scope_reconciliation_required"),
         (EventPayloadTooLarge, "event_payload_too_large"),
         (RuntimeRootMismatch, "wrong_runtime_root"),
         (StaleRevision, "stale_revision"),
@@ -1811,6 +1828,7 @@ def _error_hint(code: str) -> str:
         "goal_not_found": "Run `hermes harness goal list --json` and retry with a listed id.",
         "workspace_not_found": "Run `hermes harness workspace list --json` and retry with a listed id.",
         "realm_not_found": "Run `hermes harness realm list --json` and retry with a listed id.",
+        "default_scope_reconciliation_required": "Run `hermes harness realm default-scope --dry-run --json`; no identities will change without explicit approval.",
         "sync_conflict": "Resolve conflicts in the realm sync git repo, then retry.",
         "sync_behind": "Run `hermes harness realm sync pull <realm> --json` before publishing.",
         "sync_secret_excluded": "Remove secrets/state from the realm sync allowlist source before retrying.",
@@ -2671,11 +2689,21 @@ def _cmd_goal_archive(args) -> int:
 
 def _workspace_row(workspace, *, full: bool = False) -> dict:
     tasks = TaskStore().list_for_workspace(workspace.id)
+    roster_agent_ids = list(workspace.agent_ids or [])
+    live_scoped_agent_ids = exact_scoped_instance_ids(
+        PersonaInstanceStore().list_all(),
+        workspace_id=workspace.id,
+    )
     row = {
         "id": workspace.id,
         "name": workspace.name,
         "realm_id": workspace.realm_id,
-        "agents": len(workspace.agent_ids or []),
+        "agents": len(live_scoped_agent_ids),
+        "agent_ids": roster_agent_ids,
+        "live_scoped_agent_count": len(live_scoped_agent_ids),
+        "live_scoped_agent_ids": live_scoped_agent_ids,
+        "roster_agent_count": len(roster_agent_ids),
+        "roster_agent_ids": roster_agent_ids,
         "goals": len(tasks),
         "isolation": workspace.isolation,
         "updated_at": workspace.updated_at,
@@ -2685,7 +2713,6 @@ def _workspace_row(workspace, *, full: bool = False) -> dict:
             {
                 "kind": "workspace",
                 "slug": workspace.slug,
-                "agent_ids": list(workspace.agent_ids or []),
                 "default_blueprint_id": workspace.default_blueprint_id,
                 "max_concurrent_lanes": workspace.max_concurrent_lanes,
                 "goal_ids": [getattr(task, "goal_id", None) or task.id for task in tasks],
@@ -2929,7 +2956,10 @@ def _cmd_workspace_add_agent(args) -> int:
     if getattr(args, "dry_run", False):
         item = WorkspaceStore().get(args.workspace_id)
         row = _workspace_row(item)
-        row["agents"] = len(set([*item.agent_ids, args.persona_id]))
+        roster_agent_ids = list(dict.fromkeys([*item.agent_ids, args.persona_id]))
+        row["agent_ids"] = roster_agent_ids
+        row["roster_agent_ids"] = roster_agent_ids
+        row["roster_agent_count"] = len(roster_agent_ids)
         warnings = _workspace_agent_sync_warnings(item.id, args.persona_id)
         _print_stage42(_object_envelope("workspace", row, warnings=warnings), args=args, default_output="json")
         return 0
@@ -3055,6 +3085,21 @@ def _cmd_realm_use(args) -> int:
     row = _realm_row(item)
     row["applied"] = True
     _print_stage42(_object_envelope("realm", row), args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_default_scope(args) -> int:
+    if not getattr(args, "dry_run", False):
+        return emit_harness_error(
+            ValueError("default-scope preview requires --dry-run"),
+            args=args,
+            code="invalid_request",
+        )
+    _print_stage42(
+        preview_default_scope_migration(),
+        args=args,
+        default_output="json",
+    )
     return 0
 
 
@@ -3899,7 +3944,10 @@ def _cmd_init(args) -> int:
     else:
         personas = ensure_persisted_personas(cfg)
     persona_ids = [p.id for p in personas]
-    scope = ensure_default_scope(agent_ids=persona_ids)
+    try:
+        scope = ensure_default_scope(agent_ids=persona_ids)
+    except DefaultScopeReconciliationRequired as exc:
+        return emit_harness_error(exc, args=args, code=exc.code)
     data = {
         "personas": persona_ids,
         "default_realm_id": scope.realm.id,

@@ -56,6 +56,48 @@ def test_harness_init_materializes_an_idempotent_default_scope(capsys):
     assert len(WorkspaceStore().list_all()) == 1
 
 
+def test_harness_default_scope_dry_run_exposes_read_only_inventory(capsys):
+    legacy = RealmStore().create(name="default")
+    workspace = WorkspaceStore().create(name="default", realm_id=legacy.id)
+    legacy.default_workspace_id = workspace.id
+    legacy.workspace_ids = [workspace.id]
+    RealmStore().save(legacy)
+    args = parser().parse_args(
+        ["harness", "realm", "default-scope", "--dry-run", "--json"]
+    )
+
+    assert args.func(args) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["kind"] == "default_scope_migration_preview"
+    assert data["status"] == "legacy_adoption_ready"
+    assert data["mutated"] is False
+    assert data["proposed_default_scope"]["realm_id"] == legacy.id
+    assert RealmStore().get(legacy.id).default_workspace_id == workspace.id
+
+
+def test_harness_init_reports_typed_reconciliation_error_without_merging(capsys):
+    args = parser().parse_args(["harness", "init", "--json"])
+    assert args.func(args) == 0
+    capsys.readouterr()
+    legacy = RealmStore().create(name="default")
+    legacy_workspace = WorkspaceStore().create(
+        name="default",
+        realm_id=legacy.id,
+    )
+    before_realm_ids = [item.id for item in RealmStore().list_all()]
+    before_workspace_ids = [item.id for item in WorkspaceStore().list_all()]
+
+    assert args.func(args) == 6
+    data = json.loads(capsys.readouterr().out)
+    assert data["error"]["code"] == "default_scope_reconciliation_required"
+    assert data["error"]["safe_details"]["candidate_realm_ids"] == sorted(
+        ["realm_default", legacy.id]
+    )
+    assert [item.id for item in RealmStore().list_all()] == before_realm_ids
+    assert [item.id for item in WorkspaceStore().list_all()] == before_workspace_ids
+    assert WorkspaceStore().get(legacy_workspace.id).realm_id == legacy.id
+
+
 def test_harness_parser_exposes_idempotent_exact_instance_chat_mint():
     args = parser().parse_args(
         [

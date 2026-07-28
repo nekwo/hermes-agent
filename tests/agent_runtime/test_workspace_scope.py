@@ -83,6 +83,20 @@ def test_effective_workspace_id_blank_pointer_falls_back():
     assert workspace_scope.effective_workspace_id(inst, active_workspace_id="ws_a") == "ws_a"
 
 
+def test_exact_scoped_instance_ids_excludes_globals_and_other_workspaces():
+    instances = [
+        _inst(workspace_id="ws_a", id="personainst_a_two"),
+        _inst(workspace_id=None, id="personainst_global"),
+        _inst(workspace_id="ws_b", id="personainst_b"),
+        _inst(workspace_id=" ws_a ", id="personainst_a_one"),
+    ]
+
+    assert workspace_scope.exact_scoped_instance_ids(
+        instances,
+        workspace_id="ws_a",
+    ) == ["personainst_a_one", "personainst_a_two"]
+
+
 # --------------------------------------------------------------------------- #
 # scope_roster: filter to scope, preserve input order, never mutate           #
 # --------------------------------------------------------------------------- #
