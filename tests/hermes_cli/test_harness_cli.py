@@ -75,6 +75,46 @@ def test_harness_default_scope_dry_run_exposes_read_only_inventory(capsys):
     assert RealmStore().get(legacy.id).default_workspace_id == workspace.id
 
 
+def test_harness_default_scope_applies_explicit_legacy_winner(capsys):
+    legacy = RealmStore().create(name="default")
+    workspace = WorkspaceStore().create(name="default", realm_id=legacy.id)
+    RealmStore().set_active(legacy.id)
+    WorkspaceStore().set_active(workspace.id)
+    canonical = RealmStore().create(
+        name="Default",
+        realm_id="realm_default",
+        default_workspace_id="ws_default",
+    )
+    canonical_workspace = WorkspaceStore().create(
+        name="Default",
+        workspace_id="ws_default",
+        realm_id=canonical.id,
+    )
+    canonical.workspace_ids = [canonical_workspace.id]
+    RealmStore().save(canonical)
+    args = parser().parse_args(
+        [
+            "harness",
+            "realm",
+            "default-scope",
+            "--winner-realm",
+            legacy.id,
+            "--winner-workspace",
+            workspace.id,
+            "--yes",
+            "--json",
+        ]
+    )
+
+    assert args.func(args) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "applied"
+    assert data["winner_realm_id"] == legacy.id
+    assert data["winner_workspace_id"] == workspace.id
+    assert RealmStore().get("realm_default").archived is True
+    assert WorkspaceStore().get("ws_default").archived is True
+
+
 def test_harness_init_reports_typed_reconciliation_error_without_merging(capsys):
     args = parser().parse_args(["harness", "init", "--json"])
     assert args.func(args) == 0

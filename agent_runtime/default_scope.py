@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import hashlib
+import shutil
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
+from hermes_time import now
+from utils import atomic_json_write
+
+from . import paths
 from .errors import DefaultScopeReconciliationRequired, NotFound, StoreCorrupt
+from .locks import archive_lock
 from .models import Realm, Workspace
 from .store import RealmStore, WorkspaceStore
 
@@ -182,7 +191,7 @@ def preview_default_scope_migration() -> dict:
     archived_default_like = [
         item
         for item in realm_store.list_all(include_archived=True)
-        if item.archived and item.id != DEFAULT_REALM_ID and _is_default_equivalent(item)
+        if item.archived and _is_default_equivalent(item)
     ]
 
     selected = canonical or (legacy[0] if len(legacy) == 1 else None)
@@ -305,7 +314,11 @@ def preview_default_scope_migration() -> dict:
         "kind": "default_scope_migration_preview",
         "dry_run": True,
         "mutated": False,
-        "apply_supported": False,
+        "apply_supported": (
+            status == "reconciliation_required"
+            and reason == "canonical_and_legacy_default_realms_coexist"
+            and len(legacy) == 1
+        ),
         "status": status,
         "reason": reason,
         "active_pointers": {
@@ -346,18 +359,292 @@ def preview_default_scope_migration() -> dict:
     }
 
 
-def _get_realm(store: RealmStore, realm_id: str) -> Realm | None:
-    try:
-        return store.get(realm_id)
-    except NotFound:
-        return None
+def reconcile_default_scope_to_legacy(
+    *,
+    winner_realm_id: str,
+    winner_workspace_id: str,
+) -> dict:
+    """Archive an empty fixed-id duplicate and retain a chosen legacy scope.
+
+    This is deliberately narrower than a general merge.  It refuses to move,
+    combine, delete, or retire goals, boards, offices, or persona instances.
+    The fixed-id loser must contain none of those live identity-bearing rows;
+    its roster metadata remains recoverable inside the archived workspace.
+    Every touched store file is copied to a timestamped backup before writes.
+    """
+
+    from .board_store import BoardStore
+    from .office_store import OfficeStore
+    from .persona_assignments import PersonaInstanceStore
+    from .store import TaskStore
+    from .workspace_scope import exact_scoped_instance_ids
+
+    realm_store = RealmStore()
+    workspace_store = WorkspaceStore()
+
+    with archive_lock():
+        winner_realm = _get_realm(realm_store, winner_realm_id)
+        winner_workspace = _get_workspace(workspace_store, winner_workspace_id)
+        loser_realm = _get_realm(realm_store, DEFAULT_REALM_ID)
+        loser_workspace = _get_workspace(workspace_store, DEFAULT_WORKSPACE_ID)
+
+        if winner_realm is None or winner_workspace is None:
+            _raise_reconciliation_required(
+                "Chosen lowercase default scope is missing or archived.",
+                realm_ids=[winner_realm_id],
+                workspace_ids=[winner_workspace_id],
+            )
+        if winner_realm.id == DEFAULT_REALM_ID or winner_workspace.id == DEFAULT_WORKSPACE_ID:
+            _raise_reconciliation_required(
+                "The reconciliation winner must be the existing non-reserved default scope.",
+                realm_ids=[winner_realm.id],
+                workspace_ids=[winner_workspace.id],
+            )
+        if winner_realm.server_id or not _is_default_equivalent(winner_realm):
+            _raise_reconciliation_required(
+                "The reconciliation winner must be one local default-equivalent realm.",
+                realm_ids=[winner_realm.id],
+                workspace_ids=[winner_workspace.id],
+            )
+        if winner_workspace.realm_id not in {None, winner_realm.id}:
+            _raise_reconciliation_required(
+                "Chosen workspace does not belong to the chosen lowercase realm.",
+                realm_ids=[winner_realm.id],
+                workspace_ids=[winner_workspace.id],
+            )
+        other_legacy = [
+            item.id
+            for item in _legacy_default_realms(realm_store)
+            if item.id != winner_realm.id
+        ]
+        if other_legacy:
+            _raise_reconciliation_required(
+                "Additional live default-like realms exist; no automatic winner is safe.",
+                realm_ids=[winner_realm.id, *other_legacy],
+                workspace_ids=[winner_workspace.id],
+            )
+        if loser_realm is None or loser_workspace is None:
+            # Idempotent success after a previous application: archived fixed
+            # ids are deliberately invisible to the live lookup.
+            archived_realm = _get_realm(
+                realm_store, DEFAULT_REALM_ID, include_archived=True
+            )
+            archived_workspace = _get_workspace(
+                workspace_store, DEFAULT_WORKSPACE_ID, include_archived=True
+            )
+            if (
+                archived_realm is not None
+                and archived_realm.archived
+                and archived_workspace is not None
+                and archived_workspace.archived
+            ):
+                return {
+                    "kind": "default_scope_reconciliation",
+                    "status": "already_applied",
+                    "mutated": False,
+                    "winner_realm_id": winner_realm.id,
+                    "winner_workspace_id": winner_workspace.id,
+                    "archived_realm_id": DEFAULT_REALM_ID,
+                    "archived_workspace_id": DEFAULT_WORKSPACE_ID,
+                    "backup_dir": None,
+                }
+            _raise_reconciliation_required(
+                "The fixed-id duplicate pair is incomplete; refusing partial reconciliation.",
+                realm_ids=[winner_realm.id, DEFAULT_REALM_ID],
+                workspace_ids=[winner_workspace.id, DEFAULT_WORKSPACE_ID],
+            )
+        if loser_realm.server_id or not _is_default_equivalent(loser_realm):
+            _raise_reconciliation_required(
+                "The fixed-id realm is not a disposable local default duplicate.",
+                realm_ids=[winner_realm.id, loser_realm.id],
+                workspace_ids=[winner_workspace.id, loser_workspace.id],
+            )
+        if loser_workspace.realm_id != loser_realm.id:
+            _raise_reconciliation_required(
+                "The fixed-id workspace does not belong to the fixed-id realm.",
+                realm_ids=[winner_realm.id, loser_realm.id],
+                workspace_ids=[winner_workspace.id, loser_workspace.id],
+            )
+        loser_workspace_ids = {
+            item.id
+            for item in workspace_store.list_all()
+            if item.realm_id == loser_realm.id
+        }
+        if loser_workspace_ids != {loser_workspace.id}:
+            _raise_reconciliation_required(
+                "The fixed-id realm owns additional live workspaces; refusing to archive it.",
+                realm_ids=[winner_realm.id, loser_realm.id],
+                workspace_ids=sorted(loser_workspace_ids),
+            )
+        if realm_store.active_id() != winner_realm.id or workspace_store.active_id() != winner_workspace.id:
+            _raise_reconciliation_required(
+                "The chosen lowercase scope must already be the active operator scope.",
+                realm_ids=[winner_realm.id, loser_realm.id],
+                workspace_ids=[winner_workspace.id, loser_workspace.id],
+            )
+
+        tasks = TaskStore().list_for_workspace(loser_workspace.id)
+        boards = BoardStore().list_for_workspace(
+            loser_workspace.id, include_archived=True
+        )
+        offices = OfficeStore()
+        actors = offices.list_actors(loser_workspace.id, include_archived=True)
+        instances = exact_scoped_instance_ids(
+            PersonaInstanceStore().list_all(), workspace_id=loser_workspace.id
+        )
+        if tasks or boards or actors or offices.surface_exists(loser_workspace.id) or instances:
+            _raise_reconciliation_required(
+                "The fixed-id duplicate contains live scoped data; a reviewed merge is required.",
+                realm_ids=[winner_realm.id, loser_realm.id],
+                workspace_ids=[winner_workspace.id, loser_workspace.id],
+            )
+
+        touched = [
+            paths.realm_path(winner_realm.id),
+            paths.workspace_path(winner_workspace.id),
+            paths.realm_path(loser_realm.id),
+            paths.workspace_path(loser_workspace.id),
+            paths.active_realm_path(),
+            paths.active_workspace_path(),
+        ]
+        backup_dir = _backup_default_scope_files(touched)
+        try:
+            if winner_workspace.realm_id is None:
+                winner_workspace.realm_id = winner_realm.id
+                winner_workspace = workspace_store.save(winner_workspace)
+            changed = False
+            if winner_realm.default_workspace_id != winner_workspace.id:
+                winner_realm.default_workspace_id = winner_workspace.id
+                changed = True
+            if winner_realm.default_workspace_name != winner_workspace.name:
+                winner_realm.default_workspace_name = winner_workspace.name
+                changed = True
+            if winner_workspace.id not in winner_realm.workspace_ids:
+                winner_realm.workspace_ids.append(winner_workspace.id)
+                changed = True
+            if winner_workspace.id in winner_realm.deleted_workspace_ids:
+                winner_realm.deleted_workspace_ids = [
+                    item
+                    for item in winner_realm.deleted_workspace_ids
+                    if item != winner_workspace.id
+                ]
+                changed = True
+            if changed:
+                winner_realm = realm_store.save(winner_realm)
+
+            workspace_store.archive(loser_workspace.id)
+            realm_store.archive(loser_realm.id)
+            _finish_default_scope_backup(backup_dir, status="applied")
+        except Exception:
+            _restore_default_scope_files(backup_dir)
+            _finish_default_scope_backup(backup_dir, status="rolled_back")
+            raise
+
+        return {
+            "kind": "default_scope_reconciliation",
+            "status": "applied",
+            "mutated": True,
+            "winner_realm_id": winner_realm.id,
+            "winner_workspace_id": winner_workspace.id,
+            "archived_realm_id": loser_realm.id,
+            "archived_workspace_id": loser_workspace.id,
+            "backup_dir": str(backup_dir),
+            "preserved_roster_agent_ids": list(loser_workspace.agent_ids or []),
+        }
 
 
-def _get_workspace(store: WorkspaceStore, workspace_id: str) -> Workspace | None:
+def _backup_default_scope_files(files: list[Path]) -> Path:
+    created_at = now()
+    stamp = created_at.strftime("%Y%m%dT%H%M%S%fZ")
+    backup_dir = (
+        paths.store_root()
+        / "migration_backups"
+        / f"default_scope_{stamp}_{uuid.uuid4().hex[:8]}"
+    )
+    before = backup_dir / "before"
+    before.mkdir(parents=True, exist_ok=False)
+    records = []
+    for index, source in enumerate(files):
+        destination = before / f"{index:02d}_{source.name}"
+        existed = source.exists()
+        if existed:
+            shutil.copy2(source, destination)
+        records.append(
+            {
+                "source": str(source),
+                "backup": str(destination),
+                "existed": existed,
+                "sha256": _sha256(source) if existed else None,
+            }
+        )
+    atomic_json_write(
+        backup_dir / "manifest.json",
+        {
+            "kind": "default_scope_reconciliation_backup",
+            "status": "prepared",
+            "created_at": created_at.isoformat(),
+            "files": records,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+    return backup_dir
+
+
+def _restore_default_scope_files(backup_dir: Path) -> None:
+    import json
+
+    manifest = json.loads((backup_dir / "manifest.json").read_text(encoding="utf-8"))
+    for record in manifest["files"]:
+        source = Path(record["source"])
+        if record["existed"]:
+            shutil.copy2(Path(record["backup"]), source)
+        else:
+            source.unlink(missing_ok=True)
+
+
+def _finish_default_scope_backup(backup_dir: Path, *, status: str) -> None:
+    import json
+
+    path = backup_dir / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["status"] = status
+    manifest["finished_at"] = now().isoformat()
+    atomic_json_write(path, manifest, indent=2, sort_keys=True)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _get_realm(
+    store: RealmStore,
+    realm_id: str,
+    *,
+    include_archived: bool = False,
+) -> Realm | None:
     try:
-        return store.get(workspace_id)
+        item = store.get(realm_id)
     except NotFound:
         return None
+    return item if include_archived or not item.archived else None
+
+
+def _get_workspace(
+    store: WorkspaceStore,
+    workspace_id: str,
+    *,
+    include_archived: bool = False,
+) -> Workspace | None:
+    try:
+        item = store.get(workspace_id)
+    except NotFound:
+        return None
+    return item if include_archived or not item.archived else None
 
 
 def _is_default_equivalent(realm: Realm) -> bool:
@@ -450,10 +737,10 @@ def _raise_reconciliation_required(
 
 def _realm_exists(store: RealmStore, realm_id: str) -> bool:
     try:
-        store.get(realm_id)
+        realm = store.get(realm_id)
     except NotFound:
         return False
-    return True
+    return not realm.archived
 
 
 def _workspace_belongs_to_realm(

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from hermes_time import now
@@ -8,6 +10,7 @@ from agent_runtime.default_scope import (
     DEFAULT_WORKSPACE_ID,
     ensure_default_scope,
     preview_default_scope_migration,
+    reconcile_default_scope_to_legacy,
 )
 from agent_runtime.errors import DefaultScopeReconciliationRequired, StoreCorrupt
 from agent_runtime.models import PersonaInstance, Task
@@ -257,3 +260,108 @@ def test_default_scope_preview_inventories_candidates_without_mutation():
     assert DEFAULT_WORKSPACE_ID not in {
         item.id for item in WorkspaceStore().list_all()
     }
+
+
+def test_default_scope_reconciliation_keeps_legacy_and_archives_empty_fixed_duplicate(
+    isolate_agent_runtime_root,
+):
+    legacy_realm = RealmStore().create(name="default")
+    legacy_workspace = WorkspaceStore().create(
+        name="default",
+        realm_id=legacy_realm.id,
+        agent_ids=["neko_supervisor", "dev"],
+    )
+    RealmStore().set_active(legacy_realm.id)
+    WorkspaceStore().set_active(legacy_workspace.id)
+    canonical = RealmStore().create(
+        name="Default",
+        realm_id=DEFAULT_REALM_ID,
+        default_workspace_id=DEFAULT_WORKSPACE_ID,
+    )
+    canonical_workspace = WorkspaceStore().create(
+        name="Default",
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        realm_id=canonical.id,
+        agent_ids=["backend_dev", "dev", "neko_supervisor", "qa"],
+    )
+    canonical.workspace_ids = [canonical_workspace.id]
+    RealmStore().save(canonical)
+    test_realm = RealmStore().create(name="test realm", server_id="server_test")
+
+    result = reconcile_default_scope_to_legacy(
+        winner_realm_id=legacy_realm.id,
+        winner_workspace_id=legacy_workspace.id,
+    )
+
+    assert result["status"] == "applied"
+    assert result["mutated"] is True
+    assert Path(result["backup_dir"]).joinpath("manifest.json").exists()
+    winner = RealmStore().get(legacy_realm.id)
+    assert winner.archived is False
+    assert winner.default_workspace_id == legacy_workspace.id
+    assert winner.workspace_ids == [legacy_workspace.id]
+    assert WorkspaceStore().get(legacy_workspace.id).agent_ids == [
+        "neko_supervisor",
+        "dev",
+    ]
+    assert RealmStore().get(DEFAULT_REALM_ID).archived is True
+    assert WorkspaceStore().get(DEFAULT_WORKSPACE_ID).archived is True
+    assert RealmStore().get(test_realm.id).archived is False
+    assert RealmStore().active_id() == legacy_realm.id
+    assert WorkspaceStore().active_id() == legacy_workspace.id
+
+    adopted = ensure_default_scope()
+    assert adopted.realm.id == legacy_realm.id
+    assert adopted.workspace.id == legacy_workspace.id
+    assert adopted.adopted_legacy_realm is True
+    assert reconcile_default_scope_to_legacy(
+        winner_realm_id=legacy_realm.id,
+        winner_workspace_id=legacy_workspace.id,
+    )["status"] == "already_applied"
+
+    preview = preview_default_scope_migration()
+    assert preview["status"] == "legacy_adoption_ready"
+    assert preview["archived_default_like_realm_ids"] == [DEFAULT_REALM_ID]
+    assert test_realm.id in preview["untouched_realm_ids"]
+
+
+def test_default_scope_reconciliation_refuses_fixed_duplicate_with_scoped_data():
+    legacy_realm = RealmStore().create(name="default")
+    legacy_workspace = WorkspaceStore().create(
+        name="default", realm_id=legacy_realm.id
+    )
+    RealmStore().set_active(legacy_realm.id)
+    WorkspaceStore().set_active(legacy_workspace.id)
+    canonical = RealmStore().create(
+        name="Default",
+        realm_id=DEFAULT_REALM_ID,
+        default_workspace_id=DEFAULT_WORKSPACE_ID,
+    )
+    canonical_workspace = WorkspaceStore().create(
+        name="Default",
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        realm_id=canonical.id,
+    )
+    canonical.workspace_ids = [canonical_workspace.id]
+    RealmStore().save(canonical)
+    TaskStore().create(
+        Task(
+            id="goal_fixed_data",
+            title="Keep me",
+            description="Must block archive",
+            state=TaskState.CREATED,
+            created_at=now(),
+            updated_at=now(),
+            requested_by="test",
+            workspace_id=canonical_workspace.id,
+        )
+    )
+
+    with pytest.raises(DefaultScopeReconciliationRequired):
+        reconcile_default_scope_to_legacy(
+            winner_realm_id=legacy_realm.id,
+            winner_workspace_id=legacy_workspace.id,
+        )
+
+    assert RealmStore().get(DEFAULT_REALM_ID).archived is False
+    assert WorkspaceStore().get(DEFAULT_WORKSPACE_ID).archived is False

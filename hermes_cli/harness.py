@@ -37,7 +37,11 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.default_plan import ensure_default_mission_plan
-from agent_runtime.default_scope import ensure_default_scope, preview_default_scope_migration
+from agent_runtime.default_scope import (
+    ensure_default_scope,
+    preview_default_scope_migration,
+    reconcile_default_scope_to_legacy,
+)
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
@@ -654,7 +658,15 @@ def build_parser(parent_subparsers) -> None:
     realm_default_scope.add_argument(
         "--dry-run",
         action="store_true",
-        help="Required safety acknowledgement; this command is inventory-only",
+        help="Inventory only; never mutates persisted state",
+    )
+    realm_default_scope.add_argument("--winner-realm", default=None)
+    realm_default_scope.add_argument("--winner-workspace", default=None)
+    realm_default_scope.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Apply the explicitly selected recoverable reconciliation",
     )
     _add_stage42_global_args(realm_default_scope)
     realm_default_scope.set_defaults(func=_cmd_realm_default_scope)
@@ -3088,14 +3100,34 @@ def _cmd_realm_use(args) -> int:
 
 
 def _cmd_realm_default_scope(args) -> int:
-    if not getattr(args, "dry_run", False):
+    if getattr(args, "dry_run", False):
+        _print_stage42(
+            preview_default_scope_migration(),
+            args=args,
+            default_output="json",
+        )
+        return 0
+    if not getattr(args, "yes", False):
         return emit_harness_error(
-            ValueError("default-scope preview requires --dry-run"),
+            ValueError("default-scope reconciliation requires --dry-run or --yes"),
+            args=args,
+            code="confirmation_required",
+        )
+    winner_realm_id = str(getattr(args, "winner_realm", "") or "").strip()
+    winner_workspace_id = str(
+        getattr(args, "winner_workspace", "") or ""
+    ).strip()
+    if not winner_realm_id or not winner_workspace_id:
+        return emit_harness_error(
+            ValueError("--winner-realm and --winner-workspace are required with --yes"),
             args=args,
             code="invalid_request",
         )
     _print_stage42(
-        preview_default_scope_migration(),
+        reconcile_default_scope_to_legacy(
+            winner_realm_id=winner_realm_id,
+            winner_workspace_id=winner_workspace_id,
+        ),
         args=args,
         default_output="json",
     )

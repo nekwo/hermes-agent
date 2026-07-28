@@ -942,6 +942,22 @@ class RealmStore:
             _append_store_event(self.event_log, "realm.updated", realm_id=item.id, change="saved")
         return self.get(item.id)
 
+    def archive(self, realm_id: str) -> Realm:
+        """Recoverably remove a Realm from live selectors and projections."""
+
+        item = self.get(realm_id)
+        if item.archived:
+            return item
+        item.archived = True
+        item = self.save(item, emit_event=False)
+        _append_store_event(
+            self.event_log,
+            "realm.archived",
+            realm_id=item.id,
+            name=item.name,
+        )
+        return item
+
     def bind_server(self, realm_id: str, server_id: str) -> Realm:
         item = self.get(realm_id)
         item.server_id = _safe_model_id(server_id)
