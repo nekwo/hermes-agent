@@ -6,6 +6,20 @@ registry, so the Launcher can present every Hermes provider without maintaining
 a second hand-written list. Each descriptor states whether the provider's
 transport and account-login flow are mobile-certified or desktop-only.
 
+## Recommended connection policy
+
+Use **provider account/subscription sign-in first** whenever the provider
+descriptor offers it. That lane follows the user's existing provider account
+entitlements and limits and does not require a separately metered API key for
+the same lane. ChatGPT/Codex, Claude, xAI, and Nous currently support mobile
+account sign-in.
+
+Create a key or subscription-token profile only when account sign-in is not
+available, a developer-only model is required, or organization-managed API
+billing is intentional. Key-backed usage may be metered and billed separately
+by the provider. Hermes does not bypass provider terms or limits, and a weekly
+quota is displayed only when the provider reports that window.
+
 The runtime accepts JSON-safe requests, keeps credentials out of those
 requests, streams normalized typed events, and depends only on `httpx` and its
 pure-Python closure. It supports:
