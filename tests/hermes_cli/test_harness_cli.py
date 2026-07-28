@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from hermes_time import now
 from hermes_cli.harness import build_parser
 from agent_runtime import paths
@@ -680,3 +682,92 @@ def test_agent_set_profile_reports_typed_refusal(tmp_path, monkeypatch, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["ok"] is False
     assert data["error_code"] == "profile_missing"
+
+
+# ── the stage42 global flags are promises, and every one must be kept ────────
+#
+# A flag registered by `_add_stage42_global_args` is advertised on ~60 verbs at
+# once. An unconsumed one is therefore the worst kind of no-op: it appears in
+# `--help` everywhere, argparse accepts it without a murmur, and the operator
+# gets the UNFILTERED / UNWATCHED answer with no signal that the flag was
+# dropped on the floor. That is a wrong answer believed, not an error seen.
+# `--filter` and `--watch` were both exactly that until 2026-07-28.
+
+
+#: Flags whose contract is met WITHOUT any code reading them, and the reason.
+#: An entry here is a claim that has to stay true — not an escape hatch for the
+#: next unimplemented flag.
+_STAGE42_SATISFIED_BY_CONSTRUCTION = {
+    "no_color": "nothing on this lane emits ANSI, so 'no color' is already what you get",
+}
+
+
+def _stage42_lane_sources():
+    """Every source file that could legitimately honor a stage42 global flag.
+
+    Scoped to the HARNESS lane on purpose. Scanning all of `hermes_cli/` would
+    let an unrelated command's own identically-named flag stand in as the
+    reader — `hermes_cli/journey.py` reads a `no_color` it registers itself,
+    which would have passed this gate while the harness lane ignored its own."""
+
+    root = Path(__file__).resolve().parents[2]
+    yield root / "hermes_cli" / "harness.py"
+    for directory in (root / "hermes_cli" / "harness_parts", root / "agent_runtime"):
+        for path in sorted(directory.rglob("*.py")):
+            if "__pycache__" not in path.parts:
+                yield path
+
+
+def test_every_stage42_global_flag_is_honored():
+    """Registered means implemented, or explicitly declared a satisfied no-op.
+
+    The invariant, not a snapshot of today's flag list: add a flag to
+    `_add_stage42_global_args` and this fails until something on the lane
+    actually reads it. That is the whole point — the defect it retires was not
+    `--filter` specifically, it was that nothing connected ADVERTISING a flag
+    to HONORING it, so the two could drift silently and did, twice."""
+
+    import re
+
+    from hermes_cli.harness import _add_stage42_global_args
+
+    probe = argparse.ArgumentParser()
+    _add_stage42_global_args(probe, mutation=True)
+    dests = sorted(
+        action.dest
+        for action in probe._actions
+        if action.dest not in ("help", argparse.SUPPRESS)
+    )
+    assert "output" in dests and "dry_run" in dests, "the probe stopped seeing the flags"
+
+    lane = "\n".join(path.read_text(encoding="utf-8") for path in _stage42_lane_sources())
+    unhonored = [
+        dest
+        for dest in dests
+        if dest not in _STAGE42_SATISFIED_BY_CONSTRUCTION
+        and not re.search(rf"args\.{dest}\b|args,\s*[\"']{dest}[\"']", lane)
+    ]
+
+    assert unhonored == [], (
+        "these stage42 global flags are advertised on every verb and read by "
+        f"nothing — wire them or stop registering them: {unhonored}"
+    )
+
+
+def test_a_stage42_flag_nothing_implements_is_refused_not_swallowed():
+    """`--filter` was accepted and ignored; now it is refused.
+
+    The behavior contract that replaces it, and the reason removal was the
+    complete fix rather than a retreat: an operator who reaches for filtering
+    on a list verb must find out. Silently returning the unfiltered set is the
+    one outcome that cannot be told apart from the flag working."""
+
+    for flag in ("--filter=state=running", "--watch"):
+        with pytest.raises(SystemExit) as excinfo:
+            parser().parse_args(["harness", "goal", "list", flag])
+        assert excinfo.value.code == 2, f"{flag} was swallowed instead of refused"
+
+    # …while the typed filter the verb really does implement still works, which
+    # is the surface `--filter` was competing with.
+    args = parser().parse_args(["harness", "goal", "list", "--state", "done"])
+    assert args.state == "done"
