@@ -30,6 +30,66 @@ def _request():
     }
 
 
+def _stagec_mission_control_result(name, artifact, *, width=2560, height=1400):
+    if name == "mcp_launcher_qa_open_app_tab":
+        return {"ok": True, "redaction": {"safe": True}}
+    if name == "mcp_launcher_qa_wait_for_state":
+        return {
+            "schema": "stagec_mcp_wait_for_state.safe.v1",
+            "ok": True,
+            "matched": 3,
+            "elapsed_ms": 1250,
+            "poll_count": 4,
+            "selected_tab": "missionControl",
+            "redaction": {"safe": True},
+        }
+    if name == "mcp_launcher_qa_get_navigation_state":
+        return {
+            "ok": True,
+            "response_safe": {
+                "ok": True,
+                "data": {
+                    "selected_tab": "missionControl",
+                    "route_name": "/shell",
+                    "blocking_modal": {"present": False},
+                },
+            },
+            "redaction": {"safe": True},
+        }
+    if name == "mcp_launcher_qa_get_widget_state":
+        return {
+            "ok": True,
+            "response_safe": {
+                "ok": True,
+                "data": {
+                    "widget": "mission_control.graph",
+                    "mounted": True,
+                    "goal_id": "goal_test",
+                    "stages": [{"id": "build"}, {"id": "verify"}],
+                    "edges": [{"source": "build", "target": "verify"}],
+                    "actors": [
+                        {
+                            "actor_id": "qa",
+                            "persona_id": "qa",
+                            "persona_instance_id": "personainst_qa",
+                            "role": "qa",
+                            "presence": "active",
+                        }
+                    ],
+                },
+            },
+            "redaction": {"safe": True},
+        }
+    if name == "mcp_launcher_qa_screenshot_window":
+        return {
+            "ok": True,
+            "image_path": str(artifact),
+            "bounds": {"width": width, "height": height},
+            "redaction": {"safe": True},
+        }
+    raise AssertionError(f"unexpected Stage-C tool: {name}")
+
+
 def test_visual_runner_returns_environment_blocker_without_provider():
     result = VisualProofRunner().capture(_task(), stage_id="stage_1", run_id="run_1", actor="qa", request=_request(), kind="screenshot")
 
@@ -107,13 +167,8 @@ def test_stagec_provider_rebuilds_stale_marionette_before_capture(tmp_path, monk
             return {}
 
         def call_tool(self, name, arguments):
-            assert name == "mcp_launcher_qa_open_app_tab"
             assert all(marker in kernel.read_bytes() for marker in stagec._MARIONETTE_KERNEL_MARKERS)
-            return {
-                "ok": True,
-                "screenshot": {"path": str(artifact), "width": 2560, "height": 1400},
-                "redaction": {"safe": True},
-            }
+            return _stagec_mission_control_result(name, artifact)
 
     def fake_rebuild(task_id, *, reason, launcher_repo=None):
         rebuilds.append({"task_id": task_id, "reason": reason, "launcher_repo": launcher_repo})
@@ -163,15 +218,11 @@ def test_stagec_provider_retries_after_wrong_marionette_target_error(tmp_path, m
 
         def call_tool(self, name, arguments):
             calls.append(name)
-            if len(calls) == 1:
+            if name == "mcp_launcher_qa_open_app_tab" and calls.count(name) == 1:
                 raise stagec.StageCMcpError(
                     "launch_wrong_debug_target_missing_marionette: Debug EXE built against lib/main.dart, not lib/main_marionette.dart"
                 )
-            return {
-                "ok": True,
-                "screenshot": {"path": str(artifact)},
-                "redaction": {"safe": True},
-            }
+            return _stagec_mission_control_result(name, artifact)
 
     def fake_rebuild(task_id, *, reason, launcher_repo=None):
         rebuilds.append(reason)
@@ -191,10 +242,157 @@ def test_stagec_provider_retries_after_wrong_marionette_target_error(tmp_path, m
         )
     )
 
-    assert calls == ["mcp_launcher_qa_open_app_tab", "mcp_launcher_qa_open_app_tab"]
+    assert calls == [
+        "mcp_launcher_qa_open_app_tab",
+        "mcp_launcher_qa_open_app_tab",
+        "mcp_launcher_qa_wait_for_state",
+        "mcp_launcher_qa_get_navigation_state",
+        "mcp_launcher_qa_get_widget_state",
+        "mcp_launcher_qa_screenshot_window",
+    ]
     assert rebuilds == ["wrong_debug_target_retry"]
     assert capture.path == str(artifact)
     assert capture.provider_metadata["stagec_marionette_preflight"]["reason"] == "wrong_debug_target_retry"
+
+
+def test_stagec_provider_waits_for_settled_mission_control_before_capture(tmp_path, monkeypatch):
+    from agent_runtime import stagec_mcp_visual_provider as stagec
+
+    artifact = tmp_path / "mission_control.png"
+    artifact.write_bytes(b"png")
+    calls = []
+    sleeps = []
+
+    class FakeClient:
+        def __init__(self, config):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def initialize(self):
+            return {}
+
+        def call_tool(self, name, arguments):
+            if name in {
+                "mcp_launcher_qa_get_navigation_state",
+                "mcp_launcher_qa_get_widget_state",
+                "mcp_launcher_qa_screenshot_window",
+            }:
+                assert sleeps == [0.75]
+            calls.append((name, arguments))
+            return _stagec_mission_control_result(name, artifact)
+
+    monkeypatch.setattr(stagec, "StageCMcpJsonRpcClient", FakeClient)
+    monkeypatch.setattr(stagec.time, "sleep", sleeps.append)
+    monkeypatch.setattr(stagec, "_marionette_preflight_enabled_for_config", lambda metadata, config: False)
+    provider = stagec.StageCLauncherMcpVisualCaptureProvider(
+        stagec.StageCMcpServerConfig(name="launcher_qa", command="fake")
+    )
+
+    capture = provider.capture_screenshot(
+        ScreenshotRequest(
+            task_id="task_stagec_settle",
+            stage_id="stage_1",
+            scenario="mission_control",
+            metadata={**_request(), "semantic_settle_timeout_ms": 45_000},
+        )
+    )
+
+    assert [name for name, _ in calls] == [
+        "mcp_launcher_qa_open_app_tab",
+        "mcp_launcher_qa_wait_for_state",
+        "mcp_launcher_qa_get_navigation_state",
+        "mcp_launcher_qa_get_widget_state",
+        "mcp_launcher_qa_screenshot_window",
+    ]
+    assert calls[0][1]["screenshot"] is False
+    assert calls[1][1]["timeout_ms"] == 45_000
+    assert calls[1][1]["assertions"][-1] == {
+        "path": "mission_control.graph.mounted",
+        "equals": True,
+    }
+    semantic = capture.provider_metadata["stagec_semantic_envelope"]
+    assert semantic["ok"] is True
+    assert semantic["navigation"]["selected_tab"] == "missionControl"
+    assert semantic["widget"] == {
+        "widget": "mission_control.graph",
+        "mounted": True,
+        "goal_id": "goal_test",
+        "stage_count": 2,
+        "edge_count": 1,
+        "actor_count": 1,
+        "actors": [
+            {
+                "actor_id": "qa",
+                "persona_id": "qa",
+                "persona_instance_id": "personainst_qa",
+                "role": "qa",
+                "presence": "active",
+            }
+        ],
+    }
+
+
+def test_stagec_provider_reports_exact_semantic_settle_timeout_without_capture(tmp_path, monkeypatch):
+    from agent_runtime import stagec_mcp_visual_provider as stagec
+
+    calls = []
+
+    class FakeClient:
+        def __init__(self, config):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def initialize(self):
+            return {}
+
+        def call_tool(self, name, arguments):
+            calls.append(name)
+            if name == "mcp_launcher_qa_open_app_tab":
+                return {"ok": True, "redaction": {"safe": True}}
+            if name == "mcp_launcher_qa_wait_for_state":
+                return {
+                    "ok": False,
+                    "failure_class": "assertion_failed",
+                    "message_safe": "wait_for_state: 1 assertion(s) did not pass within 45000ms.",
+                    "failed": [
+                        {
+                            "path": "mission_control.graph.mounted",
+                            "expected": "== true",
+                            "actual": "false",
+                        }
+                    ],
+                }
+            raise AssertionError("capture must not run after semantic timeout")
+
+    monkeypatch.setattr(stagec, "StageCMcpJsonRpcClient", FakeClient)
+    monkeypatch.setattr(stagec, "_marionette_preflight_enabled_for_config", lambda metadata, config: False)
+    provider = stagec.StageCLauncherMcpVisualCaptureProvider(
+        stagec.StageCMcpServerConfig(name="launcher_qa", command="fake")
+    )
+
+    import pytest
+
+    with pytest.raises(stagec.StageCMcpError, match=r"assertion_failed: .*within 45000ms"):
+        provider.capture_screenshot(
+            ScreenshotRequest(
+                task_id="task_stagec_timeout",
+                stage_id="stage_1",
+                scenario="mission_control",
+                metadata={**_request(), "semantic_settle_timeout_ms": 45_000},
+            )
+        )
+
+    assert calls == ["mcp_launcher_qa_open_app_tab", "mcp_launcher_qa_wait_for_state"]
 
 
 def test_visual_runner_uses_configured_launcher_qa_mcp_provider(tmp_path, monkeypatch, isolate_agent_runtime_root):
@@ -224,15 +422,25 @@ for line in sys.stdin:
     elif method == "tools/list":
         print(json.dumps({"jsonrpc":"2.0","id":rid,"result":{"tools":[{"name":"mcp_launcher_qa_open_app_tab"}]}}), flush=True)
     elif method == "tools/call":
-        with open(args_path, "w", encoding="utf-8") as f:
-            json.dump(req.get("params", {}).get("arguments", {}), f)
-        with open(artifact, "wb") as f:
-            f.write(b"png")
-        envelope = {
-            "ok": True,
-            "screenshot": {"path": artifact, "width": 800, "height": 600},
-            "redaction": {"safe": True},
-        }
+        params = req.get("params", {})
+        name = params.get("name")
+        arguments = params.get("arguments", {})
+        if name == "mcp_launcher_qa_open_app_tab":
+            with open(args_path, "w", encoding="utf-8") as f:
+                json.dump(arguments, f)
+            envelope = {"ok": True, "redaction": {"safe": True}}
+        elif name == "mcp_launcher_qa_wait_for_state":
+            envelope = {"ok": True, "matched": 3, "elapsed_ms": 10, "poll_count": 1, "selected_tab": "missionControl", "redaction": {"safe": True}}
+        elif name == "mcp_launcher_qa_get_navigation_state":
+            envelope = {"ok": True, "response_safe": {"ok": True, "data": {"selected_tab": "missionControl", "route_name": "/shell", "blocking_modal": {"present": False}}}, "redaction": {"safe": True}}
+        elif name == "mcp_launcher_qa_get_widget_state":
+            envelope = {"ok": True, "response_safe": {"ok": True, "data": {"widget": "mission_control.graph", "mounted": True, "goal_id": "goal_test", "stage_count": 2}}, "redaction": {"safe": True}}
+        elif name == "mcp_launcher_qa_screenshot_window":
+            with open(artifact, "wb") as f:
+                f.write(b"png")
+            envelope = {"ok": True, "image_path": artifact, "bounds": {"width": 800, "height": 600}, "redaction": {"safe": True}}
+        else:
+            envelope = {"ok": False, "failure_class": "unexpected_tool", "message_safe": str(name)}
         print(json.dumps({"jsonrpc":"2.0","id":rid,"result":{"content":[{"type":"text","text":json.dumps(envelope)}],"isError":False}}), flush=True)
 """.strip(),
         encoding="utf-8",
@@ -303,12 +511,9 @@ def test_stagec_provider_derives_launcher_helpers_from_configured_repo(tmp_path,
             return {}
 
         def call_tool(self, name, arguments):
-            seen["args"] = dict(arguments)
-            return {
-                "ok": True,
-                "screenshot": {"path": str(artifact), "width": 1920, "height": 1080},
-                "redaction": {"safe": True},
-            }
+            if name == "mcp_launcher_qa_open_app_tab":
+                seen["args"] = dict(arguments)
+            return _stagec_mission_control_result(name, artifact, width=1920, height=1080)
 
     monkeypatch.setattr(stagec, "StageCMcpJsonRpcClient", FakeClient)
     monkeypatch.setattr(stagec, "_marionette_preflight_enabled_for_config", lambda metadata, config: False)

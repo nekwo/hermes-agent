@@ -235,7 +235,7 @@ class StageCLauncherMcpVisualCaptureProvider:
         args: dict[str, Any] = {
             "tab": _target_tab(metadata),
             "profile": "stagec-smoke",
-            "screenshot": True,
+            "screenshot": _target_tab(metadata) != "missionControl",
             "scenario_label": scenario_label,
             "reap_stale": bool(metadata.get("reap_stale", True)),
             "force_relaunch": bool(metadata.get("force_relaunch", True)),
@@ -251,14 +251,14 @@ class StageCLauncherMcpVisualCaptureProvider:
         launch_pins = _launcher_qa_launch_pins(metadata, self.config)
 
         try:
-            envelope = self._open_app_tab(args, launch_pins=launch_pins)
+            envelope = self._capture_app_tab(args, metadata=metadata, launch_pins=launch_pins)
         except StageCMcpError as exc:
             if not provider_metadata and _is_wrong_marionette_target_error(exc) and _auto_rebuild_enabled(metadata):
                 rebuild = _run_launcher_marionette_rebuild(request.task_id, reason="wrong_debug_target_retry")
                 provider_metadata["stagec_marionette_preflight"] = rebuild
                 if rebuild.get("status") != "applied":
                     raise StageCMcpError(f"{exc}; marionette rebuild failed: {_safe_summary(rebuild.get('summary'))}") from exc
-                envelope = self._open_app_tab(args, launch_pins=launch_pins)
+                envelope = self._capture_app_tab(args, metadata=metadata, launch_pins=launch_pins)
             else:
                 raise
         if envelope.get("ok") is not True:
@@ -270,6 +270,9 @@ class StageCLauncherMcpVisualCaptureProvider:
         if not image_path:
             raise StageCMcpError("launcher_qa MCP returned no screenshot path")
         redaction = envelope.get("redaction") if isinstance(envelope.get("redaction"), dict) else {}
+        semantic = envelope.get("semantic")
+        if isinstance(semantic, dict):
+            provider_metadata["stagec_semantic_envelope"] = semantic
         return CapturedArtifact(
             path=image_path,
             capture_provider="launcher_qa",
@@ -283,11 +286,87 @@ class StageCLauncherMcpVisualCaptureProvider:
     def capture_video(self, request: VideoRequest) -> CapturedArtifact:
         raise StageCMcpError("launcher_qa MCP video capture is not implemented; request screenshot proof")
 
-    def _open_app_tab(self, args: dict[str, Any], *, launch_pins: dict[str, str]) -> dict[str, Any]:
+    def _capture_app_tab(
+        self,
+        args: dict[str, Any],
+        *,
+        metadata: dict[str, Any],
+        launch_pins: dict[str, str],
+    ) -> dict[str, Any]:
         config = _config_with_launcher_qa_launch_pins(self.config, launch_pins)
         with StageCMcpJsonRpcClient(config) as client:
             client.initialize()
-            return client.call_tool("mcp_launcher_qa_open_app_tab", args)
+            opened = client.call_tool("mcp_launcher_qa_open_app_tab", args)
+            _require_stagec_envelope_ok(opened, fallback="open_app_tab_failed")
+            if args.get("tab") != "missionControl":
+                return opened
+
+            timeout_ms = min(_positive_int(metadata.get("semantic_settle_timeout_ms"), 60_000), 60_000)
+            poll_ms = min(_positive_int(metadata.get("semantic_settle_poll_ms"), 500), 5_000)
+            wait = client.call_tool(
+                "mcp_launcher_qa_wait_for_state",
+                {
+                    "assertions": [
+                        {"path": "navigation.selected_tab", "equals": "missionControl"},
+                        {"path": "blocking_modal.present", "equals": False},
+                        {"path": "mission_control.graph.mounted", "equals": True},
+                    ],
+                    "timeout_ms": timeout_ms,
+                    "poll_ms": max(poll_ms, 25),
+                    "evidence_level": "compact",
+                },
+            )
+            if wait.get("ok") is not True:
+                failure = str(wait.get("failure_class") or "semantic_settle_failed")
+                message = str(
+                    wait.get("message_safe")
+                    or f"Mission Control semantic target did not settle within {timeout_ms}ms"
+                )
+                raise StageCMcpError(f"{failure}: {message[:240]}")
+
+            stabilize_ms = min(max(int(args.get("screenshot_stabilize_ms") or 0), 0), 15_000)
+            if stabilize_ms:
+                time.sleep(stabilize_ms / 1000.0)
+            navigation = client.call_tool("mcp_launcher_qa_get_navigation_state", {})
+            widget = client.call_tool(
+                "mcp_launcher_qa_get_widget_state",
+                {"widget": "mission_control.graph", "evidence_level": "compact"},
+            )
+            _require_stagec_envelope_ok(navigation, fallback="navigation_state_failed")
+            _require_stagec_envelope_ok(widget, fallback="mission_control_graph_failed")
+            navigation_data = _stagec_envelope_data(navigation)
+            widget_data = _stagec_envelope_data(widget)
+            blocking_modal = navigation_data.get("blocking_modal")
+            modal_present = blocking_modal.get("present") if isinstance(blocking_modal, dict) else None
+            if (
+                navigation_data.get("selected_tab") != "missionControl"
+                or modal_present is not False
+                or widget_data.get("mounted") is not True
+            ):
+                raise StageCMcpError(
+                    "semantic_state_changed_before_capture: Mission Control was not settled at the final semantic probe"
+                )
+
+            screenshot = client.call_tool(
+                "mcp_launcher_qa_screenshot_window",
+                {
+                    "label": _scenario_label(str(args.get("scenario_label") or "mission_control")),
+                    "max_retries": int(args.get("screenshot_max_retries") or 8),
+                    "retry_delay_ms": int(args.get("screenshot_retry_delay_ms") or 750),
+                },
+            )
+            _require_stagec_envelope_ok(screenshot, fallback="screenshot_window_failed")
+            bounds = screenshot.get("bounds") if isinstance(screenshot.get("bounds"), dict) else {}
+            return {
+                "ok": True,
+                "screenshot": {
+                    "path": screenshot.get("image_path"),
+                    "width": bounds.get("width"),
+                    "height": bounds.get("height"),
+                },
+                "redaction": screenshot.get("redaction"),
+                "semantic": _settled_mission_control_envelope(wait, navigation_data, widget_data),
+            }
 
 
 def default_launcher_qa_visual_provider() -> StageCLauncherMcpVisualCaptureProvider | None:
@@ -802,6 +881,79 @@ def _optional_int(value: Any) -> int | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _require_stagec_envelope_ok(envelope: dict[str, Any], *, fallback: str) -> None:
+    if envelope.get("ok") is True:
+        return
+    failure = str(envelope.get("failure_class") or fallback)
+    message = str(envelope.get("message_safe") or fallback.replace("_", " "))
+    raise StageCMcpError(f"{failure}: {message[:240]}")
+
+
+def _stagec_envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:
+    response = envelope.get("response_safe")
+    source = response if isinstance(response, dict) else envelope
+    data = source.get("data")
+    return data if isinstance(data, dict) else source
+
+
+def _settled_mission_control_envelope(
+    wait: dict[str, Any],
+    navigation: dict[str, Any],
+    widget: dict[str, Any],
+) -> dict[str, Any]:
+    blocking_modal = navigation.get("blocking_modal")
+    modal = blocking_modal if isinstance(blocking_modal, dict) else {}
+    graph_keys = (
+        "widget",
+        "mounted",
+        "goal_id",
+        "blueprint_id",
+        "blueprint_version",
+        "active_stage_id",
+    )
+    graph = {key: widget.get(key) for key in graph_keys if key in widget}
+    for list_key, count_key in (("stages", "stage_count"), ("edges", "edge_count"), ("actors", "actor_count")):
+        values = widget.get(list_key)
+        if isinstance(values, list):
+            graph[count_key] = len(values)
+    actors = widget.get("actors")
+    if isinstance(actors, list):
+        actor_keys = (
+            "actor_id",
+            "persona_id",
+            "persona_instance_id",
+            "display_name",
+            "role",
+            "presence",
+            "stage_id",
+            "goal_id",
+            "state_label",
+        )
+        graph["actors"] = [
+            {key: actor.get(key) for key in actor_keys if key in actor}
+            for actor in actors[:16]
+            if isinstance(actor, dict)
+        ]
+    return {
+        "schema": "stagec_harness_settled_target.safe.v1",
+        "ok": True,
+        "target": "missionControl",
+        "acceptance": "mission_control.graph.mounted",
+        "wait": {
+            key: wait.get(key)
+            for key in ("schema", "matched", "elapsed_ms", "poll_count", "selected_tab")
+            if wait.get(key) is not None
+        },
+        "navigation": {
+            "selected_tab": navigation.get("selected_tab"),
+            "route_name": navigation.get("route_name"),
+            "blocking_modal": {"present": modal.get("present")},
+        },
+        "widget": graph,
+        "redaction": {"safe": True},
+    }
 
 
 def _safe_token(value: Any) -> str:

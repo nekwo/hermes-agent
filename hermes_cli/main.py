@@ -358,6 +358,20 @@ def _apply_profile_override() -> None:
             return False
         return True
 
+    def _inside_harness_agent_set_profile(index: int) -> bool:
+        """True when ``--profile`` belongs to the Harness rebind verb.
+
+        ``harness agent set-profile`` deliberately owns a required
+        ``--profile`` argument naming the target persona profile.  Consuming
+        that argument here turns a valid rebind into an argparse error before
+        the Harness operator can validate or apply it.
+        """
+        return any(
+            argv[harness_index : harness_index + 3]
+            == ["harness", "agent", "set-profile"]
+            for harness_index in range(index)
+        )
+
     def _resolve_sudo_user_profile_env(name: str) -> str | None:
         """Resolve `sudo hermes -p <name>` against the invoking user's home.
 
@@ -408,6 +422,10 @@ def _apply_profile_override() -> None:
         if arg == "--":
             break
         if arg == "--args" and _inside_mcp_add_args(i):
+            break
+        if (
+            arg == "--profile" or arg.startswith("--profile=")
+        ) and _inside_harness_agent_set_profile(i):
             break
         if arg in {"--profile", "-p"} and i + 1 < len(argv):
             profile_name = argv[i + 1]
