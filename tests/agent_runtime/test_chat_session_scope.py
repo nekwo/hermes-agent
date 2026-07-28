@@ -24,6 +24,7 @@ D1/D2 are fixed here too, and pinned below.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -389,6 +390,27 @@ def test_a_double_opts_in_under_its_own_name(monkeypatch):
     assert CANONICAL_SESSION_PERSISTENCE_ATTR == "__hermes_canonical_session_persistence__"
 
 
+#: The sniff, in either operand order, spanning up to a few wrapped lines.
+#:
+#: MULTILINE ON PURPOSE (2026-07-28). The first spelling of this gate matched a
+#: SINGLE line carrying both halves, which made it a gate on FORMATTING as much
+#: as on behavior: the four original guards were long lines, and the moment a
+#: formatter wrapped one of them —
+#:
+#:     if (
+#:         session_db.__class__.__module__
+#:         == "hermes_state"
+#:     ):
+#:
+#: — the identical construct walked straight past. That is not a rewrite anyone
+#: has to choose; it is what `black` / `ruff format` do to a guard that grows
+#: one clause. The character window costs a few characters of regex and closes
+#: the whole wrapping-and-operand-order family at once.
+_MODULE_SNIFF = re.compile(
+    r"__module__[\s\S]{0,160}?hermes_state|hermes_state[\s\S]{0,160}?__module__"
+)
+
+
 def test_no_guard_hand_spells_the_module_sniff_any_more():
     """Recurrence is the finding: one predicate, or four that drift.
 
@@ -401,7 +423,30 @@ def test_no_guard_hand_spells_the_module_sniff_any_more():
     looks where the bug already was is a gate the next instance walks around:
     `session_db` is handled in `hermes_cli/` modules outside `harness.py` and in
     `tools/` too, and a sniff spelled one directory deeper than a non-recursive
-    glob is exactly as wrong and exactly as invisible."""
+    glob is exactly as wrong and exactly as invisible.
+
+    WHAT THIS GATE DOES NOT CATCH, recorded here so the limit is never silent —
+    a gate believed to be total is worse than one known to be partial. It
+    matches TEXT inside a bounded window, so it sees the sniff however it is
+    wrapped, spaced, or ordered; it cannot see one taken apart across
+    statements::
+
+        module = type(session_db).__module__     # neither line carries both
+        ...                                      # halves inside the window
+        if module == "hermes_state":
+
+    Closing that needs dataflow, not text: an AST pass would have to bind the
+    name, follow it through the function, and re-derive the comparison — real
+    machinery with a standing maintenance cost, bought to catch a form nobody
+    reaches by accident.
+
+    THAT GAP IS ACCEPTED, DELIBERATELY. The single-line and formatter-wrapped
+    spellings are the ones that arrive by accident, and both are covered. The
+    indirect spelling is a rewrite somebody has to sit down and choose, and it
+    is backstopped by the behavior tests above, which pin what the predicate
+    must ANSWER no matter who asks it. If a hand-rolled sniff is ever found in
+    the wild through this gap, THAT is the evidence that buys the AST pass —
+    not a hypothetical, and not this paragraph."""
 
     from pathlib import Path
 
@@ -409,16 +454,42 @@ def test_no_guard_hand_spells_the_module_sniff_any_more():
     # `chat_session_scope.py` is the ONE sanctioned home: the fallback lives
     # inside the predicate, where the fork boundary that forces it is documented.
     predicate_home = repo_root / "agent_runtime" / "chat_session_scope.py"
-    offenders = [
-        f"{path.relative_to(repo_root).as_posix()}:{number}"
-        for directory in ("agent_runtime", "hermes_cli", "tools")
-        for path in sorted((repo_root / directory).rglob("*.py"))
-        if path != predicate_home and "__pycache__" not in path.parts
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-        if "__module__" in line and "hermes_state" in line
-    ]
+    offenders = []
+    for directory in ("agent_runtime", "hermes_cli", "tools"):
+        for path in sorted((repo_root / directory).rglob("*.py")):
+            if path == predicate_home or "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            offenders.extend(
+                f"{path.relative_to(repo_root).as_posix()}:{text.count(chr(10), 0, match.start()) + 1}"
+                for match in _MODULE_SNIFF.finditer(text)
+            )
 
     assert offenders == [], (
         "use agent_runtime.chat_session_scope.is_canonical_session_persistence "
         f"instead of a hand-spelled module sniff: {offenders}"
+    )
+
+
+def test_the_gate_itself_sees_a_sniff_a_formatter_wrapped():
+    """The gate's own regression test — an untested gate is not a gate.
+
+    Pins BOTH halves of the decision above as executable facts: the wrapped
+    and reversed spellings ARE caught, and the cross-statement one is NOT. The
+    last assertion is not an endorsement of the gap; it is the accepted
+    limitation written down where it fails loudly if it ever stops being
+    true, so the docstring can never quietly decay into a false claim that
+    this gate is total."""
+
+    single_line = 'if session_db.__class__.__module__ == "hermes_state":'
+    wrapped = 'if (\n    session_db.__class__.__module__\n    == "hermes_state"\n):'
+    reversed_order = 'if "hermes_state" == type(db).__module__:'
+    indirect = 'module = type(db).__module__\n' + ("padding = 1\n" * 40) + 'if module == "hermes_state":'
+
+    assert _MODULE_SNIFF.search(single_line)
+    assert _MODULE_SNIFF.search(wrapped), "a formatter-wrapped sniff walked past the gate"
+    assert _MODULE_SNIFF.search(reversed_order)
+    assert _MODULE_SNIFF.search(indirect) is None, (
+        "the accepted gap has closed — this gate now catches more than its "
+        "docstring claims, so the docstring is stale"
     )
