@@ -611,8 +611,46 @@ def test_reap_inventory_reparse_base_is_kept_without_traversal(
     assert marker.read_text(encoding="utf-8") == "untouched"
 
 
-def test_reap_inventory_reparse_child_cannot_escape_base_when_supported(
+def test_reap_inventory_candidate_alias_does_not_suppress_canonical_sibling(
     isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    from agent_runtime import repo_context as repo_context_mod
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+
+    current_base = tmp_path / "current-wt"
+    legacy_base = tmp_path / "hermes-agent-wt"
+    alias = legacy_base / "alias"
+    real_worktree = legacy_base / "real_worktree"
+    current_base.mkdir()
+    alias.mkdir(parents=True)
+    real_worktree.mkdir()
+    marker = real_worktree / "marker.txt"
+    marker.write_text("untouched", encoding="utf-8")
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: current_base)
+    monkeypatch.setattr(
+        repo_context_mod, "legacy_harness_worktree_base_dir", lambda: legacy_base
+    )
+    monkeypatch.setattr(
+        repo_context_mod,
+        "_path_is_reparse_point",
+        lambda path: Path(path) == alias,
+    )
+
+    result = reap_orphan_worktrees(
+        min_age_seconds=3600, dry_run=True, include_legacy_temp=True
+    )
+
+    assert any(
+        item["worktree"] == alias.name
+        and item["reason"] == "candidate_reparse_alias"
+        for item in result["kept"]
+    )
+    assert any(item["worktree"] == real_worktree.name for item in result["kept"])
+    assert marker.read_text(encoding="utf-8") == "untouched"
+
+
+def test_reap_inventory_in_base_alias_keeps_real_worktree_and_nested_target(
+    isolate_agent_runtime_root, source_repo, tmp_path, monkeypatch
 ):
     import os
 
@@ -627,9 +665,17 @@ def test_reap_inventory_reparse_child_cannot_escape_base_when_supported(
     external.mkdir()
     marker = external / "marker.txt"
     marker.write_text("external", encoding="utf-8")
-    link = legacy_base / "escaped"
+    real_worktree = legacy_base / "real_worktree"
+    _git(source_repo, "worktree", "add", "--detach", str(real_worktree), "HEAD")
+    tracked = real_worktree / "app.py"
+    tracked.write_text(
+        tracked.read_text(encoding="utf-8") + "\n# keep me\n", encoding="utf-8"
+    )
+    nested_link = real_worktree / "nested-target"
+    alias = legacy_base / "alias"
     try:
-        os.symlink(external, link, target_is_directory=True)
+        os.symlink(external, nested_link, target_is_directory=True)
+        os.symlink(real_worktree, alias, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"directory symlink/junction creation unsupported: {exc}")
     monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: current_base)
@@ -637,17 +683,29 @@ def test_reap_inventory_reparse_child_cannot_escape_base_when_supported(
         repo_context_mod, "legacy_harness_worktree_base_dir", lambda: legacy_base
     )
 
+    status_before = _git(real_worktree, "status", "--porcelain=v1").stdout
     preview = reap_orphan_worktrees(
-        min_age_seconds=0, dry_run=True, include_legacy_temp=True
+        min_age_seconds=3600, dry_run=True, include_legacy_temp=True
     )
     destructive = reap_orphan_worktrees(
-        min_age_seconds=0, include_legacy_temp=True
+        min_age_seconds=3600, include_legacy_temp=True
     )
 
-    assert any(item["reason"] == "candidate_outside_base" for item in preview["kept"])
-    assert any(item["reason"] == "candidate_outside_base" for item in destructive["kept"])
+    for result in (preview, destructive):
+        assert any(
+            item["worktree"] == alias.name
+            and item["reason"] == "candidate_reparse_alias"
+            for item in result["kept"]
+        )
+        assert any(
+            item["worktree"] == real_worktree.name
+            and item["reason"] == "younger_than_min_age"
+            for item in result["kept"]
+        )
     assert marker.read_text(encoding="utf-8") == "external"
-    assert link.exists()
+    assert _git(real_worktree, "status", "--porcelain=v1").stdout == status_before
+    assert alias.exists()
+    assert nested_link.exists()
 
 
 def test_reap_patch_capture_names_are_exclusive_across_sources_and_collisions(

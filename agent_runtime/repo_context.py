@@ -411,6 +411,8 @@ def existing_run_worktrees_in_bases(
             git_root, task_id=task_id, run_id=run_id, repo_label=token_label
         )
         for candidate in [base, *[base.with_name(f"{base.name}_{idx}") for idx in range(1, 4)]]:
+            if _path_is_reparse_point(candidate):
+                continue
             try:
                 resolved = candidate.resolve()
             except OSError:
@@ -570,6 +572,9 @@ def harness_worktree_inventory(
             rows.append((base, base, source, "base_unresolvable"))
             continue
         for worktree in base.iterdir():
+            if _path_is_reparse_point(worktree):
+                rows.append((worktree, base, source, "candidate_reparse_alias"))
+                continue
             if not worktree.is_dir():
                 continue
             try:
