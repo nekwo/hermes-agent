@@ -36,12 +36,12 @@ def main() -> None:
         {
             "schema_version": 1,
             "request_id": "wheel-smoke-request",
-            "provider": "openai",
+            "provider": "openrouter",
             "model": "fixture/model",
             "messages": [{"role": "user", "content": "smoke"}],
             "options": {},
         },
-        "fixture-secret",
+        {"type": "api_key", "secret": "fixture-secret"},
         events.append,
     )
     assert events[-1]["kind"] == "turn.completed", events

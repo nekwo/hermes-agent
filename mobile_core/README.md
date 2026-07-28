@@ -1,9 +1,26 @@
 # Hermes Mobile Core
 
-`hermes-mobile-core` is the mobile-safe, OpenAI-compatible provider lane for
-Hermes. It accepts JSON-safe requests, keeps credentials out of those requests,
-streams normalized typed events, and depends only on `httpx` and its pure-Python
-closure.
+`hermes-mobile-core` is the mobile-safe provider runtime for Hermes. Its
+committed provider catalog is generated from Hermes' canonical provider
+registry, so the Launcher can present every Hermes provider without maintaining
+a second hand-written list. Each descriptor states whether the provider's
+transport and account-login flow are mobile-certified or desktop-only.
+
+The runtime accepts JSON-safe requests, keeps credentials out of those
+requests, streams normalized typed events, and depends only on `httpx` and its
+pure-Python closure. It supports:
+
+- ChatGPT/Codex device sign-in and ChatGPT plan limits, including the weekly
+  window when OpenAI reports it.
+- Claude subscription PKCE sign-in and Claude session/weekly limits.
+- xAI and Nous device sign-in through the same account contracts used by
+  Hermes CLI.
+- OS-keystore-backed API-key or provider subscription-token profiles for
+  Hermes providers whose upstream contract is key/token based.
+
+OAuth access and refresh tokens are returned only to the native host for OS
+secure-storage persistence. The Python package never discovers desktop
+credentials or writes secrets to disk.
 
 The package intentionally contains no agent loop, tools, credential discovery,
 filesystem access, subprocess support, provider SDKs, or dynamic installation.

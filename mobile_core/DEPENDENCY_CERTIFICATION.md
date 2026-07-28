@@ -3,8 +3,8 @@
 **Decision:** GO for the Stage 1 Python distribution. The committed package
 closure contains no native extension, provider SDK, dynamic installer, desktop
 runtime, or forbidden process/tool module. The built core wheel is
-`hermes_mobile_core-0.1.0-py3-none-any.whl` (`Root-Is-Purelib: true`) and is
-approximately 37.4 KB (compressed ZIP size varies slightly with build timestamps).
+`hermes_mobile_core-0.2.0-py3-none-any.whl` (`Root-Is-Purelib: true`) and is
+approximately 48.9 KB (compressed ZIP size varies slightly with build timestamps).
 
 Certification baseline: Hermes checkout
 `d994dbf5be9e9b159062914f72f5c55040674c13`; the newest commit affecting the
@@ -72,8 +72,8 @@ devices before either feasibility stage can pass.
 | Budget | Limit | Stage 0/1 result |
 |---|---:|---|
 | Pure-Python dependency wheels | <= 0.75 MiB compressed | PASS: 0.529 MiB |
-| `hermes-mobile-core` wheel | <= 0.25 MiB compressed | PASS: 0.035 MiB |
-| Total Python package closure excluding interpreter/stdlib | <= 1.00 MiB compressed | PASS: 0.565 MiB |
+| `hermes-mobile-core` wheel | <= 0.25 MiB compressed | PASS: 0.047 MiB |
+| Total Python package closure excluding interpreter/stdlib | <= 1.00 MiB compressed | PASS: 0.576 MiB |
 | Android release AAB download delta per delivered ABI | <= 18 MiB | Stage 2 measurement gate |
 | iOS archived IPA download delta | <= 25 MiB | Stage 3 measurement gate |
 | Cold embedded-interpreter start | <= 750 ms p95 | Stage 2/3 physical-device gate |

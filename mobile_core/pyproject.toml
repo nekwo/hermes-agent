@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-mobile-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Mobile-safe Hermes provider request and streaming core"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -30,7 +30,7 @@ test = [
 where = ["src"]
 
 [tool.setuptools.package-data]
-hermes_mobile_core = ["_vendor/VENDOR_STAMP"]
+hermes_mobile_core = ["_vendor/VENDOR_STAMP", "provider_catalog.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

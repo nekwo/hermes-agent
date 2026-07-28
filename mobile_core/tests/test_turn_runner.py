@@ -253,15 +253,47 @@ def test_core_facade_rejects_serialized_keys_and_returns_json_safe_results() -> 
     json.dumps(configured)
     providers = core.list_supported_providers()
     json.dumps(providers)
-    assert {item["id"] for item in providers} == {"openrouter", "openai", "compatible"}
+    assert len(providers) >= 37
+    assert {"openrouter", "openai-codex", "anthropic", "bedrock", "custom"} <= {
+        item["id"] for item in providers
+    }
 
     bad = _request(api_key="must-not-be-here")
     with pytest.raises(InvalidRequest, match="must not appear"):
         core.start_turn(bad, "separate-secret", lambda _: None)
-
     with pytest.raises(InvalidRequest, match="unknown request fields"):
         core.start_turn(_request(tools=[]), "separate-secret", lambda _: None)
 
+
+def test_codex_responses_stream_uses_subscription_backend_and_normalizes_usage() -> None:
+    observed = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["url"] = str(request.url)
+        observed["body"] = json.loads(request.content)
+        observed["originator"] = request.headers.get("originator")
+        content = (
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"Think"}\n\n'
+            'data: {"type":"response.output_text.delta","delta":"Hello"}\n\n'
+            'data: {"type":"response.completed","response":{"id":"resp_1","usage":'
+            '{"input_tokens":7,"output_tokens":2,"total_tokens":9,"input_tokens_details":{"cached_tokens":3}}}}\n\n'
+        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=content)
+
+    events = []
+    _runner(handler).run(
+        request=_request(provider="openai-codex", model="gpt-5.4", base_url=None),
+        api_key="fixture-oauth-token",
+        provider=PROVIDERS["openai-codex"],
+        emit=events.append,
+        config={"max_retries": 0},
+    )
+    assert events[-1]["kind"] == "turn.completed"
+    assert events[-1]["payload"]["content"] == "Hello"
+    assert events[-1]["payload"]["usage"]["cached_tokens"] == 3
+    assert observed["url"] == "https://chatgpt.com/backend-api/codex/responses"
+    assert observed["originator"] == "codex_cli_rs"
+    assert observed["body"]["store"] is False
 
 def test_missing_api_key_is_a_typed_failed_turn() -> None:
     core = HermesMobileCore()

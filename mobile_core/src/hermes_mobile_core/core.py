@@ -7,8 +7,9 @@ from collections.abc import Callable, Mapping
 from threading import Lock
 from typing import Any
 
+from .auth import MobileAuthManager, credential_secret
 from .events import EventEmitter, SCHEMA_VERSION
-from .exceptions import InvalidRequest
+from .exceptions import InvalidRequest, MobileUnsupported
 from .providers import get_provider, list_supported_providers
 from .turn_runner import TurnCancellation, TurnRunner, classify_error
 
@@ -96,8 +97,14 @@ def _validate_request(request: Mapping[str, Any]) -> None:
 class HermesMobileCore:
     """Synchronous host facade; native callers run `start_turn` off the UI thread."""
 
-    def __init__(self, *, runner: TurnRunner | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        runner: TurnRunner | None = None,
+        auth_manager: MobileAuthManager | None = None,
+    ) -> None:
         self._runner = runner or TurnRunner()
+        self._auth = auth_manager or MobileAuthManager()
         self._config = dict(_CONFIG_DEFAULTS)
         self._turns: dict[str, TurnCancellation] = {}
         self._lock = Lock()
@@ -135,7 +142,7 @@ class HermesMobileCore:
     def start_turn(
         self,
         request: Mapping[str, Any],
-        api_key: str,
+        credential: Mapping[str, Any] | str,
         emit: Callable[[dict[str, Any]], None],
     ) -> None:
         _validate_request(request)
@@ -144,7 +151,10 @@ class HermesMobileCore:
         request_id = str(request["request_id"])
         provider = get_provider(str(request["provider"]))
         assert provider is not None
-        if not isinstance(api_key, str) or not api_key.strip():
+        if not provider.is_mobile_available:
+            raise MobileUnsupported(provider.unavailable_reason or "provider is unavailable on mobile")
+        secret = credential_secret(provider.id, credential)
+        if not secret:
             emitter = EventEmitter(
                 request_id=request_id,
                 provider=provider.id,
@@ -154,7 +164,7 @@ class HermesMobileCore:
             emitter.send("turn.started", {})
             emitter.send(
                 "turn.failed",
-                {"error": classify_error(InvalidRequest("API key is required")).to_dict()},
+                {"error": classify_error(InvalidRequest("profile credential is required")).to_dict()},
             )
             return
 
@@ -167,7 +177,7 @@ class HermesMobileCore:
         try:
             self._runner.run(
                 request=request,
-                api_key=api_key,
+                api_key=secret,
                 provider=provider,
                 emit=emit,
                 cancellation=cancellation,
@@ -191,3 +201,29 @@ class HermesMobileCore:
 
     def list_supported_providers(self) -> list[dict[str, Any]]:
         return list_supported_providers()
+
+    def begin_login(self, provider_id: str) -> dict[str, Any]:
+        return self._auth.begin_login(provider_id)
+
+    def poll_login(self, login_id: str) -> dict[str, Any]:
+        return self._auth.poll_login(login_id)
+
+    def cancel_login(self, login_id: str) -> dict[str, Any]:
+        return self._auth.cancel_login(login_id)
+
+    def complete_login(self, login_id: str, authorization_code: str) -> dict[str, Any]:
+        return self._auth.complete_login(login_id, authorization_code)
+
+    def refresh_credential(
+        self, provider_id: str, credential: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if not isinstance(credential, Mapping):
+            raise InvalidRequest("credential must be an object")
+        return self._auth.refresh(provider_id, credential)
+
+    def get_rate_limits(
+        self, provider_id: str, credential: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if not isinstance(credential, Mapping):
+            raise InvalidRequest("credential must be an object")
+        return self._auth.rate_limits(provider_id, credential)

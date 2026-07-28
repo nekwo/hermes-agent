@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ._vendor.agent.transports import get_transport
+from .auth import codex_headers
 from .events import EventEmitter
 from .exceptions import InvalidRequest, MalformedSSE
 from .providers import ProviderDescriptor
@@ -176,6 +177,16 @@ def _endpoint(base_url: str) -> str:
     return normalized + "/chat/completions"
 
 
+def _responses_endpoint(base_url: str) -> str:
+    normalized = str(base_url or "").strip().rstrip("/")
+    parts = urlsplit(normalized)
+    if parts.scheme.lower() != "https" or not parts.netloc:
+        raise InvalidRequest("base_url must be an absolute HTTPS URL")
+    if parts.path.endswith("/responses"):
+        return normalized
+    return normalized + "/responses"
+
+
 def _usage_payload(raw: Mapping[str, Any]) -> dict[str, int]:
     prompt = int(raw.get("prompt_tokens") or 0)
     completion = int(raw.get("completion_tokens") or 0)
@@ -273,11 +284,14 @@ class _Assembly:
             "tool_calls": [self.tool_calls[key] for key in sorted(self.tool_calls)] or None,
             "refusal": None,
         }
+        usage = dict(self.usage) if self.usage is not None else None
+        if usage is not None and usage.get("cached_tokens"):
+            usage["prompt_tokens_details"] = {"cached_tokens": usage["cached_tokens"]}
         return {
             "id": self.response_id,
             "model": self.model,
             "choices": [{"index": 0, "message": message, "finish_reason": self.finish_reason}],
-            "usage": self.usage,
+            "usage": usage,
         }
 
 
@@ -359,6 +373,8 @@ class TurnRunner:
                 if transport is None:
                     raise RuntimeError("vendored chat_completions transport is unavailable")
                 normalized = normalize_parsed_response(transport, assembly.completed_response())
+                if normalized.usage is not None and assembly.usage is not None:
+                    normalized.usage.cached_tokens = int(assembly.usage.get("cached_tokens") or 0)
                 emitter.send("turn.completed", normalized_payload(normalized))
                 return
             except Exception as exc:
@@ -385,6 +401,22 @@ class TurnRunner:
         cancellation: TurnCancellation,
         config: Mapping[str, Any],
     ) -> tuple[_Assembly, bool]:
+        if provider.transport == "codex_responses":
+            return self._attempt_responses(
+                request=request,
+                api_key=api_key,
+                provider=provider,
+                emitter=emitter,
+                cancellation=cancellation,
+                config=config,
+            )
+        if provider.transport == "anthropic_messages":
+            return self._attempt_anthropic(
+                request=request, api_key=api_key, provider=provider,
+                emitter=emitter, cancellation=cancellation, config=config,
+            )
+        if provider.transport != "openai_chat":
+            raise InvalidRequest(provider.unavailable_reason or "provider transport is unavailable on mobile")
         options = request.get("options") or {}
         transport = get_transport("chat_completions")
         if transport is None:
@@ -464,4 +496,223 @@ class TurnRunner:
                         raise MalformedSSE("provider stream ended before [DONE]")
                 finally:
                     cancellation.detach(response)
+        return assembly, emitted_delta
+
+    def _attempt_anthropic(
+        self,
+        *,
+        request: Mapping[str, Any],
+        api_key: str,
+        provider: ProviderDescriptor,
+        emitter: EventEmitter,
+        cancellation: TurnCancellation,
+        config: Mapping[str, Any],
+    ) -> tuple[_Assembly, bool]:
+        """Hermes Anthropic Messages wire format for Claude subscription/API profiles."""
+        messages = list(request["messages"])
+        system = ""
+        if messages and str(messages[0].get("role") or "") in {"system", "developer"}:
+            system = str(messages.pop(0).get("content") or "")
+        is_oauth = not api_key.startswith("sk-ant-api")
+        if is_oauth:
+            prefix = "You are Claude Code, Anthropic's official CLI for Claude."
+            system = f"{prefix}\n\n{system}" if system else prefix
+        body: dict[str, Any] = {
+            "model": str(request["model"]),
+            "messages": [{"role": str(item.get("role") or "user"), "content": str(item.get("content") or "")} for item in messages],
+            "max_tokens": int((request.get("options") or {}).get("max_output_tokens") or 8192),
+            "stream": True,
+        }
+        if system:
+            body["system"] = system
+        base = str(request.get("base_url") or provider.default_base_url).rstrip("/")
+        if not base.startswith("https://"):
+            raise InvalidRequest("base_url must be an absolute HTTPS URL")
+        url = base + ("/v1/messages" if not base.endswith("/v1") else "/messages")
+        headers = {
+            "Accept": "text/event-stream", "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+            "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14",
+        }
+        if is_oauth:
+            headers.update({
+                "Authorization": f"Bearer {api_key}",
+                "anthropic-beta": headers["anthropic-beta"] + ",claude-code-20250219,oauth-2025-04-20",
+                "User-Agent": "claude-code/2.1.74 (external, cli)", "x-app": "cli",
+            })
+        else:
+            headers["x-api-key"] = api_key
+        timeout = httpx.Timeout(
+            connect=float(config.get("connect_timeout_seconds", 10.0)),
+            read=float(config.get("read_timeout_seconds", 60.0)),
+            write=float(config.get("write_timeout_seconds", 30.0)),
+            pool=float(config.get("pool_timeout_seconds", 10.0)),
+        )
+        assembly = _Assembly(str(request["model"]))
+        emitted = False
+        terminal = False
+        input_tokens = 0
+        cached_tokens = 0
+        with self._client_factory(timeout=timeout, verify=True) as client:
+            with client.stream("POST", url, headers=headers, json=body) as response:
+                cancellation.attach(response)
+                try:
+                    if response.status_code < 200 or response.status_code >= 300:
+                        raise ProviderHTTPError(response.status_code, response.read()[:16384].decode("utf-8", errors="replace"))
+                    for data in _iter_sse(response):
+                        if cancellation.cancelled:
+                            break
+                        event = json.loads(data)
+                        kind = str(event.get("type") or "")
+                        if kind == "message_start":
+                            usage = (event.get("message") or {}).get("usage") or {}
+                            input_tokens = int(usage.get("input_tokens") or 0)
+                            cached_tokens = int(usage.get("cache_read_input_tokens") or 0)
+                            assembly.response_id = str((event.get("message") or {}).get("id") or "") or None
+                        elif kind == "content_block_delta":
+                            delta = event.get("delta") or {}
+                            text = str(delta.get("text") or delta.get("thinking") or "")
+                            if text:
+                                if delta.get("type") == "thinking_delta":
+                                    assembly.reasoning.append(text)
+                                    emitter.send("reasoning.delta", {"text": text})
+                                else:
+                                    assembly.content.append(text)
+                                    emitter.send("content.delta", {"text": text})
+                                emitted = True
+                        elif kind == "message_delta":
+                            usage = event.get("usage") or {}
+                            output_tokens = int(usage.get("output_tokens") or 0)
+                            assembly.usage = {
+                                "prompt_tokens": input_tokens, "completion_tokens": output_tokens,
+                                "total_tokens": input_tokens + output_tokens, "cached_tokens": cached_tokens,
+                            }
+                            emitter.send("usage.updated", assembly.usage)
+                            assembly.finish_reason = str((event.get("delta") or {}).get("stop_reason") or "stop")
+                        elif kind == "message_stop":
+                            terminal = True
+                finally:
+                    cancellation.detach(response)
+        if not cancellation.cancelled and not terminal:
+            raise MalformedSSE("Anthropic stream ended before message_stop")
+        return assembly, emitted
+
+    def _attempt_responses(
+        self,
+        *,
+        request: Mapping[str, Any],
+        api_key: str,
+        provider: ProviderDescriptor,
+        emitter: EventEmitter,
+        cancellation: TurnCancellation,
+        config: Mapping[str, Any],
+    ) -> tuple[_Assembly, bool]:
+        """Run the Hermes Codex/Responses lane without the desktop OpenAI SDK."""
+        options = request.get("options") or {}
+        messages = list(request["messages"])
+        instructions = ""
+        if messages and str(messages[0].get("role") or "") in {"system", "developer"}:
+            instructions = str(messages.pop(0).get("content") or "")
+        inputs: list[dict[str, Any]] = []
+        for message in messages:
+            role = str(message.get("role") or "user")
+            text = str(message.get("content") or "")
+            content_type = "output_text" if role == "assistant" else "input_text"
+            inputs.append({"role": role, "content": [{"type": content_type, "text": text}]})
+        body: dict[str, Any] = {
+            "model": str(request["model"]),
+            "instructions": instructions or "You are Hermes, a helpful AI assistant.",
+            "input": inputs,
+            "store": False,
+            "stream": True,
+        }
+        reasoning = options.get("reasoning")
+        if isinstance(reasoning, Mapping) and reasoning.get("enabled") is not False:
+            body["reasoning"] = {
+                "effort": str(reasoning.get("effort") or "medium"),
+                "summary": "auto",
+            }
+            body["include"] = ["reasoning.encrypted_content"]
+        elif provider.id == "openai-codex":
+            body["reasoning"] = {"effort": "medium", "summary": "auto"}
+            body["include"] = ["reasoning.encrypted_content"]
+        max_output = options.get("max_output_tokens")
+        # The ChatGPT Codex backend rejects max_output_tokens; direct Responses
+        # providers accept it.
+        if max_output is not None and provider.id != "openai-codex":
+            body["max_output_tokens"] = max_output
+
+        base_url = str(request.get("base_url") or provider.default_base_url)
+        url = _responses_endpoint(base_url)
+        headers = (
+            codex_headers(api_key)
+            if provider.id == "openai-codex"
+            else {"Authorization": f"Bearer {api_key}", "Accept": "text/event-stream"}
+        )
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "text/event-stream"
+        timeout = httpx.Timeout(
+            connect=float(config.get("connect_timeout_seconds", 10.0)),
+            read=float(config.get("read_timeout_seconds", 60.0)),
+            write=float(config.get("write_timeout_seconds", 30.0)),
+            pool=float(config.get("pool_timeout_seconds", 10.0)),
+        )
+        assembly = _Assembly(str(request["model"]))
+        emitted_delta = False
+        terminal_seen = False
+        with self._client_factory(timeout=timeout, verify=True) as client:
+            with client.stream("POST", url, headers=headers, json=body) as response:
+                cancellation.attach(response)
+                try:
+                    if response.status_code < 200 or response.status_code >= 300:
+                        raw = response.read()[:16384].decode("utf-8", errors="replace")
+                        raise ProviderHTTPError(response.status_code, raw)
+                    for data in _iter_sse(response):
+                        if cancellation.cancelled:
+                            break
+                        if data.strip() == "[DONE]":
+                            terminal_seen = True
+                            break
+                        try:
+                            event = json.loads(data)
+                        except json.JSONDecodeError as exc:
+                            raise MalformedSSE(f"invalid Responses SSE JSON at column {exc.colno}") from exc
+                        if not isinstance(event, Mapping):
+                            raise MalformedSSE("Responses SSE data must decode to an object")
+                        kind = str(event.get("type") or "")
+                        if kind in {"response.output_text.delta", "response.refusal.delta"}:
+                            delta = str(event.get("delta") or "")
+                            if delta:
+                                assembly.content.append(delta)
+                                emitter.send("content.delta", {"text": delta})
+                                emitted_delta = True
+                        elif kind in {"response.reasoning_summary_text.delta", "response.reasoning_text.delta"}:
+                            delta = str(event.get("delta") or "")
+                            if delta:
+                                assembly.reasoning.append(delta)
+                                emitter.send("reasoning.delta", {"text": delta})
+                                emitted_delta = True
+                        elif kind == "response.completed":
+                            terminal_seen = True
+                            raw_response = event.get("response") or {}
+                            if isinstance(raw_response, Mapping):
+                                assembly.response_id = str(raw_response.get("id") or "") or None
+                                usage = raw_response.get("usage") or {}
+                                if isinstance(usage, Mapping):
+                                    details = usage.get("input_tokens_details") or {}
+                                    assembly.usage = {
+                                        "prompt_tokens": int(usage.get("input_tokens") or 0),
+                                        "completion_tokens": int(usage.get("output_tokens") or 0),
+                                        "total_tokens": int(usage.get("total_tokens") or 0),
+                                        "cached_tokens": int(details.get("cached_tokens") or 0) if isinstance(details, Mapping) else 0,
+                                    }
+                                    emitter.send("usage.updated", assembly.usage)
+                                assembly.finish_reason = "stop"
+                        elif kind in {"response.failed", "response.incomplete"}:
+                            error = event.get("response") or event.get("error") or event
+                            raise ProviderStreamError(f"Responses API {kind}: {error}")
+                finally:
+                    cancellation.detach(response)
+        if not cancellation.cancelled and not terminal_seen:
+            raise MalformedSSE("provider Responses stream ended before completion")
         return assembly, emitted_delta

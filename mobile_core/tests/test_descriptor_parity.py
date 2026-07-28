@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 
-def test_mobile_descriptors_match_desktop_provider_authorities() -> None:
-    from hermes_cli.auth import PROVIDER_REGISTRY
-    from providers import get_provider_profile
-
+def test_mobile_catalog_matches_desktop_provider_universe() -> None:
+    from hermes_cli.provider_catalog import provider_catalog
     from hermes_mobile_core.providers import PROVIDERS
 
-    desktop_openrouter = get_provider_profile("openrouter")
-    desktop_custom = get_provider_profile("custom")
-    assert desktop_openrouter is not None
-    assert desktop_custom is not None
-    assert PROVIDERS["openrouter"].default_base_url == desktop_openrouter.base_url
-    assert PROVIDERS["compatible"].default_base_url == desktop_custom.base_url
-    assert (
-        PROVIDERS["openai"].default_base_url
-        == PROVIDER_REGISTRY["openai-api"].inference_base_url
-    )
+    assert tuple(PROVIDERS) == tuple(item.slug for item in provider_catalog())
+
+
+def test_every_provider_has_explicit_mobile_capability() -> None:
+    from hermes_mobile_core.providers import PROVIDERS
+
+    assert len(PROVIDERS) >= 37
+    assert all(item.mobile_capability for item in PROVIDERS.values())
+    assert PROVIDERS["openai-codex"].supports_usage is True
+    assert PROVIDERS["openai-codex"].auth_type == "oauth_external"
+    assert PROVIDERS["copilot-acp"].mobile_capability == "desktop_only"
+    assert PROVIDERS["bedrock"].mobile_capability == "desktop_only"
+
+
+def test_certified_openai_chat_urls_match_desktop_catalog() -> None:
+    from hermes_cli.providers import get_provider
+    from hermes_mobile_core.providers import PROVIDERS
+
+    for slug, mobile in PROVIDERS.items():
+        desktop = get_provider(slug)
+        if desktop and desktop.base_url and mobile.default_base_url and mobile.mobile_capability == "available":
+            assert mobile.default_base_url == desktop.base_url
