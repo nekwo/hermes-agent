@@ -2699,7 +2699,7 @@ def _workspace_row(workspace, *, full: bool = False) -> dict:
         "name": workspace.name,
         "realm_id": workspace.realm_id,
         "agents": len(live_scoped_agent_ids),
-        "agent_ids": roster_agent_ids,
+        "agent_ids": live_scoped_agent_ids,
         "live_scoped_agent_count": len(live_scoped_agent_ids),
         "live_scoped_agent_ids": live_scoped_agent_ids,
         "roster_agent_count": len(roster_agent_ids),
@@ -2957,7 +2957,6 @@ def _cmd_workspace_add_agent(args) -> int:
         item = WorkspaceStore().get(args.workspace_id)
         row = _workspace_row(item)
         roster_agent_ids = list(dict.fromkeys([*item.agent_ids, args.persona_id]))
-        row["agent_ids"] = roster_agent_ids
         row["roster_agent_ids"] = roster_agent_ids
         row["roster_agent_count"] = len(roster_agent_ids)
         warnings = _workspace_agent_sync_warnings(item.id, args.persona_id)

@@ -3217,11 +3217,14 @@ def _workspace_summary(
         "name": workspace.name,
         "slug": workspace.slug,
         "realm_id": workspace.realm_id,
-        # Back-compat: Launcher reads ``agents`` for the visible count and
-        # ``agent_ids`` for roster-membership scope. Keep those meanings while
-        # also shipping explicit, non-overloaded contracts for new consumers.
+        # Keep the legacy ``agents``/``agent_ids`` pair internally coherent:
+        # both describe exact live rows placed in this workspace.  Emitting
+        # roster persona ids here made pointerless canonical operator rows look
+        # workspace-scoped to older consumers, duplicating each real placement.
+        # Persisted roster metadata remains available under the explicit
+        # ``roster_agent_*`` contract.
         "agents": len(live_scoped_agent_ids),
-        "agent_ids": roster_agent_ids,
+        "agent_ids": live_scoped_agent_ids,
         "live_scoped_agent_count": len(live_scoped_agent_ids),
         "live_scoped_agent_ids": live_scoped_agent_ids,
         "roster_agent_count": len(roster_agent_ids),

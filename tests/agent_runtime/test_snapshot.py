@@ -104,7 +104,13 @@ def test_workspace_summary_distinguishes_roster_from_exact_live_scope_instances(
         "personainst_dev_one",
         "personainst_qa_one",
     ]
-    assert row["agent_ids"] == ["dev", "qa", "stale_roster_only"]
+    # The compatibility id list must match the live count.  Roster persona ids
+    # here would cause pointerless canonical rows to be inferred into the
+    # workspace alongside these exact scoped instances.
+    assert row["agent_ids"] == [
+        "personainst_dev_one",
+        "personainst_qa_one",
+    ]
     assert row["roster_agent_count"] == 3
     assert row["roster_agent_ids"] == ["dev", "qa", "stale_roster_only"]
 
