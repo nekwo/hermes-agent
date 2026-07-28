@@ -691,34 +691,198 @@ def test_settling_a_ticket_takes_it_out_of_the_index(isolate_agent_runtime_root)
     assert store.open_ticket_for_session(_CLARIFY_ROOT) is None
 
 
-def test_the_sweep_reclaims_index_files_it_can_prove_are_dead(isolate_agent_runtime_root):
-    """By mtime, which is the whole safety argument.
+def _age_clarify_store(store, token: str, seconds: float) -> None:
+    """Make the store look like it really sat for *seconds*.
 
-    An index file's mtime is bumped by every add and every drop, so a file
-    untouched for a full TTL can only name tokens minted before that mtime — all
-    of them already unlinked by the ticket loop. A session whose turn is minting
-    right now has a fresh mtime and is skipped, so the sweep can never clobber a
-    live pointer."""
+    Both the ticket's own ``created_at`` and the pointer the index recorded
+    for it, because in production those two ARE the same number — the index
+    copies it off the record at mint and off the record again at rebuild.
+    Aging only one of them would be testing a store shape the runtime cannot
+    produce."""
+
+    path = store._path(token)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    aged = time.time() - seconds
+    record["created_at"] = aged
+    path.write_text(json.dumps(record), encoding="utf-8")
+    root = str(record["chat_session_id"])
+    store._write_index(
+        root,
+        [
+            {**entry, "created_at": aged if entry["clarify_token"] == token else entry["created_at"]}
+            for entry in store._index_entries(root)
+        ],
+    )
+
+
+def test_the_sweep_reclaims_index_files_it_can_prove_are_dead(isolate_agent_runtime_root):
+    """By the file's OWN record of the newest ticket it names.
+
+    If every token an index file names is expired, the ticket loop already
+    unlinked all of them, so the file can only name the dead — that is the
+    whole safety argument, and it now rests on the file's content instead of
+    on the filesystem's clock."""
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    _age_clarify_store(store, token, CLARIFY_TICKET_TTL_SECONDS * 2)
+    index_path = store._index_path(_CLARIFY_ROOT)
+
+    assert store.sweep() == 1
+    assert not index_path.exists()
+
+    # A live pointer survives the same sweep.
+    fresh = _clarify_ticket(store)
+    assert store.sweep() == 0
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == fresh
+
+
+def test_the_index_file_records_the_newest_ticket_it_names(isolate_agent_runtime_root):
+    """The recorded fact the sweep reads, written by BOTH writers.
+
+    ``_write_index`` (the add/drop path) and ``_rebuild_index`` (the migration
+    and crash-recovery path) used to hand-build the same dict in two places.
+    One of them gaining a field the other did not is precisely how the sweep
+    would end up reading ``None`` off half the store."""
+
+    store = PersonaChatClarifyTicketStore()
+    older = _clarify_ticket(store)
+    newer = _clarify_ticket(store)
+    index_path = store._index_path(_CLARIFY_ROOT)
+
+    written = json.loads(index_path.read_text(encoding="utf-8"))
+    entries = {entry["clarify_token"]: entry["created_at"] for entry in written["open_tokens"]}
+    assert written["newest_created_at"] == max(entries.values())
+    assert written["newest_created_at"] == entries[newer] > entries[older]
+
+    # …and the rebuild agrees, field for field, because there is one writer of
+    # the shape now.
+    store._invalidate_index()
+    assert store._rebuild_index() is True
+    rebuilt = json.loads(index_path.read_text(encoding="utf-8"))
+    assert rebuilt["newest_created_at"] == written["newest_created_at"]
+    assert rebuilt["schema_version"] == written["schema_version"]
+
+
+def test_a_fresh_mtime_cannot_keep_a_dead_index_file_alive(isolate_agent_runtime_root):
+    """The benign direction of the mtime lie, and it must still be retired.
+
+    A restore, a sync, or an ordinary file copy rewrites mtime without
+    touching a byte of content. Under the old rule that alone re-dated an
+    index file naming nothing but expired tickets, and the sweep would never
+    reclaim it again — the file survives every future sweep because each one
+    re-reads the same fresh mtime."""
 
     import os
 
     store = PersonaChatClarifyTicketStore()
     token = _clarify_ticket(store)
-    path = store._path(token)
-    record = json.loads(path.read_text(encoding="utf-8"))
-    record["created_at"] = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
-    path.write_text(json.dumps(record), encoding="utf-8")
+    _age_clarify_store(store, token, CLARIFY_TICKET_TTL_SECONDS * 2)
+    index_path = store._index_path(_CLARIFY_ROOT)
+    os.utime(index_path, None)  # the copy tool's fingerprint: mtime = now
+
+    assert store.sweep() == 1
+    assert not index_path.exists(), "the sweep believed an mtime over the file's own record"
+
+
+def test_a_stale_mtime_cannot_delete_a_live_index_file(isolate_agent_runtime_root):
+    """The direction that is NOT survivable, which is why this changed.
+
+    A copy that preserves source mtimes — or any restore of an archive — can
+    land an ancient mtime on an index file whose content is entirely live.
+    Deleting it does not merely cost a read: the marker goes on swearing the
+    index is complete, so the tokenless settlement never looks for the ticket
+    again and nothing rebuilds. That is the silent permanent miss this store
+    already fixed once, arriving through the filesystem instead of through a
+    swallowed write."""
+
+    import os
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
     index_path = store._index_path(_CLARIFY_ROOT)
     aged = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
     os.utime(index_path, (aged, aged))
 
+    assert store.sweep() == 0
+    assert index_path.exists()
+    # …and the pointer still answers, which is the thing that was at stake.
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == token
+
+
+def test_an_index_file_that_predates_the_recorded_field_still_sweeps(
+    isolate_agent_runtime_root,
+):
+    """The migration is free: no rebuild owed, no repair pass.
+
+    A ``schema_version`` 1 file has no ``newest_created_at``, but the same
+    fact is derivable from the entries it names — still the file's own
+    content. Treating its absence as "unknown, keep forever" would leak every
+    index file written before this code for the life of the store."""
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    _age_clarify_store(store, token, CLARIFY_TICKET_TTL_SECONDS * 2)
+    index_path = store._index_path(_CLARIFY_ROOT)
+
+    legacy = json.loads(index_path.read_text(encoding="utf-8"))
+    legacy.pop("newest_created_at")
+    legacy["schema_version"] = 1
+    index_path.write_text(json.dumps(legacy), encoding="utf-8")
+
     assert store.sweep() == 1
     assert not index_path.exists()
 
-    # A freshly-touched index file survives the same sweep.
-    fresh = _clarify_ticket(store)
-    assert store.sweep() == 0
-    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == fresh
+
+def test_an_unreadable_index_file_is_never_swept(isolate_agent_runtime_root):
+    """UNREADABLE IS NOT DEAD, and the sweep only ever deletes on proof.
+
+    The failure this guards is not corruption, it is the ordinary Windows
+    case the add path already documents: an AV or indexer holding the file for
+    the instant the sweep reads it. Answering "could not read" with "therefore
+    expired" would delete a fully live index file — pointers and all — over a
+    transient lock. Keeping an inert file costs one small file; deleting a
+    live one costs a ticket nothing will ever look for again."""
+
+    import os
+
+    store = PersonaChatClarifyTicketStore()
+    _clarify_ticket(store)
+    index_path = store._index_path(_CLARIFY_ROOT)
+    index_path.write_text("{not json", encoding="utf-8")
+    aged = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
+    os.utime(index_path, (aged, aged))
+
+    store.sweep()
+
+    assert index_path.exists()
+    assert store._index_newest_created_at(index_path) is None
+
+
+def test_the_ticket_loop_and_the_index_sweep_share_one_cutoff(
+    isolate_agent_runtime_root,
+):
+    """One cutoff authority, not two constants that agree by coincidence.
+
+    The index sweep is only safe because "this file names nothing the ticket
+    loop did not just unlink" is TRUE, and that holds only while both sides
+    ask the same question of the same number. Pinned at the boundary: one TTL
+    either side of the ticket's age must move BOTH, together."""
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    _age_clarify_store(store, token, 1_000.0)
+    index_path = store._index_path(_CLARIFY_ROOT)
+
+    # A TTL longer than the ticket's age: neither is expired.
+    assert store.sweep(ttl_seconds=5_000.0) == 0
+    assert index_path.exists()
+    assert store.resolve(token) is not None
+
+    # A TTL shorter than it: both go, on the same pass, from the same cutoff.
+    assert store.sweep(ttl_seconds=100.0) == 1
+    assert not index_path.exists()
+    assert store.resolve(token) is None
 
 
 def test_a_pointer_that_could_not_be_written_retracts_the_marker(

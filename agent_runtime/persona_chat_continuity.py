@@ -687,6 +687,34 @@ class PersonaChatClarifyTicketStore:
         entries.sort(key=lambda item: item["created_at"], reverse=True)
         return entries
 
+    @staticmethod
+    def _index_payload(chat_session_id: str, entries: list[dict[str, Any]]) -> dict[str, Any]:
+        """The on-disk shape of one per-session index file. ONE writer of it.
+
+        ``newest_created_at`` is the file's own record of the newest ticket it
+        names, and it is what :meth:`_sweep_index` reclaims by. Recording it
+        here rather than inferring it from the filesystem is the point: an
+        mtime is a property of the FILE, which any backup, restore, sync, or
+        copy tool is free to rewrite without touching a byte of content, while
+        this is a property of the DATA and travels with it.
+
+        Written by :meth:`_write_index` and :meth:`_rebuild_index` alike, so
+        the two cannot disagree about the shape — the drift that made the
+        rebuild's hand-built dict a second spelling of this one.
+        """
+
+        ordered = sorted(entries, key=lambda item: item["created_at"], reverse=True)
+        return {
+            # v2 adds ``newest_created_at``. Purely additive: a v1 file still
+            # reads correctly (the field's absence is DERIVED from the entries,
+            # see :meth:`_index_newest_created_at`), so there is no migration
+            # pass and no rebuild owed.
+            "schema_version": 2,
+            "chat_session_id": str(chat_session_id),
+            "newest_created_at": float(ordered[0]["created_at"]) if ordered else 0.0,
+            "open_tokens": ordered,
+        }
+
     def _write_index(self, chat_session_id: str, entries: list[dict[str, Any]]) -> bool:
         """Record *entries* as the open pointers for *chat_session_id*.
 
@@ -704,17 +732,48 @@ class PersonaChatClarifyTicketStore:
             return True
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_json(
-                path,
-                {
-                    "schema_version": 1,
-                    "chat_session_id": str(chat_session_id),
-                    "open_tokens": entries,
-                },
-            )
+            _atomic_json(path, self._index_payload(chat_session_id, entries))
         except OSError:
             return False
         return True
+
+    def _index_newest_created_at(self, path: Path) -> float | None:
+        """The newest ticket ``created_at`` the index file at *path* names.
+
+        ``None`` means the file could not be read — which is NOT the same
+        answer as ``0.0`` and must never be treated as one: a transient read
+        failure (the ordinary Windows AV/indexer case) would otherwise present
+        a live index file as a dead one and have the sweep delete it, losing
+        pointers the marker still swears are there.
+
+        A ``schema_version`` 1 file predates the recorded field; the same fact
+        is derivable from the entries it names, so those files answer honestly
+        too and converge to v2 on their next write. Either way the answer comes
+        from the file's CONTENT, never from its mtime.
+        """
+
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        try:
+            recorded = float(payload.get("newest_created_at") or 0.0)
+        except (TypeError, ValueError):
+            recorded = 0.0
+        if recorded > 0.0:
+            return recorded
+        tokens = payload.get("open_tokens")
+        newest = 0.0
+        for item in tokens if isinstance(tokens, list) else []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                newest = max(newest, float(item.get("created_at") or 0.0))
+            except (TypeError, ValueError):
+                continue
+        return newest
 
     def _rebuild_index(self) -> bool:
         """Rebuild every per-session index from the ticket files. Idempotent.
@@ -755,15 +814,7 @@ class PersonaChatClarifyTicketStore:
                     merged.setdefault(entry["clarify_token"], entry)
                 _atomic_json(
                     self._index_path(root),
-                    {
-                        "schema_version": 1,
-                        "chat_session_id": root,
-                        "open_tokens": sorted(
-                            merged.values(),
-                            key=lambda item: item["created_at"],
-                            reverse=True,
-                        ),
-                    },
+                    self._index_payload(root, list(merged.values())),
                 )
             _atomic_json(
                 self._index_state_path(), {"schema_version": 1, "rebuilt_at": time.time()}
@@ -1066,7 +1117,7 @@ class PersonaChatClarifyTicketStore:
         cutoff = time.time() - max(float(ttl_seconds), 0.0)
         pruned = 0
         for record in self._iter_records():
-            if float(record.get("created_at") or 0.0) > cutoff:
+            if not self._expired(float(record.get("created_at") or 0.0), cutoff):
                 continue
             try:
                 self._path(str(record.get("clarify_token"))).unlink(missing_ok=True)
@@ -1076,14 +1127,38 @@ class PersonaChatClarifyTicketStore:
         self._sweep_index(cutoff)
         return pruned
 
+    @staticmethod
+    def _expired(created_at: float, cutoff: float) -> bool:
+        """THE expiry predicate, and there is deliberately only one.
+
+        The ticket loop and the index sweep must agree EXACTLY about what
+        "past its TTL" means, because the index sweep's entire safety argument
+        is "every ticket this file names was already unlinked by the ticket
+        loop". Two spellings of the comparison — or a second cutoff constant —
+        make that argument true only by coincidence, and the day it stops being
+        true the index file naming a LIVE ticket is the one deleted."""
+
+        return created_at <= cutoff
+
     def _sweep_index(self, cutoff: float) -> None:
         """Drop index files that cannot name a live ticket any more.
 
-        BY MTIME, not by content, and that is the whole safety argument: an
-        index file's mtime is bumped by every add and every drop, so a file
-        untouched for a full TTL can only name tokens minted before that mtime —
-        all of them already unlinked by the loop above. A session whose turn is
-        minting concurrently has a fresh mtime and is skipped.
+        BY THE FILE'S OWN RECORD of the newest ticket it names, against the
+        SAME cutoff the ticket loop above just used. That is the whole safety
+        argument: if every token in the file is expired, the loop already
+        unlinked all of them, so the file can only name the dead.
+
+        It used to be by MTIME, which is the same argument resting on an
+        INFERRED invariant — "the filesystem's clock tracks this file's
+        content" — that nothing in the code enforces and that any backup,
+        restore, sync, or copy tool breaks silently. Both directions of that
+        break are real, and one of them is not survivable: a restored file
+        carrying a fresh mtime over stale content merely leaks (the file is
+        inert; entries verify away on the read path), but a copy that lands
+        stale mtimes on LIVE content gets the file deleted while the marker
+        goes on swearing the index is complete — the silent permanent miss
+        this store already fixed once, arriving through the back door.
+        ``created_at`` is a property of the DATA and travels with it.
 
         Deliberately NOT a read-modify-write per pruned ticket: that would race
         a concurrent mint on the same session and could clobber a live pointer.
@@ -1098,9 +1173,14 @@ class PersonaChatClarifyTicketStore:
         for entry in entries:
             if entry == state_path:
                 continue
+            newest = self._index_newest_created_at(entry)
+            # UNREADABLE IS NOT DEAD. A file we could not read has not been
+            # proven to name only expired tickets, and the sweep only ever
+            # deletes on proof: keeping an inert file costs one small file,
+            # deleting a live one costs a ticket nothing will look for again.
+            if newest is None or not self._expired(newest, cutoff):
+                continue
             try:
-                if entry.stat().st_mtime > cutoff:
-                    continue
                 entry.unlink(missing_ok=True)
             except OSError:
                 continue
